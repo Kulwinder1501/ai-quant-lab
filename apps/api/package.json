@@ -1,0 +1,48 @@
+{
+  "name": "@ai-quant-lab/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "db:migrate": "tsx src/infrastructure/database/migrate.ts",
+    "data:seed:core-instruments": "tsx src/interfaces/cli/seed-core-instruments.ts",
+    "data:register:instrument": "tsx src/interfaces/cli/register-instrument.ts",
+    "data:collect:historical": "tsx src/interfaces/cli/collect-historical-data.ts",
+    "data:collect:live": "tsx src/interfaces/cli/collect-live-market-data.ts",
+    "pipeline:eod": "tsx src/interfaces/cli/run-eod-pipeline.ts",
+    "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
+    "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",
+    "analysis:generate-trade-ideas": "tsx src/interfaces/cli/generate-trade-ideas.ts",
+    "paper:accounts:create": "tsx src/interfaces/cli/create-paper-account.ts",
+    "paper:trades:open": "tsx src/interfaces/cli/open-paper-trade.ts",
+    "paper:trades:evaluate": "tsx src/interfaces/cli/evaluate-paper-trades.ts",
+    "paper:trades:close": "tsx src/interfaces/cli/close-paper-trade.ts",
+    "paper:accounts:summary": "tsx src/interfaces/cli/get-paper-account-summary.ts",
+    "backtest:run": "tsx src/interfaces/cli/run-backtest.ts",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-parse": "^5.5.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^4.6.0",
+    "pg": "^8.12.0",
+    "yahoo-finance2": "^4.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.15",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

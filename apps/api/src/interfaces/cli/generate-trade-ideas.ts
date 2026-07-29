@@ -1,0 +1,36 @@
+import "dotenv/config";
+import { loadEnvironment } from "../../config/environment.js";
+import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
+import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
+import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
+import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
+import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
+import { parseHistoricalTimeframe, requireOption } from "./arguments.js";
+
+async function main(): Promise<void> {
+  const argumentsList = process.argv.slice(2);
+  const environment = loadEnvironment();
+  const database = createDatabasePool(environment.DATABASE_URL);
+  try {
+    const symbol = requireOption(argumentsList, "instrument").toUpperCase();
+    const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
+    const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
+    if (!instrument) {
+      throw new Error(`NSE instrument "${symbol}" is not registered.`);
+    }
+    const result = await new GenerateTradeIdeas(
+      new PostgresStrategyVersionRepository(database),
+      new PostgresStrategyMarketContextRepository(database),
+      new PostgresTradeIdeaRepository(database),
+    ).execute({ instrumentId: instrument.id, timeframe });
+    console.info(JSON.stringify({ level: "info", message: "Trade-idea generation complete", instrument: symbol, timeframe, ...result }));
+  } finally {
+    await database.end();
+  }
+}
+
+void main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});

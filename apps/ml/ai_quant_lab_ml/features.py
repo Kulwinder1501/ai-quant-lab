@@ -1,0 +1,554 @@
+﻿"""Deterministic, source-candle-only feature and label construction.
+
+The feature mapping in this module is deliberately fixed.  A model trained with
+``ml-feature-v2`` therefore receives the same ordered columns regardless of
+which optional indicators or detections happen to exist for an individual
+candle.  Absent numeric evidence is represented by ``math.nan`` and is left
+for the training pipeline's imputer; this module never learns a replacement
+value from future rows.
+
+Every feature is scale-free â€” a return in basis points, a ratio, a bounded
+oscillator, or a confidence.  No feature carries an absolute rupee price. On a
+trending series an absolute level acts as a proxy for *time*, which lets a model
+infer which era a chronological holdout belongs to and therefore its local label
+distribution.  That is leakage wearing the costume of skill, and removing the
+levels is the cheapest way to prevent it.
+"""
+
+from __future__ import annotations
+
+import collections
+import json
+import math
+import statistics
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from .contracts import (
+    FEATURE_SCHEMA_VERSION,
+    CandleEvidence,
+    DatasetRequest,
+    IndicatorEvidence,
+    LabeledExample,
+    MarketLabel,
+)
+
+
+class FeatureConstructionError(ValueError):
+    """Raised when evidence cannot safely become a training example."""
+
+
+# Volume is normalised against its own recent median so the feature means the
+# same thing in 2023 and 2026. The window is trailing and includes the scored
+# bar, so it never reads a later one.
+VOLUME_MEDIAN_WINDOW = 20
+
+
+def trailing_feature_context(series: Sequence[tuple[float, float]]) -> tuple[float, float]:
+    """Return ``(prior_close, median_volume)`` for the final bar of a series.
+
+    ``series`` is chronological ``(close, volume)`` for consecutive completed
+    candles ending with the bar being scored â€” the same walk
+    :func:`build_labeled_examples` performs during training. Inference must use
+    this helper rather than passing placeholders: a feature that is real during
+    training and missing at prediction time is train/serve skew, and the imputer
+    would hide it by filling in a training-fold median.
+    """
+
+    if not series:
+        raise FeatureConstructionError("At least one trailing candle is required for feature context.")
+    closes = [close for close, _ in series]
+    volumes = [volume for _, volume in series if math.isfinite(volume)]
+    prior_close = closes[-2] if len(closes) >= 2 else _nan()
+    median_volume = statistics.median(volumes[-VOLUME_MEDIAN_WINDOW:]) if volumes else _nan()
+    return prior_close, median_volume
+
+
+_CANDLE_FEATURES: tuple[str, ...] = (
+    "candle.close_return_bps",
+    "candle.overnight_gap_bps",
+    "candle.high_atr_ratio",
+    "candle.low_atr_ratio",
+    "candle.volume_median_ratio",
+    "candle.body_return_bps",
+    "candle.range_bps",
+    "candle.upper_wick_bps",
+    "candle.lower_wick_bps",
+)
+
+_INDICATOR_VALUE_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "SMA": ("value_bps",),
+    "EMA": ("value_bps",),
+    "RSI": ("value",),
+    "MACD": ("macd", "signal", "histogram"),
+    "ATR": ("value_ratio",),
+    "VWAP": ("value_bps",),
+    # The band standard deviation is a rupee amount, so it is carried as a
+    # fraction of close. As a raw level it would encode the price era exactly the
+    # way an absolute close does.
+    "BOLLINGER_BANDS": ("middle_bps", "upper_bps", "lower_bps", "standardDeviation_ratio"),
+    "SUPERTREND": ("value_bps", "upperBand_bps", "lowerBand_bps"),
+}
+
+# These definitions are part of ml-feature-v1, not runtime knobs.  Changing a
+# period, smoothing method, reset rule, or multiplier changes feature meaning
+# and therefore requires a new feature schema version.
+_INDICATOR_PARAMETERS: Mapping[str, Mapping[str, Any]] = {
+    "SMA": {"period": 20},
+    "EMA": {"period": 20},
+    "RSI": {"period": 14, "smoothing": "WILDER"},
+    "MACD": {"fastPeriod": 12, "slowPeriod": 26, "signalPeriod": 9},
+    "ATR": {"period": 14, "smoothing": "WILDER"},
+    "VWAP": {"reset": "NSE_SESSION"},
+    "BOLLINGER_BANDS": {"period": 20, "standardDeviations": 2},
+    "SUPERTREND": {"atrPeriod": 10, "multiplier": 3},
+}
+
+_PATTERN_CODES: tuple[str, ...] = (
+    "DOJI",
+    "HAMMER",
+    "HANGING_MAN",
+    "SHOOTING_STAR",
+    "BULLISH_ENGULFING",
+    "BEARISH_ENGULFING",
+    "MORNING_STAR",
+    "EVENING_STAR",
+    "BULLISH_HARAMI",
+    "BEARISH_HARAMI",
+    "THREE_WHITE_SOLDIERS",
+    "THREE_BLACK_CROWS",
+    "INSIDE_BAR",
+    "OUTSIDE_BAR",
+)
+
+_PRICE_ACTION_EVENT_TYPES: tuple[str, ...] = (
+    "BREAKOUT",
+    "BREAKDOWN",
+    "SUPPORT",
+    "RESISTANCE",
+    "UPTREND",
+    "DOWNTREND",
+    "RANGE",
+    "PULLBACK",
+    "SWING_HIGH",
+    "SWING_LOW",
+)
+
+_DIRECTIONS: tuple[str, ...] = ("BULLISH", "BEARISH", "NEUTRAL")
+
+
+def _build_feature_schema() -> tuple[str, ...]:
+    indicator_features = tuple(
+        f"indicator.{code}.{field}"
+        for code, fields in _INDICATOR_VALUE_FIELDS.items()
+        for field in fields
+    )
+    supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
+    pattern_features = tuple(
+        f"pattern.{code}.{direction.lower()}_confidence"
+        for code in _PATTERN_CODES
+        for direction in _DIRECTIONS
+    )
+    price_action_features = tuple(
+        f"price_action.{event_type}.{direction.lower()}_confidence"
+        for event_type in _PRICE_ACTION_EVENT_TYPES
+        for direction in _DIRECTIONS
+    ) + tuple(
+        f"price_action.{event_type}.level_distance_bps" for event_type in _PRICE_ACTION_EVENT_TYPES
+    )
+    regime_features = ("regime.vix_sma20.value_ratio",)
+    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features
+
+
+# A tuple, rather than a data-dependent list, is the versioned model contract.
+FEATURE_SCHEMA: tuple[str, ...] = _build_feature_schema()
+
+# The public constant is made entirely of JSON values so a CLI can embed it in
+# artifact metadata or model-version provenance without a custom encoder.
+_FEATURE_DEFINITION: dict[str, Any] = {
+    "schemaVersion": FEATURE_SCHEMA_VERSION,
+    "features": list(FEATURE_SCHEMA),
+    "indicatorAlgorithmVersion": "ta-v1",
+    "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
+    "patternAlgorithmVersion": "candlestick-v1",
+    "priceActionAlgorithmVersion": "price-action-v2",
+}
+# Kept as a convenient JSON-safe public constant.  Runtime code should call
+# feature_definition() so an accidental caller mutation cannot affect future
+# artifact metadata.
+FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+
+
+def feature_schema() -> tuple[str, ...]:
+    """Return the immutable ordered feature names for ``ml-feature-v1``."""
+
+    return FEATURE_SCHEMA
+
+
+def feature_definition() -> dict[str, Any]:
+    """Return an independent JSON-safe description of the ml-feature-v1 contract."""
+
+    return json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+
+
+@dataclass(frozen=True)
+class LabelResult:
+    """The target derived from a later close; ``forward_return`` is fractional."""
+
+    forward_return: float
+    label: MarketLabel
+
+
+def _nan() -> float:
+    return float("nan")
+
+
+def _numeric_or_nan(value: Any) -> float:
+    """Return finite numeric evidence or a missing-value marker.
+
+    Database adapters normally deserialize numeric JSON values as ``int`` or
+    ``float``.  Numeric strings are also accepted defensively, while booleans
+    and categorical values remain missing rather than being coerced to 0/1.
+    """
+
+    if value is None or isinstance(value, bool):
+        return _nan()
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+    elif isinstance(value, str):
+        try:
+            numeric = float(value)
+        except ValueError:
+            return _nan()
+    else:
+        return _nan()
+    return numeric if math.isfinite(numeric) else _nan()
+
+
+def _source_number(value: Any, name: str) -> float:
+    numeric = _numeric_or_nan(value)
+    if math.isnan(numeric):
+        raise FeatureConstructionError(f"Source candle field {name} must be a finite numeric value.")
+    return numeric
+
+
+def _ratio_bps(numerator: float, denominator: float) -> float:
+    if not math.isfinite(numerator) or not math.isfinite(denominator) or denominator == 0:
+        return _nan()
+    # Subtract before dividing to avoid unnecessary cancellation for values
+    # that are close together, such as an OHLC body return near zero.
+    return ((numerator - denominator) / denominator) * 10_000.0
+
+
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    """Stable ordering for duplicate evidence selection without data-order bias."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _indicator_sort_key(evidence: IndicatorEvidence) -> tuple[str, str, str]:
+    return (evidence.algorithm_version, _canonical_json(evidence.parameters), _canonical_json(evidence.values))
+
+
+def _first_indicator_by_code(
+    indicators: Sequence[IndicatorEvidence],
+    code: str,
+    algorithm_version: str,
+) -> IndicatorEvidence | None:
+    candidates = [
+        candidate
+        for candidate in indicators
+        if (
+            candidate.code.upper() == code
+            and candidate.algorithm_version == algorithm_version
+            and dict(candidate.parameters) == dict(_INDICATOR_PARAMETERS[code])
+        )
+    ]
+    return min(candidates, key=_indicator_sort_key) if candidates else None
+
+
+def _maximum_confidence(values: Iterable[float]) -> float:
+    finite_values = [value for value in values if math.isfinite(value)]
+    return max(finite_values, default=0.0)
+
+
+def build_feature_vector(
+    candle: CandleEvidence,
+    *,
+    prior_close: float,
+    median_volume: float,
+    indicator_algorithm_version: str = "ta-v1",
+    pattern_algorithm_version: str = "candlestick-v1",
+    price_action_algorithm_version: str = "price-action-v2",
+) -> dict[str, float]:
+    """Build the full fixed feature mapping from one source candle's evidence.
+
+    This function intentionally does not inspect ``future_close`` or
+    ``future_close_time``.  Those fields are label-only and are handled by
+    :func:`label_from_future_close`.
+    """
+
+    open_price = _source_number(candle.open, "open")
+    high_price = _source_number(candle.high, "high")
+    low_price = _source_number(candle.low, "low")
+    close_price = _source_number(candle.close, "close")
+    volume = _source_number(candle.volume, "volume")
+
+    atr_indicator = _first_indicator_by_code(candle.indicators, "ATR", indicator_algorithm_version)
+    atr_val = _numeric_or_nan(atr_indicator.values.get("value")) if atr_indicator else _nan()
+
+    values: dict[str, float] = {name: _nan() for name in FEATURE_SCHEMA}
+    values.update(
+        {
+            "candle.close_return_bps": _ratio_bps(close_price, prior_close),
+            "candle.overnight_gap_bps": _ratio_bps(open_price, prior_close),
+            "candle.high_atr_ratio": (high_price - close_price) / atr_val if atr_val > 0 else _nan(),
+            "candle.low_atr_ratio": (close_price - low_price) / atr_val if atr_val > 0 else _nan(),
+            "candle.volume_median_ratio": volume / median_volume if median_volume > 0 else _nan(),
+            "candle.body_return_bps": _ratio_bps(close_price, open_price),
+            "candle.range_bps": _ratio_bps(high_price, low_price),
+            "candle.upper_wick_bps": _ratio_bps(high_price, max(open_price, close_price)),
+            "candle.lower_wick_bps": _ratio_bps(min(open_price, close_price), low_price),
+            "regime.vix_sma20.value_ratio": _numeric_or_nan(candle.vix_value_ratio),
+        }
+    )
+
+    for code, output_fields in _INDICATOR_VALUE_FIELDS.items():
+        indicator = _first_indicator_by_code(candle.indicators, code, indicator_algorithm_version)
+        if indicator is None:
+            continue
+        for field in output_fields:
+            raw_field = field.replace("_bps", "").replace("_ratio", "")
+            raw_val = _numeric_or_nan(indicator.values.get(raw_field))
+            
+            if field.endswith("_bps"):
+                # A level indicator becomes a signed distance from close in bps.
+                final_val = _ratio_bps(raw_val, close_price)
+            elif field.endswith("_ratio"):
+                # A rupee magnitude (ATR, band width) becomes a fraction of close.
+                final_val = raw_val / close_price if close_price > 0 else _nan()
+            else:
+                final_val = raw_val
+                
+            values[f"indicator.{code}.{field}"] = final_val
+
+        if code == "SUPERTREND":
+            trend = indicator.values.get("trend")
+            if isinstance(trend, str) and trend.upper() == "UP":
+                values["indicator.SUPERTREND.trend_up"] = 1.0
+                values["indicator.SUPERTREND.trend_down"] = 0.0
+            elif isinstance(trend, str) and trend.upper() == "DOWN":
+                values["indicator.SUPERTREND.trend_up"] = 0.0
+                values["indicator.SUPERTREND.trend_down"] = 1.0
+
+    for pattern_code in _PATTERN_CODES:
+        matching = [
+            pattern
+            for pattern in candle.patterns
+            if pattern.code.upper() == pattern_code and pattern.algorithm_version == pattern_algorithm_version
+        ]
+        for direction in _DIRECTIONS:
+            confidences = (
+                _numeric_or_nan(pattern.confidence)
+                for pattern in matching
+                if pattern.direction.upper() == direction
+            )
+            values[f"pattern.{pattern_code}.{direction.lower()}_confidence"] = _maximum_confidence(confidences)
+
+    for event_type in _PRICE_ACTION_EVENT_TYPES:
+        matching = [
+            event
+            for event in candle.price_action_events
+            if event.event_type.upper() == event_type and event.algorithm_version == price_action_algorithm_version
+        ]
+        for direction in _DIRECTIONS:
+            confidences = (
+                _numeric_or_nan(event.confidence)
+                for event in matching
+                if event.direction.upper() == direction
+            )
+            values[f"price_action.{event_type}.{direction.lower()}_confidence"] = _maximum_confidence(confidences)
+
+        level_candidates = [
+            event
+            for event in matching
+            if math.isfinite(_numeric_or_nan(event.level)) and math.isfinite(_numeric_or_nan(event.confidence))
+        ]
+        if level_candidates:
+            # Ties are resolved by level, direction and version rather than input order.
+            level_event = min(
+                level_candidates,
+                key=lambda event: (-_numeric_or_nan(event.confidence), _numeric_or_nan(event.level), event.direction, event.algorithm_version),
+            )
+            values[f"price_action.{event_type}.level_distance_bps"] = _ratio_bps(
+                _numeric_or_nan(level_event.level), close_price
+            )
+
+    return values
+
+
+def label_from_future_close(
+    *, source_close: float, future_close: float | None, neutral_threshold_bps: float
+) -> LabelResult | None:
+    """Create a three-class target from a later close and a symmetric neutral band.
+
+    ``forward_return`` is stored as a fractional return (for example ``0.01``
+    for +1%), while classification uses basis points.  Values exactly on either
+    threshold stay ``NEUTRAL`` so the neutral band is inclusive.
+    """
+
+    if neutral_threshold_bps < 0 or not math.isfinite(neutral_threshold_bps):
+        raise FeatureConstructionError("neutral_threshold_bps must be a finite value greater than or equal to zero.")
+    if future_close is None:
+        return None
+    source = _source_number(source_close, "close")
+    future = _source_number(future_close, "future_close")
+    if source <= 0 or future <= 0:
+        raise FeatureConstructionError("close and future_close must both be greater than zero.")
+
+    forward_return = future / source - 1.0
+    threshold = neutral_threshold_bps / 10_000.0
+    # A tolerance prevents binary floating-point representation from turning an
+    # exact boundary such as 101 / 100 at a 100-bps threshold into BULLISH.
+    boundary_tolerance = 1e-12
+    if forward_return - threshold > boundary_tolerance:
+        label: MarketLabel = "BULLISH"
+    elif -threshold - forward_return > boundary_tolerance:
+        label = "BEARISH"
+    else:
+        label = "NEUTRAL"
+    return LabelResult(forward_return=forward_return, label=label)
+
+
+def _validate_request(request: DatasetRequest) -> None:
+    if not request.instrument_symbol.strip():
+        raise FeatureConstructionError("instrument_symbol cannot be blank.")
+    if not request.timeframe.strip():
+        raise FeatureConstructionError("timeframe cannot be blank.")
+    if request.data_window_end <= request.data_window_start:
+        raise FeatureConstructionError("data_window_end must be after data_window_start.")
+    if request.data_window_end > request.data_cutoff_at:
+        raise FeatureConstructionError("data_window_end must not be later than data_cutoff_at.")
+    if isinstance(request.horizon_bars, bool) or not isinstance(request.horizon_bars, int) or request.horizon_bars <= 0:
+        raise FeatureConstructionError("horizon_bars must be a positive integer.")
+    if (
+        isinstance(request.neutral_threshold_bps, bool)
+        or not isinstance(request.neutral_threshold_bps, (int, float))
+        or request.neutral_threshold_bps < 0
+        or not math.isfinite(request.neutral_threshold_bps)
+    ):
+        raise FeatureConstructionError("neutral_threshold_bps must be finite and greater than or equal to zero.")
+    if not request.indicator_algorithm_version.strip():
+        raise FeatureConstructionError("indicator_algorithm_version cannot be blank.")
+    if not request.pattern_algorithm_version.strip():
+        raise FeatureConstructionError("pattern_algorithm_version cannot be blank.")
+    if not request.price_action_algorithm_version.strip():
+        raise FeatureConstructionError("price_action_algorithm_version cannot be blank.")
+
+
+def _validate_evidence_scope(candle: CandleEvidence, request: DatasetRequest) -> None:
+    requested_symbol = request.instrument_symbol.strip().upper()
+    if candle.symbol.strip().upper() != requested_symbol:
+        raise FeatureConstructionError(
+            f"Candle {candle.candle_id} belongs to {candle.symbol}, not requested symbol {request.instrument_symbol}."
+        )
+    if candle.timeframe != request.timeframe:
+        raise FeatureConstructionError(
+            f"Candle {candle.candle_id} has timeframe {candle.timeframe}, not requested timeframe {request.timeframe}."
+        )
+    if candle.open_time < request.data_window_start or candle.close_time > request.data_window_end:
+        raise FeatureConstructionError(f"Candle {candle.candle_id} falls outside the requested data window.")
+    if candle.close_time <= candle.open_time:
+        raise FeatureConstructionError(f"Candle {candle.candle_id} must close after it opens.")
+
+
+def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRequest) -> list[LabeledExample]:
+    """Turn adapter-provided evidence into chronologically ordered labeled examples.
+
+    Records without a future close are intentionally omitted: they are valid
+    latest observations but have no known target yet.  The adapter is expected
+    to attach a future close exactly ``request.horizon_bars`` after each source
+    candle and to enforce the immutable data cutoff before calling this pure
+    function.
+    """
+
+    _validate_request(request)
+    examples: list[LabeledExample] = []
+
+    # The window advances one bar at a time, so a feature can only ever see bars
+    # at or before the candle it describes.
+    volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    prior_close = _nan()
+    
+    # Process chronologically so relative metrics work correctly
+    sorted_records = sorted(records, key=lambda c: c.close_time)
+
+    for candle in sorted_records:
+        current_volume = _source_number(candle.volume, "volume")
+        if math.isfinite(current_volume):
+            volume_window.append(current_volume)
+        median_volume = statistics.median(volume_window) if volume_window else _nan()
+        
+        try:
+            _validate_evidence_scope(candle, request)
+        except FeatureConstructionError:
+            prior_close = _source_number(candle.close, "close")
+            continue
+            
+        label_result = label_from_future_close(
+            source_close=candle.close,
+            future_close=candle.future_close,
+            neutral_threshold_bps=request.neutral_threshold_bps,
+        )
+        if label_result is None:
+            prior_close = _source_number(candle.close, "close")
+            continue
+        if candle.future_close_time is None:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} has future_close but no future_close_time for label availability."
+            )
+        if candle.future_close_time <= candle.close_time:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} future_close_time must be after close_time.")
+        if candle.future_close_time > request.data_window_end:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
+
+        examples.append(
+            LabeledExample(
+                candle_id=candle.candle_id,
+                instrument_id=candle.instrument_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                observed_at=candle.close_time,
+                label_available_at=candle.future_close_time,
+                forward_return=label_result.forward_return,
+                label=label_result.label,
+                features=build_feature_vector(
+                    candle,
+                    prior_close=prior_close,
+                    median_volume=median_volume,
+                    indicator_algorithm_version=request.indicator_algorithm_version,
+                    pattern_algorithm_version=request.pattern_algorithm_version,
+                    price_action_algorithm_version=request.price_action_algorithm_version,
+                ),
+                vix_observed_at=candle.vix_observed_at,
+            )
+        )
+        prior_close = _source_number(candle.close, "close")
+
+    return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
+
+
+__all__ = [
+    "FEATURE_SCHEMA",
+    "FEATURE_DEFINITION",
+    "FEATURE_SCHEMA_VERSION",
+    "FeatureConstructionError",
+    "LabelResult",
+    "build_feature_vector",
+    "build_labeled_examples",
+    "feature_schema",
+    "feature_definition",
+    "label_from_future_close",
+]
+

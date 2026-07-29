@@ -1,0 +1,140 @@
+import type { CandleRepository, UpsertCandleInput } from "../domain/candle.js";
+import type { HistoricalMarketCandle, HistoricalMarketDataProvider, HistoricalTimeframe } from "../domain/historical-data-provider.js";
+import type { Instrument } from "../domain/instrument.js";
+import type { MarketDataIngestionRepository } from "../domain/market-data-ingestion.js";
+
+export interface ImportHistoricalMarketDataInput {
+  instrument: Instrument;
+  providerInstrumentId: string;
+  provider: HistoricalMarketDataProvider;
+  timeframe: HistoricalTimeframe;
+  from: Date;
+  to: Date;
+}
+
+export interface ImportHistoricalMarketDataResult {
+  ingestionId: string;
+  provider: string;
+  candlesFetched: number;
+  candlesPersisted: number;
+}
+
+function isPositiveDecimal(value: string): boolean {
+  return /^\d+(?:\.\d+)?$/.test(value) && Number(value) > 0;
+}
+
+function validateCandle(candle: HistoricalMarketCandle): void {
+  if (!(candle.openTime instanceof Date) || Number.isNaN(candle.openTime.getTime())) {
+    throw new Error("A historical candle has an invalid opening timestamp.");
+  }
+  if (!(candle.closeTime instanceof Date) || candle.closeTime <= candle.openTime) {
+    throw new Error("A historical candle must close after it opens.");
+  }
+  if (![candle.open, candle.high, candle.low, candle.close].every(isPositiveDecimal)) {
+    throw new Error("A historical candle contains an invalid OHLC price.");
+  }
+  if (!/^\d+(?:\.\d+)?$/.test(candle.volume) || Number(candle.volume) < 0) {
+    throw new Error("A historical candle contains an invalid volume.");
+  }
+
+  const [open, high, low, close] = [candle.open, candle.high, candle.low, candle.close].map(Number);
+  if (high < open || high < close || high < low || low > open || low > close) {
+    throw new Error("A historical candle violates OHLC bounds.");
+  }
+}
+
+function toPersistenceInput(
+  candle: HistoricalMarketCandle,
+  input: ImportHistoricalMarketDataInput,
+): UpsertCandleInput {
+  return {
+    instrumentId: input.instrument.id,
+    timeframe: input.timeframe,
+    openTime: candle.openTime,
+    closeTime: candle.closeTime,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+    isComplete: true,
+    source: input.provider.id,
+    sourceMetadata: { providerInstrumentId: input.providerInstrumentId },
+  };
+}
+
+/**
+ * Coordinates ingestion and keeps the provider adapter outside the application rule.
+ * Historical input is always stored as completed candles; live updates are a later phase.
+ */
+export class ImportHistoricalMarketData {
+  constructor(
+    private readonly ingestionRepository: MarketDataIngestionRepository,
+    private readonly candleRepository: CandleRepository,
+  ) {}
+
+  async execute(input: ImportHistoricalMarketDataInput): Promise<ImportHistoricalMarketDataResult> {
+    if (input.from >= input.to) {
+      throw new Error("The historical import start must be before its end.");
+    }
+    if (!input.providerInstrumentId.trim()) {
+      throw new Error("A provider-specific instrument ID is required for historical collection.");
+    }
+
+    const ingestion = await this.ingestionRepository.start({
+      provider: input.provider.id,
+      mode: "HISTORICAL",
+      requestMetadata: {
+        instrumentId: input.instrument.id,
+        symbol: input.instrument.symbol,
+        providerInstrumentId: input.providerInstrumentId,
+        timeframe: input.timeframe,
+        from: input.from.toISOString(),
+        to: input.to.toISOString(),
+      },
+    });
+
+    try {
+      const fetched = await input.provider.fetchCandles({
+        providerInstrumentId: input.providerInstrumentId,
+        timeframe: input.timeframe,
+        from: input.from,
+        to: input.to,
+      });
+      const timestamps = new Set<number>();
+      const candles = fetched
+        .filter((candle) => candle.openTime >= input.from && candle.openTime <= input.to)
+        .sort((left, right) => left.openTime.getTime() - right.openTime.getTime());
+
+      // Validate the whole batch before any write, preventing malformed files
+      // from creating a partially imported sequence.
+      for (const candle of candles) {
+        validateCandle(candle);
+        const timestamp = candle.openTime.getTime();
+        if (timestamps.has(timestamp)) {
+          throw new Error(`Provider returned duplicate candle timestamp ${candle.openTime.toISOString()}.`);
+        }
+        timestamps.add(timestamp);
+      }
+      for (const candle of candles) {
+        await this.candleRepository.upsert({ ...toPersistenceInput(candle, input), ingestionId: ingestion.id });
+      }
+
+      await this.ingestionRepository.complete(ingestion.id, candles.length);
+      return {
+        ingestionId: ingestion.id,
+        provider: input.provider.id,
+        candlesFetched: fetched.length,
+        candlesPersisted: candles.length,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown historical import failure.";
+      try {
+        await this.ingestionRepository.fail(ingestion.id, message);
+      } catch (ingestionError) {
+        console.error("Unable to mark historical ingestion as failed", ingestionError);
+      }
+      throw error;
+    }
+  }
+}

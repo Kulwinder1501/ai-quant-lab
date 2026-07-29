@@ -1,0 +1,111 @@
+import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
+
+export type PaperTradeStatus = "OPEN" | "CLOSED" | "CANCELLED";
+export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED";
+export type PaperTradeEventType = "OPENED" | "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED";
+
+export interface PaperAccount {
+  id: string;
+  name: string;
+  openingBalance: number;
+  currency: "INR";
+  isActive: boolean;
+}
+
+export interface CreatePaperAccountInput {
+  name: string;
+  openingBalance: number;
+}
+
+export interface PaperAccountRepository {
+  create(input: CreatePaperAccountInput): Promise<PaperAccount>;
+  findById(id: string): Promise<PaperAccount | null>;
+  findByName(name: string): Promise<PaperAccount | null>;
+}
+
+export interface PaperTrade {
+  id: string;
+  accountId: string;
+  tradeIdeaId: string | null;
+  instrumentId: string;
+  instrumentSymbol?: string;
+  timeframe: string | null;
+  side: TradeSide;
+  status: PaperTradeStatus;
+  quantity: number;
+  entryPrice: number;
+  stopLoss: number;
+  targetPrice: number;
+  openedAt: Date;
+  closedAt: Date | null;
+  exitPrice: number | null;
+  exitReason: PaperTradeExitReason | null;
+  realizedPnl: number | null;
+  /** Total simulated INR costs applied to this trade so far. */
+  fees: number;
+  /** Total simulated INR slippage costs applied to this trade so far. */
+  slippage: number;
+  notes: string;
+}
+
+export interface PaperTradeEvent {
+  id: string;
+  paperTradeId: string;
+  eventType: PaperTradeEventType;
+  price: number | null;
+  quantity: number | null;
+  details: Record<string, unknown>;
+  occurredAt: Date;
+}
+
+export interface OpenPaperTradeInput {
+  accountId: string;
+  tradeIdeaId: string;
+  quantity: number;
+  /** Explicit simulated fill price. It is never sent to a broker. */
+  fillPrice: number;
+  openedAt: Date;
+  entryFees: number;
+  entrySlippage: number;
+  notes: string;
+}
+
+export interface ClosePaperTradeInput {
+  paperTradeId: string;
+  exitPrice: number;
+  exitReason: Exclude<PaperTradeExitReason, "CANCELLED">;
+  closedAt: Date;
+  exitFees: number;
+  exitSlippage: number;
+  details: Record<string, unknown>;
+}
+
+export interface PaperTradeRepository {
+  /** Atomically validates the active account/proposed idea and records an OPENED event. */
+  openFromTradeIdea(input: OpenPaperTradeInput): Promise<PaperTrade>;
+  findOpenById(id: string): Promise<PaperTrade | null>;
+  listOpenByAccount(accountId: string): Promise<PaperTrade[]>;
+  /** Atomically closes an OPEN trade and records its corresponding exit event. */
+  close(input: ClosePaperTradeInput): Promise<PaperTrade>;
+  updateStopLoss?(id: string, newStopLoss: number, reason?: string): Promise<void>;
+  findAccountPerformanceData(accountId: string): Promise<PaperAccountPerformanceData | null>;
+}
+
+export interface PaperAccountPerformanceData {
+  account: PaperAccount;
+  closedTrades: PaperTrade[];
+  openTrades: PaperTrade[];
+  /** Cash capacity after realised P/L and currently reserved open-trade notional/costs. */
+  availableCapital: number;
+}
+
+export interface TradeIdeaAcceptanceView {
+  id: string;
+  instrumentId: string;
+  side: TradeSide;
+  status: TradeIdeaStatus;
+  entryPrice: number;
+  stopLoss: number;
+  targetPrice: number;
+  expiresAt: Date | null;
+}

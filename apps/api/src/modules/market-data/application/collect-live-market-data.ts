@@ -1,0 +1,244 @@
+import { addDecimals, compareDecimals, nonNegativeDifference } from "../domain/decimal.js";
+import type { CandleRepository, PersistedCandle, UpsertCandleInput } from "../domain/candle.js";
+import type { HistoricalTimeframe } from "../domain/historical-data-provider.js";
+import type { Instrument } from "../domain/instrument.js";
+import type { LiveMarketDataProvider, LiveMarketQuote } from "../domain/live-market-data-provider.js";
+import { NseMarketSession } from "../domain/nse-market-session.js";
+
+export interface LiveMarketSubscription {
+  instrument: Instrument;
+  providerInstrumentId: string;
+}
+
+export interface CollectLiveMarketDataInput {
+  subscriptions: LiveMarketSubscription[];
+  timeframe: HistoricalTimeframe;
+  ingestionId: string;
+  now?: Date;
+}
+
+export interface CollectLiveMarketDataResult {
+  quotesReceived: number;
+  quotesApplied: number;
+  candlesFinalized: number;
+}
+
+interface ActiveCandle {
+  subscription: LiveMarketSubscription;
+  candle: PersistedCandle;
+  lastCumulativeVolume: string | null;
+}
+
+function metadataDecimal(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? value : null;
+}
+
+function quoteTimestamp(quote: LiveMarketQuote): Date {
+  return quote.exchangeTimestamp ?? quote.observedAt;
+}
+
+function updateMetadata(
+  candle: PersistedCandle,
+  subscription: LiveMarketSubscription,
+  quote: LiveMarketQuote,
+): Record<string, unknown> {
+  return {
+    ...candle.sourceMetadata,
+    providerInstrumentId: subscription.providerInstrumentId,
+    cumulativeVolume: quote.cumulativeVolume,
+    quoteObservedAt: quote.observedAt.toISOString(),
+    exchangeTimestamp: quote.exchangeTimestamp?.toISOString() ?? null,
+  };
+}
+
+function toUpsertInput(candle: PersistedCandle): UpsertCandleInput {
+  return {
+    instrumentId: candle.instrumentId,
+    ingestionId: candle.ingestionId,
+    timeframe: candle.timeframe,
+    openTime: candle.openTime,
+    closeTime: candle.closeTime,
+    open: candle.open,
+    high: candle.high,
+    low: candle.low,
+    close: candle.close,
+    volume: candle.volume,
+    isComplete: candle.isComplete,
+    source: candle.source,
+    sourceMetadata: candle.sourceMetadata,
+  };
+}
+
+/**
+ * Aggregates read-only quote snapshots into provisional OHLCV candles, then
+ * seals them when their NSE time window closes. It contains no order logic.
+ */
+export class CollectLiveMarketData {
+  private readonly activeCandles = new Map<string, ActiveCandle>();
+  private readonly lastCumulativeVolumes = new Map<string, string>();
+
+  constructor(
+    private readonly provider: LiveMarketDataProvider,
+    private readonly candleRepository: CandleRepository,
+    private readonly marketSession: NseMarketSession,
+  ) {}
+
+  async execute(input: CollectLiveMarketDataInput): Promise<CollectLiveMarketDataResult> {
+    const now = input.now ?? new Date();
+    const finalized = await this.finalizeStaleCandles(input.subscriptions, input.timeframe, now);
+    if (!this.marketSession.isOpen(now) || input.subscriptions.length === 0) {
+      return { quotesReceived: 0, quotesApplied: 0, candlesFinalized: finalized };
+    }
+
+    const quoteByProviderId = new Map<string, LiveMarketQuote>();
+    const quotes = await this.provider.fetchQuotes(input.subscriptions.map((subscription) => subscription.providerInstrumentId));
+    for (const quote of quotes) {
+      quoteByProviderId.set(quote.providerInstrumentId, quote);
+    }
+
+    let quotesApplied = 0;
+    let candlesFinalized = finalized;
+    for (const subscription of input.subscriptions) {
+      const quote = quoteByProviderId.get(subscription.providerInstrumentId);
+      if (!quote) {
+        continue;
+      }
+      const result = await this.applyQuote(subscription, quote, input.timeframe, input.ingestionId, now);
+      quotesApplied += result.applied ? 1 : 0;
+      candlesFinalized += result.finalized;
+    }
+    return { quotesReceived: quotes.length, quotesApplied, candlesFinalized };
+  }
+
+  private async applyQuote(
+    subscription: LiveMarketSubscription,
+    quote: LiveMarketQuote,
+    timeframe: HistoricalTimeframe,
+    ingestionId: string,
+    collectionTime: Date,
+  ): Promise<{ applied: boolean; finalized: number }> {
+    if (compareDecimals(quote.lastPrice, "0") <= 0) {
+      throw new Error(`Live provider returned a non-positive price for ${subscription.providerInstrumentId}.`);
+    }
+    const quoteTime = quoteTimestamp(quote);
+    const collectionSession = this.marketSession.getSession(collectionTime);
+    const quoteSession = this.marketSession.getSession(quoteTime);
+    if (!collectionSession || !quoteSession || collectionSession.opensAt.getTime() !== quoteSession.opensAt.getTime()) {
+      return { applied: false, finalized: 0 };
+    }
+    const window = this.marketSession.candleWindow(quoteTime, timeframe);
+    if (!window) {
+      return { applied: false, finalized: 0 };
+    }
+
+    const key = subscription.instrument.id;
+    let active = this.activeCandles.get(key);
+    if (!active) {
+      const existing = await this.candleRepository.findByKey(subscription.instrument.id, timeframe, window.openTime);
+      if (existing?.isComplete) {
+        return { applied: false, finalized: 0 };
+      }
+      active = existing
+        ? {
+          subscription,
+          candle: existing,
+          lastCumulativeVolume: metadataDecimal(existing.sourceMetadata, "cumulativeVolume")
+            ?? this.lastCumulativeVolumes.get(key)
+            ?? null,
+        }
+        : {
+          subscription,
+          candle: {
+            id: "",
+            instrumentId: subscription.instrument.id,
+            timeframe,
+            openTime: window.openTime,
+            closeTime: window.closeTime,
+            open: quote.lastPrice,
+            high: quote.lastPrice,
+            low: quote.lastPrice,
+            close: quote.lastPrice,
+            volume: "0",
+            isComplete: false,
+            source: this.provider.id,
+            ingestionId,
+            sourceMetadata: {},
+          },
+          lastCumulativeVolume: this.lastCumulativeVolumes.get(key) ?? null,
+        };
+      if (existing && existing.source !== this.provider.id) {
+        throw new Error(`Cannot merge live provider ${this.provider.id} into provisional candle from ${existing.source}.`);
+      }
+      this.activeCandles.set(key, active);
+    }
+
+    if (window.openTime < active.candle.openTime) {
+      return { applied: false, finalized: 0 };
+    }
+
+    let finalized = 0;
+    if (window.openTime > active.candle.openTime) {
+      active.candle = { ...active.candle, isComplete: true };
+      await this.candleRepository.upsert(toUpsertInput(active.candle));
+      finalized = 1;
+      active = {
+        subscription,
+        candle: {
+          id: "",
+          instrumentId: subscription.instrument.id,
+          timeframe,
+          openTime: window.openTime,
+          closeTime: window.closeTime,
+          open: quote.lastPrice,
+          high: quote.lastPrice,
+          low: quote.lastPrice,
+          close: quote.lastPrice,
+          volume: "0",
+          isComplete: false,
+          source: this.provider.id,
+          ingestionId,
+          sourceMetadata: {},
+        },
+        lastCumulativeVolume: active.lastCumulativeVolume ?? this.lastCumulativeVolumes.get(key) ?? null,
+      };
+      this.activeCandles.set(key, active);
+    }
+
+    const deltaVolume = quote.cumulativeVolume && active.lastCumulativeVolume
+      ? nonNegativeDifference(quote.cumulativeVolume, active.lastCumulativeVolume)
+      : "0";
+    active.candle = {
+      ...active.candle,
+      high: compareDecimals(quote.lastPrice, active.candle.high) > 0 ? quote.lastPrice : active.candle.high,
+      low: compareDecimals(quote.lastPrice, active.candle.low) < 0 ? quote.lastPrice : active.candle.low,
+      close: quote.lastPrice,
+      volume: addDecimals(active.candle.volume, deltaVolume),
+      sourceMetadata: updateMetadata(active.candle, subscription, quote),
+    };
+    if (quote.cumulativeVolume) {
+      active.lastCumulativeVolume = quote.cumulativeVolume;
+      this.lastCumulativeVolumes.set(key, quote.cumulativeVolume);
+    }
+    active.candle = await this.candleRepository.upsert(toUpsertInput(active.candle));
+    this.activeCandles.set(key, active);
+    return { applied: true, finalized };
+  }
+
+  private async finalizeStaleCandles(
+    subscriptions: LiveMarketSubscription[],
+    timeframe: HistoricalTimeframe,
+    now: Date,
+  ): Promise<number> {
+    const pending = await this.candleRepository.listIncomplete(
+      subscriptions.map((subscription) => subscription.instrument.id),
+      timeframe,
+      now,
+    );
+    for (const candle of pending) {
+      await this.candleRepository.upsert(toUpsertInput({ ...candle, isComplete: true }));
+      this.activeCandles.delete(candle.instrumentId);
+    }
+    return pending.length;
+  }
+}

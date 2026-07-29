@@ -1,0 +1,81 @@
+export const indicatorCodes = [
+  "SMA",
+  "EMA",
+  "RSI",
+  "MACD",
+  "ATR",
+  "VWAP",
+  "BOLLINGER_BANDS",
+  "SUPERTREND",
+] as const;
+
+export type IndicatorCode = (typeof indicatorCodes)[number];
+export type IndicatorValues = Record<string, number | string | null>;
+
+export interface IndicatorDefinitionSpec {
+  code: IndicatorCode;
+  algorithmVersion: string;
+  parameters: Record<string, number | string | boolean>;
+  outputSchema: Record<string, string>;
+}
+
+export interface IndicatorCandle {
+  id: string;
+  openTime: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface IndicatorPoint {
+  candleId: string;
+  values: IndicatorValues;
+}
+
+export interface IndicatorDefinition {
+  id: string;
+  code: IndicatorCode;
+  algorithmVersion: string;
+  parameters: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
+}
+
+export interface EnsureIndicatorDefinitionInput extends IndicatorDefinitionSpec {
+  parametersHash: string;
+}
+
+export interface IndicatorDefinitionRepository {
+  ensure(input: EnsureIndicatorDefinitionInput): Promise<IndicatorDefinition>;
+}
+
+export interface IndicatorSnapshotRepository {
+  upsert(input: { candleId: string; indicatorDefinitionId: string; values: IndicatorValues }): Promise<void>;
+}
+
+export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
+  { code: "SMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
+  { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, outputSchema: { value: "number" } },
+  {
+    code: "MACD",
+    algorithmVersion: "ta-v1",
+    parameters: { fastPeriod: 12, slowPeriod: 26, signalPeriod: 9 },
+    outputSchema: { macd: "number", signal: "number|null", histogram: "number|null" },
+  },
+  { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, outputSchema: { value: "number" } },
+  { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, outputSchema: { value: "number" } },
+  {
+    code: "BOLLINGER_BANDS",
+    algorithmVersion: "ta-v1",
+    parameters: { period: 20, standardDeviations: 2 },
+    outputSchema: { middle: "number", upper: "number", lower: "number", standardDeviation: "number" },
+  },
+  {
+    code: "SUPERTREND",
+    algorithmVersion: "ta-v1",
+    parameters: { atrPeriod: 10, multiplier: 3 },
+    outputSchema: { value: "number", upperBand: "number", lowerBand: "number", trend: "UP|DOWN" },
+  },
+];
