@@ -24,7 +24,24 @@ async function main(): Promise<void> {
       new PostgresStrategyMarketContextRepository(database),
       new PostgresTradeIdeaRepository(database),
     ).execute({ instrumentId: instrument.id, timeframe });
-    console.info(JSON.stringify({ level: "info", message: "Trade-idea generation complete", instrument: symbol, timeframe, ...result }));
+    for (const res of result) {
+      if (res.skippedReason === "STRATEGY_FAILED") {
+        console.error(`Failed (${res.strategyKey}): ${res.failureMessage ?? "unknown error"}`);
+      } else if (res.skippedReason) {
+        console.log(`Skipped (${res.strategyKey}): ${res.skippedReason}`);
+      } else {
+        console.log(`Success (${res.strategyKey}): Generated ${res.candidatesGenerated} candidate(s).`);
+        for (const ideaId of res.tradeIdeaIds) {
+          console.log(` - Idea ID: ${ideaId}`);
+        }
+      }
+    }
+    console.info(JSON.stringify({ level: "info", message: "Trade-idea generation complete", instrument: symbol, timeframe, result }));
+    // A strategy that could not run is a real failure even though the strategies
+    // that did run kept their results, so the exit code has to reflect it.
+    if (result.some((res) => res.skippedReason === "STRATEGY_FAILED")) {
+      process.exitCode = 1;
+    }
   } finally {
     await database.end();
   }

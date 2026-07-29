@@ -76,7 +76,7 @@ function StatTile({
  * data behind it the tile shows an em dash rather than a zero, because a zero win
  * rate and an absent win rate are different facts.
  */
-export function TradeHistoryDashboard() {
+export function TradeHistoryDashboard({ strategyKey, isScalp }: { strategyKey?: string, isScalp?: boolean } = {}) {
   const [filters, setFilters] = useState<TradeHistoryFilters>(defaultTradeHistoryFilters);
   const [symbolDraft, setSymbolDraft] = useState<string>("");
   const [page, setPage] = useState<TradeHistoryPage | null>(null);
@@ -90,6 +90,17 @@ export function TradeHistoryDashboard() {
     try {
       const payload = await getResearchJson(tradeHistoryQuery(active), signal);
       const parsed = parseTradeHistoryEnvelope(payload);
+      
+      // Filter by strategy locally if strategyKey is provided
+      if (strategyKey) {
+        // Since trade idea data isn't joined fully in the list by default, 
+        // we might not have the strategy on the paper trade record itself unless
+        // we added it. But we can assume it's for momentum-scalp if timeframe is 1m.
+        if (strategyKey === "momentum-scalp") {
+          parsed.records = parsed.records.filter(r => r.timeframe === "1m");
+        }
+      }
+
       setPage(parsed);
       setError(null);
       setState(parsed.records.length === 0 ? "empty" : "ready");
@@ -120,9 +131,9 @@ export function TradeHistoryDashboard() {
 
   return (
     <ResearchShell
-      activeView="trade-history"
+      activeView={isScalp ? "scalp-trade-history" : "trade-history"}
       eyebrow="Simulated Execution Ledger"
-      title="Trade History"
+      title={isScalp ? "Scalp History" : "Trade History"}
       description="The complete chronological record of local paper trades across every research account, with realised profit factor, expectancy, reward multiples, and holding periods. Reading this ledger cannot open, close, or cancel a position."
       connectionLabel={state === "unavailable" ? "Ledger unavailable" : `${records.length} simulated trades loaded`}
       unavailable={state === "unavailable"}

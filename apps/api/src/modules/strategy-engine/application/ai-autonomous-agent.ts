@@ -200,6 +200,22 @@ export class AiAutonomousAgent {
           ? `POSITIVE (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`
           : `NEUTRAL (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`;
 
+    // Institutional Data
+    let fiiDiiSentiment = 0;
+    try {
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      const res = await this.database.query(`SELECT fii_cash_net_cr as fii, dii_cash_net_cr as dii FROM institutional_flows WHERE date = $1`, [today]);
+      if (res.rows.length > 0) {
+        const fii = Number(res.rows[0].fii);
+        const dii = Number(res.rows[0].dii);
+        if (fii > 1000) fiiDiiSentiment = 10;
+        else if (fii < -1000) fiiDiiSentiment = -10;
+      }
+    } catch (e) {
+      console.warn("Error fetching institutional data:", e);
+    }
+
     const openTrades = await this.paperTradeRepo.listOpenByAccount(account.id);
     const existingTrades = openTrades.filter((t) => t.instrumentId === instId);
 
@@ -264,6 +280,20 @@ export class AiAutonomousAgent {
     } else if (rsiVal < 35) {
       confidence += 10;
       reasoning.push(`RSI(14) at ${rsiVal.toFixed(1)} indicates oversold value zone.`);
+    }
+
+    // Include FII/DII sentiment
+    if (fiiDiiSentiment !== 0) {
+      confidence += fiiDiiSentiment;
+      reasoning.push(fiiDiiSentiment > 0 ? "Strong FII inflows supporting bullish momentum." : "Strong FII outflows indicating bearish pressure.");
+    }
+
+    if (livePrice > bbUpper) {
+      confidence -= 10;
+      reasoning.push(`Price pierced upper Bollinger Band (₹${bbUpper.toFixed(2)}), mean reversion risk elevated.`);
+    } else if (livePrice < bbLower) {
+      confidence += 15;
+      reasoning.push(`Price touched lower Bollinger Band (₹${bbLower.toFixed(2)}), potential value opportunity.`);
     }
 
     // Bollinger Bands logic

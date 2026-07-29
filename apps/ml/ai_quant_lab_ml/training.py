@@ -507,7 +507,7 @@ def algorithm_identifier(algorithm_choice: str) -> str:
     return identifier
 
 
-def training_metadata(result: BaselineTrainingResult) -> dict[str, Any]:
+def training_metadata(result: BaselineTrainingResult, schema_version: str = FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
     """Return JSON-compatible metadata to persist alongside a pickle artifact."""
 
     def metrics_to_mapping(metrics: EvaluationMetrics) -> dict[str, Any]:
@@ -525,9 +525,9 @@ def training_metadata(result: BaselineTrainingResult) -> dict[str, Any]:
     return {
         "algorithm": result.algorithm,
         "hyperparameters": dict(result.hyperparameters),
-        "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+        "featureSchemaVersion": schema_version,
         "featureSchema": list(result.feature_schema),
-        "featureDefinition": feature_definition(),
+        "featureDefinition": feature_definition(schema_version),
         "trainingRows": result.training_rows,
         "validationRows": result.validation_rows,
         "trainingMetrics": metrics_to_mapping(result.training_metrics),

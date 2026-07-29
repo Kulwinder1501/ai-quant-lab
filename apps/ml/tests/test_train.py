@@ -63,6 +63,10 @@ def assess(
         "minimum_initial_macro_f1": 0.38,
         "maximum_plausible_macro_f1": 0.60,
         "override_suspicious": False,
+        # The sample-size floors are neutralised here so each test exercises the one
+        # rule it names. They have their own tests below.
+        "minimum_validation_rows": 1,
+        "minimum_directional_predictions": 1,
     }
     arguments.update(overrides)
     return promotion_assessment(**arguments)  # type: ignore[arg-type]
@@ -80,6 +84,106 @@ def incumbent() -> PersistedModelVersion:
         feature_schema=({"name": "feature.one"},),
         validation_metrics={},
     )
+
+
+class PromotionSampleSizeGateTests(unittest.TestCase):
+    """A macro-F1 floor cannot discriminate on a holdout too small to resolve it."""
+
+    def test_a_passing_score_on_too_few_rows_is_refused(self) -> None:
+        # The real case this came from: a 15m candidate scored 0.4023 on 24 rows,
+        # cleared the 0.38 floor, and was declared promotion-eligible.
+        thin = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=metrics(0.4023),
+            training_rows=91,
+            validation_rows=24,
+        )
+        qualifies, assessment = assess(
+            0.4023,
+            candidate=thin,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=1,
+        )
+        self.assertFalse(qualifies)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+        self.assertIn("24 validation rows", str(assessment["reason"]))
+
+    def test_sample_size_is_checked_before_the_score_floor(self) -> None:
+        """Insufficient evidence must not be reported as a quality failure.
+
+        Reporting a too-small holdout as INITIAL_BASELINE_THRESHOLD_NOT_MET would
+        send someone off to improve a model when the actual problem is the window.
+        """
+
+        _, assessment = assess(0.10, minimum_validation_rows=60, minimum_directional_predictions=1)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+
+    def test_sample_size_is_checked_before_a_suspiciously_high_score(self) -> None:
+        _, assessment = assess(0.95, minimum_validation_rows=60, minimum_directional_predictions=1)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+
+    def test_a_model_that_almost_never_commits_has_no_readable_hit_rate(self) -> None:
+        directional = EvaluationMetrics(
+            accuracy=0.5,
+            balanced_accuracy=0.5,
+            macro_f1=0.45,
+            sample_count=100,
+            class_counts={"BEARISH": 30, "NEUTRAL": 40, "BULLISH": 30},
+            directional_predictions=8,
+            directional_hit_rate=0.25,
+            coverage=0.08,
+        )
+        thin = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=directional,
+            training_rows=400,
+            validation_rows=100,
+        )
+        qualifies, assessment = assess(
+            0.45,
+            candidate=thin,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=30,
+        )
+        self.assertFalse(qualifies)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_DIRECTIONAL_EVIDENCE")
+
+    def test_sufficient_evidence_reaches_the_score_floor(self) -> None:
+        """With enough rows and enough directional calls the gate judges quality again."""
+
+        ample = EvaluationMetrics(
+            accuracy=0.5,
+            balanced_accuracy=0.5,
+            macro_f1=0.45,
+            sample_count=200,
+            class_counts={"BEARISH": 60, "NEUTRAL": 80, "BULLISH": 60},
+            directional_predictions=120,
+            directional_hit_rate=0.52,
+            coverage=0.6,
+        )
+        strong = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=ample,
+            training_rows=800,
+            validation_rows=200,
+        )
+        qualifies, assessment = assess(
+            0.45,
+            candidate=strong,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=30,
+        )
+        self.assertTrue(qualifies)
+        self.assertEqual(assessment["decision"], "INITIAL_BASELINE_THRESHOLD_MET")
 
 
 class TrainCliPolicyTests(unittest.TestCase):

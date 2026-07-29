@@ -4,6 +4,7 @@ import { modelPredictionIdentityMigration } from "./003-model-prediction-identit
 import { marketNewsSchemaMigration } from "./004-market-news-schema.js";
 import { aiMemoryAndRagMigration } from "./005-ai-memory-and-rag.js";
 import { addRegimeEvidenceMigration } from "./006-add-regime-evidence.js";
+import { institutionalFlowsAndOffshoreMigration } from "./007-institutional-flows-and-offshore.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -12,4 +13,5 @@ export const migrations = [
   marketNewsSchemaMigration,
   aiMemoryAndRagMigration,
   addRegimeEvidenceMigration,
+  institutionalFlowsAndOffshoreMigration,
 ];

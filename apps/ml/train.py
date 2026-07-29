@@ -26,6 +26,8 @@ from ai_quant_lab_ml.contracts import (
     EvaluationMetrics,
     LabeledExample,
     PersistedModelVersion,
+    default_neutral_threshold_bps,
+    schema_version_for,
 )
 from ai_quant_lab_ml.features import build_labeled_examples, feature_definition, feature_schema
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
@@ -43,6 +45,20 @@ from ai_quant_lab_ml.validation import walk_forward_splits
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
 DEFAULT_ARTIFACT_DIRECTORY = ROOT_DIRECTORY / "models"
+
+# A macro-F1 floor cannot discriminate on a holdout that is too small to resolve
+# it. Observed on 2026-07-29: a 15m candidate scoring 0.4023 on 24 validation rows
+# with 8 directional predictions at a 25% hit rate was declared promotion-eligible
+# purely because 0.4023 > the 0.38 floor. The standard error of macro-F1 at n=24 is
+# roughly 0.10, so that "pass" and a 0.34 "fail" are the same measurement.
+#
+# 60 rows brings the standard error to about 0.06, which is the point at which the
+# 0.38 floor starts to mean something against the ~0.33 random baseline. The
+# directional floor is separate because coverage can be low enough that a model
+# committed to a direction only a handful of times, and a hit rate over 8 calls is
+# not evidence regardless of how many rows the macro-F1 was computed on.
+MINIMUM_VALIDATION_ROWS = 60
+MINIMUM_DIRECTIONAL_PREDICTIONS = 30
 
 # Each optional hyperparameter flag names the trainer keyword it fills and the
 # algorithms that accept it. A flag left unset is never forwarded, so the
@@ -147,7 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--to", dest="data_window_end", required=True, help="Inclusive data-window end (YYYY-MM-DD or ISO-8601).")
     parser.add_argument("--data-cutoff-at", help="Stored-data revision cutoff (defaults to the current UTC time).")
     parser.add_argument("--horizon-bars", type=positive_int, default=5, help="Later completed bars used for each label (default: 5).")
-    parser.add_argument("--neutral-threshold-bps", type=non_negative_float, default=50.0, help="Inclusive forward-return neutral band in bps (default: 50).")
+    parser.add_argument(
+        "--neutral-threshold-bps",
+        type=non_negative_float,
+        default=None,
+        help=(
+            "Inclusive forward-return neutral band in bps. Defaults to a band calibrated "
+            "for the timeframe (1m: 2, 5m: 5, 15m: 9, 1d: 50), because a single constant "
+            "leaves a 1m target 99% NEUTRAL."
+        ),
+    )
     parser.add_argument("--validation-fraction", type=strict_unit_interval, default=0.2, help="Final chronological validation fraction, exclusive of purge (default: 0.2).")
     parser.add_argument(
         "--algorithm",
@@ -182,6 +207,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-initial-macro-f1", type=unit_interval, default=0.38, help="Required macro-F1 for an initial production model (~0.33 is the 3-class random baseline) (default: 0.38).")
     parser.add_argument("--maximum-plausible-macro-f1", type=unit_interval, default=0.60, help="Candidate scoring above this must not auto-promote without override (default: 0.60).")
     parser.add_argument("--override-suspicious", action="store_true", help="Force promotion despite suspiciously high score or negative gap.")
+    parser.add_argument(
+        "--minimum-validation-rows",
+        type=positive_int,
+        default=MINIMUM_VALIDATION_ROWS,
+        help=f"Holdout rows required before a macro-F1 floor is meaningful (default: {MINIMUM_VALIDATION_ROWS}).",
+    )
+    parser.add_argument(
+        "--minimum-directional-predictions",
+        type=positive_int,
+        default=MINIMUM_DIRECTIONAL_PREDICTIONS,
+        help=f"Directional calls required before a hit rate is readable (default: {MINIMUM_DIRECTIONAL_PREDICTIONS}).",
+    )
     parser.add_argument("--folds", type=positive_int, default=1, help="Number of walk-forward validation folds (default: 1).")
     return parser
 
@@ -223,12 +260,12 @@ def fold_summary(fold_results: Sequence[BaselineTrainingResult]) -> dict[str, An
     }
 
 
-def feature_schema_rows(schema: Sequence[str]) -> list[dict[str, str]]:
+def feature_schema_rows(schema: Sequence[str], schema_version: str) -> list[dict[str, str]]:
     return [
         {
             "name": name,
             "dtype": "float64",
-            "schemaVersion": FEATURE_SCHEMA_VERSION,
+            "schemaVersion": schema_version,
         }
         for name in schema
     ]
@@ -250,7 +287,11 @@ def artifact_path(artifact_directory: Path, model_key: str, trained_at: datetime
     return artifact_directory / safe_key / f"{trained_at.strftime('%Y%m%dT%H%M%S%fZ')}-{unique}.pkl"
 
 
-def default_model_key(request: DatasetRequest, algorithm_choice: str) -> str:
+def default_model_key(
+    request: DatasetRequest,
+    algorithm_choice: str,
+    schema_version: str = FEATURE_SCHEMA_VERSION,
+) -> str:
     """Return a model family key that cannot accidentally span incompatible experiments.
 
     The algorithm is part of the key so a boosted candidate does not silently
@@ -270,10 +311,9 @@ def default_model_key(request: DatasetRequest, algorithm_choice: str) -> str:
             component(request.timeframe),
             f"h{request.horizon_bars}",
             f"neutral-{component(threshold)}bps",
-            FEATURE_SCHEMA_VERSION,
+            schema_version,
         )
     )
-
 
 def selected_hyperparameters(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, Any]:
     """Collect only the explicitly supplied flags that the chosen algorithm accepts."""
@@ -295,6 +335,7 @@ def validate_candidate_artifact(
     path: Path,
     expected_checksum: str,
     expected_schema: Sequence[str],
+    schema_version: str = FEATURE_SCHEMA_VERSION,
     model_key: str,
     algorithm: str,
     request: DatasetRequest,
@@ -305,9 +346,9 @@ def validate_candidate_artifact(
     metadata = loaded.metadata
     if tuple(metadata.get("featureSchema", ())) != tuple(expected_schema):
         raise ArtifactError("Candidate artifact does not match the fixed feature schema.")
-    if metadata.get("featureSchemaVersion") != FEATURE_SCHEMA_VERSION:
+    if metadata.get("featureSchemaVersion") != schema_version:
         raise ArtifactError("Candidate artifact has an incompatible feature-schema version.")
-    if metadata.get("featureDefinition") != feature_definition():
+    if metadata.get("featureDefinition") != feature_definition(schema_version):
         raise ArtifactError("Candidate artifact has an incompatible feature definition.")
     if metadata.get("algorithm") != algorithm:
         raise ArtifactError("Candidate artifact algorithm does not match the persisted candidate.")
@@ -366,6 +407,7 @@ def evaluate_incumbent(
     incumbent: PersistedModelVersion,
     validation: Sequence[LabeledExample],
     expected_schema: Sequence[str],
+    schema_version: str,
     request: DatasetRequest,
 ) -> tuple[EvaluationMetrics | None, str | None]:
     """Evaluate a trusted, checksum-matched production artifact on this exact holdout."""
@@ -379,9 +421,9 @@ def evaluate_incumbent(
         metadata_schema = loaded.metadata.get("featureSchema")
         if not isinstance(metadata_schema, list) or tuple(metadata_schema) != tuple(expected_schema):
             return None, "The production artifact does not match the candidate feature schema."
-        if loaded.metadata.get("featureSchemaVersion") != FEATURE_SCHEMA_VERSION:
+        if loaded.metadata.get("featureSchemaVersion") != schema_version:
             return None, "The production artifact has an incompatible feature-schema version."
-        if loaded.metadata.get("featureDefinition") != feature_definition():
+        if loaded.metadata.get("featureDefinition") != feature_definition(schema_version):
             return None, "The production artifact has an incompatible feature definition."
         if loaded.metadata.get("algorithm") != incumbent.algorithm:
             return None, "The production artifact algorithm does not match its persisted version."
@@ -423,13 +465,18 @@ def promotion_assessment(
     minimum_initial_macro_f1: float,
     maximum_plausible_macro_f1: float,
     override_suspicious: bool,
+    minimum_validation_rows: int = MINIMUM_VALIDATION_ROWS,
+    minimum_directional_predictions: int = MINIMUM_DIRECTIONAL_PREDICTIONS,
     folds: Mapping[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Decide promotion from unseen-data evidence alone.
 
-    The order of the checks is deliberate. A suspicious score is refused before
-    any comparison with the incumbent, because a leaking candidate that "beats"
-    production is the exact failure this gate exists to prevent.
+    The order of the checks is deliberate. Sample-size sufficiency comes first,
+    because a score computed on too few rows is not weak evidence but absent
+    evidence, and every later comparison would be reading noise. A suspicious
+    score is then refused before any comparison with the incumbent, because a
+    leaking candidate that "beats" production is the exact failure this gate
+    exists to prevent.
     """
 
     candidate_metrics = metrics_to_mapping(candidate.validation_metrics)
@@ -443,9 +490,31 @@ def promotion_assessment(
         "incumbentModelVersionId": None if incumbent is None else incumbent.id,
         "incumbent": None if incumbent_metrics is None else metrics_to_mapping(incumbent_metrics),
         "validationRows": candidate.validation_rows,
+        "minimumValidationRows": minimum_validation_rows,
+        "minimumDirectionalPredictions": minimum_directional_predictions,
     }
     if folds is not None:
         assessment["walkForward"] = dict(folds)
+
+    # Sample-size sufficiency first: a score on too few rows is absent evidence,
+    # not weak evidence, and every check below it would be reading noise.
+    directional_predictions = candidate.validation_metrics.directional_predictions
+    if candidate.validation_rows < minimum_validation_rows:
+        assessment["decision"] = "INSUFFICIENT_VALIDATION_EVIDENCE"
+        assessment["reason"] = (
+            f"{candidate.validation_rows} validation rows is below the {minimum_validation_rows} "
+            "needed for a macro-F1 floor to discriminate. Widen the data window or lower "
+            "--minimum-validation-rows deliberately."
+        )
+        return False, assessment
+    if directional_predictions is not None and directional_predictions < minimum_directional_predictions:
+        assessment["decision"] = "INSUFFICIENT_DIRECTIONAL_EVIDENCE"
+        assessment["reason"] = (
+            f"The candidate committed to a direction only {directional_predictions} time(s), below the "
+            f"{minimum_directional_predictions} needed to read a hit rate. A model that abstains on "
+            "almost every row has not been shown to be right about anything."
+        )
+        return False, assessment
 
     # With more than one fold the mean is the headline score, but the persisted
     # artifact is the final fold's model, so both must clear the floor. A mean
@@ -549,7 +618,11 @@ def main() -> int:
         data_window_end=parse_timestamp(args.data_window_end, end_of_day=True),
         data_cutoff_at=(parse_timestamp(args.data_cutoff_at) if args.data_cutoff_at else datetime.now(timezone.utc)),
         horizon_bars=args.horizon_bars,
-        neutral_threshold_bps=args.neutral_threshold_bps,
+        neutral_threshold_bps=(
+            args.neutral_threshold_bps
+            if args.neutral_threshold_bps is not None
+            else default_neutral_threshold_bps(args.timeframe)
+        ),
     )
     if request.data_window_end <= request.data_window_start:
         parser.error("--to must be after --from.")
@@ -558,7 +631,8 @@ def main() -> int:
     if args.random_state < 0:
         parser.error("--random-state must be non-negative.")
     hyperparameters = selected_hyperparameters(args, parser)
-    model_key = args.model_key or default_model_key(request, args.algorithm)
+    schema_version = schema_version_for(args.timeframe)
+    model_key = args.model_key or default_model_key(request, args.algorithm, schema_version)
 
     try:
         import psycopg
@@ -591,7 +665,7 @@ def main() -> int:
             fold_result = train_model(
                 args.algorithm,
                 split,
-                schema=feature_schema(),
+                schema=feature_schema(schema_version),
                 random_state=args.random_state,
                 hyperparameters=hyperparameters,
             )
@@ -626,7 +700,7 @@ def main() -> int:
         if len(splits) > 1:
             protocol["method"] = "WALK_FORWARD_PURGED_V1"
         artifact_metadata = {
-            **training_metadata(result),
+            **training_metadata(result, schema_version),
             "modelKey": model_key,
             "trainedAt": trained_at.isoformat(),
             "dataset": {
@@ -648,6 +722,7 @@ def main() -> int:
             path=written_artifact.path,
             expected_checksum=written_artifact.checksum,
             expected_schema=result.feature_schema,
+            schema_version=schema_version,
             model_key=model_key,
             algorithm=result.algorithm,
             request=request,
@@ -660,8 +735,9 @@ def main() -> int:
             incumbent_metrics, incumbent_error = evaluate_incumbent(
                 incumbent,
                 final_split.validation,
-                result.feature_schema,
-                request,
+                expected_schema=result.feature_schema,
+                schema_version=schema_version,
+                request=request,
             )
 
         qualifies_for_promotion, assessment = promotion_assessment(
@@ -673,6 +749,8 @@ def main() -> int:
             minimum_initial_macro_f1=args.minimum_initial_macro_f1,
             maximum_plausible_macro_f1=args.maximum_plausible_macro_f1,
             override_suspicious=args.override_suspicious,
+            minimum_validation_rows=args.minimum_validation_rows,
+            minimum_directional_predictions=args.minimum_directional_predictions,
             folds=folds,
         )
 
@@ -700,7 +778,7 @@ def main() -> int:
             )
 
         validation_metrics = {
-            **training_metadata(result),
+            **training_metadata(result, schema_version),
             "validationProtocol": protocol,
             "promotionAssessment": assessment,
         }
@@ -709,7 +787,7 @@ def main() -> int:
             algorithm=result.algorithm,
             artifact_uri=str(written_artifact.path.resolve()),
             artifact_checksum=written_artifact.checksum,
-            feature_schema=feature_schema_rows(result.feature_schema),
+            feature_schema=feature_schema_rows(result.feature_schema, schema_version),
             training_window_start=final_split.train[0].observed_at,
             training_window_end=final_split.train[-1].observed_at,
             training_rows=result.training_rows,
@@ -723,6 +801,7 @@ def main() -> int:
                 path=written_artifact.path,
                 expected_checksum=written_artifact.checksum,
                 expected_schema=result.feature_schema,
+                schema_version=schema_version,
                 model_key=model_key,
                 algorithm=result.algorithm,
                 request=request,

@@ -54,15 +54,18 @@ function qualifyingContext(): StrategyMarketContext {
 describe("GenerateTradeIdeas", () => {
   it("persists an explainable proposal from latest completed evidence", async () => {
     const saved: SaveTradeIdeaProposalInput[] = [];
+    // The double echoes the registration it is asked about, the way the real
+    // repository does. A stub that returned one strategy's configuration for every
+    // registration would hand each strategy the other's rule set.
     const strategyVersions: StrategyVersionRepository = {
-      ensure: async () => ({
-        id: "strategy-version-1",
-        strategyId: "strategy-1",
-        strategyKey: "trend-breakout",
-        name: "Trend Breakout",
-        description: "test",
-        version: 1,
-        configuration: { ...defaultTrendBreakoutStrategyConfiguration },
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
         isActive: true,
         isArchived: false,
       }),
@@ -93,8 +96,13 @@ describe("GenerateTradeIdeas", () => {
     const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas)
       .execute({ instrumentId: "instrument-1", timeframe: "1d" });
 
-    expect(result).toEqual({
-      strategyVersionId: "strategy-version-1",
+    // Every registered strategy is evaluated, so the result is one entry each.
+    // No entry may be STRATEGY_FAILED: that would mean a registered strategy
+    // cannot parse its own configuration.
+    expect(result.map((entry) => entry.skippedReason)).not.toContain("STRATEGY_FAILED");
+    expect(result.find((entry) => entry.strategyKey === "trend-breakout")).toEqual({
+      strategyVersionId: "strategy-version-trend-breakout",
+      strategyKey: "trend-breakout",
       sourceCandleId: "candle-1",
       candidatesGenerated: 1,
       tradeIdeaIds: ["idea-1"],
@@ -102,7 +110,7 @@ describe("GenerateTradeIdeas", () => {
     });
     expect(saved[0]).toMatchObject({
       instrumentId: "instrument-1",
-      strategyVersionId: "strategy-version-1",
+      strategyVersionId: "strategy-version-trend-breakout",
       sourceCandleId: "candle-1",
       side: "LONG",
       entryPrice: 110,

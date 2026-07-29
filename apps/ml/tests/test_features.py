@@ -125,9 +125,14 @@ class FeatureConstructionTests(unittest.TestCase):
         for name in FEATURE_SCHEMA:
             with self.subTest(feature=name):
                 is_bounded_oscillator = bool(re.match(r"^indicator\.(RSI|MACD)\.", name))
+                # A 0/1 indicator flag carries no unit, so it cannot encode a price
+                # era the way an absolute level does. SUPERTREND's trend_up /
+                # trend_down flags already pass via the "_up"/"_down" suffixes; an
+                # "is_" prefixed flag is the same kind of column.
+                is_binary_flag = bool(re.search(r"\.is_[a-z0-9_]+$", name))
                 self.assertTrue(
-                    name.endswith(allowed_suffixes) or is_bounded_oscillator,
-                    f"{name} is not a ratio, bps distance, bounded oscillator, or confidence.",
+                    name.endswith(allowed_suffixes) or is_bounded_oscillator or is_binary_flag,
+                    f"{name} is not a ratio, bps distance, bounded oscillator, flag, or confidence.",
                 )
         for level_feature in ("candle.open", "candle.high", "candle.low", "candle.close", "candle.volume"):
             self.assertNotIn(level_feature, FEATURE_SCHEMA)

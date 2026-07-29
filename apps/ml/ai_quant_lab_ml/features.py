@@ -1,4 +1,4 @@
-﻿"""Deterministic, source-candle-only feature and label construction.
+"""Deterministic, source-candle-only feature and label construction.
 
 The feature mapping in this module is deliberately fixed.  A model trained with
 ``ml-feature-v2`` therefore receives the same ordered columns regardless of
@@ -27,11 +27,13 @@ from typing import Any
 
 from .contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_SCALP,
     CandleEvidence,
     DatasetRequest,
     IndicatorEvidence,
     LabeledExample,
     MarketLabel,
+    schema_version_for,
 )
 
 
@@ -49,7 +51,7 @@ def trailing_feature_context(series: Sequence[tuple[float, float]]) -> tuple[flo
     """Return ``(prior_close, median_volume)`` for the final bar of a series.
 
     ``series`` is chronological ``(close, volume)`` for consecutive completed
-    candles ending with the bar being scored â€” the same walk
+    candles ending with the bar being scored — the same walk
     :func:`build_labeled_examples` performs during training. Inference must use
     this helper rather than passing placeholders: a feature that is real during
     training and missing at prediction time is train/serve skew, and the imputer
@@ -75,6 +77,38 @@ _CANDLE_FEATURES: tuple[str, ...] = (
     "candle.range_bps",
     "candle.upper_wick_bps",
     "candle.lower_wick_bps",
+    "candle.gap_fill_bps",
+    "candle.is_gap_defended",
+)
+
+_MARKET_FEATURES: tuple[str, ...] = (
+    "market.fii_net_flow_ratio",
+    "market.dii_net_flow_ratio",
+    "market.gift_nifty_implied_gap_bps",
+)
+
+# The three gap columns describe a session boundary, so inside a session they are
+# not merely uninformative but actively misleading:
+#
+# * ``overnight_gap_bps`` compares the bar's open to the *previous bar's* close.
+#   On a continuously quoted index that is ~0 on essentially every intraday bar.
+# * ``is_gap_defended`` is gated on |gap| > 20bps, which minute-to-minute never
+#   fires, making the column a constant 0.0 — zero information.
+# * ``gap_fill_bps`` is the harmful one. It means open->low when the gap is
+#   positive and open->high when it is negative, so at 1m, where the gap sign is
+#   noise, a single column carries two opposite meanings selected at random. It
+#   also duplicates upper_wick_bps / lower_wick_bps.
+#
+# ``volume_median_ratio`` is deliberately retained. It is the right normalisation
+# for scalping the moment the feed carries real volume; note that Yahoo's ^NSEI
+# 1m series reports zero volume on every bar, so against that source the column
+# imputes to a constant and contributes nothing.
+_SCALP_EXCLUDED_CANDLE_FEATURES: frozenset[str] = frozenset(
+    {"candle.overnight_gap_bps", "candle.gap_fill_bps", "candle.is_gap_defended"}
+)
+
+_SCALP_CANDLE_FEATURES: tuple[str, ...] = tuple(
+    name for name in _CANDLE_FEATURES if name not in _SCALP_EXCLUDED_CANDLE_FEATURES
 )
 
 _INDICATOR_VALUE_FIELDS: Mapping[str, tuple[str, ...]] = {
@@ -158,11 +192,21 @@ def _build_feature_schema() -> tuple[str, ...]:
         f"price_action.{event_type}.level_distance_bps" for event_type in _PRICE_ACTION_EVENT_TYPES
     )
     regime_features = ("regime.vix_sma20.value_ratio",)
-    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features
+    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features + _MARKET_FEATURES
+
+def _build_feature_schema_scalp() -> tuple[str, ...]:
+    indicator_features = tuple(
+        f"indicator.{code}.{field}"
+        for code, fields in _INDICATOR_VALUE_FIELDS.items()
+        for field in fields
+    )
+    supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
+    return _SCALP_CANDLE_FEATURES + indicator_features + supertrend_features + _MARKET_FEATURES
 
 
 # A tuple, rather than a data-dependent list, is the versioned model contract.
 FEATURE_SCHEMA: tuple[str, ...] = _build_feature_schema()
+FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp()
 
 # The public constant is made entirely of JSON values so a CLI can embed it in
 # artifact metadata or model-version provenance without a custom encoder.
@@ -174,21 +218,33 @@ _FEATURE_DEFINITION: dict[str, Any] = {
     "patternAlgorithmVersion": "candlestick-v1",
     "priceActionAlgorithmVersion": "price-action-v2",
 }
+
+_FEATURE_DEFINITION_SCALP: dict[str, Any] = {
+    "schemaVersion": FEATURE_SCHEMA_VERSION_SCALP,
+    "features": list(FEATURE_SCHEMA_SCALP),
+    "indicatorAlgorithmVersion": "ta-v1",
+    "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
+    "patternAlgorithmVersion": "candlestick-v1",
+    "priceActionAlgorithmVersion": "price-action-v2",
+}
+
 # Kept as a convenient JSON-safe public constant.  Runtime code should call
 # feature_definition() so an accidental caller mutation cannot affect future
 # artifact metadata.
 FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+FEATURE_DEFINITION_SCALP: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_SCALP, sort_keys=True))
 
-
-def feature_schema() -> tuple[str, ...]:
-    """Return the immutable ordered feature names for ``ml-feature-v1``."""
-
+def feature_schema(schema_version: str = FEATURE_SCHEMA_VERSION) -> tuple[str, ...]:
+    """Return the immutable ordered feature names for a given schema version."""
+    if schema_version == FEATURE_SCHEMA_VERSION_SCALP:
+        return FEATURE_SCHEMA_SCALP
     return FEATURE_SCHEMA
 
 
-def feature_definition() -> dict[str, Any]:
-    """Return an independent JSON-safe description of the ml-feature-v1 contract."""
-
+def feature_definition(schema_version: str = FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
+    """Return an independent JSON-safe description of the contract."""
+    if schema_version == FEATURE_SCHEMA_VERSION_SCALP:
+        return json.loads(json.dumps(_FEATURE_DEFINITION_SCALP, sort_keys=True))
     return json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
 
 
@@ -278,6 +334,7 @@ def build_feature_vector(
     *,
     prior_close: float,
     median_volume: float,
+    schema_version: str = FEATURE_SCHEMA_VERSION,
     indicator_algorithm_version: str = "ta-v1",
     pattern_algorithm_version: str = "candlestick-v1",
     price_action_algorithm_version: str = "price-action-v2",
@@ -298,11 +355,31 @@ def build_feature_vector(
     atr_indicator = _first_indicator_by_code(candle.indicators, "ATR", indicator_algorithm_version)
     atr_val = _numeric_or_nan(atr_indicator.values.get("value")) if atr_indicator else _nan()
 
-    values: dict[str, float] = {name: _nan() for name in FEATURE_SCHEMA}
+    overnight_gap_bps = _ratio_bps(open_price, prior_close)
+
+    # Calculate Gap Fill & Gap Defense
+    gap_fill_bps = _nan()
+    is_gap_defended = 0.0
+    if math.isfinite(overnight_gap_bps):
+        if overnight_gap_bps > 0:
+            gap_fill_bps = _ratio_bps(low_price, open_price)
+            if overnight_gap_bps > 20.0:
+                gap_half_price = prior_close + (open_price - prior_close) * 0.5
+                if low_price >= gap_half_price:
+                    is_gap_defended = 1.0
+        elif overnight_gap_bps < 0:
+            gap_fill_bps = _ratio_bps(high_price, open_price)
+            if overnight_gap_bps < -20.0:
+                gap_half_price = prior_close + (open_price - prior_close) * 0.5
+                if high_price <= gap_half_price:
+                    is_gap_defended = 1.0
+
+    schema_keys = feature_schema(schema_version)
+    values: dict[str, float] = {name: _nan() for name in schema_keys}
     values.update(
         {
             "candle.close_return_bps": _ratio_bps(close_price, prior_close),
-            "candle.overnight_gap_bps": _ratio_bps(open_price, prior_close),
+            "candle.overnight_gap_bps": overnight_gap_bps,
             "candle.high_atr_ratio": (high_price - close_price) / atr_val if atr_val > 0 else _nan(),
             "candle.low_atr_ratio": (close_price - low_price) / atr_val if atr_val > 0 else _nan(),
             "candle.volume_median_ratio": volume / median_volume if median_volume > 0 else _nan(),
@@ -310,6 +387,11 @@ def build_feature_vector(
             "candle.range_bps": _ratio_bps(high_price, low_price),
             "candle.upper_wick_bps": _ratio_bps(high_price, max(open_price, close_price)),
             "candle.lower_wick_bps": _ratio_bps(min(open_price, close_price), low_price),
+            "candle.gap_fill_bps": gap_fill_bps,
+            "candle.is_gap_defended": is_gap_defended,
+            "market.fii_net_flow_ratio": _numeric_or_nan(candle.fii_net_flow_ratio),
+            "market.dii_net_flow_ratio": _numeric_or_nan(candle.dii_net_flow_ratio),
+            "market.gift_nifty_implied_gap_bps": _numeric_or_nan(candle.gift_nifty_implied_gap_bps),
             "regime.vix_sma20.value_ratio": _numeric_or_nan(candle.vix_value_ratio),
         }
     )
@@ -385,7 +467,7 @@ def build_feature_vector(
                 _numeric_or_nan(level_event.level), close_price
             )
 
-    return values
+    return {k: v for k, v in values.items() if k in schema_keys}
 
 
 def label_from_future_close(
@@ -513,6 +595,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if candle.future_close_time > request.data_window_end:
             raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
 
+        schema_version = schema_version_for(request.timeframe)
         examples.append(
             LabeledExample(
                 candle_id=candle.candle_id,
@@ -527,6 +610,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
                     candle,
                     prior_close=prior_close,
                     median_volume=median_volume,
+                    schema_version=schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,
                     price_action_algorithm_version=request.price_action_algorithm_version,
@@ -541,8 +625,11 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
 
 __all__ = [
     "FEATURE_SCHEMA",
+    "FEATURE_SCHEMA_SCALP",
     "FEATURE_DEFINITION",
+    "FEATURE_DEFINITION_SCALP",
     "FEATURE_SCHEMA_VERSION",
+    "FEATURE_SCHEMA_VERSION_SCALP",
     "FeatureConstructionError",
     "LabelResult",
     "build_feature_vector",

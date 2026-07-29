@@ -1,4 +1,4 @@
-﻿"""Stable contracts shared by local training, inference, and persistence adapters."""
+"""Stable contracts shared by local training, inference, and persistence adapters."""
 
 from __future__ import annotations
 
@@ -8,7 +8,67 @@ from typing import Any, Literal, Mapping, Sequence
 
 MarketLabel = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 LABELS: tuple[MarketLabel, ...] = ("BEARISH", "NEUTRAL", "BULLISH")
-FEATURE_SCHEMA_VERSION = "ml-feature-v3"
+
+# v4 rather than v3 because ``candle.gap_fill_bps`` and ``candle.is_gap_defended``
+# were added to the swing schema while the version string still said v3. Two
+# different ordered column sets under one version name is the exact failure the
+# version exists to prevent: the champion/challenger gate compares an incumbent's
+# stored schema against the candidate's, and a mismatch makes it skip the
+# incumbent instead of failing, so a candidate would promote uncontested.
+# Artifacts under models/*--ml-feature-v3 were trained on the 9-feature candle
+# block and must be retrained before they can be promoted again.
+FEATURE_SCHEMA_VERSION = "ml-feature-v4"
+FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v1"
+
+# Scalping timeframes share one schema. The swing schema's pattern, price-action,
+# and daily-gap columns are either absent or degenerate inside a single session,
+# so an intraday model gets a deliberately narrower, denser feature block.
+SCALP_TIMEFRAMES: tuple[str, ...] = ("1m", "3m", "5m")
+
+
+def schema_version_for(timeframe: str) -> str:
+    """Return the feature-schema version a timeframe trains and predicts under.
+
+    Training, inference, artifact metadata, and the model key must all agree on
+    this. It is a single function rather than an inline conditional in each of
+    those places because four copies of the same mapping drift, and the symptom
+    is a model whose metadata claims one schema while its columns are another.
+    """
+
+    return FEATURE_SCHEMA_VERSION_SCALP if timeframe in SCALP_TIMEFRAMES else FEATURE_SCHEMA_VERSION
+
+
+# Empirically calibrated on Yahoo ^NSEI closes (2026-07): a constant band cannot
+# serve every timeframe, because the neutral share at +/-50bps is 20% on 1d, 88%
+# on 15m, and 99.2% on 1m. A 1m model trained at 50bps sees one class and learns
+# to answer NEUTRAL always. Each intraday value below is roughly the 33rd
+# percentile of |forward return| over 5 bars, which puts the three classes near
+# balance. These assume horizon_bars=5; re-measure if the horizon changes.
+#
+# 1d deliberately stays at 50bps even though the balanced value is ~72bps. At
+# 50bps the daily split is already a workable 20/40/40, and the threshold is part
+# of the default model key, so moving it would orphan the existing daily
+# promotion lineage for no measured gain.
+DEFAULT_NEUTRAL_THRESHOLD_BPS: Mapping[str, float] = {
+    "1m": 2.0,
+    "3m": 4.0,
+    "5m": 5.0,
+    "10m": 7.0,
+    "15m": 9.0,
+    "30m": 13.0,
+    "60m": 20.0,
+    "1d": 50.0,
+}
+
+
+def default_neutral_threshold_bps(timeframe: str) -> float:
+    """Return the calibrated neutral band for a timeframe.
+
+    An unrecognised timeframe falls back to the daily band, which is also the
+    historical constant, so no existing command changes behaviour.
+    """
+
+    return DEFAULT_NEUTRAL_THRESHOLD_BPS.get(timeframe, DEFAULT_NEUTRAL_THRESHOLD_BPS["1d"])
 
 # The volatility-regime feature reads a second instrument, so its source is part of
 # the schema contract: changing the symbol, indicator, period, algorithm version, or
@@ -115,6 +175,9 @@ class CandleEvidence:
     future_close_time: datetime | None
     vix_value_ratio: float | None = None
     vix_observed_at: datetime | None = None
+    fii_net_flow_ratio: float | None = None
+    dii_net_flow_ratio: float | None = None
+    gift_nifty_implied_gap_bps: float | None = None
 
 @dataclass(frozen=True)
 class LabeledExample:

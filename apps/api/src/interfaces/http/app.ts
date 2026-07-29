@@ -301,13 +301,19 @@ export function createApp({ database }: ApplicationDependencies): Express {
   }, 5000);
 
   // EOD Pipeline - Automated ML Training at 4:05 PM IST (Monday to Friday)
-  // Assuming the server timezone is UTC, 4:05 PM IST is 10:35 AM UTC
-  // Wait, if server timezone is local, just run at 16:05.
+  // Assuming the server timezone is UTC, we can explicitly specify Asia/Kolkata to ensure it runs at 4:05 PM IST
   cron.schedule("5 16 * * 1-5", () => {
     console.log("Triggering EOD Pipeline...");
     const child = spawn("npm", ["run", "pipeline:eod"], { stdio: "inherit", shell: true });
     child.on("error", (err) => console.error("EOD Pipeline spawn error:", err));
-  });
+  }, { timezone: "Asia/Kolkata" });
+
+  // Institutional Data Collection at 6:30 PM IST (Monday to Friday)
+  cron.schedule("30 18 * * 1-5", () => {
+    console.log("Triggering Institutional Data Collection...");
+    const child = spawn("npm", ["run", "data:collect:institutional"], { stdio: "inherit", shell: true });
+    child.on("error", (err) => console.error("Institutional Data Collection spawn error:", err));
+  }, { timezone: "Asia/Kolkata" });
 
   const aiAutonomousAgent = new AiAutonomousAgent(
     database,

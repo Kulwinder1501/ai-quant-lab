@@ -38,26 +38,37 @@ export class YahooHistoricalDataProvider implements HistoricalMarketDataProvider
     const results = await yf.chart(yfSymbol, queryOptions);
     const quotes = results.quotes || [];
 
-    return quotes.map((row: any) => {
-      // Calculate closeTime by adding timeframe minutes
-      const openTime = new Date(row.date);
-      let durationMs = 0;
-      if (request.timeframe.endsWith("m")) {
-        durationMs = parseInt(request.timeframe.replace("m", ""), 10) * 60000;
-      } else if (request.timeframe.endsWith("d")) {
-        durationMs = parseInt(request.timeframe.replace("d", ""), 10) * 86400000;
-      }
-      const closeTime = new Date(openTime.getTime() + durationMs);
+    return quotes
+      // Yahoo emits rows with null OHLC for exchange holidays and for a bar that
+      // has not settled yet. Coercing those to 0 with `row.open || 0` produced a
+      // candle with a zero price, which the importer correctly rejects as invalid
+      // OHLC — so one holiday in the requested range failed the whole backfill.
+      // A row without a price is absent data, not a zero price, so it is skipped.
+      .filter((row: any) => [row.open, row.high, row.low, row.close].every(
+        (price) => typeof price === "number" && Number.isFinite(price) && price > 0,
+      ))
+      .map((row: any) => {
+        // Calculate closeTime by adding timeframe minutes
+        const openTime = new Date(row.date);
+        let durationMs = 0;
+        if (request.timeframe.endsWith("m")) {
+          durationMs = parseInt(request.timeframe.replace("m", ""), 10) * 60000;
+        } else if (request.timeframe.endsWith("d")) {
+          durationMs = parseInt(request.timeframe.replace("d", ""), 10) * 86400000;
+        }
+        const closeTime = new Date(openTime.getTime() + durationMs);
 
-      return {
-        openTime,
-        closeTime,
-        open: String(row.open || 0),
-        high: String(row.high || 0),
-        low: String(row.low || 0),
-        close: String(row.close || 0),
-        volume: String(row.volume || 0),
-      };
-    });
+        return {
+          openTime,
+          closeTime,
+          open: String(row.open),
+          high: String(row.high),
+          low: String(row.low),
+          close: String(row.close),
+          // Volume genuinely is absent on an index series, so zero is the honest
+          // value here rather than a placeholder for a missing number.
+          volume: String(Number.isFinite(row.volume) ? row.volume : 0),
+        };
+      });
   }
 }

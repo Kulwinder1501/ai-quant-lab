@@ -15,7 +15,10 @@ export type ResearchView =
   | "trade-history"
   | "backtesting"
   | "predictions"
-  | "model-performance";
+  | "model-performance"
+  | "scalp-trade-history"
+  | "scalp-strategy"
+  | "scalp-ideas";
 
 export function ResearchNavigation({ activeView }: { activeView: ResearchView }) {
   const linkClass = (view: ResearchView) => classNames(
@@ -51,6 +54,20 @@ export function ResearchNavigation({ activeView }: { activeView: ResearchView })
       <Link aria-current={activeView === "strategy" ? "page" : undefined} className={linkClass("strategy")} href="/strategy">
         Strategy & Ideas
       </Link>
+      
+      {/* Scalp Features */}
+      <div className="mt-2 mb-1 pl-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Scalping</div>
+      <Link aria-current={activeView === "scalp-trade-history" ? "page" : undefined} className={linkClass("scalp-trade-history")} href="/scalp-trade-history">
+        🧾 Scalp History
+      </Link>
+      <Link aria-current={activeView === "scalp-strategy" ? "page" : undefined} className={linkClass("scalp-strategy")} href="/scalp-strategy">
+        ⚡ Scalp Strategy
+      </Link>
+      <Link aria-current={activeView === "scalp-ideas" ? "page" : undefined} className={linkClass("scalp-ideas")} href="/scalp-ideas">
+        💡 Scalp Ideas
+      </Link>
+      <div className="my-1 border-t border-slate-700/50 w-full" />
+
       <Link aria-current={activeView === "paper-trading" ? "page" : undefined} className={linkClass("paper-trading")} href="/paper-trading">
         Paper Trading
       </Link>

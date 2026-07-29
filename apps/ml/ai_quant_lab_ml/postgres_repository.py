@@ -46,6 +46,35 @@ _FIND_NSE_INSTRUMENT_SQL = """
     WHERE exchange = 'NSE' AND symbol = %s
 """
 
+# An intraday forward label must not reach across the session close. NSE trades
+# 09:15-15:30 IST, so a LEAD over an unpartitioned series hands the last
+# horizon_bars candles of every session a label measured from the *next morning*,
+# which means the label contains the overnight gap. Measured on Yahoo ^NSEI 1m
+# (2026-07-23..29): the median |overnight gap| is 71bps while the 99th percentile
+# 5-bar intraday move is 21bps, so those rows carry labels an order of magnitude
+# larger than the distribution being fitted, and they land in the directional
+# tails by construction. Partitioning by IST trading date nulls them instead.
+#
+# Daily and longer bars must stay UNPARTITIONED: one bar per session means a
+# per-session partition would make every forward label NULL and silently empty
+# the training set.
+_INTRADAY_SESSION_PARTITION = "PARTITION BY (candles.close_time AT TIME ZONE 'Asia/Kolkata')::date"
+
+
+def _is_intraday_timeframe(timeframe: str) -> bool:
+    """Return whether a timeframe has more than one bar per trading session.
+
+    Minute and hour codes ("1m", "15m", "1h") are intraday. Day, week, and month
+    codes ("1d", "1wk", "1mo") are not, and none of them end in "m" or "h".
+    """
+
+    return timeframe.strip().lower().endswith(("m", "h"))
+
+
+def _session_partition_clause(timeframe: str) -> str:
+    return _INTRADAY_SESSION_PARTITION if _is_intraday_timeframe(timeframe) else ""
+
+
 # LEAD runs over the cutoff-bounded series before the outer source-window
 # filter. Tail labels past the requested window are explicitly nulled, so a
 # non-null label is exactly horizon_bars later and remains inside the immutable
@@ -65,9 +94,11 @@ _CANDLE_EVIDENCE_SQL = """
         candles.close,
         candles.volume,
         LEAD(candles.close, %s) OVER (
+          {session_partition}
           ORDER BY candles.open_time ASC, candles.close_time ASC, candles.id ASC
         ) AS future_close,
         LEAD(candles.close_time, %s) OVER (
+          {session_partition}
           ORDER BY candles.open_time ASC, candles.close_time ASC, candles.id ASC
         ) AS future_close_time
       FROM candles
@@ -277,9 +308,11 @@ _HISTORICAL_PREDICTION_RELIABILITY_SQL = """
         candles.close,
         candles.close_time,
         LEAD(candles.close, %s) OVER (
+          {session_partition}
           ORDER BY candles.open_time ASC, candles.close_time ASC, candles.id ASC
         ) AS future_close,
         LEAD(candles.close_time, %s) OVER (
+          {session_partition}
           ORDER BY candles.open_time ASC, candles.close_time ASC, candles.id ASC
         ) AS future_close_time
       FROM candles
@@ -529,7 +562,7 @@ class PostgresMlRepository:
         instrument_id = str(instrument["id"])
         with self._connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                _CANDLE_EVIDENCE_SQL,
+                _CANDLE_EVIDENCE_SQL.format(session_partition=_session_partition_clause(timeframe)),
                 (
                     request.horizon_bars,
                     request.horizon_bars,
@@ -1000,7 +1033,9 @@ class PostgresMlRepository:
 
         with self._connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                _HISTORICAL_PREDICTION_RELIABILITY_SQL,
+                _HISTORICAL_PREDICTION_RELIABILITY_SQL.format(
+                    session_partition=_session_partition_clause(normalized_timeframe)
+                ),
                 (
                     horizon_bars,
                     horizon_bars,

@@ -14,7 +14,7 @@ interface PaperAccountOption {
   openingBalance: number;
 }
 
-export function StrategyDashboard() {
+export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: string, isScalp?: boolean } = {}) {
   const [ideas, setIdeas] = useState<TradeIdeaRow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +28,7 @@ export function StrategyDashboard() {
   // Generate Modal state
   const [showGenerateModal, setShowGenerateModal] = useState<boolean>(false);
   const [genSymbol, setGenSymbol] = useState<string>("NIFTY50");
-  const [genTimeframe, setGenTimeframe] = useState<string>("1d");
+  const [genTimeframe, setGenTimeframe] = useState<string>(isScalp ? "1m" : "1d");
   const [generating, setGenerating] = useState<boolean>(false);
   const [genMessage, setGenMessage] = useState<string | null>(null);
   const [genError, setGenError] = useState<string | null>(null);
@@ -50,7 +50,11 @@ export function StrategyDashboard() {
     try {
       const dateParam = dateFilter ? `&date=${dateFilter}` : "";
       const res = await getResearchJson(`/trade-ideas?limit=100&_t=${Date.now()}${dateParam}`, signal) as { data: TradeIdeaRow[] };
-      setIdeas(res.data || []);
+      let fetched = res.data || [];
+      if (strategyKey) {
+        fetched = fetched.filter(idea => (idea.evidence as any)?.strategy === strategyKey);
+      }
+      setIdeas(fetched);
     } catch (err: any) {
       if (err.name !== "AbortError") {
         setError(err.message || "Failed to load trade ideas.");
@@ -58,7 +62,7 @@ export function StrategyDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [dateFilter]);
+  }, [dateFilter, strategyKey]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -76,13 +80,23 @@ export function StrategyDashboard() {
         symbol: genSymbol.trim().toUpperCase(),
         timeframe: genTimeframe,
       }) as {
-        data: { strategyVersionId: string; candidatesGenerated: number; tradeIdeaIds: string[]; skippedReason: string | null };
+        data: { strategyVersionId: string; candidatesGenerated: number; tradeIdeaIds: string[]; skippedReason: string | null }[];
       };
-      const count = res.data.candidatesGenerated || 0;
-      if (count > 0) {
-        setGenMessage(`Successfully generated ${count} breakout proposal(s) for ${genSymbol.toUpperCase()} (${genTimeframe})!`);
+      
+      // If we got an array, check if any succeeded
+      let totalGen = 0;
+      let reasons: string[] = [];
+      if (Array.isArray(res.data)) {
+        for (const item of res.data) {
+          if (item.candidatesGenerated > 0) totalGen += item.candidatesGenerated;
+          else if (item.skippedReason) reasons.push(item.skippedReason);
+        }
+      }
+
+      if (totalGen > 0) {
+        setGenMessage(`Successfully generated ${totalGen} proposal(s) for ${genSymbol.toUpperCase()} (${genTimeframe})!`);
       } else {
-        setGenMessage(`Evaluated latest candle for ${genSymbol.toUpperCase()} (${genTimeframe}), but rules were not met (${res.data.skippedReason || "NO_CANDIDATE"}).`);
+        setGenMessage(`Evaluated latest candle for ${genSymbol.toUpperCase()} (${genTimeframe}), but rules were not met (${reasons.length > 0 ? reasons[0] : "NO_CANDIDATE"}).`);
       }
       await fetchIdeas();
     } catch (err: any) {
@@ -153,9 +167,9 @@ export function StrategyDashboard() {
 
   return (
     <ResearchShell
-      activeView="strategy"
+      activeView={isScalp ? "scalp-strategy" : "strategy"}
       eyebrow="Quantitative Proposals"
-      title="Strategy Engine & Trade Ideas"
+      title={isScalp ? "Scalp Strategy & Ideas" : "Strategy Engine & Trade Ideas"}
       description="Generate and evaluate quantitative breakout proposals from historical market context. Filter by side, confidence, and instrument."
       connectionLabel="Engine Ready"
     >
@@ -390,10 +404,16 @@ export function StrategyDashboard() {
                     onChange={(e) => setGenTimeframe(e.target.value)}
                     className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
                   >
-                    <option value="15m">15 Minutes (15m)</option>
-                    <option value="1h">1 Hour (1h)</option>
-                    <option value="1d">Daily (1d)</option>
-                    <option value="1w">Weekly (1w)</option>
+                    {isScalp ? (
+                      <option value="1m">1 Minute (1m) - Momentum Scalp</option>
+                    ) : (
+                      <>
+                        <option value="15m">15 Minutes (15m)</option>
+                        <option value="1h">1 Hour (1h)</option>
+                        <option value="1d">Daily (1d)</option>
+                        <option value="1w">Weekly (1w)</option>
+                      </>
+                    )}
                   </select>
                 </div>
                 <div className="flex items-center justify-end gap-3 pt-2">

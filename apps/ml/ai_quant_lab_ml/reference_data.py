@@ -22,7 +22,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .contracts import FEATURE_SCHEMA_VERSION, LABELS, LabeledExample, MarketLabel
+from .contracts import (
+    FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_SCALP,
+    LABELS,
+    LabeledExample,
+    MarketLabel,
+)
 from .features import feature_schema
 
 
@@ -134,12 +140,47 @@ def _parse_datetime(value: Any, field: str) -> datetime:
     return _require_aware_datetime(parsed, field)
 
 
+def _known_schemas() -> Mapping[tuple[str, ...], str]:
+    """Map each supported ordered schema to the version that names it."""
+
+    return {
+        tuple(feature_schema(version)): version
+        for version in (FEATURE_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION_SCALP)
+    }
+
+
 def _fixed_schema(schema: Sequence[str] | None) -> tuple[str, ...]:
-    fixed = tuple(feature_schema())
-    selected = fixed if schema is None else tuple(schema)
-    if selected != fixed:
-        raise ReferenceDataError("Reference data must use the fixed ml-feature-v1 feature schema in its declared order.")
-    return fixed
+    """Accept a known schema in its declared order, and nothing else.
+
+    The scalp track needs this to admit a second schema, but it must stay a
+    whitelist. Returning ``tuple(schema)`` unchecked was the only thing standing
+    between silently reordered columns at inference and a caught error: a
+    permuted feature vector still has the right length and dtype, so every
+    downstream check passes and the model simply reads the wrong column.
+    """
+
+    if schema is None:
+        return tuple(feature_schema(FEATURE_SCHEMA_VERSION))
+    selected = tuple(schema)
+    if selected not in _known_schemas():
+        raise ReferenceDataError(
+            "Reference data must use a known feature schema "
+            f"({FEATURE_SCHEMA_VERSION} or {FEATURE_SCHEMA_VERSION_SCALP}) in its declared order."
+        )
+    return selected
+
+
+def _schema_version_of(selected_schema: tuple[str, ...]) -> str:
+    """Return the version naming an already-validated schema.
+
+    Reference data for a scalp model must declare the scalp version, not the
+    swing one, or the reader rejects the writer's own output.
+    """
+
+    version = _known_schemas().get(selected_schema)
+    if version is None:
+        raise ReferenceDataError("Reference data schema does not correspond to a known feature-schema version.")
+    return version
 
 
 def _label_counts(labels: Sequence[MarketLabel]) -> dict[MarketLabel, int]:
@@ -281,7 +322,7 @@ def build_reference_metadata(
 
     return {
         "format": REFERENCE_DATA_FORMAT,
-        "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+        "featureSchemaVersion": _schema_version_of(selected_schema),
         "featureSchema": list(selected_schema),
         "trainingOnly": True,
         "sampling": {
@@ -359,7 +400,7 @@ def parse_reference_metadata(
     payload = _require_mapping(metadata, "Reference metadata")
     if payload.get("format") != REFERENCE_DATA_FORMAT:
         raise ReferenceDataError("Reference metadata has an unsupported format.")
-    if payload.get("featureSchemaVersion") != FEATURE_SCHEMA_VERSION:
+    if payload.get("featureSchemaVersion") != _schema_version_of(selected_schema):
         raise ReferenceDataError("Reference metadata has an incompatible feature-schema version.")
     payload_schema = _require_sequence(payload.get("featureSchema"), "Reference metadata featureSchema")
     if tuple(payload_schema) != selected_schema:

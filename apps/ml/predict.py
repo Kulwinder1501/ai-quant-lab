@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ai_quant_lab_ml.artifacts import load_model_artifact
-from ai_quant_lab_ml.contracts import InferenceRequest, PersistedModelVersion
+from ai_quant_lab_ml.contracts import InferenceRequest, PersistedModelVersion, schema_version_for
 from ai_quant_lab_ml.features import VOLUME_MEDIAN_WINDOW, build_feature_vector, trailing_feature_context
 from ai_quant_lab_ml.inference import (
     InferenceError,
@@ -215,10 +215,12 @@ def main() -> int:
             bars=VOLUME_MEDIAN_WINDOW,
         )
         prior_close, median_volume = trailing_feature_context(trailing_series)
+        schema_version = schema_version_for(args.timeframe)
         feature_values = build_feature_vector(
             evidence,
             prior_close=prior_close,
             median_volume=median_volume,
+            schema_version=schema_version,
             indicator_algorithm_version=contract.indicator_algorithm_version,
             pattern_algorithm_version=contract.pattern_algorithm_version,
             price_action_algorithm_version=contract.price_action_algorithm_version,

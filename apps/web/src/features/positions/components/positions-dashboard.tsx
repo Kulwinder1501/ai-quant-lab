@@ -468,9 +468,19 @@ return (
                               {isWinning ? "+" : ""}{liveRet.toFixed(2)}%
                             </span>
                           </td>
-                          <td className="py-4 px-4 text-xs text-slate-300 max-w-xs">
-                            <div className="truncate font-semibold text-cyan-200">{trade.notes || "Autonomous AI Execution"}</div>
-                            <div className="text-[11px] text-slate-400 mt-0.5">SL: -1.5% | Target: +3.0%</div>
+                          <td className="py-4 px-4 max-w-[200px] truncate text-slate-400 text-xs">
+                            <div className="flex flex-col gap-1">
+                              <span className={`inline-flex self-start px-2 py-0.5 rounded text-[10px] font-bold ${
+                                trade.timeframe === "1m" 
+                                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" 
+                                  : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                              }`}>
+                                {trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout"}
+                              </span>
+                              <span title={trade.notes || "Opened via AI Agent"}>
+                                {trade.notes || "Opened via AI Agent"}
+                              </span>
+                            </div>
                           </td>
                           <td className="py-4 px-4 text-xs font-mono text-slate-400">{formatTimestamp(trade.openedAt)}</td>
                           <td className="py-4 px-4 text-right">
