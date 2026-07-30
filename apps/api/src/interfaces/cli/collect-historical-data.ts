@@ -49,6 +49,10 @@ async function main(): Promise<void> {
     const from = parseDateOption(requireOption(argumentsList, "from"), false);
     const to = parseDateOption(requireOption(argumentsList, "to"), true);
     const providerInstrumentId = getOption(argumentsList, "provider-instrument-id") ?? instrument.symbol;
+    // Presence flag: `--skip-existing` makes an overlapping backfill idempotent
+    // instead of aborting on the first already-stored (and possibly provider-
+    // revised) date. Absent → strict immutability, unchanged.
+    const skipExisting = argumentsList.includes("--skip-existing");
     const service = new ImportHistoricalMarketData(
       new PostgresMarketDataIngestionRepository(database),
       new PostgresCandleRepository(database),
@@ -60,6 +64,7 @@ async function main(): Promise<void> {
       timeframe,
       from,
       to,
+      skipExisting,
     });
     console.info(JSON.stringify({ level: "info", message: "Historical import complete", ...result }));
   } finally {

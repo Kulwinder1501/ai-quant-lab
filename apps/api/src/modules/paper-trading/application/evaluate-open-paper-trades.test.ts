@@ -54,6 +54,8 @@ describe("EvaluateOpenPaperTrades", () => {
       openFromTradeIdea: async () => { throw new Error("not used"); },
       findOpenById: async () => trade,
       listOpenByAccount: async () => [trade],
+      listPendingByAccount: async () => [],
+      fillPendingTrade: async () => { throw new Error("not used"); },
       close: async (input) => {
         closings.push(input);
         return { ...trade, status: "CLOSED", closedAt: input.closedAt, exitPrice: input.exitPrice, exitReason: input.exitReason, realizedPnl: -53 };
@@ -79,9 +81,14 @@ describe("EvaluateOpenPaperTrades", () => {
 
     expect(result).toEqual({
       openTradesRead: 1,
+      pendingTradesRead: 0,
       eligibleCandlesRead: 1,
       tradesClosed: 1,
       closedTradeIds: ["trade-1"],
+      pendingTradesFilled: 0,
+      filledTradeIds: [],
+      pendingTradesCancelled: 0,
+      cancelledTradeIds: [],
       skippedWithoutTimeframe: 0,
     });
     expect(closings[0]).toMatchObject({

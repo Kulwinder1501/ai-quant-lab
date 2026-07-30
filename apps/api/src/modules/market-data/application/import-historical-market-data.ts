@@ -10,6 +10,14 @@ export interface ImportHistoricalMarketDataInput {
   timeframe: HistoricalTimeframe;
   from: Date;
   to: Date;
+  /**
+   * When true, dates already stored as completed candles are left untouched
+   * instead of re-written. Providers such as Yahoo re-issue slightly revised OHLC
+   * on a re-fetch, which trips the repository's (correct) immutability guard and
+   * aborts an otherwise-successful backfill. This makes an overlapping re-run
+   * idempotent. Default false preserves the strict behaviour.
+   */
+  skipExisting?: boolean;
 }
 
 export interface ImportHistoricalMarketDataResult {
@@ -17,6 +25,8 @@ export interface ImportHistoricalMarketDataResult {
   provider: string;
   candlesFetched: number;
   candlesPersisted: number;
+  /** Completed candles left untouched because they were already stored (skipExisting). */
+  candlesSkipped: number;
 }
 
 function isPositiveDecimal(value: string): boolean {
@@ -116,16 +126,32 @@ export class ImportHistoricalMarketData {
         }
         timestamps.add(timestamp);
       }
+      let candlesSkipped = 0;
       for (const candle of candles) {
+        if (input.skipExisting) {
+          const existing = await this.candleRepository.findByKey(
+            input.instrument.id,
+            input.timeframe,
+            candle.openTime,
+          );
+          // Only an already-*completed* candle is skipped. An incomplete one is
+          // still allowed to be finalised by this write.
+          if (existing?.isComplete) {
+            candlesSkipped += 1;
+            continue;
+          }
+        }
         await this.candleRepository.upsert({ ...toPersistenceInput(candle, input), ingestionId: ingestion.id });
       }
 
-      await this.ingestionRepository.complete(ingestion.id, candles.length);
+      const candlesPersisted = candles.length - candlesSkipped;
+      await this.ingestionRepository.complete(ingestion.id, candlesPersisted);
       return {
         ingestionId: ingestion.id,
         provider: input.provider.id,
         candlesFetched: fetched.length,
-        candlesPersisted: candles.length,
+        candlesPersisted,
+        candlesSkipped,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown historical import failure.";

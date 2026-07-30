@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
 
-const ML_ALGORITHMS = ["xgboost", "lightgbm"];
+const ML_ALGORITHMS = ["xgboost"];
 
 async function runCommand(command: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -18,6 +18,7 @@ async function runCommand(command: string, args: string[], cwd?: string): Promis
 async function main(): Promise<void> {
   try {
     const today = new Date().toISOString().split("T")[0];
+    const nowIso = new Date().toISOString();
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
     console.info("============== EOD PIPELINE STARTED ==============");
@@ -29,15 +30,20 @@ async function main(): Promise<void> {
       "--instrument", "NIFTY50",
       "--timeframe", "15m",
       "--from", sevenDaysAgo,
-      "--to", today
+      "--to", today,
+      "--skip-existing"
     ]);
 
     // 2. Train Candidates and Promote
     for (const algo of ML_ALGORITHMS) {
       await runCommand("npm", [
         "run", `ml:train:${algo}`, "--",
+        "--instrument", "NIFTY50",
+        "--timeframe", "15m",
+        "--from", "2024-01-01",
+        "--to", nowIso,
         "--promote"
-      ], "../../.."); // Run from repo root
+      ], "../.."); // Run from repo root
     }
 
     console.info("============== EOD PIPELINE COMPLETE ==============");

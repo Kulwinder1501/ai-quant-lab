@@ -48,8 +48,11 @@ describe("CalculateTechnicalIndicators", () => {
     const result = await new CalculateTechnicalIndicators(candleRepository, definitionRepository, snapshotRepository)
       .execute({ instrumentId: "instrument-1", timeframe: "1m" });
 
-    expect(definitions).toHaveLength(8);
-    expect(result).toMatchObject({ candlesRead: 40, definitionsProcessed: 8, snapshotsWritten: snapshots.length });
+    // 9 default definitions: the registry gained a second EMA (period 9, the
+    // momentum-scalp fast leg) alongside the period-20 EMA.
+    expect(definitions).toHaveLength(9);
+    expect(definitions.filter((code) => code === "EMA")).toHaveLength(2);
+    expect(result).toMatchObject({ candlesRead: 40, definitionsProcessed: 9, snapshotsWritten: snapshots.length });
     expect(snapshots.some((snapshot) => snapshot.indicatorDefinitionId === "definition-SMA" && snapshot.candleId === "candle-20")).toBe(true);
     expect(snapshots.some((snapshot) => snapshot.indicatorDefinitionId === "definition-RSI" && snapshot.candleId === "candle-15")).toBe(true);
   });

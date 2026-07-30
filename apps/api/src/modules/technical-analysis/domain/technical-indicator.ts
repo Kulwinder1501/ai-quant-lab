@@ -57,6 +57,13 @@ export interface IndicatorSnapshotRepository {
 export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
   { code: "SMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
   { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
+  // EMA-9 is the fast leg the momentum-scalp strategy pairs with the 20-period
+  // slow EMA. Without it in the registry, `analysis:calculate-indicators` never
+  // computes it, so the scalp strategy's resolveIndicators always fails on real
+  // data and it can produce no ideas in either direction. The ML feature pipeline
+  // selects EMA strictly at period 20 (see _INDICATOR_PARAMETERS), so this extra
+  // definition does not touch the immutable feature schema.
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, outputSchema: { value: "number" } },
   { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, outputSchema: { value: "number" } },
   {
     code: "MACD",

@@ -206,6 +206,59 @@ class TrainCliPolicyTests(unittest.TestCase):
         self.assertNotEqual(default_model_key(five_bar, "logistic"), default_model_key(ten_bar, "logistic"))
         self.assertNotEqual(default_model_key(five_bar, "logistic"), default_model_key(wider_band, "logistic"))
 
+    def test_a_label_scheme_gets_its_own_lineage_and_only_its_own_parameters(self) -> None:
+        """A scheme is a different question, so it must never share a PRODUCTION slot.
+
+        The key also carries only the parameters that shape *that* scheme's target:
+        stamping a neutral band or barrier multiples onto a volatility model would
+        name a geometry it does not have, and would split one model's lineage in two
+        whenever an unrelated flag moved.
+        """
+
+        from ai_quant_lab_ml.contracts import (
+            LABEL_SCHEME_TRIPLE_BARRIER,
+            LABEL_SCHEME_VOLATILITY_EXPANSION,
+        )
+
+        common = {
+            "instrument_symbol": "NIFTY50",
+            "timeframe": "1d",
+            "data_window_start": datetime(2024, 1, 1, tzinfo=UTC),
+            "data_window_end": datetime(2024, 2, 1, tzinfo=UTC),
+            "data_cutoff_at": datetime(2024, 2, 2, tzinfo=UTC),
+            "horizon_bars": 10,
+            "neutral_threshold_bps": 50.0,
+        }
+        directional = DatasetRequest(**common)
+        barrier = DatasetRequest(**common, label_scheme=LABEL_SCHEME_TRIPLE_BARRIER)
+        volatility = DatasetRequest(**common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION)
+
+        keys = {
+            default_model_key(directional, "logistic"),
+            default_model_key(barrier, "logistic"),
+            default_model_key(volatility, "logistic"),
+        }
+        self.assertEqual(len(keys), 3, "each scheme must get a distinct lineage")
+
+        volatility_key = default_model_key(volatility, "logistic")
+        # Named for the target family, not "market-direction".
+        self.assertTrue(volatility_key.startswith("volatility-expansion-logistic"))
+        self.assertIn("band0.25", volatility_key)
+        # The directional-only label parameters must not appear.
+        self.assertNotIn("neutral-", volatility_key)
+        self.assertNotIn("bu1", volatility_key)
+
+        # A changed band is a changed target, so it is a different lineage...
+        wider = DatasetRequest(
+            **common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION, expansion_band=0.5
+        )
+        self.assertNotEqual(volatility_key, default_model_key(wider, "logistic"))
+        # ...while an unused barrier flag must not move a volatility key at all.
+        unused_barrier = DatasetRequest(
+            **common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION, barrier_upper_multiple=3.0
+        )
+        self.assertEqual(volatility_key, default_model_key(unused_barrier, "logistic"))
+
     def test_each_algorithm_gets_its_own_default_promotion_lineage(self) -> None:
         request = DatasetRequest(
             instrument_symbol="NIFTY50",

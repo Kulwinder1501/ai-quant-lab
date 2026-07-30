@@ -23,14 +23,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import (
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
-    LABELS,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     SUPPORTED_ALGORITHMS,
     TREE_ENSEMBLE_ALGORITHMS,
     XGBOOST_ALGORITHM,
+    AnyLabel,
     CandleEvidence,
+    LabelAlphabet,
     MarketLabel,
     PersistedModelVersion,
 )
@@ -149,6 +151,7 @@ def validate_production_artifact(
     *,
     instrument_symbol: str,
     timeframe: str,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> ProductionInferenceContract:
     """Reject any artifact that cannot prove it matches the request and V1 contract."""
 
@@ -205,7 +208,9 @@ def validate_production_artifact(
             "The production artifact has no training-only similar-setup reference data. Retrain and promote a Phase 11-compatible model."
         )
     try:
-        training_reference_data = parse_reference_metadata(reference_metadata, expected_schema=expected_schema)
+        training_reference_data = parse_reference_metadata(
+            reference_metadata, expected_schema=expected_schema, alphabet=alphabet
+        )
     except ReferenceDataError as error:
         raise InferenceError(f"The production artifact has invalid training-only reference data: {error}") from error
 
@@ -426,7 +431,12 @@ class _ScoredVector:
     confidence: float
 
 
-def _score_fixed_vector(model: Any, features: Mapping[str, Any], selected_schema: Sequence[str]) -> _ScoredVector:
+def _score_fixed_vector(
+    model: Any,
+    features: Mapping[str, Any],
+    selected_schema: Sequence[str],
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> _ScoredVector:
     """Apply the stored imputer and scaler, then score the fixed feature vector.
 
     Both transforms were fitted on the training partition only, so scoring here
@@ -455,15 +465,18 @@ def _score_fixed_vector(model: Any, features: Mapping[str, Any], selected_schema
         raise InferenceError("The promoted model could not score the fixed feature vector.") from error
     if len(imputed) != len(selected_schema) or len(standardized) != len(selected_schema):
         raise InferenceError("The promoted pipeline changed the fixed feature schema width.")
-    if any(label not in LABELS for label in classes):
-        raise InferenceError("The promoted classifier exposes a label outside the Phase 11 label set.")
+    permitted = set(alphabet.labels)
+    if any(label not in permitted for label in classes):
+        raise InferenceError(
+            f"The promoted classifier exposes a label outside the {alphabet.name} label set."
+        )
     predicted_label = str(raw_prediction)
-    if predicted_label not in LABELS or predicted_label not in classes:
+    if predicted_label not in permitted or predicted_label not in classes:
         raise InferenceError("The promoted classifier returned an unsupported prediction label.")
     if len(probability_row) != len(classes):
         raise InferenceError("The promoted classifier probability width does not match its classes.")
 
-    probabilities: dict[MarketLabel, float] = {label: 0.0 for label in LABELS}
+    probabilities: dict[AnyLabel, float] = {label: 0.0 for label in alphabet.labels}
     for label, value in zip(classes, probability_row, strict=True):
         probability = _finite(value, f"Probability for {label}")
         if probability < 0 or probability > 1:
@@ -493,6 +506,7 @@ def explain_prediction(
     algorithm: str = LOGISTIC_BASELINE_ALGORITHM,
     schema: Sequence[str] | None = None,
     maximum_features: int = 12,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> ExplainablePrediction:
     """Score one fixed-schema vector and explain it with its own model's arithmetic.
 
@@ -515,7 +529,7 @@ def explain_prediction(
     if isinstance(maximum_features, bool) or not isinstance(maximum_features, int) or maximum_features <= 0:
         raise InferenceError("maximum_features must be a positive integer.")
 
-    scored = _score_fixed_vector(model, features, selected_schema)
+    scored = _score_fixed_vector(model, features, selected_schema, alphabet)
     width = len(selected_schema)
     if algorithm in TREE_ENSEMBLE_ALGORITHMS:
         contribution_values, intercept = _tree_contributions(

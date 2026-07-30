@@ -35,6 +35,12 @@ from .contracts import (
     MarketLabel,
     schema_version_for,
 )
+from .triple_barrier import TripleBarrierError, triple_barrier_label
+from .volatility_expansion import (
+    VolatilityExpansionError,
+    trailing_range_of,
+    volatility_expansion_label,
+)
 
 
 class FeatureConstructionError(ValueError):
@@ -81,10 +87,19 @@ _CANDLE_FEATURES: tuple[str, ...] = (
     "candle.is_gap_defended",
 )
 
+# Institutional cash flow, normalised to be scale-free and era-robust. Both are
+# populated by ``PostgresMlRepository._load_institutional_flow``, which enforces
+# the point-in-time rule that matters here: flows for session D are published
+# *after* D closes, so a bar may only read a print from a strictly earlier session.
+#
+# ``market.gift_nifty_implied_gap_bps`` used to sit alongside these. It is gone:
+# nothing populated it, so it was a guaranteed-NaN column in both training and
+# inference. Re-add it together with a loader once a real offshore feed exists --
+# a declared column with no source is worse than an absent one, because it enters
+# the versioned contract and forces a retrain while contributing nothing.
 _MARKET_FEATURES: tuple[str, ...] = (
     "market.fii_net_flow_ratio",
     "market.dii_net_flow_ratio",
-    "market.gift_nifty_implied_gap_bps",
 )
 
 # The three gap columns describe a session boundary, so inside a session they are
@@ -391,7 +406,6 @@ def build_feature_vector(
             "candle.is_gap_defended": is_gap_defended,
             "market.fii_net_flow_ratio": _numeric_or_nan(candle.fii_net_flow_ratio),
             "market.dii_net_flow_ratio": _numeric_or_nan(candle.dii_net_flow_ratio),
-            "market.gift_nifty_implied_gap_bps": _numeric_or_nan(candle.gift_nifty_implied_gap_bps),
             "regime.vix_sma20.value_ratio": _numeric_or_nan(candle.vix_value_ratio),
         }
     )
@@ -623,6 +637,216 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
     return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
 
 
+def build_triple_barrier_examples(records: Sequence[CandleEvidence], request: DatasetRequest) -> list[LabeledExample]:
+    """Turn evidence into labeled examples under the triple-barrier scheme.
+
+    The parallel of :func:`build_labeled_examples`: the chronological walk, the
+    feature construction, and the as-of discipline are identical, so this shares
+    :func:`build_feature_vector` and the same validation. Only the *label* differs
+    -- it comes from :func:`triple_barrier_label` over ``candle.forward_path``, with
+    the profit/stop barriers scaled to the source bar's ATR.
+
+    A candle is skipped (not an error) when it has no usable ATR, no forward path
+    yet, or a same-bar double touch the OHLC cannot order -- the same "omit what
+    cannot be labelled" rule the fixed-horizon builder applies to a missing future
+    close. ``label_available_at`` is the barrier-touch time, which the split's
+    purge gap must cover by setting ``horizon_bars`` to the vertical-barrier count.
+    """
+
+    _validate_request(request)
+    if not (math.isfinite(request.barrier_upper_multiple) and request.barrier_upper_multiple > 0):
+        raise FeatureConstructionError("barrier_upper_multiple must be finite and greater than zero.")
+    if not (math.isfinite(request.barrier_lower_multiple) and request.barrier_lower_multiple > 0):
+        raise FeatureConstructionError("barrier_lower_multiple must be finite and greater than zero.")
+
+    examples: list[LabeledExample] = []
+    volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    prior_close = _nan()
+    sorted_records = sorted(records, key=lambda candle: candle.close_time)
+
+    for candle in sorted_records:
+        current_volume = _source_number(candle.volume, "volume")
+        if math.isfinite(current_volume):
+            volume_window.append(current_volume)
+        median_volume = statistics.median(volume_window) if volume_window else _nan()
+
+        try:
+            _validate_evidence_scope(candle, request)
+        except FeatureConstructionError:
+            prior_close = _source_number(candle.close, "close")
+            continue
+
+        source_close = _source_number(candle.close, "close")
+        atr_indicator = _first_indicator_by_code(candle.indicators, "ATR", request.indicator_algorithm_version)
+        atr_value = _numeric_or_nan(atr_indicator.values.get("value")) if atr_indicator else _nan()
+        # A barrier cannot be placed without a volatility scale. Missing ATR is a
+        # skip, not a failure -- the same treatment a missing label gets.
+        if source_close <= 0 or not (math.isfinite(atr_value) and atr_value > 0):
+            prior_close = source_close
+            continue
+
+        try:
+            result = triple_barrier_label(
+                source_close=source_close,
+                atr=atr_value,
+                upper_multiple=request.barrier_upper_multiple,
+                lower_multiple=request.barrier_lower_multiple,
+                forward_path=candle.forward_path,
+            )
+        except TripleBarrierError as error:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} has a malformed forward path: {error}") from error
+        if result is None:
+            # No forward path yet, or a same-bar double touch: unlabelable, omit.
+            prior_close = source_close
+            continue
+
+        # Right-censoring guard. A NEUTRAL means "no barrier within the window",
+        # but if the available path is shorter than the vertical barrier the run
+        # simply ended early -- a later bar could still have touched a barrier, so
+        # this is unknown, not a genuine time-out. A horizontal touch inside a
+        # short path is still valid (the barrier was reached before data ran out).
+        if result.touched == "VERTICAL" and len(candle.forward_path) < request.horizon_bars:
+            prior_close = source_close
+            continue
+
+        if result.touch_close_time <= candle.close_time:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} barrier touch must be after its close time.")
+        if result.touch_close_time > request.data_window_end:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
+
+        schema_version = schema_version_for(request.timeframe)
+        examples.append(
+            LabeledExample(
+                candle_id=candle.candle_id,
+                instrument_id=candle.instrument_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                observed_at=candle.close_time,
+                label_available_at=result.touch_close_time,
+                forward_return=result.forward_return,
+                label=result.label,
+                features=build_feature_vector(
+                    candle,
+                    prior_close=prior_close,
+                    median_volume=median_volume,
+                    schema_version=schema_version,
+                    indicator_algorithm_version=request.indicator_algorithm_version,
+                    pattern_algorithm_version=request.pattern_algorithm_version,
+                    price_action_algorithm_version=request.price_action_algorithm_version,
+                ),
+                vix_observed_at=candle.vix_observed_at,
+            )
+        )
+        prior_close = source_close
+
+    return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
+
+
+def build_volatility_expansion_examples(
+    records: Sequence[CandleEvidence], request: DatasetRequest
+) -> list[LabeledExample]:
+    """Turn evidence into labeled examples under the volatility-expansion scheme.
+
+    Shares the chronological walk, the feature vector, and the as-of validation with
+    the other builders; only the label differs. ``request.horizon_bars`` is used for
+    **both** windows -- the trailing range is the K bars ending at the source bar and
+    the forward range is the K bars after it -- because equal windows make the ratio
+    directly interpretable as "wider or narrower than the recent past".
+
+    The trailing window is built from bars already walked, so it can never contain
+    future information. A candle is skipped when the trailing window is not yet full
+    (no scale to compare against) or the label is censored.
+
+    The returned labels are CONTRACTION/STABLE/EXPANSION, **not** the directional
+    alphabet, so callers must pass ``VOLATILITY_ALPHABET`` to training, evaluation,
+    and persistence.
+    """
+
+    _validate_request(request)
+    window = request.horizon_bars
+    examples: list[LabeledExample] = []
+    volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    trailing_highs: collections.deque[float] = collections.deque(maxlen=window)
+    trailing_lows: collections.deque[float] = collections.deque(maxlen=window)
+    prior_close = _nan()
+    sorted_records = sorted(records, key=lambda candle: candle.close_time)
+
+    for candle in sorted_records:
+        current_volume = _source_number(candle.volume, "volume")
+        if math.isfinite(current_volume):
+            volume_window.append(current_volume)
+        median_volume = statistics.median(volume_window) if volume_window else _nan()
+
+        source_close = _source_number(candle.close, "close")
+        # The trailing window advances for every candle, including ones that fail
+        # scope validation, so the envelope stays a true picture of recent range.
+        trailing_highs.append(_source_number(candle.high, "high"))
+        trailing_lows.append(_source_number(candle.low, "low"))
+
+        try:
+            _validate_evidence_scope(candle, request)
+        except FeatureConstructionError:
+            prior_close = source_close
+            continue
+
+        if len(trailing_highs) < window:
+            prior_close = source_close
+            continue
+
+        try:
+            result = volatility_expansion_label(
+                trailing_range=trailing_range_of(list(trailing_highs), list(trailing_lows)),
+                forward_path=candle.forward_path,
+                expected_forward_bars=window,
+                band=request.expansion_band,
+            )
+        except VolatilityExpansionError as error:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} has a malformed forward path: {error}"
+            ) from error
+        if result is None:
+            prior_close = source_close
+            continue
+
+        label_available_at = result.label_available_at
+        if label_available_at <= candle.close_time:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} label must become known after its close time."
+            )
+        if label_available_at > request.data_window_end:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} label falls outside the requested data window."
+            )
+
+        examples.append(
+            LabeledExample(
+                candle_id=candle.candle_id,
+                instrument_id=candle.instrument_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                observed_at=candle.close_time,
+                label_available_at=label_available_at,
+                # The realised range ratio, kept where forward_return lives so the
+                # continuous quantity behind the class is not thrown away.
+                forward_return=result.range_ratio,
+                label=result.label,
+                features=build_feature_vector(
+                    candle,
+                    prior_close=prior_close,
+                    median_volume=median_volume,
+                    schema_version=schema_version_for(request.timeframe),
+                    indicator_algorithm_version=request.indicator_algorithm_version,
+                    pattern_algorithm_version=request.pattern_algorithm_version,
+                    price_action_algorithm_version=request.price_action_algorithm_version,
+                ),
+                vix_observed_at=candle.vix_observed_at,
+            )
+        )
+        prior_close = source_close
+
+    return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
+
+
 __all__ = [
     "FEATURE_SCHEMA",
     "FEATURE_SCHEMA_SCALP",
@@ -634,6 +858,8 @@ __all__ = [
     "LabelResult",
     "build_feature_vector",
     "build_labeled_examples",
+    "build_triple_barrier_examples",
+    "build_volatility_expansion_examples",
     "feature_schema",
     "feature_definition",
     "label_from_future_close",

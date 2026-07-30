@@ -78,11 +78,67 @@ describe("ImportHistoricalMarketData", () => {
       timeframe: "1d",
       from: new Date("2025-01-01T00:00:00Z"),
       to: new Date("2025-01-01T23:59:59Z"),
-    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 1 });
+    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 1, candlesSkipped: 0 });
 
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ instrumentId: "instrument-1", ingestionId: "ingestion-1", isComplete: true });
     expect(ingestion.completed).toEqual([1]);
+  });
+
+  it("skips dates already stored as completed candles when skipExisting is set", async () => {
+    const day1 = new Date("2025-01-01T03:45:00Z");
+    const day2 = new Date("2025-01-02T03:45:00Z");
+    const existingComplete: PersistedCandle = {
+      id: "existing-1",
+      instrumentId: "instrument-1",
+      timeframe: "1d",
+      openTime: day1,
+      closeTime: new Date("2025-01-01T10:00:00Z"),
+      open: "100", high: "110", low: "95", close: "105", volume: "10",
+      isComplete: true,
+      source: "test-provider",
+      ingestionId: "old",
+      sourceMetadata: {},
+    };
+    const stored: UpsertCandleInput[] = [];
+    const candles: CandleRepository = {
+      upsert: async (input): Promise<PersistedCandle> => {
+        // day1 must never reach here — a revised value would trip the immutability
+        // guard, which is exactly what skipExisting exists to avoid.
+        if (input.openTime.getTime() === day1.getTime()) {
+          throw new Error("Completed candles are immutable; record a provider correction as a new data revision.");
+        }
+        stored.push(input);
+        return { id: "candle-new", ...input, ingestionId: input.ingestionId ?? null, sourceMetadata: input.sourceMetadata ?? {} };
+      },
+      // day1 is already stored and complete; day2 is new.
+      findByKey: async (_instrumentId, _timeframe, openTime) =>
+        openTime.getTime() === day1.getTime() ? existingComplete : null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const provider: HistoricalMarketDataProvider = {
+      id: "test-provider",
+      fetchCandles: async () => [
+        // day1 comes back with revised OHLC (101 vs stored 100), the real trigger.
+        { openTime: day1, closeTime: new Date("2025-01-01T10:00:00Z"), open: "101", high: "111", low: "96", close: "106", volume: "12" },
+        { openTime: day2, closeTime: new Date("2025-01-02T10:00:00Z"), open: "106", high: "112", low: "104", close: "110", volume: "9" },
+      ],
+    };
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, candles);
+
+    await expect(service.execute({
+      instrument, provider, providerInstrumentId: "256265", timeframe: "1d",
+      from: new Date("2025-01-01T00:00:00Z"), to: new Date("2025-01-02T23:59:59Z"),
+      skipExisting: true,
+    })).resolves.toMatchObject({ candlesFetched: 2, candlesPersisted: 1, candlesSkipped: 1 });
+
+    // Only the genuinely-new bar was written; the already-stored one was skipped.
+    expect(stored).toHaveLength(1);
+    expect(stored[0].openTime.toISOString()).toBe("2025-01-02T03:45:00.000Z");
+    expect(ingestion.completed).toEqual([1]);
+    expect(ingestion.failures).toHaveLength(0);
   });
 
   it("marks the ingestion as failed when a provider returns duplicate timestamps", async () => {

@@ -154,9 +154,9 @@ function hasGeometryForFill(side: TradeSide, fillPrice: number, stopLoss: number
     : targetPrice < fillPrice && fillPrice < stopLoss;
 }
 
-function exitEventType(reason: Exclude<PaperTradeExitReason, "CANCELLED">): Extract<
+function exitEventType(reason: PaperTradeExitReason): Extract<
   PaperTradeEventType,
-  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED"
+  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED"
 > {
   switch (reason) {
     case "STOP_LOSS":
@@ -165,6 +165,8 @@ function exitEventType(reason: Exclude<PaperTradeExitReason, "CANCELLED">): Extr
       return "TARGET_HIT";
     case "MANUAL":
       return "MANUALLY_CLOSED";
+    case "CANCELLED":
+      return "CANCELLED";
   }
 }
 
@@ -261,12 +263,13 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         throw new Error("Insufficient available capital for this simulated fill.");
       }
 
+      const status = input.status ?? 'OPEN';
       const inserted = await client.query<{ id: string }>(`
         INSERT INTO paper_trades (
           account_id, trade_idea_id, instrument_id, side, status, quantity,
           entry_price, stop_loss, target_price, opened_at, fees, slippage, notes
         ) VALUES (
-          $1, $2, $3, $4, 'OPEN', $5, $6, $7, $8, $9, $10, $11, $12
+          $1, $2, $3, $4, $13, $5, $6, $7, $8, $9, $10, $11, $12
         )
         RETURNING id
       `, [
@@ -282,17 +285,19 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.entryFees,
         input.entrySlippage,
         input.notes,
+        status,
       ]);
       const paperTradeId = inserted.rows[0]?.id;
       if (!paperTradeId) {
         throw new Error("Opening a paper trade did not return a row.");
       }
 
+      const eventType = status === 'PENDING' ? 'PENDING_PLACED' : 'OPENED';
       await client.query(`
         INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
-        VALUES ($1, 'OPENED', $2, $3, $4::jsonb, $5)
+        VALUES ($1, $6, $2, $3, $4::jsonb, $5)
       `, [paperTradeId, input.fillPrice, input.quantity, JSON.stringify({
-        fillPolicy: "MANUAL_EXPLICIT",
+        fillPolicy: status === 'PENDING' ? "LIMIT_STOP_PENDING" : "MANUAL_EXPLICIT",
         tradeIdeaId: idea.id,
         referenceEntryPrice: toNumber(idea.entry_price, "trade idea entry price"),
         stopLoss,
@@ -301,7 +306,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         entryFees: input.entryFees,
         entrySlippage: input.entrySlippage,
         notes: input.notes,
-      }), input.openedAt]);
+      }), input.openedAt, eventType]);
 
       const accepted = await client.query<{ id: string }>(`
         UPDATE trade_ideas
@@ -355,6 +360,58 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     return result.rows.map(toPaperTrade);
   }
 
+  async listPendingByAccount(accountId: string): Promise<PaperTrade[]> {
+    const result = await this.database.query<PaperTradeRow>(`
+      SELECT ${tradeColumns}, instruments.symbol AS instrument_symbol
+      FROM paper_trades
+      LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+      LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+      LEFT JOIN instruments ON instruments.id = paper_trades.instrument_id
+      WHERE paper_trades.account_id = $1 AND paper_trades.status = 'PENDING'
+      ORDER BY paper_trades.opened_at DESC, paper_trades.id ASC
+    `, [accountId]);
+    return result.rows.map(toPaperTrade);
+  }
+
+  async fillPendingTrade(input: { paperTradeId: string; fillPrice: number; filledAt: Date }): Promise<PaperTrade> {
+    const client = await this.database.connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+
+      const tradeResult = await client.query(`
+        SELECT id FROM paper_trades WHERE id = $1 AND status = 'PENDING' FOR UPDATE
+      `, [input.paperTradeId]);
+      if (!tradeResult.rows[0]) {
+        throw new Error("Trade is not pending or does not exist.");
+      }
+
+      await client.query(`
+        UPDATE paper_trades
+        SET status = 'OPEN', entry_price = $2
+        WHERE id = $1
+      `, [input.paperTradeId, input.fillPrice]);
+
+      await client.query(`
+        INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+        VALUES ($1, 'OPENED', $2, NULL, $3::jsonb, $4)
+      `, [input.paperTradeId, input.fillPrice, JSON.stringify({ fillPolicy: "LIMIT_STOP_TRIGGERED" }), input.filledAt]);
+
+      await client.query("COMMIT");
+      transactionStarted = false;
+
+      const updated = await findPaperTradeById(client, input.paperTradeId);
+      if (!updated) throw new Error("Unable to resolve filled trade.");
+      return updated;
+    } catch (err) {
+      if (transactionStarted) await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async close(input: ClosePaperTradeInput): Promise<PaperTrade> {
     assertPositiveFinite(input.exitPrice, "Exit price");
     assertNonNegativeFinite(input.exitFees, "Exit fees");
@@ -389,12 +446,30 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
           paper_trades.slippage,
           paper_trades.notes
         FROM paper_trades
-        WHERE paper_trades.id = $1 AND paper_trades.status = 'OPEN'
+        WHERE paper_trades.id = $1 AND paper_trades.status IN ('OPEN', 'PENDING')
         FOR UPDATE
       `, [input.paperTradeId]);
       const existing = openTrade.rows[0];
       if (!existing) {
-        throw new Error("Open paper trade was not found.");
+        throw new Error("Paper trade was not found, or is already closed/cancelled.");
+      }
+
+      if (existing.status === 'PENDING' || input.exitReason === 'CANCELLED') {
+        await client.query(`
+          UPDATE paper_trades
+          SET status = 'CANCELLED', closed_at = $2, exit_reason = 'CANCELLED'
+          WHERE id = $1
+        `, [existing.id, input.closedAt]);
+
+        await client.query(`
+          INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+          VALUES ($1, 'CANCELLED', $2, $3, $4::jsonb, $5)
+        `, [existing.id, input.exitPrice, toNumber(existing.quantity, "trade quantity"), JSON.stringify(input.details), input.closedAt]);
+
+        await client.query("COMMIT");
+        transactionStarted = false;
+        const cancelledTrade = await findPaperTradeById(client, existing.id);
+        return cancelledTrade!;
       }
       if (input.closedAt.getTime() < existing.opened_at.getTime()) {
         throw new Error("Closed at cannot be before the paper trade was opened.");

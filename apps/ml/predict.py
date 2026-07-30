@@ -26,7 +26,14 @@ from ai_quant_lab_ml.inference import (
     validate_production_artifact,
 )
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
+from ai_quant_lab_ml.contracts import (
+    DIRECTIONAL_ALPHABET,
+    DIRECTIONAL_LABEL_SCHEMES,
+    LABEL_SCHEME_FIXED_HORIZON,
+    LabelAlphabet,
+)
 from ai_quant_lab_ml.reference_data import ReferenceDataError, nearest_reference_label_agreement
+from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -174,11 +181,23 @@ def main() -> int:
             production_model.artifact_uri,
             expected_checksum=production_model.artifact_checksum,
         )
+        # The label scheme is read from the artifact rather than a CLI flag, so a
+        # served model can never be scored or persisted under the wrong target.
+        # An artifact written before schemes existed was necessarily directional.
+        artifact_protocol = loaded_artifact.metadata.get("validationProtocol")
+        label_scheme = (
+            artifact_protocol.get("labelScheme", LABEL_SCHEME_FIXED_HORIZON)
+            if isinstance(artifact_protocol, Mapping)
+            else LABEL_SCHEME_FIXED_HORIZON
+        )
+        is_directional = label_scheme in DIRECTIONAL_LABEL_SCHEMES
+        alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET if is_directional else VOLATILITY_ALPHABET
         contract = validate_production_artifact(
             production_model,
             loaded_artifact.metadata,
             instrument_symbol=symbol,
             timeframe=args.timeframe,
+            alphabet=alphabet,
         )
         inference_request = InferenceRequest(
             instrument_symbol=symbol,
@@ -233,6 +252,7 @@ def main() -> int:
             algorithm=production_model.algorithm,
             schema=contract.feature_schema,
             maximum_features=args.maximum_features,
+            alphabet=alphabet,
         )
         try:
             similar_setup = nearest_reference_label_agreement(
@@ -242,27 +262,39 @@ def main() -> int:
                 reference_metadata=contract.training_reference_data,
                 k=args.similar_neighbors,
                 expected_schema=contract.feature_schema,
+                alphabet=alphabet,
             ).as_dict()
         except ReferenceDataError as error:
             raise InferenceError(f"Could not calculate training-only similar-setup label agreement: {error}") from error
-        observed_prior_predictions = repository.historical_prediction_reliability(
-            model_version_id=production_model.id,
-            instrument_id=evidence.instrument_id,
-            timeframe=evidence.timeframe,
-            prediction=explained_prediction.prediction,
-            reference_close_time=evidence.close_time,
-            data_cutoff_at=as_of,
-            horizon_bars=contract.horizon_bars,
-            neutral_threshold_bps=contract.neutral_threshold_bps,
-        )
-        historical_reference = {
-            "trainingOnlySimilarSetups": similar_setup,
-            "earlierSameLabelPredictions": {
+        # This reliability measure asks whether earlier same-label calls came true
+        # by comparing a forward close against the directional neutral band. That
+        # question only exists for a directional target, so for any other scheme it
+        # is reported as not applicable instead of being computed misleadingly.
+        if is_directional:
+            observed_prior_predictions = repository.historical_prediction_reliability(
+                model_version_id=production_model.id,
+                instrument_id=evidence.instrument_id,
+                timeframe=evidence.timeframe,
+                prediction=explained_prediction.prediction,
+                reference_close_time=evidence.close_time,
+                data_cutoff_at=as_of,
+                horizon_bars=contract.horizon_bars,
+                neutral_threshold_bps=contract.neutral_threshold_bps,
+            )
+            earlier_same_label = {
                 "method": "EARLIER_SAME_LABEL_PREDICTION_OUTCOMES_V1",
                 "evaluatedPredictions": observed_prior_predictions.evaluated_predictions,
                 "correctPredictions": observed_prior_predictions.correct_predictions,
                 "accuracy": observed_prior_predictions.accuracy,
-            },
+            }
+        else:
+            earlier_same_label = {
+                "method": "NOT_APPLICABLE_FOR_NON_DIRECTIONAL_TARGET",
+                "labelScheme": label_scheme,
+            }
+        historical_reference = {
+            "trainingOnlySimilarSetups": similar_setup,
+            "earlierSameLabelPredictions": earlier_same_label,
         }
         explanation = build_prediction_explanation(
             candle=evidence,
@@ -272,23 +304,45 @@ def main() -> int:
             evidence_cutoff_at=as_of,
             historical_reference=historical_reference,
         )
-        persisted_prediction = repository.save_model_prediction(
-            model_version_id=production_model.id,
-            instrument_id=evidence.instrument_id,
-            source_candle_id=evidence.candle_id,
-            prediction=explained_prediction.prediction,
-            confidence=explained_prediction.confidence,
-            feature_contributions=explained_prediction.feature_contributions,
-            explanation=explanation,
-            evidence_cutoff_at=as_of,
-        )
+        # model_predictions is read as a trade direction by the strategy engine, the
+        # autonomous agent, the market scanner, and the predictions dashboard. A
+        # non-directional label must therefore go to its own table, never there.
+        if is_directional:
+            persisted = repository.save_model_prediction(
+                model_version_id=production_model.id,
+                instrument_id=evidence.instrument_id,
+                source_candle_id=evidence.candle_id,
+                prediction=explained_prediction.prediction,
+                confidence=explained_prediction.confidence,
+                feature_contributions=explained_prediction.feature_contributions,
+                explanation=explanation,
+                evidence_cutoff_at=as_of,
+            )
+            prediction_id = persisted.id
+            prediction_model_version_id = persisted.model_version_id
+        else:
+            auxiliary = repository.save_auxiliary_prediction(
+                model_version_id=production_model.id,
+                instrument_id=evidence.instrument_id,
+                source_candle_id=evidence.candle_id,
+                label_scheme=label_scheme,
+                prediction=explained_prediction.prediction,
+                confidence=explained_prediction.confidence,
+                feature_contributions=explained_prediction.feature_contributions,
+                explanation=explanation,
+                evidence_cutoff_at=as_of,
+                alphabet=alphabet,
+            )
+            prediction_id = auxiliary["id"]
+            prediction_model_version_id = auxiliary["modelVersionId"]
 
     json_output(
         {
             "level": "info",
             "message": "Explainable local model prediction persisted",
-            "predictionId": persisted_prediction.id,
-            "modelVersionId": persisted_prediction.model_version_id,
+            "predictionId": prediction_id,
+            "modelVersionId": prediction_model_version_id,
+            "labelScheme": label_scheme,
             "modelKey": contract.model_key,
             "algorithm": explained_prediction.algorithm,
             "contributionMethod": explained_prediction.contribution_method,

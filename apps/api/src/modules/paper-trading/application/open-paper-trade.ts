@@ -9,6 +9,7 @@ export interface OpenPaperTradeRequest {
   entrySlippage?: number;
   notes?: string;
   openedAt?: Date;
+  orderType?: "MARKET" | "PENDING";
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -47,6 +48,7 @@ export class OpenPaperTrade {
       entryFees,
       entrySlippage,
       notes: input.notes?.trim() ?? "",
+      status: input.orderType === "PENDING" ? "PENDING" : "OPEN",
     };
     return this.paperTradeRepository.openFromTradeIdea(request);
   }

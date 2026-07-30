@@ -39,6 +39,78 @@ export interface AgentPerformanceMetrics {
   recentThoughts: AiBrainThought[];
 }
 
+/** How stale a published FII/DII print may be before the agent ignores it. */
+export const INSTITUTIONAL_FLOW_MAX_AGE_DAYS = 5;
+
+export interface InstitutionalFlowBias {
+  /** Confidence points to add to a long-biased score. Negative discounts the trade. */
+  adjustment: number;
+  reasoning: string | null;
+}
+
+/**
+ * Grade the institutional-flow bias for a long-biased confidence score.
+ *
+ * Three things this fixes over the original flat ±10 at |FII| > 1000 Cr:
+ *
+ * 1. DII is included. It was queried and parsed but never read, which mattered
+ *    because DII routinely absorbs FII selling — a -3000 Cr FII day against
+ *    +2800 Cr DII is a rotation, not an exodus, and penalising it as though it
+ *    were the latter is simply the wrong reading of the tape.
+ * 2. It is graded rather than binary, so 1001 Cr and 12000 Cr no longer score
+ *    identically.
+ * 3. Outflows are weighted more heavily than inflows (the 1.5x below). This is
+ *    what "heavily discounting bullish trades on extreme FII outflows" in the
+ *    phase-22 doc actually asks for, and it matches the asymmetry the rest of
+ *    this scorer already applies to bad news.
+ *
+ * Bands are in crore of *combined* net cash flow. They are deliberately coarse:
+ * these are hand-set heuristics for a long-biased score, not a fitted model, and
+ * the ML path gets its own scale-free feature instead.
+ */
+export function institutionalFlowBias(
+  fiiCashNetCr: number | null,
+  diiCashNetCr: number | null,
+): InstitutionalFlowBias {
+  // Absent data must not read as a flat market, so a null is not treated as 0.
+  if (fiiCashNetCr === null && diiCashNetCr === null) {
+    return { adjustment: 0, reasoning: null };
+  }
+
+  const fii = fiiCashNetCr ?? 0;
+  const dii = diiCashNetCr ?? 0;
+  const combined = fii + dii;
+  const magnitude = Math.abs(combined);
+
+  let points: number;
+  if (magnitude < 500) points = 0;
+  else if (magnitude < 2_000) points = 5;
+  else if (magnitude < 5_000) points = 10;
+  else points = 18;
+
+  if (points === 0) {
+    return {
+      adjustment: 0,
+      reasoning: `Institutional flows broadly balanced (FII ₹${fii.toFixed(0)}Cr, DII ₹${dii.toFixed(0)}Cr).`,
+    };
+  }
+
+  const bullish = combined > 0;
+  const adjustment = bullish ? points : -Math.round(points * 1.5);
+  const descriptor = magnitude >= 5_000 ? "Extreme" : magnitude >= 2_000 ? "Strong" : "Mild";
+  const rotation =
+    Math.sign(fii) !== Math.sign(dii) && Math.min(Math.abs(fii), Math.abs(dii)) > 500
+      ? " Counter-flow between FII and DII suggests rotation rather than a one-sided exit."
+      : "";
+
+  return {
+    adjustment,
+    reasoning:
+      `${descriptor} net institutional ${bullish ? "inflows" : "outflows"}: ` +
+      `FII ₹${fii.toFixed(0)}Cr, DII ₹${dii.toFixed(0)}Cr (combined ₹${combined.toFixed(0)}Cr).${rotation}`,
+  };
+}
+
 // Generate a deterministic 384-d vector from a string for local testing without external API.
 export function generatePseudoEmbedding(text: string): number[] {
   let hash = 0;
@@ -201,16 +273,29 @@ export class AiAutonomousAgent {
           : `NEUTRAL (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`;
 
     // Institutional Data
-    let fiiDiiSentiment = 0;
+    //
+    // Reads the most recent *published* print rather than today's row. Flows for
+    // session D are only collected after D's close (18:30 IST), so the previous
+    // `WHERE date = today` lookup returned zero rows for the entire trading day
+    // and this whole signal was dead every time the agent actually ran.
+    let flowBias: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
     try {
-      const today = new Date();
-      today.setUTCHours(0, 0, 0, 0);
-      const res = await this.database.query(`SELECT fii_cash_net_cr as fii, dii_cash_net_cr as dii FROM institutional_flows WHERE date = $1`, [today]);
-      if (res.rows.length > 0) {
-        const fii = Number(res.rows[0].fii);
-        const dii = Number(res.rows[0].dii);
-        if (fii > 1000) fiiDiiSentiment = 10;
-        else if (fii < -1000) fiiDiiSentiment = -10;
+      const res = await this.database.query<{ fii: string | null; dii: string | null; date: Date }>(
+        `SELECT fii_cash_net_cr AS fii, dii_cash_net_cr AS dii, date
+         FROM institutional_flows
+         WHERE date >= CURRENT_DATE - $1::int
+         ORDER BY date DESC
+         LIMIT 1`,
+        [INSTITUTIONAL_FLOW_MAX_AGE_DAYS],
+      );
+      const row = res.rows[0];
+      if (row) {
+        const toNumber = (value: string | null): number | null => {
+          if (value === null) return null;
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        flowBias = institutionalFlowBias(toNumber(row.fii), toNumber(row.dii));
       }
     } catch (e) {
       console.warn("Error fetching institutional data:", e);
@@ -283,9 +368,9 @@ export class AiAutonomousAgent {
     }
 
     // Include FII/DII sentiment
-    if (fiiDiiSentiment !== 0) {
-      confidence += fiiDiiSentiment;
-      reasoning.push(fiiDiiSentiment > 0 ? "Strong FII inflows supporting bullish momentum." : "Strong FII outflows indicating bearish pressure.");
+    if (flowBias.reasoning) {
+      confidence += flowBias.adjustment;
+      reasoning.push(flowBias.reasoning);
     }
 
     if (livePrice > bbUpper) {

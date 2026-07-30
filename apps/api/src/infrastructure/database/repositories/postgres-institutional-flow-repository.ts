@@ -1,52 +1,102 @@
 import type { Pool } from "pg";
 import type { InstitutionalFlow } from "../../../modules/market-data/domain/institutional-flow.js";
 
+/**
+ * Bind `date` as an ISO `YYYY-MM-DD` string rather than as a Date.
+ *
+ * node-pg serialises a Date using the *host process's* local timezone, so a
+ * UTC-midnight Date becomes the previous calendar day on any host west of UTC and
+ * therefore keys the wrong row of a DATE column. Formatting from the UTC
+ * components makes the key independent of where the collector runs.
+ */
+function toDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export class PostgresInstitutionalFlowRepository {
   constructor(private readonly database: Pool) {}
 
   async upsert(flow: InstitutionalFlow): Promise<void> {
-    await this.database.query(`
+    await this.database.query(
+      `
       INSERT INTO institutional_flows (
         date,
         fii_cash_net_cr,
         dii_cash_net_cr,
         fii_index_futures_net_cr,
-        fii_index_options_net_cr
-      ) VALUES ($1, $2, $3, $4, $5)
+        fii_index_options_net_cr,
+        published_at
+      ) VALUES ($1, $2, $3, $4, $5, $6)
       ON CONFLICT (date) DO UPDATE SET
         fii_cash_net_cr = EXCLUDED.fii_cash_net_cr,
         dii_cash_net_cr = EXCLUDED.dii_cash_net_cr,
         fii_index_futures_net_cr = EXCLUDED.fii_index_futures_net_cr,
         fii_index_options_net_cr = EXCLUDED.fii_index_options_net_cr,
+        published_at = EXCLUDED.published_at,
         updated_at = NOW()
-    `, [
-      flow.date,
-      flow.fiiCashNetCr,
-      flow.diiCashNetCr,
-      flow.fiiIndexFuturesNetCr,
-      flow.fiiIndexOptionsNetCr
-    ]);
+    `,
+      [
+        toDateKey(flow.date),
+        flow.fiiCashNetCr,
+        flow.diiCashNetCr,
+        flow.fiiIndexFuturesNetCr,
+        flow.fiiIndexOptionsNetCr,
+        flow.publishedAt,
+      ],
+    );
   }
 
   async findByDate(date: Date): Promise<InstitutionalFlow | null> {
-    const result = await this.database.query(`
-      SELECT 
-        date,
-        fii_cash_net_cr as "fiiCashNetCr",
-        dii_cash_net_cr as "diiCashNetCr",
-        fii_index_futures_net_cr as "fiiIndexFuturesNetCr",
-        fii_index_options_net_cr as "fiiIndexOptionsNetCr"
+    const result = await this.database.query(
+      `
+      SELECT date, fii_cash_net_cr, dii_cash_net_cr,
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
       FROM institutional_flows
       WHERE date = $1
-    `, [date]);
-
-    if (!result.rows[0]) return null;
-    return {
-      date: result.rows[0].date,
-      fiiCashNetCr: parseFloat(result.rows[0].fiiCashNetCr),
-      diiCashNetCr: parseFloat(result.rows[0].diiCashNetCr),
-      fiiIndexFuturesNetCr: parseFloat(result.rows[0].fiiIndexFuturesNetCr),
-      fiiIndexOptionsNetCr: parseFloat(result.rows[0].fiiIndexOptionsNetCr),
-    };
+    `,
+      [toDateKey(date)],
+    );
+    return toFlow(result.rows[0]);
   }
+
+  /**
+   * The most recently published print, optionally no older than `withinDays`.
+   *
+   * Anything running during a live session needs this rather than `findByDate`:
+   * flows for session D are published only after D closes, so a same-day lookup
+   * returns nothing for the entire trading day. The staleness bound stops a long
+   * collector outage from presenting month-old flows as current context.
+   */
+  async findLatest(options: { withinDays?: number } = {}): Promise<InstitutionalFlow | null> {
+    const result = await this.database.query(
+      `
+      SELECT date, fii_cash_net_cr, dii_cash_net_cr,
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
+      FROM institutional_flows
+      WHERE ($1::int IS NULL OR date >= CURRENT_DATE - $1::int)
+      ORDER BY date DESC
+      LIMIT 1
+    `,
+      [options.withinDays ?? null],
+    );
+    return toFlow(result.rows[0]);
+  }
+}
+
+function toFlow(row: Record<string, unknown> | undefined): InstitutionalFlow | null {
+  if (!row) return null;
+  return {
+    date: row.date as Date,
+    fiiCashNetCr: toNumberOrNull(row.fii_cash_net_cr),
+    diiCashNetCr: toNumberOrNull(row.dii_cash_net_cr),
+    fiiIndexFuturesNetCr: toNumberOrNull(row.fii_index_futures_net_cr),
+    fiiIndexOptionsNetCr: toNumberOrNull(row.fii_index_options_net_cr),
+    publishedAt: row.published_at as Date,
+  };
 }

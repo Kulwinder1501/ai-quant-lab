@@ -1,4 +1,4 @@
-export type NewsProvider = "MONEYCONTROL" | "ECONOMIC_TIMES" | "LIVEMINT" | "NSE";
+export type NewsProvider = "MONEYCONTROL" | "ECONOMIC_TIMES" | "LIVEMINT" | "NSE" | "TIMES_OF_INDIA" | "BUSINESS_STANDARD" | "NDTV_PROFIT";
 export type SentimentLabel = "BULLISH" | "BEARISH" | "NEUTRAL" | "HIGH_VOLATILITY";
 
 export interface NewsArticle {

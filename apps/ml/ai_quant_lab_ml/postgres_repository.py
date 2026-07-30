@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
+from dataclasses import dataclass
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 if TYPE_CHECKING:
@@ -21,8 +22,15 @@ from .contracts import (
     CandleEvidence,
     DatasetRequest,
     HistoricalPredictionReliability,
+    AnyLabel,
+    ForwardBar,
     IndicatorEvidence,
     InferenceRequest,
+    LabelAlphabet,
+    INSTITUTIONAL_FLOW_SCALE_SESSIONS,
+    INSTITUTIONAL_FLOW_STALENESS_DAYS,
+    LABEL_SCHEME_TRIPLE_BARRIER,
+    LABEL_SCHEME_VOLATILITY_EXPANSION,
     MarketLabel,
     PatternEvidence,
     PersistedModelPrediction,
@@ -38,6 +46,15 @@ from .contracts import (
 from .features import feature_definition
 
 Row = Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class InstitutionalFlowEvidence:
+    """The scale-free flow reading visible to one candle, and its source session."""
+
+    fii_net_flow_ratio: float | None
+    dii_net_flow_ratio: float | None
+    flow_date: date | None
 
 
 _FIND_NSE_INSTRUMENT_SQL = """
@@ -73,6 +90,55 @@ def _is_intraday_timeframe(timeframe: str) -> bool:
 
 def _session_partition_clause(timeframe: str) -> str:
     return _INTRADAY_SESSION_PARTITION if _is_intraday_timeframe(timeframe) else ""
+
+
+# The forward path triple-barrier labelling reads. For each source candle it takes
+# the next up-to-`horizon_bars` completed bars, in time order, that were recorded by
+# the cutoff and close within the data window. The strict `open_time`/`close_time`/
+# `id` ordering after the source is the same total order used everywhere else, so a
+# bar is never both a source and its own forward bar. For intraday the forward walk
+# is confined to the source's own IST session (`{session_bound}`), the same reason
+# the label LEAD is session-partitioned: a path crossing the overnight gap would
+# measure the gap, not the intraday move.
+_FORWARD_PATH_SQL = """
+    SELECT
+      src.id AS source_candle_id,
+      fwd.high,
+      fwd.low,
+      fwd.close,
+      fwd.close_time
+    FROM candles AS src
+    CROSS JOIN LATERAL (
+      SELECT f.high, f.low, f.close, f.close_time, f.open_time, f.id
+      FROM candles AS f
+      WHERE f.instrument_id = src.instrument_id
+        AND f.timeframe = src.timeframe
+        AND f.is_complete = TRUE
+        AND f.received_at <= %s
+        AND f.close_time <= %s
+        AND (
+          f.open_time > src.open_time
+          OR (f.open_time = src.open_time AND f.close_time > src.close_time)
+          OR (f.open_time = src.open_time AND f.close_time = src.close_time AND f.id > src.id)
+        )
+        {session_bound}
+      ORDER BY f.open_time ASC, f.close_time ASC, f.id ASC
+      LIMIT %s
+    ) AS fwd
+    WHERE src.id = ANY(%s::uuid[])
+    ORDER BY src.id ASC, fwd.open_time ASC, fwd.close_time ASC, fwd.id ASC
+"""
+
+_FORWARD_PATH_SESSION_BOUND = (
+    "AND (f.close_time AT TIME ZONE 'Asia/Kolkata')::date "
+    "= (src.close_time AT TIME ZONE 'Asia/Kolkata')::date"
+)
+
+#: Schemes whose label is decided by a *path* of later bars rather than a single
+#: later close. Only these pay for the forward-path query.
+_FORWARD_PATH_LABEL_SCHEMES: frozenset[str] = frozenset(
+    {LABEL_SCHEME_TRIPLE_BARRIER, LABEL_SCHEME_VOLATILITY_EXPANSION}
+)
 
 
 # LEAD runs over the cutoff-bounded series before the outer source-window
@@ -257,6 +323,67 @@ _VIX_REGIME_SQL = """
       AND indicator_definitions.algorithm_version = %s
       AND indicator_definitions.parameters ->> 'period' = %s
     ORDER BY target.id ASC, indicator_definitions.parameters_hash ASC
+"""
+
+# Institutional flows are a second source, so the as-of discipline is restated here
+# the same way it is for the VIX regime -- and it is stricter, because these figures
+# are not a market quote but a report published hours after the session they
+# describe.
+#
+# Three separate bounds, each guarding a different way this leaks:
+#
+# 1. ``published_at <= data_cutoff_at`` -- the experiment's immutable evidence
+#    boundary, identical to every other loader here.
+# 2. ``published_at <= target.close_time`` -- the bar may only read what was known
+#    when it closed. Without this, a 15:30 IST bar reads figures published at 18:30
+#    the same day, which is a three-hour lookahead into its own label window. This
+#    is the bound that makes the feature legitimate at all.
+# 3. ``flow.date < target``'s own IST session -- belt and braces on (2). Even if a
+#    backfill wrote an early ``published_at``, a bar can never read the report for
+#    its own session.
+#
+# The scale window is ``ROWS BETWEEN n PRECEDING AND 1 PRECEDING``: strictly prior
+# sessions, so an outlier does not normalise itself away. NULLIF guards the case
+# where every prior session was flat, which would otherwise divide by zero.
+_INSTITUTIONAL_FLOW_SQL = """
+    WITH visible_flows AS (
+      SELECT
+        date,
+        published_at,
+        fii_cash_net_cr,
+        dii_cash_net_cr,
+        AVG(ABS(fii_cash_net_cr)) OVER scale_window AS fii_scale,
+        AVG(ABS(dii_cash_net_cr)) OVER scale_window AS dii_scale
+      FROM institutional_flows
+      WHERE published_at <= %s
+      WINDOW scale_window AS (
+        ORDER BY date ASC
+        ROWS BETWEEN %s PRECEDING AND 1 PRECEDING
+      )
+    )
+    SELECT
+      target.id AS candle_id,
+      flow.date AS flow_date,
+      flow.fii_cash_net_cr,
+      flow.dii_cash_net_cr,
+      flow.fii_scale,
+      flow.dii_scale
+    FROM candles AS target
+    CROSS JOIN LATERAL (
+      SELECT
+        visible_flows.date,
+        visible_flows.fii_cash_net_cr,
+        visible_flows.dii_cash_net_cr,
+        visible_flows.fii_scale,
+        visible_flows.dii_scale
+      FROM visible_flows
+      WHERE visible_flows.published_at <= target.close_time
+        AND visible_flows.date < (target.close_time AT TIME ZONE 'Asia/Kolkata')::date
+        AND visible_flows.date >= (target.close_time AT TIME ZONE 'Asia/Kolkata')::date - %s
+      ORDER BY visible_flows.date DESC
+      LIMIT 1
+    ) AS flow
+    WHERE target.id = ANY(%s::uuid[])
 """
 
 _TIMEFRAME_PATTERN = re.compile(r"^(\d+)(m|h|d)$")
@@ -642,6 +769,20 @@ class PostgresMlRepository:
             )
 
         regime_by_candle = self._load_vix_regime(candle_ids, timeframe, request.data_cutoff_at)
+        flow_by_candle = self._load_institutional_flow(candle_ids, request.data_cutoff_at)
+        # Only path-based schemes read a forward path, so the fixed-horizon scheme
+        # issues no extra query and its behaviour is bit-for-bit unchanged.
+        forward_paths = (
+            self._load_forward_paths(
+                candle_ids,
+                timeframe,
+                request.horizon_bars,
+                request.data_cutoff_at,
+                request.data_window_end,
+            )
+            if request.label_scheme in _FORWARD_PATH_LABEL_SCHEMES
+            else {}
+        )
 
         evidence: list[CandleEvidence] = []
         for row in candle_rows:
@@ -659,6 +800,7 @@ class PostgresMlRepository:
 
             candle_id = str(row["candle_id"])
             regime = regime_by_candle.get(candle_id)
+            flow = flow_by_candle.get(candle_id)
             evidence.append(
                 CandleEvidence(
                     candle_id=candle_id,
@@ -679,9 +821,109 @@ class PostgresMlRepository:
                     future_close_time=resolved_future_close_time,
                     vix_value_ratio=None if regime is None else regime[0],
                     vix_observed_at=None if regime is None else regime[1],
+                    fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
+                    dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
+                    institutional_flow_date=None if flow is None else flow.flow_date,
+                    forward_path=forward_paths.get(candle_id, ()),
                 )
             )
         return tuple(evidence)
+
+    def _load_forward_paths(
+        self,
+        candle_ids: Sequence[str],
+        timeframe: str,
+        horizon_bars: int,
+        data_cutoff_at: datetime,
+        data_window_end: datetime,
+    ) -> dict[str, tuple[ForwardBar, ...]]:
+        """Map each source candle to its forward path for triple-barrier labelling.
+
+        A candle missing from the result, or present with fewer than ``horizon_bars``
+        bars, is right-censored at the end of the data: the builder treats a short
+        no-touch path as unknown rather than a genuine time-out.
+        """
+
+        if not candle_ids:
+            return {}
+
+        session_bound = _FORWARD_PATH_SESSION_BOUND if _is_intraday_timeframe(timeframe) else ""
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                _FORWARD_PATH_SQL.format(session_bound=session_bound),
+                (data_cutoff_at, data_window_end, horizon_bars, list(candle_ids)),
+            )
+            rows = list(cursor.fetchall())
+
+        paths: dict[str, list[ForwardBar]] = defaultdict(list)
+        for row in rows:
+            paths[str(row["source_candle_id"])].append(
+                ForwardBar(
+                    high=_to_float(row["high"], "forward bar high"),
+                    low=_to_float(row["low"], "forward bar low"),
+                    close=_to_float(row["close"], "forward bar close"),
+                    close_time=_require_valid_datetime(row["close_time"], "forward bar close time"),
+                )
+            )
+        return {candle_id: tuple(bars) for candle_id, bars in paths.items()}
+
+    def _load_institutional_flow(
+        self,
+        candle_ids: Sequence[str],
+        data_cutoff_at: datetime,
+    ) -> dict[str, InstitutionalFlowEvidence]:
+        """Map candle id to the scale-free institutional flow visible when it closed.
+
+        A candle is simply absent from the result when the flow is unmeasurable --
+        no collected print, a gap wider than the staleness window, or fewer than
+        one prior session to scale against. Callers leave the feature missing in
+        that case rather than substituting 0, because a zero net flow is a real
+        and different observation from an unobserved one, and imputing it would
+        teach the model that "collector was down" looks like "balanced session".
+        """
+
+        if not candle_ids:
+            return {}
+
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                _INSTITUTIONAL_FLOW_SQL,
+                (
+                    data_cutoff_at,
+                    INSTITUTIONAL_FLOW_SCALE_SESSIONS,
+                    INSTITUTIONAL_FLOW_STALENESS_DAYS,
+                    list(candle_ids),
+                ),
+            )
+            rows = list(cursor.fetchall())
+
+        flow_by_candle: dict[str, InstitutionalFlowEvidence] = {}
+        for row in rows:
+            candle_id = str(row["candle_id"])
+            if candle_id in flow_by_candle:
+                continue
+
+            def ratio(net_key: str, scale_key: str) -> float | None:
+                net = row[net_key]
+                scale = row[scale_key]
+                if net is None or scale is None:
+                    return None
+                scale_value = _to_float(scale, "institutional flow scale")
+                if scale_value <= 0:
+                    return None
+                return _to_float(net, "institutional net flow") / scale_value
+
+            fii_ratio = ratio("fii_cash_net_cr", "fii_scale")
+            dii_ratio = ratio("dii_cash_net_cr", "dii_scale")
+            if fii_ratio is None and dii_ratio is None:
+                continue
+
+            flow_by_candle[candle_id] = InstitutionalFlowEvidence(
+                fii_net_flow_ratio=fii_ratio,
+                dii_net_flow_ratio=dii_ratio,
+                flow_date=row["flow_date"],
+            )
+        return flow_by_candle
 
     def _load_vix_regime(
         self,
@@ -868,9 +1110,14 @@ class PostgresMlRepository:
         open_time = _require_valid_datetime(candle_row["open_time"], "Candle open time")
         if close_time <= open_time:
             raise ValueError("Database returned a candle that does not close after it opens.")
-        # Resolved the same way as in training. Substituting a placeholder here instead
-        # would be train/serve skew, and the imputer would hide it.
+        # Both resolved through the same loaders training uses. Substituting a
+        # placeholder here instead would be train/serve skew, and the imputer would
+        # hide it. This is precisely what went wrong with the institutional-flow
+        # columns when they were introduced: they were declared in the schema but
+        # never loaded on either path, so the model was fitted on and served a
+        # constant.
         regime = self._load_vix_regime([candle_id], timeframe, request.data_cutoff_at).get(candle_id)
+        flow = self._load_institutional_flow([candle_id], request.data_cutoff_at).get(candle_id)
         return CandleEvidence(
             candle_id=candle_id,
             instrument_id=str(candle_row["instrument_id"]),
@@ -890,6 +1137,9 @@ class PostgresMlRepository:
             future_close_time=None,
             vix_value_ratio=None if regime is None else regime[0],
             vix_observed_at=None if regime is None else regime[1],
+            fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
+            dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
+            institutional_flow_date=None if flow is None else flow.flow_date,
         )
 
     def create_candidate_model(
@@ -1132,6 +1382,152 @@ class PostgresMlRepository:
         if row is None:
             raise RuntimeError("Saving the model prediction did not return a row.")
         return _to_model_prediction(row)
+
+    def save_auxiliary_prediction(
+        self,
+        *,
+        model_version_id: str,
+        instrument_id: str,
+        source_candle_id: str,
+        label_scheme: str,
+        prediction: AnyLabel,
+        confidence: float,
+        feature_contributions: Sequence[Mapping[str, Any]],
+        explanation: Sequence[Mapping[str, Any]],
+        evidence_cutoff_at: datetime,
+        alphabet: LabelAlphabet,
+    ) -> dict[str, Any]:
+        """Upsert one prediction from a model whose target is not a trade direction.
+
+        Deliberately a separate method writing a separate table, not a branch inside
+        :meth:`save_model_prediction`. ``model_predictions`` is read as a directional
+        signal by the strategy engine, the agent, the scanner, and the dashboards; a
+        CONTRACTION/STABLE/EXPANSION value reaching that table would be interpreted
+        as a call on price direction.
+
+        ``alphabet`` is required rather than defaulted: the database intentionally
+        does not constrain ``prediction`` to a value list (the table serves every
+        non-directional scheme), so this is the boundary that enforces the label set,
+        and making it explicit stops a caller from silently getting the directional
+        one.
+        """
+
+        normalized_model_version_id = _require_non_blank(model_version_id, "Model version ID")
+        normalized_instrument_id = _require_non_blank(instrument_id, "Instrument ID")
+        normalized_source_candle_id = _require_non_blank(source_candle_id, "Source candle ID")
+        normalized_scheme = _require_non_blank(label_scheme, "Label scheme")
+        if prediction not in set(alphabet.labels):
+            raise ValueError(
+                f"Prediction must be one of {', '.join(alphabet.labels)} for the {alphabet.name} alphabet."
+            )
+        # A directional label in this table would mean a directional model wrote to
+        # the auxiliary path, which is as much a mistake as the reverse.
+        if prediction in set(LABELS):
+            raise ValueError(
+                "Directional labels belong in model_predictions, not auxiliary_model_predictions."
+            )
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise ValueError("Prediction confidence must be a finite value in [0, 1].")
+        _require_valid_datetime(evidence_cutoff_at, "Evidence cutoff")
+        serialized_contributions = _serialize_json_array(feature_contributions, "Feature contributions")
+        serialized_explanation = _serialize_json_array(explanation, "Explanation")
+
+        with self._connection.transaction():
+            with self._connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO auxiliary_model_predictions (
+                      model_version_id,
+                      instrument_id,
+                      source_candle_id,
+                      label_scheme,
+                      prediction,
+                      confidence,
+                      feature_contributions,
+                      explanation,
+                      evidence_cutoff_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                    ON CONFLICT (model_version_id, source_candle_id)
+                      WHERE source_candle_id IS NOT NULL
+                    DO UPDATE SET
+                      label_scheme = EXCLUDED.label_scheme,
+                      prediction = EXCLUDED.prediction,
+                      confidence = EXCLUDED.confidence,
+                      feature_contributions = EXCLUDED.feature_contributions,
+                      explanation = EXCLUDED.explanation,
+                      evidence_cutoff_at = EXCLUDED.evidence_cutoff_at
+                    RETURNING id, model_version_id, instrument_id, source_candle_id,
+                              label_scheme, prediction, confidence, created_at
+                    """,
+                    (
+                        normalized_model_version_id,
+                        normalized_instrument_id,
+                        normalized_source_candle_id,
+                        normalized_scheme,
+                        prediction,
+                        float(confidence),
+                        serialized_contributions,
+                        serialized_explanation,
+                        evidence_cutoff_at,
+                    ),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("Saving the auxiliary prediction did not return a row.")
+        return {
+            "id": str(row["id"]),
+            "modelVersionId": str(row["model_version_id"]),
+            "instrumentId": str(row["instrument_id"]),
+            "sourceCandleId": None if row["source_candle_id"] is None else str(row["source_candle_id"]),
+            "labelScheme": str(row["label_scheme"]),
+            "prediction": str(row["prediction"]),
+            "confidence": _to_float(row["confidence"], "prediction confidence"),
+            "createdAt": _require_valid_datetime(row["created_at"], "Prediction created-at"),
+        }
+
+    def list_auxiliary_predictions(
+        self,
+        *,
+        instrument_id: str,
+        label_scheme: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Most recent non-directional predictions for one instrument and scheme."""
+
+        normalized_instrument_id = _require_non_blank(instrument_id, "Instrument ID")
+        normalized_scheme = _require_non_blank(label_scheme, "Label scheme")
+        bounded_limit = max(1, min(500, int(limit)))
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT id, model_version_id, instrument_id, source_candle_id,
+                       label_scheme, prediction, confidence, created_at
+                FROM auxiliary_model_predictions
+                WHERE instrument_id = %s AND label_scheme = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (normalized_instrument_id, normalized_scheme, bounded_limit),
+            )
+            rows = list(cursor.fetchall())
+        return [
+            {
+                "id": str(row["id"]),
+                "modelVersionId": str(row["model_version_id"]),
+                "instrumentId": str(row["instrument_id"]),
+                "sourceCandleId": None if row["source_candle_id"] is None else str(row["source_candle_id"]),
+                "labelScheme": str(row["label_scheme"]),
+                "prediction": str(row["prediction"]),
+                "confidence": _to_float(row["confidence"], "prediction confidence"),
+                "createdAt": _require_valid_datetime(row["created_at"], "Prediction created-at"),
+            }
+            for row in rows
+        ]
 
     def promote_candidate(
         self,

@@ -6,9 +6,11 @@ import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { ResearchShell } from "../../research/components/research-shell";
+import { PageHeader } from "../../../components/layout/page-header";
+import { SentimentSummary } from "./sentiment-summary";
+import { NewsCard } from "./news-card";
 
-export type NewsProvider = "MONEYCONTROL" | "ECONOMIC_TIMES" | "LIVEMINT" | "NSE";
+export type NewsProvider = "MONEYCONTROL" | "ECONOMIC_TIMES" | "LIVEMINT" | "NSE" | "TIMES_OF_INDIA" | "BUSINESS_STANDARD" | "NDTV_PROFIT";
 export type SentimentLabel = "BULLISH" | "BEARISH" | "NEUTRAL" | "HIGH_VOLATILITY";
 
 export interface NewsArticle {
@@ -39,8 +41,10 @@ interface NewsResponse {
 
 const PROVIDERS: Array<{ label: string; value: string }> = [
   { label: "All Feeds", value: "" },
-  { label: "Moneycontrol", value: "MONEYCONTROL" },
-  { label: "Economic Times", value: "ECONOMIC_TIMES" },
+  { label: "LiveMint", value: "LIVEMINT" },
+  { label: "Times of India", value: "TIMES_OF_INDIA" },
+  { label: "Business Standard", value: "BUSINESS_STANDARD" },
+  { label: "NDTV Profit", value: "NDTV_PROFIT" },
 ];
 
 const SENTIMENTS: Array<{ label: string; value: string; color: string }> = [
@@ -145,45 +149,18 @@ export function NewsDashboard() {
   })[state], [state]);
 
   return (
-    <ResearchShell
-      activeView="news"
-      connectionLabel={connectionLabel}
+    <>
+      <PageHeader connectionLabel={connectionLabel}
       description="Live financial RSS feed ingestion with quantitative lexicon scoring and autonomous agent emergency circuit breakers."
       eyebrow="REAL-TIME MACRO INTELLIGENCE"
       title="Market News & Sentiment Engine"
-      unavailable={state === "unavailable"}
-    >
+      unavailable={state === "unavailable"} />
+      <div className="mt-10">
       <section className="mt-6">
         {state === "ready" || state === "empty" ? (
           <div className="space-y-8">
             {/* Macro Sentiment Gauge & Circuit Breaker Banner */}
-            <Reveal>
-              <div className={`rounded-2xl border p-5 shadow-2xl backdrop-blur-xl transition-all ${cbStatus.color}`}>
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">⚡</span>
-                    <div>
-                      <h2 className="text-base font-bold tracking-wide uppercase">System Defense Status</h2>
-                      <p className="text-sm font-semibold mt-0.5">{cbStatus.label}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-6 text-right">
-                    <div>
-                      <span className="text-xs uppercase tracking-wider opacity-80 block">12H Rolling Sentiment</span>
-                      <span className={`text-2xl font-black ${summary.averageScore > 0 ? "text-emerald-400" : summary.averageScore < 0 ? "text-rose-400" : "text-slate-300"}`}>
-                        {summary.averageScore > 0 ? `+${summary.averageScore}` : summary.averageScore}
-                      </span>
-                    </div>
-                    <div className="border-l border-white/10 pl-6 hidden sm:block">
-                      <span className="text-xs uppercase tracking-wider opacity-80 block">Article Breakdown</span>
-                      <span className="text-sm font-semibold">
-                        <span className="text-emerald-400">{summary.bullishCount} Bull</span> / <span className="text-rose-400">{summary.bearishCount} Bear</span> ({summary.articleCount} Total)
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </Reveal>
+            <SentimentSummary summary={summary} cbStatus={cbStatus} />
 
             {/* Filter Bar & Action Controls */}
             <Reveal delayMs={50}>
@@ -281,78 +258,9 @@ export function NewsDashboard() {
             {articles.length > 0 ? (
               <Reveal delayMs={100}>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                  {articles.map((art) => {
-                    const isBull = art.sentimentLabel === "BULLISH";
-                    const isBear = art.sentimentLabel === "BEARISH";
-                    const isVol = art.sentimentLabel === "HIGH_VOLATILITY";
-
-                    const badgeStyle = isBull
-                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                      : isBear
-                        ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
-                        : isVol
-                          ? "bg-purple-500/15 text-purple-300 border-purple-500/30"
-                          : "bg-slate-800/60 text-slate-300 border-slate-700";
-
-                    const badgeText = isBull
-                      ? `🟢 BULLISH (${art.sentimentScore > 0 ? "+" : ""}${art.sentimentScore})`
-                      : isBear
-                        ? `🔴 BEARISH (${art.sentimentScore})`
-                        : isVol
-                          ? `⚡ VOLATILE (${art.sentimentScore})`
-                          : `⚪ NEUTRAL (${art.sentimentScore})`;
-
-                    const providerName = art.provider === "MONEYCONTROL" ? "Moneycontrol" : art.provider === "ECONOMIC_TIMES" ? "Economic Times" : art.provider;
-                    const pubDate = new Date(art.publishedAt);
-                    const timeStr = !isNaN(pubDate.getTime())
-                      ? pubDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " · " + pubDate.toLocaleDateString([], { month: "short", day: "numeric" })
-                      : "Recent";
-
-                    return (
-                      <div
-                        key={art.id}
-                        className="group relative flex flex-col justify-between rounded-2xl border border-white/10 bg-slate-950/50 p-5 backdrop-blur-md hover:border-cyan-500/40 hover:bg-slate-900/60 transition-all duration-300 shadow-xl"
-                      >
-                        <div>
-                          {/* Top Header Row */}
-                          <div className="flex items-center justify-between gap-2 mb-3">
-                            <span className="inline-flex items-center rounded-full bg-white/5 px-2.5 py-0.5 text-[11px] font-semibold text-slate-300 border border-white/10">
-                              {providerName}
-                            </span>
-                            <span className="text-[11px] font-medium text-slate-400">{timeStr}</span>
-                          </div>
-
-                          {/* Title */}
-                          <h3 className="text-base font-bold text-slate-100 group-hover:text-cyan-300 transition-colors line-clamp-2 leading-snug">
-                            {art.title}
-                          </h3>
-
-                          {/* Description */}
-                          <p className="mt-3 text-xs md:text-sm text-slate-300/90 line-clamp-5 leading-relaxed font-normal">
-                            {art.description}
-                          </p>
-                        </div>
-
-                        {/* Footer Badges */}
-                        <div className="mt-5 pt-4 border-t border-white/5 flex flex-wrap items-center justify-between gap-2">
-                          <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-semibold ${badgeStyle}`}>
-                            {badgeText}
-                          </span>
-
-                          <div className="flex items-center gap-1">
-                            {art.symbolsMentioned?.map((s) => (
-                              <span
-                                key={s}
-                                className="rounded bg-cyan-950/50 px-1.5 py-0.5 text-[10px] font-bold text-cyan-400 border border-cyan-800/40"
-                              >
-                                {s}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {articles.map((art) => (
+                    <NewsCard key={art.id} art={art} />
+                  ))}
                 </div>
               </Reveal>
             ) : (
@@ -391,6 +299,7 @@ export function NewsDashboard() {
           />
         )}
       </section>
-    </ResearchShell>
+    </div>
+    </>
   );
 }

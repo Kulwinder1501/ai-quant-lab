@@ -580,7 +580,7 @@ export function createApp({ database }: ApplicationDependencies): Express {
 
   app.post("/api/v1/paper-trades/open", async (request, response, _next) => {
     try {
-      const { accountId, tradeIdeaId, fillPrice, quantity, notes } = request.body || {};
+      const { accountId, tradeIdeaId, fillPrice, quantity, notes, orderType } = request.body || {};
       if (!accountId || !tradeIdeaId || typeof fillPrice !== "number" || typeof quantity !== "number") {
         response.status(400).json({ error: "accountId, tradeIdeaId, fillPrice, and quantity are required." });
         return;
@@ -594,6 +594,7 @@ export function createApp({ database }: ApplicationDependencies): Express {
         entryFees: 0,
         entrySlippage: 0,
         notes: notes || "Opened via UI",
+        orderType: orderType === "PENDING" ? "PENDING" : "MARKET",
       });
       response.status(201).json({ data: trade });
     } catch (error: any) {

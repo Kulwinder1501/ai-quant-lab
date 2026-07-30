@@ -1,8 +1,8 @@
 import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
-export type PaperTradeStatus = "OPEN" | "CLOSED" | "CANCELLED";
+export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
 export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED";
-export type PaperTradeEventType = "OPENED" | "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED";
+export type PaperTradeEventType = "PENDING_PLACED" | "OPENED" | "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED";
 
 export interface PaperAccount {
   id: string;
@@ -68,16 +68,23 @@ export interface OpenPaperTradeInput {
   entryFees: number;
   entrySlippage: number;
   notes: string;
+  status?: PaperTradeStatus; // If "PENDING", trade waits to be filled
 }
 
 export interface ClosePaperTradeInput {
   paperTradeId: string;
   exitPrice: number;
-  exitReason: Exclude<PaperTradeExitReason, "CANCELLED">;
+  exitReason: PaperTradeExitReason;
   closedAt: Date;
   exitFees: number;
   exitSlippage: number;
   details: Record<string, unknown>;
+}
+
+export interface FillPendingTradeInput {
+  paperTradeId: string;
+  fillPrice: number;
+  filledAt: Date;
 }
 
 export interface PaperTradeRepository {
@@ -85,8 +92,11 @@ export interface PaperTradeRepository {
   openFromTradeIdea(input: OpenPaperTradeInput): Promise<PaperTrade>;
   findOpenById(id: string): Promise<PaperTrade | null>;
   listOpenByAccount(accountId: string): Promise<PaperTrade[]>;
+  listPendingByAccount(accountId: string): Promise<PaperTrade[]>;
   /** Atomically closes an OPEN trade and records its corresponding exit event. */
   close(input: ClosePaperTradeInput): Promise<PaperTrade>;
+  /** Fills a PENDING trade, moving it to OPEN. */
+  fillPendingTrade(input: FillPendingTradeInput): Promise<PaperTrade>;
   updateStopLoss?(id: string, newStopLoss: number, reason?: string): Promise<void>;
   findAccountPerformanceData(accountId: string): Promise<PaperAccountPerformanceData | null>;
 }

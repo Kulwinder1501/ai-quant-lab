@@ -38,7 +38,7 @@ class LabelEncodedClassifier:
     # duck-typed estimator is the final step of a pipeline.
     _estimator_type = "classifier"
 
-    def __init__(self, estimator: Any, *, labels: Sequence[MarketLabel] = LABELS) -> None:
+    def __init__(self, estimator: Any, *, labels: Sequence[str] = LABELS) -> None:
         self.estimator = estimator
         self.labels = tuple(labels)
         self.classes_: tuple[MarketLabel, ...] = ()

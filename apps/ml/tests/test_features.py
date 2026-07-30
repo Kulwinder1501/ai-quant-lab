@@ -51,6 +51,8 @@ def evidence(
     indicators: tuple[IndicatorEvidence, ...] | None = None,
     patterns: tuple[PatternEvidence, ...] | None = None,
     events: tuple[PriceActionEvidence, ...] | None = None,
+    fii_net_flow_ratio: float | None = None,
+    dii_net_flow_ratio: float | None = None,
 ) -> CandleEvidence:
     open_time = START + timedelta(days=index)
     return CandleEvidence(
@@ -90,6 +92,8 @@ def evidence(
         else (PriceActionEvidence("BREAKOUT", "price-action-v2", "BULLISH", 0.7, 100.0),),
         future_close=future_close,
         future_close_time=open_time + timedelta(days=2, hours=6) if future_close is not None else None,
+        fii_net_flow_ratio=fii_net_flow_ratio,
+        dii_net_flow_ratio=dii_net_flow_ratio,
     )
 
 
@@ -136,6 +140,51 @@ class FeatureConstructionTests(unittest.TestCase):
                 )
         for level_feature in ("candle.open", "candle.high", "candle.low", "candle.close", "candle.volume"):
             self.assertNotIn(level_feature, FEATURE_SCHEMA)
+
+    def test_institutional_flow_evidence_reaches_the_feature_vector(self) -> None:
+        """A declared column must be fed by something.
+
+        These two were added to the schema with no loader on either the training or
+        the inference path, so every vector carried NaN for them and the imputer
+        filled it in silently. The model was fitted on a constant, which is
+        indistinguishable from the column not existing except that it enlarged the
+        versioned contract and forced a retrain.
+        """
+
+        for name in ("market.fii_net_flow_ratio", "market.dii_net_flow_ratio"):
+            self.assertIn(name, FEATURE_SCHEMA)
+
+        observed = features_of(evidence(fii_net_flow_ratio=-2.0, dii_net_flow_ratio=1.5))
+        self.assertAlmostEqual(observed["market.fii_net_flow_ratio"], -2.0, places=10)
+        self.assertAlmostEqual(observed["market.dii_net_flow_ratio"], 1.5, places=10)
+
+    def test_unobserved_institutional_flow_stays_missing_rather_than_zero(self) -> None:
+        """A flat session and an uncollected one are different evidence.
+
+        Imputing 0 would teach the model that a collector outage looks like balanced
+        institutional buying and selling.
+        """
+
+        observed = features_of(evidence())
+        self.assertTrue(math.isnan(observed["market.fii_net_flow_ratio"]))
+        self.assertTrue(math.isnan(observed["market.dii_net_flow_ratio"]))
+
+    def test_no_declared_feature_is_sourced_by_nothing(self) -> None:
+        """Guards the class of bug above for every ``market.*`` column at once.
+
+        A column that stays NaN when its evidence is fully populated has no loader
+        behind it. ``market.gift_nifty_implied_gap_bps`` was exactly that and has
+        been removed until a real offshore feed exists.
+        """
+
+        populated = features_of(evidence(fii_net_flow_ratio=-2.0, dii_net_flow_ratio=1.5))
+        unsourced = [
+            name
+            for name in FEATURE_SCHEMA
+            if name.startswith("market.") and math.isnan(populated[name])
+        ]
+        self.assertEqual(unsourced, [], f"declared but never populated: {unsourced}")
+        self.assertNotIn("market.gift_nifty_implied_gap_bps", FEATURE_SCHEMA)
 
     def test_feature_schema_is_fixed_and_future_label_cannot_change_features(self) -> None:
         source = evidence()

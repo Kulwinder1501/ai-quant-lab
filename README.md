@@ -56,6 +56,10 @@ Phase 21 hardens model integrity. The feature schema moves to `ml-feature-v2`, w
 
 Phase 22 integrates FII/DII Institutional Flows and GIFT Nifty data via a daily automated NSE scraper (`npm run data:collect:institutional`), feeding into the ML features and the `AiAutonomousAgent` logic. It also introduces `npm run ml:prune` to automatically garbage-collect old candidate models, and finalizes the dedicated React UI dashboard tabs (`/scalp-ideas` and `/scalp-trade-history`) to manage high-frequency 1-minute Momentum Scalping strategies independently from EOD strategies. See [the Phase 22 institutional & scalping guide](docs/phase-22-institutional-scalping.md) for data flow and UI isolation details.
 
+Phase 23 expands the Market News architecture by replacing the volatile mock memory-repository with real PostgreSQL persistence. It deprecates stale publishers (MoneyControl, ET) and integrates highly active external RSS feeds (LiveMint, Times of India, Business Standard, NDTV Profit). This ensures authentic publication timestamps and accurate, live sentiment scoring directly from the `market_news` table.
+
+Phase 24 introduces **Pending Paper Trades**. It adds the capability to submit simulated limit/stop-entry orders that wait for the market to trigger them instead of executing instantly at the current price. It relies on both live-tick checking and completed-candle checking to resolve `PENDING` states into `OPEN` positions, and implements End-of-Day cancellations to automatically void untriggered intraday limit orders at midnight.
+
 ## Safety boundary
 
 This project is for analysis, backtesting, and simulated paper trades. It contains no broker authentication, order-routing, or real-order execution capability.

@@ -82,6 +82,24 @@ def persistent_dataset(rows: int = 320, seed: int = 5) -> list[LabeledExample]:
     return examples
 
 
+def no_skill_dataset(rows: int = 320, seed: int = 5) -> list[LabeledExample]:
+    """Labels drawn independently of every feature: the model cannot beat chance.
+
+    This is the shape the real 5-bar direction target turned out to have — every
+    algorithm at or below the three-class baseline. The audit must not describe
+    that as leakage.
+    """
+
+    generator = random.Random(seed)
+    labels = ("BULLISH", "BEARISH", "NEUTRAL")
+    examples: list[LabeledExample] = []
+    for index in range(rows):
+        label = generator.choice(labels)
+        features = with_noise(generator, signal=generator.gauss(0.0, 1.0), momentum=generator.gauss(0.0, 1.0))
+        examples.append(example(index, label, features))
+    return examples
+
+
 @unittest.skipUnless(SKLEARN_AVAILABLE, "scikit-learn is not installed")
 class LeakageAuditTests(unittest.TestCase):
     def audit(self, examples: list[LabeledExample], **overrides: object) -> dict:
@@ -125,6 +143,81 @@ class LeakageAuditTests(unittest.TestCase):
         self.assertEqual(audit["verdict"], "INVESTIGATE")
         self.assertIn("FEATURE_LAG", audit["failedChecks"])
         self.assertLess(lag["metrics"]["degradation"], lag["metrics"]["minimumDegradation"])
+
+    def test_a_no_skill_model_passes_without_leakage_shaped_failures(self) -> None:
+        """A model at or below the random baseline must not be reported as leaking.
+
+        Feature-lag and era-holdout are uninterpretable when there is no skill to
+        trace, and previously both reported FAILED for a no-skill model, burying
+        the real "the target has no edge" conclusion under a false leakage alarm.
+        """
+
+        # Seed pinned to one whose deterministic holdout lands below the baseline;
+        # a small random-label holdout scores either side of 1/3 depending on seed,
+        # and this test is specifically about the below-baseline branch.
+        audit = self.audit(no_skill_dataset(seed=2))
+
+        # Precondition: the fixture really is no-skill.
+        self.assertLessEqual(audit["metrics"]["baseMacroF1"], RANDOM_BASELINE_MACRO_F1)
+
+        names = [check["check"] for check in audit["checks"]]
+        self.assertEqual(names, ["LABEL_SHUFFLE", "NO_SKILL_TO_AUDIT"])
+        self.assertNotIn("FEATURE_LAG", names)
+        self.assertNotIn("ERA_HOLDOUT", names)
+
+        # The short-circuit is a clean PASS, not an INVESTIGATE, and stays conclusive.
+        self.assertEqual(audit["verdict"], "PASS")
+        self.assertEqual(audit["failedChecks"], [])
+        self.assertTrue(audit_is_conclusive(audit))
+
+        # Label-shuffle still runs — it is what actually rules out leakage.
+        shuffle = next(check for check in audit["checks"] if check["check"] == "LABEL_SHUFFLE")
+        self.assertEqual(shuffle["status"], "PASS")
+
+    def test_feature_lag_is_inconclusive_not_failed_for_a_persistent_target(self) -> None:
+        """The check's premise does not hold for a persistence-dominated target.
+
+        ``persistent_dataset`` is exactly that shape: a slow-drifting state, so the
+        previous bar's features predict about as well as the current bar's. For a
+        directional target that pattern is a leakage smell and must FAIL. For a
+        target that is *known* to be persistent -- volatility clusters -- a near-zero
+        degradation is expected, and calling it leakage buried the real finding.
+        """
+
+        examples = persistent_dataset()
+
+        # Default (transient assumption): still a hard failure. Not weakened.
+        strict = self.audit(examples)
+        strict_lag = next(check for check in strict["checks"] if check["check"] == "FEATURE_LAG")
+        self.assertEqual(strict_lag["status"], "FAILED")
+        self.assertEqual(strict["verdict"], "INVESTIGATE")
+
+        # Declared persistent: reported as inconclusive, and it no longer blocks.
+        lenient = self.audit(examples, persistence_dominated=True)
+        lenient_lag = next(check for check in lenient["checks"] if check["check"] == "FEATURE_LAG")
+        self.assertEqual(lenient_lag["status"], "INCONCLUSIVE")
+        self.assertEqual(lenient["verdict"], "PASS")
+        self.assertNotIn("FEATURE_LAG", lenient["failedChecks"])
+        self.assertIn("FEATURE_LAG", lenient["inconclusiveChecks"])
+
+        # It is never upgraded to PASS, and the number is still reported.
+        self.assertNotEqual(lenient_lag["status"], "PASS")
+        self.assertEqual(lenient_lag["metrics"]["degradation"], strict_lag["metrics"]["degradation"])
+        self.assertTrue(lenient_lag["metrics"]["persistenceDominated"])
+        # The summary must not claim every check passed when one could not decide.
+        self.assertNotIn("All", lenient["summary"])
+        self.assertIn("could not discriminate", lenient["summary"])
+
+    def test_a_persistent_flag_cannot_mask_a_real_leak(self) -> None:
+        """LABEL_SHUFFLE still blocks, so the flag is not a general escape hatch."""
+
+        examples = persistent_dataset()
+        # An impossibly low ceiling forces the shuffle check to fail, standing in for
+        # a pipeline that learns from row structure.
+        audit = self.audit(examples, persistence_dominated=True, shuffle_ceiling=0.0)
+
+        self.assertEqual(audit["verdict"], "INVESTIGATE")
+        self.assertIn("LABEL_SHUFFLE", audit["failedChecks"])
 
     def test_the_same_random_state_reproduces_the_same_verdict(self) -> None:
         examples = honest_dataset()

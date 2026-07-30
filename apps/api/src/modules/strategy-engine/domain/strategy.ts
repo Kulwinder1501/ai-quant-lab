@@ -77,6 +77,13 @@ export interface StrategyMarketContext {
 
 export interface StrategyMarketContextRepository {
   findLatestCompleted(input: { instrumentId: string; timeframe: string }): Promise<StrategyMarketContext | null>;
+  /**
+   * The most recent `limit` completed contexts in chronological order (oldest
+   * first). Used by the historical-scan path of idea generation, which evaluates
+   * a window of past bars rather than only the latest one, so bearish setups that
+   * have already closed still surface as SHORT proposals.
+   */
+  listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]>;
 }
 
 export interface TradeIdeaEvidence {

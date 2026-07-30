@@ -6,7 +6,18 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
-import { parseHistoricalTimeframe, requireOption } from "./arguments.js";
+import { getOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
+
+/** Parse an optional positive-integer `--lookback`, or null when it is absent. */
+function parseLookback(argumentsList: string[]): number | null {
+  const raw = getOption(argumentsList, "lookback");
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`--lookback must be a positive integer, received "${raw}".`);
+  }
+  return value;
+}
 
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
@@ -15,15 +26,39 @@ async function main(): Promise<void> {
   try {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
+    const lookback = parseLookback(argumentsList);
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
       throw new Error(`NSE instrument "${symbol}" is not registered.`);
     }
-    const result = await new GenerateTradeIdeas(
+    const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
       new PostgresStrategyMarketContextRepository(database),
       new PostgresTradeIdeaRepository(database),
-    ).execute({ instrumentId: instrument.id, timeframe });
+    );
+
+    // Opt-in scan: --lookback N evaluates the last N completed candles and
+    // persists every proposal (long and short). Without it, behaviour is the
+    // unchanged point-in-time evaluation of the single latest candle.
+    if (lookback !== null) {
+      const result = await generator.executeScan({ instrumentId: instrument.id, timeframe, lookback });
+      for (const res of result) {
+        if (res.skippedReason === "STRATEGY_FAILED") {
+          console.error(`Failed (${res.strategyKey}): ${res.failureMessage ?? "unknown error"}`);
+        } else if (res.skippedReason) {
+          console.log(`Skipped (${res.strategyKey}): ${res.skippedReason} (scanned ${res.contextsScanned} candles)`);
+        } else {
+          console.log(`Success (${res.strategyKey}): ${res.candidatesGenerated} idea(s) across ${res.contextsScanned} candles — ${res.longIdeas} LONG, ${res.shortIdeas} SHORT.`);
+        }
+      }
+      console.info(JSON.stringify({ level: "info", message: "Trade-idea scan complete", instrument: symbol, timeframe, lookback, result }));
+      if (result.some((res) => res.skippedReason === "STRATEGY_FAILED")) {
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    const result = await generator.execute({ instrumentId: instrument.id, timeframe });
     for (const res of result) {
       if (res.skippedReason === "STRATEGY_FAILED") {
         console.error(`Failed (${res.strategyKey}): ${res.failureMessage ?? "unknown error"}`);

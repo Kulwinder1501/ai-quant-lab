@@ -92,7 +92,7 @@ export function PredictionInspector({ prediction }: { prediction: PredictionDeta
             <p className="mt-1 text-xs text-slate-500">A model probability, not a market forecast guarantee.</p>
           </div>
         </div>
-        <dl className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-5 grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-4">
           <Metric label="Model version" value={`${prediction.model.key ?? "Unrecorded"}${prediction.model.version === null ? "" : ` v${prediction.model.version}`}`} />
           <Metric label="Validation macro F1" value={formatPercentage(macroF1)} />
           <Metric label="Evidence cutoff" value={formatTimestamp(prediction.evidenceCutoffAt)} />

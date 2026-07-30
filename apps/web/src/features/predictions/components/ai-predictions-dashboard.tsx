@@ -6,7 +6,7 @@ import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { ResearchShell } from "../../research/components/research-shell";
+import { PageHeader } from "../../../components/layout/page-header";
 import { parsePredictionDetailEnvelope, parsePredictionListEnvelope } from "../api";
 import type { PredictionDetail, PredictionSummary } from "../domain";
 import { PredictionInspector } from "./prediction-inspector";
@@ -14,18 +14,7 @@ import { PredictionList } from "./prediction-list";
 
 const maximumRecords = 6;
 
-function DetailPlaceholder({ loading, unavailable = false }: { loading: boolean; unavailable?: boolean }) {
-  return (
-    <GlassPanel className="flex min-h-80 flex-col justify-center border-dashed border-slate-600/80 bg-slate-950/40 p-7 text-center">
-      <p className="text-sm font-medium text-slate-100">{loading ? "Loading the recorded explanation..." : unavailable ? "Prediction explanation is unavailable" : "Select a recorded prediction"}</p>
-      <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-slate-400">
-        {unavailable
-          ? "The selected record could not be read, so the dashboard does not substitute live data or derive a new explanation."
-          : "The explanation inspector only reads the stored model evidence and does not trigger a strategy, paper-trade, or order workflow."}
-      </p>
-    </GlassPanel>
-  );
-}
+import { DetailPlaceholder } from "./detail-placeholder";
 
 export function AiPredictionsDashboard() {
   const [state, setState] = useState<RequestState>("loading");
@@ -91,14 +80,13 @@ export function AiPredictionsDashboard() {
   })[state], [state]);
 
   return (
-    <ResearchShell
-      activeView="predictions"
-      connectionLabel={connectionLabel}
+    <>
+      <PageHeader connectionLabel={connectionLabel}
       description="Inspect explainable model observations, their evidence cutoff, and validation context. The dashboard is deliberately read-only."
       eyebrow="Local research platform - Phase 12"
       title="AI Predictions"
-      unavailable={state === "unavailable"}
-    >
+      unavailable={state === "unavailable"} />
+      <div className="mt-10">
       <Reveal delayMs={130}>
         <ReadOnlyBoundary
           badge="EXECUTION DISABLED"
@@ -135,6 +123,7 @@ export function AiPredictionsDashboard() {
           />
         )}
       </section>
-    </ResearchShell>
+    </div>
+    </>
   );
 }

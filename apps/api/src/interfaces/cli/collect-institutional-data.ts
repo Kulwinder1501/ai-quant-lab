@@ -5,26 +5,36 @@ import { PostgresInstitutionalFlowRepository } from "../../infrastructure/databa
 import { PostgresOffshoreDerivativeRepository } from "../../infrastructure/database/repositories/postgres-offshore-derivative-repository.js";
 import { CollectInstitutionalDataService } from "../../modules/market-data/application/collect-institutional-data.js";
 
-async function main() {
+async function main(): Promise<void> {
   const database = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
   try {
-    const nseApiClient = new NseApiClient();
-    const institutionalFlowRepo = new PostgresInstitutionalFlowRepository(database);
-    const offshoreDerivativeRepo = new PostgresOffshoreDerivativeRepository(database);
-
     const service = new CollectInstitutionalDataService(
-      nseApiClient,
-      institutionalFlowRepo,
-      offshoreDerivativeRepo
+      new NseApiClient(),
+      new PostgresInstitutionalFlowRepository(database),
+      new PostgresOffshoreDerivativeRepository(database),
     );
 
     console.info("Starting institutional data collection...");
-    await service.execute();
-    console.info("Collection complete.");
+    const result = await service.execute();
 
+    for (const warning of result.warnings) {
+      console.warn(`⚠️  ${warning}`);
+    }
+    console.info(
+      `Stored FII/DII for session ${result.flowSessionDate}. ` +
+        `GIFT Nifty: ${result.offshoreStored ? "stored" : "unavailable"}.`,
+    );
+
+    // A stale print is not a crash, but it does mean the expected session is
+    // still missing. A distinct non-zero code lets a scheduler retry rather than
+    // treating a publication delay as a completed collection.
+    if (result.flowIsStale) {
+      console.warn("Expected session not yet available; exiting non-zero so the caller can retry.");
+      process.exitCode = 2;
+    }
   } catch (error) {
-    console.error("Critical error during institutional data collection:", error);
+    console.error("Institutional data collection failed:", error);
     process.exitCode = 1;
   } finally {
     await database.end();

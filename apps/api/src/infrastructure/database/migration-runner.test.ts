@@ -19,12 +19,29 @@ function fakePool(existingMigrationIds: string[] = []): { pool: Pool; queries: s
 }
 
 describe("database migrations", () => {
-  it("keeps migration IDs ordered and the initial schema feature-complete", () => {
-    expect(migrations.map((migration) => migration.id)).toEqual([
-      "001-initial-schema",
-      "002-trade-idea-proposal-identity",
-      "003-model-prediction-identity",
-    ]);
+  // Asserted structurally rather than as a literal list of IDs. The literal list
+  // stopped at 003 while the project grew to 010, so it failed on every phase
+  // that added a migration and stopped being read as a real signal. What
+  // actually matters is that the sequence numbers are unique, ascending, and
+  // gapless, because the runner applies them in array order and records them by
+  // ID — a duplicate or out-of-order prefix silently applies the wrong schema.
+  it("keeps migration IDs uniquely numbered, ascending, and gapless", () => {
+    const ids = migrations.map((migration) => migration.id);
+    expect(new Set(ids).size).toBe(ids.length);
+
+    const sequenceNumbers = ids.map((id) => {
+      const match = /^(\d{3})-[a-z0-9-]+$/.exec(id);
+      expect(match, `migration ID "${id}" must look like "007-some-name"`).not.toBeNull();
+      return Number(match![1]);
+    });
+    expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index + 1));
+
+    for (const migration of migrations) {
+      expect(migration.sql.trim().length, `migration ${migration.id} has empty SQL`).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps the initial schema feature-complete", () => {
     expect(migrations[0].sql).toContain("CREATE TABLE candles");
     expect(migrations[0].sql).toContain("CREATE TABLE paper_trades");
     expect(migrations[0].sql).toContain("CREATE TABLE model_versions");

@@ -22,6 +22,12 @@ from ai_quant_lab_ml.artifacts import ArtifactError, load_model_artifact, write_
 from ai_quant_lab_ml.contracts import (
     ALGORITHM_CHOICES,
     FEATURE_SCHEMA_VERSION,
+    DIRECTIONAL_ALPHABET,
+    LABEL_SCHEME_FIXED_HORIZON,
+    LABEL_SCHEME_TRIPLE_BARRIER,
+    LABEL_SCHEME_VOLATILITY_EXPANSION,
+    LABEL_SCHEMES,
+    LabelAlphabet,
     DatasetRequest,
     EvaluationMetrics,
     LabeledExample,
@@ -29,9 +35,16 @@ from ai_quant_lab_ml.contracts import (
     default_neutral_threshold_bps,
     schema_version_for,
 )
-from ai_quant_lab_ml.features import build_labeled_examples, feature_definition, feature_schema
+from ai_quant_lab_ml.features import (
+    build_labeled_examples,
+    build_triple_barrier_examples,
+    build_volatility_expansion_examples,
+    feature_definition,
+    feature_schema,
+)
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
 from ai_quant_lab_ml.reference_data import build_reference_metadata
+from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 from ai_quant_lab_ml.training import (
     BaselineTrainingResult,
     evaluate_predictions,
@@ -173,6 +186,28 @@ def build_parser() -> argparse.ArgumentParser:
             "leaves a 1m target 99% NEUTRAL."
         ),
     )
+    parser.add_argument(
+        "--label-scheme",
+        choices=LABEL_SCHEMES,
+        default=LABEL_SCHEME_FIXED_HORIZON,
+        help=(
+            "Target definition. fixed-horizon-v1: sign of the close-to-close return at "
+            "--horizon-bars against the neutral band. triple-barrier-v1: which of the "
+            "ATR-scaled profit/stop barriers the forward path hits first, with "
+            "--horizon-bars as the time barrier (default: fixed-horizon-v1)."
+        ),
+    )
+    parser.add_argument("--barrier-upper-multiple", type=positive_float, default=1.0, help="triple-barrier: profit barrier in ATR units (default: 1.0).")
+    parser.add_argument("--barrier-lower-multiple", type=positive_float, default=1.0, help="triple-barrier: stop barrier in ATR units (default: 1.0).")
+    parser.add_argument(
+        "--expansion-band",
+        type=positive_float,
+        default=0.25,
+        help=(
+            "volatility-expansion: band around an unchanged range. EXPANSION at a ratio "
+            ">= 1 + band, CONTRACTION at <= 1 / (1 + band) (default: 0.25)."
+        ),
+    )
     parser.add_argument("--validation-fraction", type=strict_unit_interval, default=0.2, help="Final chronological validation fraction, exclusive of purge (default: 0.2).")
     parser.add_argument(
         "--algorithm",
@@ -204,7 +239,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-child-samples", type=positive_int, help="lightgbm: minimum observations per leaf (default: 20).")
     parser.add_argument("--promote", action="store_true", help="Promote only if the explicit unseen-data gate passes.")
     parser.add_argument("--minimum-improvement", type=non_negative_float, default=0.0, help="Required candidate macro-F1 advantage over production (default: 0).")
-    parser.add_argument("--minimum-initial-macro-f1", type=unit_interval, default=0.38, help="Required macro-F1 for an initial production model (~0.33 is the 3-class random baseline) (default: 0.38).")
+    parser.add_argument(
+        "--minimum-initial-macro-f1",
+        type=unit_interval,
+        default=None,
+        help=(
+            "Required macro-F1 for an initial production model. Defaults per label scheme "
+            "(direction: 0.38, volatility-expansion: 0.40); ~0.33 is the 3-class random baseline."
+        ),
+    )
     parser.add_argument("--maximum-plausible-macro-f1", type=unit_interval, default=0.60, help="Candidate scoring above this must not auto-promote without override (default: 0.60).")
     parser.add_argument("--override-suspicious", action="store_true", help="Force promotion despite suspiciously high score or negative gap.")
     parser.add_argument(
@@ -303,17 +346,41 @@ def default_model_key(
     def component(value: str) -> str:
         return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-") or "value"
 
-    threshold = format(request.neutral_threshold_bps, ".12g")
-    return "--".join(
-        (
-            f"market-direction-{component(algorithm_choice)}",
-            component(request.instrument_symbol.upper()),
-            component(request.timeframe),
-            f"h{request.horizon_bars}",
-            f"neutral-{component(threshold)}bps",
-            schema_version,
-        )
-    )
+    is_volatility = request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION
+    # The prefix names the target family, so a volatility model must not be called
+    # "market-direction": the key is the model's identity and appears in the
+    # artifact path, the promotion lineage, and every log line.
+    family = "volatility-expansion" if is_volatility else "market-direction"
+    parts = [
+        f"{family}-{component(algorithm_choice)}",
+        component(request.instrument_symbol.upper()),
+        component(request.timeframe),
+        f"h{request.horizon_bars}",
+    ]
+    # The neutral band defines the *directional* label boundary and has no meaning
+    # for a range-ratio target, so it is omitted rather than recorded misleadingly.
+    if not is_volatility:
+        parts.append(f"neutral-{component(format(request.neutral_threshold_bps, '.12g'))}bps")
+    parts.append(schema_version)
+    # A different labelling scheme is a different question, so it must not share a
+    # promotion lineage: a triple-barrier candidate scored against a fixed-horizon
+    # incumbent is a meaningless comparison. The component is appended only for
+    # non-default schemes so every existing fixed-horizon key stays byte-identical
+    # and its promotion history is preserved.
+    if request.label_scheme != LABEL_SCHEME_FIXED_HORIZON:
+        parts.append(component(request.label_scheme))
+        # Only the parameters that actually shape *this* scheme's target belong in
+        # the key. Stamping barrier multiples onto a volatility model would imply a
+        # geometry it does not have, and would make two otherwise-identical vol
+        # models look different if an unused barrier flag changed.
+        if request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION:
+            parts.append(f"band{format(request.expansion_band, '.12g')}")
+        else:
+            parts.append(
+                f"bu{format(request.barrier_upper_multiple, '.12g')}"
+                f"-bl{format(request.barrier_lower_multiple, '.12g')}"
+            )
+    return "--".join(parts)
 
 def selected_hyperparameters(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, Any]:
     """Collect only the explicitly supplied flags that the chosen algorithm accepts."""
@@ -361,6 +428,9 @@ def validate_candidate_artifact(
     if not isinstance(protocol, Mapping) or (
         protocol.get("horizonBars") != request.horizon_bars
         or protocol.get("neutralThresholdBps") != request.neutral_threshold_bps
+        # Absent means an artifact written before schemes existed, which was
+        # necessarily fixed-horizon.
+        or protocol.get("labelScheme", LABEL_SCHEME_FIXED_HORIZON) != request.label_scheme
         or protocol.get("indicatorAlgorithmVersion") != request.indicator_algorithm_version
         or protocol.get("patternAlgorithmVersion") != request.pattern_algorithm_version
         or protocol.get("priceActionAlgorithmVersion") != request.price_action_algorithm_version
@@ -382,6 +452,12 @@ def validation_protocol(
         "purgeBars": purge_count,
         "horizonBars": request.horizon_bars,
         "neutralThresholdBps": request.neutral_threshold_bps,
+        # Part of the label definition, so it is recorded and cross-checked like
+        # every other label parameter. For the fixed-horizon scheme the barrier
+        # multiples are unused, but recording them keeps the block one shape.
+        "labelScheme": request.label_scheme,
+        "barrierUpperMultiple": request.barrier_upper_multiple,
+        "barrierLowerMultiple": request.barrier_lower_multiple,
         "indicatorAlgorithmVersion": request.indicator_algorithm_version,
         "patternAlgorithmVersion": request.pattern_algorithm_version,
         "priceActionAlgorithmVersion": request.price_action_algorithm_version,
@@ -409,6 +485,7 @@ def evaluate_incumbent(
     expected_schema: Sequence[str],
     schema_version: str,
     request: DatasetRequest,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> tuple[EvaluationMetrics | None, str | None]:
     """Evaluate a trusted, checksum-matched production artifact on this exact holdout."""
 
@@ -438,6 +515,11 @@ def evaluate_incumbent(
         if (
             protocol.get("horizonBars") != request.horizon_bars
             or protocol.get("neutralThresholdBps") != request.neutral_threshold_bps
+            # An incumbent labelled under a different scheme is answering a
+            # different question; its score is not comparable to the candidate's,
+            # so it is refused rather than silently scored. Absent means an
+            # artifact predating schemes, which was fixed-horizon.
+            or protocol.get("labelScheme", LABEL_SCHEME_FIXED_HORIZON) != request.label_scheme
             or protocol.get("indicatorAlgorithmVersion") != request.indicator_algorithm_version
             or protocol.get("patternAlgorithmVersion") != request.pattern_algorithm_version
             or protocol.get("priceActionAlgorithmVersion") != request.price_action_algorithm_version
@@ -449,8 +531,13 @@ def evaluate_incumbent(
         incumbent_training_end = parse_timestamp(training_window["end"])
         if incumbent_training_end >= validation[0].observed_at:
             return None, "The production artifact may already have trained on the candidate validation period."
-        predicted = predict_labels(loaded.model, validation, schema=expected_schema)
-        return evaluate_predictions([example.label for example in validation], predicted), None
+        predicted = predict_labels(loaded.model, validation, schema=expected_schema, alphabet=alphabet)
+        return (
+            evaluate_predictions(
+                [example.label for example in validation], predicted, alphabet=alphabet
+            ),
+            None,
+        )
     except (ArtifactError, OSError, ValueError, RuntimeError) as error:
         return None, f"The production artifact could not be safely evaluated: {error}"
 
@@ -623,6 +710,10 @@ def main() -> int:
             if args.neutral_threshold_bps is not None
             else default_neutral_threshold_bps(args.timeframe)
         ),
+        label_scheme=args.label_scheme,
+        barrier_upper_multiple=args.barrier_upper_multiple,
+        barrier_lower_multiple=args.barrier_lower_multiple,
+        expansion_band=args.expansion_band,
     )
     if request.data_window_end <= request.data_window_start:
         parser.error("--to must be after --from.")
@@ -631,6 +722,21 @@ def main() -> int:
     if args.random_state < 0:
         parser.error("--random-state must be non-negative.")
     hyperparameters = selected_hyperparameters(args, parser)
+    # The alphabet follows the scheme. A volatility model predicts
+    # CONTRACTION/STABLE/EXPANSION, which must never be scored, explained, or
+    # persisted as though it were a directional call.
+    is_volatility = request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION
+    alphabet: LabelAlphabet = VOLATILITY_ALPHABET if is_volatility else DIRECTIONAL_ALPHABET
+    # The 0.38 directional floor was calibrated against a ~0.33 random baseline
+    # and a majority-class macro-F1 near 0.19. The volatility target's trivial
+    # baseline is far lower (~0.15-0.22 measured), so 0.38 would be a much
+    # weaker bar there than it looks; 0.40 keeps the floor genuinely selective
+    # for a target whose models reach 0.42-0.46.
+    minimum_initial_macro_f1 = (
+        args.minimum_initial_macro_f1
+        if args.minimum_initial_macro_f1 is not None
+        else (0.40 if is_volatility else 0.38)
+    )
     schema_version = schema_version_for(args.timeframe)
     model_key = args.model_key or default_model_key(request, args.algorithm, schema_version)
 
@@ -646,7 +752,12 @@ def main() -> int:
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = PostgresMlRepository(connection)
         records = repository.load_candle_evidence(request)
-        examples = build_labeled_examples(records, request)
+        if request.label_scheme == LABEL_SCHEME_TRIPLE_BARRIER:
+            examples = build_triple_barrier_examples(records, request)
+        elif is_volatility:
+            examples = build_volatility_expansion_examples(records, request)
+        else:
+            examples = build_labeled_examples(records, request)
         splits = walk_forward_splits(
             examples,
             horizon_bars=request.horizon_bars,
@@ -668,6 +779,7 @@ def main() -> int:
                 schema=feature_schema(schema_version),
                 random_state=args.random_state,
                 hyperparameters=hyperparameters,
+                alphabet=alphabet,
             )
             fold_results.append(fold_result)
             print(
@@ -714,7 +826,9 @@ def main() -> int:
             "validationProtocol": protocol,
             # Phase 11 uses only this training partition—never validation rows—
             # to explain label agreement among nearby historical setups.
-            "trainingReferenceSet": build_reference_metadata(final_split.train, schema=result.feature_schema),
+            "trainingReferenceSet": build_reference_metadata(
+                final_split.train, schema=result.feature_schema, alphabet=alphabet
+            ),
         }
         destination = artifact_path(args.artifact_dir, model_key, trained_at)
         written_artifact = write_model_artifact(destination, model=result.model, metadata=artifact_metadata)
@@ -738,6 +852,7 @@ def main() -> int:
                 expected_schema=result.feature_schema,
                 schema_version=schema_version,
                 request=request,
+                alphabet=alphabet,
             )
 
         qualifies_for_promotion, assessment = promotion_assessment(
@@ -746,7 +861,7 @@ def main() -> int:
             incumbent_metrics=incumbent_metrics,
             incumbent_error=incumbent_error,
             minimum_improvement=args.minimum_improvement,
-            minimum_initial_macro_f1=args.minimum_initial_macro_f1,
+            minimum_initial_macro_f1=minimum_initial_macro_f1,
             maximum_plausible_macro_f1=args.maximum_plausible_macro_f1,
             override_suspicious=args.override_suspicious,
             minimum_validation_rows=args.minimum_validation_rows,
@@ -771,6 +886,12 @@ def main() -> int:
                 hyperparameters=hyperparameters,
                 random_state=args.random_state,
                 validation_fraction=args.validation_fraction,
+                alphabet=alphabet,
+                # Volatility clusters, so a stale feature vector predicts the next
+                # window's range about as well as the current one. The feature-lag
+                # check cannot discriminate under that persistence, and must report
+                # inconclusive rather than a false leakage failure.
+                persistence_dominated=is_volatility,
             )
             print(f"Leakage audit verdict: {audit_result['verdict']}", file=sys.stderr)
             qualifies_for_promotion = apply_audit_verdict(

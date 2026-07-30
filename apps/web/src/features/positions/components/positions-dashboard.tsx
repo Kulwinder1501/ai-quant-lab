@@ -1,12 +1,18 @@
 "use client";
 
+"use client";
+
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { apiV1Url, getResearchJson, postResearchJson } from "../../research/api";
 import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
-import { ResearchShell } from "../../research/components/research-shell";
+import { PageHeader } from "../../../components/layout/page-header";
+
 import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
+import { LivePortfolioMetrics } from "./live-portfolio-metrics";
+import { ActivePositionsTable, resolveLiveQuote } from "./active-positions-table";
+import { CloseTradeModal } from "./close-trade-modal";
 
 interface LivePriceMap {
   [symbol: string]: {
@@ -16,16 +22,6 @@ interface LivePriceMap {
     direction?: "UP" | "DOWN" | "NONE";
   };
 }
-
-// Robust quote resolver that matches index quotes regardless of formatting (spaces, NSE: prefix, case, etc.)
-const resolveLiveQuote = (tradeSymbol?: string, quotes?: LivePriceMap) => {
-  if (!quotes) return undefined;
-  const s = (tradeSymbol || "").toUpperCase().replace(/\s+/g, "");
-  if (s.includes("BANK")) {
-    return quotes["BANKNIFTY"] || quotes["NSE:BANKNIFTY"] || quotes["NIFTYBANK"];
-  }
-  return quotes["NIFTY50"] || quotes["NSE:NIFTY50"] || quotes["NIFTY"];
-};
 
 export function PositionsDashboard() {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
@@ -261,13 +257,12 @@ export function PositionsDashboard() {
     }
   };
 return (
-    <ResearchShell
-      activeView="positions"
-      eyebrow="Autonomous AI Trading Lab"
+    <>
+      <PageHeader eyebrow="Autonomous AI Trading Lab"
       title="Live Positions & Real-Time P&L Monitor"
       description="Track open quantitative positions executed by the autonomous AI strategy engine. Real-time second-by-second Server-Sent Events (SSE) live valuation stream."
-      connectionLabel={isStreaming ? `⚡ Live SSE Stream Active @ ${lastUpdated}` : lastUpdated ? `Live Ticks Updated @ ${lastUpdated}` : "Connecting Live SSE Feed..."}
-    >
+      connectionLabel={isStreaming ? `⚡ Live SSE Stream Active @ ${lastUpdated}` : lastUpdated ? `Live Ticks Updated @ ${lastUpdated}` : "Connecting Live SSE Feed..."} />
+      <div className="mt-10">
       <div className="space-y-6">
         {/* Account Selector & Control Bar */}
         <Reveal>
@@ -308,47 +303,7 @@ return (
 
         {/* Real-Time Live Portfolio Overview Cards */}
         <Reveal delayMs={100}>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <GlassPanel className="p-5 border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-cyan-950/20">
-              <span className="text-xs font-extrabold text-cyan-400 uppercase tracking-wider">Live Portfolio Equity</span>
-              <div className="mt-2 text-2xl font-black text-white">
-                ₹{formatNumber(livePortfolioStats.liveEquity, 2)}
-              </div>
-              <p className="mt-1 text-xs text-slate-400">
-                Total Return: <span className={livePortfolioStats.totalReturnPercent >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                  {formatPercentage(livePortfolioStats.totalReturnPercent / 100)}
-                </span>
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className={`p-5 border-white/10 transition-colors duration-500 ${livePortfolioStats.totalUnrealizedPnl >= 0 ? "bg-emerald-950/20 border-emerald-500/30" : "bg-rose-950/20 border-rose-500/30"}`}>
-              <span className="text-xs font-extrabold text-slate-400 uppercase tracking-wider">Live Unrealized P&amp;L</span>
-              <div className={`mt-2 text-2xl font-black transition-colors duration-300 ${livePortfolioStats.totalUnrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {livePortfolioStats.totalUnrealizedPnl >= 0 ? "+" : ""}₹{formatNumber(livePortfolioStats.totalUnrealizedPnl, 2)}
-              </div>
-              <p className="mt-1 text-xs text-slate-400">
-                Active Open Trades: <strong className="text-white">{livePortfolioStats.openCount}</strong>
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className="p-5 border-white/10 bg-slate-950/60">
-              <span className="text-xs font-extrabold text-slate-400 uppercase tracking-wider">Position Win / Loss Ratio</span>
-              <div className="mt-2 flex items-baseline gap-2 text-2xl font-black text-white">
-                <span className="text-emerald-400">{livePortfolioStats.winningPositions} W</span>
-                <span className="text-slate-600">/</span>
-                <span className="text-rose-400">{livePortfolioStats.losingPositions} L</span>
-              </div>
-              <p className="mt-1 text-xs text-slate-400">Current live ticking performance</p>
-            </GlassPanel>
-
-            <GlassPanel className="p-5 border-white/10 bg-slate-950/60">
-              <span className="text-xs font-extrabold text-slate-400 uppercase tracking-wider">Invested Capital Margin</span>
-              <div className="mt-2 text-2xl font-black text-white">
-                ₹{formatNumber(livePortfolioStats.totalInvestedMargin, 0)}
-              </div>
-              <p className="mt-1 text-xs text-slate-400">Total simulated capital deployed</p>
-            </GlassPanel>
-          </div>
+          <LivePortfolioMetrics livePortfolioStats={livePortfolioStats} />
         </Reveal>
 
         {/* Active AI Positions Table */}
@@ -380,208 +335,29 @@ return (
               </button>
             </div>
 
-            {loading && !summary ? (
-              <div className="py-12 text-center text-sm font-semibold text-slate-400">
-                <span className="inline-block h-6 w-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-3" />
-                <p>Loading open positions and calculating live valuations...</p>
-              </div>
-            ) : (summary?.openTrades.length || 0) === 0 ? (
-              <div className="py-16 text-center rounded-2xl border border-dashed border-white/10 bg-slate-950/40 p-8">
-                <span className="text-3xl">📭</span>
-                <p className="mt-3 text-base font-bold text-white">No Active Open Positions Right Now</p>
-                <p className="mt-1 text-xs text-slate-400 max-w-md mx-auto">
-                  The AI Autonomous Agent is scanning NIFTY 50 and BANK NIFTY for high-confidence multi-modal setups (≥80% confidence). When a trade is triggered, it will appear here instantly.
-                </p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-white/10 text-xs font-bold uppercase tracking-wider text-slate-400">
-                      <th className="py-3 px-4">Instrument</th>
-                      <th className="py-3 px-4">Side</th>
-                      <th className="py-3 px-4">Qty</th>
-                      <th className="py-3 px-4">Entry Price</th>
-                      <th className="py-3 px-4">Live Price</th>
-                      <th className="py-3 px-4">Live P&amp;L (₹)</th>
-                      <th className="py-3 px-4">Return %</th>
-                      <th className="py-3 px-4">AI Strategy / Notes</th>
-                      <th className="py-3 px-4">Opened At</th>
-                      <th className="py-3 px-4 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5 text-sm font-medium">
-                    {summary?.openTrades.map((trade) => {
-                      const sym = trade.instrumentSymbol || "NIFTY50";
-                      const quote = resolveLiveQuote(sym, liveQuotes);
-                      const currentPrice = quote?.livePrice || trade.fillPrice;
-                      const direction = quote?.direction || "NONE";
-                      const isBuy = trade.side === "BUY";
-                      const priceDiff = isBuy ? currentPrice - trade.fillPrice : trade.fillPrice - currentPrice;
-                      const livePnl = priceDiff * trade.quantity;
-                      const liveRet = ((livePnl / (trade.fillPrice * trade.quantity)) * 100);
-                      const isWinning = livePnl >= 0;
-
-                      return (
-                        <tr key={trade.id} className="hover:bg-white/[0.03] transition">
-                          <td className="py-4 px-4 font-extrabold text-white">
-                            <div className="flex items-center gap-2">
-                              <span className="h-2 w-2 rounded-full bg-cyan-400"></span>
-                              <span>{sym}</span>
-                            </div>
-                            <span className="block text-[11px] font-mono font-normal text-slate-400 mt-0.5">
-                              ID: {trade.id.substring(0, 8)}...
-                            </span>
-                          </td>
-                          <td className="py-4 px-4">
-                            <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-black ${
-                              isBuy ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                            }`}>
-                              {trade.side}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4 font-bold text-slate-200">{formatNumber(trade.quantity, 0)}</td>
-                          <td className="py-4 px-4 font-semibold text-slate-300">₹{formatNumber(trade.fillPrice, 2)}</td>
-                          <td className="py-4 px-4 font-black text-white">
-                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors duration-300 ${
-                              direction === "UP" ? "bg-emerald-500/25 text-emerald-200 border border-emerald-500/40 shadow-sm shadow-emerald-500/10" :
-                              direction === "DOWN" ? "bg-rose-500/25 text-rose-200 border border-rose-500/40 shadow-sm shadow-rose-500/10" :
-                              "bg-slate-900 text-white border border-white/10"
-                            }`}>
-                              ₹{formatNumber(currentPrice, 2)}
-                              <span className={`text-[10px] ${direction === "UP" ? "text-emerald-400 animate-bounce" : direction === "DOWN" ? "text-rose-400 animate-bounce" : "text-cyan-400 animate-pulse"}`}>
-                                {direction === "UP" ? "▲" : direction === "DOWN" ? "▼" : "●"}
-                              </span>
-                            </span>
-                          </td>
-                          <td className="py-4 px-4">
-                            <span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-black transition-colors duration-300 ${
-                              isWinning
-                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-500/10"
-                                : "bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-sm shadow-rose-500/10"
-                            }`}>
-                              {isWinning ? "+" : ""}₹{formatNumber(livePnl, 2)}
-                            </span>
-                          </td>
-                          <td className="py-4 px-4 font-extrabold">
-                            <span className={`transition-colors duration-300 ${isWinning ? "text-emerald-400" : "text-rose-400"}`}>
-                              {isWinning ? "+" : ""}{liveRet.toFixed(2)}%
-                            </span>
-                          </td>
-                          <td className="py-4 px-4 max-w-[200px] truncate text-slate-400 text-xs">
-                            <div className="flex flex-col gap-1">
-                              <span className={`inline-flex self-start px-2 py-0.5 rounded text-[10px] font-bold ${
-                                trade.timeframe === "1m" 
-                                  ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" 
-                                  : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
-                              }`}>
-                                {trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout"}
-                              </span>
-                              <span title={trade.notes || "Opened via AI Agent"}>
-                                {trade.notes || "Opened via AI Agent"}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="py-4 px-4 text-xs font-mono text-slate-400">{formatTimestamp(trade.openedAt)}</td>
-                          <td className="py-4 px-4 text-right">
-                            <button
-                              type="button"
-                              onClick={() => handleOpenCloseModal(trade)}
-                              className="px-3.5 py-1.5 rounded-xl text-xs font-extrabold bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 border border-rose-500/40 transition shadow-sm shadow-rose-500/10"
-                            >
-                              ⚡ Close Trade
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <ActivePositionsTable 
+              summary={summary}
+              loading={loading}
+              liveQuotes={liveQuotes}
+              handleOpenCloseModal={handleOpenCloseModal}
+            />
           </GlassPanel>
         </Reveal>
 
         {/* Close Trade Modal */}
-        {tradeToClose && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-md">
-            <GlassPanel className="w-full max-w-md p-6 border-cyan-500/40 shadow-2xl">
-              <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                <h3 className="text-base font-extrabold text-white flex items-center gap-2">
-                  <span>⚡ Manually Close AI Position</span>
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setTradeToClose(null)}
-                  className="text-slate-400 hover:text-white font-bold text-lg"
-                >
-                  ×
-                </button>
-              </div>
-
-              <form onSubmit={handleConfirmCloseTrade} className="mt-4 space-y-4">
-                <div className="p-3 rounded-xl bg-slate-950/80 border border-white/5 text-xs text-slate-300 space-y-1">
-                  <div>Instrument: <strong className="text-white">{tradeToClose.instrumentSymbol || "NIFTY50"}</strong></div>
-                  <div>Side &amp; Qty: <strong className="text-cyan-300">{tradeToClose.side} {tradeToClose.quantity} Qty</strong></div>
-                  <div>Entry Price: <strong className="text-white">₹{formatNumber(tradeToClose.fillPrice, 2)}</strong></div>
-                </div>
-
-                <div>
-                  <label htmlFor="exit-price" className="block text-xs font-bold text-slate-300 mb-1">
-                    Exit Price (₹):
-                  </label>
-                  <input
-                    id="exit-price"
-                    type="number"
-                    step="0.05"
-                    required
-                    value={closeExitPrice}
-                    onChange={(e) => setCloseExitPrice(Number(e.target.value))}
-                    className="w-full rounded-xl bg-slate-950 border border-white/20 px-3 py-2 text-sm font-bold text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                  />
-                  <p className="mt-1 text-[11px] text-slate-500">Pre-filled with latest market valuation.</p>
-                </div>
-
-                <div>
-                  <label htmlFor="close-notes" className="block text-xs font-bold text-slate-300 mb-1">
-                    Exit Reason / Notes:
-                  </label>
-                  <input
-                    id="close-notes"
-                    type="text"
-                    value={closeNotes}
-                    onChange={(e) => setCloseNotes(e.target.value)}
-                    className="w-full rounded-xl bg-slate-950 border border-white/20 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
-                  />
-                </div>
-
-                {closeError && (
-                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs font-semibold">
-                    {closeError}
-                  </div>
-                )}
-
-                <div className="flex justify-end gap-3 pt-2 border-t border-white/10">
-                  <button
-                    type="button"
-                    onClick={() => setTradeToClose(null)}
-                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 bg-slate-900 hover:bg-slate-800 transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={closeLoading}
-                    className="px-5 py-2 rounded-xl text-xs font-extrabold text-white bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 transition shadow-lg shadow-rose-500/20 disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {closeLoading ? "Closing..." : "⚡ Confirm Exit Position"}
-                  </button>
-                </div>
-              </form>
-            </GlassPanel>
-          </div>
-        )}
+        <CloseTradeModal
+          tradeToClose={tradeToClose}
+          setTradeToClose={setTradeToClose}
+          closeExitPrice={closeExitPrice}
+          setCloseExitPrice={setCloseExitPrice}
+          closeNotes={closeNotes}
+          setCloseNotes={setCloseNotes}
+          closeError={closeError}
+          closeLoading={closeLoading}
+          onSubmit={handleConfirmCloseTrade}
+        />
       </div>
-    </ResearchShell>
+    </div>
+    </>
   );
 }

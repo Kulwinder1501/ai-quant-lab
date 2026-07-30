@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Mapping, Sequence
 
 MarketLabel = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 LABELS: tuple[MarketLabel, ...] = ("BEARISH", "NEUTRAL", "BULLISH")
+
+# A label is only meaningful together with the alphabet it was drawn from, and this
+# project now has more than one: the directional target predicts BEARISH/NEUTRAL/
+# BULLISH, while the volatility-expansion target predicts CONTRACTION/STABLE/
+# EXPANSION. Those two must never be conflated -- emitting "BULLISH" to mean "the
+# range widened" would be read as a signal to go long by the strategy engine, the
+# autonomous agent, and the dashboards.
+#
+# Rather than widen one global tuple (which would make the random baseline 1/6 and
+# render the decisive-prediction metric meaningless for both targets), the alphabet
+# is an explicit value that training, evaluation, and the leakage audit accept.
+# Every such parameter defaults to DIRECTIONAL_ALPHABET, so existing callers and
+# their persisted metrics are bit-for-bit unchanged.
+AnyLabel = str
+
+
+@dataclass(frozen=True)
+class LabelAlphabet:
+    """An ordered label set plus the class that means "no commitment"."""
+
+    name: str
+    labels: tuple[AnyLabel, ...]
+    #: The class a model predicts when it declines to commit -- NEUTRAL for
+    #: direction, STABLE for volatility. Metrics that measure how often a model
+    #: actually committed, and how often it was right when it did, are computed
+    #: against this rather than against a hardcoded pair of directional labels.
+    abstain_label: AnyLabel
+
+    def __post_init__(self) -> None:
+        if len(self.labels) < 2:
+            raise ValueError("A label alphabet needs at least two labels.")
+        if len(set(self.labels)) != len(self.labels):
+            raise ValueError("A label alphabet cannot repeat a label.")
+        if self.abstain_label not in self.labels:
+            raise ValueError("The abstain label must be one of the alphabet's labels.")
+
+    @property
+    def random_baseline_macro_f1(self) -> float:
+        """Macro-F1 a uniformly random predictor scores over this alphabet."""
+
+        return 1.0 / len(self.labels)
+
+    @property
+    def decisive_labels(self) -> tuple[AnyLabel, ...]:
+        return tuple(label for label in self.labels if label != self.abstain_label)
+
+
+DIRECTIONAL_ALPHABET = LabelAlphabet(name="direction", labels=LABELS, abstain_label="NEUTRAL")
 
 # v4 rather than v3 because ``candle.gap_fill_bps`` and ``candle.is_gap_defended``
 # were added to the swing schema while the version string still said v3. Two
@@ -17,8 +65,18 @@ LABELS: tuple[MarketLabel, ...] = ("BEARISH", "NEUTRAL", "BULLISH")
 # incumbent instead of failing, so a candidate would promote uncontested.
 # Artifacts under models/*--ml-feature-v3 were trained on the 9-feature candle
 # block and must be retrained before they can be promoted again.
-FEATURE_SCHEMA_VERSION = "ml-feature-v4"
-FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v1"
+#
+# v5 rather than v4 because ``market.gift_nifty_implied_gap_bps`` was removed. It
+# was declared in v4 but nothing ever populated it -- no loader read
+# ``offshore_derivatives`` -- so it was a guaranteed-NaN column in both training
+# and inference, and the only free "GIFT Nifty" source turned out to be a
+# hardcoded zero. A constant column cannot inform a split, but it does enlarge the
+# versioned contract and force a retrain, so it is gone until a real offshore feed
+# exists. Both v4 and scalp-v1 artifacts were built against the old column set and
+# must be retrained; redefining either name in place is the mismatch the paragraph
+# above describes.
+FEATURE_SCHEMA_VERSION = "ml-feature-v5"
+FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v2"
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
 # and daily-gap columns are either absent or degenerate inside a single session,
@@ -79,6 +137,59 @@ REGIME_SOURCE_INDICATOR_PERIOD = 20
 REGIME_SOURCE_INDICATOR_ALGORITHM_VERSION = "ta-v1"
 REGIME_STALENESS_BARS = 5
 
+# Labelling schemes. Distinct from FEATURE_SCHEMA_VERSION on purpose: the feature
+# *columns* are identical across schemes, only the *target* differs, so a scheme
+# is tracked separately. A model's provenance records both, and the
+# champion/challenger gate must only ever compare models that share a scheme --
+# a fixed-horizon model and a triple-barrier model are answering different
+# questions and their scores are not comparable.
+#
+# fixed-horizon: the incumbent 3-class target -- sign of the close-to-close return
+#   at exactly horizon_bars, against a symmetric neutral band.
+# triple-barrier: label by which of {profit barrier, stop barrier, time barrier}
+#   the forward path reaches first, with the price barriers scaled to ATR.
+# volatility-expansion: not a direction at all -- whether the next K bars' range
+#   widens or narrows against the trailing K bars. It draws from its own label
+#   alphabet (CONTRACTION/STABLE/EXPANSION) and persists to its own table, because
+#   a non-directional label in the directional path would be read as a trade signal.
+LABEL_SCHEME_FIXED_HORIZON = "fixed-horizon-v1"
+LABEL_SCHEME_TRIPLE_BARRIER = "triple-barrier-v1"
+LABEL_SCHEME_VOLATILITY_EXPANSION = "volatility-expansion-v1"
+LABEL_SCHEMES: tuple[str, ...] = (
+    LABEL_SCHEME_FIXED_HORIZON,
+    LABEL_SCHEME_TRIPLE_BARRIER,
+    LABEL_SCHEME_VOLATILITY_EXPANSION,
+)
+
+#: Schemes whose target is a price direction. Everything outside this set uses a
+#: non-directional alphabet and must not be written to ``model_predictions``.
+DIRECTIONAL_LABEL_SCHEMES: tuple[str, ...] = (
+    LABEL_SCHEME_FIXED_HORIZON,
+    LABEL_SCHEME_TRIPLE_BARRIER,
+)
+
+# The institutional-flow feature reads a second table, so the same reasoning
+# applies: this normalisation is part of the schema contract, and changing either
+# constant changes what a stored feature value meant.
+#
+# The raw figure is net crore, which is not usable as a feature across eras -- FII
+# cash turnover has grown by roughly an order of magnitude over the history this
+# project trains on, so a fixed crore value means something different in 2015 than
+# in 2026 and the model would be fitting the era, not the flow. Dividing by the
+# trailing mean absolute net flow of the *prior* published sessions gives a
+# dimensionless "how unusual is today's flow" reading centred near +/-1.
+#
+# The window excludes the session being scaled. Including it would let an extreme
+# day inflate its own denominator and compress exactly the signal the feature is
+# meant to carry.
+INSTITUTIONAL_FLOW_SCALE_SESSIONS = 20
+
+# How stale a published print may be and still describe the bar being scored. NSE
+# publishes every trading day, so a gap wider than this means the collector was
+# down; the feature is reported unmeasurable rather than carrying a fortnight-old
+# reading forward as though it were current.
+INSTITUTIONAL_FLOW_STALENESS_DAYS = 5
+
 # Persisted algorithm identifiers. They are written to model_versions.algorithm
 # and into the artifact metadata envelope, so an existing identifier must never
 # change meaning; a new model family gets a new identifier instead.
@@ -114,6 +225,18 @@ class DatasetRequest:
     indicator_algorithm_version: str = "ta-v1"
     pattern_algorithm_version: str = "candlestick-v1"
     price_action_algorithm_version: str = "price-action-v2"
+    # Labelling scheme and its parameters. Defaults reproduce the incumbent
+    # fixed-horizon target exactly, so an unchanged caller is unaffected. For the
+    # triple-barrier scheme, ``horizon_bars`` is the vertical-barrier bar count
+    # (the max bars a label can take), which is what the purge gap must cover; the
+    # two multiples set the ATR-scaled profit and stop distances.
+    label_scheme: str = LABEL_SCHEME_FIXED_HORIZON
+    barrier_upper_multiple: float = 1.0
+    barrier_lower_multiple: float = 1.0
+    # volatility-expansion only: the band around an unchanged range. EXPANSION at a
+    # ratio >= 1 + band, CONTRACTION at <= 1 / (1 + band). 0.25 measured as the
+    # best-balanced value on daily NIFTY50/BANKNIFTY.
+    expansion_band: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -154,6 +277,23 @@ class PriceActionEvidence:
 
 
 @dataclass(frozen=True)
+class ForwardBar:
+    """One completed bar on the forward path after a source candle, in time order.
+
+    Label-only evidence for triple-barrier labelling: ``high``/``low`` decide a
+    barrier touch, ``close`` gives the realised return at the touch, and
+    ``close_time`` is when that label became known (feeding the purge discipline).
+    It is the multi-bar analogue of ``CandleEvidence.future_close`` and, like it,
+    must never be read as a feature.
+    """
+
+    high: float
+    low: float
+    close: float
+    close_time: datetime
+
+
+@dataclass(frozen=True)
 class CandleEvidence:
     """Data visible at a source candle close plus a later close used only as its label."""
 
@@ -175,9 +315,21 @@ class CandleEvidence:
     future_close_time: datetime | None
     vix_value_ratio: float | None = None
     vix_observed_at: datetime | None = None
+    # Scale-free institutional cash flow: net crore over the trailing mean
+    # absolute net crore of prior published sessions. See
+    # ``INSTITUTIONAL_FLOW_SCALE_SESSIONS`` for why it is a ratio and not the raw
+    # figure. None means the flow was unmeasurable as of this bar, which is left
+    # missing rather than imputed to 0 -- a flat session and an unobserved one are
+    # not the same evidence.
     fii_net_flow_ratio: float | None = None
     dii_net_flow_ratio: float | None = None
-    gift_nifty_implied_gap_bps: float | None = None
+    # The trading session whose published flows the two ratios above came from.
+    # Carried so a leakage audit can assert it precedes this bar's own session.
+    institutional_flow_date: date | None = None
+    # Label-only: the forward bars used by triple-barrier labelling, bounded to the
+    # vertical barrier and obeying the same as-of cutoff as ``future_close``. Empty
+    # for the fixed-horizon scheme, which never reads it. Never a feature.
+    forward_path: Sequence["ForwardBar"] = ()
 
 @dataclass(frozen=True)
 class LabeledExample:
@@ -188,7 +340,11 @@ class LabeledExample:
     observed_at: datetime
     label_available_at: datetime
     forward_return: float
-    label: MarketLabel
+    # Drawn from whichever LabelAlphabet the dataset's label scheme declares, so it
+    # is not narrowed to MarketLabel. The alphabet is validated at the training and
+    # evaluation boundaries rather than here, because a frozen dataclass cannot
+    # know which scheme produced it.
+    label: AnyLabel
     features: Mapping[str, float]
     vix_observed_at: datetime | None = None
 

@@ -5,7 +5,7 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
 import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
-import { ResearchShell } from "../../research/components/research-shell";
+import { PageHeader } from "../../../components/layout/page-header";
 import type { ChartPayload, PatternAnnotation } from "../domain";
 import { InteractiveChart } from "./interactive-chart";
 
@@ -59,13 +59,12 @@ export function ChartsDashboard() {
   const patterns = chartData?.patterns || [];
 
   return (
-    <ResearchShell
-      activeView="charts"
-      eyebrow="Technical Visualizer"
-      title="Interactive Multi-Layer Charts"
-      description="Visualize OHLCV price action, technical indicators (SMA, RSI, Bollinger Bands), and automated pattern recognition annotations."
-      connectionLabel="Charting Engine Ready"
-    >
+    <>
+      <PageHeader
+        eyebrow="Technical Visualizer"
+        title="Interactive Multi-Layer Charts"
+        description="Visualize OHLCV price action, technical indicators (SMA, RSI, Bollinger Bands), and automated pattern recognition annotations."
+      />
       <div className="space-y-6">
         {/* Control Bar */}
         <Reveal>
@@ -214,8 +213,8 @@ export function ChartsDashboard() {
               </div>
 
               <div className="max-h-[400px] overflow-y-auto custom-scrollbar pr-2 pb-2">
-                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-                  {patterns.map((pat, index) => {
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[...patterns].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map((pat, index) => {
                     const isBullish = pat.direction === "BULLISH";
                     // Using index in key as a fallback since these might be duplicated in dummy data
                     return (
@@ -247,6 +246,6 @@ export function ChartsDashboard() {
           </Reveal>
         )}
       </div>
-    </ResearchShell>
+    </>
   );
 }

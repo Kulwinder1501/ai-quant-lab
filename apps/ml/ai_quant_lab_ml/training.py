@@ -24,12 +24,15 @@ from typing import Any
 
 from .contracts import (
     ALGORITHM_BY_CHOICE,
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     LABELS,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     XGBOOST_ALGORITHM,
+    AnyLabel,
     EvaluationMetrics,
+    LabelAlphabet,
     LabeledExample,
     MarketLabel,
     TemporalSplit,
@@ -78,57 +81,71 @@ def _feature_matrix(examples: Sequence[LabeledExample], schema: Sequence[str]) -
     return matrix
 
 
-def _labels(examples: Sequence[LabeledExample]) -> list[MarketLabel]:
+def _labels(examples: Sequence[LabeledExample]) -> list[AnyLabel]:
     return [example.label for example in examples]
 
 
-def _class_counts(labels: Sequence[MarketLabel]) -> dict[MarketLabel, int]:
+def _class_counts(labels: Sequence[AnyLabel], alphabet: LabelAlphabet) -> dict[AnyLabel, int]:
     counts = Counter(labels)
-    return {label: int(counts[label]) for label in LABELS}
+    return {label: int(counts[label]) for label in alphabet.labels}
 
 
 def evaluate_predictions(
-    actual: Sequence[MarketLabel], predicted: Sequence[MarketLabel],
+    actual: Sequence[AnyLabel],
+    predicted: Sequence[AnyLabel],
+    *,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> EvaluationMetrics:
-    """Evaluate a fixed three-class label space without importing sklearn early."""
+    """Evaluate a three-class label space without importing sklearn early.
+
+    ``alphabet`` defaults to the directional one, so every existing caller keeps
+    identical behaviour and identical persisted numbers.
+
+    The ``directional_*`` metric fields are computed against
+    ``alphabet.abstain_label`` rather than a hardcoded ``("BULLISH", "BEARISH")``.
+    For the directional alphabet that is exactly the previous behaviour (NEUTRAL is
+    the abstain class); for another alphabet it generalises to the same idea -- how
+    often the model committed, and how often it was right when it did.
+    """
 
     if not actual:
         raise TrainingError("Cannot evaluate an empty label sequence.")
     if len(actual) != len(predicted):
         raise TrainingError("actual and predicted labels must have the same length.")
-    if any(label not in LABELS for label in actual) or any(label not in LABELS for label in predicted):
-        raise TrainingError("Labels must be one of BEARISH, NEUTRAL, or BULLISH.")
+    permitted = set(alphabet.labels)
+    if any(label not in permitted for label in actual) or any(label not in permitted for label in predicted):
+        raise TrainingError(f"Labels must be one of {', '.join(alphabet.labels)}.")
 
     try:
         from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
     except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
         raise RuntimeError("scikit-learn is required to evaluate model predictions. Install apps/ml requirements first.") from error
 
-    directional_predictions = 0
-    correct_directional_predictions = 0
+    decisive_predictions = 0
+    correct_decisive_predictions = 0
     for a, p in zip(actual, predicted):
-        if p in ("BULLISH", "BEARISH"):
-            directional_predictions += 1
+        if p != alphabet.abstain_label:
+            decisive_predictions += 1
             if a == p:
-                correct_directional_predictions += 1
-    
+                correct_decisive_predictions += 1
+
     sample_count = len(actual)
-    coverage = float(directional_predictions) / sample_count if sample_count > 0 else 0.0
-    directional_hit_rate = (
-        float(correct_directional_predictions) / directional_predictions
-        if directional_predictions > 0
+    coverage = float(decisive_predictions) / sample_count if sample_count > 0 else 0.0
+    decisive_hit_rate = (
+        float(correct_decisive_predictions) / decisive_predictions
+        if decisive_predictions > 0
         else None
     )
 
     return EvaluationMetrics(
         accuracy=float(accuracy_score(actual, predicted)),
         balanced_accuracy=float(balanced_accuracy_score(actual, predicted)),
-        macro_f1=float(f1_score(actual, predicted, labels=list(LABELS), average="macro", zero_division=0)),
-        directional_predictions=directional_predictions,
-        directional_hit_rate=directional_hit_rate,
+        macro_f1=float(f1_score(actual, predicted, labels=list(alphabet.labels), average="macro", zero_division=0)),
+        directional_predictions=decisive_predictions,
+        directional_hit_rate=decisive_hit_rate,
         coverage=coverage,
         sample_count=sample_count,
-        class_counts=_class_counts(actual),
+        class_counts=_class_counts(actual, alphabet),
     )
 
 
@@ -137,7 +154,8 @@ def predict_labels(
     examples: Sequence[LabeledExample],
     *,
     schema: Sequence[str] | None = None,
-) -> list[MarketLabel]:
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> list[AnyLabel]:
     """Predict labels for already-built examples using the declared schema order.
 
     Promotion code uses this helper to score an existing production artifact on
@@ -159,8 +177,8 @@ def predict_labels(
     except (TypeError, ValueError, AttributeError) as error:
         raise TrainingError("The supplied model could not score the provided feature matrix.") from error
     predictions = [str(value) for value in raw_predictions]
-    if any(label not in LABELS for label in predictions):
-        raise TrainingError("The supplied model returned a label outside the fixed Phase 10 label set.")
+    if any(label not in set(alphabet.labels) for label in predictions):
+        raise TrainingError(f"The supplied model returned a label outside the {alphabet.name} label set.")
     return predictions  # type: ignore[return-value]
 
 
@@ -169,7 +187,8 @@ def _prepared_split(
     schema: Sequence[str] | None,
     *,
     algorithm_label: str,
-) -> tuple[tuple[str, ...], list[MarketLabel], list[MarketLabel]]:
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> tuple[tuple[str, ...], list[AnyLabel], list[AnyLabel]]:
     """Validate one purged split and its feature schema before any library loads."""
 
     if not split.train:
@@ -184,8 +203,8 @@ def _prepared_split(
 
     train_labels = _labels(split.train)
     validation_labels = _labels(split.validation)
-    if any(label not in LABELS for label in (*train_labels, *validation_labels)):
-        raise TrainingError("Labels must be one of BEARISH, NEUTRAL, or BULLISH.")
+    if any(label not in set(alphabet.labels) for label in (*train_labels, *validation_labels)):
+        raise TrainingError(f"Labels must be one of {', '.join(alphabet.labels)}.")
     if len(set(train_labels)) < 2:
         raise TrainingError(f"{algorithm_label} requires at least two classes in the training partition.")
     return selected_schema, train_labels, validation_labels
@@ -197,21 +216,22 @@ def _fitted_result(
     pipeline: Any,
     split: TemporalSplit,
     selected_schema: tuple[str, ...],
-    train_labels: Sequence[MarketLabel],
-    validation_labels: Sequence[MarketLabel],
+    train_labels: Sequence[AnyLabel],
+    validation_labels: Sequence[AnyLabel],
     hyperparameters: Mapping[str, Any],
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit one pipeline on the training partition only and score both partitions."""
 
     pipeline.fit(_feature_matrix(split.train, selected_schema), list(train_labels))
-    train_predictions = predict_labels(pipeline, split.train, schema=selected_schema)
-    validation_predictions = predict_labels(pipeline, split.validation, schema=selected_schema)
+    train_predictions = predict_labels(pipeline, split.train, schema=selected_schema, alphabet=alphabet)
+    validation_predictions = predict_labels(pipeline, split.validation, schema=selected_schema, alphabet=alphabet)
     return BaselineTrainingResult(
         algorithm=algorithm,
         model=pipeline,
         feature_schema=selected_schema,
-        training_metrics=evaluate_predictions(train_labels, train_predictions),
-        validation_metrics=evaluate_predictions(validation_labels, validation_predictions),
+        training_metrics=evaluate_predictions(train_labels, train_predictions, alphabet=alphabet),
+        validation_metrics=evaluate_predictions(validation_labels, validation_predictions, alphabet=alphabet),
         training_rows=len(split.train),
         validation_rows=len(split.validation),
         hyperparameters=dict(hyperparameters),
@@ -257,6 +277,7 @@ def train_logistic_regression_baseline(
     schema: Sequence[str] | None = None,
     random_state: int = 42,
     max_iter: int = 1_000,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit the Phase 10 logistic-regression benchmark on a purged temporal split.
 
@@ -266,7 +287,7 @@ def train_logistic_regression_baseline(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="Logistic regression",
+        split, schema, algorithm_label="Logistic regression", alphabet=alphabet,
     )
     max_iter = _positive_int(max_iter, "max_iter")
 
@@ -302,10 +323,11 @@ def train_logistic_regression_baseline(
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters={"maxIter": max_iter, "solver": "lbfgs", "randomState": random_state},
+        alphabet=alphabet,
     )
 
 
-def _boosting_pipeline(classifier: Any) -> Any:
+def _boosting_pipeline(classifier: Any, alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET) -> Any:
     """Wrap a boosted classifier in the shared three-step artifact contract."""
 
     try:
@@ -319,7 +341,9 @@ def _boosting_pipeline(classifier: Any) -> Any:
         steps=[
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
             ("scaler", StandardScaler()),
-            ("classifier", LabelEncodedClassifier(classifier)),
+            # The encoder must know the full alphabet, not just the classes present
+            # in this fold, so the stored artifact decodes to the same labels later.
+            ("classifier", LabelEncodedClassifier(classifier, labels=alphabet.labels)),
         ]
     )
 
@@ -336,6 +360,7 @@ def train_xgboost_classifier(
     colsample_bytree: float = 0.8,
     min_child_weight: float = 5.0,
     reg_lambda: float = 1.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit a deterministic XGBoost forest on the same purged temporal split.
 
@@ -346,7 +371,7 @@ def train_xgboost_classifier(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="XGBoost",
+        split, schema, algorithm_label="XGBoost", alphabet=alphabet,
     )
     hyperparameters = {
         "nEstimators": _positive_int(n_estimators, "n_estimators"),
@@ -381,12 +406,13 @@ def train_xgboost_classifier(
     )
     return _fitted_result(
         algorithm=XGBOOST_ALGORITHM,
-        pipeline=_boosting_pipeline(classifier),
+        pipeline=_boosting_pipeline(classifier, alphabet),
         split=split,
         selected_schema=selected_schema,
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters=hyperparameters,
+        alphabet=alphabet,
     )
 
 
@@ -403,6 +429,7 @@ def train_lightgbm_classifier(
     subsample: float = 0.8,
     colsample_bytree: float = 0.8,
     reg_lambda: float = 1.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit a deterministic LightGBM forest on the same purged temporal split.
 
@@ -412,7 +439,7 @@ def train_lightgbm_classifier(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="LightGBM",
+        split, schema, algorithm_label="LightGBM", alphabet=alphabet,
     )
     hyperparameters = {
         "nEstimators": _positive_int(n_estimators, "n_estimators"),
@@ -453,12 +480,13 @@ def train_lightgbm_classifier(
     )
     return _fitted_result(
         algorithm=LIGHTGBM_ALGORITHM,
-        pipeline=_boosting_pipeline(classifier),
+        pipeline=_boosting_pipeline(classifier, alphabet),
         split=split,
         selected_schema=selected_schema,
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters=hyperparameters,
+        alphabet=alphabet,
     )
 
 
@@ -476,12 +504,16 @@ def train_model(
     schema: Sequence[str] | None = None,
     random_state: int = 42,
     hyperparameters: Mapping[str, Any] | None = None,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Train one registered algorithm so callers stay free of library imports.
 
     ``hyperparameters`` are the trainer's own keyword arguments. An unknown key
     fails loudly rather than being silently dropped, so a mistyped CLI flag can
     never produce a model trained with defaults it did not ask for.
+
+    ``alphabet`` selects the label space. It defaults to the directional one, so an
+    existing caller trains and scores exactly as before.
     """
 
     trainer = TRAINERS.get(algorithm_choice)
@@ -491,7 +523,7 @@ def train_model(
         )
     supplied = dict(hyperparameters or {})
     try:
-        return trainer(split, schema=schema, random_state=random_state, **supplied)
+        return trainer(split, schema=schema, random_state=random_state, alphabet=alphabet, **supplied)
     except TypeError as error:
         raise TrainingError(f"Invalid hyperparameters for {algorithm_choice}: {error}") from error
 

@@ -51,6 +51,62 @@ function qualifyingContext(): StrategyMarketContext {
   };
 }
 
+/** A completed 1m context that satisfies the momentum-scalp SHORT rule. */
+function bearishScalpContext(id: string): StrategyMarketContext {
+  return {
+    candle: {
+      id,
+      instrumentId: "instrument-1",
+      timeframe: "1m",
+      openTime: new Date("2026-07-25T05:00:00Z"),
+      closeTime: new Date("2026-07-25T05:01:00Z"),
+      open: 101,
+      high: 101.5,
+      low: 99.5,
+      close: 100, // below VWAP
+      volume: 1_000,
+      tickSize: 0.05,
+    },
+    indicators: [
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: 98 } },   // fast below slow
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: 101 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 30 } },   // in 20-40 band
+      { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 101 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 2 } },
+    ],
+    patterns: [],
+    priceActionEvents: [],
+  };
+}
+
+/** A completed 1m context that satisfies the momentum-scalp LONG rule. */
+function bullishScalpContext(id: string): StrategyMarketContext {
+  return {
+    candle: {
+      id,
+      instrumentId: "instrument-1",
+      timeframe: "1m",
+      openTime: new Date("2026-07-25T05:01:00Z"),
+      closeTime: new Date("2026-07-25T05:02:00Z"),
+      open: 101,
+      high: 102.5,
+      low: 100.5,
+      close: 102, // above VWAP
+      volume: 1_000,
+      tickSize: 0.05,
+    },
+    indicators: [
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: 103 } },  // fast above slow
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: 101 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 70 } },   // in 60-80 band
+      { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 101 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 2 } },
+    ],
+    patterns: [],
+    priceActionEvents: [],
+  };
+}
+
 describe("GenerateTradeIdeas", () => {
   it("persists an explainable proposal from latest completed evidence", async () => {
     const saved: SaveTradeIdeaProposalInput[] = [];
@@ -72,6 +128,7 @@ describe("GenerateTradeIdeas", () => {
     };
     const contexts: StrategyMarketContextRepository = {
       findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
     };
     const ideas: TradeIdeaRepository = {
       saveProposal: async (input) => {
@@ -124,5 +181,73 @@ describe("GenerateTradeIdeas", () => {
       expect.objectContaining({ sourceType: "PATTERN", sourceReference: "BULLISH_ENGULFING:candlestick-v1" }),
       expect.objectContaining({ sourceType: "PRICE_ACTION", sourceReference: "BREAKOUT:price-action-v2" }),
     ]));
+  });
+
+  it("scans a window of candles and surfaces SHORT proposals from bearish bars", async () => {
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    let ideaCounter = 0;
+    const strategyVersions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const window = [bearishScalpContext("candle-bear"), bullishScalpContext("candle-bull")];
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => window[window.length - 1],
+      // The scan path reads the window; assert it asks for the lookback we passed.
+      listCompletedContexts: async (input) => {
+        expect(input.limit).toBe(2);
+        return window;
+      },
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input) => {
+        saved.push(input);
+        ideaCounter += 1;
+        return {
+          id: `idea-${ideaCounter}`,
+          instrumentId: input.instrumentId,
+          strategyVersionId: input.strategyVersionId,
+          sourceCandleId: input.sourceCandleId,
+          side: input.side,
+          status: "PROPOSED",
+          entryPrice: input.entryPrice,
+          stopLoss: input.stopLoss,
+          targetPrice: input.targetPrice,
+          riskReward: input.riskReward,
+          confidence: input.confidence,
+          expiresAt: input.expiresAt,
+        };
+      },
+    };
+
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas)
+      .executeScan({ instrumentId: "instrument-1", timeframe: "1m", lookback: 2 });
+
+    const scalp = result.find((entry) => entry.strategyKey === "momentum-scalp");
+    expect(scalp).toBeDefined();
+    // The whole point of the scan: a bearish bar in the window becomes a SHORT.
+    expect(scalp?.shortIdeas).toBe(1);
+    expect(scalp?.longIdeas).toBe(1);
+    expect(scalp?.contextsScanned).toBe(2);
+    expect(scalp?.skippedReason).toBeNull();
+
+    // No entry may be STRATEGY_FAILED — a registered strategy must parse its own config.
+    expect(result.map((entry) => entry.skippedReason)).not.toContain("STRATEGY_FAILED");
+
+    const sides = saved.map((idea) => idea.side);
+    expect(sides).toContain("SHORT");
+    expect(sides).toContain("LONG");
+    // Each proposal is keyed to the bar it came from, not collapsed onto one candle.
+    const shortIdea = saved.find((idea) => idea.side === "SHORT");
+    expect(shortIdea?.sourceCandleId).toBe("candle-bear");
   });
 });

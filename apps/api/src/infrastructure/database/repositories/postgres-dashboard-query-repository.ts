@@ -117,6 +117,7 @@ export class PostgresDashboardQueryRepository {
     account: DashboardPaperAccountSummary | null;
     metrics: unknown;
     openTrades: Record<string, unknown>[];
+    pendingTrades: Record<string, unknown>[];
     closedTrades: Record<string, unknown>[];
   }> {
     const accResult = await this.database.query<QueryResultRow>(`
@@ -189,6 +190,7 @@ export class PostgresDashboardQueryRepository {
       account,
       metrics,
       openTrades: formattedTrades.filter((t) => t.status === "OPEN"),
+      pendingTrades: formattedTrades.filter((t) => t.status === "PENDING"),
       closedTrades: formattedTrades.filter((t) => t.status === "CLOSED"),
     };
   }

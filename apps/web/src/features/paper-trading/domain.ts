@@ -15,7 +15,7 @@ export interface PaperTradeRow {
   timeframe?: string;
   tradeIdeaId?: string | null;
   side: "BUY" | "SELL";
-  status: "OPEN" | "CLOSED" | "CANCELLED";
+  status: "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
   quantity: number;
   fillPrice: number;
   openedAt: string;
@@ -34,6 +34,7 @@ export interface PaperTradeRow {
 export interface PaperAccountFullSummary {
   account: PaperAccountSummary;
   openTrades: PaperTradeRow[];
+  pendingTrades: PaperTradeRow[];
   closedTrades: PaperTradeRow[];
   metrics: {
     totalTrades: number;

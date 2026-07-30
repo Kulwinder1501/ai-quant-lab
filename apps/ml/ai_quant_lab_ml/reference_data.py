@@ -23,9 +23,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .contracts import (
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION_SCALP,
-    LABELS,
+    AnyLabel,
+    LabelAlphabet,
     LabeledExample,
     MarketLabel,
 )
@@ -183,9 +185,11 @@ def _schema_version_of(selected_schema: tuple[str, ...]) -> str:
     return version
 
 
-def _label_counts(labels: Sequence[MarketLabel]) -> dict[MarketLabel, int]:
+def _label_counts(
+    labels: Sequence[AnyLabel], alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET
+) -> dict[AnyLabel, int]:
     counts = Counter(labels)
-    return {label: int(counts[label]) for label in LABELS}
+    return {label: int(counts[label]) for label in alphabet.labels}
 
 
 def _json_feature_value(value: Any) -> float | None:
@@ -205,7 +209,11 @@ def _matrix_feature_value(value: Any) -> float:
     return float("nan") if normalized is None else normalized
 
 
-def _validate_training_example(example: LabeledExample, schema: Sequence[str]) -> ReferenceExample:
+def _validate_training_example(
+    example: LabeledExample,
+    schema: Sequence[str],
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> ReferenceExample:
     if not isinstance(example, LabeledExample):
         raise ReferenceDataError("Training references must be LabeledExample instances.")
     candle_id = _require_non_blank_string(example.candle_id, "Training example candle_id")
@@ -213,8 +221,10 @@ def _validate_training_example(example: LabeledExample, schema: Sequence[str]) -
     label_available_at = _require_aware_datetime(example.label_available_at, "Training example label_available_at")
     if label_available_at <= observed_at:
         raise ReferenceDataError("Training example label_available_at must be after observed_at.")
-    if example.label not in LABELS:
-        raise ReferenceDataError("Training example label must be BEARISH, NEUTRAL, or BULLISH.")
+    if example.label not in set(alphabet.labels):
+        raise ReferenceDataError(
+            f"Training example label must be one of {', '.join(alphabet.labels)}."
+        )
     if not isinstance(example.features, Mapping):
         raise ReferenceDataError("Training example features must be a mapping.")
     return ReferenceExample(
@@ -226,41 +236,42 @@ def _validate_training_example(example: LabeledExample, schema: Sequence[str]) -
 
 
 def _allocate_stratified_quotas(
-    counts: Mapping[MarketLabel, int],
+    counts: Mapping[AnyLabel, int],
     maximum_rows: int,
-) -> dict[MarketLabel, int]:
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> dict[AnyLabel, int]:
     """Allocate bounded proportional quotas, keeping every present class when possible."""
 
     total_rows = sum(counts.values())
     target_rows = min(maximum_rows, total_rows)
-    quotas = {label: 0 for label in LABELS}
-    present_labels = [label for label in LABELS if counts[label] > 0]
+    quotas = {label: 0 for label in alphabet.labels}
+    present_labels = [label for label in alphabet.labels if counts[label] > 0]
     if target_rows == total_rows:
-        return {label: counts[label] for label in LABELS}
+        return {label: counts[label] for label in alphabet.labels}
     if target_rows < len(present_labels):
         # A too-small cap cannot represent every class. Prefer the larger
-        # strata and retain LABELS order as the deterministic tie breaker.
-        for label in sorted(present_labels, key=lambda item: (-counts[item], LABELS.index(item)))[:target_rows]:
+        # strata and retain alphabet order as the deterministic tie breaker.
+        for label in sorted(present_labels, key=lambda item: (-counts[item], alphabet.labels.index(item)))[:target_rows]:
             quotas[label] = 1
         return quotas
 
     for label in present_labels:
         quotas[label] = 1
     remaining_rows = target_rows - len(present_labels)
-    remaining_capacity = {label: counts[label] - quotas[label] for label in LABELS}
+    remaining_capacity = {label: counts[label] - quotas[label] for label in alphabet.labels}
     total_capacity = sum(remaining_capacity.values())
     if remaining_rows == 0 or total_capacity == 0:
         return quotas
 
-    fractional_allocations: dict[MarketLabel, float] = {}
-    for label in LABELS:
+    fractional_allocations: dict[AnyLabel, float] = {}
+    for label in alphabet.labels:
         allocation = remaining_rows * remaining_capacity[label] / total_capacity
         whole = min(remaining_capacity[label], math.floor(allocation))
         quotas[label] += whole
         fractional_allocations[label] = allocation - whole
 
     rows_left = target_rows - sum(quotas.values())
-    for label in sorted(LABELS, key=lambda item: (-fractional_allocations[item], LABELS.index(item))):
+    for label in sorted(alphabet.labels, key=lambda item: (-fractional_allocations[item], alphabet.labels.index(item))):
         if rows_left == 0:
             break
         if quotas[label] < counts[label]:
@@ -290,6 +301,7 @@ def build_reference_metadata(
     *,
     maximum_examples: int = DEFAULT_MAXIMUM_REFERENCE_EXAMPLES,
     schema: Sequence[str] | None = None,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> dict[str, Any]:
     """Build deterministic, stratified metadata from a model's training rows only.
 
@@ -305,23 +317,29 @@ def build_reference_metadata(
     if not training_examples:
         raise ReferenceDataError("At least one training example is required for reference metadata.")
 
-    parsed_examples = [_validate_training_example(example, selected_schema) for example in training_examples]
+    parsed_examples = [
+        _validate_training_example(example, selected_schema, alphabet) for example in training_examples
+    ]
     parsed_examples.sort(key=lambda item: (item.observed_at, item.candle_id))
     candle_ids = [item.candle_id for item in parsed_examples]
     if len(set(candle_ids)) != len(candle_ids):
         raise ReferenceDataError("Training reference candle IDs must be unique.")
 
-    training_counts = _label_counts([item.label for item in parsed_examples])
-    quotas = _allocate_stratified_quotas(training_counts, maximum_rows)
+    training_counts = _label_counts([item.label for item in parsed_examples], alphabet)
+    quotas = _allocate_stratified_quotas(training_counts, maximum_rows, alphabet)
     selected: list[ReferenceExample] = []
-    for label in LABELS:
+    for label in alphabet.labels:
         label_examples = [item for item in parsed_examples if item.label == label]
         selected.extend(_chronological_sample(label_examples, quotas[label]))
     selected.sort(key=lambda item: (item.observed_at, item.candle_id))
-    reference_counts = _label_counts([item.label for item in selected])
+    reference_counts = _label_counts([item.label for item in selected], alphabet)
 
     return {
         "format": REFERENCE_DATA_FORMAT,
+        # Recorded so a reader validates class counts against the alphabet the
+        # writer actually used, rather than assuming the directional one.
+        "labelAlphabet": alphabet.name,
+        "labels": list(alphabet.labels),
         "featureSchemaVersion": _schema_version_of(selected_schema),
         "featureSchema": list(selected_schema),
         "trainingOnly": True,
@@ -357,12 +375,14 @@ def _require_sequence(value: Any, field: str) -> Sequence[Any]:
     return value
 
 
-def _parse_class_counts(value: Any, field: str) -> dict[MarketLabel, int]:
+def _parse_class_counts(
+    value: Any, field: str, alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET
+) -> dict[AnyLabel, int]:
     parsed = _require_mapping(value, field)
-    if set(parsed) != set(LABELS):
-        raise ReferenceDataError(f"{field} must contain exactly the fixed label keys.")
-    counts: dict[MarketLabel, int] = {}
-    for label in LABELS:
+    if set(parsed) != set(alphabet.labels):
+        raise ReferenceDataError(f"{field} must contain exactly the {alphabet.name} label keys.")
+    counts: dict[AnyLabel, int] = {}
+    for label in alphabet.labels:
         count = parsed[label]
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
             raise ReferenceDataError(f"{field}.{label} must be a non-negative integer.")
@@ -393,8 +413,9 @@ def parse_reference_metadata(
     metadata: Mapping[str, Any],
     *,
     expected_schema: Sequence[str] | None = None,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> ReferenceData:
-    """Parse and validate saved reference metadata against ``ml-feature-v1``."""
+    """Parse and validate saved reference metadata against its feature schema."""
 
     selected_schema = _fixed_schema(expected_schema)
     payload = _require_mapping(metadata, "Reference metadata")
@@ -413,7 +434,9 @@ def parse_reference_metadata(
         raise ReferenceDataError("Reference metadata has an unsupported sampling method.")
     maximum_rows = _require_positive_int(sampling.get("maximumRows"), "Reference metadata maximumRows")
     training_rows = _require_positive_int(sampling.get("trainingRows"), "Reference metadata trainingRows")
-    training_counts = _parse_class_counts(sampling.get("trainingClassCounts"), "Reference metadata trainingClassCounts")
+    training_counts = _parse_class_counts(
+        sampling.get("trainingClassCounts"), "Reference metadata trainingClassCounts", alphabet
+    )
     if sum(training_counts.values()) != training_rows:
         raise ReferenceDataError("Reference metadata training class counts do not match trainingRows.")
 
@@ -437,8 +460,10 @@ def parse_reference_metadata(
         seen_candle_ids.add(candle_id)
         observed_at = _parse_datetime(item.get("observedAt"), f"Reference metadata examples[{index}].observedAt")
         label = item.get("label")
-        if label not in LABELS:
-            raise ReferenceDataError("Reference metadata labels must be BEARISH, NEUTRAL, or BULLISH.")
+        if label not in set(alphabet.labels):
+            raise ReferenceDataError(
+                f"Reference metadata labels must be one of {', '.join(alphabet.labels)}."
+            )
         key = (observed_at, candle_id)
         if previous_key is not None and key < previous_key:
             raise ReferenceDataError("Reference metadata examples must be chronological and deterministically ordered.")
@@ -452,8 +477,10 @@ def parse_reference_metadata(
             )
         )
 
-    reference_counts = _parse_class_counts(sampling.get("referenceClassCounts"), "Reference metadata referenceClassCounts")
-    if reference_counts != _label_counts([item.label for item in examples]):
+    reference_counts = _parse_class_counts(
+        sampling.get("referenceClassCounts"), "Reference metadata referenceClassCounts", alphabet
+    )
+    if reference_counts != _label_counts([item.label for item in examples], alphabet):
         raise ReferenceDataError("Reference metadata reference class counts do not match examples.")
     return ReferenceData(
         feature_schema=selected_schema,
@@ -563,10 +590,11 @@ def nearest_reference_label_agreement(
     *,
     pipeline: Any,
     features: Mapping[str, Any],
-    predicted_label: MarketLabel,
+    predicted_label: AnyLabel,
     reference_metadata: Mapping[str, Any] | ReferenceData,
     k: int = 20,
     expected_schema: Sequence[str] | None = None,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> SimilarSetupAgreement:
     """Compare a prediction with its nearest saved training-only references.
 
@@ -577,14 +605,18 @@ def nearest_reference_label_agreement(
 
     selected_schema = _fixed_schema(expected_schema)
     requested_k = _require_positive_int(k, "k")
-    if predicted_label not in LABELS:
-        raise ReferenceDataError("predicted_label must be BEARISH, NEUTRAL, or BULLISH.")
+    if predicted_label not in set(alphabet.labels):
+        raise ReferenceDataError(
+            f"predicted_label must be one of {', '.join(alphabet.labels)}."
+        )
     if not isinstance(features, Mapping):
         raise ReferenceDataError("features must be a mapping.")
     reference_data = (
         reference_metadata
         if isinstance(reference_metadata, ReferenceData)
-        else parse_reference_metadata(reference_metadata, expected_schema=selected_schema)
+        else parse_reference_metadata(
+            reference_metadata, expected_schema=selected_schema, alphabet=alphabet
+        )
     )
     if reference_data.feature_schema != selected_schema:
         raise ReferenceDataError("Reference data does not match the fixed feature schema.")
@@ -604,7 +636,7 @@ def nearest_reference_label_agreement(
         distances.append((distance, reference))
     distances.sort(key=lambda item: (item[0], item[1].observed_at, item[1].candle_id))
     selected_neighbors = distances[: min(requested_k, len(distances))]
-    label_counts = _label_counts([reference.label for _, reference in selected_neighbors])
+    label_counts = _label_counts([reference.label for _, reference in selected_neighbors], alphabet)
     matching_label_count = label_counts[predicted_label]
     neighbor_count = len(selected_neighbors)
     return SimilarSetupAgreement(

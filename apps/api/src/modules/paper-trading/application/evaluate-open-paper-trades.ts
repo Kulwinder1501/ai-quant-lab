@@ -12,9 +12,14 @@ export interface EvaluateOpenPaperTradesInput {
 
 export interface EvaluateOpenPaperTradesResult {
   openTradesRead: number;
+  pendingTradesRead: number;
   eligibleCandlesRead: number;
   tradesClosed: number;
   closedTradeIds: string[];
+  pendingTradesFilled: number;
+  filledTradeIds: string[];
+  pendingTradesCancelled: number;
+  cancelledTradeIds: string[];
   skippedWithoutTimeframe: number;
 }
 
@@ -59,9 +64,75 @@ export class EvaluateOpenPaperTrades {
     const exitFees = nonNegativeFinite(input.exitFees ?? 0, "Exit fees");
     const exitSlippage = nonNegativeFinite(input.exitSlippage ?? 0, "Exit slippage");
     const openTrades = await this.paperTradeRepository.listOpenByAccount(input.accountId);
+    const pendingTrades = await this.paperTradeRepository.listPendingByAccount(input.accountId);
     let eligibleCandlesRead = 0;
     let skippedWithoutTimeframe = 0;
     const closedTradeIds: string[] = [];
+    const filledTradeIds: string[] = [];
+    const cancelledTradeIds: string[] = [];
+
+    // Evaluate PENDING trades first
+    for (const trade of pendingTrades) {
+      const tradeDateStr = trade.openedAt.toISOString().split("T")[0];
+      const asOfDateStr = asOf.toISOString().split("T")[0];
+      if (tradeDateStr !== asOfDateStr) {
+        await this.paperTradeRepository.close({
+          paperTradeId: trade.id,
+          exitPrice: trade.entryPrice,
+          exitReason: "CANCELLED",
+          closedAt: asOf,
+          exitFees: 0,
+          exitSlippage: 0,
+          details: { reason: "END_OF_DAY_EXPIRATION" },
+        });
+        cancelledTradeIds.push(trade.id);
+        continue;
+      }
+
+      let isFilled = false;
+      
+      const symKey = trade.instrumentSymbol ? trade.instrumentSymbol.toUpperCase() : "";
+      const livePrice = input.livePrices?.[symKey] ?? input.livePrices?.[trade.instrumentId];
+      if (livePrice !== undefined && Number.isFinite(livePrice) && livePrice > 0) {
+        // Trigger based on live price
+        if (trade.side === "LONG" && livePrice >= trade.entryPrice) {
+          isFilled = true;
+        } else if (trade.side === "SHORT" && livePrice <= trade.entryPrice) {
+          isFilled = true;
+        }
+        
+        if (isFilled) {
+          await this.paperTradeRepository.fillPendingTrade({
+            paperTradeId: trade.id,
+            fillPrice: trade.entryPrice,
+            filledAt: asOf
+          });
+          filledTradeIds.push(trade.id);
+          continue;
+        }
+      }
+
+      if (!trade.timeframe) continue;
+      
+      const candles = await this.candleRepository.listCompleted(trade.instrumentId, trade.timeframe);
+      for (const persisted of candles) {
+        const candle = toCompletedPriceCandle(persisted);
+        if (candle.openTime < trade.openedAt || candle.closeTime > asOf) continue;
+        
+        if (candle.low <= trade.entryPrice && candle.high >= trade.entryPrice) {
+          await this.paperTradeRepository.fillPendingTrade({
+            paperTradeId: trade.id,
+            fillPrice: trade.entryPrice,
+            filledAt: candle.closeTime
+          });
+          filledTradeIds.push(trade.id);
+          isFilled = true;
+          break;
+        }
+      }
+      
+      if (isFilled) continue;
+    }
 
     for (const trade of openTrades) {
       const symKey = trade.instrumentSymbol ? trade.instrumentSymbol.toUpperCase() : "";
@@ -139,9 +210,14 @@ export class EvaluateOpenPaperTrades {
 
     return {
       openTradesRead: openTrades.length,
+      pendingTradesRead: pendingTrades.length,
       eligibleCandlesRead,
       tradesClosed: closedTradeIds.length,
       closedTradeIds,
+      pendingTradesFilled: filledTradeIds.length,
+      filledTradeIds,
+      pendingTradesCancelled: cancelledTradeIds.length,
+      cancelledTradeIds,
       skippedWithoutTimeframe,
     };
   }
