@@ -31,17 +31,16 @@ Expect a clean typecheck and **139 passed / 32 files**. Any *sixth* ML error or 
 API failure is new and yours.
 
 ```bash
-git status --short | wc -l      # expect ~150; NOTHING is committed
-git log --oneline -1            # expect 8ac8e02 "implementation of gift nifty and fiidii"
+git status --short               # expect a clean tree (docker-compose.v2.yml may be untracked)
+git log --oneline -3             # expect 425b7fb docs, 82883e7 the session's work, 8ac8e02
 ```
 
 ---
 
 ## 1. Where things stand
 
-Branch `feature/FIIDII-giftnifty`. **Everything below is uncommitted working-tree
-work on top of `8ac8e02`.** Committing it is item 3.1 and is the single highest-risk
-outstanding thing.
+Branch `feature/FIIDII-giftnifty`. All of the work described below **is committed**
+(`82883e7` for the code, `425b7fb` for this brief) and **not pushed**.
 
 Current contract versions — **these are immutable ordered column contracts; adding
 or removing any column requires a new version string**:
@@ -116,12 +115,14 @@ It is a **position-sizing / regime-gating** signal, not a directional edge.
   a strictly earlier session). The unbacked `gift_nifty_implied_gap_bps` column was
   removed. The agent now reads the latest *published* flow instead of `date = today`
   (which returned zero rows for the entire trading day).
+- **Indicator/pattern backfill run** for NIFTY50 + BANKNIFTY on 1d and 15m, so
+  EMA-9 now has real `ta-v1` snapshots (see 3.2).
 - **`run-backtest` fabrication removed.** It fell back to a `Math.random()` synthetic
   series when a strategy produced no trades, and reported those metrics as real.
 - **Scalp LONG/SHORT.** The seed hard-coded a `'LONG'` placeholder; that is fixed.
   The real blocker was that **EMA-9 was missing from `defaultIndicatorDefinitions`**,
   so `resolveIndicators` always failed and momentum-scalp could produce *nothing* on
-  real data. EMA-9 is now registered (see 3.2 — it still needs a backfill run).
+  real data. EMA-9 is now registered *and backfilled* (see 3.2 and the 3.2b blocker).
   `analysis:generate-trade-ideas` gained an opt-in `--lookback N` historical scan.
 - **B1 triple-barrier**: fully built (label core, DB forward-path loader, builder,
   train.py wiring) and measured → negative result above. The machinery is reusable
@@ -138,10 +139,9 @@ It is a **position-sizing / regime-gating** signal, not a directional edge.
 
 ## 3. What is left
 
-### 3.1 Commit (highest priority, ~150 files)
-Nothing from the session is committed. Suggest splitting: (a) phase-22 + test
-fixes, (b) scalp LONG/SHORT + EMA-9, (c) label-alphabet + volatility track +
-migrations 010/011.
+### 3.1 DONE — committed
+The session's work is in `82883e7`, this brief in `425b7fb`. Neither is pushed, so
+pushing (or opening a PR) is the only remaining git action.
 
 ### 3.2 DONE — EMA-9 backfilled, and momentum-scalp proven to work
 Indicators and patterns were recomputed for NIFTY50 + BANKNIFTY on 1d and 15m.
