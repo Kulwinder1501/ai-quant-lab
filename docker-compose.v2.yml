@@ -1,0 +1,53 @@
+services:
+  database-v2:
+    image: pgvector/pgvector:pg16
+    container_name: ai-quant-lab-db-v2
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_quant_lab}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_quant_lab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data-v2:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api-v2:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: ai-quant-lab-api-v2
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+    ports:
+      - "4001:4000"
+    depends_on:
+      database-v2:
+        condition: service_healthy
+
+  web-v2:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: ai-quant-lab-web-v2
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: http://localhost:4001/api/v1
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api-v2
+
+volumes:
+  postgres-data-v2:

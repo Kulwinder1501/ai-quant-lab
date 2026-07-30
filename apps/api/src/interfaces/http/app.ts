@@ -665,7 +665,8 @@ export function createApp({ database }: ApplicationDependencies): Express {
     try {
       const limit = parseLimit(request) || 50;
       const dateStr = queryString(request, "date");
-      const ideas = await dashboardRepository.listTradeIdeas(limit, dateStr || undefined);
+      const strategy = queryString(request, "strategy");
+      const ideas = await dashboardRepository.listTradeIdeas(limit, dateStr || undefined, strategy || undefined);
       response.status(200).json({ data: ideas });
     } catch (error) {
       next(error);

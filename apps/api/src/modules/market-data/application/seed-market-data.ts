@@ -115,10 +115,14 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             const date = new Date(q.date);
             const open = Number((q.open ?? q.close ?? 0).toFixed(2));
             const close = Number((q.close ?? 0).toFixed(2));
-            const high = Number((q.high ?? Math.max(open, close)).toFixed(2));
-            const low = Number((q.low ?? Math.min(open, close)).toFixed(2));
+            // Rounding each leg on its own can push the extremes inside the body —
+            // a high of 24175.599 rounds to 24175.60 while its open stays 24175.599609 —
+            // and the candles_check1/check2 invariants then reject the row. Widening to
+            // the rounded body keeps the bar consistent with what is actually stored.
+            const high = Math.max(Number((q.high ?? Math.max(open, close)).toFixed(2)), open, close);
+            const low = Math.min(Number((q.low ?? Math.min(open, close)).toFixed(2)), open, close);
             const volume = q.volume ?? 0;
-            
+
             if (close === 0) continue;
 
             prices.push(close);
@@ -128,7 +132,11 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
               INSERT INTO candles (instrument_id, timeframe, open_time, close_time, open, high, low, close, volume, is_complete, source)
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, 'seed')
               ON CONFLICT (instrument_id, timeframe, open_time) DO UPDATE
-              SET close = EXCLUDED.close, high = EXCLUDED.high, low = EXCLUDED.low, volume = EXCLUDED.volume
+              SET open = EXCLUDED.open,
+                  close = EXCLUDED.close,
+                  high = EXCLUDED.high,
+                  low = EXCLUDED.low,
+                  volume = EXCLUDED.volume
               RETURNING id
             `, [inst.id, tf, date, new Date(date.getTime() + intervalMs - 1), open, high, low, close, volume]);
 

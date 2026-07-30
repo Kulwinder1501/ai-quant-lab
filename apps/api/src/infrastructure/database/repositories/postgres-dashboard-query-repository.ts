@@ -195,7 +195,18 @@ export class PostgresDashboardQueryRepository {
     };
   }
 
-  async listTradeIdeas(limit = 50, dateStr?: string): Promise<DashboardTradeIdeaRow[]> {
+  /**
+   * Newest proposal first, where "newest" is the close of the candle the proposal
+   * was made on — not `generated_at`. `generated_at` is re-stamped every time a
+   * proposal is re-upserted, so a historical re-scan rewrites it for every row and
+   * the resulting order reflects the order the backfill happened to write in rather
+   * than which signal is most recent.
+   *
+   * `strategyKey` filters in SQL on purpose. Filtering in the browser instead applies
+   * `limit` across every strategy first, so the strategy whose rows were written last
+   * fills the whole page and the others vanish from the list entirely.
+   */
+  async listTradeIdeas(limit = 50, dateStr?: string, strategyKey?: string): Promise<DashboardTradeIdeaRow[]> {
     let query = `
       SELECT
         ti.id,
@@ -222,12 +233,22 @@ export class PostgresDashboardQueryRepository {
     `;
     
     const params: any[] = [limit];
+    const conditions: string[] = [];
     if (dateStr) {
-      query += ` WHERE DATE(c.close_time AT TIME ZONE 'Asia/Kolkata') = $2 `;
       params.push(dateStr);
+      conditions.push(`DATE(c.close_time AT TIME ZONE 'Asia/Kolkata') = $${params.length}`);
     }
-    
-    query += ` ORDER BY ti.generated_at DESC, ti.id DESC LIMIT $1`;
+    if (strategyKey) {
+      params.push(strategyKey);
+      conditions.push(`ti.evidence->>'strategy' = $${params.length}`);
+    }
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")} `;
+    }
+
+    // NULLS LAST keeps proposals with no source candle (seeded demo rows) from
+    // sorting above real signals.
+    query += ` ORDER BY c.close_time DESC NULLS LAST, ti.generated_at DESC, ti.id DESC LIMIT $1`;
 
     const result = await this.database.query<QueryResultRow>(query, params);
 

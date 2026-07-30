@@ -52,13 +52,16 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
     setLoading(true);
     setError(null);
     try {
-      const dateParam = dateFilter ? `&date=${dateFilter}` : "";
-      const res = await getResearchJson(`/trade-ideas?limit=100&_t=${Date.now()}${dateParam}`, signal) as { data: TradeIdeaRow[] };
-      let fetched = res.data || [];
-      if (strategyKey) {
-        fetched = fetched.filter(idea => (idea.evidence as any)?.strategy === strategyKey);
-      }
-      setIdeas(fetched);
+      const dateParam = dateFilter ? `&date=${encodeURIComponent(dateFilter)}` : "";
+      // The strategy filter has to go to the API. Filtering the response here instead
+      // applies limit=100 across every strategy first, so whichever strategy was
+      // regenerated last fills the page and this one shows stale rows or nothing.
+      const strategyParam = strategyKey ? `&strategy=${encodeURIComponent(strategyKey)}` : "";
+      const res = await getResearchJson(
+        `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}`,
+        signal,
+      ) as { data: TradeIdeaRow[] };
+      setIdeas(res.data || []);
     } catch (err: any) {
       if (err.name !== "AbortError") {
         setError(err.message || "Failed to load trade ideas.");
