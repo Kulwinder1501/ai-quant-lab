@@ -468,10 +468,54 @@ assembled from the review, and reflection ids are deterministic (`ref-<tradeId>`
 re-review replaces its entry instead of leaving stale text beside it. **0 rows still
 contain the old wording.**
 
+### 3.8 DONE — risk engine, and the volatility model finally has a consumer
+From `improvements.txt` §4.3, scoped to four checks rather than its sixteen. New module
+`risk-management`; `evaluateRisk` is pure, with 15 unit tests.
+
+**Rejection is the default.** A proposal is approved only after every mandatory check
+passes *and* a whole-unit size is solved for. Every early return returns a rejection, so
+a check added later cannot leave a trade accidentally approved. Rejections carry every
+failed reason code, not just the first.
+
+The four checks: risk-based position sizing, max concurrent positions, daily realised
+loss limit, and drawdown from peak equity. Defaults mirror the backtest engine
+(0.5% risk, 0.2 margin) so a risk decision and a backtest of the same rule describe the
+same account.
+
+**This closes §3.5.** The volatility-expansion model is read from
+`auxiliary_model_predictions` — never `model_predictions`, per the disjoint-alphabet
+invariant in §5 — and used to *size*, never to pick a side, which is what the measurement
+in §1 said it is good for. Predicted EXPANSION halves size rather than blocking, because
+expansion makes a fixed stop likelier to be hit; that is a reason to commit less, not a
+reason to think the trade is wrong. Confidence below 0.5 is treated as unknown instead of
+acted on, and **a prediction whose `evidence_cutoff_at` is after the decision is a
+rejection, not a bonus** — the point-in-time guard is enforced in the engine as well as
+the query, so a caller who forgets the predicate fails closed.
+
+Verified against real state via `npm run risk:evaluate -- --account "Alpha Simulation Fund"`:
+
+```
+ceff6255  NIFTY50    LONG  APPROVED qty= 684 risk=250043.04 regime=STABLE@0.7052  [APPROVED]
+bddf91a4  BANKNIFTY  LONG  APPROVED qty=4374 risk=250149.06 regime=none  [APPROVED, REGIME_UNAVAILABLE]
+```
+
+Constant risk is doing what it should: 684 vs 4374 units, both risking ~250,000 (0.5% of
+the account's 50,031,710 equity). At the real position limit every idea is rejected with
+`REJECTED_MAX_CONCURRENT_POSITIONS`, since 4 positions are already open against a limit
+of 3 — `--max-positions` exists to exercise the approval path without changing that.
+
+Two findings from that run: **only NIFTY50 has a volatility prediction**, so BANKNIFTY
+sizes at full and says `REGIME_UNAVAILABLE` rather than pretending; and two ideas hit
+`REJECTED_INSUFFICIENT_CAPITAL` because a very tight stop makes constant-risk sizing
+demand more notional than the account can margin — the same coupling documented in §3.4c,
+now surfacing as an explicit reason code instead of a silent skip.
+
+Not yet wired into execution. It is read-only until the paper-trading path is changed to
+require an approved decision, which is the natural next step.
+
 ### 3.5 Deliberately skipped
-**Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that
-table, so the promoted volatility model is currently inert plumbing. Wiring it into
-position sizing or regime gating is where its value actually lands.
+~~**Phase 4 — a consumer for `auxiliary_model_predictions`.**~~ **DONE — see §3.8.** The
+volatility model is no longer inert; the risk engine sizes positions from it.
 
 ---
 

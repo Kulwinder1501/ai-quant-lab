@@ -36,7 +36,8 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "paper:trades:review": "npm run paper:trades:review --workspace @ai-quant-lab/api --"
+    "paper:trades:review": "npm run paper:trades:review --workspace @ai-quant-lab/api --",
+    "risk:evaluate": "npm run risk:evaluate --workspace @ai-quant-lab/api --"
   },
   "engines": {
     "node": ">=20.11.0",
