@@ -391,6 +391,28 @@ metadata rather than replacing it, and touches no price, volume, or timestamp.
 `YAHOO_PROVIDER_ID` now lives in `market-data/domain/candle-provenance.ts` and the
 Yahoo provider reads it from there, so the string has one definition rather than three.
 
+### 3.6d The seeds no longer rewrite settled history
+The more serious find. `PostgresCandleRepository.upsert` — the path all real ingestion
+goes through — restricts its `ON CONFLICT ... DO UPDATE` with
+**`WHERE candles.is_complete = FALSE`**, so a completed candle is immutable. Both seeds
+ran their own raw upsert with **no such guard** while inserting `is_complete = TRUE`, so
+a seed run could silently rewrite settled bars. The backtests and ML feature builders
+read those exact rows, so results could move underneath them. That the 2026-07-30 candle
+came back byte-identical on the earlier run was luck — both paths fetch from Yahoo — not
+protection.
+
+Both seeds now share `upsertSeedCandle`, which applies the same guard. Because the guard
+makes the conflicting update return no row, the id is read back with a follow-up SELECT
+rather than assumed from `RETURNING` — the previous inline version would have thrown on
+`rows[0].id`. It also unifies the two seeds' update lists, which disagreed (the market
+seed refreshed `open`, the scalp seed did not).
+
+**Proven, not assumed.** A settled NIFTY50 1d candle was deliberately tampered to
+`open=24000.00 close=24010.00`, the full seed was run, and the tampered values were still
+there afterwards — the seed did not touch it. The sentinel was then restored to its real
+values (23971.25 / 24041.15 / 23954.60 / 23985.35). Seeding still works normally: 9002
+candles, all `source='yahoo'`, 4462 seed / 4540 collector, 0 incomplete.
+
 Verified after a second seed run: **all 8964 candles are `source='yahoo'`**, split by
 ingestion path into 4540 collector and 4424 seed. The seeds' `ON CONFLICT` clauses do
 not update the provenance columns, so re-running cannot undo the relabel.

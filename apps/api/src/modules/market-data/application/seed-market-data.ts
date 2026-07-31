@@ -1,7 +1,7 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
 import { simpleRsi } from "../domain/simple-rsi.js";
-import { SEED_SOURCE_METADATA, YAHOO_PROVIDER_ID } from "../domain/candle-provenance.js";
+import { upsertSeedCandle } from "./upsert-seed-candle.js";
 
 export async function seedMarketData(database: DatabasePool): Promise<void> {
   const client = await database.connect();
@@ -126,21 +126,17 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             prices.push(close);
             if (prices.length > 20) prices.shift();
 
-            // source is the provider the prices came from, which is Yahoo; that this
-            // particular row was written by a seed run belongs in source_metadata.
-            const candRes = await client.query<{ id: string }>(`
-              INSERT INTO candles (instrument_id, timeframe, open_time, close_time, open, high, low, close, volume, is_complete, source, source_metadata)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11::jsonb)
-              ON CONFLICT (instrument_id, timeframe, open_time) DO UPDATE
-              SET open = EXCLUDED.open,
-                  close = EXCLUDED.close,
-                  high = EXCLUDED.high,
-                  low = EXCLUDED.low,
-                  volume = EXCLUDED.volume
-              RETURNING id
-            `, [inst.id, tf, date, new Date(date.getTime() + intervalMs - 1), open, high, low, close, volume, YAHOO_PROVIDER_ID, SEED_SOURCE_METADATA]);
-
-            const candleId = candRes.rows[0].id;
+            const candleId = await upsertSeedCandle(client, {
+              instrumentId: inst.id,
+              timeframe: tf,
+              openTime: date,
+              closeTime: new Date(date.getTime() + intervalMs - 1),
+              open,
+              high,
+              low,
+              close,
+              volume,
+            });
             lastCandleId = candleId;
             lastCandleClose = close;
 
