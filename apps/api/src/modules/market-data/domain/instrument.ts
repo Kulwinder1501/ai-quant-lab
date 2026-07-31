@@ -1,5 +1,6 @@
-export const instrumentTypes = ["INDEX", "EQUITY", "ETF"] as const;
+export const instrumentTypes = ["INDEX", "EQUITY", "ETF", "OPTION", "FUTURE"] as const;
 export type InstrumentType = (typeof instrumentTypes)[number];
+export type OptionType = "CE" | "PE";
 
 export interface Instrument {
   id: string;
@@ -12,6 +13,10 @@ export interface Instrument {
   lotSize: number;
   isActive: boolean;
   metadata: Record<string, unknown>;
+  underlyingSymbol?: string | null;
+  strikePrice?: number | null;
+  expiryDate?: string | null;
+  optionType?: OptionType | null;
 }
 
 export interface UpsertInstrumentInput {
@@ -24,10 +29,15 @@ export interface UpsertInstrumentInput {
   lotSize?: number;
   isActive?: boolean;
   metadata?: Record<string, unknown>;
+  underlyingSymbol?: string | null;
+  strikePrice?: number | null;
+  expiryDate?: string | null;
+  optionType?: OptionType | null;
 }
 
 export interface InstrumentRepository {
   upsert(input: UpsertInstrumentInput): Promise<Instrument>;
+  findById(id: string): Promise<Instrument | null>;
   findByExchangeAndSymbol(exchange: Instrument["exchange"], symbol: string): Promise<Instrument | null>;
   listActive(): Promise<Instrument[]>;
 }

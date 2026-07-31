@@ -1,7 +1,9 @@
-import React from "react";
-import { formatNumber, formatTimestamp } from "../../research/presentation";
+"use client";
 
-// Need to match quote resolve from parent if we just pass quotes down or do it here. 
+import { useEffect, useState } from "react";
+import { formatElapsedDuration, formatNumber, formatTimestamp } from "../../research/presentation";
+
+// Need to match quote resolve from parent if we just pass quotes down or do it here.
 // Parent resolves it, let's pass a helper or just the quotes.
 
 export function resolveLiveQuote(tradeSymbol?: string, quotes?: any) {
@@ -21,6 +23,13 @@ interface ActivePositionsTableProps {
 }
 
 export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenCloseModal }: ActivePositionsTableProps) {
+  // Tick every second so "Time in Trade" advances even when the SSE quote is flat.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   if (loading && !summary) {
     return (
       <div className="py-12 text-center text-sm font-semibold text-slate-400">
@@ -51,9 +60,11 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
             <th className="py-3 px-4">Side</th>
             <th className="py-3 px-4">Qty</th>
             <th className="py-3 px-4">Entry Price</th>
+            <th className="py-3 px-4">Target Price</th>
             <th className="py-3 px-4">Live Price</th>
             <th className="py-3 px-4">Live P&amp;L (₹)</th>
             <th className="py-3 px-4">Return %</th>
+            <th className="py-3 px-4">Time in Trade</th>
             <th className="py-3 px-4">AI Strategy / Notes</th>
             <th className="py-3 px-4">Opened At</th>
             <th className="py-3 px-4 text-right">Action</th>
@@ -70,6 +81,9 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
             const livePnl = priceDiff * trade.quantity;
             const liveRet = ((livePnl / (trade.fillPrice * trade.quantity)) * 100);
             const isWinning = livePnl >= 0;
+            const targetPrice = typeof trade.targetPrice === "number" ? trade.targetPrice : null;
+            const stopLoss = typeof trade.stopLoss === "number" ? trade.stopLoss : null;
+            const timeInTrade = formatElapsedDuration(trade.openedAt, nowMs);
 
             return (
               <tr key={trade.id} className="hover:bg-white/[0.03] transition">
@@ -91,6 +105,20 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
                 </td>
                 <td className="py-4 px-4 font-bold text-slate-200">{formatNumber(trade.quantity, 0)}</td>
                 <td className="py-4 px-4 font-semibold text-slate-300">₹{formatNumber(trade.fillPrice, 2)}</td>
+                <td className="py-4 px-4">
+                  {targetPrice === null ? (
+                    <span className="text-slate-500">—</span>
+                  ) : (
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-extrabold text-amber-200">₹{formatNumber(targetPrice, 2)}</span>
+                      {stopLoss !== null && (
+                        <span className="text-[10px] font-mono text-slate-500" title="Stop loss">
+                          SL ₹{formatNumber(stopLoss, 2)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </td>
                 <td className="py-4 px-4 font-black text-white">
                   <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-colors duration-300 ${
                     direction === "UP" ? "bg-emerald-500/25 text-emerald-200 border border-emerald-500/40 shadow-sm shadow-emerald-500/10" :
@@ -117,11 +145,19 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
                     {isWinning ? "+" : ""}{liveRet.toFixed(2)}%
                   </span>
                 </td>
+                <td className="py-4 px-4">
+                  <span
+                    className="inline-flex rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 font-mono text-xs font-bold text-cyan-200"
+                    title={`Opened ${formatTimestamp(trade.openedAt)}`}
+                  >
+                    {timeInTrade}
+                  </span>
+                </td>
                 <td className="py-4 px-4 max-w-[200px] truncate text-slate-400 text-xs">
                   <div className="flex flex-col gap-1">
                     <span className={`inline-flex self-start px-2 py-0.5 rounded text-[10px] font-bold ${
-                      trade.timeframe === "1m" 
-                        ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" 
+                      trade.timeframe === "1m"
+                        ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
                         : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
                     }`}>
                       {trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout"}

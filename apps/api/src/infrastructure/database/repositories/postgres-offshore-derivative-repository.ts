@@ -1,10 +1,6 @@
 import type { Pool } from "pg";
 import type { OffshoreDerivative } from "../../../modules/market-data/domain/offshore-derivative.js";
-
-/** See the note in postgres-institutional-flow-repository: DATE keys bind as strings. */
-function toDateKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
+import { fromDateColumn, toDateKey } from "../date-column.js";
 
 export class PostgresOffshoreDerivativeRepository {
   constructor(private readonly database: Pool) {}
@@ -45,13 +41,31 @@ export class PostgresOffshoreDerivativeRepository {
       [instrumentId, toDateKey(date)],
     );
 
-    const row = result.rows[0];
-    if (!row) return null;
-    return {
-      instrumentId: row.instrument_id,
-      date: row.date,
-      closePrice: Number.parseFloat(String(row.close_price)),
-      publishedAt: row.published_at,
-    };
+    return toDerivative(result.rows[0]);
   }
+
+  /** The most recent print for an instrument, whatever session it belongs to. */
+  async findLatest(instrumentId: string): Promise<OffshoreDerivative | null> {
+    const result = await this.database.query(
+      `
+      SELECT instrument_id, date, close_price, published_at
+      FROM offshore_derivatives
+      WHERE instrument_id = $1
+      ORDER BY date DESC
+      LIMIT 1
+    `,
+      [instrumentId],
+    );
+    return toDerivative(result.rows[0]);
+  }
+}
+
+function toDerivative(row: Record<string, unknown> | undefined): OffshoreDerivative | null {
+  if (!row) return null;
+  return {
+    instrumentId: String(row.instrument_id),
+    date: fromDateColumn(row.date),
+    closePrice: Number.parseFloat(String(row.close_price)),
+    publishedAt: row.published_at as Date,
+  };
 }

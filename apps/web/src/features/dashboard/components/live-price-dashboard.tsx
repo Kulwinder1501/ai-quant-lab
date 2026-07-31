@@ -12,6 +12,7 @@ import { PriceHeroCard } from "./price-hero-card";
 import { AiBrainStream } from "./ai-brain-stream";
 import { PerformanceScorecard } from "./performance-scorecard";
 import { TechnicalIndicators } from "./technical-indicators";
+import { InstitutionalContextCards } from "./institutional-context-cards";
 export interface AiBrainThought {
   id: string;
   timestamp: string;
@@ -218,6 +219,13 @@ export function LivePriceDashboard() {
             </div>
           </div>
         </GlassPanel>
+
+        {/* Institutional context. Rendered outside the price-stream conditional
+            because FII/DII and GIFT Nifty are end-of-day data that do not depend
+            on the SSE feed being connected. */}
+        <div className="mb-8">
+          <InstitutionalContextCards />
+        </div>
 
         {/* Dashboard Main Content */}
         {state !== "ready" || !data ? (

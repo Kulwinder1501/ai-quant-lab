@@ -149,4 +149,32 @@ export class PostgresCandleRepository implements CandleRepository {
     `, [instrumentId, timeframe]);
     return result.rows.map(toCandle);
   }
+
+  /**
+   * The settled daily close for a symbol on a session, by symbol rather than id.
+   *
+   * Restricted to complete candles: a provisional close is still moving, and this
+   * is used as the denominator of an offshore premium, where a mid-session value
+   * would silently misreport the gap. Returns null when the session has no settled
+   * daily bar, which a caller reports as an unmeasurable gap rather than zero.
+   */
+  async findCloseOn(symbol: string, date: Date): Promise<number | null> {
+    const result = await this.database.query<{ close: string }>(`
+      SELECT c.close
+      FROM candles c
+      JOIN instruments i ON i.id = c.instrument_id
+      WHERE i.symbol = $1
+        AND c.timeframe = '1d'
+        AND c.is_complete = TRUE
+        AND c.open_time >= $2::date
+        AND c.open_time < ($2::date + INTERVAL '1 day')
+      ORDER BY c.open_time DESC
+      LIMIT 1
+    `, [symbol, date.toISOString().slice(0, 10)]);
+
+    const row = result.rows[0];
+    if (!row) return null;
+    const parsed = Number.parseFloat(String(row.close));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
 }

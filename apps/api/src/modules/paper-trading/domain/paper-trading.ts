@@ -43,6 +43,8 @@ export interface PaperTrade {
   realizedPnl: number | null;
   /** Total simulated INR costs applied to this trade so far. */
   fees: number;
+  /** Itemised entry/exit fee ledger (Zerodha/NSE options schedule). */
+  feeBreakdown?: Record<string, unknown>;
   /** Total simulated INR slippage costs applied to this trade so far. */
   slippage: number;
   notes: string;
@@ -69,6 +71,15 @@ export interface OpenPaperTradeInput {
   entrySlippage: number;
   notes: string;
   status?: PaperTradeStatus; // If "PENDING", trade waits to be filled
+  /** Optional itemised entry fee ledger persisted on the trade. */
+  feeBreakdown?: Record<string, unknown>;
+  /**
+   * Option-buyer fills store premium-space stop/target and are always LONG
+   * (buying CE or PE). When set, these override the trade idea's index geometry.
+   */
+  stopLossOverride?: number;
+  targetPriceOverride?: number;
+  sideOverride?: TradeSide;
 }
 
 export interface ClosePaperTradeInput {
@@ -79,6 +90,8 @@ export interface ClosePaperTradeInput {
   exitFees: number;
   exitSlippage: number;
   details: Record<string, unknown>;
+  /** Optional itemised exit fee ledger merged into fee_breakdown.exit. */
+  feeBreakdown?: Record<string, unknown>;
 }
 
 export interface FillPendingTradeInput {

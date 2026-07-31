@@ -58,8 +58,8 @@ export function StrategyFilters({
             className="bg-transparent text-sm font-semibold text-white focus:outline-none cursor-pointer"
           >
             <option value="ALL" className="bg-slate-900 text-white">All Sides</option>
-            <option value="BUY" className="bg-slate-900 text-emerald-300">BUY / Long</option>
-            <option value="SELL" className="bg-slate-900 text-rose-300">SELL / Short</option>
+            <option value="LONG" className="bg-slate-900 text-emerald-300">LONG</option>
+            <option value="SHORT" className="bg-slate-900 text-rose-300">SHORT</option>
           </select>
         </div>
 

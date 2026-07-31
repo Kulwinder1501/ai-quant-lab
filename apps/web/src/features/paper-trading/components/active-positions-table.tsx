@@ -2,6 +2,18 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { formatNumber, formatTimestamp } from "../../research/presentation";
 import type { PaperTradeRow } from "../domain";
 
+function lotSizeForSymbol(symbol?: string): number {
+  if (symbol === "BANKNIFTY") return 15;
+  if (symbol === "NIFTY50") return 75;
+  return 1;
+}
+
+function formatLots(quantity: number, symbol?: string): string {
+  const lot = lotSizeForSymbol(symbol);
+  if (lot <= 1 || quantity % lot !== 0) return `${formatNumber(quantity, 0)} units`;
+  return `${quantity / lot} lots (${formatNumber(quantity, 0)} units)`;
+}
+
 interface ActivePositionsTableProps {
   openTrades: PaperTradeRow[];
   pendingTrades: PaperTradeRow[];
@@ -37,6 +49,7 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                 <th className="py-3 px-4">Side</th>
                 <th className="py-3 px-4">Qty</th>
                 <th className="py-3 px-4">Entry Price</th>
+                <th className="py-3 px-4">Fees</th>
                 <th className="py-3 px-4">Opened At</th>
                 <th className="py-3 px-4">Notes</th>
                 <th className="py-3 px-4 text-right">Action</th>
@@ -58,13 +71,18 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                   </td>
                   <td className="py-3.5 px-4">
                     <span className={`inline-flex px-2 py-0.5 rounded text-xs font-bold ${
-                      trade.side === "BUY" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                      trade.side === "BUY" || trade.side === "LONG" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
                     }`}>
                       {trade.side}
                     </span>
                   </td>
-                  <td className="py-3.5 px-4 font-medium text-slate-200">{formatNumber(trade.quantity, 0)}</td>
+                  <td className="py-3.5 px-4 font-medium text-slate-200">
+                    {formatLots(trade.quantity, trade.instrumentSymbol)}
+                  </td>
                   <td className="py-3.5 px-4 font-semibold text-white">₹{formatNumber(trade.fillPrice, 2)}</td>
+                  <td className="py-3.5 px-4 text-xs text-slate-300" title={JSON.stringify(trade.feeBreakdown || {})}>
+                    ₹{formatNumber(trade.entryFees || 0, 2)}
+                  </td>
                   <td className="py-3.5 px-4 text-xs text-slate-400">{formatTimestamp(trade.openedAt)}</td>
                   <td className="py-3.5 px-4 text-xs text-slate-400 max-w-xs truncate">{trade.notes || "—"}</td>
                   <td className="py-3.5 px-4 text-right">

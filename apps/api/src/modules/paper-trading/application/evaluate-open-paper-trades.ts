@@ -1,6 +1,7 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 import type { PaperTradeRepository } from "../domain/paper-trading.js";
+import { calculateExitFees } from "../domain/brokerage-calculator.js";
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -61,8 +62,11 @@ export class EvaluateOpenPaperTrades {
     if (Number.isNaN(asOf.getTime())) {
       throw new Error("As-of timestamp is invalid.");
     }
-    const exitFees = nonNegativeFinite(input.exitFees ?? 0, "Exit fees");
+    const explicitExitFees = input.exitFees;
     const exitSlippage = nonNegativeFinite(input.exitSlippage ?? 0, "Exit slippage");
+    if (explicitExitFees !== undefined) {
+      nonNegativeFinite(explicitExitFees, "Exit fees");
+    }
     const openTrades = await this.paperTradeRepository.listOpenByAccount(input.accountId);
     const pendingTrades = await this.paperTradeRepository.listPendingByAccount(input.accountId);
     let eligibleCandlesRead = 0;
@@ -154,13 +158,17 @@ export class EvaluateOpenPaperTrades {
         }
 
         if (decision) {
+          const exitBreakdown = explicitExitFees === undefined
+            ? calculateExitFees(decision.exitPrice, trade.quantity)
+            : null;
           const closed = await this.paperTradeRepository.close({
             paperTradeId: trade.id,
             exitPrice: decision.exitPrice,
             exitReason: decision.reason,
             closedAt: asOf,
-            exitFees,
+            exitFees: explicitExitFees ?? exitBreakdown!.total,
             exitSlippage,
+            feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
             details: {
               source: "LIVE_MARKET_PRICE_EVALUATOR",
               livePrice,
@@ -186,13 +194,17 @@ export class EvaluateOpenPaperTrades {
         eligibleCandlesRead += 1;
         const decision = decidePaperTradeExit(trade, candle);
         if (!decision) continue;
+        const exitBreakdown = explicitExitFees === undefined
+          ? calculateExitFees(decision.exitPrice, trade.quantity)
+          : null;
         const closed = await this.paperTradeRepository.close({
           paperTradeId: trade.id,
           exitPrice: decision.exitPrice,
           exitReason: decision.reason,
           closedAt: candle.closeTime,
-          exitFees,
+          exitFees: explicitExitFees ?? exitBreakdown!.total,
           exitSlippage,
+          feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
           details: {
             source: "COMPLETED_CANDLE_EVALUATOR",
             candleId: candle.id,

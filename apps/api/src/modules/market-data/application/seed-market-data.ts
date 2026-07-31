@@ -24,8 +24,7 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
       ON CONFLICT (strategy_id, version) DO UPDATE SET is_active = TRUE
       RETURNING id
     `, [strategyId]);
-    const strategyVersionId = verRes.rows[0]?.id;
-    if (!strategyVersionId) throw new Error("Failed to insert/resolve strategy version");
+    if (!verRes.rows[0]?.id) throw new Error("Failed to insert/resolve strategy version");
 
     // 2. Ensure indicator definitions exist
     await client.query(`
@@ -102,8 +101,6 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             continue;
           }
 
-          let lastCandleId: string | null = null;
-          let lastCandleClose: number = 0;
           let lastRsiValue = 50;
 
           let prices: number[] = [];
@@ -137,8 +134,6 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
               close,
               volume,
             });
-            lastCandleId = candleId;
-            lastCandleClose = close;
 
             let sma = close;
             let bbMiddle = close;
@@ -201,44 +196,16 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             // number wrapped in a fabricated vector.
           }
 
-        // 5. Seed active Trade Ideas (PROPOSED status) for this timeframe so Paper Trading works immediately!
-        if (lastCandleId) {
-          const entryPrice = lastCandleClose;
-          const stopLoss = Number((lastCandleClose * 0.985).toFixed(2));
-          const targetPrice = Number((lastCandleClose * 1.03).toFixed(2));
-
-          await client.query(`
-            INSERT INTO trade_ideas (
-              instrument_id, strategy_version_id, source_candle_id, side, status,
-              entry_price, stop_loss, target_price, risk_reward, confidence, reasoning, evidence
-            ) VALUES (
-              $1, $2, $3, 'LONG', 'PROPOSED', $4, $5, $6, 2.0, 0.82,
-              '["Seeded breakout momentum proposal ready for paper simulation"]'::jsonb,
-              '{"trend": "BULLISH", "rsi": 58}'::jsonb
-            )
-            ON CONFLICT (strategy_version_id, source_candle_id, side)
-            WHERE strategy_version_id IS NOT NULL AND source_candle_id IS NOT NULL
-            DO UPDATE SET status = 'PROPOSED', entry_price = EXCLUDED.entry_price, stop_loss = EXCLUDED.stop_loss, target_price = EXCLUDED.target_price
-          `, [inst.id, strategyVersionId, lastCandleId, entryPrice, stopLoss, targetPrice]);
-
-          // No seeded model_predictions row.
-          //
-          // This block used to nearest-neighbour the pseudo-embeddings, turn the
-          // hit rate into a BULLISH/BEARISH call, and write it to
-          // `model_predictions` with hardcoded feature coefficients (0.421, 0.315)
-          // and a hardcoded `linearScore: 0.856` -- attributed to whichever real
-          // model happened to be in PRODUCTION. The predictions dashboard could not
-          // distinguish those rows from genuine inference output.
-          //
-          // It was also one archived model away from breaking a documented
-          // invariant: `SELECT ... WHERE stage = 'PRODUCTION' LIMIT 1` now returns
-          // the volatility-expansion model, so it would have written a directional
-          // label against a model whose label alphabet is
-          // CONTRACTION/STABLE/EXPANSION -- exactly the confusion migration 011
-          // created a separate table to make impossible.
-          //
-          // Real predictions come from `apps/ml/predict.py`.
-        }
+        // No seeded trade_ideas row.
+        //
+        // This previously inserted a LONG proposal from `lastCandleClose` with a
+        // hard-coded 1.5% stop / 3% target and the reasoning string
+        // "Seeded breakout momentum proposal ready for paper simulation". That row
+        // lived in the same table real strategy evaluation writes to, so the
+        // Strategy dashboard could not tell a demo placeholder from a rule-scored
+        // idea. Real proposals come from `analysis:generate-trade-ideas` (or the
+        // Generate Proposals button), which runs TrendBreakoutStrategy over real
+        // indicator/pattern evidence.
       }
     }
 

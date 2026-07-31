@@ -42,7 +42,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
   const [selectedIdea, setSelectedIdea] = useState<TradeIdeaRow | null>(null);
   const [accounts, setAccounts] = useState<PaperAccountOption[]>([]);
   const [simAccountId, setSimAccountId] = useState<string>("");
-  const [simQuantity, setSimQuantity] = useState<number>(50);
+  const [simLots, setSimLots] = useState<number>(1);
   const [simNotes, setSimNotes] = useState<string>("Simulated from Strategy Dashboard");
   const [simulating, setSimulating] = useState<boolean>(false);
   const [simSuccess, setSimSuccess] = useState<string | null>(null);
@@ -115,7 +115,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
 
   const openSimulateModal = async (idea: TradeIdeaRow) => {
     setSelectedIdea(idea);
-    setSimQuantity(50);
+    setSimLots(1);
     setSimNotes(`Simulated ${idea.side} entry on ${idea.instrumentSymbol}`);
     setSimSuccess(null);
     setSimError(null);
@@ -143,8 +143,9 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
         accountId: simAccountId,
         tradeIdeaId: selectedIdea.id,
         fillPrice: selectedIdea.entryPrice,
-        quantity: Number(simQuantity),
+        lots: Number(simLots),
         notes: simNotes,
+        asOptionBuyer: true,
       });
       setSimSuccess(`Successfully simulated ${selectedIdea.side} position for ${selectedIdea.instrumentSymbol} in portfolio!`);
       setTimeout(() => {
@@ -177,7 +178,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
       <PageHeader
         eyebrow="Quantitative Proposals"
         title={isScalp ? "Scalp Strategy & Ideas" : "Strategy Engine & Trade Ideas"}
-        description="Generate and evaluate quantitative breakout proposals from historical market context. Filter by side, confidence, and instrument."
+        description="Proposals from the latest settled candle close. Today's open session is evaluated after the bar completes — expired historical setups are hidden."
       >
       </PageHeader>
       <div className="space-y-6">
@@ -246,8 +247,8 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
           accounts={accounts}
           simAccountId={simAccountId}
           setSimAccountId={setSimAccountId}
-          simQuantity={simQuantity}
-          setSimQuantity={setSimQuantity}
+          simLots={simLots}
+          setSimLots={setSimLots}
           simNotes={simNotes}
           setSimNotes={setSimNotes}
           simulating={simulating}

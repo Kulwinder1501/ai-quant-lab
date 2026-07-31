@@ -6,6 +6,7 @@ const coreInstruments = [
     symbol: "NIFTY50",
     displayName: "NIFTY 50",
     instrumentType: "INDEX" as const,
+    lotSize: 75,
     metadata: { market: "India", canonicalName: "NIFTY 50", kiteQuoteSymbol: "NSE:NIFTY 50" },
   },
   {
@@ -13,10 +14,10 @@ const coreInstruments = [
     symbol: "BANKNIFTY",
     displayName: "NIFTY BANK",
     instrumentType: "INDEX" as const,
+    lotSize: 15,
     metadata: { market: "India", canonicalName: "NIFTY BANK", kiteQuoteSymbol: "NSE:NIFTY BANK" },
   },
 ];
-
 export async function seedCoreInstruments(repository: InstrumentRepository): Promise<Instrument[]> {
   return Promise.all(coreInstruments.map((instrument) => repository.upsert(instrument)));
 }

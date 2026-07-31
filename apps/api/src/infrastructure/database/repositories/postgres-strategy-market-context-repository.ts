@@ -106,6 +106,10 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       WHERE candles.instrument_id = $1
         AND candles.timeframe = $2
         AND candles.is_complete = TRUE
+        -- Yahoo historical imports mark the still-open session bar complete; its
+        -- close_time is still in the future. Strategies evaluate only bars whose
+        -- close has already elapsed, matching the market-scanner settled-bar rule.
+        AND candles.close_time <= CURRENT_TIMESTAMP
       ORDER BY candles.close_time DESC, candles.open_time DESC
       LIMIT 1
     `, [input.instrumentId, input.timeframe]);
@@ -138,6 +142,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       WHERE candles.instrument_id = $1
         AND candles.timeframe = $2
         AND candles.is_complete = TRUE
+        AND candles.close_time <= CURRENT_TIMESTAMP
       ORDER BY candles.close_time DESC, candles.open_time DESC
       LIMIT $3
     `, [input.instrumentId, input.timeframe, limit]);

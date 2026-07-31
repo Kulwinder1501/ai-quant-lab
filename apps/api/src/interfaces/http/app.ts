@@ -46,7 +46,16 @@ import { OpenPaperTrade } from "../../modules/paper-trading/application/open-pap
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { ClosePaperTrade } from "../../modules/paper-trading/application/close-paper-trade.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
+import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
+import { calculateEntryFees, calculateExitFees, calculateTotalFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
+import { lotsToQuantity } from "../../modules/paper-trading/domain/lot-size-validator.js";
+import {
+  defaultWeeklyExpiry,
+  mapIdeaToOptionBuyerFill,
+} from "../../modules/paper-trading/domain/option-buyer-fill.js";
+import { priceOption } from "../../modules/pricing/application/price-option.js";
+import { regimeSourceInstrumentSymbol } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresAiJournalRepository } from "../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
@@ -58,6 +67,9 @@ import { AiAutonomousAgent } from "../../modules/strategy-engine/application/ai-
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { ListMarketNewsService } from "../../modules/news-sentiment/application/list-market-news.js";
+import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
+import { PostgresOffshoreDerivativeRepository } from "../../infrastructure/database/repositories/postgres-offshore-derivative-repository.js";
+import { GetInstitutionalContextService } from "../../modules/market-data/application/get-institutional-context.js";
 
 export interface ApplicationDependencies {
   database: any;
@@ -271,6 +283,7 @@ export function createApp({ database }: ApplicationDependencies): Express {
   const paperAccountRepository = new PostgresPaperAccountRepository(database);
   const paperTradeRepository = new PostgresPaperTradeRepository(database);
   const candleRepository = new PostgresCandleRepository(database);
+  const instrumentRepository = new PostgresInstrumentRepository(database);
   const tradeIdeaRepository = new PostgresTradeIdeaRepository(database);
   const strategyVersionRepository = new PostgresStrategyVersionRepository(database);
   const strategyContextRepository = new PostgresStrategyMarketContextRepository(database);
@@ -289,6 +302,12 @@ export function createApp({ database }: ApplicationDependencies): Express {
   const runBacktest = new RunBacktest(backtestRepository, backtestMarketDataRepository);
   const ingestNews = new IngestRssNewsService(newsRepository);
   const listNews = new ListMarketNewsService(newsRepository);
+
+  const getInstitutionalContext = new GetInstitutionalContextService(
+    new PostgresInstitutionalFlowRepository(database),
+    new PostgresOffshoreDerivativeRepository(database),
+    candleRepository,
+  );
 
   // No schedules here. RSS ingestion, the EOD pipeline, and institutional collection
   // are owned by `apps/api/src/interfaces/scheduler/scheduler.ts` (`npm run scheduler`).
@@ -567,21 +586,139 @@ export function createApp({ database }: ApplicationDependencies): Express {
 
   app.post("/api/v1/paper-trades/open", async (request, response, _next) => {
     try {
-      const { accountId, tradeIdeaId, fillPrice, quantity, notes, orderType } = request.body || {};
-      if (!accountId || !tradeIdeaId || typeof fillPrice !== "number" || typeof quantity !== "number") {
-        response.status(400).json({ error: "accountId, tradeIdeaId, fillPrice, and quantity are required." });
-        return;
-      }
-      const trade = await openPaperTrade.execute({
+      const {
         accountId,
         tradeIdeaId,
         fillPrice,
         quantity,
+        lots,
+        notes,
+        orderType,
+        asOptionBuyer = true,
+        impliedVolatility,
+        expiryDate,
+      } = request.body || {};
+      if (!accountId || !tradeIdeaId) {
+        response.status(400).json({ error: "accountId and tradeIdeaId are required." });
+        return;
+      }
+
+      const ideaResult = await database.query(`
+        SELECT ti.id, ti.side, ti.entry_price, ti.stop_loss, ti.target_price,
+               ti.instrument_id, i.lot_size, i.symbol, i.strike_step
+        FROM trade_ideas ti
+        INNER JOIN instruments i ON i.id = ti.instrument_id
+        WHERE ti.id = $1
+      `, [tradeIdeaId]);
+      const idea = ideaResult.rows[0] as {
+        id: string;
+        side: TradeSide;
+        entry_price: string;
+        stop_loss: string;
+        target_price: string;
+        instrument_id: string;
+        lot_size: number;
+        symbol: string;
+        strike_step: string | null;
+      } | undefined;
+      if (!idea) {
+        response.status(404).json({ error: "Trade idea not found." });
+        return;
+      }
+
+      const lotSize = Number(idea.lot_size);
+      const resolvedQuantity = typeof lots === "number" && lots > 0
+        ? lotsToQuantity(Math.floor(lots), lotSize)
+        : quantity;
+      if (typeof resolvedQuantity !== "number") {
+        response.status(400).json({ error: "quantity or lots is required." });
+        return;
+      }
+
+      let openFill = typeof fillPrice === "number" ? fillPrice : Number(idea.entry_price);
+      let stopOverride: number | undefined;
+      let targetOverride: number | undefined;
+      let sideOverride: TradeSide | undefined;
+      let feeMeta: Record<string, unknown> | undefined;
+
+      if (asOptionBuyer) {
+        let iv = typeof impliedVolatility === "number" ? impliedVolatility : undefined;
+        if (iv === undefined) {
+          const vixClose = await database.query(`
+            SELECT c.close
+            FROM candles c
+            INNER JOIN instruments i ON i.id = c.instrument_id
+            WHERE i.symbol = $1
+              AND c.timeframe = '1d'
+              AND c.is_complete = TRUE
+              AND c.close_time <= CURRENT_TIMESTAMP
+            ORDER BY c.close_time DESC
+            LIMIT 1
+          `, [regimeSourceInstrumentSymbol]);
+          if (vixClose.rows[0]) {
+            iv = Number((vixClose.rows[0] as { close: string }).close) / 100;
+          }
+        }
+        if (iv === undefined || !Number.isFinite(iv) || iv <= 0) {
+          iv = 0.12;
+        }
+        if (iv > 1) iv = iv / 100;
+
+        // From instruments.strike_step rather than a symbol ternary, so adding an
+        // underlying is a data change. Refused outright when unset: guessing an interval
+        // produces strikes that do not exist on the exchange.
+        const strikeStep = idea.strike_step === null ? null : Number(idea.strike_step);
+        if (strikeStep === null || !Number.isFinite(strikeStep) || strikeStep <= 0) {
+          response.status(422).json({
+            error: `Instrument ${idea.symbol} has no strike_step configured, so an option strike cannot be chosen.`,
+          });
+          return;
+        }
+
+        const expiry = expiryDate ? new Date(expiryDate) : defaultWeeklyExpiry();
+        const mapped = mapIdeaToOptionBuyerFill({
+          ideaSide: idea.side,
+          underlyingEntry: Number(idea.entry_price),
+          underlyingStop: Number(idea.stop_loss),
+          underlyingTarget: Number(idea.target_price),
+          impliedVolatility: iv,
+          expiryDate: expiry,
+          strikeStep,
+        });
+        openFill = mapped.fillPremium;
+        stopOverride = mapped.stopPremium;
+        targetOverride = mapped.targetPremium;
+        sideOverride = mapped.side;
+        feeMeta = {
+          entry: calculateEntryFees(openFill, resolvedQuantity),
+          option: {
+            optionType: mapped.optionType,
+            strike: mapped.strike,
+            impliedVolatility: iv,
+            expiryDate: expiry.toISOString(),
+            greeks: mapped.entryGreeks,
+            underlyingEntry: Number(idea.entry_price),
+          },
+        };
+      }
+
+      const trade = await openPaperTrade.execute({
+        accountId,
+        tradeIdeaId,
+        fillPrice: openFill,
+        quantity: resolvedQuantity,
         openedAt: new Date(),
-        entryFees: 0,
+        entryFees: feeMeta && typeof (feeMeta.entry as { total?: number })?.total === "number"
+          ? (feeMeta.entry as { total: number }).total
+          : undefined,
         entrySlippage: 0,
-        notes: notes || "Opened via UI",
+        notes: notes || "Opened via UI (option buyer)",
         orderType: orderType === "PENDING" ? "PENDING" : "MARKET",
+        stopLossOverride: stopOverride,
+        targetPriceOverride: targetOverride,
+        sideOverride,
+        feeBreakdown: feeMeta,
+        applyBrokerageFees: !feeMeta,
       });
       response.status(201).json({ data: trade });
     } catch (error: any) {
@@ -637,7 +774,6 @@ export function createApp({ database }: ApplicationDependencies): Express {
         paperTradeId,
         exitPrice,
         closedAt: new Date(),
-        exitFees: 0,
         exitSlippage: 0,
         notes: notes || "Manually closed from UI",
       });
@@ -647,13 +783,121 @@ export function createApp({ database }: ApplicationDependencies): Express {
     }
   });
 
+  app.get("/api/v1/pricing/options", async (request, response, next) => {
+    try {
+      const underlyingPrice = Number(queryString(request, "underlyingPrice"));
+      const strikePrice = Number(queryString(request, "strikePrice"));
+      const expiryRaw = queryString(request, "expiryDate");
+      const optionTypeRaw = (queryString(request, "optionType") || "").toUpperCase();
+      const ivRaw = Number(queryString(request, "iv") ?? queryString(request, "impliedVolatility"));
+      if (!Number.isFinite(underlyingPrice) || !Number.isFinite(strikePrice) || !expiryRaw || !Number.isFinite(ivRaw)) {
+        response.status(400).json({
+          error: "underlyingPrice, strikePrice, expiryDate, optionType, and iv are required.",
+        });
+        return;
+      }
+      if (optionTypeRaw !== "CE" && optionTypeRaw !== "PE") {
+        response.status(400).json({ error: "optionType must be CE or PE." });
+        return;
+      }
+      const priced = priceOption({
+        underlyingPrice,
+        strikePrice,
+        expiryDate: new Date(expiryRaw),
+        optionType: optionTypeRaw,
+        impliedVolatility: ivRaw,
+      });
+      response.status(200).json({ data: priced });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/v1/instruments/:id/lot-info", async (request, response, next) => {
+    try {
+      const instrument = await instrumentRepository.findById(request.params.id || "");
+      if (!instrument) {
+        response.status(404).json({ error: "Instrument not found." });
+        return;
+      }
+      const premium = Number(queryString(request, "premium") ?? 100);
+      const lots = Math.max(1, Math.floor(Number(queryString(request, "lots") ?? 1)));
+      const quantity = lotsToQuantity(lots, instrument.lotSize);
+      const entry = calculateEntryFees(premium, quantity);
+      const exit = calculateExitFees(premium, quantity);
+      const roundTrip = calculateTotalFees(premium, premium, quantity);
+      response.status(200).json({
+        data: {
+          instrumentId: instrument.id,
+          symbol: instrument.symbol,
+          lotSize: instrument.lotSize,
+          tickSize: instrument.tickSize,
+          lots,
+          quantity,
+          premium,
+          feeEstimate: {
+            entry,
+            exit,
+            roundTripTotal: roundTrip.total,
+            totalCost: Number((premium * quantity + entry.total).toFixed(2)),
+          },
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/v1/instruments/by-symbol/:symbol/lot-info", async (request, response, next) => {
+    try {
+      const symbol = (request.params.symbol || "").toUpperCase();
+      const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
+      if (!instrument) {
+        response.status(404).json({ error: `Instrument ${symbol} not found.` });
+        return;
+      }
+      const premium = Number(queryString(request, "premium") ?? 100);
+      const lots = Math.max(1, Math.floor(Number(queryString(request, "lots") ?? 1)));
+      const quantity = lotsToQuantity(lots, instrument.lotSize);
+      const entry = calculateEntryFees(premium, quantity);
+      const exit = calculateExitFees(premium, quantity);
+      const roundTrip = calculateTotalFees(premium, premium, quantity);
+      response.status(200).json({
+        data: {
+          instrumentId: instrument.id,
+          symbol: instrument.symbol,
+          lotSize: instrument.lotSize,
+          tickSize: instrument.tickSize,
+          lots,
+          quantity,
+          premium,
+          feeEstimate: {
+            entry,
+            exit,
+            roundTripTotal: roundTrip.total,
+            totalCost: Number((premium * quantity + entry.total).toFixed(2)),
+          },
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   // Strategy & Trade Ideas Routes
   app.get("/api/v1/trade-ideas", async (request, response, next) => {
     try {
       const limit = parseLimit(request) || 50;
       const dateStr = queryString(request, "date");
       const strategy = queryString(request, "strategy");
-      const ideas = await dashboardRepository.listTradeIdeas(limit, dateStr || undefined, strategy || undefined);
+      const includeExpired = queryString(request, "includeExpired") === "true"
+        || queryString(request, "includeExpired") === "1";
+      const ideas = await dashboardRepository.listTradeIdeas(
+        limit,
+        dateStr || undefined,
+        strategy || undefined,
+        includeExpired,
+      );
       response.status(200).json({ data: ideas });
     } catch (error) {
       next(error);
@@ -1088,6 +1332,24 @@ export function createApp({ database }: ApplicationDependencies): Express {
   app.post("/api/v1/market-news/refresh", async (_request, response, next) => {
     try {
       const result = await ingestNews.execute();
+      response.status(200).json({ data: result });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // GET-only. Reports what was collected, including the fact that nothing was:
+  // an absent GIFT Nifty print is a described state, never a substituted number.
+  app.get("/api/v1/institutional-context", async (request, response, next) => {
+    try {
+      const sessionsText = queryString(request, "sessions");
+      const sessions = sessionsText ? Number(sessionsText) : undefined;
+      if (sessions !== undefined && (!Number.isFinite(sessions) || sessions < 1)) {
+        response.status(400).json({ error: "`sessions` must be a positive integer." });
+        return;
+      }
+
+      const result = await getInstitutionalContext.execute({ historySessions: sessions });
       response.status(200).json({ data: result });
     } catch (error) {
       next(error);

@@ -56,7 +56,12 @@ function validateCandle(candle: HistoricalMarketCandle): void {
 function toPersistenceInput(
   candle: HistoricalMarketCandle,
   input: ImportHistoricalMarketDataInput,
+  now: Date,
 ): UpsertCandleInput {
+  // Providers (Yahoo especially) return the in-progress session bar with a
+  // projected close_time still ahead of wall clock. Marking that bar complete
+  // made GenerateTradeIdeas treat a mid-session print as a settled close.
+  const isComplete = candle.closeTime.getTime() <= now.getTime();
   return {
     instrumentId: input.instrument.id,
     timeframe: input.timeframe,
@@ -67,7 +72,7 @@ function toPersistenceInput(
     low: candle.low,
     close: candle.close,
     volume: candle.volume,
-    isComplete: true,
+    isComplete,
     source: input.provider.id,
     sourceMetadata: { providerInstrumentId: input.providerInstrumentId },
   };
@@ -75,7 +80,8 @@ function toPersistenceInput(
 
 /**
  * Coordinates ingestion and keeps the provider adapter outside the application rule.
- * Historical input is always stored as completed candles; live updates are a later phase.
+ * Settled provider bars are stored complete; a bar whose close is still ahead of
+ * wall clock stays provisional so live updates and strategy evaluation can own it.
  */
 export class ImportHistoricalMarketData {
   constructor(
@@ -127,6 +133,7 @@ export class ImportHistoricalMarketData {
         timestamps.add(timestamp);
       }
       let candlesSkipped = 0;
+      const now = new Date();
       for (const candle of candles) {
         if (input.skipExisting) {
           const existing = await this.candleRepository.findByKey(
@@ -141,7 +148,10 @@ export class ImportHistoricalMarketData {
             continue;
           }
         }
-        await this.candleRepository.upsert({ ...toPersistenceInput(candle, input), ingestionId: ingestion.id });
+        await this.candleRepository.upsert({
+          ...toPersistenceInput(candle, input, now),
+          ingestionId: ingestion.id,
+        });
       }
 
       const candlesPersisted = candles.length - candlesSkipped;

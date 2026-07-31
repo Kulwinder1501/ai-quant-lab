@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { formatNumber } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
+import { getResearchJson } from "../../research/api";
 import type { TradeIdeaRow } from "../domain";
 
 interface PaperAccountOption {
@@ -16,8 +17,8 @@ interface SimulateTradeModalProps {
   accounts: PaperAccountOption[];
   simAccountId: string;
   setSimAccountId: (v: string) => void;
-  simQuantity: number;
-  setSimQuantity: (v: number) => void;
+  simLots: number;
+  setSimLots: (v: number) => void;
   simNotes: string;
   setSimNotes: (v: string) => void;
   simulating: boolean;
@@ -33,8 +34,8 @@ export function SimulateTradeModal({
   accounts,
   simAccountId,
   setSimAccountId,
-  simQuantity,
-  setSimQuantity,
+  simLots,
+  setSimLots,
   simNotes,
   setSimNotes,
   simulating,
@@ -42,6 +43,24 @@ export function SimulateTradeModal({
   simError,
   onSubmit,
 }: SimulateTradeModalProps) {
+  const [lotSize, setLotSize] = useState(75);
+  const [entryFees, setEntryFees] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!show || !selectedIdea) return;
+    const controller = new AbortController();
+    void getResearchJson(
+      `/instruments/by-symbol/${encodeURIComponent(selectedIdea.instrumentSymbol)}/lot-info?lots=${simLots}&premium=100`,
+      controller.signal,
+    )
+      .then((res: any) => {
+        setLotSize(res.data.lotSize);
+        setEntryFees(res.data.feeEstimate.entry.total);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [show, selectedIdea, simLots]);
+
   if (!show || !selectedIdea) return null;
 
   return (
@@ -49,7 +68,7 @@ export function SimulateTradeModal({
       <GlassPanel className="w-full max-w-md max-h-[90vh] overflow-y-auto p-6 border-cyan-500/30 bg-slate-950 shadow-2xl">
         <h3 className="text-xl font-bold text-white">Simulate in Paper Portfolio</h3>
         <p className="text-xs text-slate-400 mt-1">
-          Execute a simulated {selectedIdea.side} order for {selectedIdea.instrumentSymbol} at ₹{formatNumber(selectedIdea.entryPrice, 2)}.
+          Buy ATM {selectedIdea.side === "SHORT" ? "PE" : "CE"} for {selectedIdea.instrumentSymbol} (option-buyer). Underlying ref ₹{formatNumber(selectedIdea.entryPrice, 2)}.
         </p>
 
         {simSuccess && <p className="mt-3 text-xs text-emerald-300 bg-emerald-500/10 p-2.5 rounded-xl border border-emerald-500/20 font-bold">{simSuccess}</p>}
@@ -77,16 +96,24 @@ export function SimulateTradeModal({
             )}
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase">Quantity (Shares / Lots)</label>
-            <input
-              type="number"
-              required
-              min="1"
-              step="1"
-              value={simQuantity}
-              onChange={(e) => setSimQuantity(Number(e.target.value))}
-              className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400 font-bold"
-            />
+            <label className="block text-xs font-semibold text-slate-300 uppercase">Number of Lots</label>
+            <div className="mt-1 flex items-center gap-2">
+              <button type="button" onClick={() => setSimLots(Math.max(1, simLots - 1))} className="h-9 w-9 rounded-lg border border-white/10 bg-white/5 text-white">−</button>
+              <input
+                type="number"
+                required
+                min="1"
+                step="1"
+                value={simLots}
+                onChange={(e) => setSimLots(Math.max(1, Number(e.target.value) || 1))}
+                className="w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white text-center font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400"
+              />
+              <button type="button" onClick={() => setSimLots(simLots + 1)} className="h-9 w-9 rounded-lg border border-white/10 bg-white/5 text-white">+</button>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-400">{simLots} × {lotSize} = {simLots * lotSize} units</p>
+            {entryFees !== null && (
+              <p className="mt-1 text-[10px] text-cyan-300/80">Est. entry fees ≈ ₹{formatNumber(entryFees, 2)} (exact on fill premium)</p>
+            )}
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase">Simulation Notes</label>
@@ -116,7 +143,7 @@ export function SimulateTradeModal({
                   <span>Simulating...</span>
                 </>
               ) : (
-                <span>🚀 Confirm Order</span>
+                <span>Confirm Order</span>
               )}
             </button>
           </div>

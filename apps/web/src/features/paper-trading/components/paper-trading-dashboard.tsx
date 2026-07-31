@@ -46,7 +46,7 @@ export function PaperTradingDashboard() {
   const [tradeIdeas, setTradeIdeas] = useState<TradeIdeaOption[]>([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState<string>("");
   const [openFillPrice, setOpenFillPrice] = useState<number>(0);
-  const [openQuantity, setOpenQuantity] = useState<number>(50);
+  const [openLots, setOpenLots] = useState<number>(1);
   const [openOrderType, setOpenOrderType] = useState<"MARKET" | "PENDING">("MARKET");
   const [openNotes, setOpenNotes] = useState<string>("Opened from Paper Trading UI");
   const [openError, setOpenError] = useState<string | null>(null);
@@ -168,9 +168,10 @@ export function PaperTradingDashboard() {
         accountId: selectedAccountId,
         tradeIdeaId: selectedIdeaId,
         fillPrice: Number(openFillPrice),
-        quantity: Number(openQuantity),
+        lots: Number(openLots),
         notes: openNotes,
         orderType: openOrderType,
+        asOptionBuyer: true,
       });
       setShowOpenModal(false);
       await fetchSummary(selectedAccountId);
@@ -352,8 +353,8 @@ export function PaperTradingDashboard() {
           onIdeaSelectionChange={handleIdeaSelectionChange}
           openFillPrice={openFillPrice}
           setOpenFillPrice={setOpenFillPrice}
-          openQuantity={openQuantity}
-          setOpenQuantity={setOpenQuantity}
+          openLots={openLots}
+          setOpenLots={setOpenLots}
           openOrderType={openOrderType}
           setOpenOrderType={setOpenOrderType}
           openNotes={openNotes}

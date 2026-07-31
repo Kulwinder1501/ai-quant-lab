@@ -87,17 +87,23 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
 
   const linkClass = (href: string) =>
     classNames(
-      "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 motion-reduce:transition-none",
+      "flex items-center rounded-lg text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 motion-reduce:transition-none",
       pathname === href
         ? "bg-cyan-300/15 text-cyan-100 shadow-inner shadow-cyan-200/10"
         : "text-slate-300 hover:bg-white/5 hover:text-slate-100",
-      collapsed ? "justify-center px-0" : ""
+      // Collapsed rail: square centered icon hits. Expanded: label + icon row.
+      collapsed ? "justify-center size-10 mx-auto" : "gap-3 px-3 py-2.5",
     );
 
   return (
-    <div className="flex h-full flex-col">
-      <div className={classNames("flex items-center gap-3 px-4 py-6 sm:px-6 lg:px-6 lg:py-8", collapsed ? "justify-center px-0" : "")}>
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 shadow-lg shadow-cyan-500/20">
+    <div className="flex h-full min-h-0 flex-col">
+      <div
+        className={classNames(
+          "flex shrink-0 items-center gap-3 py-5",
+          collapsed ? "justify-center px-2" : "px-4 sm:px-6",
+        )}
+      >
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 shadow-lg shadow-cyan-500/20">
           <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
@@ -110,51 +116,61 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pb-4 scrollbar-hide">
+      <div
+        className={classNames(
+          "min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-4 scrollbar-hide",
+          collapsed ? "px-2" : "px-4",
+        )}
+      >
         <nav aria-label="Sidebar navigation" className="flex flex-col gap-6">
           {sections.map((section, idx) => (
-            <div key={idx}>
+            <div key={idx} className={collapsed ? "flex flex-col items-center gap-1.5" : undefined}>
               {!collapsed && (
                 <div className="mb-2 pl-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   {section.title}
                 </div>
               )}
-              <div className="flex flex-col gap-1.5">
+              <div className={classNames("flex flex-col", collapsed ? "items-center gap-1.5" : "gap-1.5")}>
                 {section.items.map((item) => (
                   <Link
                     key={item.href}
                     href={item.href}
                     aria-current={pathname === item.href ? "page" : undefined}
+                    aria-label={collapsed ? item.name : undefined}
                     className={linkClass(item.href)}
                     title={collapsed ? item.name : undefined}
                   >
-                    {item.icon}
+                    <span className="shrink-0">{item.icon}</span>
                     {!collapsed && <span>{item.name}</span>}
                   </Link>
                 ))}
               </div>
             </div>
           ))}
-          
+
           <div className="border-t border-slate-700/50 w-full" />
-          
+
           <Link
             href="/settings"
             aria-current={pathname === "/settings" ? "page" : undefined}
+            aria-label={collapsed ? "Settings" : undefined}
             className={linkClass("/settings")}
             title={collapsed ? "Settings" : undefined}
           >
-            <Settings className="size-5" />
+            <Settings className="size-5 shrink-0" />
             {!collapsed && <span>Settings</span>}
           </Link>
         </nav>
       </div>
 
-      <div className="p-4 border-t border-white/10">
+      <div className={classNames("shrink-0 border-t border-white/10", collapsed ? "p-2" : "p-4")}>
         <button
+          type="button"
           onClick={onToggleCollapse}
           className="flex w-full items-center justify-center rounded-lg p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100 transition"
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!collapsed}
         >
           {collapsed ? <ChevronRight className="size-5" /> : <ChevronLeft className="size-5" />}
         </button>

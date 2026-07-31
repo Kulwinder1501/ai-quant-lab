@@ -46,10 +46,11 @@ async function main(): Promise<void> {
 
     const ideas = await client.query<{
       id: string; instrument_id: string; symbol: string; side: "LONG" | "SHORT";
-      entry_price: string; stop_loss: string; target_price: string;
+      entry_price: string; stop_loss: string; target_price: string; lot_size: string;
     }>(`
       SELECT trade_ideas.id, trade_ideas.instrument_id, instruments.symbol, trade_ideas.side,
-             trade_ideas.entry_price, trade_ideas.stop_loss, trade_ideas.target_price
+             trade_ideas.entry_price, trade_ideas.stop_loss, trade_ideas.target_price,
+             instruments.lot_size
       FROM trade_ideas
       JOIN instruments ON instruments.id = trade_ideas.instrument_id
       WHERE trade_ideas.status = 'PROPOSED'
@@ -73,13 +74,14 @@ async function main(): Promise<void> {
         entryPrice: Number(idea.entry_price),
         stopLoss: Number(idea.stop_loss),
         targetPrice: Number(idea.target_price),
+        lotSize: Number(idea.lot_size),
       }, state, policy);
 
       const regime = state.volatilityRegime;
       console.log(
         `${idea.id.substring(0, 8)}  ${idea.symbol.padEnd(10)} ${idea.side.padEnd(5)} `
         + `${decision.approved ? "APPROVED" : "REJECTED"} qty=${String(decision.approvedQuantity).padStart(5)} `
-        + `risk=${String(decision.estimatedRiskAmount).padStart(10)} `
+        + `risk=${String(decision.estimatedRiskAmount).padStart(10)} lot=${String(idea.lot_size).padStart(3)} `
         + `regime=${regime ? `${regime.prediction}@${regime.confidence}` : "none"}  [${decision.reasonCodes.join(", ")}]`,
       );
     }

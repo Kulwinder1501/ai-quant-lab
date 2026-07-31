@@ -1,5 +1,28 @@
+import { useEffect, useMemo, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
+import { formatNumber } from "../../research/presentation";
+import { getResearchJson } from "../../research/api";
 import type { TradeIdeaOption } from "./paper-trading-dashboard";
+
+interface LotInfoResponse {
+  data: {
+    lotSize: number;
+    quantity: number;
+    lots: number;
+    feeEstimate: {
+      entry: {
+        brokerage: number;
+        stt: number;
+        exchangeCharges: number;
+        sebiCharges: number;
+        gst: number;
+        stampDuty: number;
+        total: number;
+      };
+      totalCost: number;
+    };
+  };
+}
 
 interface OpenTradeModalProps {
   show: boolean;
@@ -10,8 +33,8 @@ interface OpenTradeModalProps {
   onIdeaSelectionChange: (id: string) => void;
   openFillPrice: number;
   setOpenFillPrice: (val: number) => void;
-  openQuantity: number;
-  setOpenQuantity: (val: number) => void;
+  openLots: number;
+  setOpenLots: (val: number) => void;
   openOrderType: "MARKET" | "PENDING";
   setOpenOrderType: (val: "MARKET" | "PENDING") => void;
   openNotes: string;
@@ -28,21 +51,55 @@ export function OpenTradeModal({
   onIdeaSelectionChange,
   openFillPrice,
   setOpenFillPrice,
-  openQuantity,
-  setOpenQuantity,
+  openLots,
+  setOpenLots,
   openOrderType,
   setOpenOrderType,
   openNotes,
   setOpenNotes,
   openError
 }: OpenTradeModalProps) {
+  const selected = tradeIdeas.find((idea) => idea.id === selectedIdeaId);
+  const [lotSize, setLotSize] = useState(75);
+  const [feeTotal, setFeeTotal] = useState<number | null>(null);
+  const [feeLines, setFeeLines] = useState<LotInfoResponse["data"]["feeEstimate"]["entry"] | null>(null);
+
+  useEffect(() => {
+    if (!show || !selected?.instrumentSymbol) return;
+    const controller = new AbortController();
+    const premium = openFillPrice > 0 ? openFillPrice : 100;
+    void getResearchJson(
+      `/instruments/by-symbol/${encodeURIComponent(selected.instrumentSymbol)}/lot-info?lots=${openLots}&premium=${premium}`,
+      controller.signal,
+    )
+      .then((res) => {
+        const body = res as LotInfoResponse;
+        setLotSize(body.data.lotSize);
+        setFeeTotal(body.data.feeEstimate.entry.total);
+        setFeeLines(body.data.feeEstimate.entry);
+      })
+      .catch(() => {
+        /* keep last known lot size */
+      });
+    return () => controller.abort();
+  }, [show, selected?.instrumentSymbol, openLots, openFillPrice]);
+
+  const quantity = useMemo(() => openLots * lotSize, [openLots, lotSize]);
+  const notional = useMemo(() => openFillPrice * quantity, [openFillPrice, quantity]);
+  const totalCost = useMemo(
+    () => notional + (feeTotal ?? 0),
+    [notional, feeTotal],
+  );
+
   if (!show) return null;
-  
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <GlassPanel className="w-full max-w-lg p-6 border-cyan-500/30 bg-slate-950 shadow-2xl">
+      <GlassPanel className="w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 border-cyan-500/30 bg-slate-950 shadow-2xl">
         <h3 className="text-xl font-bold text-white">Simulate Position Entry</h3>
-        <p className="text-xs text-slate-400 mt-1">Select an AI trade idea from the quantitative strategy engine and execute a simulated order.</p>
+        <p className="text-xs text-slate-400 mt-1">
+          Option-buyer simulation with NSE lot sizes and Zerodha-style fees. Premium fill is priced via Black–Scholes on open.
+        </p>
         {openError && <p className="mt-3 text-xs text-rose-400 bg-rose-500/10 p-2 rounded border border-rose-500/20">{openError}</p>}
         <form onSubmit={onSubmit} className="mt-4 space-y-4">
           <div>
@@ -77,13 +134,10 @@ export function OpenTradeModal({
                 Pending (Wait for Price)
               </label>
             </div>
-            {openOrderType === "PENDING" && (
-              <p className="text-[10px] text-emerald-400 mt-1 pl-6">Trade will stay pending until market price hits the entry level.</p>
-            )}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Fill Price (₹)</label>
+              <label className="block text-xs font-semibold text-slate-300 uppercase">Reference Underlying (₹)</label>
               <input
                 type="number"
                 required
@@ -93,20 +147,56 @@ export function OpenTradeModal({
                 onChange={(e) => setOpenFillPrice(Number(e.target.value))}
                 className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
               />
+              <p className="mt-1 text-[10px] text-slate-500">Used to seed ATM option pricing on submit.</p>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase">Quantity (Shares/Lots)</label>
-              <input
-                type="number"
-                required
-                min="1"
-                step="1"
-                value={openQuantity}
-                onChange={(e) => setOpenQuantity(Number(e.target.value))}
-                className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-              />
+              <label className="block text-xs font-semibold text-slate-300 uppercase">Number of Lots</label>
+              <div className="mt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOpenLots(Math.max(1, openLots - 1))}
+                  className="h-9 w-9 rounded-lg border border-white/10 bg-white/5 text-white"
+                >
+                  −
+                </button>
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  step="1"
+                  value={openLots}
+                  onChange={(e) => setOpenLots(Math.max(1, Number(e.target.value) || 1))}
+                  className="w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white text-center font-bold focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => setOpenLots(openLots + 1)}
+                  className="h-9 w-9 rounded-lg border border-white/10 bg-white/5 text-white"
+                >
+                  +
+                </button>
+              </div>
+              <p className="mt-1 text-[10px] text-slate-400">
+                {openLots} × {lotSize} = {quantity} units
+              </p>
             </div>
           </div>
+
+          <div className="rounded-xl border border-white/10 bg-slate-900/80 p-3 space-y-1.5">
+            <p className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Fee Estimate (entry)</p>
+            {feeLines ? (
+              <ul className="text-xs text-slate-300 space-y-1">
+                <li className="flex justify-between"><span>Brokerage</span><span>₹{formatNumber(feeLines.brokerage, 2)}</span></li>
+                <li className="flex justify-between"><span>Stamp duty</span><span>₹{formatNumber(feeLines.stampDuty, 2)}</span></li>
+                <li className="flex justify-between"><span>Exchange + SEBI + GST</span><span>₹{formatNumber(feeLines.exchangeCharges + feeLines.sebiCharges + feeLines.gst, 2)}</span></li>
+                <li className="flex justify-between font-bold text-white border-t border-white/10 pt-1"><span>Entry fees</span><span>₹{formatNumber(feeLines.total, 2)}</span></li>
+                <li className="flex justify-between font-bold text-cyan-300"><span>Total cost</span><span>₹{formatNumber(totalCost, 2)}</span></li>
+              </ul>
+            ) : (
+              <p className="text-xs text-slate-500">Loading fee estimate…</p>
+            )}
+          </div>
+
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Order Notes</label>
             <input

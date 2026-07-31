@@ -120,6 +120,48 @@ describe("evaluateRisk", () => {
     expect(decision.reasonCodes).toContain(riskReasonCodes.maxDrawdown);
   });
 
+  it("floors the size to a whole lot so the trade can actually be opened", () => {
+    // 0.5% of 5,000,000 over a 100-point stop is 250 units; at a 75-unit lot that is
+    // 3 lots, or 225. The unfloored 250 was refused by validateQuantity, so every
+    // approved F&O trade failed to open.
+    const decision = evaluateRisk(proposal({ lotSize: 75 }), state());
+
+    expect(decision.approved).toBe(true);
+    expect(decision.approvedQuantity).toBe(225);
+    expect(decision.approvedQuantity % 75).toBe(0);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.sizeFlooredToLot);
+  });
+
+  it("floors rather than rounds, so risk never exceeds the budget", () => {
+    const budget = 5_000_000 * defaultRiskPolicy.riskFractionPerTrade;
+    const decision = evaluateRisk(proposal({ lotSize: 75 }), state());
+
+    // Rounding 250 units to the nearest lot would give 4 lots (300) and 30,000 of
+    // risk against a 25,000 budget.
+    expect(decision.estimatedRiskAmount).toBeLessThanOrEqual(budget);
+    expect(decision.approvedQuantity).toBeLessThan(250);
+  });
+
+  it("does not disturb sizing when the instrument trades in single units", () => {
+    expect(evaluateRisk(proposal(), state()).approvedQuantity).toBe(250);
+    expect(evaluateRisk(proposal({ lotSize: 1 }), state()).approvedQuantity).toBe(250);
+  });
+
+  it("distinguishes a budget too small for one lot from one too small for one unit", () => {
+    // Affords 250 units, but a lot is 400, so no whole lot fits.
+    const belowLot = evaluateRisk(proposal({ lotSize: 400 }), state());
+
+    expect(belowLot.approved).toBe(false);
+    expect(belowLot.reasonCodes).toContain(riskReasonCodes.belowOneLot);
+    expect(belowLot.reasonCodes).not.toContain(riskReasonCodes.unsizable);
+  });
+
+  it("rejects a lot size that is not a positive whole number", () => {
+    for (const lotSize of [0, -75, 7.5]) {
+      expect(evaluateRisk(proposal({ lotSize }), state()).approved).toBe(false);
+    }
+  });
+
   it("rejects when the risk budget cannot buy a whole unit", () => {
     // A stop 1,000,000 points away cannot be sized at any sane equity.
     const decision = evaluateRisk(

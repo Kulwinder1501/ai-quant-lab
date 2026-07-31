@@ -8,6 +8,8 @@ export const riskReasonCodes = {
   approved: "APPROVED",
   invalidGeometry: "REJECTED_INVALID_GEOMETRY",
   unsizable: "REJECTED_RISK_BUDGET_BELOW_ONE_UNIT",
+  belowOneLot: "REJECTED_RISK_BUDGET_BELOW_ONE_LOT",
+  sizeFlooredToLot: "SIZE_FLOORED_TO_LOT_MULTIPLE",
   maxConcurrentPositions: "REJECTED_MAX_CONCURRENT_POSITIONS",
   dailyLossLimit: "REJECTED_DAILY_LOSS_LIMIT",
   maxDrawdown: "REJECTED_MAX_DRAWDOWN",
@@ -42,6 +44,17 @@ export interface RiskProposal {
   entryPrice: number;
   stopLoss: number;
   targetPrice: number;
+  /**
+   * Units per lot, from `instruments.lot_size`. Defaults to 1 for instruments that
+   * trade in single units.
+   *
+   * Without this, the engine solved for an arbitrary unit count -- 2053 units of a
+   * 75-unit-lot instrument -- which `validateQuantity` then refused, so every approved
+   * F&O trade failed to open. The size is floored to a whole lot, never rounded:
+   * rounding up would put more capital at risk than the policy allows, which is the
+   * one thing this engine exists to prevent.
+   */
+  lotSize?: number;
 }
 
 export interface RiskState {
@@ -178,11 +191,26 @@ export function evaluateRisk(
     reasonCodes.push(riskReasonCodes.sizeReducedForExpansion);
   }
 
+  const lotSize = proposal.lotSize ?? 1;
+  if (!Number.isInteger(lotSize) || lotSize <= 0) {
+    return rejection([riskReasonCodes.invalidGeometry]);
+  }
+
   const riskPerUnit = Math.abs(proposal.entryPrice - proposal.stopLoss);
   const riskBudget = state.accountEquity * riskFraction;
-  const quantity = Math.floor(riskBudget / riskPerUnit);
-  if (quantity < 1) {
+  const affordableUnits = Math.floor(riskBudget / riskPerUnit);
+  // Floored to whole lots, so realised risk stays at or under the budget. Rounding to
+  // the nearest lot could exceed it.
+  const quantity = Math.floor(affordableUnits / lotSize) * lotSize;
+  if (affordableUnits < 1) {
     reasonCodes.push(riskReasonCodes.unsizable);
+  } else if (quantity < lotSize) {
+    // The budget buys units but not a whole lot, which is a different problem from
+    // buying nothing at all: the instrument is tradable, this account cannot take one
+    // lot of it at this risk fraction.
+    reasonCodes.push(riskReasonCodes.belowOneLot);
+  } else if (quantity !== affordableUnits) {
+    reasonCodes.push(riskReasonCodes.sizeFlooredToLot);
   }
 
   const notional = quantity * proposal.entryPrice;

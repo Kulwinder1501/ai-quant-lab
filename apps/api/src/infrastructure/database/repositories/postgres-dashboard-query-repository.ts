@@ -15,6 +15,7 @@ export interface DashboardTradeIdeaRow {
   instrumentSymbol: string;
   instrumentName: string;
   strategyVersionId: string | null;
+  strategyKey: string | null;
   candleTimeframe: string | null;
   candleCloseTime: Date | null;
   side: string;
@@ -138,7 +139,7 @@ export class PostgresDashboardQueryRepository {
       SELECT
         pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, '1d') AS timeframe, pt.side, pt.status,
         pt.quantity, pt.entry_price, pt.stop_loss, pt.target_price, pt.opened_at, pt.closed_at,
-        pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.slippage, pt.notes,
+        pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.fee_breakdown, pt.slippage, pt.notes,
         COALESCE(i.symbol, 'NIFTY50') AS instrument_symbol,
         COALESCE(i.display_name, 'NIFTY 50 Index') AS instrument_name
       FROM paper_trades pt
@@ -167,14 +168,17 @@ export class PostgresDashboardQueryRepository {
         instrumentName: String(row.instrument_name),
         timeframe: row.timeframe ? String(row.timeframe) : "1d",
         tradeIdeaId: row.trade_idea_id ? String(row.trade_idea_id) : null,
-        side: String(row.side) === "LONG" || String(row.side) === "BUY" ? "BUY" : "SELL",
+        side: String(row.side),
         status: String(row.status),
         quantity,
         fillPrice: entryPrice,
         entryPrice,
+        stopLoss: toNumber(row.stop_loss),
+        targetPrice: toNumber(row.target_price),
         openedAt: row.opened_at instanceof Date ? row.opened_at.toISOString() : String(row.opened_at),
         entryFees: toNumber(row.fees),
         entrySlippage: toNumber(row.slippage),
+        feeBreakdown: row.fee_breakdown && typeof row.fee_breakdown === "object" ? row.fee_breakdown : {},
         exitPrice,
         closedAt: row.closed_at instanceof Date ? row.closed_at.toISOString() : row.closed_at ? String(row.closed_at) : null,
         exitFees: 0,
@@ -205,8 +209,17 @@ export class PostgresDashboardQueryRepository {
    * `strategyKey` filters in SQL on purpose. Filtering in the browser instead applies
    * `limit` across every strategy first, so the strategy whose rows were written last
    * fills the whole page and the others vanish from the list entirely.
+   *
+   * Expired proposals are hidden by default. A lookback scan persists every historical
+   * hit, and without this filter the Strategy page fills with June/July setups that
+   * already passed `expires_at` and drown out anything still actionable today.
    */
-  async listTradeIdeas(limit = 50, dateStr?: string, strategyKey?: string): Promise<DashboardTradeIdeaRow[]> {
+  async listTradeIdeas(
+    limit = 50,
+    dateStr?: string,
+    strategyKey?: string,
+    includeExpired = false,
+  ): Promise<DashboardTradeIdeaRow[]> {
     let query = `
       SELECT
         ti.id,
@@ -226,28 +239,43 @@ export class PostgresDashboardQueryRepository {
         COALESCE(i.symbol, 'UNKNOWN') AS instrument_symbol,
         COALESCE(i.display_name, 'Unknown Instrument') AS instrument_name,
         c.timeframe AS candle_timeframe,
-        c.close_time AS candle_close_time
+        c.close_time AS candle_close_time,
+        s.strategy_key AS strategy_key
       FROM trade_ideas ti
       LEFT JOIN instruments i ON i.id = ti.instrument_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
+      LEFT JOIN strategy_versions sv ON sv.id = ti.strategy_version_id
+      LEFT JOIN strategies s ON s.id = sv.strategy_id
     `;
     
     const params: any[] = [limit];
     const conditions: string[] = [];
+    if (!includeExpired) {
+      // NULL expiry is treated as still live (agent/manual rows without a clock).
+      conditions.push(`(ti.expires_at IS NULL OR ti.expires_at > CURRENT_TIMESTAMP)`);
+      // Hide proposals whose source bar is still forming. Yahoo/agent paths can
+      // attach an idea to today's open session; that is not a settled close.
+      conditions.push(`(c.id IS NULL OR (c.is_complete = TRUE AND c.close_time <= CURRENT_TIMESTAMP))`);
+    }
     if (dateStr) {
       params.push(dateStr);
-      conditions.push(`DATE(c.close_time AT TIME ZONE 'Asia/Kolkata') = $${params.length}`);
+      // Yahoo daily bars stamp open_time at the NSE session open (≈09:15 IST). That
+      // is the trading-day label; close_time often falls on the next calendar date.
+      conditions.push(`DATE(c.open_time AT TIME ZONE 'Asia/Kolkata') = $${params.length}`);
     }
     if (strategyKey) {
+      // Filter on the registered strategy key, not on evidence JSON. Seeded
+      // scalp rows used to stamp evidence.strategy = 'momentum-scalp'; real
+      // proposals from GenerateTradeIdeas do not, so the evidence path silently
+      // hid every genuine idea from the Strategy / Scalp dashboards.
       params.push(strategyKey);
-      conditions.push(`ti.evidence->>'strategy' = $${params.length}`);
+      conditions.push(`s.strategy_key = $${params.length}`);
     }
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(" AND ")} `;
     }
 
-    // NULLS LAST keeps proposals with no source candle (seeded demo rows) from
-    // sorting above real signals.
+    // NULLS LAST keeps proposals with no source candle from sorting above real signals.
     query += ` ORDER BY c.close_time DESC NULLS LAST, ti.generated_at DESC, ti.id DESC LIMIT $1`;
 
     const result = await this.database.query<QueryResultRow>(query, params);
@@ -258,6 +286,7 @@ export class PostgresDashboardQueryRepository {
       instrumentSymbol: String(row.instrument_symbol),
       instrumentName: String(row.instrument_name),
       strategyVersionId: row.strategy_version_id ? String(row.strategy_version_id) : null,
+      strategyKey: row.strategy_key ? String(row.strategy_key) : null,
       candleTimeframe: row.candle_timeframe ? String(row.candle_timeframe) : null,
       candleCloseTime: row.candle_close_time instanceof Date ? row.candle_close_time : null,
       side: String(row.side),

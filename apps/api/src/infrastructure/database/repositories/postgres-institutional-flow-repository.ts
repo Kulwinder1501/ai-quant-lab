@@ -1,17 +1,6 @@
 import type { Pool } from "pg";
 import type { InstitutionalFlow } from "../../../modules/market-data/domain/institutional-flow.js";
-
-/**
- * Bind `date` as an ISO `YYYY-MM-DD` string rather than as a Date.
- *
- * node-pg serialises a Date using the *host process's* local timezone, so a
- * UTC-midnight Date becomes the previous calendar day on any host west of UTC and
- * therefore keys the wrong row of a DATE column. Formatting from the UTC
- * components makes the key independent of where the collector runs.
- */
-function toDateKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
+import { fromDateColumn, toDateKey } from "../date-column.js";
 
 function toNumberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
@@ -87,12 +76,28 @@ export class PostgresInstitutionalFlowRepository {
     );
     return toFlow(result.rows[0]);
   }
+
+  /** The most recent `limit` published prints, newest first. */
+  async listRecent(limit: number): Promise<InstitutionalFlow[]> {
+    const bounded = Math.max(1, Math.min(Math.trunc(limit), 250));
+    const result = await this.database.query(
+      `
+      SELECT date, fii_cash_net_cr, dii_cash_net_cr,
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
+      FROM institutional_flows
+      ORDER BY date DESC
+      LIMIT $1
+    `,
+      [bounded],
+    );
+    return result.rows.map((row) => toFlow(row)).filter((flow): flow is InstitutionalFlow => flow !== null);
+  }
 }
 
 function toFlow(row: Record<string, unknown> | undefined): InstitutionalFlow | null {
   if (!row) return null;
   return {
-    date: row.date as Date,
+    date: fromDateColumn(row.date),
     fiiCashNetCr: toNumberOrNull(row.fii_cash_net_cr),
     diiCashNetCr: toNumberOrNull(row.dii_cash_net_cr),
     fiiIndexFuturesNetCr: toNumberOrNull(row.fii_index_futures_net_cr),

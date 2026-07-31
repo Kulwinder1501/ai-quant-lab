@@ -22,8 +22,10 @@ export function ProposalsGrid({
   if (filteredIdeas.length === 0) {
     return (
       <div className="py-12 text-center rounded-xl border border-dashed border-white/10 bg-white/5">
-        <p className="text-sm font-semibold text-slate-300">No matching proposals found</p>
-        <p className="text-xs text-slate-500 mt-1">Try adjusting your filters or click &quot;Generate Proposals&quot; to evaluate recent candles.</p>
+        <p className="text-sm font-semibold text-slate-300">No active proposals</p>
+        <p className="text-xs text-slate-500 mt-1">
+          Expired historical setups are hidden. Click &quot;Generate Proposals&quot; to evaluate the latest settled candle, or pick a date filter for a specific session.
+        </p>
       </div>
     );
   }
@@ -50,6 +52,11 @@ export function ProposalsGrid({
                     </span>
                     <h3 className="text-lg font-extrabold text-white mt-0.5">{idea.instrumentSymbol}</h3>
                     <p className="text-xs text-slate-400 truncate max-w-[180px]">{idea.instrumentName}</p>
+                    {idea.strategyKey && (
+                      <span className="mt-1 inline-flex rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-mono font-semibold text-slate-400">
+                        {idea.strategyKey}
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-extrabold tracking-wide ${
@@ -60,6 +67,14 @@ export function ProposalsGrid({
                     <span className="text-xs font-semibold text-cyan-300">
                       Conf: {formatPercentage(idea.confidence)}
                     </span>
+                    {idea.status && idea.status !== "PROPOSED" && (
+                      <span className="text-[10px] font-mono font-semibold text-slate-500">{idea.status}</span>
+                    )}
+                    {idea.expiresAt && (
+                      <span className="text-[10px] font-mono text-slate-500">
+                        Exp {formatTimestamp(idea.expiresAt)}
+                      </span>
+                    )}
                   </div>
                 </div>
 

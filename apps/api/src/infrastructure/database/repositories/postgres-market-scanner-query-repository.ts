@@ -71,7 +71,7 @@ interface ActiveResearchStrategyRow extends QueryResultRow {
   strategy_version: string | number;
 }
 
-const knownInstrumentTypes = ["INDEX", "EQUITY", "ETF"] as const;
+const knownInstrumentTypes = ["INDEX", "EQUITY", "ETF", "OPTION", "FUTURE"] as const;
 const knownIndicatorCodes = [
   "SMA",
   "EMA",
@@ -183,7 +183,7 @@ function asScannerExchange(value: string): ScannerExchange {
 }
 
 function asInstrumentType(value: string): InstrumentType {
-  if (!knownInstrumentTypes.includes(value as InstrumentType)) {
+  if (!(knownInstrumentTypes as readonly string[]).includes(value)) {
     throw new Error("Database returned an invalid instrument type.");
   }
   return value as InstrumentType;

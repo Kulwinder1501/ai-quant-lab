@@ -36,8 +36,7 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
       ON CONFLICT (strategy_id, version) DO UPDATE SET is_active = TRUE
       RETURNING id
     `, [strategyId, momentumScalpStrategyVersion, JSON.stringify(defaultMomentumScalpStrategyConfiguration)]);
-    const strategyVersionId = verRes.rows[0]?.id;
-    if (!strategyVersionId) throw new Error("Failed to insert/resolve strategy version");
+    if (!verRes.rows[0]?.id) throw new Error("Failed to insert/resolve strategy version");
 
     // These demo indicators are deliberately registered under 'v1', NOT the real
     // 'ta-v1' contract, and that separation is intentional — do not "align" them.
@@ -108,8 +107,6 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
             continue;
           }
 
-          let lastCandleId: string | null = null;
-          let lastCandleClose: number = 0;
           let prices: number[] = [];
           
           let sessionKey = "";
@@ -141,8 +138,6 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
               close,
               volume,
             });
-            lastCandleId = candleId;
-            lastCandleClose = close;
 
             let ema9 = close;
             let ema20 = close;
@@ -202,50 +197,20 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
             }
           }
 
-        if (lastCandleId) {
-          // Seed one proposal per direction, not a hardcoded LONG. The strategy is
-          // symmetric (see MomentumScalpStrategy: a SHORT triggers on price below
-          // VWAP with the fast EMA below the slow and RSI in the 20-40 band), so a
-          // single 'LONG' placeholder made the dashboard look call-only when the
-          // engine produces both. The unique key is (strategy_version_id,
-          // source_candle_id, side), so both sides can share this source candle.
-          //
-          // These remain clearly-labelled demo rows for first-boot UI. Real,
-          // strategy-generated ideas come from `analysis:generate-trade-ideas`
-          // (use --lookback to scan history), which runs the actual rule set over
-          // the real indicator pipeline.
-          const entryPrice = lastCandleClose;
-          const seededIdeas = [
-            {
-              side: "LONG",
-              stopLoss: Number((lastCandleClose * 0.999).toFixed(2)),
-              targetPrice: Number((lastCandleClose * 1.002).toFixed(2)),
-              reasoning: "Seeded LONG momentum scalp example (fast EMA above slow, price above VWAP).",
-            },
-            {
-              side: "SHORT",
-              stopLoss: Number((lastCandleClose * 1.001).toFixed(2)),
-              targetPrice: Number((lastCandleClose * 0.998).toFixed(2)),
-              reasoning: "Seeded SHORT momentum scalp example (fast EMA below slow, price below VWAP).",
-            },
-          ];
-
-          for (const idea of seededIdeas) {
-            await client.query(`
-              INSERT INTO trade_ideas (
-                instrument_id, strategy_version_id, source_candle_id, side, status,
-                entry_price, stop_loss, target_price, risk_reward, confidence, reasoning, evidence
-              ) VALUES (
-                $1, $2, $3, $4, 'PROPOSED', $5, $6, $7, 2.0, 0.82,
-                $8::jsonb,
-                '{"strategy": "momentum-scalp", "seeded": true}'::jsonb
-              )
-              ON CONFLICT (strategy_version_id, source_candle_id, side)
-              WHERE strategy_version_id IS NOT NULL AND source_candle_id IS NOT NULL
-              DO UPDATE SET status = 'PROPOSED', entry_price = EXCLUDED.entry_price, stop_loss = EXCLUDED.stop_loss, target_price = EXCLUDED.target_price
-            `, [inst.id, strategyVersionId, lastCandleId, idea.side, entryPrice, idea.stopLoss, idea.targetPrice, JSON.stringify([idea.reasoning])]);
-          }
-        }
+        // No seeded trade_ideas row.
+        //
+        // This previously inserted BOTH a LONG and a SHORT from the same
+        // `lastCandleClose`, with ±0.1%/±0.2% fabricated geometry. That is
+        // physically impossible under MomentumScalpStrategy: LONG requires price
+        // above VWAP with fast EMA above slow, SHORT requires the opposite, so a
+        // single bar can never satisfy both. The unique key
+        // (strategy_version_id, source_candle_id, side) let both rows coexist, and
+        // the Strategy dashboard then showed a LONG and a SHORT sharing one entry
+        // price and one candle close time as if the engine had flipped a coin.
+        //
+        // Real proposals come from `analysis:generate-trade-ideas` (use --lookback
+        // to scan history) or the Generate Proposals button, which runs the actual
+        // rule set and returns at most one side per candle.
       }
     }
 

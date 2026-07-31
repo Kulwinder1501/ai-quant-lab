@@ -9,6 +9,7 @@ import type {
   PaperTradeExitReason,
   PaperTradeRepository,
 } from "../../../modules/paper-trading/domain/paper-trading.js";
+import { validateQuantity } from "../../../modules/paper-trading/domain/lot-size-validator.js";
 import type { TradeSide } from "../../../modules/strategy-engine/domain/strategy.js";
 import type { DatabaseClient, DatabasePool } from "../database.js";
 
@@ -48,6 +49,7 @@ interface PaperTradeRow extends QueryResultRow {
   exit_reason: PaperTradeExitReason | null;
   realized_pnl: string | null;
   fees: string;
+  fee_breakdown: Record<string, unknown> | null;
   slippage: string;
   notes: string;
   instrument_symbol?: string;
@@ -83,6 +85,7 @@ const tradeColumns = `
   paper_trades.exit_reason,
   paper_trades.realized_pnl,
   paper_trades.fees,
+  paper_trades.fee_breakdown,
   paper_trades.slippage,
   paper_trades.notes
 `;
@@ -125,6 +128,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     exitReason: row.exit_reason,
     realizedPnl: row.realized_pnl === null ? null : toNumber(row.realized_pnl, "realized P/L"),
     fees: toNumber(row.fees, "trade fees"),
+    feeBreakdown: row.fee_breakdown && typeof row.fee_breakdown === "object" ? row.fee_breakdown : {},
     slippage: toNumber(row.slippage, "trade slippage"),
     notes: row.notes,
   };
@@ -212,17 +216,27 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         throw new Error("Paper account was not found or is inactive.");
       }
 
-      const ideaResult = await client.query<LockedTradeIdeaRow>(`
-        SELECT id, instrument_id, side, entry_price, stop_loss, target_price, expires_at
+      const ideaResult = await client.query<LockedTradeIdeaRow & { lot_size: number }>(`
+        SELECT
+          trade_ideas.id,
+          trade_ideas.instrument_id,
+          trade_ideas.side,
+          trade_ideas.entry_price,
+          trade_ideas.stop_loss,
+          trade_ideas.target_price,
+          trade_ideas.expires_at,
+          instruments.lot_size
         FROM trade_ideas
-        WHERE id = $1
-          AND status = 'PROPOSED'
-        FOR UPDATE
+        INNER JOIN instruments ON instruments.id = trade_ideas.instrument_id
+        WHERE trade_ideas.id = $1
+          AND trade_ideas.status = 'PROPOSED'
+        FOR UPDATE OF trade_ideas
       `, [input.tradeIdeaId]);
       const idea = ideaResult.rows[0];
       if (!idea) {
         throw new Error("Trade idea was not found or is no longer proposed.");
       }
+      validateQuantity(input.quantity, Number(idea.lot_size));
       if (idea.expires_at && idea.expires_at.getTime() <= input.openedAt.getTime()) {
         await client.query(`
           UPDATE trade_ideas
@@ -234,9 +248,12 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         throw new Error("Trade idea expired before the simulated opening time.");
       }
 
-      const stopLoss = toNumber(idea.stop_loss, "trade idea stop loss");
-      const targetPrice = toNumber(idea.target_price, "trade idea target price");
-      if (!hasGeometryForFill(idea.side, input.fillPrice, stopLoss, targetPrice)) {
+      const stopLoss = input.stopLossOverride
+        ?? toNumber(idea.stop_loss, "trade idea stop loss");
+      const targetPrice = input.targetPriceOverride
+        ?? toNumber(idea.target_price, "trade idea target price");
+      const side = input.sideOverride ?? idea.side;
+      if (!hasGeometryForFill(side, input.fillPrice, stopLoss, targetPrice)) {
         throw new Error("The explicit fill price invalidates the referenced trade idea's stop/target geometry.");
       }
 
@@ -264,19 +281,20 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       }
 
       const status = input.status ?? 'OPEN';
+      const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
       const inserted = await client.query<{ id: string }>(`
         INSERT INTO paper_trades (
           account_id, trade_idea_id, instrument_id, side, status, quantity,
-          entry_price, stop_loss, target_price, opened_at, fees, slippage, notes
+          entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes
         ) VALUES (
-          $1, $2, $3, $4, $13, $5, $6, $7, $8, $9, $10, $11, $12
+          $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12
         )
         RETURNING id
       `, [
         input.accountId,
         idea.id,
         idea.instrument_id,
-        idea.side,
+        side,
         input.quantity,
         input.fillPrice,
         stopLoss,
@@ -285,6 +303,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.entryFees,
         input.entrySlippage,
         input.notes,
+        JSON.stringify(feeBreakdown),
         status,
       ]);
       const paperTradeId = inserted.rows[0]?.id;
@@ -493,6 +512,11 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
           exit_reason = $4,
           fees = paper_trades.fees + $5,
           slippage = paper_trades.slippage + $6,
+          fee_breakdown = COALESCE(paper_trades.fee_breakdown, '{}'::jsonb)
+            || jsonb_build_object(
+              'exit',
+              COALESCE($7::jsonb, jsonb_build_object('total', $5))
+            ),
           realized_pnl = CASE paper_trades.side
             WHEN 'LONG' THEN ($3 - paper_trades.entry_price) * paper_trades.quantity
             WHEN 'SHORT' THEN (paper_trades.entry_price - $3) * paper_trades.quantity
@@ -506,6 +530,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.exitReason,
         input.exitFees,
         input.exitSlippage,
+        JSON.stringify(input.feeBreakdown ?? { total: input.exitFees }),
       ]);
       if (!closed.rows[0]) {
         throw new Error("Paper trade could not be closed because it is no longer open.");

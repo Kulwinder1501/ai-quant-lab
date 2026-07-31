@@ -14,13 +14,17 @@ export interface PaperTradeRow {
   instrumentName?: string;
   timeframe?: string;
   tradeIdeaId?: string | null;
-  side: "BUY" | "SELL";
+  side: "BUY" | "SELL" | "LONG" | "SHORT";
   status: "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
   quantity: number;
   fillPrice: number;
+  entryPrice?: number;
+  stopLoss?: number;
+  targetPrice?: number;
   openedAt: string;
   entryFees: number;
   entrySlippage: number;
+  feeBreakdown?: Record<string, unknown>;
   exitPrice?: number | null;
   closedAt?: string | null;
   exitFees?: number | null;

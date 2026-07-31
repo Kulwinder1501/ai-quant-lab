@@ -14,6 +14,10 @@ import { purgeFabricatedRsiMigration } from "./013-purge-fabricated-rsi.js";
 import { correctSeedCandleProvenanceMigration } from "./014-correct-seed-candle-provenance.js";
 import { tradeReviewsMigration } from "./015-trade-reviews.js";
 import { scheduledJobRunsMigration } from "./016-scheduled-job-runs.js";
+import { purgeSeededTradeIdeasMigration } from "./017-purge-seeded-trade-ideas.js";
+import { reopenUnsettledCandlesMigration } from "./018-reopen-unsettled-candles.js";
+import { fnoInstrumentsAndFeesMigration } from "./019-fno-instruments-and-fees.js";
+import { correctFnoContractSpecsMigration } from "./020-correct-fno-contract-specs.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -32,5 +36,8 @@ export const migrations = [
   correctSeedCandleProvenanceMigration,
   tradeReviewsMigration,
   scheduledJobRunsMigration,
+  purgeSeededTradeIdeasMigration,
+  reopenUnsettledCandlesMigration,
+  fnoInstrumentsAndFeesMigration,
+  correctFnoContractSpecsMigration,
 ];
-

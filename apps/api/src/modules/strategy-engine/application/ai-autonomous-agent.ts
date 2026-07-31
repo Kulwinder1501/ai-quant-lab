@@ -7,6 +7,7 @@ import type { NewsRepository } from "../../news-sentiment/domain/news-article.js
 import type { PostgresAiJournalRepository } from "../../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
 import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
+import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
 
 export interface AiBrainThought {
   id: string;
@@ -41,8 +42,13 @@ export interface AgentPerformanceMetrics {
   recentThoughts: AiBrainThought[];
 }
 
-/** How stale a published FII/DII print may be before the agent ignores it. */
-export const INSTITUTIONAL_FLOW_MAX_AGE_DAYS = 5;
+/**
+ * How stale a published FII/DII print may be before the agent ignores it.
+ *
+ * Aliases the market-data domain constant rather than redefining 5, so the agent,
+ * the dashboard summary, and the ML loader cannot drift to different windows.
+ */
+export const INSTITUTIONAL_FLOW_MAX_AGE_DAYS = INSTITUTIONAL_FLOW_STALENESS_DAYS;
 
 /**
  * The indicator algorithm version the agent trusts, matching what the strategies

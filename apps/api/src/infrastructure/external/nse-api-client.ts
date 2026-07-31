@@ -3,7 +3,57 @@ import type { InstitutionalFlow } from "../../modules/market-data/domain/institu
 import type { OffshoreDerivative } from "../../modules/market-data/domain/offshore-derivative.js";
 
 const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/**
+ * NSE sits behind Akamai, which scores the *consistency* of a request's headers
+ * rather than any single one of them. A Chrome user agent sent with a full
+ * `Accept` string but none of the `Sec-Fetch-*` / `sec-ch-ua` metadata that real
+ * Chrome always attaches is precisely the mismatch it blocks: measured against
+ * the live host, that combination returned `403 Access Denied` on every attempt
+ * while both a bare `Mozilla/5.0` and the complete set below returned 200 with a
+ * cookie jar. So the headers are declared as two coherent sets and reused, and a
+ * new one must stay internally consistent — adding a Chrome-only header to a
+ * non-Chrome agent, or dropping a `Sec-Fetch-*` value, reintroduces the 403.
+ */
+const CLIENT_HINT_HEADERS = {
+  "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not:A-Brand";v="24"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+} as const;
+
+/** Headers for a top-level document request, i.e. the cookie handshake. */
+const NAVIGATION_HEADERS = {
+  "User-Agent": BROWSER_USER_AGENT,
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  ...CLIENT_HINT_HEADERS,
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+  Connection: "keep-alive",
+} as const;
+
+/**
+ * Headers for a same-origin JSON fetch. The `Sec-Fetch-*` triple differs from the
+ * navigation set because a browser reports how the request was actually made; a
+ * document-style triple on an XHR is the same kind of inconsistency Akamai blocks.
+ */
+const XHR_HEADERS = {
+  "User-Agent": BROWSER_USER_AGENT,
+  Accept: "*/*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  ...CLIENT_HINT_HEADERS,
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
+  "X-Requested-With": "XMLHttpRequest",
+  Connection: "keep-alive",
+} as const;
 
 const MONTH_ABBREVIATIONS: Record<string, number> = {
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
@@ -107,11 +157,7 @@ export class NseApiClient {
     let response;
     try {
       response = await axios.get(this.baseUrl, {
-        headers: {
-          "User-Agent": BROWSER_USER_AGENT,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-        },
+        headers: NAVIGATION_HEADERS,
         timeout: 10_000,
       });
     } catch (error) {
@@ -142,8 +188,7 @@ export class NseApiClient {
     try {
       response = await axios.get(`${this.baseUrl}/api/fiidiiTradeReact`, {
         headers: {
-          "User-Agent": BROWSER_USER_AGENT,
-          Accept: "*/*",
+          ...XHR_HEADERS,
           Referer: `${this.baseUrl}/reports/fii-dii`,
           Cookie: this.sessionCookies.join("; "),
         },

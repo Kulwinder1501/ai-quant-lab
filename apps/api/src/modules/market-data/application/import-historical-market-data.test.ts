@@ -85,6 +85,42 @@ describe("ImportHistoricalMarketData", () => {
     expect(ingestion.completed).toEqual([1]);
   });
 
+  it("keeps a provider bar provisional when its close is still in the future", async () => {
+    const stored: UpsertCandleInput[] = [];
+    const candles: CandleRepository = {
+      upsert: async (input): Promise<PersistedCandle> => {
+        stored.push(input);
+        return { id: "candle", ...input, ingestionId: input.ingestionId ?? null, sourceMetadata: input.sourceMetadata ?? {} };
+      },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const futureClose = new Date(Date.now() + 60 * 60 * 1000);
+    const provider: HistoricalMarketDataProvider = {
+      id: "test-provider",
+      fetchCandles: async () => [{
+        openTime: new Date(futureClose.getTime() - 6.5 * 60 * 60 * 1000),
+        closeTime: futureClose,
+        open: "100", high: "110", low: "95", close: "105", volume: "10",
+      }],
+    };
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, candles);
+    const openTime = new Date(futureClose.getTime() - 6.5 * 60 * 60 * 1000);
+
+    await expect(service.execute({
+      instrument,
+      provider,
+      providerInstrumentId: "256265",
+      timeframe: "1d",
+      from: new Date(openTime.getTime() - 60_000),
+      to: new Date(futureClose.getTime() + 60_000),
+    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 1 });
+
+    expect(stored[0]?.isComplete).toBe(false);
+  });
+
   it("skips dates already stored as completed candles when skipExisting is set", async () => {
     const day1 = new Date("2025-01-01T03:45:00Z");
     const day2 = new Date("2025-01-02T03:45:00Z");
