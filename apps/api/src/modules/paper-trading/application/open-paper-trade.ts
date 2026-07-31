@@ -1,4 +1,9 @@
-import type { OpenPaperTradeInput, PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
+import type {
+  OpenPaperTradeInput,
+  OptionContractSpec,
+  PaperTrade,
+  PaperTradeRepository,
+} from "../domain/paper-trading.js";
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
 import { calculateEntryFees } from "../domain/brokerage-calculator.js";
 
@@ -18,6 +23,8 @@ export interface OpenPaperTradeRequest {
   targetPriceOverride?: number;
   sideOverride?: TradeSide;
   feeBreakdown?: Record<string, unknown>;
+  /** Persists strike/expiry/type/IV for live Black–Scholes mark-to-market. */
+  optionContract?: OptionContractSpec;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -63,6 +70,7 @@ export class OpenPaperTrade {
       stopLossOverride: input.stopLossOverride,
       targetPriceOverride: input.targetPriceOverride,
       sideOverride: input.sideOverride,
+      optionContract: input.optionContract,
     };
     return this.paperTradeRepository.openFromTradeIdea(request);
   }

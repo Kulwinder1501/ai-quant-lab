@@ -17,7 +17,7 @@ export class InvalidTradeHistoryQueryError extends Error {}
 
 const statuses: readonly PaperTradeStatus[] = ["OPEN", "CLOSED", "CANCELLED"];
 const sides: readonly TradeSide[] = ["LONG", "SHORT"];
-const exitReasons: readonly PaperTradeExitReason[] = ["STOP_LOSS", "TARGET", "MANUAL", "CANCELLED"];
+const exitReasons: readonly PaperTradeExitReason[] = ["STOP_LOSS", "TARGET", "MANUAL", "CANCELLED", "EXPIRED"];
 const outcomes: readonly TradeOutcomeFilter[] = ["WIN", "LOSS", "BREAK_EVEN"];
 
 function normalizeOptionalText(value: string | undefined, field: string): string | undefined {

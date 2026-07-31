@@ -51,6 +51,7 @@ import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repos
 import { calculateEntryFees, calculateExitFees, calculateTotalFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
 import { lotsToQuantity } from "../../modules/paper-trading/domain/lot-size-validator.js";
 import { mapIdeaToOptionBuyerFill } from "../../modules/paper-trading/domain/option-buyer-fill.js";
+import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
 import { priceOption } from "../../modules/pricing/application/price-option.js";
 import { regimeSourceInstrumentSymbol } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
@@ -293,7 +294,12 @@ export function createApp({ database }: ApplicationDependencies): Express {
   const createPaperAccount = new CreatePaperAccount(paperAccountRepository);
   const getPaperAccountSummary = new GetPaperAccountSummary(paperTradeRepository);
   const openPaperTrade = new OpenPaperTrade(paperTradeRepository);
-  const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(paperTradeRepository, candleRepository);
+  const impliedVolatilitySource = new PostgresIndiaVixImpliedVolatilitySource(database);
+  const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(
+    paperTradeRepository,
+    candleRepository,
+    impliedVolatilitySource,
+  );
   const closePaperTrade = new ClosePaperTrade(paperTradeRepository);
   const generateTradeIdeas = new GenerateTradeIdeas(strategyVersionRepository, strategyContextRepository, tradeIdeaRepository);
   const runBacktest = new RunBacktest(backtestRepository, backtestMarketDataRepository);
@@ -637,6 +643,13 @@ export function createApp({ database }: ApplicationDependencies): Express {
       let targetOverride: number | undefined;
       let sideOverride: TradeSide | undefined;
       let feeMeta: Record<string, unknown> | undefined;
+      let optionContract: {
+        optionStrike: number;
+        optionExpiry: Date;
+        optionType: "CE" | "PE";
+        underlyingSymbol: string;
+        entryIv: number;
+      } | undefined;
 
       if (asOptionBuyer) {
         let iv = typeof impliedVolatility === "number" ? impliedVolatility : undefined;
@@ -719,6 +732,13 @@ export function createApp({ database }: ApplicationDependencies): Express {
         stopOverride = mapped.stopPremium;
         targetOverride = mapped.targetPremium;
         sideOverride = mapped.side;
+        optionContract = {
+          optionStrike: mapped.strike,
+          optionExpiry: expiry,
+          optionType: mapped.optionType,
+          underlyingSymbol: idea.symbol,
+          entryIv: iv,
+        };
         feeMeta = {
           entry: calculateEntryFees(openFill, resolvedQuantity),
           option: {
@@ -749,6 +769,7 @@ export function createApp({ database }: ApplicationDependencies): Express {
         sideOverride,
         feeBreakdown: feeMeta,
         applyBrokerageFees: !feeMeta,
+        optionContract,
       });
       response.status(201).json({ data: trade });
     } catch (error: any) {
@@ -764,21 +785,26 @@ export function createApp({ database }: ApplicationDependencies): Express {
         return;
       }
       const openTrades = await paperTradeRepository.listOpenByAccount(accountId);
-      const activeSymbols = [...new Set(openTrades.map((t) => t.instrumentSymbol?.toUpperCase()).filter(Boolean))];
+      const activeSymbols = [...new Set(
+        openTrades.flatMap((t) => [
+          t.instrumentSymbol?.toUpperCase(),
+          t.underlyingSymbol?.toUpperCase(),
+        ]).filter((sym): sym is string => typeof sym === "string" && sym.length > 0),
+      )];
       const livePrices: Record<string, number> = {};
 
       if (activeSymbols.length > 0) {
         const yf = new (yahooFinance as any)();
         for (const sym of activeSymbols) {
-          let yfSymbol = sym as string;
+          let yfSymbol = sym;
           if (sym === "NIFTY50") yfSymbol = "^NSEI";
           else if (sym === "BANKNIFTY") yfSymbol = "^NSEBANK";
-          else if (!sym!.includes(".")) yfSymbol = `${sym}.NS`;
-          
+          else if (!sym.includes(".")) yfSymbol = `${sym}.NS`;
+
           try {
             const quote = await yf.quote(yfSymbol);
             if (quote && quote.regularMarketPrice) {
-              livePrices[sym as string] = quote.regularMarketPrice;
+              livePrices[sym] = quote.regularMarketPrice;
             }
           } catch (err) {
             console.error(`Failed to fetch live price for ${sym}:`, err);

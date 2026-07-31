@@ -2,6 +2,7 @@ import type { DatabasePool } from "../../../infrastructure/database/database.js"
 import type { StrategyMarketContextRepository, TradeIdeaRepository, TradeSide } from "../domain/strategy.js";
 import type { PaperAccountRepository, PaperTradeRepository, PaperTrade } from "../../paper-trading/domain/paper-trading.js";
 import { EvaluateOpenPaperTrades } from "../../paper-trading/application/evaluate-open-paper-trades.js";
+import { PostgresIndiaVixImpliedVolatilitySource } from "../../paper-trading/infrastructure/india-vix-implied-volatility-source.js";
 import type { CandleRepository } from "../../market-data/domain/candle.js";
 import type { NewsRepository } from "../../news-sentiment/domain/news-article.js";
 import type { PostgresAiJournalRepository } from "../../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
@@ -142,7 +143,11 @@ export class AiAutonomousAgent {
     private readonly newsRepo: NewsRepository,
     private readonly aiJournalRepo: PostgresAiJournalRepository,
   ) {
-    this.evaluateTrades = new EvaluateOpenPaperTrades(paperTradeRepo, candleRepo);
+    this.evaluateTrades = new EvaluateOpenPaperTrades(
+      paperTradeRepo,
+      candleRepo,
+      new PostgresIndiaVixImpliedVolatilitySource(database),
+    );
   }
 
   public getThoughts(limit = 15): AiBrainThought[] {

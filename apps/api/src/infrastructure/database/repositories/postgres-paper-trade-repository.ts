@@ -53,6 +53,11 @@ interface PaperTradeRow extends QueryResultRow {
   slippage: string;
   notes: string;
   instrument_symbol?: string;
+  option_strike: string | null;
+  option_expiry: Date | null;
+  option_type: "CE" | "PE" | null;
+  underlying_symbol: string | null;
+  entry_iv: string | null;
 }
 
 interface CapitalRow extends QueryResultRow {
@@ -87,7 +92,12 @@ const tradeColumns = `
   paper_trades.fees,
   paper_trades.fee_breakdown,
   paper_trades.slippage,
-  paper_trades.notes
+  paper_trades.notes,
+  paper_trades.option_strike,
+  paper_trades.option_expiry,
+  paper_trades.option_type,
+  paper_trades.underlying_symbol,
+  paper_trades.entry_iv
 `;
 
 function toNumber(value: string, field: string): number {
@@ -131,6 +141,15 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     feeBreakdown: row.fee_breakdown && typeof row.fee_breakdown === "object" ? row.fee_breakdown : {},
     slippage: toNumber(row.slippage, "trade slippage"),
     notes: row.notes,
+    optionStrike: row.option_strike === null || row.option_strike === undefined
+      ? null
+      : toNumber(row.option_strike, "option strike"),
+    optionExpiry: row.option_expiry ?? null,
+    optionType: row.option_type ?? null,
+    underlyingSymbol: row.underlying_symbol ?? null,
+    entryIv: row.entry_iv === null || row.entry_iv === undefined
+      ? null
+      : toNumber(row.entry_iv, "entry IV"),
   };
 }
 
@@ -160,7 +179,7 @@ function hasGeometryForFill(side: TradeSide, fillPrice: number, stopLoss: number
 
 function exitEventType(reason: PaperTradeExitReason): Extract<
   PaperTradeEventType,
-  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED"
+  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED" | "EXPIRED"
 > {
   switch (reason) {
     case "STOP_LOSS":
@@ -171,6 +190,8 @@ function exitEventType(reason: PaperTradeExitReason): Extract<
       return "MANUALLY_CLOSED";
     case "CANCELLED":
       return "CANCELLED";
+    case "EXPIRED":
+      return "EXPIRED";
   }
 }
 
@@ -282,12 +303,15 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
 
       const status = input.status ?? 'OPEN';
       const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
+      const contract = input.optionContract;
       const inserted = await client.query<{ id: string }>(`
         INSERT INTO paper_trades (
           account_id, trade_idea_id, instrument_id, side, status, quantity,
-          entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes
+          entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes,
+          option_strike, option_expiry, option_type, underlying_symbol, entry_iv
         ) VALUES (
-          $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12
+          $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12,
+          $15, $16, $17, $18, $19
         )
         RETURNING id
       `, [
@@ -305,6 +329,11 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.notes,
         JSON.stringify(feeBreakdown),
         status,
+        contract?.optionStrike ?? null,
+        contract?.optionExpiry ?? null,
+        contract?.optionType ?? null,
+        contract?.underlyingSymbol ?? null,
+        contract?.entryIv ?? null,
       ]);
       const paperTradeId = inserted.rows[0]?.id;
       if (!paperTradeId) {
@@ -432,7 +461,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
   }
 
   async close(input: ClosePaperTradeInput): Promise<PaperTrade> {
-    assertPositiveFinite(input.exitPrice, "Exit price");
+    assertNonNegativeFinite(input.exitPrice, "Exit price");
     assertNonNegativeFinite(input.exitFees, "Exit fees");
     assertNonNegativeFinite(input.exitSlippage, "Exit slippage");
     assertDate(input.closedAt, "Closed at");

@@ -169,6 +169,7 @@ export function summarizePaperTradeHistory(records: readonly PaperTradeHistoryRe
     TARGET: 0,
     MANUAL: 0,
     CANCELLED: 0,
+    EXPIRED: 0,
   };
   for (const record of records) {
     if (record.exitReason) {

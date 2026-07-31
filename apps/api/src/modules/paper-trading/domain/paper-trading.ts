@@ -1,8 +1,16 @@
 import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
-export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED";
-export type PaperTradeEventType = "PENDING_PLACED" | "OPENED" | "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED";
+export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED" | "EXPIRED";
+export type PaperTradeEventType =
+  | "PENDING_PLACED"
+  | "OPENED"
+  | "STOP_LOSS_HIT"
+  | "TARGET_HIT"
+  | "MANUALLY_CLOSED"
+  | "CANCELLED"
+  | "EXPIRED";
+export type OptionContractType = "CE" | "PE";
 
 export interface PaperAccount {
   id: string;
@@ -48,6 +56,12 @@ export interface PaperTrade {
   /** Total simulated INR slippage costs applied to this trade so far. */
   slippage: number;
   notes: string;
+  /** Option-buyer contract fields; all null for legacy / non-option trades. */
+  optionStrike?: number | null;
+  optionExpiry?: Date | null;
+  optionType?: OptionContractType | null;
+  underlyingSymbol?: string | null;
+  entryIv?: number | null;
 }
 
 export interface PaperTradeEvent {
@@ -58,6 +72,14 @@ export interface PaperTradeEvent {
   quantity: number | null;
   details: Record<string, unknown>;
   occurredAt: Date;
+}
+
+export interface OptionContractSpec {
+  optionStrike: number;
+  optionExpiry: Date;
+  optionType: OptionContractType;
+  underlyingSymbol: string;
+  entryIv: number;
 }
 
 export interface OpenPaperTradeInput {
@@ -80,6 +102,8 @@ export interface OpenPaperTradeInput {
   stopLossOverride?: number;
   targetPriceOverride?: number;
   sideOverride?: TradeSide;
+  /** When set, persists first-class option contract columns for live repricing. */
+  optionContract?: OptionContractSpec;
 }
 
 export interface ClosePaperTradeInput {
