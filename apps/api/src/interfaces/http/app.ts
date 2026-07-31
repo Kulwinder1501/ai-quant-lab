@@ -676,15 +676,26 @@ export function createApp({ database }: ApplicationDependencies): Express {
         }
 
         const expiry = expiryDate ? new Date(expiryDate) : defaultWeeklyExpiry();
-        const mapped = mapIdeaToOptionBuyerFill({
-          ideaSide: idea.side,
-          underlyingEntry: Number(idea.entry_price),
-          underlyingStop: Number(idea.stop_loss),
-          underlyingTarget: Number(idea.target_price),
-          impliedVolatility: iv,
-          expiryDate: expiry,
-          strikeStep,
-        });
+        // The mapper now refuses incoherent levels and worthless contracts instead of
+        // synthesising a stop/target band, so those become a 422 rather than a 500: the
+        // request is understood, the contract just cannot carry the idea's geometry.
+        let mapped: ReturnType<typeof mapIdeaToOptionBuyerFill>;
+        try {
+          mapped = mapIdeaToOptionBuyerFill({
+            ideaSide: idea.side,
+            underlyingEntry: Number(idea.entry_price),
+            underlyingStop: Number(idea.stop_loss),
+            underlyingTarget: Number(idea.target_price),
+            impliedVolatility: iv,
+            expiryDate: expiry,
+            strikeStep,
+          });
+        } catch (error) {
+          response.status(422).json({
+            error: error instanceof Error ? error.message : "Option fill could not be derived.",
+          });
+          return;
+        }
         openFill = mapped.fillPremium;
         stopOverride = mapped.stopPremium;
         targetOverride = mapped.targetPremium;

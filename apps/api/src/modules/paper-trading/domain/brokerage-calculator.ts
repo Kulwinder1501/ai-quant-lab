@@ -50,8 +50,27 @@ export function breakdownFees(premium: number, quantity: number, side: "BUY" | "
   }
 
   const turnover = premium * quantity;
+
+  // Zero turnover means no order was placed, so nothing is chargeable. The NSE option
+  // tick is 0.05, so a fill at 0 cannot occur in the market: this is a long option left
+  // to expire worthless, and letting it expire costs nothing. Charging the flat 20 plus
+  // GST here billed 23.60 for a transaction that never happened. An option that expires
+  // *in* the money is a different event -- see `calculateExercisedExpiryFees`.
+  if (turnover === 0) {
+    return {
+      turnover: 0,
+      brokerage: 0,
+      stt: 0,
+      exchangeTxnCharges: 0,
+      sebiCharges: 0,
+      gst: 0,
+      stampDuty: 0,
+      total: 0,
+    };
+  }
+
   const brokerage = OPTIONS_BROKERAGE_PER_ORDER;
-  
+
   const stt = side === "SELL" ? roundInr(turnover * OPTION_SALE_STT_RATE) : 0;
   // Uses the declared rate. A hardcoded 0.00035 was used here while
   // EXCHANGE_TXN_RATE sat unused, so the documented rate and the applied one differed.
@@ -80,6 +99,39 @@ export function calculateEntryFees(premium: number, quantity: number): FeeBreakd
 
 export function calculateExitFees(premium: number, quantity: number): FeeBreakdown {
   return breakdownFees(premium, quantity, "SELL");
+}
+
+/**
+ * STT on an option that expires **in the money and is exercised**: 0.125% of intrinsic
+ * value, with no brokerage.
+ *
+ * This is the event the 0.125% rate actually belongs to, and it is why that rate was
+ * plausible enough to end up misapplied to ordinary sales. It is a separate function
+ * because it needs a different input: intrinsic value at settlement, not premium
+ * turnover. Exchange, SEBI, GST, and stamp charges do not arise -- no order is placed.
+ */
+export const EXERCISED_OPTION_STT_RATE = 0.00125;
+
+export function calculateExercisedExpiryFees(intrinsicValue: number, quantity: number): FeeBreakdown {
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error("Quantity must be a positive integer.");
+  }
+  if (!Number.isFinite(intrinsicValue) || intrinsicValue < 0) {
+    throw new Error("Intrinsic value must be zero or positive.");
+  }
+
+  const settlementValue = intrinsicValue * quantity;
+  const stt = roundInr(settlementValue * EXERCISED_OPTION_STT_RATE);
+  return {
+    turnover: settlementValue,
+    brokerage: 0,
+    stt,
+    exchangeTxnCharges: 0,
+    sebiCharges: 0,
+    gst: 0,
+    stampDuty: 0,
+    total: stt,
+  };
 }
 
 export function calculateTotalFees(entryPremium: number, exitPremium: number, quantity: number): TradeFeeBreakdown {

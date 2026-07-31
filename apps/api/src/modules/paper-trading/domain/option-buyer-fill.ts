@@ -8,6 +8,8 @@ import {
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 const DEFAULT_RISK_FREE_RATE = 0.07;
+/** NSE option premium tick. Premiums cannot be quoted below it. */
+const TICK_SIZE = 0.05;
 
 export interface OptionBuyerFillInput {
   /** Directional idea side: LONG → buy CE, SHORT → buy PE. */
@@ -84,15 +86,39 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     optionType,
   });
 
-  const fillPremium = Math.max(0.05, entryGreeks.premium);
-  let stopPremium = Math.max(0.05, stopGreeks.premium);
-  let targetPremium = Math.max(0.05, targetGreeks.premium);
+  // The underlying levels must sit on the side the idea claims, or the repriced
+  // premiums are meaningless. Caught here rather than absorbed, because a stop on the
+  // wrong side of the entry is a caller error, not a market condition.
+  const expectedStopBelow = input.ideaSide === "LONG";
+  if (expectedStopBelow
+    ? !(input.underlyingStop < input.underlyingEntry && input.underlyingEntry < input.underlyingTarget)
+    : !(input.underlyingTarget < input.underlyingEntry && input.underlyingEntry < input.underlyingStop)) {
+    throw new Error(
+      `A ${input.ideaSide} idea needs its stop and target on opposite sides of the entry; `
+      + `received entry ${input.underlyingEntry}, stop ${input.underlyingStop}, target ${input.underlyingTarget}.`,
+    );
+  }
 
-  // Guarantee LONG premium geometry even if IV surface quirks invert levels.
+  const fillPremium = Math.max(TICK_SIZE, entryGreeks.premium);
+  const stopPremium = Math.max(TICK_SIZE, stopGreeks.premium);
+  const targetPremium = Math.max(TICK_SIZE, targetGreeks.premium);
+
+  // Black-Scholes premium is monotonic in spot, so with coherent inputs the ordering
+  // always holds -- except when the option is so far out of the money, or so close to
+  // expiry, that two of the three premiums collapse onto the tick floor. That is a real
+  // and meaningful condition: the contract is effectively worthless, and no tradable
+  // stop/target geometry exists in premium space.
+  //
+  // This used to synthesise one: a symmetric band of `abs(fill - stop)` or, failing
+  // that, `fillPremium * 0.3`. That turned a worthless option into a setup that looked
+  // tradable, with a 30%-of-premium risk nobody chose and no record that the model's
+  // own output had been discarded. It now refuses.
   if (!(stopPremium < fillPremium && fillPremium < targetPremium)) {
-    const risk = Math.max(0.05, Math.abs(fillPremium - stopPremium) || fillPremium * 0.3);
-    stopPremium = Math.max(0.05, roundMoney(fillPremium - risk));
-    targetPremium = roundMoney(fillPremium + risk);
+    throw new Error(
+      `Repricing gave no tradable premium geometry (stop ${stopPremium}, fill ${fillPremium}, `
+      + `target ${targetPremium}) for the ${strike} ${optionType} at ${T.toFixed(4)}y to expiry. `
+      + "The option is effectively worthless at these levels; widen the expiry or move the strike.",
+    );
   }
 
   return {
@@ -107,20 +133,53 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
   };
 }
 
-/** Next weekly Thursday 15:30 IST approximated as UTC Thursday 10:00. */
-export function defaultWeeklyExpiry(from: Date = new Date()): Date {
-  const day = from.getUTCDay(); // 0 Sun … 4 Thu
-  const daysUntilThu = (4 - day + 7) % 7 || 7;
-  const expiry = new Date(Date.UTC(
+/** Thursday. `Date.getUTCDay()` numbering, where Sunday is 0. */
+const DEFAULT_EXPIRY_WEEKDAY = 4;
+/** 15:30 IST, the NSE close, expressed in UTC. */
+const EXPIRY_HOUR_UTC = 10;
+
+/**
+ * The next weekly expiry at 15:30 IST, **including today when today is expiry day and
+ * the close has not passed**.
+ *
+ * The previous implementation computed `(4 - day + 7) % 7 || 7`, so on a Thursday the
+ * `|| 7` turned today's zero-day offset into a full week. Every trade opened on expiry
+ * morning was then priced against a contract seven days out, which overstates the
+ * premium and understates theta by the entire week that matters most.
+ *
+ * `weekday` is a parameter because not every underlying expires on the same day, and
+ * **not every underlying has a weekly expiry at all** — NSE has consolidated weekly
+ * expiries, so applying this to an index that trades monthly-only would model a
+ * contract that does not exist. Callers holding an instrument with no weekly series
+ * must pass an explicit expiry rather than rely on this default.
+ */
+export function defaultWeeklyExpiry(from: Date = new Date(), weekday: number = DEFAULT_EXPIRY_WEEKDAY): Date {
+  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
+    throw new Error("Expiry weekday must be an integer from 0 (Sunday) to 6 (Saturday).");
+  }
+  const expiryToday = Date.UTC(
     from.getUTCFullYear(),
     from.getUTCMonth(),
-    from.getUTCDate() + daysUntilThu,
-    10,
+    from.getUTCDate(),
+    EXPIRY_HOUR_UTC,
+    0,
+    0,
+    0,
+  );
+  // Today counts only while its close is still ahead; once 15:30 IST passes, that
+  // series has settled and the next one is a week out.
+  const isExpiryDayStillOpen = from.getUTCDay() === weekday && from.getTime() < expiryToday;
+  const daysAhead = isExpiryDayStillOpen ? 0 : ((weekday - from.getUTCDay() + 7) % 7) || 7;
+
+  return new Date(Date.UTC(
+    from.getUTCFullYear(),
+    from.getUTCMonth(),
+    from.getUTCDate() + daysAhead,
+    EXPIRY_HOUR_UTC,
     0,
     0,
     0,
   ));
-  return expiry;
 }
 
 function roundMoney(value: number): number {

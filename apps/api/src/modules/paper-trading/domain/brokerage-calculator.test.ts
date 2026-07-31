@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   breakdownFees,
   calculateEntryFees,
+  calculateExercisedExpiryFees,
   calculateExitFees,
   calculateTotalFees,
   OPTIONS_BROKERAGE_PER_ORDER,
@@ -53,12 +54,41 @@ describe("brokerage-calculator (Zerodha NSE options buyer)", () => {
     expect(sell.stt).not.toBe(14.06);
   });
 
-  it("handles zero premium (worthless expiry) without throwing", () => {
+  it("charges nothing to let a long option expire worthless", () => {
+    // The NSE option tick is 0.05, so a fill at 0 cannot happen in the market: this is
+    // an expiry, not a sale, and no order means no brokerage. This used to bill 23.60.
     const fees = calculateExitFees(0, 75);
+
     expect(fees.turnover).toBe(0);
-    expect(fees.brokerage).toBe(20);
-    expect(fees.stt).toBe(0);
-    expect(fees.total).toBe(roundInr(20 + 20 * 0.18));
+    expect(fees.brokerage).toBe(0);
+    expect(fees.gst).toBe(0);
+    expect(fees.total).toBe(0);
+  });
+
+  it("charges exercise STT on intrinsic value, with no brokerage", () => {
+    // 200 points intrinsic on 75 units is 15,000 of settlement value; exercise STT is
+    // 0.125% of that. This is the event the 0.125% rate belongs to.
+    const fees = calculateExercisedExpiryFees(200, 75);
+
+    expect(fees.turnover).toBe(15_000);
+    expect(fees.stt).toBe(18.75);
+    expect(fees.brokerage).toBe(0);
+    expect(fees.gst).toBe(0);
+    expect(fees.total).toBe(18.75);
+  });
+
+  it("keeps the exercise rate distinct from the sale rate", () => {
+    // Same rupee value, different taxable events: 0.125% on exercise, 0.1% on sale.
+    const exercised = calculateExercisedExpiryFees(150, 75).stt;
+    const sold = breakdownFees(150, 75, "SELL").stt;
+
+    expect(exercised).toBe(14.06);
+    expect(sold).toBe(11.25);
+  });
+
+  it("rejects a negative intrinsic value rather than crediting STT", () => {
+    expect(() => calculateExercisedExpiryFees(-1, 75)).toThrow(/Intrinsic value/);
+    expect(() => calculateExercisedExpiryFees(100, 0)).toThrow(/Quantity/);
   });
 
   it("rejects non-positive quantity", () => {
@@ -66,7 +96,3 @@ describe("brokerage-calculator (Zerodha NSE options buyer)", () => {
     expect(() => calculateEntryFees(10, 1.5)).toThrow(/Quantity/);
   });
 });
-
-function roundInr(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
