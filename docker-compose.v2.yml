@@ -38,6 +38,10 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        # Must be a build arg: Next.js bakes NEXT_PUBLIC_* into the client bundle,
+        # so the environment entry below alone leaves the UI calling the v1 API.
+        NEXT_PUBLIC_API_URL: http://localhost:4001/api/v1
     container_name: ai-quant-lab-web-v2
     restart: unless-stopped
     environment:
