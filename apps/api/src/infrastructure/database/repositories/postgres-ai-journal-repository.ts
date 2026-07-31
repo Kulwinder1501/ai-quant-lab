@@ -41,6 +41,23 @@ export class PostgresAiJournalRepository {
     }
   }
 
+  /**
+   * Removes any reflection already held for a trade.
+   *
+   * Reflection ids used to be `ref-<timestamp>-<random>`, so re-reviewing a trade
+   * could not overwrite its earlier entry and the superseded text stayed on the
+   * dashboard. Deleting by trade id rather than matching on the old wording is
+   * deliberate: a text signature would be a heuristic, and this is exact.
+   */
+  public async deleteByTradeId(tradeId: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("DELETE FROM ai_journal_reflections WHERE trade_id = $1", [tradeId]);
+    } finally {
+      client.release();
+    }
+  }
+
   public async getRecentReflections(limit: number): Promise<AiReflectionLog[]> {
     const client = await this.pool.connect();
     try {

@@ -12,6 +12,7 @@ import { auxiliaryModelPredictionsMigration } from "./011-auxiliary-model-predic
 import { removePseudoEmbeddingsMigration } from "./012-remove-pseudo-embeddings.js";
 import { purgeFabricatedRsiMigration } from "./013-purge-fabricated-rsi.js";
 import { correctSeedCandleProvenanceMigration } from "./014-correct-seed-candle-provenance.js";
+import { tradeReviewsMigration } from "./015-trade-reviews.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -28,5 +29,6 @@ export const migrations = [
   removePseudoEmbeddingsMigration,
   purgeFabricatedRsiMigration,
   correctSeedCandleProvenanceMigration,
+  tradeReviewsMigration,
 ];
 

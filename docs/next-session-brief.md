@@ -417,6 +417,57 @@ Verified after a second seed run: **all 8964 candles are `source='yahoo'`**, spl
 ingestion path into 4540 collector and 4424 seed. The seeds' `ON CONFLICT` clauses do
 not update the provenance columns, so re-running cannot undo the relabel.
 
+### 3.7 DONE — trade reviews with MAE/MFE replace the templated self-reflection
+From `improvements.txt` §4.4, chosen as the first item because it is the one that pays
+back immediately as a diagnostic. Migration `015-trade-reviews`.
+
+**What trade closure used to write.** Two sentences whose content did not depend on the
+trade. `analysis` inferred *"hit Target Profit"* from a positive P&L **while the real
+`exit_reason` sat unread in the same query** — so all three of this database's profitable
+`MANUAL` closes were reported as having hit their target. `improvementRule` proposed the
+same fixed rule for every loss: tighten stops when *"intraday volume is below its
+20-period average"* — a condition never evaluated, and unevaluable here, since index
+intraday volume is zero on every bar (§3.2b).
+
+**What it writes now** — `buildTradeReview` (pure, 14 unit tests), stored in
+`trade_reviews`, one row per trade:
+
+- **realised R** against the trade's own initial risk (`|entry − stop|`)
+- **MAE / MFE** in points and in R
+- the **recorded** exit reason, never inferred
+- derived observations and `proposed_research_tags`
+
+Why MAE/MFE specifically: realised P&L says whether a trade worked, MAE/MFE say whether
+the *geometry* was right. Reconstructing exactly this from exit populations is what
+diagnosed momentum-scalp's realised 0.58:1 (§3.4b) — this makes it a stored field.
+
+Measured on the 4 real closed trades via `npm run paper:trades:review`:
+
+```
+b266c001  WIN  2.075R  MFE 3.081R  MAE 0.280R  1m x29   [EXITED_BELOW_PEAK]
+f07336d4  WIN  1.490R  MFE 1.564R  MAE 0.255R  1m x25   [EXIT_OUTSIDE_GEOMETRY]
+5834f49a  WIN  0.988R  MFE 1.090R  MAE 0R      1m x830  [EXIT_OUTSIDE_GEOMETRY]
+56759aab  WIN  0.168R  MFE 0.442R  MAE 0.118R  1m x200  [EXIT_OUTSIDE_GEOMETRY]
+```
+
+`EXIT_OUTSIDE_GEOMETRY` fires on exactly the 3 manual closes the old text mislabelled.
+The first run also exposed a gap in my own tagging: `b266c001` peaked at 3.08R and banked
+2.08R, and the giveback check only looked at losers — hence `EXITED_BELOW_PEAK`.
+
+Two caveats built into the data rather than left implicit:
+1. **Excursions are an upper bound.** They come from candle extremes, so intra-candle
+   path is unknown and a single candle spanning entry and exit reports its whole range.
+   `observed_timeframe` is stored alongside because it sets the precision — these were
+   read at **1m**, the finest available; a 1d-derived excursion means far less.
+2. **Unmeasured is not zero.** With no holding-period candles the excursions are NULL,
+   tagged `NO_HOLDING_PERIOD_DATA`, and a DB check constraint keeps them null together.
+
+Tags are inputs to offline research and nothing reads them automatically — §4.4's rule
+that a review must never mutate a live strategy. The journal the dashboard reads is now
+assembled from the review, and reflection ids are deterministic (`ref-<tradeId>`), so a
+re-review replaces its entry instead of leaving stale text beside it. **0 rows still
+contain the old wording.**
+
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that
 table, so the promoted volatility model is currently inert plumbing. Wiring it into

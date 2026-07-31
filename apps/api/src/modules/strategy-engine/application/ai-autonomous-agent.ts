@@ -5,6 +5,8 @@ import { EvaluateOpenPaperTrades } from "../../paper-trading/application/evaluat
 import type { CandleRepository } from "../../market-data/domain/candle.js";
 import type { NewsRepository } from "../../news-sentiment/domain/news-article.js";
 import type { PostgresAiJournalRepository } from "../../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
+import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
+import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 
 export interface AiBrainThought {
   id: string;
@@ -534,35 +536,73 @@ export class AiAutonomousAgent {
     try {
       const res = await client.query<{
         id: string;
+        instrument_id: string;
         side: TradeSide;
+        quantity: string;
         realized_pnl: string;
-        exit_reason: any;
+        exit_reason: string | null;
         entry_price: string;
-        exit_price: string;
+        exit_price: string | null;
+        stop_loss: string;
+        target_price: string;
+        opened_at: Date;
         closed_at: Date | null;
-      }>("SELECT id, side, realized_pnl, exit_reason, entry_price, exit_price, closed_at FROM paper_trades WHERE id = $1", [tradeId]);
-      
+        timeframe: string | null;
+      }>(`
+        SELECT paper_trades.id, paper_trades.instrument_id, paper_trades.side, paper_trades.quantity,
+               paper_trades.realized_pnl, paper_trades.exit_reason, paper_trades.entry_price,
+               paper_trades.exit_price, paper_trades.stop_loss, paper_trades.target_price,
+               paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe
+        FROM paper_trades
+        LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+        LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+        WHERE paper_trades.id = $1
+      `, [tradeId]);
+
       const row = res.rows[0];
       if (!row) return;
+      // A review measures a finished trade. Reviewing one that has not closed would
+      // have to invent an exit price, which is the class of thing this replaced.
+      if (row.closed_at === null || row.exit_price === null) return;
 
       const pnl = Number(row.realized_pnl ?? 0);
-      const isWin = pnl >= 0;
-      const outcome = isWin ? "WIN" : "LOSS";
+      const reviewRepository = new PostgresTradeReviewRepository(client);
+      const holdingPeriod = await reviewRepository.findHoldingPeriodCandles({
+        instrumentId: row.instrument_id,
+        openedAt: row.opened_at,
+        closedAt: row.closed_at,
+        preferredTimeframe: row.timeframe,
+      });
 
-      let analysis = "";
-      let improvementRule = "";
+      const review = buildTradeReview({
+        tradeId: row.id,
+        side: row.side,
+        quantity: Number(row.quantity),
+        entryPrice: Number(row.entry_price),
+        exitPrice: Number(row.exit_price),
+        stopLoss: Number(row.stop_loss),
+        targetPrice: Number(row.target_price),
+        realizedPnl: pnl,
+        exitReason: row.exit_reason,
+        candles: holdingPeriod.candles,
+        observedTimeframe: holdingPeriod.timeframe,
+      });
+      await reviewRepository.save(review);
 
-      if (isWin) {
-        analysis = `Trade #${row.id.substring(0, 6)} hit Target Profit (+₹${pnl.toFixed(2)}). Multi-modal confluence across RSI and candlestick pattern recognition successfully captured intraday trend momentum.`;
-        improvementRule = `SUCCESS REINFORCEMENT: Maintain current indicator weighting when news sentiment aligns with technical breakout direction.`;
-      } else {
-        analysis = `Trade #${row.id.substring(0, 6)} hit Stop Loss (-₹${Math.abs(pnl).toFixed(2)}). Market experienced intraday volatility spike against position direction.`;
-        improvementRule = `SELF-CORRECTION RULE: When intraday volume is below 20-period average, tighten Stop Loss from 1.5% to 1.0% to minimize drawdown.`;
-      }
+      // The journal text is now assembled from the measured review rather than
+      // written from a template. The previous version inferred "hit Target Profit"
+      // from a positive P&L while ignoring the exit_reason in its own query, and
+      // proposed the same fixed stop-tightening rule for every loss based on a
+      // volume condition it never evaluated.
+      const outcome = review.outcome === "LOSS" ? "LOSS" : "WIN";
+      const analysis = review.observations.join(" ");
+      const improvementRule = review.proposedResearchTags.length > 0
+        ? `RESEARCH TAGS (aggregate before acting; these change nothing on their own): ${review.proposedResearchTags.join(", ")}.`
+        : "No research tag triggered: geometry and outcome were unremarkable.";
 
       const reflection: AiReflectionLog = {
-        id: `ref-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
-        timestamp: row.closed_at ? new Date(row.closed_at).toISOString() : new Date().toISOString(),
+        id: `ref-${row.id}`,
+        timestamp: new Date(row.closed_at).toISOString(),
         tradeId: row.id,
         symbol,
         side: row.side,
@@ -572,9 +612,14 @@ export class AiAutonomousAgent {
         improvementRule,
       };
 
+      // Any earlier entry for this trade is removed first: historical reflections were
+      // keyed by `ref-<timestamp>-<random>`, so a re-review could not overwrite them
+      // and superseded text would linger on the dashboard alongside the new entry.
+      //
       // Saved without an embedding. The reflection text is real and worth keeping;
       // a vector for it is not available until a real embedding model exists, and
       // a fabricated one is worse than none.
+      await this.aiJournalRepo.deleteByTradeId(row.id);
       await this.aiJournalRepo.saveReflection(reflection);
 
       this.thoughts.push({
@@ -583,8 +628,24 @@ export class AiAutonomousAgent {
         symbol,
         action: "LEARNING",
         confidence: 95,
-        message: `🧠 DAILY SELF-REFLECTION LOGGED (${outcome} ₹${pnl.toFixed(2)}): ${improvementRule}`,
-        details: { tradeId: row.id, outcome, pnl },
+        // Reports the measured excursions, which is what the review actually
+        // establishes. `confidence: 95` above is a display artefact of the thought
+        // stream, not a claim about this review.
+        message: `🧠 TRADE REVIEW RECORDED (${review.outcome} ${review.realizedR}R): ran `
+          + `${review.maximumFavourableExcursionR ?? "unmeasured"}R in favour and `
+          + `${review.maximumAdverseExcursionR ?? "unmeasured"}R against before closing `
+          + `${review.exitReason ?? "with no recorded reason"}.`,
+        details: {
+          tradeId: row.id,
+          outcome: review.outcome,
+          pnl,
+          realizedR: review.realizedR,
+          maximumAdverseExcursionR: review.maximumAdverseExcursionR,
+          maximumFavourableExcursionR: review.maximumFavourableExcursionR,
+          observedTimeframe: review.observedTimeframe,
+          candlesObserved: review.candlesObserved,
+          proposedResearchTags: review.proposedResearchTags,
+        },
       });
     } finally {
       client.release();

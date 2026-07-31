@@ -2,7 +2,10 @@
   "name": "ai-quant-lab",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev:api": "npm run dev --workspace @ai-quant-lab/api",
     "dev:web": "npm run dev --workspace @ai-quant-lab/web",
@@ -32,7 +35,11 @@
     "ml:test": "py -3.12 -m unittest discover -s apps/ml -p \"test_*.py\" -v",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "paper:trades:review": "npm run paper:trades:review --workspace @ai-quant-lab/api --"
   },
-  "engines": { "node": ">=20.11.0", "npm": ">=10.0.0" }
+  "engines": {
+    "node": ">=20.11.0",
+    "npm": ">=10.0.0"
+  }
 }
