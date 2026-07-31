@@ -5,6 +5,8 @@ import type {
   SettleableModel,
 } from "../../../modules/model-predictions/application/settle-model-predictions.js";
 import type { DirectionalLabel } from "../../../modules/model-predictions/domain/model-competition.js";
+import { DIRECTIONAL_LABEL_SCHEMES } from "../../../modules/model-predictions/domain/competition-eligibility.js";
+import { directionalLabelFromForwardReturnBps } from "../../../modules/model-predictions/domain/directional-label.js";
 import type { DatabasePool } from "../database.js";
 
 /**
@@ -65,7 +67,10 @@ const SETTLE_SQL = `
     AND p.model_version_id = $1
     AND p.settled_at IS NULL
     AND cc.future_close IS NOT NULL
-  RETURNING (cc.close_time AT TIME ZONE 'Asia/Kolkata')::date::text AS score_date
+  RETURNING
+    (cc.close_time AT TIME ZONE 'Asia/Kolkata')::date::text AS score_date,
+    p.realized_return_bps,
+    p.realized_label
 `;
 
 function toFiniteOrNull(value: unknown): number | null {
@@ -88,9 +93,16 @@ export class PostgresModelPredictionSettlementRepository implements ModelPredict
       FROM model_predictions mp
       INNER JOIN model_versions mv ON mv.id = mp.model_version_id
       WHERE mp.settled_at IS NULL
+        -- Only models whose target actually is a trade direction. model_predictions
+        -- already CHECKs its prediction column against the directional alphabet, so a
+        -- non-directional model cannot have rows here -- but grading depends on reading
+        -- neutralThresholdBps from the model's protocol, and a volatility model carries a
+        -- value there (50.0) that means nothing for its real target. Naming the schemes
+        -- makes the requirement explicit instead of relying on a constraint two tables away.
+        AND (mv.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = ANY($1)
       GROUP BY mv.id, mv.model_key, horizon_bars, neutral_threshold_bps
       ORDER BY mv.model_key, mv.id
-    `);
+    `, [DIRECTIONAL_LABEL_SCHEMES]);
     return result.rows.map((row) => {
       const record = row as {
         model_version_id: string;
@@ -119,7 +131,28 @@ export class PostgresModelPredictionSettlementRepository implements ModelPredict
       input.horizonBars,
       input.neutralThresholdBps,
     ]);
-    return result.rows.map((row) => (row as { score_date: string }).score_date);
+
+    // The SQL and the trainer are two implementations of one labelling rule, so every
+    // label it just wrote is re-derived here from the return the SQL itself computed. A
+    // disagreement means the band semantics have drifted apart, which would otherwise
+    // corrupt every live accuracy figure while looking entirely reasonable. Loud beats
+    // silent: the run fails and nothing downstream scores on mixed definitions.
+    const scoreDates: string[] = [];
+    for (const row of result.rows) {
+      const record = row as { score_date: string; realized_return_bps: string; realized_label: DirectionalLabel };
+      const returnBps = Number(record.realized_return_bps);
+      const expected = directionalLabelFromForwardReturnBps(returnBps, input.neutralThresholdBps);
+      if (expected !== record.realized_label) {
+        throw new Error(
+          `Settlement labelling disagreed with the shared rule for model ${input.modelVersionId}: `
+          + `a ${returnBps}bps return at a ${input.neutralThresholdBps}bps band was stored as `
+          + `${record.realized_label} but the rule gives ${expected}. The settlement SQL and `
+          + "directionalLabelFromForwardReturnBps have drifted; reconcile them before scoring.",
+        );
+      }
+      scoreDates.push(record.score_date);
+    }
+    return scoreDates;
   }
 
   async settledConfusionByDate(modelVersionId: string, scoreDates: string[]): Promise<DailyConfusionRow[]> {
