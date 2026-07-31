@@ -572,6 +572,11 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           mp.evidence_cutoff_at,
           mp.model_version_id
         FROM model_predictions mp
+        -- PRODUCTION only: with the daily model competition, SECONDARY and
+        -- COMPETITOR pool members shadow-predict on the same candles. Only the
+        -- PRIMARY (the sole PRODUCTION version) may surface a trade direction.
+        INNER JOIN model_versions pmv
+          ON pmv.id = mp.model_version_id AND pmv.stage = 'PRODUCTION'
         WHERE mp.instrument_id = c.instrument_id
           AND mp.source_candle_id = c.id
           AND mp.created_at <= CURRENT_TIMESTAMP

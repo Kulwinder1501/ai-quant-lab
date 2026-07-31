@@ -516,6 +516,80 @@ export function createApp({ database }: ApplicationDependencies): Express {
     }
   });
 
+  /**
+   * The daily model-competition leaderboard: pool roles, rolling scores, recent
+   * daily settled metrics, and live-competition promotion history. Read-only —
+   * roles change only through the scheduled competition job.
+   */
+  app.get("/api/v1/models/competition", async (_request, response, next) => {
+    try {
+      const stateResult = await database.query(`
+        SELECT
+          s.competition_group,
+          s.role,
+          s.model_version_id,
+          s.enrolled_at,
+          s.last_rolling_macro_f1,
+          s.last_evaluated_at,
+          mv.model_key,
+          mv.version,
+          mv.algorithm,
+          mv.stage,
+          mv.trained_at,
+          mv.promoted_at
+        FROM model_competition_state s
+        INNER JOIN model_versions mv ON mv.id = s.model_version_id
+        ORDER BY
+          s.competition_group,
+          CASE s.role WHEN 'PRIMARY' THEN 0 WHEN 'SECONDARY' THEN 1 ELSE 2 END,
+          s.last_rolling_macro_f1 DESC NULLS LAST,
+          s.enrolled_at
+      `);
+      const memberIds = stateResult.rows.map(
+        (row: Record<string, unknown>) => (row as { model_version_id: string }).model_version_id,
+      );
+      const scoresResult = memberIds.length === 0
+        ? { rows: [] as unknown[] }
+        : await database.query(`
+            SELECT
+              model_version_id,
+              score_date::text AS score_date,
+              predictions_settled,
+              predictions_correct,
+              accuracy,
+              macro_f1,
+              directional_hit_rate
+            FROM model_daily_scores
+            WHERE model_version_id = ANY($1::uuid[])
+              AND score_date >= CURRENT_DATE - INTERVAL '14 days'
+            ORDER BY score_date DESC
+          `, [memberIds]);
+      const promotionsResult = await database.query(`
+        SELECT
+          p.model_version_id,
+          p.previous_model_version_id,
+          p.comparison,
+          p.promoted_at,
+          mv.model_key,
+          mv.version
+        FROM model_promotions p
+        INNER JOIN model_versions mv ON mv.id = p.model_version_id
+        ORDER BY p.promoted_at DESC
+        LIMIT 10
+      `);
+      response.status(200).json({
+        data: {
+          pool: stateResult.rows,
+          dailyScores: scoresResult.rows,
+          promotions: promotionsResult.rows,
+        },
+        context: { researchOnly: true },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   // Paper Trading Routes
   app.get("/api/v1/paper-accounts", async (_request, response, next) => {
     try {

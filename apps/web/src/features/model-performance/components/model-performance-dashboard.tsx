@@ -29,6 +29,7 @@ const limitChoices = [25, 50, 100, 200] as const;
 import { ModelFamilies } from "./model-families";
 import { ModelLeaderboard } from "./model-leaderboard";
 import { ModelInspector } from "./model-inspector";
+import { ModelCompetition } from "./model-competition";
 
 /**
  * The Model Performance registry.
@@ -204,6 +205,8 @@ export function ModelPerformanceDashboard() {
           />
         ) : (
           <>
+            <ModelCompetition />
+
             <ModelFamilies families={page?.families ?? []} />
 
             <ModelLeaderboard 

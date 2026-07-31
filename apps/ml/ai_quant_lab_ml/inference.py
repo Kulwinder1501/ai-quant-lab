@@ -152,10 +152,18 @@ def validate_production_artifact(
     instrument_symbol: str,
     timeframe: str,
     alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+    allow_candidate_pool_member: bool = False,
 ) -> ProductionInferenceContract:
-    """Reject any artifact that cannot prove it matches the request and V1 contract."""
+    """Reject any artifact that cannot prove it matches the request and V1 contract.
 
-    if model_version.stage != "PRODUCTION":
+    ``allow_candidate_pool_member`` admits a CANDIDATE that is enrolled in the
+    daily model competition: its shadow predictions build the live track record
+    the competition ranks on, and every other artifact integrity check below
+    still applies to it unchanged.
+    """
+
+    allowed_stages = ("PRODUCTION", "CANDIDATE") if allow_candidate_pool_member else ("PRODUCTION",)
+    if model_version.stage not in allowed_stages:
         raise InferenceError("Only a PRODUCTION model may create a Phase 11 prediction.")
     if model_version.algorithm not in SUPPORTED_ALGORITHMS:
         raise InferenceError(

@@ -2,6 +2,7 @@ import "dotenv/config";
 import cron from "node-cron";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
+import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
@@ -25,9 +26,15 @@ import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/sch
 const IST = "Asia/Kolkata";
 const processIdentity = `${hostname()}:${process.pid}`;
 
+// apps/api/{src|dist}/interfaces/scheduler → five levels up is the repo root.
+// Spawned npm scripts are resolved against the root package.json explicitly,
+// because the process cwd differs between host runs (apps/api) and the
+// container (/app) — relying on it silently broke every ML job in Docker.
+const REPO_ROOT = fileURLToPath(new URL("../../../../..", import.meta.url));
+
 function runCommand(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", shell: true });
+    const child = spawn(command, args, { stdio: "inherit", shell: true, cwd: REPO_ROOT });
     child.on("error", reject);
     child.on("exit", (code) => {
       // A non-zero exit is a failed run, not a completed one. The previous version
@@ -74,6 +81,29 @@ async function main(): Promise<void> {
     void schedule("EOD_PIPELINE", () => runCommand("npm", ["run", "pipeline:eod"]));
   }, { timezone: IST });
 
+  // Intraday shadow predictions for the model-competition pool. Labels are
+  // session-partitioned (a bar near the close has no same-session forward bars),
+  // so predictions must be made during the session to ever settle; a single EOD
+  // prediction on the day's final bar would never mature. Each run ingests the
+  // session's completed 15m bars so far, then predicts once per pool model on
+  // the latest one — idempotent per (model, candle), so overlapping runs and
+  // out-of-hours no-ops are harmless.
+  cron.schedule("*/15 9-15 * * 1-5", () => {
+    void schedule("INTRADAY_MODEL_PREDICTIONS", async () => {
+      const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
+      await runCommand("npm", [
+        "run", "data:collect:historical", "--",
+        "--provider", "yahoo",
+        "--instrument", "NIFTY50",
+        "--timeframe", "15m",
+        "--from", todayIst,
+        "--to", todayIst,
+        "--skip-existing",
+      ]);
+      await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
+    });
+  }, { timezone: IST });
+
   cron.schedule("30 18 * * 1-5", () => {
     void schedule("INSTITUTIONAL_FLOWS", () => runCommand("npm", ["run", "data:collect:institutional"]));
   }, { timezone: IST });
@@ -86,7 +116,7 @@ async function main(): Promise<void> {
   });
 
   log("Scheduler started", {
-    jobs: ["EOD_PIPELINE", "INSTITUTIONAL_FLOWS", "RSS_NEWS_INGESTION"],
+    jobs: ["EOD_PIPELINE", "INTRADAY_MODEL_PREDICTIONS", "INSTITUTIONAL_FLOWS", "RSS_NEWS_INGESTION"],
     timezone: IST,
   });
 

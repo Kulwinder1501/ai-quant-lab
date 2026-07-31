@@ -129,7 +129,7 @@ export function SimulateTradeModal({
               className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
             />
             <p className="mt-1 text-[11px] text-slate-400">
-              Names the contract being priced. Not inferred — expiry weekdays differ by
+              Names the contract being priced. Not inferred â€” expiry weekdays differ by
               index and not every index has a weekly series.
             </p>
           </div>

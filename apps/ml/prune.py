@@ -55,6 +55,14 @@ _SELECT_STALE_CANDIDATES = """
         WHERE model_promotions.model_version_id = model_versions.id
            OR model_promotions.previous_model_version_id = model_versions.id
       )
+      -- Competition-pool members are CANDIDATEs by design (only the PRIMARY is
+      -- PRODUCTION). Their FK protection via predictions is incidental — a
+      -- freshly enrolled competitor that has not predicted yet must still
+      -- survive the age-based sweep, so the pool is excluded explicitly.
+      AND NOT EXISTS (
+        SELECT 1 FROM model_competition_state
+        WHERE model_competition_state.model_version_id = model_versions.id
+      )
     ORDER BY model_versions.trained_at ASC
 """
 
@@ -76,6 +84,10 @@ _COUNT_REFERENCED_CANDIDATES = """
           SELECT 1 FROM model_promotions
           WHERE model_promotions.model_version_id = model_versions.id
              OR model_promotions.previous_model_version_id = model_versions.id
+        )
+        OR EXISTS (
+          SELECT 1 FROM model_competition_state
+          WHERE model_competition_state.model_version_id = model_versions.id
         )
       )
 """

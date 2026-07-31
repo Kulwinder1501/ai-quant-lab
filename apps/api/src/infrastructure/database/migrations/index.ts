@@ -22,6 +22,8 @@ import { weeklyExpiryWeekdayMigration } from "./021-weekly-expiry-weekday.js";
 import { paperTradeOptionContractMigration } from "./022-paper-trade-option-contract.js";
 import { optionContractRequiresLongMigration } from "./023-option-contract-requires-long.js";
 import { weeklyExpiryProvenanceMigration } from "./024-weekly-expiry-provenance.js";
+import { modelCompetitionMigration } from "./025-model-competition.js";
+import { purgeFabricatedPredictionsMigration } from "./026-purge-fabricated-predictions.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -48,4 +50,6 @@ export const migrations = [
   paperTradeOptionContractMigration,
   optionContractRequiresLongMigration,
   weeklyExpiryProvenanceMigration,
+  modelCompetitionMigration,
+  purgeFabricatedPredictionsMigration,
 ];

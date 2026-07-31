@@ -1243,6 +1243,53 @@ class PostgresMlRepository:
             row = cursor.fetchone()
         return None if row is None else _to_model_version(row)
 
+    def list_competition_pool(self, model_key: str | None = None) -> list[dict[str, Any]]:
+        """Enrolled competition-pool members with their role and enrollment time.
+
+        Pool members that are not PRODUCTION are CANDIDATEs shadow-predicting to
+        build a live track record; the caller must guard their predictions by
+        ``enrolled_at`` (never before enrollment) the same way PRODUCTION
+        predictions are guarded by ``promoted_at``.
+        """
+
+        query = """
+            SELECT
+                model_versions.id,
+                model_versions.model_key,
+                model_versions.version,
+                model_versions.algorithm,
+                model_versions.stage,
+                model_versions.artifact_uri,
+                model_versions.artifact_checksum,
+                model_versions.feature_schema,
+                model_versions.validation_metrics,
+                model_versions.trained_at,
+                model_versions.promoted_at,
+                model_competition_state.role AS competition_role,
+                model_competition_state.enrolled_at AS competition_enrolled_at,
+                model_competition_state.competition_group AS competition_group
+            FROM model_competition_state
+            INNER JOIN model_versions ON model_versions.id = model_competition_state.model_version_id
+        """
+        parameters: tuple[Any, ...] = ()
+        if model_key is not None:
+            query += " WHERE model_competition_state.competition_group = %s"
+            parameters = (_require_non_blank(model_key, "Model key"),)
+        query += " ORDER BY model_competition_state.competition_group, model_competition_state.enrolled_at"
+
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, parameters)
+            rows = list(cursor.fetchall())
+        return [
+            {
+                "model_version": _to_model_version(row),
+                "role": _require_non_blank(str(row["competition_role"]), "Competition role"),
+                "enrolled_at": _require_valid_datetime(row["competition_enrolled_at"], "Competition enrolled at"),
+                "competition_group": _require_non_blank(str(row["competition_group"]), "Competition group"),
+            }
+            for row in rows
+        ]
+
     def historical_prediction_reliability(
         self,
         *,

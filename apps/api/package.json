@@ -23,6 +23,8 @@
     "paper:trades:close": "tsx src/interfaces/cli/close-paper-trade.ts",
     "paper:accounts:summary": "tsx src/interfaces/cli/get-paper-account-summary.ts",
     "backtest:run": "tsx src/interfaces/cli/run-backtest.ts",
+    "models:settle-predictions": "tsx src/interfaces/cli/settle-model-predictions.ts",
+    "models:compete": "tsx src/interfaces/cli/run-model-competition.ts",
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "paper:trades:review": "tsx src/interfaces/cli/review-closed-trades.ts",
