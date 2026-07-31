@@ -1,6 +1,7 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
 import { simpleRsi } from "../domain/simple-rsi.js";
+import { SEED_SOURCE_METADATA, YAHOO_PROVIDER_ID } from "../domain/candle-provenance.js";
 import {
   defaultMomentumScalpStrategyConfiguration,
   momentumScalpStrategyRegistration,
@@ -40,11 +41,14 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
 
     // These demo indicators are deliberately registered under 'v1', NOT the real
     // 'ta-v1' contract, and that separation is intentional — do not "align" them.
-    // The values here are approximations (the RSI below is random), and the
-    // momentum-scalp strategy resolves indicators by (code, algorithmVersion,
-    // params). Promoting these to 'ta-v1' would let the strategy match a random
-    // seed RSI against its {period:14} rule and resolve trades from noise, because
-    // findIndicator checks only the config's parameter keys. Real scalp ideas come
+    // Every value here is now computed from real closes (the RSI used to be
+    // `Math.floor(40 + Math.random() * 30)`), but they are still approximations of
+    // the production algorithms: the EMAs are simple means over a 20-close window
+    // rather than exponential, and the RSI is the plain textbook average rather than
+    // Wilder-smoothed. momentum-scalp resolves indicators by (code, algorithmVersion,
+    // params) and `findIndicator` checks only the config's parameter keys, so
+    // promoting these to 'ta-v1' would let the strategy match an approximation
+    // against its {period:14} rule and resolve trades from it. Real scalp ideas come
     // from `analysis:calculate-indicators` (which now includes the EMA-9 fast leg)
     // writing genuine 'ta-v1' snapshots; these seed rows only keep the demo candles
     // from being bare before that runs.
@@ -126,13 +130,15 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
             prices.push(close);
             if (prices.length > 20) prices.shift();
 
+            // source is the provider the prices came from, which is Yahoo; that this
+            // particular row was written by a seed run belongs in source_metadata.
             const candRes = await client.query<{ id: string }>(`
-              INSERT INTO candles (instrument_id, timeframe, open_time, close_time, open, high, low, close, volume, is_complete, source)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, 'seed')
+              INSERT INTO candles (instrument_id, timeframe, open_time, close_time, open, high, low, close, volume, is_complete, source, source_metadata)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $11::jsonb)
               ON CONFLICT (instrument_id, timeframe, open_time) DO UPDATE
               SET close = EXCLUDED.close, high = EXCLUDED.high, low = EXCLUDED.low, volume = EXCLUDED.volume
               RETURNING id
-            `, [inst.id, tf, date, new Date(date.getTime() + intervalMs - 1), open, high, low, close, volume]);
+            `, [inst.id, tf, date, new Date(date.getTime() + intervalMs - 1), open, high, low, close, volume, YAHOO_PROVIDER_ID, SEED_SOURCE_METADATA]);
 
             const candleId = candRes.rows[0].id;
             lastCandleId = candleId;

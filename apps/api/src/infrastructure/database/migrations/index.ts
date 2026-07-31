@@ -11,6 +11,7 @@ import { institutionalFlowAsOfMigration } from "./010-institutional-flow-as-of.j
 import { auxiliaryModelPredictionsMigration } from "./011-auxiliary-model-predictions.js";
 import { removePseudoEmbeddingsMigration } from "./012-remove-pseudo-embeddings.js";
 import { purgeFabricatedRsiMigration } from "./013-purge-fabricated-rsi.js";
+import { correctSeedCandleProvenanceMigration } from "./014-correct-seed-candle-provenance.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -26,5 +27,6 @@ export const migrations = [
   auxiliaryModelPredictionsMigration,
   removePseudoEmbeddingsMigration,
   purgeFabricatedRsiMigration,
+  correctSeedCandleProvenanceMigration,
 ];
 

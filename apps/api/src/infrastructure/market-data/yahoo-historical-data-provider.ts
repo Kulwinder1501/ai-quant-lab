@@ -5,6 +5,7 @@ import type {
   HistoricalMarketDataRequest,
 } from "../../modules/market-data/domain/historical-data-provider.js";
 import { resolveYahooSymbol } from "../../modules/market-data/domain/yahoo-symbol-resolver.js";
+import { YAHOO_PROVIDER_ID } from "../../modules/market-data/domain/candle-provenance.js";
 
 function getYahooInterval(timeframe: string): "1m" | "2m" | "5m" | "15m" | "30m" | "60m" | "90m" | "1h" | "1d" | "5d" | "1wk" | "1mo" | "3mo" {
   switch (timeframe) {
@@ -21,7 +22,7 @@ function getYahooInterval(timeframe: string): "1m" | "2m" | "5m" | "15m" | "30m"
 }
 
 export class YahooHistoricalDataProvider implements HistoricalMarketDataProvider {
-  readonly id = "yahoo";
+  readonly id = YAHOO_PROVIDER_ID;
 
   async fetchCandles(request: HistoricalMarketDataRequest): Promise<HistoricalMarketCandle[]> {
     const yfSymbol = resolveYahooSymbol(request.providerInstrumentId);

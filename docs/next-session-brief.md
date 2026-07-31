@@ -367,6 +367,34 @@ seeds):
 - Candles were not corrupted: NIFTY50 1d 2026-07-30 is byte-identical after the run and
   still `source: yahoo`. Counts only grew as new bars were fetched (1m 3742→4064).
 
+**Do not treat the fabrication signature as a live detector.** "A whole number in
+[40,70)" identified the old `Math.random()` RSI, but a genuine RSI stored to two
+decimals lands on an integer roughly 1% of the time — after the fix, **31 of 3748 rows
+match the signature and every sampled one recomputes exactly**, verified against an
+independent reimplementation. So a future run of that query reporting "31 fabricated"
+is a false positive, not a regression. Migration 013 was therefore a one-time cleanup,
+not a reusable check; on a fresh database it runs before any seeding and deletes
+nothing.
+
+### 3.6c `candles.source` now records the provider, not the script
+`source` is provider provenance — the ingestion paths set it from `provider.id`, which
+is where `'yahoo'` comes from. Both seeds fetch from Yahoo through `yahoo-finance2`
+exactly like the real collector, but hardcoded `source = 'seed'`, so **4374 rows of
+genuine Yahoo data had the column that exists to identify real market data naming the
+script that wrote it instead.** "Which candles are real?" was unanswerable from it.
+
+Fixed without losing the distinction: `source` is the provider, and the ingestion path
+moved to `source_metadata` (`{"ingestedBy":"seed"}`), which is what that column is for.
+Migration `014-correct-seed-candle-provenance` relabels the existing rows, merging
+metadata rather than replacing it, and touches no price, volume, or timestamp.
+
+`YAHOO_PROVIDER_ID` now lives in `market-data/domain/candle-provenance.ts` and the
+Yahoo provider reads it from there, so the string has one definition rather than three.
+
+Verified after a second seed run: **all 8964 candles are `source='yahoo'`**, split by
+ingestion path into 4540 collector and 4424 seed. The seeds' `ON CONFLICT` clauses do
+not update the provenance columns, so re-running cannot undo the relabel.
+
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that
 table, so the promoted volatility model is currently inert plumbing. Wiring it into
