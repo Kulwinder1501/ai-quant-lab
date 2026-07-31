@@ -21,6 +21,8 @@ interface SimulateTradeModalProps {
   setSimLots: (v: number) => void;
   simNotes: string;
   setSimNotes: (v: string) => void;
+  simExpiryDate: string;
+  setSimExpiryDate: (v: string) => void;
   simulating: boolean;
   simSuccess: string | null;
   simError: string | null;
@@ -38,6 +40,8 @@ export function SimulateTradeModal({
   setSimLots,
   simNotes,
   setSimNotes,
+  simExpiryDate,
+  setSimExpiryDate,
   simulating,
   simSuccess,
   simError,
@@ -114,6 +118,20 @@ export function SimulateTradeModal({
             {entryFees !== null && (
               <p className="mt-1 text-[10px] text-cyan-300/80">Est. entry fees ≈ ₹{formatNumber(entryFees, 2)} (exact on fill premium)</p>
             )}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 uppercase">Option Expiry</label>
+            <input
+              type="date"
+              required
+              value={simExpiryDate}
+              onChange={(e) => setSimExpiryDate(e.target.value)}
+              className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Names the contract being priced. Not inferred � expiry weekdays differ by
+              index and not every index has a weekly series.
+            </p>
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase">Simulation Notes</label>

@@ -50,10 +50,7 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
 import { calculateEntryFees, calculateExitFees, calculateTotalFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
 import { lotsToQuantity } from "../../modules/paper-trading/domain/lot-size-validator.js";
-import {
-  defaultWeeklyExpiry,
-  mapIdeaToOptionBuyerFill,
-} from "../../modules/paper-trading/domain/option-buyer-fill.js";
+import { mapIdeaToOptionBuyerFill } from "../../modules/paper-trading/domain/option-buyer-fill.js";
 import { priceOption } from "../../modules/pricing/application/price-option.js";
 import { regimeSourceInstrumentSymbol } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
@@ -675,7 +672,29 @@ export function createApp({ database }: ApplicationDependencies): Express {
           return;
         }
 
-        const expiry = expiryDate ? new Date(expiryDate) : defaultWeeklyExpiry();
+        // Required, never derived. This used to fall back to `defaultWeeklyExpiry()`,
+        // which assumed every underlying has a weekly series expiring on a Thursday.
+        // NSE has consolidated weekly expiries, so for an index that trades
+        // monthly-only that default priced a contract which does not exist -- silently,
+        // since a plausible date looks like a real one. The caller names the contract.
+        if (typeof expiryDate !== "string" || expiryDate.trim() === "") {
+          response.status(422).json({
+            error: "expiryDate is required when opening an option-buyer position; "
+              + "it names the contract being priced and cannot be inferred.",
+          });
+          return;
+        }
+        const expiry = new Date(expiryDate);
+        if (Number.isNaN(expiry.getTime())) {
+          response.status(422).json({ error: `expiryDate "${expiryDate}" is not a valid date.` });
+          return;
+        }
+        if (expiry.getTime() <= Date.now()) {
+          response.status(422).json({
+            error: `expiryDate ${expiry.toISOString()} has already passed; an expired contract cannot be priced.`,
+          });
+          return;
+        }
         // The mapper now refuses incoherent levels and worthless contracts instead of
         // synthesising a stop/target band, so those become a 422 rather than a 500: the
         // request is understood, the contract just cannot carry the idea's geometry.

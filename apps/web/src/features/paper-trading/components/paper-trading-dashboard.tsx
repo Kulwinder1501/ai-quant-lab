@@ -49,6 +49,7 @@ export function PaperTradingDashboard() {
   const [openLots, setOpenLots] = useState<number>(1);
   const [openOrderType, setOpenOrderType] = useState<"MARKET" | "PENDING">("MARKET");
   const [openNotes, setOpenNotes] = useState<string>("Opened from Paper Trading UI");
+  const [openExpiryDate, setOpenExpiryDate] = useState("");
   const [openError, setOpenError] = useState<string | null>(null);
 
   const [showCloseModal, setShowCloseModal] = useState<boolean>(false);
@@ -172,6 +173,7 @@ export function PaperTradingDashboard() {
         notes: openNotes,
         orderType: openOrderType,
         asOptionBuyer: true,
+        expiryDate: openExpiryDate,
       });
       setShowOpenModal(false);
       await fetchSummary(selectedAccountId);
@@ -359,6 +361,8 @@ export function PaperTradingDashboard() {
           setOpenOrderType={setOpenOrderType}
           openNotes={openNotes}
           setOpenNotes={setOpenNotes}
+          openExpiryDate={openExpiryDate}
+          setOpenExpiryDate={setOpenExpiryDate}
           openError={openError}
         />
 

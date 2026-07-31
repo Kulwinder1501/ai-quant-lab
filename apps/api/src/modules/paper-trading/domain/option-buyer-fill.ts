@@ -133,27 +133,28 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
   };
 }
 
-/** Thursday. `Date.getUTCDay()` numbering, where Sunday is 0. */
-const DEFAULT_EXPIRY_WEEKDAY = 4;
 /** 15:30 IST, the NSE close, expressed in UTC. */
 const EXPIRY_HOUR_UTC = 10;
 
 /**
- * The next weekly expiry at 15:30 IST, **including today when today is expiry day and
- * the close has not passed**.
+ * The next weekly expiry at 15:30 IST for an instrument that expires on `weekday`,
+ * **including today when today is expiry day and the close has not passed**.
  *
  * The previous implementation computed `(4 - day + 7) % 7 || 7`, so on a Thursday the
  * `|| 7` turned today's zero-day offset into a full week. Every trade opened on expiry
  * morning was then priced against a contract seven days out, which overstates the
  * premium and understates theta by the entire week that matters most.
  *
- * `weekday` is a parameter because not every underlying expires on the same day, and
- * **not every underlying has a weekly expiry at all** — NSE has consolidated weekly
- * expiries, so applying this to an index that trades monthly-only would model a
- * contract that does not exist. Callers holding an instrument with no weekly series
- * must pass an explicit expiry rather than rely on this default.
+ * `weekday` is required and has no default. It belongs to the instrument
+ * (`instruments.weekly_expiry_weekday`), because NSE has consolidated weekly expiries
+ * so the day is neither fixed nor shared across indices — and because an instrument may
+ * have no weekly series at all, which a default cannot express. An instrument whose
+ * weekday is unset has no inferable weekly expiry, and callers must be given an explicit
+ * one rather than have this function invent a contract.
+ *
+ * Renamed from `defaultWeeklyExpiry`: nothing about it is a default any more.
  */
-export function defaultWeeklyExpiry(from: Date = new Date(), weekday: number = DEFAULT_EXPIRY_WEEKDAY): Date {
+export function nextWeeklyExpiry(from: Date, weekday: number): Date {
   if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
     throw new Error("Expiry weekday must be an integer from 0 (Sunday) to 6 (Saturday).");
   }

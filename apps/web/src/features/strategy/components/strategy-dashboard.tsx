@@ -44,6 +44,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
   const [simAccountId, setSimAccountId] = useState<string>("");
   const [simLots, setSimLots] = useState<number>(1);
   const [simNotes, setSimNotes] = useState<string>("Simulated from Strategy Dashboard");
+  const [simExpiryDate, setSimExpiryDate] = useState("");
   const [simulating, setSimulating] = useState<boolean>(false);
   const [simSuccess, setSimSuccess] = useState<string | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
@@ -146,6 +147,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
         lots: Number(simLots),
         notes: simNotes,
         asOptionBuyer: true,
+        expiryDate: simExpiryDate,
       });
       setSimSuccess(`Successfully simulated ${selectedIdea.side} position for ${selectedIdea.instrumentSymbol} in portfolio!`);
       setTimeout(() => {
@@ -251,6 +253,8 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
           setSimLots={setSimLots}
           simNotes={simNotes}
           setSimNotes={setSimNotes}
+          simExpiryDate={simExpiryDate}
+          setSimExpiryDate={setSimExpiryDate}
           simulating={simulating}
           simSuccess={simSuccess}
           simError={simError}

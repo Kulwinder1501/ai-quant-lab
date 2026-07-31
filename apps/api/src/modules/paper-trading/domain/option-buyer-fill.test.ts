@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  defaultWeeklyExpiry,
+  nextWeeklyExpiry,
   mapIdeaToOptionBuyerFill,
   type OptionBuyerFillInput,
 } from "./option-buyer-fill.js";
@@ -96,39 +96,39 @@ describe("mapIdeaToOptionBuyerFill", () => {
   });
 });
 
-describe("defaultWeeklyExpiry", () => {
+describe("nextWeeklyExpiry", () => {
   it("returns this Thursday's close from earlier in the week", () => {
-    expect(defaultWeeklyExpiry(new Date("2026-07-27T04:00:00.000Z")).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-27T04:00:00.000Z"), 4).toISOString())
       .toBe("2026-07-30T10:00:00.000Z");
   });
 
   it("keeps today when today is expiry day and the close has not passed", () => {
     // The bug: `(4 - day + 7) % 7 || 7` turned today's zero offset into a full week, so
     // an expiry-morning trade was priced seven days out.
-    expect(defaultWeeklyExpiry(new Date("2026-07-30T04:00:00.000Z")).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-30T04:00:00.000Z"), 4).toISOString())
       .toBe("2026-07-30T10:00:00.000Z");
   });
 
   it("rolls to next week once expiry day's close has passed", () => {
-    expect(defaultWeeklyExpiry(new Date("2026-07-30T10:00:00.000Z")).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-30T10:00:00.000Z"), 4).toISOString())
       .toBe("2026-08-06T10:00:00.000Z");
-    expect(defaultWeeklyExpiry(new Date("2026-07-30T11:30:00.000Z")).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-30T11:30:00.000Z"), 4).toISOString())
       .toBe("2026-08-06T10:00:00.000Z");
   });
 
   it("returns the coming Thursday from a Friday, not the one just gone", () => {
-    expect(defaultWeeklyExpiry(new Date("2026-07-31T04:00:00.000Z")).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-31T04:00:00.000Z"), 4).toISOString())
       .toBe("2026-08-06T10:00:00.000Z");
   });
 
   it("honours a different expiry weekday, since not every underlying uses Thursday", () => {
     // Tuesday from a Monday.
-    expect(defaultWeeklyExpiry(new Date("2026-07-27T04:00:00.000Z"), 2).toISOString())
+    expect(nextWeeklyExpiry(new Date("2026-07-27T04:00:00.000Z"), 2).toISOString())
       .toBe("2026-07-28T10:00:00.000Z");
   });
 
   it("rejects a weekday outside the week", () => {
-    expect(() => defaultWeeklyExpiry(NOW, 7)).toThrow(/weekday/);
-    expect(() => defaultWeeklyExpiry(NOW, -1)).toThrow(/weekday/);
+    expect(() => nextWeeklyExpiry(NOW, 7)).toThrow(/weekday/);
+    expect(() => nextWeeklyExpiry(NOW, -1)).toThrow(/weekday/);
   });
 });

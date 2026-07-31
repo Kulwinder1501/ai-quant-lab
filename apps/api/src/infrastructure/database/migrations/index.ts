@@ -18,6 +18,7 @@ import { purgeSeededTradeIdeasMigration } from "./017-purge-seeded-trade-ideas.j
 import { reopenUnsettledCandlesMigration } from "./018-reopen-unsettled-candles.js";
 import { fnoInstrumentsAndFeesMigration } from "./019-fno-instruments-and-fees.js";
 import { correctFnoContractSpecsMigration } from "./020-correct-fno-contract-specs.js";
+import { weeklyExpiryWeekdayMigration } from "./021-weekly-expiry-weekday.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -40,4 +41,5 @@ export const migrations = [
   reopenUnsettledCandlesMigration,
   fnoInstrumentsAndFeesMigration,
   correctFnoContractSpecsMigration,
+  weeklyExpiryWeekdayMigration,
 ];

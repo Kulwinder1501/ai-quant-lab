@@ -39,6 +39,8 @@ interface OpenTradeModalProps {
   setOpenOrderType: (val: "MARKET" | "PENDING") => void;
   openNotes: string;
   setOpenNotes: (val: string) => void;
+  openExpiryDate: string;
+  setOpenExpiryDate: (val: string) => void;
   openError: string | null;
 }
 
@@ -57,6 +59,8 @@ export function OpenTradeModal({
   setOpenOrderType,
   openNotes,
   setOpenNotes,
+  openExpiryDate,
+  setOpenExpiryDate,
   openError
 }: OpenTradeModalProps) {
   const selected = tradeIdeas.find((idea) => idea.id === selectedIdeaId);
@@ -121,6 +125,20 @@ export function OpenTradeModal({
                 ))}
               </select>
             )}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 uppercase">Option Expiry</label>
+            <input
+              type="date"
+              required
+              value={openExpiryDate}
+              onChange={(e) => setOpenExpiryDate(e.target.value)}
+              className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Names the contract being priced. Not inferred — expiry weekdays differ by
+              index and not every index has a weekly series.
+            </p>
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase mb-2">Order Type</label>
