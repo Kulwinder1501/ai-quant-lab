@@ -13,6 +13,7 @@ import { removePseudoEmbeddingsMigration } from "./012-remove-pseudo-embeddings.
 import { purgeFabricatedRsiMigration } from "./013-purge-fabricated-rsi.js";
 import { correctSeedCandleProvenanceMigration } from "./014-correct-seed-candle-provenance.js";
 import { tradeReviewsMigration } from "./015-trade-reviews.js";
+import { scheduledJobRunsMigration } from "./016-scheduled-job-runs.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -30,5 +31,6 @@ export const migrations = [
   purgeFabricatedRsiMigration,
   correctSeedCandleProvenanceMigration,
   tradeReviewsMigration,
+  scheduledJobRunsMigration,
 ];
 

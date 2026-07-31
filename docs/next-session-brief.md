@@ -513,6 +513,51 @@ now surfacing as an explicit reason code instead of a silent skip.
 Not yet wired into execution. It is read-only until the paper-trading path is changed to
 require an approved decision, which is the natural next step.
 
+### 3.9 DONE — schedules moved out of the API, and made single-fire
+From `improvements.txt` §8. Migration `016-scheduled-job-runs`.
+
+**The bug.** `cron.schedule` was registered inside the Express app, so **every API
+instance ran every job** — including spawning `npm run pipeline:eod` as a child process.
+`docker-compose.v2.yml` runs a second stack against the same database, so this was live:
+two EOD pipelines could train and promote concurrently. RSS ingestion was a
+`setInterval` on the same app, so each instance also ingested the same feeds and raced on
+the same article rows.
+
+**The fix.** All three schedules (EOD pipeline, institutional collection, RSS ingestion)
+now live in `apps/api/src/interfaces/scheduler/scheduler.ts` — `npm run scheduler`. The
+API keeps only its request-scoped `setInterval` for SSE price streaming, which belongs
+there, and still constructs `ingestNews` for the on-demand POST endpoint.
+
+**Every job claims its due minute before running**, so scaling the scheduler — or
+briefly running an old and a new one during a deploy — still cannot double-fire:
+
+- The lock is the unique index on `(job_type, scheduled_for)`, not an advisory lock. An
+  advisory lock dies with its connection, so a crashed worker frees its claim and a peer
+  re-runs the job; a row persists, which is the right meaning for "this due time was
+  handled". It also leaves an audit trail of what ran, when, and what failed.
+- `scheduled_for` is the **due** minute, not the start instant. Two instances woken by
+  the same tick are milliseconds apart, so raw timestamps would let both through.
+- A failed run **keeps** its claim. Freeing it would let a peer immediately retry, which
+  for the EOD pipeline means concurrent training.
+- A non-zero child exit is now a failure. The old code listened only for `error`, so a
+  job that started and exited 1 was indistinguishable from success.
+
+**Verified against live Postgres**, 10 concurrent claimants on one due minute:
+
+```
+claimants: 10, winners: 1, task executions: 1
+rows in scheduled_job_runs: 1   ->   RACE_TEST COMPLETED instance-3
+```
+
+Plus 9 unit tests on the claim semantics, and the process boots clean:
+`{"message":"Scheduler started","jobs":["EOD_PIPELINE","INSTITUTIONAL_FLOWS","RSS_NEWS_INGESTION"]}`
+
+**A `scheduler` service was added to both compose files** — without it, moving the cron
+out of the API would have silently stopped every scheduled job in Docker. It reuses the
+api image and overrides only the command, deliberately skipping that image's
+migrate-and-seed prelude since the api service owns those and running them from two
+containers races. Both files validate with `docker compose config`.
+
 ### 3.5 Deliberately skipped
 ~~**Phase 4 — a consumer for `auxiliary_model_predictions`.**~~ **DONE — see §3.8.** The
 volatility model is no longer inert; the risk engine sizes positions from it.

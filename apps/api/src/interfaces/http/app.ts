@@ -1,8 +1,6 @@
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import yahooFinance from "yahoo-finance2";
-import cron from "node-cron";
-import { spawn } from "node:child_process";
 import { checkDatabaseReadiness, type DatabaseQueryable } from "../../infrastructure/database/database.js";
 import { PostgresModelPredictionQueryRepository } from "../../infrastructure/database/repositories/postgres-model-prediction-query-repository.js";
 import { PostgresMarketScannerQueryRepository } from "../../infrastructure/database/repositories/postgres-market-scanner-query-repository.js";
@@ -292,28 +290,17 @@ export function createApp({ database }: ApplicationDependencies): Express {
   const ingestNews = new IngestRssNewsService(newsRepository);
   const listNews = new ListMarketNewsService(newsRepository);
 
-  // Background 3-Minute RSS News Ingestion Timer (180 seconds)
-  setInterval(() => {
-    ingestNews.execute().catch((err) => console.error("Background RSS ingestion error:", err));
-  }, 180 * 1000);
-  setTimeout(() => {
-    ingestNews.execute().catch((err) => console.error("Initial RSS ingestion error:", err));
-  }, 5000);
-
-  // EOD Pipeline - Automated ML Training at 4:05 PM IST (Monday to Friday)
-  // Assuming the server timezone is UTC, we can explicitly specify Asia/Kolkata to ensure it runs at 4:05 PM IST
-  cron.schedule("5 16 * * 1-5", () => {
-    console.log("Triggering EOD Pipeline...");
-    const child = spawn("npm", ["run", "pipeline:eod"], { stdio: "inherit", shell: true });
-    child.on("error", (err) => console.error("EOD Pipeline spawn error:", err));
-  }, { timezone: "Asia/Kolkata" });
-
-  // Institutional Data Collection at 6:30 PM IST (Monday to Friday)
-  cron.schedule("30 18 * * 1-5", () => {
-    console.log("Triggering Institutional Data Collection...");
-    const child = spawn("npm", ["run", "data:collect:institutional"], { stdio: "inherit", shell: true });
-    child.on("error", (err) => console.error("Institutional Data Collection spawn error:", err));
-  }, { timezone: "Asia/Kolkata" });
+  // No schedules here. RSS ingestion, the EOD pipeline, and institutional collection
+  // are owned by `apps/api/src/interfaces/scheduler/scheduler.ts` (`npm run scheduler`).
+  //
+  // They used to be registered on this app, so every API instance ran every one of them
+  // and each spawned its own `npm run pipeline:eod`. With docker-compose.v2.yml running
+  // a second stack against the same database, that meant concurrent training and
+  // promotion. Serving HTTP is replicable; owning time is not, so the two are separated
+  // and each job now claims its due minute in `scheduled_job_runs` before running.
+  //
+  // `ingestNews` is still constructed above: the POST endpoint that triggers ingestion
+  // on demand continues to use it.
 
   const aiAutonomousAgent = new AiAutonomousAgent(
     database,

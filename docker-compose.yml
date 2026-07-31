@@ -34,6 +34,23 @@ services:
       database:
         condition: service_healthy
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: ai-quant-lab-scheduler
+    restart: unless-stopped
+    # Reuses the api image and only overrides the command. Deliberately skips the
+    # migrate-and-seed prelude in that image's CMD: the api service owns those, and
+    # running them from two containers races on the same database.
+    command: ["node", "apps/api/dist/interfaces/scheduler/scheduler.js"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database:5432/${POSTGRES_DB:-ai_quant_lab}
+    depends_on:
+      database:
+        condition: service_healthy
+
   web:
     build:
       context: .

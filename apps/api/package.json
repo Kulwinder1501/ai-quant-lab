@@ -26,7 +26,8 @@
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "paper:trades:review": "tsx src/interfaces/cli/review-closed-trades.ts",
-    "risk:evaluate": "tsx src/interfaces/cli/evaluate-trade-risk.ts"
+    "risk:evaluate": "tsx src/interfaces/cli/evaluate-trade-risk.ts",
+    "scheduler": "tsx src/interfaces/scheduler/scheduler.ts"
   },
   "dependencies": {
     "axios": "^1.18.1",
