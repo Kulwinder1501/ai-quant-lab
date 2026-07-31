@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { simpleRsi } from "./seed-market-data.js";
+import { simpleRsi } from "./simple-rsi.js";
 
 /** 15 closes yields the 14 changes one RSI period needs. */
 function closesFrom(start: number, changes: readonly number[]): number[] {

@@ -10,6 +10,7 @@ import { pendingPaperTradesMigration } from "./009-pending-paper-trades.js";
 import { institutionalFlowAsOfMigration } from "./010-institutional-flow-as-of.js";
 import { auxiliaryModelPredictionsMigration } from "./011-auxiliary-model-predictions.js";
 import { removePseudoEmbeddingsMigration } from "./012-remove-pseudo-embeddings.js";
+import { purgeFabricatedRsiMigration } from "./013-purge-fabricated-rsi.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -24,5 +25,6 @@ export const migrations = [
   institutionalFlowAsOfMigration,
   auxiliaryModelPredictionsMigration,
   removePseudoEmbeddingsMigration,
+  purgeFabricatedRsiMigration,
 ];
 

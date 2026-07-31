@@ -1,5 +1,6 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
+import { simpleRsi } from "../domain/simple-rsi.js";
 import {
   defaultMomentumScalpStrategyConfiguration,
   momentumScalpStrategyRegistration,
@@ -182,13 +183,16 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
                 `, [candleId, vwapId, JSON.stringify({ value: Number(vwap.toFixed(2)) }), date]);
             }
 
-            if (rsiId) {
-              const lastRsiValue = Math.floor(40 + Math.random() * 30);
+            // Was `Math.floor(40 + Math.random() * 30)` -- a random number stored as a
+            // measured indicator, and the source of every fabricated RSI row in the
+            // database. Now computed from the same closes the EMAs above use.
+            const rsiValue = rsiId ? simpleRsi(prices) : null;
+            if (rsiId && rsiValue !== null) {
               await client.query(`
                 INSERT INTO indicator_snapshots (candle_id, indicator_definition_id, values, calculated_at)
                 VALUES ($1, $2, $3::jsonb, $4)
                 ON CONFLICT (candle_id, indicator_definition_id) DO UPDATE SET values = EXCLUDED.values
-              `, [candleId, rsiId, JSON.stringify({ value: lastRsiValue }), date]);
+              `, [candleId, rsiId, JSON.stringify({ value: Number(rsiValue.toFixed(2)) }), date]);
             }
           }
 

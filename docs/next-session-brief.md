@@ -324,10 +324,14 @@ for a simpler reason — 4 reflection rows, and their text is templated boilerpl
 Cleaned up in the same pass. The seed no longer invents indicator or pattern values:
 
 - `Math.floor(40 + Math.random() * 30)` written as an RSI into `indicator_snapshots`
-  is now a **real simple-average RSI(14)** computed from the same closes the seed
-  already uses for SMA and Bollinger Bands (`simpleRsi`, unit-tested). It stays under
-  algorithm version `v1`, deliberately distinct from the production pipeline's
+  is now a **real simple-average RSI(14)** computed from the same closes the seeds
+  already use for SMA, Bollinger, EMA, and VWAP (`simpleRsi` in
+  `market-data/domain/simple-rsi.ts`, unit-tested, shared by both seeds). It stays
+  under algorithm version `v1`, deliberately distinct from the production pipeline's
   `ta-v1`, which uses Wilder smoothing — two algorithms must not share a version.
+  **`seed-scalp-data.ts` was the real source**: it wrote a random RSI per 1m candle,
+  which was every one of the 3742 fabricated rows in the database. `seed-market-data.ts`
+  caps at 100 rows per timeframe, so fixing only it would have left the bulk in place.
 - The seeded `BULLISH_ENGULFING` detection is gone. It fired whenever a candle merely
   closed up, with `confidence = 0.85 + random() * 0.1` and a description of "Test
   Pattern on Real Data". A bullish engulfing is a two-candle relationship, so the
@@ -347,8 +351,21 @@ sorted first, so a seeded snapshot could stand in for a production one. It now p
 `PRODUCTION_INDICATOR_VERSION = "ta-v1"`, the same version the strategies pin through
 their configuration.
 
-Not verified at runtime: the seed itself was not re-run (it refetches from Yahoo and
-overwrites candles). Typecheck and the `simpleRsi` unit tests are the coverage.
+**Verified by running it** (`npm run data:seed:core-instruments`, which runs all three
+seeds):
+
+- RSI `v1` went from **3742/3742 carrying the random signature** (a whole number in
+  [40,70)) to a real 9.75–98.40 spread.
+- Re-running the seeds only rewrites candles inside their current fetch window, so 379
+  fabricated rows survived on older 1m candles that no future run would revisit.
+  Migration **`013-purge-fabricated-rsi`** deletes them by that signature; **0 remain**.
+  It is scoped to RSI (the seeds' other `v1` indicators were always real) and leaves
+  all 38,284 `ta-v1` snapshots untouched.
+- No `pattern_detections`, `model_predictions`, or `market_context_embeddings` rows were
+  created (2585 / 110 / 0, all unchanged) — confirming the removed fabrications stay
+  removed across a seed run.
+- Candles were not corrupted: NIFTY50 1d 2026-07-30 is byte-identical after the run and
+  still `source: yahoo`. Counts only grew as new bars were fetched (1m 3742→4064).
 
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that

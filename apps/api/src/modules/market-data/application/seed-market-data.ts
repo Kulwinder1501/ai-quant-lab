@@ -1,37 +1,6 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
-
-const RSI_PERIOD = 14;
-
-/**
- * Simple-average RSI over the trailing window, or null before enough closes exist.
- *
- * This replaces `Math.floor(40 + Math.random() * 30)`, which wrote a random number
- * into `indicator_snapshots` as though it were a measured indicator. It is computed
- * from the same real closes the seed already uses for SMA and Bollinger Bands.
- *
- * Registered under algorithm version `v1`, matching the seed's other indicators and
- * deliberately distinct from the production pipeline's `ta-v1`, which uses Wilder
- * smoothing. Two different algorithms must not share one version string, and callers
- * that need the production values ask for `ta-v1` explicitly.
- */
-export function simpleRsi(closes: readonly number[]): number | null {
-  if (closes.length < RSI_PERIOD + 1) return null;
-  const window = closes.slice(-(RSI_PERIOD + 1));
-  let gains = 0;
-  let losses = 0;
-  for (let index = 1; index < window.length; index += 1) {
-    const change = window[index] - window[index - 1];
-    if (change >= 0) gains += change;
-    else losses -= change;
-  }
-  const averageGain = gains / RSI_PERIOD;
-  const averageLoss = losses / RSI_PERIOD;
-  // An unbroken run of gains has no downside to divide by; RSI is 100 by definition.
-  if (averageLoss === 0) return averageGain === 0 ? 50 : 100;
-  const relativeStrength = averageGain / averageLoss;
-  return 100 - 100 / (1 + relativeStrength);
-}
+import { simpleRsi } from "../domain/simple-rsi.js";
 
 export async function seedMarketData(database: DatabasePool): Promise<void> {
   const client = await database.connect();
