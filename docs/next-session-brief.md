@@ -320,10 +320,35 @@ Not measured: retrieval over journal *prose*, which is genuinely semantic. Block
 for a simpler reason — 4 reflection rows, and their text is templated boilerplate
 ("tighten Stop Loss from 1.5% to 1.0%") rather than observation. No corpus.
 
-**Still-live fabrication in the same seed, deliberately left** (out of scope, flagged):
-`seed-market-data.ts` writes `Math.floor(40 + Math.random() * 30)` as a **real RSI
-into `indicator_snapshots`**, which the strategy engine reads as genuine. Same class of
-defect, larger blast radius.
+### 3.6b Seed fabrication removed, and the RSI read that never worked
+Cleaned up in the same pass. The seed no longer invents indicator or pattern values:
+
+- `Math.floor(40 + Math.random() * 30)` written as an RSI into `indicator_snapshots`
+  is now a **real simple-average RSI(14)** computed from the same closes the seed
+  already uses for SMA and Bollinger Bands (`simpleRsi`, unit-tested). It stays under
+  algorithm version `v1`, deliberately distinct from the production pipeline's
+  `ta-v1`, which uses Wilder smoothing — two algorithms must not share a version.
+- The seeded `BULLISH_ENGULFING` detection is gone. It fired whenever a candle merely
+  closed up, with `confidence = 0.85 + random() * 0.1` and a description of "Test
+  Pattern on Real Data". A bullish engulfing is a two-candle relationship, so the
+  detection was wrong independently of its invented confidence. Real detections come
+  from `npm run analysis:detect-patterns`.
+
+**And the bug found while checking whether that fake RSI mattered:** it did not,
+because **the agent could not read RSI at all.** It read `values["rsi"]`, but RSI
+snapshots store `value`, so `rsiVal` was a hardcoded **50** on every run — none of the
+`52–68` / `>70` / `<35` branches could ever fire, while the emitted thought still
+claimed the setup was "aligned across RSI, Bollinger Bands, and News Sentiment". Now
+reads the right key, so **the agent's confidence numbers will differ from every
+previous run** — for the first time they include RSI.
+
+The agent also matched indicators on code alone, taking whichever algorithm version
+sorted first, so a seeded snapshot could stand in for a production one. It now pins
+`PRODUCTION_INDICATOR_VERSION = "ta-v1"`, the same version the strategies pin through
+their configuration.
+
+Not verified at runtime: the seed itself was not re-run (it refetches from Yahoo and
+overwrites candles). Typecheck and the `simpleRsi` unit tests are the coverage.
 
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that

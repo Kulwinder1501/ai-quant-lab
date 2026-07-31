@@ -1,6 +1,38 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
 
+const RSI_PERIOD = 14;
+
+/**
+ * Simple-average RSI over the trailing window, or null before enough closes exist.
+ *
+ * This replaces `Math.floor(40 + Math.random() * 30)`, which wrote a random number
+ * into `indicator_snapshots` as though it were a measured indicator. It is computed
+ * from the same real closes the seed already uses for SMA and Bollinger Bands.
+ *
+ * Registered under algorithm version `v1`, matching the seed's other indicators and
+ * deliberately distinct from the production pipeline's `ta-v1`, which uses Wilder
+ * smoothing. Two different algorithms must not share one version string, and callers
+ * that need the production values ask for `ta-v1` explicitly.
+ */
+export function simpleRsi(closes: readonly number[]): number | null {
+  if (closes.length < RSI_PERIOD + 1) return null;
+  const window = closes.slice(-(RSI_PERIOD + 1));
+  let gains = 0;
+  let losses = 0;
+  for (let index = 1; index < window.length; index += 1) {
+    const change = window[index] - window[index - 1];
+    if (change >= 0) gains += change;
+    else losses -= change;
+  }
+  const averageGain = gains / RSI_PERIOD;
+  const averageLoss = losses / RSI_PERIOD;
+  // An unbroken run of gains has no downside to divide by; RSI is 100 by definition.
+  if (averageLoss === 0) return averageGain === 0 ? 50 : 100;
+  const relativeStrength = averageGain / averageLoss;
+  return 100 - 100 / (1 + relativeStrength);
+}
+
 export async function seedMarketData(database: DatabasePool): Promise<void> {
   const client = await database.connect();
   try {
@@ -174,26 +206,26 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
               }), date]);
             }
 
-            lastRsiValue = Math.floor(40 + Math.random() * 30);
-            if (rsiId) {
+            const rsiValue = simpleRsi(prices);
+            if (rsiId && rsiValue !== null) {
+              lastRsiValue = rsiValue;
               await client.query(`
                 INSERT INTO indicator_snapshots (candle_id, indicator_definition_id, values, calculated_at)
                 VALUES ($1, $2, $3::jsonb, $4)
                 ON CONFLICT (candle_id, indicator_definition_id) DO UPDATE SET values = EXCLUDED.values
-              `, [candleId, rsiId, JSON.stringify({ value: lastRsiValue }), date]);
+              `, [candleId, rsiId, JSON.stringify({ value: Number(rsiValue.toFixed(2)) }), date]);
             }
 
-            const isRecent = i >= quotes.length - 5;
-            if (isRecent && patMap.has("BULLISH_ENGULFING")) {
-              const patId = patMap.get("BULLISH_ENGULFING");
-              if (close > open) {
-                await client.query(`
-                  INSERT INTO pattern_detections (candle_id, pattern_definition_id, direction, confidence, details, detected_at)
-                  VALUES ($1, $2, 'BULLISH', 0.85 + (random() * 0.1), '{"description":"Test Pattern on Real Data"}', $3)
-                  ON CONFLICT (candle_id, pattern_definition_id) DO UPDATE SET confidence = EXCLUDED.confidence
-                `, [candleId, patId, date]);
-              }
-            }
+            // No seeded pattern_detections row.
+            //
+            // This wrote BULLISH_ENGULFING with `confidence = 0.85 + random() * 0.1`
+            // and a description of "Test Pattern on Real Data" whenever a candle
+            // merely closed up. A bullish engulfing is a two-candle relationship, so
+            // the detection was wrong independently of its invented confidence, and
+            // it landed in the same table the real detector writes to.
+            //
+            // Real detections come from `npm run analysis:detect-patterns`, which
+            // uses the tested candlestick-pattern-engine.
 
             // No market_context_embeddings row is written. This used to invent an
             // RSI (`Math.floor(40 + Math.random() * 30)`), describe it in a string,

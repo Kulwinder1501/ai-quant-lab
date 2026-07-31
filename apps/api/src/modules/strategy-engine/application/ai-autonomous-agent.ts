@@ -42,6 +42,14 @@ export interface AgentPerformanceMetrics {
 /** How stale a published FII/DII print may be before the agent ignores it. */
 export const INSTITUTIONAL_FLOW_MAX_AGE_DAYS = 5;
 
+/**
+ * The indicator algorithm version the agent trusts, matching what the strategies
+ * pin in `indicatorAlgorithmVersion`. Snapshots exist under other versions (the
+ * seed writes its own simpler variants), and those must not be substituted for
+ * production values just because they share an indicator code.
+ */
+export const PRODUCTION_INDICATOR_VERSION = "ta-v1";
+
 export interface InstitutionalFlowBias {
   /** Confidence points to add to a long-biased score. Negative discounts the trade. */
   adjustment: number;
@@ -237,11 +245,22 @@ export class AiAutonomousAgent {
     if (!ctx) return;
 
     // 4. Perform Multi-Modal AI Analysis (Indicators + Pattern + News Sentiment)
-    const rsiObj = ctx.indicators.find((i) => i.code === "RSI");
-    const bbObj = ctx.indicators.find((i) => i.code === "BOLLINGER_BANDS");
+    //
+    // Matching on the code alone picked whichever algorithm version sorted first,
+    // so a seeded or experimental snapshot could stand in for the production one.
+    // The strategies pin this version through their configuration; the agent has no
+    // configuration, so it pins it here.
+    const rsiObj = ctx.indicators.find((i) => i.code === "RSI" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
+    const bbObj = ctx.indicators.find((i) => i.code === "BOLLINGER_BANDS" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
     const latestPattern = ctx.patterns[0];
 
-    const rsiVal = rsiObj ? Number(rsiObj.values["rsi"] ?? 50) : 50;
+    // Reads `value`, the key RSI snapshots are actually written under. This read
+    // `values["rsi"]`, which is never present, so every RSI branch below saw a
+    // hardcoded 50 and none of them could fire -- while the emitted thought still
+    // claimed the setup was "aligned across RSI, Bollinger Bands, and News
+    // Sentiment". Fixing the key makes the agent's RSI reasoning real for the first
+    // time, so its confidence numbers now differ from previous runs.
+    const rsiVal = rsiObj ? Number(rsiObj.values["value"] ?? 50) : 50;
     const bbUpper = bbObj ? Number(bbObj.values["upper"] ?? livePrice * 1.02) : livePrice * 1.02;
     const bbLower = bbObj ? Number(bbObj.values["lower"] ?? livePrice * 0.98) : livePrice * 0.98;
 
