@@ -274,6 +274,57 @@ Both default to the previous behaviour, so recorded runs stay reproducible.
   budget bought under one unit — kept distinct from the capital and gap counters so
   the three failure modes can never be confused. Metrics are jsonb; no migration.
 
+### 3.6 DONE — pseudo-embeddings removed, and RAG measured before building it
+A proposed 11-phase `@xenova/transformers` semantic-memory migration was assessed on
+2026-07-31. **The fabrication it identified was removed; the pipeline it proposed was
+measured first and is not worth building.**
+
+**Removed** (migration `012-remove-pseudo-embeddings`). `generatePseudoEmbedding` was
+`Math.sin(hash + i) * Math.cos(hash * i)` over a string hash — no semantic structure,
+so cosine distance ranked nothing. It fed three things:
+
+1. The agent took the 2 nearest reflections **with no similarity threshold** and moved
+   confidence ±15 per hit while printing *"MEMORY RECALL: Found highly similar past
+   losing setup"* to the dashboard. With noise as the metric and 2 rows in the table,
+   the same rows came back every time — a constant bias on every decision, presented
+   as recall.
+2. `seed-market-data.ts` invented an RSI (`Math.floor(40 + Math.random() * 30)`) and
+   stored a hash of a string describing it as the "embedding" for 504 rows.
+3. It k-NN'd those vectors into a BULLISH/BEARISH call written to **`model_predictions`**
+   with hardcoded coefficients (0.421, 0.315) and `linearScore: 0.856`, attributed to
+   whichever model was in PRODUCTION — indistinguishable from real inference on the
+   dashboard, and one archived model away from writing a directional label against the
+   volatility model (the exact confusion §5 and migration 011 exist to prevent).
+
+Journal reflections now save with a NULL embedding ("not embedded" is true; a fake
+vector was not). The 504 context rows were deleted since the vector was their only
+payload. `findSimilarLessons` was removed rather than left looking functional.
+
+**Measured, then declined.** A market-context document here is a template of numbers,
+so a sentence encoder is a lossy re-encoding of those numbers and k-NN on the numbers
+themselves is an **upper bound** on what embedded RAG could do. Tested on real
+`ta-v1` snapshots, point-in-time (a neighbour's label must resolve before the query
+bar), h5, ±50bps, 173-row holdout:
+
+| | best k-NN | trivial | label-shuffle |
+|---|---|---|---|
+| NIFTY50 | 0.3070 / acc **0.3410** | 0.1780 / **0.3642** | **0.3359** |
+| BANKNIFTY | 0.3419 / acc **0.3584** | 0.1920 / **0.4046** | 0.3237 |
+
+Two refutations, the second decisive: k-NN **loses to trivial on accuracy** at every
+k (5/15/25/50) and both metrics; and the **label-shuffle control matches or beats the
+real labels**, so the macro-F1 gain is purely the spread-the-classes artifact from §1.
+Better embeddings cannot rescue this — the upper bound was tested.
+
+Not measured: retrieval over journal *prose*, which is genuinely semantic. Blocked
+for a simpler reason — 4 reflection rows, and their text is templated boilerplate
+("tighten Stop Loss from 1.5% to 1.0%") rather than observation. No corpus.
+
+**Still-live fabrication in the same seed, deliberately left** (out of scope, flagged):
+`seed-market-data.ts` writes `Math.floor(40 + Math.random() * 30)` as a **real RSI
+into `indicator_snapshots`**, which the strategy engine reads as genuine. Same class of
+defect, larger blast radius.
+
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that
 table, so the promoted volatility model is currently inert plumbing. Wiring it into

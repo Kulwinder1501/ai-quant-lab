@@ -1,5 +1,4 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
-import { generatePseudoEmbedding } from "../../strategy-engine/application/ai-autonomous-agent.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
 import {
   defaultMomentumScalpStrategyConfiguration,

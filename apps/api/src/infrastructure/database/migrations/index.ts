@@ -9,6 +9,7 @@ import { addNewsProvidersMigration } from "./008-add-news-providers.js";
 import { pendingPaperTradesMigration } from "./009-pending-paper-trades.js";
 import { institutionalFlowAsOfMigration } from "./010-institutional-flow-as-of.js";
 import { auxiliaryModelPredictionsMigration } from "./011-auxiliary-model-predictions.js";
+import { removePseudoEmbeddingsMigration } from "./012-remove-pseudo-embeddings.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -22,5 +23,6 @@ export const migrations = [
   pendingPaperTradesMigration,
   institutionalFlowAsOfMigration,
   auxiliaryModelPredictionsMigration,
+  removePseudoEmbeddingsMigration,
 ];
 

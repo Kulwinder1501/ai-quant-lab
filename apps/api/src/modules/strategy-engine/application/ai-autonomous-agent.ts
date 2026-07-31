@@ -111,22 +111,6 @@ export function institutionalFlowBias(
   };
 }
 
-// Generate a deterministic 384-d vector from a string for local testing without external API.
-export function generatePseudoEmbedding(text: string): number[] {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (hash << 5) - hash + text.charCodeAt(i);
-    hash |= 0;
-  }
-  const vec = new Array(384).fill(0);
-  for (let i = 0; i < 384; i++) {
-    vec[i] = Math.sin(hash + i) * Math.cos(hash * i);
-  }
-  // Normalize vector
-  const mag = Math.sqrt(vec.reduce((sum, val) => sum + val * val, 0));
-  return vec.map((v) => (mag === 0 ? 0 : v / mag));
-}
-
 export class AiAutonomousAgent {
   private readonly thoughts: AiBrainThought[] = [];
   private readonly evaluateTrades: EvaluateOpenPaperTrades;
@@ -408,23 +392,15 @@ export class AiAutonomousAgent {
       reasoning.push(`Mild negative news sentiment (${newsSentiment.toFixed(2)}).`);
     }
 
-    // ==========================================
-    // AI JOURNAL MEMORY RAG (pgvector similarity)
-    // ==========================================
-    // Generate an embedding representing current context to find similar past lessons.
-    const currentContextString = `${symbol} rsi:${rsiVal.toFixed(1)} bbUpperDist:${(bbUpper - livePrice).toFixed(1)} pattern:${latestPattern?.code || 'NONE'} sentiment:${newsSentiment.toFixed(2)}`;
-    const currentEmbedding = generatePseudoEmbedding(currentContextString);
-    const similarLessons = await this.aiJournalRepo.findSimilarLessons(currentEmbedding, 2);
-
-    for (const lesson of similarLessons) {
-      if (lesson.outcome === 'LOSS') {
-        confidence -= 15;
-        reasoning.push(`🧠 MEMORY RECALL: Deducting 15% confidence. Found highly similar past losing setup on ${lesson.symbol}. Lesson learned: ${lesson.improvementRule}`);
-      } else if (lesson.outcome === 'WIN') {
-        confidence += 15;
-        reasoning.push(`🧠 MEMORY RECALL: Adding 15% confidence. Found highly similar past winning setup on ${lesson.symbol}. Lesson learned: ${lesson.improvementRule}`);
-      }
-    }
+    // No memory recall term. This previously embedded the context with
+    // `generatePseudoEmbedding` -- a string hash, not a semantic encoding -- took the
+    // 2 nearest journal reflections with no similarity threshold, and moved
+    // confidence by +/-15 per hit while telling the user it had "found a highly
+    // similar past setup". With hash noise as the metric and 2 rows in the table,
+    // the same rows came back for every context, so it was a constant bias on every
+    // decision presented as recall. Restoring it requires a real embedding model, a
+    // similarity floor, and a corpus worth retrieving from; see
+    // docs/next-session-brief.md 3.6.
 
     // Cap confidence
     confidence = Math.min(96, Math.max(15, confidence));
@@ -577,11 +553,10 @@ export class AiAutonomousAgent {
         improvementRule,
       };
 
-      // Generate embedding based on the analysis and rule so it can be retrieved semantically
-      const embeddingText = `${symbol} ${row.side} ${analysis} ${improvementRule}`;
-      const embedding = generatePseudoEmbedding(embeddingText);
-
-      await this.aiJournalRepo.saveReflection(reflection, embedding);
+      // Saved without an embedding. The reflection text is real and worth keeping;
+      // a vector for it is not available until a real embedding model exists, and
+      // a fabricated one is worse than none.
+      await this.aiJournalRepo.saveReflection(reflection);
 
       this.thoughts.push({
         id: `th-${Date.now()}-learn`,

@@ -1,5 +1,4 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
-import { generatePseudoEmbedding } from "../../strategy-engine/application/ai-autonomous-agent.js";
 import { resolveYahooSymbol } from "../../market-data/domain/yahoo-symbol-resolver.js";
 
 export async function seedMarketData(database: DatabasePool): Promise<void> {
@@ -103,10 +102,7 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
 
           let lastCandleId: string | null = null;
           let lastCandleClose: number = 0;
-          let lastEmbedding: number[] = [];
           let lastRsiValue = 50;
-          let lastBbUpper = 0;
-          let lastBbMiddle = 0;
 
           let prices: number[] = [];
           
@@ -199,20 +195,10 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
               }
             }
 
-            const rsiValue = Math.floor(40 + Math.random() * 30);
-            const embeddingText = `${inst.symbol} ${tf} rsi:${rsiValue} bbUpperDist:${(bbUpper - close).toFixed(2)}`;
-            const embedding = generatePseudoEmbedding(embeddingText);
-
-            lastEmbedding = embedding;
-            lastRsiValue = rsiValue;
-            lastBbUpper = bbUpper;
-            lastBbMiddle = bbMiddle;
-
-            await client.query(`
-              INSERT INTO market_context_embeddings (candle_id, instrument_id, embedding, created_at)
-              VALUES ($1, $2, $3::vector, $4)
-              ON CONFLICT (candle_id) DO UPDATE SET embedding = EXCLUDED.embedding
-            `, [candleId, inst.id, `[${embedding.join(",")}]`, date]);
+            // No market_context_embeddings row is written. This used to invent an
+            // RSI (`Math.floor(40 + Math.random() * 30)`), describe it in a string,
+            // and store a hash of that string as a 384-d "embedding" -- a fabricated
+            // number wrapped in a fabricated vector.
           }
 
         // 5. Seed active Trade Ideas (PROPOSED status) for this timeframe so Paper Trading works immediately!
@@ -235,61 +221,23 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             DO UPDATE SET status = 'PROPOSED', entry_price = EXCLUDED.entry_price, stop_loss = EXCLUDED.stop_loss, target_price = EXCLUDED.target_price
           `, [inst.id, strategyVersionId, lastCandleId, entryPrice, stopLoss, targetPrice]);
 
-          // 6. Seed Explainable AI Model Predictions (for the /predictions tab)
-          const mvRes = await client.query("SELECT id FROM model_versions WHERE stage = 'PRODUCTION' LIMIT 1");
-          const modelVersionId = mvRes.rows[0]?.id;
-          if (modelVersionId) {
-            // Perform KNN RAG Query using pgvector!
-            // Find up to 5 most similar historical market contexts based on embedding cosine similarity
-            const knnRes = await client.query(`
-              SELECT c.id, c.close,
-                (SELECT close FROM candles WHERE instrument_id = c.instrument_id AND open_time > c.open_time ORDER BY open_time ASC LIMIT 1 OFFSET 3) as future_close
-              FROM market_context_embeddings mce
-              JOIN candles c ON c.id = mce.candle_id
-              WHERE mce.candle_id != $1 AND c.instrument_id = $2
-              ORDER BY mce.embedding <=> $3::vector
-              LIMIT 15
-            `, [lastCandleId, inst.id, `[${lastEmbedding.join(",")}]`]);
-
-            let wins = 0;
-            let validMatches = 0;
-            let avgReturn = 0;
-
-            for (const match of knnRes.rows) {
-              if (match.future_close) {
-                validMatches++;
-                const ret = (Number(match.future_close) - Number(match.close)) / Number(match.close);
-                avgReturn += ret;
-                if (ret > 0) wins++;
-              }
-            }
-
-            const winRate = validMatches > 0 ? (wins / validMatches) * 100 : 50;
-            const avgReturnPct = validMatches > 0 ? (avgReturn / validMatches) * 100 : 0;
-            const isBullish = winRate >= 50;
-            const predictionLabel = isBullish ? 'BULLISH' : 'BEARISH';
-            const confidence = Number((0.50 + Math.abs(winRate - 50) / 100).toFixed(4));
-            
-            const fcBullish = JSON.stringify([
-              { feature: "rsi_14", category: "MOMENTUM", rawValue: lastRsiValue, coefficient: 0.421, contribution: 0.288, supportsPredictedClass: true },
-              { feature: "bb_width_dist", category: "VOLATILITY", rawValue: Number((lastBbUpper - lastBbMiddle).toFixed(2)), coefficient: 0.315, contribution: 0.393, supportsPredictedClass: true },
-            ]);
-            
-            const expBullish = JSON.stringify([
-              { kind: "SUMMARY", summary: `Model predicted ${predictionLabel} with ${(confidence * 100).toFixed(1)}% confidence. Output aligned with pgvector RAG nearest-neighbor similarity.`, details: { linearScore: 0.856, intercept: 0.05, topFeature: "rsi_14" } },
-              { kind: "EVIDENCE", summary: `Historical pgvector nearest neighbors (${validMatches} similar setups) showed ${winRate.toFixed(1)}% win rate with avg return of ${avgReturnPct.toFixed(2)}%.`, details: { similarSetupsCount: validMatches, historicalWinRate: winRate, averageReturnPct: avgReturnPct } }
-            ]);
-            await client.query(`
-              INSERT INTO model_predictions (
-                model_version_id, instrument_id, source_candle_id, prediction, confidence,
-                feature_contributions, explanation, evidence_cutoff_at, created_at
-              ) VALUES (
-                $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, NOW(), NOW()
-              )
-              ON CONFLICT (model_version_id, source_candle_id) WHERE source_candle_id IS NOT NULL
-              DO UPDATE SET prediction = EXCLUDED.prediction, confidence = EXCLUDED.confidence, feature_contributions = EXCLUDED.feature_contributions, explanation = EXCLUDED.explanation
-            `, [modelVersionId, inst.id, lastCandleId, predictionLabel, confidence, fcBullish, expBullish]);
-          }
+          // No seeded model_predictions row.
+          //
+          // This block used to nearest-neighbour the pseudo-embeddings, turn the
+          // hit rate into a BULLISH/BEARISH call, and write it to
+          // `model_predictions` with hardcoded feature coefficients (0.421, 0.315)
+          // and a hardcoded `linearScore: 0.856` -- attributed to whichever real
+          // model happened to be in PRODUCTION. The predictions dashboard could not
+          // distinguish those rows from genuine inference output.
+          //
+          // It was also one archived model away from breaking a documented
+          // invariant: `SELECT ... WHERE stage = 'PRODUCTION' LIMIT 1` now returns
+          // the volatility-expansion model, so it would have written a directional
+          // label against a model whose label alphabet is
+          // CONTRACTION/STABLE/EXPANSION -- exactly the confusion migration 011
+          // created a separate table to make impossible.
+          //
+          // Real predictions come from `apps/ml/predict.py`.
         }
       }
     }
