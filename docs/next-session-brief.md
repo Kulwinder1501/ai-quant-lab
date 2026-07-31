@@ -1,7 +1,19 @@
 # Next Session Brief — AI Quant Lab
 
-Paste this whole file as your prompt. It is self-contained and assumes no memory of
-the 2026-07-30 session that produced it.
+> [!IMPORTANT]
+> **Superseded for the next session by `docs/prediction-settlement-brief.md`.** Paste that
+> one instead; it carries the current verified state and the next task. This file is still
+> the fullest record of *why* the project is where it is — sections 1, 3.2b, 3.4b–3.9, and
+> 5 are the ones worth reading — but its section 0 numbers below are from 2026-07-30 and
+> are now wrong. Corrected figures, verified 2026-07-31:
+>
+> | | this file says | actually |
+> |---|---|---|
+> | API tests | 139 passed / 32 files | **285 passed / 48 files** |
+> | ML tests | `FAILED (errors=5)` | **`Ran 155 ... OK`** — the LightGBM block is gone |
+> | migrations | through 011 | through **024**; next is **025** |
+> | HEAD | 425b7fb | **5443c52**, branch `feature/champion-challenger` |
+> | pushed? | "not pushed" | **pushed** — `origin/feature/FIIDII-giftnifty == 5443c52` |
 
 ---
 
