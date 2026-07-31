@@ -5,11 +5,11 @@ import {
   type OptionGreeks,
   type OptionType,
 } from "../../pricing/domain/black-scholes-engine.js";
+import { OPTION_TICK_SIZE } from "../../pricing/domain/option-tick.js";
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 const DEFAULT_RISK_FREE_RATE = 0.07;
-/** NSE option premium tick. Premiums cannot be quoted below it. */
-const TICK_SIZE = 0.05;
+
 
 export interface OptionBuyerFillInput {
   /** Directional idea side: LONG → buy CE, SHORT → buy PE. */
@@ -99,9 +99,9 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     );
   }
 
-  const fillPremium = Math.max(TICK_SIZE, entryGreeks.premium);
-  const stopPremium = Math.max(TICK_SIZE, stopGreeks.premium);
-  const targetPremium = Math.max(TICK_SIZE, targetGreeks.premium);
+  const fillPremium = Math.max(OPTION_TICK_SIZE, entryGreeks.premium);
+  const stopPremium = Math.max(OPTION_TICK_SIZE, stopGreeks.premium);
+  const targetPremium = Math.max(OPTION_TICK_SIZE, targetGreeks.premium);
 
   // Black-Scholes premium is monotonic in spot, so with coherent inputs the ordering
   // always holds -- except when the option is so far out of the money, or so close to

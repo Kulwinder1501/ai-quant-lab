@@ -21,6 +21,7 @@ import { correctFnoContractSpecsMigration } from "./020-correct-fno-contract-spe
 import { weeklyExpiryWeekdayMigration } from "./021-weekly-expiry-weekday.js";
 import { paperTradeOptionContractMigration } from "./022-paper-trade-option-contract.js";
 import { optionContractRequiresLongMigration } from "./023-option-contract-requires-long.js";
+import { weeklyExpiryProvenanceMigration } from "./024-weekly-expiry-provenance.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -46,4 +47,5 @@ export const migrations = [
   weeklyExpiryWeekdayMigration,
   paperTradeOptionContractMigration,
   optionContractRequiresLongMigration,
+  weeklyExpiryProvenanceMigration,
 ];

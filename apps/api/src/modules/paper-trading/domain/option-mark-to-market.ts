@@ -3,6 +3,7 @@ import {
   yearsToExpiry,
   type OptionGreeks,
 } from "../../pricing/domain/black-scholes-engine.js";
+import { floorLivePremiumToTick } from "../../pricing/domain/option-tick.js";
 import type { CompletedPriceCandle, PaperTradeExitDecision } from "./paper-trade-exit-policy.js";
 import type { PaperTrade } from "./paper-trading.js";
 
@@ -17,6 +18,14 @@ export interface OptionMarkInput {
 }
 
 export interface OptionMark {
+  /**
+   * The tradable mark: the model premium floored to the 0.05 tick while the contract is
+   * live, and the raw settlement value at or after expiry.
+   *
+   * Differs from `greeks.premium` only when the model price falls below one tick.
+   * `greeks.premium` is the unmodified Black-Scholes output and is kept as such so the
+   * model and the quote it implies stay separable.
+   */
   premium: number;
   greeks: OptionGreeks;
   timeToExpiryYears: number;
@@ -61,7 +70,7 @@ export function priceOptionMark(input: OptionMarkInput): OptionMark {
   });
 
   return {
-    premium: greeks.premium,
+    premium: floorLivePremiumToTick(greeks.premium, timeToExpiryYears),
     greeks,
     timeToExpiryYears,
     spot: input.spot,
