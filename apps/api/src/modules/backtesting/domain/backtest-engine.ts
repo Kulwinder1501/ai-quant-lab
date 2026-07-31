@@ -10,6 +10,11 @@ export const defaultBacktestConfiguration: BacktestConfiguration = {
   initialCapital: 100_000,
   feePerOrder: 0,
   slippageBps: 0,
+  // Fixed quantity stays the default so previously recorded runs remain
+  // reproducible. Constant-risk sizing has to be asked for.
+  positionSizing: "FIXED_QUANTITY",
+  riskFractionPerTrade: 0.01,
+  marginFraction: 1,
   entryPolicy: "NEXT_CANDLE_OPEN",
   invalidGapPolicy: "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET",
   exitPolicy: "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST",
@@ -51,6 +56,11 @@ function assertConfiguration(configuration: BacktestConfiguration): void {
     || !Number.isFinite(configuration.initialCapital) || configuration.initialCapital <= 0
     || !Number.isFinite(configuration.feePerOrder) || configuration.feePerOrder < 0
     || !Number.isFinite(configuration.slippageBps) || configuration.slippageBps < 0 || configuration.slippageBps >= 10_000
+    || (configuration.positionSizing !== "FIXED_QUANTITY" && configuration.positionSizing !== "CONSTANT_RISK_FRACTION")
+    || !Number.isFinite(configuration.riskFractionPerTrade)
+    || configuration.riskFractionPerTrade <= 0 || configuration.riskFractionPerTrade > 1
+    || !Number.isFinite(configuration.marginFraction)
+    || configuration.marginFraction <= 0 || configuration.marginFraction > 1
     || configuration.entryPolicy !== "NEXT_CANDLE_OPEN"
     || configuration.invalidGapPolicy !== "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET"
     || configuration.exitPolicy !== "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST"
@@ -123,16 +133,41 @@ function exitFillPrice(side: PaperTrade["side"], rawExit: number, slippageBps: n
   return side === "LONG" ? roundDownToTick(slipped, tickSize) : roundUpToTick(slipped, tickSize);
 }
 
+/**
+ * Units to fill, or null when the risk budget cannot buy a whole unit.
+ *
+ * Under constant-risk sizing the quantity falls as the stop widens, so the
+ * capital at risk is the same on every trade and a wide-stop trade can no longer
+ * outweigh several narrow-stop ones. Rounding is downward so the realised risk
+ * never exceeds the configured budget.
+ */
+function resolveQuantity(
+  proposal: ProposedTradeIdea,
+  fillPrice: number,
+  configuration: BacktestConfiguration,
+): number | null {
+  if (configuration.positionSizing === "FIXED_QUANTITY") return configuration.quantity;
+  const riskPerUnit = Math.abs(fillPrice - proposal.stopLoss);
+  if (!Number.isFinite(riskPerUnit) || riskPerUnit <= 0) return null;
+  const riskBudget = configuration.initialCapital * configuration.riskFractionPerTrade;
+  const quantity = Math.floor(riskBudget / riskPerUnit);
+  return quantity >= 1 ? quantity : null;
+}
+
+type PositionAttempt = OpenPosition | "INVALID_GAP" | "UNSIZABLE";
+
 function createPosition(
   pending: PendingSignal,
   entryContext: StrategyMarketContext,
   configuration: BacktestConfiguration,
-): OpenPosition | null {
+): PositionAttempt {
   const { proposal } = pending;
   const rawOpen = entryContext.candle.open;
-  if (!isFillInsideRiskGeometry(proposal, rawOpen)) return null;
+  if (!isFillInsideRiskGeometry(proposal, rawOpen)) return "INVALID_GAP";
   const fillPrice = entryFillPrice(proposal.side, rawOpen, configuration.slippageBps, entryContext.candle.tickSize);
-  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !isFillInsideRiskGeometry(proposal, fillPrice)) return null;
+  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !isFillInsideRiskGeometry(proposal, fillPrice)) return "INVALID_GAP";
+  const quantity = resolveQuantity(proposal, fillPrice, configuration);
+  if (quantity === null) return "UNSIZABLE";
   const paperTrade: PaperTrade = {
     id: `backtest-${pending.sourceContext.candle.id}`,
     accountId: "backtest",
@@ -141,7 +176,7 @@ function createPosition(
     timeframe: entryContext.candle.timeframe,
     side: proposal.side,
     status: "OPEN",
-    quantity: configuration.quantity,
+    quantity,
     entryPrice: fillPrice,
     stopLoss: proposal.stopLoss,
     targetPrice: proposal.targetPrice,
@@ -199,6 +234,9 @@ function closePosition(input: {
       "Entry policy: next eligible candle open, adjusted adversely for configured slippage.",
       `Entry candle: ${input.position.entryCandleId}; exit candle: ${input.exitContext.candle.id}.`,
       `Exit policy: ${input.fillRule}.`,
+      input.configuration.positionSizing === "FIXED_QUANTITY"
+        ? `Sizing: FIXED_QUANTITY at ${quantity} unit(s).`
+        : `Sizing: CONSTANT_RISK_FRACTION at ${(input.configuration.riskFractionPerTrade * 100).toFixed(4)}% of ${input.configuration.initialCapital} initial capital, giving ${quantity} unit(s).`,
       `Configured costs: ${input.configuration.feePerOrder.toFixed(6)} INR per order and ${input.configuration.slippageBps.toFixed(4)} bps slippage.`,
     ],
   };
@@ -230,6 +268,7 @@ export class BacktestEngine {
       skippedSignalsWhilePositionOpen: 0,
       skippedSignalsInvalidGap: 0,
       skippedSignalsInsufficientCapital: 0,
+      skippedSignalsUnsizable: 0,
     };
     const trades: BacktestTrade[] = [];
     let realisedEquity = configuration.initialCapital;
@@ -241,9 +280,14 @@ export class BacktestEngine {
       if (pending) {
         const candidate = createPosition(pending, context, configuration);
         pending = null;
-        if (!candidate) {
+        if (candidate === "INVALID_GAP") {
           counters.skippedSignalsInvalidGap += 1;
-        } else if (candidate.paperTrade.entryPrice * candidate.paperTrade.quantity + candidate.entryFees > realisedEquity + 1e-9) {
+        } else if (candidate === "UNSIZABLE") {
+          counters.skippedSignalsUnsizable += 1;
+        } else if (
+          candidate.paperTrade.entryPrice * candidate.paperTrade.quantity * configuration.marginFraction
+            + candidate.entryFees > realisedEquity + 1e-9
+        ) {
           counters.skippedSignalsInsufficientCapital += 1;
         } else {
           position = candidate;

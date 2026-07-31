@@ -4,6 +4,7 @@ import type {
   BacktestEvaluationResult,
   BacktestMarketDataRepository,
   BacktestMetrics,
+  BacktestPositionSizing,
   BacktestRepository,
 } from "../domain/backtesting.js";
 import type { StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
@@ -13,6 +14,9 @@ export interface BacktestExecutionOverrides {
   initialCapital?: number;
   feePerOrder?: number;
   slippageBps?: number;
+  positionSizing?: BacktestPositionSizing;
+  riskFractionPerTrade?: number;
+  marginFraction?: number;
 }
 
 export interface RunBacktestInput {

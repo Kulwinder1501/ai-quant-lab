@@ -18,29 +18,30 @@ three sessions out of date.
 ```bash
 py -3.12 -m unittest discover -s apps/ml -p "test_*.py"
 ```
-Expect **`Ran 155`, `FAILED (errors=5)`**. All 5 errors are
-`tests/test_gradient_boosting.py` LightGBM cases failing with
-`OSError: [WinError 4551] An Application Control policy has blocked this file` —
-**environmental, not regressions** (the native DLL is blocked by Windows
-Application Control). sklearn/logistic, xgboost, numpy, pandas all work.
+Expect **`Ran 155 ... OK`** — zero failures. Re-verified 2026-07-31. Through
+2026-07-30 this suite ended `FAILED (errors=5)`, all 5 being
+`tests/test_gradient_boosting.py` LightGBM cases hitting
+`OSError: [WinError 4551] An Application Control policy has blocked this file`;
+**that machine policy no longer blocks the DLL** (`import lightgbm` → 4.7.0, all
+20 gradient-boosting cases pass). Any ML error at all is now new and yours.
 
 ```bash
 cd apps/api && npx tsc --noEmit && npx vitest run
 ```
-Expect a clean typecheck and **139 passed / 32 files**. Any *sixth* ML error or any
-API failure is new and yours.
+Expect a clean typecheck and **139 passed / 32 files**. Verified 2026-07-31.
 
 ```bash
-git status --short               # expect a clean tree (docker-compose.v2.yml may be untracked)
-git log --oneline -3             # expect 425b7fb docs, 82883e7 the session's work, 8ac8e02
+git status --short               # 2026-07-31: two uncommitted files, see §3.1
+git log --oneline -3             # expect d032da8, 948b895 docs, 425b7fb docs
 ```
 
 ---
 
 ## 1. Where things stand
 
-Branch `feature/FIIDII-giftnifty`. All of the work described below **is committed**
-(`82883e7` for the code, `425b7fb` for this brief) and **not pushed**.
+Branch `feature/FIIDII-giftnifty`. All of the work described below **is committed
+and pushed** — `origin/feature/FIIDII-giftnifty` is at `d032da8`, level with HEAD.
+(`82883e7` code, `425b7fb`/`948b895` this brief, `d032da8` later UI/docker work.)
 
 Current contract versions — **these are immutable ordered column contracts; adding
 or removing any column requires a new version string**:
@@ -139,9 +140,15 @@ It is a **position-sizing / regime-gating** signal, not a directional edge.
 
 ## 3. What is left
 
-### 3.1 DONE — committed
-The session's work is in `82883e7`, this brief in `425b7fb`. Neither is pushed, so
-pushing (or opening a PR) is the only remaining git action.
+### 3.1 DONE — committed and pushed; two files left dirty
+The session's work is in `82883e7`, this brief in `425b7fb`/`948b895`, later
+UI/docker work in `d032da8`. All pushed; opening a PR is the only git action left.
+
+Uncommitted as of 2026-07-31 (verified, not stray edits — a real fix):
+`apps/web/Dockerfile` + `docker-compose.v2.yml` turn `NEXT_PUBLIC_API_URL` into a
+**build arg**. Next.js inlines `NEXT_PUBLIC_*` at build time, so setting it only in
+compose's `environment:` was too late and every v2 image shipped pointing at the v1
+API port. Needs an image rebuild to take effect, then a commit.
 
 ### 3.2 DONE — EMA-9 backfilled, and momentum-scalp proven to work
 Indicators and patterns were recomputed for NIFTY50 + BANKNIFTY on 1d and 15m.
@@ -174,14 +181,19 @@ source with real intraday volume exists (NIFTY futures, NIFTYBEES ETF, or
 constituent-summed volume), no amount of strategy tuning will produce an intraday
 scalp idea. Do not spend time debugging `momentum-scalp` before fixing the feed.
 
-### 3.3 PARTLY DONE — PRODUCTION cleaned; candidates deliberately left
-The two throwaway volatility models were archived. PRODUCTION is now:
+### 3.3 DONE — PRODUCTION cleaned; candidates deliberately left
+The two throwaway volatility models were archived on 07-30, and on **2026-07-31 the
+two orphaned pre-v5 models were archived too** (§4.2 decided). PRODUCTION is now a
+single row:
 
 ```
-v1  market-direction-logistic--NIFTY50--1d--h5--neutral-50bps--ml-feature-v1   <- orphaned by v5 (see 4.2)
-v3  scalp-momentum-v1                                                          <- orphaned by v5 (see 4.2)
 v4  volatility-expansion-logistic--…--volatility-expansion-v1--band0.25        <- the keeper
 ```
+
+Archived, not deleted — reverting is `UPDATE model_versions SET stage='PRODUCTION'`
+on `42b726d9-0bb7-4f9d-a489-11af123e6b15` (v1, `ml-feature-v1`) and
+`3c0e6ab9-48a4-4485-ba68-89d658724865` (v3, `ml-feature-scalp-v1`). Both were
+confirmed orphaned by reading their stored `feature_schema`, not by assuming it.
 
 **56 CANDIDATE rows were left in place on purpose.** `prune.py` can only express
 "older than N days", so removing the ~14 created on 2026-07-30 would also delete the
@@ -192,11 +204,11 @@ so it correctly skips any candidate referenced by a prediction or promotion.
 ### 3.4 Brief items never started
 - ~~**B7 intraday indicator + pattern backfill**~~ — **DONE** for NIFTY50 and
   BANKNIFTY on 1d and 15m. Re-run after ingesting new candles.
-- **B6 backtest `momentum-scalp` v2** — the rules are now *proven to fire* (110
-  ideas on 1d, 73 LONG / 37 SHORT), but have never been run through
-  `backtest:run` to get P&L. Still the cheapest remaining source of signal and
-  independent of the ML track. Note it can only be backtested on 1d until 3.2b is
-  fixed.
+- ~~**B6 backtest `momentum-scalp` v2**~~ — **DONE 2026-07-31, negative result.**
+  It loses on 1d *frictionless*: NIFTY50 97 trades / 53.6% win rate / PF 0.73,
+  BANKNIFTY 86 trades / 41.9% / PF 0.48 (trend-breakout baseline: 7 trades, 0 wins,
+  PF 0.00). Cause is not gaps and not `rewardRiskMultiple` — see §3.4b. Intraday is
+  still untested because of 3.2b.
 - **B3 time-of-day / session-position features** (data-justified: 1m median bar
   range is 5.4bps at 09:15 IST vs ~2.3bps midday). Needs a new scalp schema version.
 - **B4 relative-strength features** (NIFTY-vs-BANKNIFTY spread in bps + rate of
@@ -211,6 +223,57 @@ so it correctly skips any candidate referenced by a prediction or promotion.
   inside a session. Extend the scalp set, or add a third intraday schema. **This is
   a design call, not a mechanical fix.**
 
+### 3.4b Why momentum-scalp loses, and the false lead inside it
+Under a 1:1 stop/target a 53.6% win rate should pay. It doesn't: the average stop
+loss is ~2× the average target win (NIFTY50 -121.4 vs +60.2). **That is not gap
+slippage** — only 3 of 45 stop exits were `OPEN_GAP_STOP`, the rest filled intrabar
+at the exact stop price. It is that `quantity` is fixed while stops are
+ATR-proportional, so risk per trade varies hugely (R spanned 0.8–196 points) and the
+large-R trades are the losers. Bucketed by R, NIFTY50 win rate falls monotonically
+**77% → 64% → 41% → 41%**.
+
+**Do not read that as a tradable low-volatility filter.** Split by time, the low-R
+win rate decays 87.0% → 56.5% (NIFTY50) and 68.4% → 36.8% (BANKNIFTY — below its own
+high-R bucket in the second half).
+
+**The root cause, isolated by equalising risk and re-running** (`--position-sizing
+CONSTANT_RISK_FRACTION`, see §3.4c). Equal risk does *not* rescue it — profit factor
+stays 0.68 / 0.46 — which rules sizing out as the cause. What survives is that the
+mean per-unit gain on TARGET exits is only **0.58R (NIFTY50) / 0.65R (BANKNIFTY)
+against a nominal 1:1 geometry**. The strategy sets stop and target from the source
+candle's *close* but fills at the *next candle's open*, and a momentum bar tends to
+continue overnight, so the fill lands nearer the target and further from the stop.
+Every trade opens with degraded geometry; 56% accuracy at 0.58:1 is −0.12R/trade,
+matching the engine's −0.145R.
+
+The only repair with a real mechanism behind it is to re-derive stop and target from
+the **fill** price rather than the signal bar's close — a strategy-version bump, not
+a parameter tweak. Tuning `rewardRiskMultiple` would repeat the triple-barrier
+mistake in §1.
+
+`backtest:run` now takes `--strategy <key>`; it was hard-wired to trend-breakout, so
+momentum-scalp had never been measurable. Both strategies now resolve through one
+`strategy-registry.ts` shared with idea generation.
+
+### 3.4c Backtest execution model — two additions
+Both default to the previous behaviour, so recorded runs stay reproducible.
+
+- `--position-sizing CONSTANT_RISK_FRACTION --risk-fraction 0.005` solves for the
+  quantity that risks the same capital on every trade. Default is `FIXED_QUANTITY`,
+  which risks capital in proportion to stop width and therefore lets the most
+  volatile bars dominate any result. **Use constant risk for anything you intend to
+  believe.**
+- `--margin-fraction 0.2` funds a position on margin. The two settings are
+  *coupled*, and this is the trap: the capital check was cash-secured, but risking
+  1% behind a stop 0.3% away implies ~3× notional, so a cash-secured account rejects
+  nearly every risk-sized signal. Measured: 97 of 118 NIFTY50 signals skipped as
+  `skippedSignalsInsufficientCapital`, which reads as "no signal" when it is really
+  "no funding". At 0.2 only 4 are skipped. Index futures margin at ~0.15–0.20, so
+  that is the realistic setting; `1` (cash) is the default.
+- New metric `skippedSignalsUnsizable` counts signals whose stop was so wide the risk
+  budget bought under one unit — kept distinct from the capital and gap counters so
+  the three failure modes can never be confused. Metrics are jsonb; no migration.
+
 ### 3.5 Deliberately skipped
 **Phase 4 — a consumer for `auxiliary_model_predictions`.** Nothing reads that
 table, so the promoted volatility model is currently inert plumbing. Wiring it into
@@ -220,15 +283,16 @@ position sizing or regime gating is where its value actually lands.
 
 ## 4. Decisions needed from the user
 
-1. **`rewardRiskMultiple` is still 1.0** in `momentum-scalp`. At a ~0.5 ATR stop on
-   1m this is likely negative-expectancy after spread, slippage, and brokerage. Left
-   alone deliberately — it is a trading-economics decision. State the friction
-   assumption and the geometry can be set.
-2. **Archive the orphaned pre-v5 PRODUCTION models?**
-   `market-direction-logistic--…--ml-feature-v1` (v1) and `scalp-momentum-v1` (v3)
-   are orphaned by the v5 bump and will be rejected at inference.
+1. ~~**`rewardRiskMultiple` is still 1.0**~~ — **superseded by §3.4b.** It was framed
+   as a friction question; the measurement says friction is not what is killing this
+   strategy, since it loses at zero cost. Setting the geometry is no longer the
+   decision that matters.
+2. ~~**Archive the orphaned pre-v5 PRODUCTION models?**~~ — **done 2026-07-31**, see
+   §3.3.
 3. **Is the volatility model worth a consumer** (3.5), given its signal is
-   persistence-dominated?
+   persistence-dominated? **Still open, and now the highest-value open question** —
+   with momentum-scalp dead on 1d and direction dead entirely, volatility expansion
+   is the only measured signal in the repo, and nothing reads it.
 
 ---
 
@@ -261,8 +325,9 @@ position sizing or regime gating is where its value actually lands.
 
 ## 6. Local environment traps (each looks like a code bug and is not)
 
-- **LightGBM is unusable on this machine** (`WinError 4551`, Application Control).
-  5 permanent test errors. Use xgboost for boosted comparisons.
+- ~~**LightGBM is unusable on this machine**~~ — **resolved 2026-07-31.** The
+  Application Control block (`WinError 4551`) is gone; lightgbm 4.7.0 imports and
+  all 20 gradient-boosting tests pass. xgboost is no longer the only boosted option.
 - **Postgres is live** at `postgresql://localhost:5432/ai_quant_lab`. `DATABASE_URL`
   is in `.env`, `apps/api/.env`, `apps/ml/.env` but is **not exported**, so scripts
   must `load_dotenv`. Do not assume there is no database — check first.

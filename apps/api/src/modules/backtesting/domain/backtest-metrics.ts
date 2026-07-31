@@ -10,6 +10,7 @@ export interface BacktestCounters {
   skippedSignalsWhilePositionOpen: number;
   skippedSignalsInvalidGap: number;
   skippedSignalsInsufficientCapital: number;
+  skippedSignalsUnsizable: number;
 }
 
 function rounded(value: number): number {

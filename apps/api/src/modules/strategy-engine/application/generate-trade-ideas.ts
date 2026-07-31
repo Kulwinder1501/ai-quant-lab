@@ -3,9 +3,7 @@ import {
   type StrategyVersionRepository,
   type TradeIdeaRepository,
 } from "../domain/strategy.js";
-import { TrendBreakoutStrategy, trendBreakoutStrategyRegistration } from "../domain/trend-breakout-strategy.js";
-
-import { MomentumScalpStrategy, momentumScalpStrategyRegistration } from "../domain/momentum-scalp-strategy.js";
+import { registeredStrategies } from "../domain/strategy-registry.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -43,10 +41,7 @@ export interface ScanTradeIdeasResult {
   failureMessage?: string;
 }
 
-const STRATEGIES = [
-  { registration: trendBreakoutStrategyRegistration, StrategyClass: TrendBreakoutStrategy },
-  { registration: momentumScalpStrategyRegistration, StrategyClass: MomentumScalpStrategy },
-];
+const STRATEGIES = registeredStrategies;
 
 /**
  * Evaluates the latest completed candle only. The resulting idea is a research

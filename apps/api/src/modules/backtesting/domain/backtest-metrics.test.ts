@@ -8,6 +8,7 @@ const counters: BacktestCounters = {
   skippedSignalsWhilePositionOpen: 2,
   skippedSignalsInvalidGap: 1,
   skippedSignalsInsufficientCapital: 0,
+  skippedSignalsUnsizable: 0,
 };
 
 function trade(overrides: Partial<BacktestTrade> = {}): BacktestTrade {
