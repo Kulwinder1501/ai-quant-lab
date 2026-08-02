@@ -107,6 +107,44 @@ function bullishScalpContext(id: string): StrategyMarketContext {
   };
 }
 
+function passthroughStrategyVersions(): StrategyVersionRepository {
+  return {
+    ensure: async (input) => ({
+      id: `strategy-version-${input.strategyKey}`,
+      strategyId: `strategy-${input.strategyKey}`,
+      strategyKey: input.strategyKey,
+      name: input.name,
+      description: input.description,
+      version: input.version,
+      configuration: { ...input.configuration },
+      isActive: true,
+      isArchived: false,
+    }),
+  };
+}
+
+function recordingIdeas(saved: SaveTradeIdeaProposalInput[]): TradeIdeaRepository {
+  return {
+    saveProposal: async (input) => {
+      saved.push(input);
+      return {
+        id: `idea-${saved.length}`,
+        instrumentId: input.instrumentId,
+        strategyVersionId: input.strategyVersionId,
+        sourceCandleId: input.sourceCandleId,
+        side: input.side,
+        status: "PROPOSED",
+        entryPrice: input.entryPrice,
+        stopLoss: input.stopLoss,
+        targetPrice: input.targetPrice,
+        riskReward: input.riskReward,
+        confidence: input.confidence,
+        expiresAt: input.expiresAt,
+      };
+    },
+  };
+}
+
 describe("GenerateTradeIdeas", () => {
   it("persists an explainable proposal from latest completed evidence", async () => {
     const saved: SaveTradeIdeaProposalInput[] = [];
@@ -249,5 +287,44 @@ describe("GenerateTradeIdeas", () => {
     // Each proposal is keyed to the bar it came from, not collapsed onto one candle.
     const shortIdea = saved.find((idea) => idea.side === "SHORT");
     expect(shortIdea?.sourceCandleId).toBe("candle-bear");
+  });
+
+  // momentum-scalp's RSI bands and ATR-relative VWAP displacement are calibrated
+  // for one-minute bars. Run against a daily bar it still emitted proposals, and
+  // they reached the Scalp tab stamped "1d" with day-sized stops.
+  it("does not run a scalp strategy against a daily candle", async () => {
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
+    };
+
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved))
+      .execute({ instrumentId: "instrument-1", timeframe: "1d" });
+
+    expect(result.find((entry) => entry.strategyKey === "momentum-scalp")).toEqual({
+      strategyVersionId: null,
+      strategyKey: "momentum-scalp",
+      sourceCandleId: null,
+      candidatesGenerated: 0,
+      tradeIdeaIds: [],
+      skippedReason: "TIMEFRAME_UNSUPPORTED",
+    });
+    expect(saved.every((idea) => idea.strategyVersionId === "strategy-version-trend-breakout")).toBe(true);
+  });
+
+  it("does not run a swing strategy against a one-minute candle", async () => {
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    const window = [bearishScalpContext("candle-bear")];
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => window[0],
+      listCompletedContexts: async () => window,
+    };
+
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved))
+      .executeScan({ instrumentId: "instrument-1", timeframe: "1m", lookback: 1 });
+
+    expect(result.find((entry) => entry.strategyKey === "trend-breakout")?.skippedReason).toBe("TIMEFRAME_UNSUPPORTED");
+    expect(saved.every((idea) => idea.strategyVersionId === "strategy-version-momentum-scalp")).toBe(true);
   });
 });

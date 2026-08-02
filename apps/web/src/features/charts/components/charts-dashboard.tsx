@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
-import { getResearchJson, postResearchJson } from "../../research/api";
+import { postResearchJson } from "../../research/api";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
 import { PageHeader } from "../../../components/layout/page-header";
-import type { ChartPayload, PatternAnnotation } from "../domain";
+import type { ChartPayload } from "../domain";
 import { InteractiveChart } from "./interactive-chart";
 
 export function ChartsDashboard() {
@@ -19,35 +20,52 @@ export function ChartsDashboard() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchChartData = useCallback(async (sym: string, tf: string, ind: string[], pat: boolean, signal?: AbortSignal) => {
+  // Overlay toggles only change what the request asks the API to compute; they must
+  // not re-fetch on their own, so the loader reads their latest values off a ref
+  // instead of closing over them and becoming a dependency of the reload effect.
+  const overlaysRef = useRef({ indicators: activeIndicators, includePatterns: showPatterns });
+  useEffect(() => {
+    overlaysRef.current = { indicators: activeIndicators, includePatterns: showPatterns };
+  }, [activeIndicators, showPatterns]);
+
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadChartData = useCallback(async (signal?: AbortSignal) => {
+    const res = await postResearchJson("/charts/data", {
+      symbol: symbol.trim().toUpperCase(),
+      timeframe,
+      indicators: overlaysRef.current.indicators,
+      includePatterns: overlaysRef.current.includePatterns,
+    }, signal) as { data: ChartPayload };
+    return res.data;
+  }, [symbol, timeframe]);
+
+  const applyChartData = useCallback((data: ChartPayload) => {
+    setChartData(data);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applyChartDataError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load chart data."));
+    setLoading(false);
+  }, []);
+
+  const refreshChartData = useCallback(() => {
     setLoading(true);
     setError(null);
-    try {
-      const res = await postResearchJson("/charts/data", {
-        symbol: sym.trim().toUpperCase(),
-        timeframe: tf,
-        indicators: ind,
-        includePatterns: pat,
-      }, signal) as { data: ChartPayload };
-      setChartData(res.data);
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load chart data.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    void loadChartData().then(applyChartData, applyChartDataError);
+  }, [loadChartData, applyChartData, applyChartDataError]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchChartData(symbol, timeframe, activeIndicators, showPatterns, controller.signal);
+    void loadChartData(controller.signal).then(applyChartData, applyChartDataError);
     return () => controller.abort();
-  }, [symbol, timeframe]); // We reload when symbol or timeframe changes
+  }, [loadChartData, applyChartData, applyChartDataError]);
 
   const handlePlotSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    fetchChartData(symbol, timeframe, activeIndicators, showPatterns);
+    refreshChartData();
   };
 
   const toggleIndicator = (ind: string) => {
@@ -159,11 +177,11 @@ export function ChartsDashboard() {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
+                  className="px-5 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
                 >
                   {loading ? (
                     <>
-                      <span className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span className="h-3.5 w-3.5 border-2 border-static-white border-t-transparent rounded-full animate-spin" />
                       <span>Rendering...</span>
                     </>
                   ) : (

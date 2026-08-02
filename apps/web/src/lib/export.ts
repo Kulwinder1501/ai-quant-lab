@@ -1,4 +1,6 @@
-export function exportToCsv<T extends Record<string, any>>(data: T[], filename: string) {
+// `object` rather than `Record<string, unknown>`: callers pass interfaces, which
+// have no implicit index signature and so are not assignable to that constraint.
+export function exportToCsv<T extends object>(data: T[], filename: string) {
   if (!data || !data.length) return;
 
   const headers = Object.keys(data[0]);
@@ -7,7 +9,7 @@ export function exportToCsv<T extends Record<string, any>>(data: T[], filename: 
     ...data.map((row) =>
       headers
         .map((header) => {
-          const value = row[header];
+          const value = (row as Record<string, unknown>)[header];
           // Handle values that contain commas, quotes, or newlines
           if (typeof value === 'string' && (value.includes(',') || value.includes('"') || value.includes('\n'))) {
             return `"${value.replace(/"/g, '""')}"`;

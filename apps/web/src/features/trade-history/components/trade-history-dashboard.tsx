@@ -1,22 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download } from "lucide-react";
+import { Download, Timer, TrendingUp } from "lucide-react";
 import { exportToCsv } from "../../../lib/export";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
+import { Tabs } from "../../../components/ui/tabs";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { formatNumber, formatTimestamp } from "../../research/presentation";
 import { parseTradeHistoryEnvelope } from "../api";
 import {
   defaultTradeHistoryFilters,
-  formatHoldingPeriod,
+  isTradeInMode,
+  summarizeTradeHistory,
   tradeHistoryQuery,
   type TradeHistoryFilters,
+  type TradeHistoryMode,
   type TradeHistoryPage,
-  type TradeHistoryRecord,
 } from "../domain";
 
 const limitChoices = [50, 100, 250, 500] as const;
@@ -32,70 +34,104 @@ import { TradeLedgerTable } from "./trade-ledger-table";
  * data behind it the tile shows an em dash rather than a zero, because a zero win
  * rate and an absent win rate are different facts.
  */
-export function TradeHistoryDashboard({ strategyKey, isScalp }: { strategyKey?: string, isScalp?: boolean } = {}) {
+export function TradeHistoryDashboard({ initialMode = "swing" }: { initialMode?: TradeHistoryMode } = {}) {
+  const [mode, setMode] = useState<TradeHistoryMode>(initialMode);
   const [filters, setFilters] = useState<TradeHistoryFilters>(defaultTradeHistoryFilters);
   const [symbolDraft, setSymbolDraft] = useState<string>("");
   const [page, setPage] = useState<TradeHistoryPage | null>(null);
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState<string | null>(null);
 
-  // Every state write happens after the request resolves. The previous ledger
-  // stays on screen while a new filter loads, which avoids both a skeleton flash
-  // and the cascading renders a synchronous effect update would cause.
-  const load = useCallback(async (active: TradeHistoryFilters, signal?: AbortSignal) => {
-    try {
-      const payload = await getResearchJson(tradeHistoryQuery(active), signal);
-      const parsed = parseTradeHistoryEnvelope(payload);
-      
-      // Filter by strategy locally if strategyKey is provided
-      if (strategyKey) {
-        // Since trade idea data isn't joined fully in the list by default, 
-        // we might not have the strategy on the paper trade record itself unless
-        // we added it. But we can assume it's for momentum-scalp if timeframe is 1m.
-        if (strategyKey === "momentum-scalp") {
-          parsed.records = parsed.records.filter(r => r.timeframe === "1m");
-        }
-      }
-
-      setPage(parsed);
-      setError(null);
-      setState(parsed.records.length === 0 ? "empty" : "ready");
-    } catch (caught) {
-      if ((caught as Error).name === "AbortError") return;
-      setError((caught as Error).message || "The trade ledger could not be read.");
-      setState("unavailable");
-    }
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadLedger = useCallback(async (active: TradeHistoryFilters, signal?: AbortSignal) => {
+    // The API has no timeframe filter. Read its safe maximum, then partition
+    // locally so one category cannot consume the selected row limit before the
+    // active Swing/Scalp tab is applied.
+    const payload = await getResearchJson(tradeHistoryQuery({ ...active, limit: 500 }), signal);
+    return parseTradeHistoryEnvelope(payload);
   }, []);
+
+  // Every state write happens after the request resolves. The previous ledger
+  // stays on screen while a new filter loads, which avoids a skeleton flash.
+  const applyLedger = useCallback((parsed: TradeHistoryPage) => {
+    setPage(parsed);
+    setError(null);
+    setState("ready");
+  }, []);
+
+  const applyLedgerError = useCallback((caught: unknown) => {
+    if (isAbortError(caught)) return;
+    setError(errorMessage(caught, "The trade ledger could not be read."));
+    setState("unavailable");
+  }, []);
+
+  const refreshLedger = useCallback(() => {
+    void loadLedger(filters).then(applyLedger, applyLedgerError);
+  }, [filters, loadLedger, applyLedger, applyLedgerError]);
 
   useEffect(() => {
     const controller = new AbortController();
-    load(filters, controller.signal);
+    void loadLedger(filters, controller.signal).then(applyLedger, applyLedgerError);
     return () => controller.abort();
-  }, [filters, load]);
+  }, [filters, loadLedger, applyLedger, applyLedgerError]);
 
-  const summary = page?.summary ?? null;
-  const records = useMemo(() => page?.records ?? [], [page]);
+  const matchingRecords = useMemo(
+    () => (page?.records ?? []).filter((record) => isTradeInMode(record, mode)),
+    [mode, page],
+  );
+  const records = useMemo(
+    () => matchingRecords.slice(0, filters.limit),
+    [filters.limit, matchingRecords],
+  );
+  const summary = useMemo(
+    () => state === "ready" ? summarizeTradeHistory(records) : null,
+    [records, state],
+  );
+  const viewState: RequestState = state === "ready"
+    ? (records.length === 0 ? "empty" : "ready")
+    : state;
+  const pageTruncated = (page?.truncated ?? false) || matchingRecords.length > filters.limit;
 
   const symbolOptions = useMemo(
-    () => [...new Set(records.map((record) => record.instrumentSymbol))].sort(),
-    [records],
+    () => [...new Set(matchingRecords.map((record) => record.instrumentSymbol))].sort(),
+    [matchingRecords],
   );
 
   const update = <K extends keyof TradeHistoryFilters>(key: K, value: TradeHistoryFilters[K]) => {
     setFilters((previous) => ({ ...previous, [key]: value }));
   };
 
+  const applyMode = useCallback((next: TradeHistoryMode) => {
+    setMode(next);
+    window.history.replaceState(null, "", next === "scalp" ? "/trade-history?mode=scalp" : "/trade-history");
+  }, []);
+
   return (
     <>
       <PageHeader
         eyebrow="Simulated Execution Ledger"
-        title={isScalp ? "Scalp History" : "Trade History"}
+        title="Trade History"
         description="The complete chronological record of local paper trades across every research account, with realised profit factor, expectancy, reward multiples, and holding periods. Reading this ledger cannot open, close, or cancel a position."
-        connectionLabel={state === "unavailable" ? "Ledger unavailable" : `${records.length} simulated trades loaded`}
+        connectionLabel={state === "unavailable"
+          ? "Ledger unavailable"
+          : state === "loading"
+            ? "Loading trade history"
+            : `${records.length}${pageTruncated ? "+" : ""} ${mode} simulated trades loaded`}
         unavailable={state === "unavailable"}
       />
       <div className="mt-10">
       <div className="space-y-6">
+        <Reveal>
+          <Tabs
+            tabs={[
+              { id: "swing", label: "Swing", icon: <TrendingUp className="size-4" /> },
+              { id: "scalp", label: "Scalp", icon: <Timer className="size-4" /> },
+            ]}
+            activeId={mode}
+            onChange={(id) => applyMode(id as TradeHistoryMode)}
+          />
+        </Reveal>
+
         <Reveal>
           <GlassPanel className="flex flex-wrap items-end gap-3 border-cyan-500/20 bg-gradient-to-r from-slate-950 via-slate-900 to-cyan-950/30 p-4">
             <label className="flex flex-col gap-1 text-xs font-semibold text-slate-400">
@@ -219,14 +255,14 @@ export function TradeHistoryDashboard({ strategyKey, isScalp }: { strategyKey?: 
             </button>
             <button
               className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-100 transition hover:bg-cyan-400/20"
-              onClick={() => load(filters)}
+              onClick={refreshLedger}
               type="button"
             >
               Refresh
             </button>
             <button
               className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
-              onClick={() => exportToCsv(records, "trade-history")}
+              onClick={() => exportToCsv(records, `${mode}-trade-history`)}
               type="button"
               disabled={records.length === 0}
             >
@@ -244,11 +280,11 @@ export function TradeHistoryDashboard({ strategyKey, isScalp }: { strategyKey?: 
 
         <TradeHistorySummary summary={summary} />
 
-        {state === "ready" ? (
+        {viewState === "ready" ? (
           <TradeLedgerTable 
             records={records}
-            pageTruncated={page?.truncated ?? false}
-            pageLimit={page?.limit ?? 0}
+            pageTruncated={pageTruncated}
+            pageLimit={filters.limit}
           />
           ) : (
             <RequestStatePanel
@@ -256,7 +292,7 @@ export function TradeHistoryDashboard({ strategyKey, isScalp }: { strategyKey?: 
               emptyTitle="No trades in this slice of the ledger"
               loadingDescription="Reading the persisted simulated-trade ledger."
               loadingTitle="Loading trade history"
-              state={state}
+              state={viewState}
               unavailableDescription="The research API did not return the trade ledger. Confirm the API is running and the local database is reachable."
               unavailableTitle="Trade ledger unavailable"
             />

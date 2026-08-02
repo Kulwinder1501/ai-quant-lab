@@ -1,17 +1,19 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { Download } from "lucide-react";
 import { exportToCsv } from "../../../lib/export";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 import type { PaperAccountSummary, PaperAccountFullSummary } from "../../paper-trading/domain";
 import { OrdersFilterBar } from "./orders-filter-bar";
 import { OrdersStats } from "./orders-stats";
 import { OrdersTable } from "./orders-table";
+import type { OrderRow } from "./orders-table";
 
-export function OrdersDashboard() {
+export function OrdersDashboard({ navigation }: { navigation?: ReactNode } = {}) {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
@@ -23,64 +25,72 @@ export function OrdersDashboard() {
   const [filterSide, setFilterSide] = useState<string>("ALL");
   const [filterOutcome, setFilterOutcome] = useState<string>("ALL");
 
-  // 1. Fetch Paper Accounts
-  const fetchAccounts = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = (await getResearchJson("/paper-accounts", signal)) as { data: PaperAccountSummary[] };
-      const list = res?.data || [];
-      setAccounts(list);
-      if (list.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(list[0].id);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load paper trading accounts.");
-      }
+  // 1. Fetch Paper Accounts. Pure I/O: no state writes, so an effect can call it
+  // without cascading a render.
+  const loadAccounts = useCallback(async (signal?: AbortSignal) => {
+    const res = (await getResearchJson("/paper-accounts", signal)) as { data?: PaperAccountSummary[] };
+    return res?.data || [];
+  }, []);
+
+  const applyAccounts = useCallback((list: PaperAccountSummary[]) => {
+    setAccounts(list);
+    if (list.length > 0 && !selectedAccountId) {
+      setSelectedAccountId(list[0].id);
     }
   }, [selectedAccountId]);
 
-  // 2. Fetch Account Summary (Closed Trades / Orders)
-  const fetchSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
-    if (!accId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = (await getResearchJson(`/paper-accounts/${accId}/summary`, signal)) as { data: PaperAccountFullSummary };
-      if (res?.data) {
-        setSummary(res.data);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load completed order history.");
-      }
-    } finally {
-      setLoading(false);
-    }
+  const applyAccountsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load paper trading accounts."));
   }, []);
+
+  // 2. Fetch Account Summary (Closed Trades / Orders)
+  const loadSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
+    const res = (await getResearchJson(`/paper-accounts/${accId}/summary`, signal)) as { data?: PaperAccountFullSummary };
+    return res?.data;
+  }, []);
+
+  const applySummary = useCallback((data?: PaperAccountFullSummary) => {
+    if (data) {
+      setSummary(data);
+    }
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applySummaryError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load completed order history."));
+    setLoading(false);
+  }, []);
+
+  const refreshSummary = useCallback(() => {
+    if (!selectedAccountId) return;
+    setLoading(true);
+    void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchAccounts(controller.signal);
+    void loadAccounts(controller.signal).then(applyAccounts, applyAccountsError);
     return () => controller.abort();
-  }, [fetchAccounts]);
+  }, [loadAccounts, applyAccounts, applyAccountsError]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     const controller = new AbortController();
-    fetchSummary(selectedAccountId, controller.signal);
+    void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
 
-    const timer = setInterval(() => {
-      fetchSummary(selectedAccountId);
-    }, 5000);
+    const timer = setInterval(refreshSummary, 5000);
 
     return () => {
       controller.abort();
       clearInterval(timer);
     };
-  }, [selectedAccountId, fetchSummary]);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError, refreshSummary]);
 
   // Filter and Compute Order Analytics
-  const filteredOrders = useMemo(() => {
+  const filteredOrders = useMemo<OrderRow[]>(() => {
     const list = summary?.closedTrades || [];
     return list.filter((order) => {
       const sym = order.instrumentSymbol || "NIFTY50";
@@ -133,6 +143,8 @@ export function OrdersDashboard() {
       />
       <div className="mt-10">
         <div className="space-y-6">
+        {navigation && <Reveal>{navigation}</Reveal>}
+
         {/* Account & Filter Control Bar */}
         <Reveal>
           <OrdersFilterBar
@@ -145,7 +157,7 @@ export function OrdersDashboard() {
             setFilterSide={setFilterSide}
             filterOutcome={filterOutcome}
             setFilterOutcome={setFilterOutcome}
-            onRefresh={() => selectedAccountId && fetchSummary(selectedAccountId)}
+            onRefresh={refreshSummary}
           />
         </Reveal>
 

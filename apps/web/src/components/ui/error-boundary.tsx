@@ -93,7 +93,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               </button>
               <button
                 onClick={this.resetErrorBoundary}
-                className="inline-flex items-center justify-center rounded-lg bg-cyan-600/90 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-cyan-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
+                className="inline-flex items-center justify-center rounded-lg bg-cyan-600/90 px-4 py-2 text-sm font-medium text-static-white shadow-sm transition-colors hover:bg-cyan-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200"
               >
                 Try Again
               </button>

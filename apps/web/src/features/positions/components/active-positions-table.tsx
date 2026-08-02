@@ -2,11 +2,21 @@
 
 import { useEffect, useState } from "react";
 import { formatElapsedDuration, formatNumber, formatTimestamp } from "../../research/presentation";
+import type { PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
+
+export interface LiveQuote {
+  livePrice: number;
+  change: number;
+  changePercent: number;
+  direction?: "UP" | "DOWN" | "NONE";
+}
+
+export type LiveQuoteMap = Record<string, LiveQuote>;
 
 // Need to match quote resolve from parent if we just pass quotes down or do it here.
 // Parent resolves it, let's pass a helper or just the quotes.
 
-export function resolveLiveQuote(tradeSymbol?: string, quotes?: any) {
+export function resolveLiveQuote(tradeSymbol?: string, quotes?: LiveQuoteMap): LiveQuote | undefined {
   if (!quotes) return undefined;
   const s = (tradeSymbol || "").toUpperCase().replace(/\s+/g, "");
   if (s.includes("BANK")) {
@@ -16,10 +26,10 @@ export function resolveLiveQuote(tradeSymbol?: string, quotes?: any) {
 }
 
 interface ActivePositionsTableProps {
-  summary: any;
+  summary: PaperAccountFullSummary | null;
   loading: boolean;
-  liveQuotes: any;
-  handleOpenCloseModal: (trade: any) => void;
+  liveQuotes: LiveQuoteMap;
+  handleOpenCloseModal: (trade: PaperTradeRow) => void;
 }
 
 export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenCloseModal }: ActivePositionsTableProps) {
@@ -71,7 +81,7 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
           </tr>
         </thead>
         <tbody className="divide-y divide-white/5 text-sm font-medium">
-          {summary?.openTrades.map((trade: any) => {
+          {summary?.openTrades.map((trade) => {
             const sym = trade.instrumentSymbol || "NIFTY50";
             const quote = resolveLiveQuote(sym, liveQuotes);
             const currentPrice = quote?.livePrice || trade.fillPrice;

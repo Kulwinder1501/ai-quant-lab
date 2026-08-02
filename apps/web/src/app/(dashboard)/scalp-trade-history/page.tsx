@@ -1,5 +1,5 @@
-import { TradeHistoryDashboard } from "../../../features/trade-history/components/trade-history-dashboard";
+import { redirect } from "next/navigation";
 
 export default function ScalpTradeHistoryPage() {
-  return <TradeHistoryDashboard strategyKey="momentum-scalp" isScalp={true} />;
+  redirect("/trade-history?mode=scalp");
 }

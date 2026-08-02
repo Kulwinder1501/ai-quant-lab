@@ -24,6 +24,7 @@ import { optionContractRequiresLongMigration } from "./023-option-contract-requi
 import { weeklyExpiryProvenanceMigration } from "./024-weekly-expiry-provenance.js";
 import { modelCompetitionMigration } from "./025-model-competition.js";
 import { purgeFabricatedPredictionsMigration } from "./026-purge-fabricated-predictions.js";
+import { equityTrainingUniverseMigration } from "./027-equity-training-universe.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -52,4 +53,5 @@ export const migrations = [
   weeklyExpiryProvenanceMigration,
   modelCompetitionMigration,
   purgeFabricatedPredictionsMigration,
+  equityTrainingUniverseMigration,
 ];

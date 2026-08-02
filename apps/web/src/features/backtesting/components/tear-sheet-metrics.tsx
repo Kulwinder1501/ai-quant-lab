@@ -1,9 +1,10 @@
 import React from "react";
 import { Tooltip } from "../../../components/ui/tooltip";
 import { formatNumber } from "../../research/presentation";
+import type { BacktestMetrics, BacktestRunDetails } from "../domain";
 
 interface TearSheetMetricsProps {
-  details: any;
+  details: BacktestRunDetails;
   netPnl: number;
   winRate: number;
   profitFactor: number | null;
@@ -12,7 +13,7 @@ interface TearSheetMetricsProps {
 }
 
 export function TearSheetMetrics({ details, netPnl, winRate, profitFactor, sharpe, maxDd }: TearSheetMetricsProps) {
-  const metrics = details.run.metrics || {};
+  const metrics: BacktestMetrics = details.run.metrics || {};
   return (
     <div className="p-6 border-white/10 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 rounded-2xl border">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">

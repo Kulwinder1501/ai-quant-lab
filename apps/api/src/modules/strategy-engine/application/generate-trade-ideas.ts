@@ -3,7 +3,7 @@ import {
   type StrategyVersionRepository,
   type TradeIdeaRepository,
 } from "../domain/strategy.js";
-import { registeredStrategies } from "../domain/strategy-registry.js";
+import { registeredStrategies, strategySupportsTimeframe } from "../domain/strategy-registry.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -16,7 +16,7 @@ export interface GenerateTradeIdeasResult {
   sourceCandleId: string | null;
   candidatesGenerated: number;
   tradeIdeaIds: string[];
-  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | null;
+  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | null;
   /** Present only when skippedReason is STRATEGY_FAILED. */
   failureMessage?: string;
 }
@@ -37,7 +37,7 @@ export interface ScanTradeIdeasResult {
   longIdeas: number;
   shortIdeas: number;
   tradeIdeaIds: string[];
-  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | null;
+  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | null;
   failureMessage?: string;
 }
 
@@ -58,12 +58,25 @@ export class GenerateTradeIdeas {
     const context = await this.marketContextRepository.findLatestCompleted(input);
     const results: GenerateTradeIdeasResult[] = [];
 
-    for (const { registration, StrategyClass } of STRATEGIES) {
+    for (const strategyEntry of STRATEGIES) {
+      const { registration, StrategyClass } = strategyEntry;
       // Each strategy is isolated. Without this, one strategy whose registered
       // configuration fails its own parser rejects the whole call *after* an
       // earlier strategy has already persisted its proposals, so the caller sees
       // a failure for a run that committed rows.
       try {
+        if (!strategySupportsTimeframe(strategyEntry, input.timeframe)) {
+          results.push({
+            strategyVersionId: null,
+            strategyKey: registration.strategyKey,
+            sourceCandleId: null,
+            candidatesGenerated: 0,
+            tradeIdeaIds: [],
+            skippedReason: "TIMEFRAME_UNSUPPORTED",
+          });
+          continue;
+        }
+
         const strategyVersion = await this.strategyVersionRepository.ensure(registration);
         if (strategyVersion.isArchived || !strategyVersion.isActive) {
           results.push({
@@ -141,11 +154,26 @@ export class GenerateTradeIdeas {
     });
     const results: ScanTradeIdeasResult[] = [];
 
-    for (const { registration, StrategyClass } of STRATEGIES) {
+    for (const strategyEntry of STRATEGIES) {
+      const { registration, StrategyClass } = strategyEntry;
       // Each strategy stays isolated for the same reason execute() isolates them:
       // one strategy that cannot parse its own configuration must not discard
       // proposals another has already persisted.
       try {
+        if (!strategySupportsTimeframe(strategyEntry, input.timeframe)) {
+          results.push({
+            strategyVersionId: null,
+            strategyKey: registration.strategyKey,
+            contextsScanned: contexts.length,
+            candidatesGenerated: 0,
+            longIdeas: 0,
+            shortIdeas: 0,
+            tradeIdeaIds: [],
+            skippedReason: "TIMEFRAME_UNSUPPORTED",
+          });
+          continue;
+        }
+
         const strategyVersion = await this.strategyVersionRepository.ensure(registration);
         if (strategyVersion.isArchived || !strategyVersion.isActive) {
           results.push({

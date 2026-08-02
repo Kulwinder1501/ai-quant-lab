@@ -1,5 +1,5 @@
-import { PositionsDashboard } from "../../../features/positions/components/positions-dashboard";
+import { redirect } from "next/navigation";
 
 export default function PositionsPage() {
-  return <PositionsDashboard />;
+  redirect("/positions-orders");
 }

@@ -1,25 +1,30 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ai_quant_lab_ml.artifacts import ArtifactError, write_model_artifact
 from ai_quant_lab_ml.contracts import (
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     DatasetRequest,
     EvaluationMetrics,
+    LabeledExample,
     PersistedModelVersion,
+    TemporalSplit,
 )
 from ai_quant_lab_ml.features import feature_definition, feature_schema
 from ai_quant_lab_ml.training import BaselineTrainingResult
 from train import (
     apply_audit_verdict,
+    cpcv_summary,
     default_model_key,
     fold_summary,
     parse_timestamp,
     promotion_assessment,
+    trivial_majority_metrics,
     validate_candidate_artifact,
 )
 
@@ -31,6 +36,21 @@ def metrics(macro_f1: float) -> EvaluationMetrics:
         macro_f1=macro_f1,
         sample_count=10,
         class_counts={"BEARISH": 3, "NEUTRAL": 4, "BULLISH": 3},
+    )
+
+
+def labeled(index: int, label: str) -> LabeledExample:
+    observed_at = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=index)
+    return LabeledExample(
+        candle_id=f"candle-{index}",
+        instrument_id="instrument-1",
+        symbol="NIFTY50",
+        timeframe="1d",
+        observed_at=observed_at,
+        label_available_at=observed_at + timedelta(days=5),
+        forward_return=0.0,
+        label=label,
+        features={"feature.one": float(index)},
     )
 
 
@@ -364,6 +384,44 @@ class TrainCliPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(summary["spreadMacroF1"], 0.20, places=10)
         # The final fold is the one whose artifact is persisted and promoted.
         self.assertAlmostEqual(summary["finalFoldMacroF1"], 0.40, places=10)
+
+    def test_cpcv_summary_separates_a_macro_f1_edge_from_an_accuracy_edge(self) -> None:
+        # The real 2026-08-01 measurement on NIFTY50 daily, in miniature: the model
+        # beat the constant predictor on macro-F1 in every split and lost to it on
+        # accuracy in every split. Reporting only macro-F1 would have read as a
+        # discovered edge when the model was getting fewer rows right.
+        model = [
+            EvaluationMetrics(accuracy=0.35, balanced_accuracy=0.33, macro_f1=0.29, sample_count=290, class_counts={}),
+            EvaluationMetrics(accuracy=0.37, balanced_accuracy=0.35, macro_f1=0.32, sample_count=290, class_counts={}),
+        ]
+        trivial = [
+            EvaluationMetrics(accuracy=0.49, balanced_accuracy=0.33, macro_f1=0.22, sample_count=290, class_counts={}),
+            EvaluationMetrics(accuracy=0.52, balanced_accuracy=0.33, macro_f1=0.23, sample_count=290, class_counts={}),
+        ]
+
+        summary = cpcv_summary(model, trivial, groups=6, test_groups=2, embargo_fraction=0.01)
+
+        self.assertEqual(summary["method"], "CPCV_V1")
+        self.assertEqual(summary["splits"], 2)
+        self.assertGreater(summary["macroF1MinusTrivial"]["mean"], 0)
+        self.assertEqual(summary["macroF1WinRateVsTrivial"], 1.0)
+        # The half that matters: fewer rows right than always guessing one class.
+        self.assertLess(summary["accuracyMinusTrivial"]["mean"], 0)
+        self.assertEqual(summary["accuracyWinRateVsTrivial"], 0.0)
+
+    def test_trivial_baseline_predicts_the_training_majority_not_the_holdout_majority(self) -> None:
+        # A deployed constant predictor only knows the training distribution, so
+        # taking the majority from the holdout would give the baseline a peek at the
+        # answers and understate the model's disadvantage.
+        train = [labeled(index, "BULLISH") for index in range(7)] + [labeled(100 + index, "BEARISH") for index in range(3)]
+        validation = [labeled(200 + index, "BEARISH") for index in range(8)] + [labeled(300, "BULLISH")]
+        split = TemporalSplit(train=tuple(train), validation=tuple(validation), purge_count=0)
+
+        baseline = trivial_majority_metrics(split, alphabet=DIRECTIONAL_ALPHABET)
+
+        # Predicts BULLISH throughout (the training majority), so it is right on the
+        # single BULLISH holdout row out of nine.
+        self.assertAlmostEqual(baseline.accuracy, 1 / 9, places=10)
 
     def test_parses_dates_and_utc_timestamps_deterministically(self) -> None:
         self.assertEqual(

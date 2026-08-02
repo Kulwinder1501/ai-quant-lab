@@ -123,6 +123,17 @@ export function SkeletonStatGrid({
   );
 }
 
+// Fixed rather than random: randomising during render reshuffles every bar on each
+// re-render, which reads as flicker instead of a loading placeholder.
+const chartSkeletonBars = [
+  { height: 46, opacity: 0.62 }, { height: 78, opacity: 0.85 },
+  { height: 34, opacity: 0.55 }, { height: 91, opacity: 0.95 },
+  { height: 58, opacity: 0.7 }, { height: 25, opacity: 0.5 },
+  { height: 83, opacity: 0.88 }, { height: 67, opacity: 0.76 },
+  { height: 40, opacity: 0.58 }, { height: 72, opacity: 0.8 },
+  { height: 52, opacity: 0.66 }, { height: 88, opacity: 0.92 },
+];
+
 export function SkeletonChart({
   className,
   ...props
@@ -140,14 +151,11 @@ export function SkeletonChart({
         <Skeleton className="h-8 w-32 rounded-lg bg-slate-700/50" />
       </div>
       <div className="flex-1 min-h-[300px] flex items-end gap-2">
-        {Array.from({ length: 12 }).map((_, i) => (
+        {chartSkeletonBars.map((bar, i) => (
           <Skeleton
             key={i}
             className="flex-1 bg-slate-700/40 rounded-t-md"
-            style={{
-              height: `${Math.max(20, Math.random() * 100)}%`,
-              opacity: 0.5 + Math.random() * 0.5,
-            }}
+            style={{ height: `${bar.height}%`, opacity: bar.opacity }}
           />
         ))}
       </div>

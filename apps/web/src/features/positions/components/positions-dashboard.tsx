@@ -1,29 +1,28 @@
 "use client";
 
-"use client";
-
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { apiV1Url, getResearchJson, postResearchJson } from "../../research/api";
-import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
+import { formatNumber } from "../../research/presentation";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 
 import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
 import { LivePortfolioMetrics } from "./live-portfolio-metrics";
 import { ActivePositionsTable, resolveLiveQuote } from "./active-positions-table";
+import type { LiveQuote, LiveQuoteMap } from "./active-positions-table";
 import { CloseTradeModal } from "./close-trade-modal";
 
-interface LivePriceMap {
-  [symbol: string]: {
+interface LivePriceResponse {
+  data?: {
     livePrice: number;
     change: number;
     changePercent: number;
-    direction?: "UP" | "DOWN" | "NONE";
   };
 }
 
-export function PositionsDashboard() {
+export function PositionsDashboard({ navigation }: { navigation?: ReactNode } = {}) {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
@@ -31,7 +30,7 @@ export function PositionsDashboard() {
   const [error, setError] = useState<string | null>(null);
 
   // Live Price State for real-time PnL
-  const [liveQuotes, setLiveQuotes] = useState<LivePriceMap>({});
+  const [liveQuotes, setLiveQuotes] = useState<LiveQuoteMap>({});
   const [lastUpdated, setLastUpdated] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
@@ -42,44 +41,53 @@ export function PositionsDashboard() {
   const [closeLoading, setCloseLoading] = useState<boolean>(false);
   const [closeError, setCloseError] = useState<string | null>(null);
 
-  // 1. Fetch Paper Accounts
-  const fetchAccounts = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = (await getResearchJson("/paper-accounts", signal)) as { data: PaperAccountSummary[] };
-      const list = res?.data || [];
-      setAccounts(list);
-      if (list.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(list[0].id);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load paper trading accounts.");
-      }
+  // 1. Fetch Paper Accounts. Pure I/O: no state writes, so an effect can call it
+  // without cascading a render.
+  const loadAccounts = useCallback(async (signal?: AbortSignal) => {
+    const res = (await getResearchJson("/paper-accounts", signal)) as { data?: PaperAccountSummary[] };
+    return res?.data || [];
+  }, []);
+
+  const applyAccounts = useCallback((list: PaperAccountSummary[]) => {
+    setAccounts(list);
+    if (list.length > 0 && !selectedAccountId) {
+      setSelectedAccountId(list[0].id);
     }
   }, [selectedAccountId]);
 
-  // 2. Fetch Account Summary (Open Trades)
-  const fetchSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
-    if (!accId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = (await getResearchJson(`/paper-accounts/${accId}/summary`, signal)) as { data: PaperAccountFullSummary };
-      if (res?.data) {
-        setSummary(res.data);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load active positions summary.");
-      }
-    } finally {
-      setLoading(false);
-    }
+  const applyAccountsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load paper trading accounts."));
   }, []);
+
+  // 2. Fetch Account Summary (Open Trades)
+  const loadSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
+    const res = (await getResearchJson(`/paper-accounts/${accId}/summary`, signal)) as { data?: PaperAccountFullSummary };
+    return res?.data;
+  }, []);
+
+  const applySummary = useCallback((data?: PaperAccountFullSummary) => {
+    if (data) {
+      setSummary(data);
+    }
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applySummaryError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load active positions summary."));
+    setLoading(false);
+  }, []);
+
+  const refreshSummary = useCallback(() => {
+    if (!selectedAccountId) return;
+    setLoading(true);
+    void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   // 3. Connect to Server-Sent Events (SSE) live ticking stream for real-time P&L & AI Execution
   useEffect(() => {
-    setIsStreaming(false);
     const symbols = ["NIFTY50", "BANKNIFTY"];
     const sources = symbols.map((sym) => {
       const streamUrl = `${apiV1Url}/stream/live-agent?symbol=${sym}&timeframe=1d`;
@@ -120,73 +128,76 @@ export function PositionsDashboard() {
   }, []);
 
   // 4. Fetch Live Quotes fallback & position refresh (every 3s)
-  const fetchLiveQuotesFallback = useCallback(async () => {
-    try {
-      const [niftyRes, bankRes] = await Promise.all([
-        getResearchJson("/live-price?symbol=NIFTY50") as Promise<any>,
-        getResearchJson("/live-price?symbol=BANKNIFTY") as Promise<any>,
-      ]);
-      const newQuotes: Record<string, { livePrice: number; change: number; changePercent: number }> = {};
-      if (niftyRes?.data) {
-        newQuotes.NIFTY50 = {
-          livePrice: niftyRes.data.livePrice,
-          change: niftyRes.data.change,
-          changePercent: niftyRes.data.changePercent,
-        };
-      }
-      if (bankRes?.data) {
-        newQuotes.BANKNIFTY = {
-          livePrice: bankRes.data.livePrice,
-          change: bankRes.data.change,
-          changePercent: bankRes.data.changePercent,
-        };
-      }
-      setLiveQuotes((prev) => {
-        const updateWithDir = (sym: string, newQ?: { livePrice: number; change: number; changePercent: number }) => {
-          if (!newQ) return prev[sym];
-          const oldPrice = prev[sym]?.livePrice || newQ.livePrice;
-          let direction: "UP" | "DOWN" | "NONE" = prev[sym]?.direction || "NONE";
-          if (newQ.livePrice > oldPrice) direction = "UP";
-          else if (newQ.livePrice < oldPrice) direction = "DOWN";
-          return { ...newQ, direction };
-        };
-        return {
-          ...prev,
-          NIFTY50: updateWithDir("NIFTY50", newQuotes.NIFTY50),
-          BANKNIFTY: updateWithDir("BANKNIFTY", newQuotes.BANKNIFTY),
-        };
-      });
-      setLastUpdated(new Date().toLocaleTimeString());
-    } catch {
-      // Ignore fallback error
+  const loadLiveQuotes = useCallback(async () => {
+    const [niftyRes, bankRes] = (await Promise.all([
+      getResearchJson("/live-price?symbol=NIFTY50"),
+      getResearchJson("/live-price?symbol=BANKNIFTY"),
+    ])) as [LivePriceResponse, LivePriceResponse];
+    const newQuotes: Record<string, LiveQuote> = {};
+    if (niftyRes?.data) {
+      newQuotes.NIFTY50 = {
+        livePrice: niftyRes.data.livePrice,
+        change: niftyRes.data.change,
+        changePercent: niftyRes.data.changePercent,
+      };
     }
+    if (bankRes?.data) {
+      newQuotes.BANKNIFTY = {
+        livePrice: bankRes.data.livePrice,
+        change: bankRes.data.change,
+        changePercent: bankRes.data.changePercent,
+      };
+    }
+    return newQuotes;
   }, []);
+
+  const applyLiveQuotes = useCallback((newQuotes: Record<string, LiveQuote>) => {
+    setLiveQuotes((prev) => {
+      const updateWithDir = (sym: string, newQ?: LiveQuote) => {
+        if (!newQ) return prev[sym];
+        const oldPrice = prev[sym]?.livePrice || newQ.livePrice;
+        let direction: "UP" | "DOWN" | "NONE" = prev[sym]?.direction || "NONE";
+        if (newQ.livePrice > oldPrice) direction = "UP";
+        else if (newQ.livePrice < oldPrice) direction = "DOWN";
+        return { ...newQ, direction };
+      };
+      return {
+        ...prev,
+        NIFTY50: updateWithDir("NIFTY50", newQuotes.NIFTY50),
+        BANKNIFTY: updateWithDir("BANKNIFTY", newQuotes.BANKNIFTY),
+      };
+    });
+    setLastUpdated(new Date().toLocaleTimeString());
+  }, []);
+
+  /** The SSE stream is the primary feed, so a failed fallback poll waits for the next tick. */
+  const ignoreLiveQuotesError = useCallback(() => undefined, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchAccounts(controller.signal);
+    void loadAccounts(controller.signal).then(applyAccounts, applyAccountsError);
     return () => controller.abort();
-  }, [fetchAccounts]);
+  }, [loadAccounts, applyAccounts, applyAccountsError]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     const controller = new AbortController();
-    fetchSummary(selectedAccountId, controller.signal);
+    void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
     return () => controller.abort();
-  }, [selectedAccountId, fetchSummary]);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   useEffect(() => {
-    fetchLiveQuotesFallback();
-    const quoteTimer = setInterval(fetchLiveQuotesFallback, 2000);
-    const summaryTimer = setInterval(() => {
-      if (selectedAccountId) fetchSummary(selectedAccountId);
-    }, 3000);
+    void loadLiveQuotes().then(applyLiveQuotes, ignoreLiveQuotesError);
+    const quoteTimer = setInterval(() => {
+      void loadLiveQuotes().then(applyLiveQuotes, ignoreLiveQuotesError);
+    }, 2000);
+    const summaryTimer = setInterval(refreshSummary, 3000);
 
     return () => {
       clearInterval(quoteTimer);
       clearInterval(summaryTimer);
     };
-  }, [fetchLiveQuotesFallback, selectedAccountId, fetchSummary]);
+  }, [loadLiveQuotes, applyLiveQuotes, ignoreLiveQuotesError, refreshSummary]);
 
   // Calculate Real-Time Live Portfolio Metrics across all open trades
   const livePortfolioStats = useMemo(() => {
@@ -249,9 +260,9 @@ export function PositionsDashboard() {
         notes: closeNotes,
       });
       setTradeToClose(null);
-      fetchSummary(selectedAccountId);
-    } catch (err: any) {
-      setCloseError(err.message || "Failed to close position.");
+      refreshSummary();
+    } catch (err: unknown) {
+      setCloseError(errorMessage(err, "Failed to close position."));
     } finally {
       setCloseLoading(false);
     }
@@ -264,6 +275,8 @@ return (
       connectionLabel={isStreaming ? `⚡ Live SSE Stream Active @ ${lastUpdated}` : lastUpdated ? `Live Ticks Updated @ ${lastUpdated}` : "Connecting Live SSE Feed..."} />
       <div className="mt-10">
       <div className="space-y-6">
+        {navigation && <Reveal>{navigation}</Reveal>}
+
         {/* Account Selector & Control Bar */}
         <Reveal>
           <GlassPanel className="p-4 border-cyan-500/20 bg-gradient-to-r from-slate-950 via-slate-900 to-cyan-950/30 flex flex-wrap items-center justify-between gap-4">
@@ -328,7 +341,7 @@ return (
               </div>
               <button
                 type="button"
-                onClick={() => selectedAccountId && fetchSummary(selectedAccountId)}
+                onClick={refreshSummary}
                 className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-slate-300 bg-slate-900 hover:bg-slate-800 border border-white/10 transition flex items-center gap-1.5"
               >
                 <span>🔄 Refresh Positions</span>

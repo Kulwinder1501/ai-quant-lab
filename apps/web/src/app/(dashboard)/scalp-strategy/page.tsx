@@ -1,5 +1,7 @@
-import { StrategyDashboard } from "../../../features/strategy/components/strategy-dashboard";
+import { redirect } from "next/navigation";
 
+// Swing and scalp ideas now share one page with a mode tab. This route is kept
+// so existing bookmarks and the Phase 22 docs still resolve.
 export default function ScalpStrategyPage() {
-  return <StrategyDashboard strategyKey="momentum-scalp" isScalp={true} />;
+  redirect("/strategy?mode=scalp");
 }

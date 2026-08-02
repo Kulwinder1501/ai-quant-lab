@@ -2,6 +2,12 @@ import React from "react";
 import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
 import type { TradeIdeaRow } from "../domain";
 
+/** A single rule evaluation note as persisted on the trade idea's reasoning array. */
+interface ReasoningNote {
+  rule?: string;
+  passed?: boolean;
+}
+
 interface ProposalsGridProps {
   filteredIdeas: TradeIdeaRow[];
   loading: boolean;
@@ -102,7 +108,7 @@ export function ProposalsGrid({
                   <div className="mt-3 pt-3 border-t border-white/10 space-y-1">
                     <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Rule Evaluation Notes</span>
                     <ul className="text-xs text-slate-300 space-y-1 max-h-24 overflow-y-auto pr-1">
-                      {idea.reasoning.slice(0, 3).map((r: any, idx: number) => (
+                      {idea.reasoning.slice(0, 3).map((r: ReasoningNote, idx: number) => (
                         <li key={idx} className="flex items-center gap-1.5">
                           <span className={r.passed ? "text-emerald-400 font-bold" : "text-slate-500"}>{r.passed ? "✓" : "•"}</span>
                           <span className="truncate">{r.rule || JSON.stringify(r)}</span>

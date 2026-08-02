@@ -27,11 +27,13 @@ from ai_quant_lab_ml.contracts import (
     LABEL_SCHEME_TRIPLE_BARRIER,
     LABEL_SCHEME_VOLATILITY_EXPANSION,
     LABEL_SCHEMES,
+    AnyLabel,
     LabelAlphabet,
     DatasetRequest,
     EvaluationMetrics,
     LabeledExample,
     PersistedModelVersion,
+    TemporalSplit,
     default_neutral_threshold_bps,
     schema_version_for,
 )
@@ -53,7 +55,7 @@ from ai_quant_lab_ml.training import (
     training_metadata,
 )
 from ai_quant_lab_ml.leakage import run_leakage_audit
-from ai_quant_lab_ml.validation import walk_forward_splits
+from ai_quant_lab_ml.validation import CPCV_METHOD_NAME, combinatorial_purged_splits, walk_forward_splits
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -263,6 +265,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Directional calls required before a hit rate is readable (default: {MINIMUM_DIRECTIONAL_PREDICTIONS}).",
     )
     parser.add_argument("--folds", type=positive_int, default=1, help="Number of walk-forward validation folds (default: 1).")
+    # CPCV is a research measurement, off by default. It fits one model per
+    # combination, so 6 groups choosing 2 is 15 extra fits; the walk-forward path
+    # and the promotion gate are untouched whether it runs or not.
+    parser.add_argument(
+        "--cpcv-groups",
+        type=positive_int,
+        default=None,
+        help="Run Combinatorial Purged CV over this many blocks as a research metric (default: off).",
+    )
+    parser.add_argument("--cpcv-test-groups", type=positive_int, default=2, help="Blocks held out per CPCV combination (default: 2).")
+    parser.add_argument(
+        "--cpcv-embargo-fraction",
+        type=fraction,
+        default=0.01,
+        help="Share of the series embargoed after each CPCV test block (default: 0.01).",
+    )
     return parser
 
 
@@ -300,6 +318,120 @@ def fold_summary(fold_results: Sequence[BaselineTrainingResult]) -> dict[str, An
         "spreadMacroF1": max(scores) - min(scores),
         # The most recent fold is the one whose artifact is persisted and promoted.
         "finalFoldMacroF1": scores[-1],
+    }
+
+
+def trivial_majority_metrics(
+    split: TemporalSplit,
+    *,
+    alphabet: LabelAlphabet,
+) -> EvaluationMetrics:
+    """Score the always-predict-the-training-majority strategy on a split's holdout.
+
+    This is the baseline that matters, and it is not the random one. Macro-F1
+    rises mechanically as a label distribution becomes less degenerate, so a
+    model can post a higher macro-F1 than a previous attempt purely because its
+    classes are better balanced while still being beaten by a constant predictor.
+    Every real result in this project came from making this comparison; the
+    triple-barrier track looked like an improvement until it was made.
+
+    The majority class is taken from the *training* partition, because that is
+    the only thing a deployed constant predictor could have known.
+    """
+
+    counts: dict[AnyLabel, int] = {}
+    for item in split.train:
+        counts[item.label] = counts.get(item.label, 0) + 1
+    majority = max(counts.items(), key=lambda entry: (entry[1], entry[0]))[0]
+    actual = [item.label for item in split.validation]
+    return evaluate_predictions(actual, [majority] * len(actual), alphabet=alphabet)
+
+
+def _percentile(values: Sequence[float], fraction: float) -> float:
+    ranked = sorted(values)
+    size = len(ranked)
+    if size == 1:
+        return ranked[0]
+    position = fraction * (size - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ranked[lower]
+    return ranked[lower] + (ranked[upper] - ranked[lower]) * (position - lower)
+
+
+def _distribution(values: Sequence[float]) -> dict[str, float]:
+    count = len(values)
+    mean = sum(values) / count
+    variance = sum((value - mean) ** 2 for value in values) / count
+    return {
+        "mean": mean,
+        "std": math.sqrt(variance),
+        "min": min(values),
+        "p05": _percentile(values, 0.05),
+        "median": _percentile(values, 0.5),
+        "p95": _percentile(values, 0.95),
+        "max": max(values),
+    }
+
+
+def cpcv_summary(
+    model_metrics: Sequence[EvaluationMetrics],
+    trivial_metrics: Sequence[EvaluationMetrics],
+    *,
+    groups: int,
+    test_groups: int,
+    embargo_fraction: float,
+) -> dict[str, Any]:
+    """Summarise a CPCV score distribution against its per-split trivial baseline.
+
+    Reported as a distribution rather than a headline number on purpose. The
+    walk-forward score answers "how did this model do on the most recent block";
+    this answers "how much does that answer move when the evaluation window
+    moves", which is the question a single number cannot address.
+
+    The spread is not a standard error over independent samples -- CPCV training
+    sets overlap heavily, so the scores are correlated and the true uncertainty is
+    wider than a naive sqrt(n) reading of this std would suggest. It is a lower
+    bound on how unstable the score is, and that is still far more than one number
+    conveys.
+
+    **Both metrics are reported against the trivial majority-class predictor on the
+    same holdout, and accuracy is the one to read first.** Macro-F1 flatters any
+    model that spreads its predictions: a constant predictor scores an F1 of zero
+    on two of three classes by construction, so merely guessing in all three
+    classes lifts macro-F1 above it without a single extra correct call. Accuracy
+    has no such loophole -- beating a constant predictor on accuracy means genuinely
+    getting more rows right. A macro-F1 edge with a flat or negative accuracy edge
+    is the signature of a redistributed guess, not a discovered signal, and is
+    precisely what made the triple-barrier track look like progress.
+    """
+
+    macro_f1 = [metrics.macro_f1 for metrics in model_metrics]
+    accuracy = [metrics.accuracy for metrics in model_metrics]
+    trivial_macro_f1 = [metrics.macro_f1 for metrics in trivial_metrics]
+    trivial_accuracy = [metrics.accuracy for metrics in trivial_metrics]
+    macro_f1_deltas = [model - trivial for model, trivial in zip(macro_f1, trivial_macro_f1)]
+    accuracy_deltas = [model - trivial for model, trivial in zip(accuracy, trivial_accuracy)]
+
+    return {
+        # Carried so nothing ever ranks a CPCV score against a walk-forward score:
+        # they average over different test distributions and are not comparable.
+        "method": CPCV_METHOD_NAME,
+        "groups": groups,
+        "testGroups": test_groups,
+        "embargoFraction": embargo_fraction,
+        "splits": len(model_metrics),
+        "macroF1": _distribution(macro_f1),
+        "accuracy": _distribution(accuracy),
+        "trivialMacroF1": _distribution(trivial_macro_f1),
+        "trivialAccuracy": _distribution(trivial_accuracy),
+        "macroF1MinusTrivial": _distribution(macro_f1_deltas),
+        "accuracyMinusTrivial": _distribution(accuracy_deltas),
+        # The share of splits actually won, because a mean edge carried by three
+        # lucky splits out of fifteen is not an edge.
+        "macroF1WinRateVsTrivial": sum(1 for delta in macro_f1_deltas if delta > 0) / len(macro_f1_deltas),
+        "accuracyWinRateVsTrivial": sum(1 for delta in accuracy_deltas if delta > 0) / len(accuracy_deltas),
     }
 
 
@@ -799,6 +931,63 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+        # Research-only second opinion. Walk-forward scores only the trailing
+        # `validation_fraction`, so a candidate's whole reputation rests on one
+        # recent window; CPCV scores every block and reports how much that number
+        # moves. It is deliberately kept out of `gate_scores` below: CPCV trains on
+        # later data to score earlier data, which is a fair robustness question and
+        # an unfair deployment simulation, so it must never decide a promotion.
+        cpcv: dict[str, Any] | None = None
+        if args.cpcv_groups:
+            cpcv_splits = combinatorial_purged_splits(
+                examples,
+                groups=args.cpcv_groups,
+                test_groups=args.cpcv_test_groups,
+                embargo_fraction=args.cpcv_embargo_fraction,
+            )
+            print(f"Running CPCV over {len(cpcv_splits)} combination(s).", file=sys.stderr)
+            cpcv_model_metrics: list[EvaluationMetrics] = []
+            cpcv_trivial_metrics: list[EvaluationMetrics] = []
+            for index, split in enumerate(cpcv_splits, start=1):
+                cpcv_result = train_model(
+                    args.algorithm,
+                    split,
+                    schema=feature_schema(schema_version),
+                    random_state=args.random_state,
+                    hyperparameters=hyperparameters,
+                    alphabet=alphabet,
+                )
+                trivial = trivial_majority_metrics(split, alphabet=alphabet)
+                cpcv_model_metrics.append(cpcv_result.validation_metrics)
+                cpcv_trivial_metrics.append(trivial)
+                print(
+                    f"CPCV {index}/{len(cpcv_splits)} "
+                    f"macroF1 {cpcv_result.validation_metrics.macro_f1:.4f} vs {trivial.macro_f1:.4f} | "
+                    f"acc {cpcv_result.validation_metrics.accuracy:.4f} vs {trivial.accuracy:.4f}",
+                    file=sys.stderr,
+                )
+            cpcv = cpcv_summary(
+                cpcv_model_metrics,
+                cpcv_trivial_metrics,
+                groups=args.cpcv_groups,
+                test_groups=args.cpcv_test_groups,
+                embargo_fraction=args.cpcv_embargo_fraction,
+            )
+            print(
+                f"CPCV macro-F1 {cpcv['macroF1']['mean']:.4f} "
+                f"(std {cpcv['macroF1']['std']:.4f}) vs trivial {cpcv['trivialMacroF1']['mean']:.4f} "
+                f"-> {cpcv['macroF1MinusTrivial']['mean']:+.4f}, "
+                f"won {cpcv['macroF1WinRateVsTrivial'] * 100:.0f}% of splits",
+                file=sys.stderr,
+            )
+            print(
+                f"CPCV accuracy {cpcv['accuracy']['mean']:.4f} "
+                f"(std {cpcv['accuracy']['std']:.4f}) vs trivial {cpcv['trivialAccuracy']['mean']:.4f} "
+                f"-> {cpcv['accuracyMinusTrivial']['mean']:+.4f}, "
+                f"won {cpcv['accuracyWinRateVsTrivial'] * 100:.0f}% of splits",
+                file=sys.stderr,
+            )
+
         protocol = {
             **validation_protocol(
                 request,
@@ -811,6 +1000,8 @@ def main() -> int:
         }
         if len(splits) > 1:
             protocol["method"] = "WALK_FORWARD_PURGED_V1"
+        if cpcv is not None:
+            protocol["crossValidation"] = cpcv
         artifact_metadata = {
             **training_metadata(result, schema_version),
             "modelKey": model_key,

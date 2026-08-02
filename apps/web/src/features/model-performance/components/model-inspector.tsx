@@ -6,7 +6,7 @@ import {
   stageTone,
   type ModelVersionPerformance,
 } from "../domain";
-import { GlassPanel, InteractiveGlassCard } from "../../../components/ui/glass-panel";
+import { InteractiveGlassCard } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { StatCard } from "../../../components/ui/stat-card";
 import { Tooltip } from "../../../components/ui/tooltip";

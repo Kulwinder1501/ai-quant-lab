@@ -1,5 +1,5 @@
-import { OrdersDashboard } from "../../../features/orders/components/orders-dashboard";
+import { redirect } from "next/navigation";
 
 export default function OrdersPage() {
-  return <OrdersDashboard />;
+  redirect("/positions-orders?tab=orders");
 }

@@ -10,13 +10,11 @@ export type ResearchView =
   | "charts"
   | "strategy"
   | "paper-trading"
-  | "positions"
-  | "orders"
+  | "positions-orders"
   | "trade-history"
   | "backtesting"
   | "predictions"
   | "model-performance"
-  | "scalp-trade-history"
   | "scalp-strategy";
 
 export function ResearchNavigation({ activeView }: { activeView: ResearchView }) {
@@ -35,11 +33,8 @@ export function ResearchNavigation({ activeView }: { activeView: ResearchView })
       <Link aria-current={activeView === "news" ? "page" : undefined} className={linkClass("news")} href="/news">
         📰 Market News
       </Link>
-      <Link aria-current={activeView === "positions" ? "page" : undefined} className={linkClass("positions")} href="/positions">
-        📌 Positions
-      </Link>
-      <Link aria-current={activeView === "orders" ? "page" : undefined} className={linkClass("orders")} href="/orders">
-        📜 Orders
+      <Link aria-current={activeView === "positions-orders" ? "page" : undefined} className={linkClass("positions-orders")} href="/positions-orders">
+        Positions &amp; Orders
       </Link>
       <Link aria-current={activeView === "trade-history" ? "page" : undefined} className={linkClass("trade-history")} href="/trade-history">
         🧾 Trade History
@@ -56,9 +51,6 @@ export function ResearchNavigation({ activeView }: { activeView: ResearchView })
       
       {/* Scalp Features */}
       <div className="mt-2 mb-1 pl-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Scalping</div>
-      <Link aria-current={activeView === "scalp-trade-history" ? "page" : undefined} className={linkClass("scalp-trade-history")} href="/scalp-trade-history">
-        🧾 Scalp History
-      </Link>
       <Link aria-current={activeView === "scalp-strategy" ? "page" : undefined} className={linkClass("scalp-strategy")} href="/scalp-strategy">
         ⚡ Scalp Strategy & Ideas
       </Link>

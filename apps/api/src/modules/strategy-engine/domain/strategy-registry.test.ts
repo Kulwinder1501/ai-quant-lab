@@ -15,6 +15,13 @@ describe("strategy registry", () => {
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
   });
 
+  it("keeps the scalp and swing timeframe sets disjoint", () => {
+    const scalp = requireRegisteredStrategy("momentum-scalp").supportedTimeframes;
+    const swing = requireRegisteredStrategy("trend-breakout").supportedTimeframes;
+    expect(scalp).toEqual(["1m"]);
+    expect(swing.some((timeframe) => scalp.includes(timeframe))).toBe(false);
+  });
+
   it("registers each key exactly once so a lookup cannot be ambiguous", () => {
     expect(new Set(strategyKeys()).size).toBe(registeredStrategies.length);
   });

@@ -10,6 +10,15 @@ interface PaperAccountOption {
   openingBalance: number;
 }
 
+interface LotInfoResponse {
+  data: {
+    lotSize: number;
+    feeEstimate: {
+      entry: { total: number };
+    };
+  };
+}
+
 interface SimulateTradeModalProps {
   show: boolean;
   onClose: () => void;
@@ -57,9 +66,10 @@ export function SimulateTradeModal({
       `/instruments/by-symbol/${encodeURIComponent(selectedIdea.instrumentSymbol)}/lot-info?lots=${simLots}&premium=100`,
       controller.signal,
     )
-      .then((res: any) => {
-        setLotSize(res.data.lotSize);
-        setEntryFees(res.data.feeEstimate.entry.total);
+      .then((res) => {
+        const { data } = res as LotInfoResponse;
+        setLotSize(data.lotSize);
+        setEntryFees(data.feeEstimate.entry.total);
       })
       .catch(() => undefined);
     return () => controller.abort();
@@ -153,11 +163,11 @@ export function SimulateTradeModal({
             <button
               type="submit"
               disabled={simulating || accounts.length === 0}
-              className="px-5 py-2 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
+              className="px-5 py-2 rounded-xl text-sm font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
             >
               {simulating ? (
                 <>
-                  <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span className="h-4 w-4 border-2 border-static-white border-t-transparent rounded-full animate-spin" />
                   <span>Simulating...</span>
                 </>
               ) : (

@@ -68,7 +68,7 @@ export function CloseTradeModal({
             </button>
             <button
               type="submit"
-              className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-500/20"
+              className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-500/20"
             >
               Close Position
             </button>

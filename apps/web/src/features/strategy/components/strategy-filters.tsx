@@ -107,7 +107,7 @@ export function StrategyFilters({
         <button
           type="button"
           onClick={onGenerate}
-          className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 flex items-center gap-1.5"
+          className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 flex items-center gap-1.5"
         >
           <span>⚡ Generate Proposals</span>
         </button>

@@ -3,25 +3,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download } from "lucide-react";
 import { exportToCsv } from "../../../lib/export";
-import { GlassPanel, InteractiveGlassCard } from "../../../components/ui/glass-panel";
+import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
 import { parseModelPerformanceEnvelope } from "../api";
 import {
   algorithmLabel,
   defaultModelPerformanceFilters,
-  explanationMethodLabel,
-  generalizationLabel,
   modelVersionQuery,
-  promotionDecisionLabel,
-  stageTone,
   type ModelPerformanceFilters,
   type ModelPerformancePage,
   type ModelVersionPerformance,
-  type LeakageRisk,
 } from "../domain";
 
 const limitChoices = [25, 50, 100, 200] as const;
@@ -45,33 +40,40 @@ export function ModelPerformanceDashboard() {
   const [state, setState] = useState<RequestState>("loading");
   const [error, setError] = useState<string | null>(null);
 
-  // Every state write happens after the request resolves, so the registry never
-  // flashes a skeleton on a filter change and the effect stays free of the
-  // synchronous updates that cause cascading renders.
-  const load = useCallback(async (active: ModelPerformanceFilters, signal?: AbortSignal) => {
-    try {
-      const payload = await getResearchJson(modelVersionQuery(active), signal);
-      const parsed = parseModelPerformanceEnvelope(payload);
-      setPage(parsed);
-      setError(null);
-      setState(parsed.records.length === 0 ? "empty" : "ready");
-      setSelectedId((previous) => (
-        previous && parsed.records.some((record) => record.id === previous)
-          ? previous
-          : parsed.records[0]?.id ?? null
-      ));
-    } catch (caught) {
-      if ((caught as Error).name === "AbortError") return;
-      setError((caught as Error).message || "The model registry could not be read.");
-      setState("unavailable");
-    }
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadRegistry = useCallback(async (active: ModelPerformanceFilters, signal?: AbortSignal) => {
+    const payload = await getResearchJson(modelVersionQuery(active), signal);
+    return parseModelPerformanceEnvelope(payload);
   }, []);
+
+  // Every state write happens after the request resolves, so the registry never
+  // flashes a skeleton on a filter change.
+  const applyRegistry = useCallback((parsed: ModelPerformancePage) => {
+    setPage(parsed);
+    setError(null);
+    setState(parsed.records.length === 0 ? "empty" : "ready");
+    setSelectedId((previous) => (
+      previous && parsed.records.some((record) => record.id === previous)
+        ? previous
+        : parsed.records[0]?.id ?? null
+    ));
+  }, []);
+
+  const applyRegistryError = useCallback((caught: unknown) => {
+    if (isAbortError(caught)) return;
+    setError(errorMessage(caught, "The model registry could not be read."));
+    setState("unavailable");
+  }, []);
+
+  const refreshRegistry = useCallback(() => {
+    void loadRegistry(filters).then(applyRegistry, applyRegistryError);
+  }, [filters, loadRegistry, applyRegistry, applyRegistryError]);
 
   useEffect(() => {
     const controller = new AbortController();
-    load(filters, controller.signal);
+    void loadRegistry(filters, controller.signal).then(applyRegistry, applyRegistryError);
     return () => controller.abort();
-  }, [filters, load]);
+  }, [filters, loadRegistry, applyRegistry, applyRegistryError]);
 
   const records = useMemo(() => page?.records ?? [], [page]);
   const selected: ModelVersionPerformance | null = useMemo(
@@ -170,7 +172,7 @@ export function ModelPerformanceDashboard() {
             </button>
             <button
               className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-100 transition hover:bg-cyan-400/20"
-              onClick={() => load(filters)}
+              onClick={refreshRegistry}
               type="button"
             >
               Refresh

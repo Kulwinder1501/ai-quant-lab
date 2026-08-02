@@ -46,7 +46,7 @@ export function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerf
                 onClick={() => setPerfPeriod(p.id)}
                 className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
                   perfPeriod === p.id
-                    ? "bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20 font-extrabold"
+                    ? "bg-emerald-500 text-static-navy shadow-md shadow-emerald-500/20 font-extrabold"
                     : "text-slate-300 hover:bg-white/5 hover:text-white"
                 }`}
               >

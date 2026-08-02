@@ -36,7 +36,7 @@ export function ResearchShell({
       <aside className="relative z-20 w-full lg:w-72 shrink-0 border-b lg:border-b-0 lg:border-r border-white/10 bg-slate-950/45 backdrop-blur-xl lg:h-screen lg:sticky lg:top-0 px-4 py-6 sm:px-6 lg:px-6 lg:py-8 overflow-y-auto">
         <div className="mb-8 flex items-center gap-3 px-2">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 shadow-lg shadow-cyan-500/20">
-            <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="h-6 w-6 text-static-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>

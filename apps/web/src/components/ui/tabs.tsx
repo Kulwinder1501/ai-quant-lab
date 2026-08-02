@@ -18,11 +18,14 @@ interface TabsProps {
 
 export function Tabs({ tabs, activeId, onChange, className }: TabsProps) {
   return (
-    <div className={classNames("flex border-b border-slate-800", className)}>
+    <div aria-label="View mode" className={classNames("flex border-b border-slate-800", className)} role="tablist">
       {tabs.map((tab) => (
         <button
+          aria-selected={activeId === tab.id}
           key={tab.id}
           onClick={() => onChange(tab.id)}
+          role="tab"
+          type="button"
           className={classNames(
             "flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-[1px]",
             activeId === tab.id

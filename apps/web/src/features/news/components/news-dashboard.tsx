@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
+import { isAbortError } from "../../../lib/errors";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
 import { PageHeader } from "../../../components/layout/page-header";
@@ -73,48 +74,60 @@ export function NewsDashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
-  const fetchNews = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const params = new URLSearchParams();
-      if (providerFilter) params.append("provider", providerFilter);
-      if (sentimentFilter) params.append("sentiment", sentimentFilter);
-      if (symbolFilter && symbolFilter !== "ALL") params.append("symbol", symbolFilter);
-      if (searchQuery.trim()) params.append("search", searchQuery.trim());
-      params.append("limit", "50");
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadNews = useCallback(async (signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    if (providerFilter) params.append("provider", providerFilter);
+    if (sentimentFilter) params.append("sentiment", sentimentFilter);
+    if (symbolFilter && symbolFilter !== "ALL") params.append("symbol", symbolFilter);
+    if (searchQuery.trim()) params.append("search", searchQuery.trim());
+    params.append("limit", "50");
 
-      const res = await getResearchJson(`/market-news?${params.toString()}`, signal) as NewsResponse;
-      if (signal?.aborted) return;
-
-      const fetchedArticles = res.data?.articles || [];
-      setArticles(fetchedArticles);
-      if (res.data?.sentimentSummary) {
-        setSummary(res.data.sentimentSummary);
-      }
-      setState(fetchedArticles.length > 0 ? "ready" : "empty");
-      setLastRefreshed(new Date());
-    } catch (err) {
-      if (signal?.aborted) return;
-      setState("unavailable");
-    }
+    return await getResearchJson(`/market-news?${params.toString()}`, signal) as NewsResponse;
   }, [providerFilter, sentimentFilter, symbolFilter, searchQuery]);
+
+  const applyNews = useCallback((res: NewsResponse) => {
+    const fetchedArticles = res.data?.articles || [];
+    setArticles(fetchedArticles);
+    if (res.data?.sentimentSummary) {
+      setSummary(res.data.sentimentSummary);
+    }
+    setState(fetchedArticles.length > 0 ? "ready" : "empty");
+    setLastRefreshed(new Date());
+  }, []);
+
+  const applyNewsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setState("unavailable");
+  }, []);
+
+  const refreshNews = useCallback(
+    () => loadNews().then(applyNews, applyNewsError),
+    [loadNews, applyNews, applyNewsError],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchNews(controller.signal);
+    const { signal } = controller;
+    void loadNews(signal).then((res) => {
+      // A response that lands after the filters changed must not overwrite the
+      // newer one already in flight.
+      if (!signal.aborted) applyNews(res);
+    }, applyNewsError);
     const timer = setInterval(() => {
-      fetchNews();
+      void refreshNews();
     }, 30000); // 30s UI auto-refresh
     return () => {
       controller.abort();
       clearInterval(timer);
     };
-  }, [fetchNews]);
+  }, [loadNews, applyNews, applyNewsError, refreshNews]);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
     try {
       await postResearchJson("/market-news/refresh");
-      await fetchNews();
+      await refreshNews();
     } catch {
       // Ignore refresh error
     } finally {

@@ -1,10 +1,13 @@
 import { formatNumber, formatTimestamp } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { DataTable } from "../../../components/ui/data-table";
-import type { PaperAccountFullSummary } from "../../paper-trading/domain";
+import type { PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
+
+/** `DataTable` and `exportToCsv` require an index signature, which an interface does not provide. */
+export type OrderRow = { [K in keyof PaperTradeRow]: PaperTradeRow[K] };
 
 interface OrdersTableProps {
-  filteredOrders: NonNullable<PaperAccountFullSummary['closedTrades']>;
+  filteredOrders: OrderRow[];
   summary: PaperAccountFullSummary | null;
   loading: boolean;
 }
@@ -14,7 +17,7 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "instrument",
       label: "Instrument",
-      render: (order: any) => {
+      render: (order: OrderRow) => {
         const sym = order.instrumentSymbol || "NIFTY50";
         const isWin = (order.realizedPnl || 0) >= 0;
         return (
@@ -33,7 +36,7 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "side",
       label: "Side",
-      render: (order: any) => (
+      render: (order: OrderRow) => (
         <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-black ${
           order.side === "BUY" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
         }`}>
@@ -44,22 +47,22 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "quantity",
       label: "Qty",
-      render: (order: any) => <span className="font-bold text-slate-200">{formatNumber(order.quantity, 0)}</span>
+      render: (order: OrderRow) => <span className="font-bold text-slate-200">{formatNumber(order.quantity, 0)}</span>
     },
     {
       key: "entryPrice",
       label: "Entry Price",
-      render: (order: any) => <span className="font-semibold text-slate-300">₹{formatNumber(order.fillPrice, 2)}</span>
+      render: (order: OrderRow) => <span className="font-semibold text-slate-300">₹{formatNumber(order.fillPrice, 2)}</span>
     },
     {
       key: "exitPrice",
       label: "Exit Price",
-      render: (order: any) => <span className="font-bold text-white">₹{formatNumber(order.exitPrice || 0, 2)}</span>
+      render: (order: OrderRow) => <span className="font-bold text-white">₹{formatNumber(order.exitPrice || 0, 2)}</span>
     },
     {
       key: "realizedPnl",
       label: "Realized P&L",
-      render: (order: any) => {
+      render: (order: OrderRow) => {
         const pnl = order.realizedPnl || 0;
         const isWin = pnl >= 0;
         return (
@@ -76,7 +79,7 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "returnPercent",
       label: "Return %",
-      render: (order: any) => {
+      render: (order: OrderRow) => {
         const ret = order.returnPercent || 0;
         const isWin = (order.realizedPnl || 0) >= 0;
         return (
@@ -89,7 +92,7 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "reason",
       label: "AI Exit Trigger / Analysis",
-      render: (order: any) => (
+      render: (order: OrderRow) => (
         <div className="text-xs text-slate-300 max-w-xs">
           <div className="truncate font-semibold text-cyan-200">
             {order.exitReason || "Algorithmic Target Reached"}
@@ -103,7 +106,7 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     {
       key: "closedAt",
       label: "Closed At",
-      render: (order: any) => (
+      render: (order: OrderRow) => (
         <span className="text-xs font-mono text-slate-400">
           {order.closedAt ? formatTimestamp(order.closedAt) : "—"}
         </span>

@@ -1,8 +1,9 @@
 import React from "react";
 import { formatNumber } from "../../research/presentation";
+import type { BacktestMonthlyPerformanceRow } from "../domain";
 
 interface MonthlyBreakdownTableProps {
-  monthlyPerformance: any[];
+  monthlyPerformance: BacktestMonthlyPerformanceRow[];
 }
 
 export function MonthlyBreakdownTable({ monthlyPerformance }: MonthlyBreakdownTableProps) {

@@ -105,27 +105,34 @@ export function InstitutionalContextCards() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    try {
-      const response = (await getResearchJson("/institutional-context?sessions=10")) as {
-        data: InstitutionalContext;
-      };
-      setContext(response.data);
-      setError(null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not load institutional context.");
-    } finally {
-      setLoading(false);
-    }
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadContext = useCallback(async () => {
+    const response = (await getResearchJson("/institutional-context?sessions=10")) as {
+      data: InstitutionalContext;
+    };
+    return response.data;
+  }, []);
+
+  const applyContext = useCallback((data: InstitutionalContext) => {
+    setContext(data);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applyContextError = useCallback((cause: unknown) => {
+    setError(cause instanceof Error ? cause.message : "Could not load institutional context.");
+    setLoading(false);
   }, []);
 
   useEffect(() => {
-    void load();
+    void loadContext().then(applyContext, applyContextError);
     // Flows are published once a day after the close, so a slow poll is enough to
     // pick up a collector run without hammering the endpoint.
-    const interval = setInterval(() => void load(), 300_000);
+    const interval = setInterval(() => {
+      void loadContext().then(applyContext, applyContextError);
+    }, 300_000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [loadContext, applyContext, applyContextError]);
 
   if (loading) {
     return (

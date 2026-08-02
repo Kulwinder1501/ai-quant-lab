@@ -236,7 +236,7 @@ export function OpenTradeModal({
             <button
               type="submit"
               disabled={!selectedIdeaId}
-              className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50"
+              className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50"
             >
               Confirm Simulation
             </button>

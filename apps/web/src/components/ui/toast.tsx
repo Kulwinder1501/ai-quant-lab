@@ -65,21 +65,18 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 function ToastItem({ toast, onRemove }: { toast: ToastOptions; onRemove: () => void }) {
   const [isLeaving, setIsLeaving] = useState(false);
 
-  useEffect(() => {
-    if (toast.duration !== Infinity) {
-      const timer = setTimeout(() => {
-        handleRemove();
-      }, toast.duration);
-      return () => clearTimeout(timer);
-    }
-  }, [toast.duration]);
-
-  const handleRemove = () => {
+  const handleRemove = useCallback(() => {
     setIsLeaving(true);
     setTimeout(() => {
       onRemove();
     }, 300); // Wait for exit animation
-  };
+  }, [onRemove]);
+
+  useEffect(() => {
+    if (toast.duration === Infinity) return;
+    const timer = setTimeout(handleRemove, toast.duration);
+    return () => clearTimeout(timer);
+  }, [toast.duration, handleRemove]);
 
   const variants = {
     success: "border-emerald-500",

@@ -10,6 +10,17 @@ export interface StrategyEvaluator {
 export interface RegisteredStrategy {
   registration: EnsureStrategyVersionInput;
   StrategyClass: new () => StrategyEvaluator;
+  /**
+   * The timeframes whose bar geometry the rule thresholds were calibrated against.
+   *
+   * Rule thresholds are not scale-free. momentum-scalp bounds RSI to a 20-40 /
+   * 60-80 band and measures VWAP displacement in ATR units of a one-minute bar;
+   * run against a daily bar it still emits proposals, but they are day-sized
+   * moves wearing a scalp's label, and VWAP on a daily candle is meaningless.
+   * Generation therefore asks each strategy whether it owns the timeframe rather
+   * than running every registered strategy against whatever was requested.
+   */
+  supportedTimeframes: readonly string[];
 }
 
 /**
@@ -22,9 +33,21 @@ export interface RegisteredStrategy {
  * is significant — idea generation reports results in this order.
  */
 export const registeredStrategies: readonly RegisteredStrategy[] = [
-  { registration: trendBreakoutStrategyRegistration, StrategyClass: TrendBreakoutStrategy },
-  { registration: momentumScalpStrategyRegistration, StrategyClass: MomentumScalpStrategy },
+  {
+    registration: trendBreakoutStrategyRegistration,
+    StrategyClass: TrendBreakoutStrategy,
+    supportedTimeframes: ["15m", "30m", "60m", "1d"],
+  },
+  {
+    registration: momentumScalpStrategyRegistration,
+    StrategyClass: MomentumScalpStrategy,
+    supportedTimeframes: ["1m"],
+  },
 ];
+
+export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
+  return strategy.supportedTimeframes.includes(timeframe);
+}
 
 export function strategyKeys(): string[] {
   return registeredStrategies.map((strategy) => strategy.registration.strategyKey);

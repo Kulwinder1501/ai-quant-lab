@@ -5,6 +5,7 @@ import { Crown, Swords, TrendingUp } from "lucide-react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 
 interface CompetitionPoolMember {
   competition_group: string;
@@ -77,24 +78,28 @@ export function ModelCompetition() {
   const [promotions, setPromotions] = useState<CompetitionPromotion[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const payload = await getResearchJson("/models/competition", signal) as CompetitionEnvelope;
-      setPool(payload.data?.pool ?? []);
-      setDailyScores(payload.data?.dailyScores ?? []);
-      setPromotions(payload.data?.promotions ?? []);
-      setError(null);
-    } catch (caught) {
-      if ((caught as Error).name === "AbortError") return;
-      setError((caught as Error).message || "The model competition state could not be read.");
-    }
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadCompetition = useCallback(async (signal?: AbortSignal) => {
+    return await getResearchJson("/models/competition", signal) as CompetitionEnvelope;
+  }, []);
+
+  const applyCompetition = useCallback((payload: CompetitionEnvelope) => {
+    setPool(payload.data?.pool ?? []);
+    setDailyScores(payload.data?.dailyScores ?? []);
+    setPromotions(payload.data?.promotions ?? []);
+    setError(null);
+  }, []);
+
+  const applyCompetitionError = useCallback((caught: unknown) => {
+    if (isAbortError(caught)) return;
+    setError(errorMessage(caught, "The model competition state could not be read."));
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    load(controller.signal);
+    void loadCompetition(controller.signal).then(applyCompetition, applyCompetitionError);
     return () => controller.abort();
-  }, [load]);
+  }, [loadCompetition, applyCompetition, applyCompetitionError]);
 
   const groups = useMemo(() => {
     const byGroup = new Map<string, CompetitionPoolMember[]>();

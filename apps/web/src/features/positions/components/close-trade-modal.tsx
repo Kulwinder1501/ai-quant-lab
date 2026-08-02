@@ -1,10 +1,11 @@
 import React from "react";
 import { formatNumber } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
+import type { PaperTradeRow } from "../../paper-trading/domain";
 
 interface CloseTradeModalProps {
-  tradeToClose: any;
-  setTradeToClose: (trade: any) => void;
+  tradeToClose: PaperTradeRow | null;
+  setTradeToClose: (trade: PaperTradeRow | null) => void;
   closeExitPrice: number;
   setCloseExitPrice: (price: number) => void;
   closeNotes: string;
@@ -96,7 +97,7 @@ export function CloseTradeModal({
             <button
               type="submit"
               disabled={closeLoading}
-              className="px-5 py-2 rounded-xl text-xs font-extrabold text-white bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 transition shadow-lg shadow-rose-500/20 disabled:opacity-50 flex items-center gap-2"
+              className="px-5 py-2 rounded-xl text-xs font-extrabold text-static-white bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 transition shadow-lg shadow-rose-500/20 disabled:opacity-50 flex items-center gap-2"
             >
               {closeLoading ? "Closing..." : "⚡ Confirm Exit Position"}
             </button>

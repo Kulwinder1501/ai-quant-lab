@@ -5,6 +5,7 @@ import { PageHeader } from '../../../components/layout/page-header';
 import { GlassPanel } from '../../../components/ui/glass-panel';
 import { Select } from '../../../components/ui/select';
 import { Button } from '../../../components/ui/button';
+import { ThemeToggle } from '../../../components/theme/theme-toggle';
 import { useAppStore } from '../../../stores/app-store';
 
 const INSTRUMENT_OPTIONS = [
@@ -23,12 +24,6 @@ const TIMEFRAME_OPTIONS = [
   { value: '1d', label: '1 Day' },
 ];
 
-const THEME_OPTIONS = [
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
-  { value: 'system', label: 'System' },
-];
-
 export function SettingsDashboard() {
   const {
     selectedInstrument,
@@ -39,8 +34,6 @@ export function SettingsDashboard() {
     setAutoRefreshInterval,
     apiBaseUrl,
     setApiBaseUrl,
-    theme,
-    setTheme,
   } = useAppStore();
 
   const handleSave = () => {
@@ -108,12 +101,9 @@ export function SettingsDashboard() {
                 />
               </div>
 
-              <Select
-                label="Theme Preference"
-                value={theme}
-                onChange={(val) => setTheme(val as 'light' | 'dark' | 'system')}
-                options={THEME_OPTIONS}
-              />
+              <div className="rounded-xl border border-white/10 bg-slate-900/60 p-4">
+                <ThemeToggle />
+              </div>
             </div>
           </div>
         </GlassPanel>

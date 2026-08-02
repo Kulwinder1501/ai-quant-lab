@@ -1,7 +1,7 @@
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { formatNumber } from "../../research/presentation";
-import { formatHoldingPeriod } from "../domain";
+import { formatHoldingPeriod, type TradeHistorySummary as TradeHistorySummaryStats } from "../domain";
 import { StatCard } from "../../../components/ui/stat-card";
 import { Tooltip } from "../../../components/ui/tooltip";
 
@@ -11,7 +11,7 @@ function currency(value: number | null, fractionDigits = 2): string {
   return `${sign}₹${formatNumber(value, fractionDigits)}`;
 }
 
-export function TradeHistorySummary({ summary }: { summary: any }) {
+export function TradeHistorySummary({ summary }: { summary: TradeHistorySummaryStats | null }) {
   if (!summary) return null;
   return (
     <>

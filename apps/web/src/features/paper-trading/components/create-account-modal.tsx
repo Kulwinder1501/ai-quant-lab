@@ -63,7 +63,7 @@ export function CreateAccountModal({
             </button>
             <button
               type="submit"
-              className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-cyan-600 hover:bg-cyan-500 transition shadow-lg shadow-cyan-500/20"
+              className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-cyan-600 hover:bg-cyan-500 transition shadow-lg shadow-cyan-500/20"
             >
               Create Fund
             </button>

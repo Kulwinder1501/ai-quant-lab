@@ -1,21 +1,28 @@
 import React, { ReactNode } from 'react';
 import { classNames } from './class-names';
 
-interface Column {
+export interface Column<T> {
   key: string;
   label: string;
   align?: 'left' | 'center' | 'right';
-  render?: (row: any) => ReactNode;
+  render?: (row: T) => ReactNode;
 }
 
-interface DataTableProps {
-  columns: Column[];
-  data: any[];
+interface DataTableProps<T> {
+  columns: Column<T>[];
+  data: T[];
   emptyMessage?: string;
   loading?: boolean;
 }
 
-export function DataTable({ columns, data, emptyMessage = "No data available", loading = false }: DataTableProps) {
+/** Columns without a `render` are expected to hold scalars. */
+function renderCell(value: unknown): ReactNode {
+  return value === null || value === undefined ? null : String(value);
+}
+
+// `object` rather than `Record<string, unknown>`: callers pass interfaces, which
+// have no implicit index signature and so are not assignable to that constraint.
+export function DataTable<T extends object>({ columns, data, emptyMessage = "No data available", loading = false }: DataTableProps<T>) {
   return (
     <div className="w-full overflow-x-auto rounded-2xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm">
       <table className="w-full text-left border-collapse">
@@ -58,7 +65,7 @@ export function DataTable({ columns, data, emptyMessage = "No data available", l
                       col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'
                     )}
                   >
-                    {col.render ? col.render(row) : row[col.key]}
+                    {col.render ? col.render(row) : renderCell((row as Record<string, unknown>)[col.key])}
                   </td>
                 ))}
               </tr>

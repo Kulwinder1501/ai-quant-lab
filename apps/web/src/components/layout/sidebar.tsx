@@ -5,18 +5,14 @@ import Link from "next/link";
 import {
   Zap,
   Newspaper,
-  Pin,
   ScrollText,
   Receipt,
   ScanSearch,
   CandlestickChart,
   Lightbulb,
-  Wallet,
   FlaskConical,
   BrainCircuit,
   Cpu,
-  Timer,
-  ClipboardList,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -56,10 +52,8 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
     {
       title: "TRADING",
       items: [
-        { name: "Positions", href: "/positions", icon: <Pin className="size-5" /> },
-        { name: "Orders", href: "/orders", icon: <ScrollText className="size-5" /> },
+        { name: "Positions & Orders", href: "/positions-orders", icon: <ScrollText className="size-5" /> },
         { name: "Trade History", href: "/trade-history", icon: <Receipt className="size-5" /> },
-        { name: "Paper Trading", href: "/paper-trading", icon: <Wallet className="size-5" /> },
       ],
     },
     {
@@ -67,13 +61,6 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       items: [
         { name: "Strategy & Ideas", href: "/strategy", icon: <Lightbulb className="size-5" /> },
         { name: "Backtesting", href: "/backtesting", icon: <FlaskConical className="size-5" /> },
-      ],
-    },
-    {
-      title: "SCALPING",
-      items: [
-        { name: "Scalp Strategy", href: "/scalp-strategy", icon: <Timer className="size-5" /> },
-        { name: "Scalp History", href: "/scalp-trade-history", icon: <ClipboardList className="size-5" /> },
       ],
     },
     {
@@ -104,7 +91,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         )}
       >
         <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 to-blue-600 shadow-lg shadow-cyan-500/20">
-          <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="h-6 w-6 text-static-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
         </div>

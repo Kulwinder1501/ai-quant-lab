@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Download } from "lucide-react";
 import { exportToCsv } from "../../../lib/export";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
-import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
-import type { BacktestRunRow, BacktestRunDetails } from "../domain";
+import type { BacktestMetrics, BacktestRunRow, BacktestRunDetails } from "../domain";
 import { RunBacktestModal } from "./run-backtest-modal";
 import { BacktestList } from "./backtest-list";
 import { TearSheetMetrics } from "./tear-sheet-metrics";
@@ -20,7 +20,7 @@ export function BacktestingDashboard() {
   const [selectedRunId, setSelectedRunId] = useState<string>("");
   const [details, setDetails] = useState<BacktestRunDetails | null>(null);
   const [loadingList, setLoadingList] = useState<boolean>(true);
-  const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
+  const [loadingDetails, setLoadingDetails] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
   // Tab state in inspector
@@ -36,56 +36,68 @@ export function BacktestingDashboard() {
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
 
-  const fetchRuns = useCallback(async (signal?: AbortSignal) => {
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadRuns = useCallback(async (signal?: AbortSignal) => {
+    const res = await getResearchJson("/backtest-runs?limit=50", signal) as { data: BacktestRunRow[] };
+    return res.data || [];
+  }, []);
+
+  const applyRuns = useCallback((list: BacktestRunRow[]) => {
+    setRuns(list);
+    setSelectedRunId((current) => (!current && list.length > 0 ? list[0].id : current));
+    setError(null);
+    setLoadingList(false);
+  }, []);
+
+  const applyRunsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load backtest runs."));
+    setLoadingList(false);
+  }, []);
+
+  const refreshRuns = useCallback(() => {
     setLoadingList(true);
     setError(null);
-    try {
-      const res = await getResearchJson("/backtest-runs?limit=50", signal) as { data: BacktestRunRow[] };
-      const list = res.data || [];
-      setRuns(list);
-      if (list.length > 0 && !selectedRunId) {
-        setSelectedRunId(list[0].id);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load backtest runs.");
-      }
-    } finally {
-      setLoadingList(false);
-    }
-  }, [selectedRunId]);
+    return loadRuns().then(applyRuns, applyRunsError);
+  }, [loadRuns, applyRuns, applyRunsError]);
 
-  const fetchDetails = useCallback(async (runId: string, signal?: AbortSignal) => {
-    if (!runId) {
-      setDetails(null);
-      return;
-    }
+  const loadDetails = useCallback(async (runId: string, signal?: AbortSignal) => {
+    const res = await getResearchJson(`/backtest-runs/${runId}`, signal) as { data: BacktestRunDetails };
+    return res.data;
+  }, []);
+
+  const applyDetails = useCallback((data: BacktestRunDetails) => {
+    setDetails(data);
+    setError(null);
+    setLoadingDetails(false);
+  }, []);
+
+  const applyDetailsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load backtest details."));
+    setLoadingDetails(false);
+  }, []);
+
+  // The details effect may not raise `loadingDetails` itself, so selection changes
+  // have to raise it from the event handler that triggers them.
+  const selectRun = useCallback((runId: string) => {
+    setSelectedRunId(runId);
     setLoadingDetails(true);
     setError(null);
-    try {
-      const res = await getResearchJson(`/backtest-runs/${runId}`, signal) as { data: BacktestRunDetails };
-      setDetails(res.data);
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load backtest details.");
-      }
-    } finally {
-      setLoadingDetails(false);
-    }
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchRuns(controller.signal);
+    void loadRuns(controller.signal).then(applyRuns, applyRunsError);
     return () => controller.abort();
-  }, [fetchRuns]);
+  }, [loadRuns, applyRuns, applyRunsError]);
 
   useEffect(() => {
     if (!selectedRunId) return;
     const controller = new AbortController();
-    fetchDetails(selectedRunId, controller.signal);
+    void loadDetails(selectedRunId, controller.signal).then(applyDetails, applyDetailsError);
     return () => controller.abort();
-  }, [selectedRunId, fetchDetails]);
+  }, [selectedRunId, loadDetails, applyDetails, applyDetailsError]);
 
   const handleRunSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,25 +113,24 @@ export function BacktestingDashboard() {
       }) as { data: { backtestRunId: string; tradesSimulated: number; status: string } };
       
       setRunMessage(`Successfully replayed historical data! Reconstructed and evaluated ${res.data.tradesSimulated} trades.`);
-      await fetchRuns();
+      await refreshRuns();
       if (res.data.backtestRunId) {
-        setSelectedRunId(res.data.backtestRunId);
+        selectRun(res.data.backtestRunId);
       }
       setTimeout(() => {
         setShowRunModal(false);
       }, 1500);
-    } catch (err: any) {
-      setRunError(err.message || "Failed to execute backtest simulation.");
+    } catch (err: unknown) {
+      setRunError(errorMessage(err, "Failed to execute backtest simulation."));
     } finally {
       setRunning(false);
     }
   };
 
-  const metrics = details?.run.metrics || {};
+  const metrics: BacktestMetrics = details?.run.metrics || {};
   const netPnl = metrics.netPnl || 0;
   const winRate = metrics.winRatePercent || 0;
   const sharpe = metrics.sharpeRatio !== undefined ? metrics.sharpeRatio : null;
-  const sortino = metrics.sortinoRatio !== undefined ? metrics.sortinoRatio : null;
   const profitFactor = metrics.profitFactor !== undefined ? metrics.profitFactor : null;
   const maxDd = metrics.maxDrawdownPercent || 0;
 
@@ -140,7 +151,7 @@ export function BacktestingDashboard() {
               </span>
               <button
                 type="button"
-                onClick={() => fetchRuns()}
+                onClick={() => { void refreshRuns(); }}
                 disabled={loadingList}
                 className="px-3 py-1 rounded-lg text-xs font-semibold text-slate-400 hover:text-white bg-white/5 border border-white/10 transition"
               >
@@ -165,7 +176,7 @@ export function BacktestingDashboard() {
               <button
                 type="button"
                 onClick={() => { setShowRunModal(true); setRunMessage(null); setRunError(null); }}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 flex items-center gap-1.5"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 flex items-center gap-1.5"
               >
                 <span>⚡ Run New Backtest</span>
               </button>
@@ -193,7 +204,7 @@ export function BacktestingDashboard() {
                   runs={runs}
                   loadingList={loadingList}
                   selectedRunId={selectedRunId}
-                  setSelectedRunId={setSelectedRunId}
+                  setSelectedRunId={selectRun}
                 />
               </GlassPanel>
             </Reveal>

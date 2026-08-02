@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { Timer, TrendingUp } from "lucide-react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
+import { Tabs } from "../../../components/ui/tabs";
 import { getResearchJson, postResearchJson } from "../../research/api";
-import { formatNumber, formatPercentage, formatTimestamp } from "../../research/presentation";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 import type { TradeIdeaRow } from "../domain";
 import { StrategyFilters } from "./strategy-filters";
@@ -18,7 +20,36 @@ export interface PaperAccountOption {
   openingBalance: number;
 }
 
-export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: string, isScalp?: boolean } = {}) {
+export type StrategyMode = "swing" | "scalp";
+
+const modeConfig: Record<StrategyMode, {
+  strategyKey: string;
+  defaultTimeframe: string;
+  title: string;
+  gridHeading: string;
+  gridDescription: string;
+}> = {
+  swing: {
+    strategyKey: "trend-breakout",
+    defaultTimeframe: "1d",
+    title: "Strategy Engine & Trade Ideas",
+    gridHeading: "Quantitative Breakout Proposals",
+    gridDescription: "Generated from Trend Breakout and Candlestick Pattern engines. These are research proposals, not automated orders.",
+  },
+  scalp: {
+    strategyKey: "momentum-scalp",
+    defaultTimeframe: "1m",
+    title: "Scalp Strategy & Ideas",
+    gridHeading: "Momentum Scalp Proposals",
+    gridDescription: "Generated from the 1m Momentum Scalp engine (EMA separation, VWAP displacement, bounded RSI). These are research proposals, not automated orders.",
+  },
+};
+
+export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: StrategyMode } = {}) {
+  const [mode, setMode] = useState<StrategyMode>(initialMode);
+  const { strategyKey, title, gridHeading, gridDescription } = modeConfig[mode];
+  const isScalp = mode === "scalp";
+
   const [ideas, setIdeas] = useState<TradeIdeaRow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +63,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
   // Generate Modal state
   const [showGenerateModal, setShowGenerateModal] = useState<boolean>(false);
   const [genSymbol, setGenSymbol] = useState<string>("NIFTY50");
-  const [genTimeframe, setGenTimeframe] = useState<string>(isScalp ? "1m" : "1d");
+  const [genTimeframe, setGenTimeframe] = useState<string>(modeConfig[initialMode].defaultTimeframe);
   const [generating, setGenerating] = useState<boolean>(false);
   const [genMessage, setGenMessage] = useState<string | null>(null);
   const [genError, setGenError] = useState<string | null>(null);
@@ -49,34 +80,60 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
   const [simSuccess, setSimSuccess] = useState<string | null>(null);
   const [simError, setSimError] = useState<string | null>(null);
 
-  const fetchIdeas = useCallback(async (signal?: AbortSignal) => {
+  // Swing and scalp are the same dashboard over a different strategy key, so the
+  // tab is view state rather than a route. The URL still carries it so a refresh,
+  // a bookmark, and the /scalp-strategy redirect all land on the right tab.
+  const applyMode = useCallback((next: StrategyMode) => {
+    setMode(next);
+    // Drop the outgoing mode's rows and show the skeleton straight away. The
+    // refetch is driven by an effect, which cannot raise `loading` itself, so
+    // without this the previous mode's proposals stay on screen under the new
+    // mode's heading — a trend-breakout card labelled "Momentum Scalp Proposals".
+    setIdeas([]);
     setLoading(true);
-    setError(null);
-    try {
-      const dateParam = dateFilter ? `&date=${encodeURIComponent(dateFilter)}` : "";
-      // The strategy filter has to go to the API. Filtering the response here instead
-      // applies limit=100 across every strategy first, so whichever strategy was
-      // regenerated last fills the page and this one shows stale rows or nothing.
-      const strategyParam = strategyKey ? `&strategy=${encodeURIComponent(strategyKey)}` : "";
-      const res = await getResearchJson(
-        `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}`,
-        signal,
-      ) as { data: TradeIdeaRow[] };
-      setIdeas(res.data || []);
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load trade ideas.");
-      }
-    } finally {
-      setLoading(false);
-    }
+    // The generate modal offers a different timeframe set per mode. Leaving the
+    // previous mode's value selected would post a timeframe the new mode's
+    // dropdown does not even list.
+    setGenTimeframe(modeConfig[next].defaultTimeframe);
+    window.history.replaceState(null, "", next === "scalp" ? "/strategy?mode=scalp" : "/strategy");
+  }, []);
+
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadIdeas = useCallback(async (signal?: AbortSignal) => {
+    const dateParam = dateFilter ? `&date=${encodeURIComponent(dateFilter)}` : "";
+    // The strategy filter has to go to the API. Filtering the response here instead
+    // applies limit=100 across every strategy first, so whichever strategy was
+    // regenerated last fills the page and this one shows stale rows or nothing.
+    const strategyParam = strategyKey ? `&strategy=${encodeURIComponent(strategyKey)}` : "";
+    const res = await getResearchJson(
+      `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}`,
+      signal,
+    ) as { data: TradeIdeaRow[] };
+    return res.data || [];
   }, [dateFilter, strategyKey]);
+
+  const applyIdeas = useCallback((rows: TradeIdeaRow[]) => {
+    setIdeas(rows);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applyIdeasError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load trade ideas."));
+    setLoading(false);
+  }, []);
+
+  const refreshIdeas = useCallback(() => {
+    setLoading(true);
+    void loadIdeas().then(applyIdeas, applyIdeasError);
+  }, [loadIdeas, applyIdeas, applyIdeasError]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchIdeas(controller.signal);
+    void loadIdeas(controller.signal).then(applyIdeas, applyIdeasError);
     return () => controller.abort();
-  }, [fetchIdeas, dateFilter]);
+  }, [loadIdeas, applyIdeas, applyIdeasError]);
 
   const handleGenerateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,7 +150,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
       
       // If we got an array, check if any succeeded
       let totalGen = 0;
-      let reasons: string[] = [];
+      const reasons: string[] = [];
       if (Array.isArray(res.data)) {
         for (const item of res.data) {
           if (item.candidatesGenerated > 0) totalGen += item.candidatesGenerated;
@@ -106,9 +163,9 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
       } else {
         setGenMessage(`Evaluated latest candle for ${genSymbol.toUpperCase()} (${genTimeframe}), but rules were not met (${reasons.length > 0 ? reasons[0] : "NO_CANDIDATE"}).`);
       }
-      await fetchIdeas();
-    } catch (err: any) {
-      setGenError(err.message || "Failed to generate proposals.");
+      await loadIdeas().then(applyIdeas, applyIdeasError);
+    } catch (err: unknown) {
+      setGenError(errorMessage(err, "Failed to generate proposals."));
     } finally {
       setGenerating(false);
     }
@@ -153,8 +210,8 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
       setTimeout(() => {
         setShowSimulateModal(false);
       }, 1500);
-    } catch (err: any) {
-      setSimError(err.message || "Failed to open simulated position.");
+    } catch (err: unknown) {
+      setSimError(errorMessage(err, "Failed to open simulated position."));
     } finally {
       setSimulating(false);
     }
@@ -179,11 +236,22 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
     <>
       <PageHeader
         eyebrow="Quantitative Proposals"
-        title={isScalp ? "Scalp Strategy & Ideas" : "Strategy Engine & Trade Ideas"}
+        title={title}
         description="Proposals from the latest settled candle close. Today's open session is evaluated after the bar completes — expired historical setups are hidden."
       >
       </PageHeader>
       <div className="space-y-6">
+        <Reveal>
+          <Tabs
+            tabs={[
+              { id: "swing", label: "Swing", icon: <TrendingUp className="size-4" /> },
+              { id: "scalp", label: "Scalp", icon: <Timer className="size-4" /> },
+            ]}
+            activeId={mode}
+            onChange={(id) => applyMode(id as StrategyMode)}
+          />
+        </Reveal>
+
         {/* Control Bar & Filters */}
         <Reveal>
           <StrategyFilters
@@ -196,7 +264,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
             dateFilter={dateFilter}
             setDateFilter={setDateFilter}
             loading={loading}
-            onRefresh={() => fetchIdeas()}
+            onRefresh={refreshIdeas}
             onGenerate={() => { setShowGenerateModal(true); setGenMessage(null); setGenError(null); }}
           />
         </Reveal>
@@ -212,8 +280,8 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
           <GlassPanel className="p-6 border-white/10">
             <div className="flex items-center justify-between mb-6">
               <div>
-                <h2 className="text-lg font-bold text-white">Quantitative Breakout Proposals ({filteredIdeas.length})</h2>
-                <p className="text-xs text-slate-400">Generated from Trend Breakout and Candlestick Pattern engines. These are research proposals, not automated orders.</p>
+                <h2 className="text-lg font-bold text-white">{gridHeading} ({filteredIdeas.length})</h2>
+                <p className="text-xs text-slate-400">{gridDescription}</p>
               </div>
             </div>
 
@@ -234,7 +302,7 @@ export function StrategyDashboard({ strategyKey, isScalp }: { strategyKey?: stri
           setGenSymbol={setGenSymbol}
           genTimeframe={genTimeframe}
           setGenTimeframe={setGenTimeframe}
-          isScalp={!!isScalp}
+          isScalp={isScalp}
           generating={generating}
           genMessage={genMessage}
           genError={genError}

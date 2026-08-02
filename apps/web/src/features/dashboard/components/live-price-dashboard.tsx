@@ -79,6 +79,14 @@ export interface LivePriceData {
   researchOnly?: boolean;
 }
 
+interface AgentPerformanceResponse {
+  data?: AgentPerformanceMetrics;
+}
+
+interface LivePriceResponse {
+  data?: LivePriceData;
+}
+
 export function LivePriceDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("NIFTY50");
   const [timeframe, setTimeframe] = useState<string>("1d");
@@ -88,29 +96,48 @@ export function LivePriceDashboard() {
   const [metrics, setMetrics] = useState<AgentPerformanceMetrics | null>(null);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
-  // Fetch performance metrics for the selected timeframe
-  const fetchPerformanceMetrics = useCallback(async (period: string) => {
-    try {
-      const response = (await getResearchJson(`/agent/performance?period=${period}`)) as { data: AgentPerformanceMetrics };
-      if (response && response.data) {
-        setMetrics(response.data);
-      }
-    } catch (error) {
-      console.error("Failed to fetch agent performance metrics:", error);
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadPerformanceMetrics = useCallback(async (period: string) => {
+    return (await getResearchJson(`/agent/performance?period=${period}`)) as AgentPerformanceResponse;
+  }, []);
+
+  const applyPerformanceMetrics = useCallback((response: AgentPerformanceResponse) => {
+    if (response && response.data) {
+      setMetrics(response.data);
     }
   }, []);
 
+  const applyPerformanceMetricsError = useCallback((error: unknown) => {
+    console.error("Failed to fetch agent performance metrics:", error);
+  }, []);
+
   useEffect(() => {
-    fetchPerformanceMetrics(perfPeriod);
-    const interval = setInterval(() => fetchPerformanceMetrics(perfPeriod), 10000);
+    void loadPerformanceMetrics(perfPeriod).then(applyPerformanceMetrics, applyPerformanceMetricsError);
+    const interval = setInterval(() => {
+      void loadPerformanceMetrics(perfPeriod).then(applyPerformanceMetrics, applyPerformanceMetricsError);
+    }, 10000);
     return () => clearInterval(interval);
-  }, [perfPeriod, fetchPerformanceMetrics]);
+  }, [perfPeriod, loadPerformanceMetrics, applyPerformanceMetrics, applyPerformanceMetricsError]);
+
+  // The stream is reset where the selection changes rather than in the effect
+  // below, because a synchronous state write in an effect body cascades a
+  // render. On first mount the initial state values already say "connecting".
+  const selectSymbol = (symbol: string) => {
+    if (symbol === selectedSymbol) return;
+    setSelectedSymbol(symbol);
+    setState("loading");
+    setIsStreaming(false);
+  };
+
+  const selectTimeframe = (next: string) => {
+    if (next === timeframe) return;
+    setTimeframe(next);
+    setState("loading");
+    setIsStreaming(false);
+  };
 
   // Connect to Server-Sent Events (SSE) live ticking stream
   useEffect(() => {
-    setState("loading");
-    setIsStreaming(false);
-
     const streamUrl = `${apiV1Url}/stream/live-agent?symbol=${selectedSymbol}&timeframe=${timeframe}`;
     const es = new EventSource(streamUrl);
 
@@ -136,9 +163,10 @@ export function LivePriceDashboard() {
       setIsStreaming(false);
       // Fallback to static query if SSE fails temporarily
       getResearchJson(`/live-price?symbol=${selectedSymbol}&timeframe=${timeframe}`)
-        .then((res: any) => {
-          if (res?.data) {
-            setData(res.data);
+        .then((res) => {
+          const payload = res as LivePriceResponse | null;
+          if (payload?.data) {
+            setData(payload.data);
             setState("ready");
           }
         })
@@ -189,7 +217,7 @@ export function LivePriceDashboard() {
                 <select
                   id="symbol-select"
                   value={selectedSymbol}
-                  onChange={(e) => setSelectedSymbol(e.target.value)}
+                  onChange={(e) => selectSymbol(e.target.value)}
                   className="rounded-xl border border-cyan-500/30 bg-slate-900 px-4 py-2.5 text-base font-bold text-white shadow-lg shadow-cyan-500/10 transition hover:border-cyan-400 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/30"
                 >
                   <option value="NIFTY50">⚡ NIFTY 50 (NSE:NIFTY50)</option>
@@ -204,10 +232,10 @@ export function LivePriceDashboard() {
                     <button
                       key={tf}
                       type="button"
-                      onClick={() => setTimeframe(tf)}
+                      onClick={() => selectTimeframe(tf)}
                       className={`rounded-lg px-3 py-1.5 text-xs font-bold uppercase transition ${
                         timeframe === tf
-                          ? "bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20"
+                          ? "bg-cyan-500 text-static-navy shadow-md shadow-cyan-500/20"
                           : "text-slate-300 hover:bg-white/5 hover:text-white"
                       }`}
                     >
@@ -274,7 +302,7 @@ export function LivePriceDashboard() {
                 </Link>
                 <Link
                   href="/paper-trading"
-                  className="rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 px-4 py-2 text-sm font-extrabold text-slate-950 transition hover:brightness-110 shadow-lg shadow-emerald-500/20"
+                  className="rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 px-4 py-2 text-sm font-extrabold text-static-navy transition hover:brightness-110 shadow-lg shadow-emerald-500/20"
                 >
                   🚀 Review Paper Portfolio
                 </Link>

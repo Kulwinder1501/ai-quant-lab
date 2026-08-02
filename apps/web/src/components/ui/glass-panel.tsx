@@ -9,7 +9,7 @@ export function GlassPanel({ children, className, ...props }: GlassPanelProps) {
   return (
     <div
       className={classNames(
-        "rounded-2xl border border-slate-700/70 bg-slate-950/45 shadow-[0_18px_60px_-32px_rgba(8,145,178,0.55)] backdrop-blur-xl",
+        "rounded-2xl border border-slate-700/70 bg-slate-950/45 shadow-[0_18px_60px_-32px_rgb(var(--panel-shadow)/0.55)] backdrop-blur-xl",
         className,
       )}
       {...props}
@@ -23,7 +23,7 @@ export function InteractiveGlassCard({ children, className, ...props }: GlassPan
   return (
     <GlassPanel
       className={classNames(
-        "transition duration-300 ease-out hover:-translate-y-1 hover:border-cyan-300/30 hover:bg-slate-900/80 hover:shadow-[0_24px_70px_-34px_rgba(34,211,238,0.42)] motion-reduce:transform-none motion-reduce:transition-none",
+        "transition duration-300 ease-out hover:-translate-y-1 hover:border-cyan-300/30 hover:bg-slate-900/80 hover:shadow-[0_24px_70px_-34px_rgb(var(--panel-shadow)/0.42)] motion-reduce:transform-none motion-reduce:transition-none",
         className,
       )}
       {...props}

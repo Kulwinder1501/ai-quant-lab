@@ -1,29 +1,33 @@
 "use client";
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export function useAutoRefresh(callback: () => void, intervalMs: number = 60000) {
-  const [timeLeft, setTimeLeft] = useState(Math.ceil(intervalMs / 1000));
-
-  const resetTimer = useCallback(() => {
-    setTimeLeft(Math.ceil(intervalMs / 1000));
-  }, [intervalMs]);
+  const seconds = Math.max(1, Math.ceil(intervalMs / 1000));
+  const [timeLeft, setTimeLeft] = useState(seconds);
+  // Held in a ref so a caller passing an inline arrow does not restart the countdown
+  // on every render.
+  const callbackRef = useRef(callback);
+  const remainingRef = useRef(seconds);
 
   useEffect(() => {
-    resetTimer();
+    callbackRef.current = callback;
+  }, [callback]);
+
+  useEffect(() => {
+    remainingRef.current = seconds;
 
     const timer = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          callback();
-          return Math.ceil(intervalMs / 1000);
-        }
-        return prev - 1;
-      });
+      remainingRef.current -= 1;
+      if (remainingRef.current <= 0) {
+        remainingRef.current = seconds;
+        callbackRef.current();
+      }
+      setTimeLeft(remainingRef.current);
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [callback, intervalMs, resetTimer]);
+  }, [seconds]);
 
   return timeLeft;
 }

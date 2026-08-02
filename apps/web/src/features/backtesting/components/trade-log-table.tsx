@@ -1,8 +1,9 @@
 import React from "react";
 import { formatNumber, formatTimestamp } from "../../research/presentation";
+import type { BacktestTradeRow } from "../domain";
 
 interface TradeLogTableProps {
-  trades: any[];
+  trades: BacktestTradeRow[];
 }
 
 export function TradeLogTable({ trades }: TradeLogTableProps) {

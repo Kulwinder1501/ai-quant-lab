@@ -1,12 +1,14 @@
 import { create } from 'zustand';
 
+export type AppTheme = 'light' | 'dark';
+
 interface AppState {
   selectedInstrument: string | null;
   selectedTimeframe: string | null;
   activeAccountId: string | null;
   apiConnected: boolean;
   sidebarCollapsed: boolean;
-  theme: 'light' | 'dark' | 'system';
+  theme: AppTheme;
   autoRefreshInterval: number;
   apiBaseUrl: string;
   setSelectedInstrument: (instrument: string | null) => void;
@@ -14,7 +16,7 @@ interface AppState {
   setActiveAccountId: (id: string | null) => void;
   setApiConnected: (connected: boolean) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
-  setTheme: (theme: 'light' | 'dark' | 'system') => void;
+  setTheme: (theme: AppTheme) => void;
   setAutoRefreshInterval: (interval: number) => void;
   setApiBaseUrl: (url: string) => void;
 }
@@ -25,7 +27,7 @@ export const useAppStore = create<AppState>((set) => ({
   activeAccountId: null,
   apiConnected: false,
   sidebarCollapsed: false,
-  theme: 'system',
+  theme: 'dark',
   autoRefreshInterval: 5,
   apiBaseUrl: 'http://localhost:8000',
   setSelectedInstrument: (instrument) => set({ selectedInstrument: instrument }),

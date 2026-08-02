@@ -73,6 +73,8 @@ export interface TradeHistoryPage {
   truncated: boolean;
 }
 
+export type TradeHistoryMode = "swing" | "scalp";
+
 export interface TradeHistoryFilters {
   accountId: string;
   instrumentSymbol: string;
@@ -92,6 +94,89 @@ export const defaultTradeHistoryFilters: TradeHistoryFilters = {
   outcome: "ALL",
   limit: 100,
 };
+
+const rounded = (value: number): number => Number(value.toFixed(6));
+
+const average = (values: number[]): number | null => (
+  values.length === 0 ? null : rounded(values.reduce((sum, value) => sum + value, 0) / values.length)
+);
+
+/**
+ * Scalp trades are generated from the dedicated 1m strategy. Everything else,
+ * including older records without timeframe metadata, remains in Swing so a
+ * legacy trade never disappears from both tabs.
+ */
+export function isTradeInMode(record: TradeHistoryRecord, mode: TradeHistoryMode): boolean {
+  const isScalp = record.timeframe?.trim().toLowerCase() === "1m";
+  return mode === "scalp" ? isScalp : !isScalp;
+}
+
+/** Rebuilds the summary after the Swing/Scalp partition has been applied. */
+export function summarizeTradeHistory(records: readonly TradeHistoryRecord[]): TradeHistorySummary {
+  const closed = records
+    .filter((record) => record.status === "CLOSED" && record.realizedPnl !== null)
+    .sort((left, right) => {
+      const leftClosedAt = left.closedAt ? Date.parse(left.closedAt) : 0;
+      const rightClosedAt = right.closedAt ? Date.parse(right.closedAt) : 0;
+      const safeLeft = Number.isNaN(leftClosedAt) ? 0 : leftClosedAt;
+      const safeRight = Number.isNaN(rightClosedAt) ? 0 : rightClosedAt;
+      return safeLeft - safeRight || left.id.localeCompare(right.id);
+    });
+
+  const profits = closed.map((record) => record.realizedPnl as number);
+  const wins = profits.filter((value) => value > 0);
+  const losses = profits.filter((value) => value < 0);
+  const grossProfit = wins.reduce((sum, value) => sum + value, 0);
+  const grossLoss = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+
+  let equity = 0;
+  let peak = 0;
+  let maximumDrawdown = 0;
+  for (const value of profits) {
+    equity += value;
+    peak = Math.max(peak, equity);
+    maximumDrawdown = Math.max(maximumDrawdown, peak - equity);
+  }
+
+  const exitReasonCounts: Record<TradeHistoryExitReason, number> = {
+    STOP_LOSS: 0,
+    TARGET: 0,
+    MANUAL: 0,
+    CANCELLED: 0,
+  };
+  for (const record of records) {
+    if (record.exitReason) exitReasonCounts[record.exitReason] += 1;
+  }
+
+  return {
+    tradeCount: records.length,
+    openTradeCount: records.filter((record) => record.status === "OPEN").length,
+    closedTradeCount: closed.length,
+    winningTradeCount: wins.length,
+    losingTradeCount: losses.length,
+    breakEvenTradeCount: profits.filter((value) => value === 0).length,
+    winRatePercent: closed.length === 0 ? null : rounded(wins.length / closed.length * 100),
+    grossProfit: rounded(grossProfit),
+    grossLoss: rounded(grossLoss),
+    netRealizedPnl: rounded(grossProfit - grossLoss),
+    profitFactor: grossLoss === 0 ? null : rounded(grossProfit / grossLoss),
+    expectancy: average(profits),
+    averageWin: average(wins),
+    averageLoss: average(losses),
+    averageRewardMultiple: average(
+      closed.map((record) => record.rewardMultiple).filter((value): value is number => value !== null),
+    ),
+    averageHoldingMinutes: average(
+      closed.map((record) => record.holdingMinutes).filter((value): value is number => value !== null),
+    ),
+    largestWin: wins.length === 0 ? null : rounded(Math.max(...wins)),
+    largestLoss: losses.length === 0 ? null : rounded(Math.min(...losses)),
+    totalFees: rounded(records.reduce((sum, record) => sum + (record.fees ?? 0), 0)),
+    totalSlippage: rounded(records.reduce((sum, record) => sum + (record.slippage ?? 0), 0)),
+    maximumDrawdown: rounded(maximumDrawdown),
+    exitReasonCounts,
+  };
+}
 
 /** Turns the UI filter state into a query string the read-only endpoint accepts. */
 export function tradeHistoryQuery(filters: TradeHistoryFilters): string {

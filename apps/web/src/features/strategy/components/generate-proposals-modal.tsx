@@ -60,14 +60,16 @@ export function GenerateProposalsModal({
               onChange={(e) => setGenTimeframe(e.target.value)}
               className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
             >
+              {/* Must stay in step with `supportedTimeframes` in the API's strategy
+                  registry: a timeframe no strategy owns generates nothing. */}
               {isScalp ? (
                 <option value="1m">1 Minute (1m) - Momentum Scalp</option>
               ) : (
                 <>
                   <option value="15m">15 Minutes (15m)</option>
-                  <option value="1h">1 Hour (1h)</option>
+                  <option value="30m">30 Minutes (30m)</option>
+                  <option value="60m">1 Hour (60m)</option>
                   <option value="1d">Daily (1d)</option>
-                  <option value="1w">Weekly (1w)</option>
                 </>
               )}
             </select>
@@ -83,11 +85,11 @@ export function GenerateProposalsModal({
             <button
               type="submit"
               disabled={generating}
-              className="px-5 py-2 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
+              className="px-5 py-2 rounded-xl text-sm font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-2"
             >
               {generating ? (
                 <>
-                  <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span className="h-4 w-4 border-2 border-static-white border-t-transparent rounded-full animate-spin" />
                   <span>Evaluating...</span>
                 </>
               ) : (

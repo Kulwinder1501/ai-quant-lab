@@ -1,8 +1,10 @@
 "use client";
 
 import React, { useEffect, useRef, useMemo } from "react";
-import { createChart, ColorType, IChartApi, ISeriesApi, Time, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers } from "lightweight-charts";
+import { createChart, ColorType, IChartApi, LineStyle, Time, CandlestickSeries, LineSeries, HistogramSeries, createSeriesMarkers } from "lightweight-charts";
+import type { CandlestickData, HistogramData, LineData, SeriesMarker } from "lightweight-charts";
 import type { ChartPayload } from "../domain";
+import { useAppStore } from "../../../stores/app-store";
 
 interface InteractiveChartProps {
   payload: ChartPayload;
@@ -13,17 +15,36 @@ interface InteractiveChartProps {
 export function InteractiveChart({ payload, activeIndicators, showPatterns }: InteractiveChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const theme = useAppStore((state) => state.theme);
 
-  const candles = payload.candles || [];
-  const indicators = payload.indicators || {};
-  const patterns = payload.patterns || [];
+  const chartColors = useMemo(() => theme === "light" ? {
+    text: "#475569",
+    grid: "rgba(203, 213, 225, 0.65)",
+    crosshair: "#f97316",
+    border: "#cbd5e1",
+    sma: "#ea580c",
+    bollingerMiddle: "rgba(37, 99, 235, 0.85)",
+    rsi: "#d97706",
+  } : {
+    text: "#94a3b8",
+    grid: "rgba(30, 41, 59, 0.5)",
+    crosshair: "#38bdf8",
+    border: "#334155",
+    sma: "#06b6d4",
+    bollingerMiddle: "rgba(59, 130, 246, 0.8)",
+    rsi: "#f59e0b",
+  }, [theme]);
+
+  const candles = useMemo(() => payload.candles || [], [payload.candles]);
+  const indicators = useMemo(() => payload.indicators || {}, [payload.indicators]);
+  const patterns = useMemo(() => payload.patterns || [], [payload.patterns]);
 
   const hasRsi = activeIndicators.includes("RSI");
   const hasSma = activeIndicators.includes("SMA");
   const hasBb = activeIndicators.includes("BB");
 
   // Format data for lightweight-charts
-  const ohlcData = useMemo(() => {
+  const ohlcData = useMemo<CandlestickData<Time>[]>(() => {
     return candles
       .map((c) => ({
         time: (new Date(c.timestamp).getTime() / 1000) as Time,
@@ -35,7 +56,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       .sort((a, b) => (a.time as number) - (b.time as number));
   }, [candles]);
 
-  const volumeData = useMemo(() => {
+  const volumeData = useMemo<HistogramData<Time>[]>(() => {
     return candles
       .map((c) => ({
         time: (new Date(c.timestamp).getTime() / 1000) as Time,
@@ -45,7 +66,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       .sort((a, b) => (a.time as number) - (b.time as number));
   }, [candles]);
 
-  const smaData = useMemo(() => {
+  const smaData = useMemo<LineData<Time>[]>(() => {
     if (!hasSma || !indicators.SMA) return [];
     return indicators.SMA
       .filter((p) => p.value !== undefined && p.value !== null)
@@ -58,9 +79,9 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
   const { bbUpper, bbMiddle, bbLower } = useMemo(() => {
     if (!hasBb || !indicators.BB) return { bbUpper: [], bbMiddle: [], bbLower: [] };
-    const upper: any[] = [];
-    const middle: any[] = [];
-    const lower: any[] = [];
+    const upper: LineData<Time>[] = [];
+    const middle: LineData<Time>[] = [];
+    const lower: LineData<Time>[] = [];
 
     indicators.BB.forEach((p) => {
       const time = (new Date(p.timestamp).getTime() / 1000) as Time;
@@ -76,7 +97,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     };
   }, [hasBb, indicators.BB]);
 
-  const rsiData = useMemo(() => {
+  const rsiData = useMemo<LineData<Time>[]>(() => {
     if (!hasRsi || !indicators.RSI) return [];
     return indicators.RSI
       .filter((p) => p.value !== undefined && p.value !== null)
@@ -87,9 +108,9 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       .sort((a, b) => (a.time as number) - (b.time as number));
   }, [hasRsi, indicators.RSI]);
 
-  const markers = useMemo(() => {
+  const markers = useMemo<SeriesMarker<Time>[]>(() => {
     if (!showPatterns || patterns.length === 0) return [];
-    return patterns.map((pat) => {
+    return patterns.map((pat): SeriesMarker<Time> => {
       const isBullish = pat.direction === "BULLISH";
       return {
         time: (new Date(pat.timestamp).getTime() / 1000) as Time,
@@ -108,34 +129,34 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#94a3b8",
+        textColor: chartColors.text,
         fontFamily: "'Inter', 'Roboto', sans-serif",
       },
       grid: {
-        vertLines: { color: "rgba(30, 41, 59, 0.5)" },
-        horzLines: { color: "rgba(30, 41, 59, 0.5)" },
+        vertLines: { color: chartColors.grid },
+        horzLines: { color: chartColors.grid },
       },
       crosshair: {
         mode: 0,
         vertLine: {
           width: 1,
-          color: "#38bdf8",
+          color: chartColors.crosshair,
           style: 3,
         },
         horzLine: {
           width: 1,
-          color: "#38bdf8",
+          color: chartColors.crosshair,
           style: 3,
         },
       },
       rightPriceScale: {
-        borderColor: "#334155",
+        borderColor: chartColors.border,
         scaleMargins: hasRsi 
           ? { top: 0.1, bottom: 0.35 } 
           : { top: 0.1, bottom: 0.2 },
       },
       timeScale: {
-        borderColor: "#334155",
+        borderColor: chartColors.border,
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 10,
@@ -167,10 +188,10 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       wickUpColor: "#10b981",
       wickDownColor: "#f43f5e",
     });
-    mainSeries.setData(ohlcData as any);
+    mainSeries.setData(ohlcData);
     
     if (markers.length > 0) {
-      createSeriesMarkers(mainSeries, markers as any);
+      createSeriesMarkers(mainSeries, markers);
     }
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -188,7 +209,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
     if (hasSma && smaData.length > 0) {
       const smaLine = chart.addSeries(LineSeries, {
-        color: "#06b6d4",
+        color: chartColors.sma,
         lineWidth: 2,
       });
       smaLine.setData(smaData);
@@ -204,7 +225,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       }
       if (bbMiddle.length > 0) {
         chart.addSeries(LineSeries, {
-          color: "rgba(59, 130, 246, 0.8)",
+          color: chartColors.bollingerMiddle,
           lineWidth: 1,
         }).setData(bbMiddle);
       }
@@ -218,32 +239,30 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     }
 
     // Add RSI Pane if present
-    let rsiSeries: ISeriesApi<"Line"> | null = null;
     if (hasRsi && rsiData.length > 0) {
       const rsiScale = chart.priceScale("rsi");
       rsiScale.applyOptions({
         scaleMargins: { top: 0.85, bottom: 0 },
-        borderColor: "#334155",
+        borderColor: chartColors.border,
       });
 
       const rsiLine = chart.addSeries(LineSeries, {
-        color: "#f59e0b",
+        color: chartColors.rsi,
         lineWidth: 2,
         priceScaleId: "rsi",
       });
       rsiLine.setData(rsiData);
-      rsiSeries = rsiLine as any;
-      
+
       const rsiBaseOptions = {
         priceScaleId: "rsi",
-        lineWidth: 1,
-        lineStyle: 3, // Dotted
+        lineWidth: 1 as const,
+        lineStyle: LineStyle.Dotted,
         lastValueVisible: false,
         priceLineVisible: false,
       };
 
-      const overboughtLine = chart.addSeries(LineSeries, { ...rsiBaseOptions, color: "#f43f5e" } as any);
-      const oversoldLine = chart.addSeries(LineSeries, { ...rsiBaseOptions, color: "#10b981" } as any);
+      const overboughtLine = chart.addSeries(LineSeries, { ...rsiBaseOptions, color: "#f43f5e" });
+      const oversoldLine = chart.addSeries(LineSeries, { ...rsiBaseOptions, color: "#10b981" });
 
       // Create static threshold lines for RSI
       const overboughtData = rsiData.map(d => ({ time: d.time, value: 70 }));
@@ -268,7 +287,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     };
   }, [
     ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower, 
-    hasRsi, rsiData, markers, payload.timeframe
+    hasRsi, rsiData, markers, payload.timeframe, chartColors
   ]);
 
   const handleZoom = (direction: 'in' | 'out') => {

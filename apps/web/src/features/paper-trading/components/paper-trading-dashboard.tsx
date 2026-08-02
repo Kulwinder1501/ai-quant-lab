@@ -4,7 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
-import { formatNumber, formatTimestamp } from "../../research/presentation";
+import { formatNumber } from "../../research/presentation";
+import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../domain";
 import { EquityMetrics } from "./equity-metrics";
@@ -58,49 +59,66 @@ export function PaperTradingDashboard() {
   const [closeNotes, setCloseNotes] = useState<string>("Manually closed from UI");
   const [closeError, setCloseError] = useState<string | null>(null);
 
-  const fetchAccounts = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = await getResearchJson("/paper-accounts", signal) as { data: PaperAccountSummary[] };
-      const list = res.data || [];
-      setAccounts(list);
-      if (list.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(list[0].id);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load paper accounts.");
-      }
-    }
-  }, [selectedAccountId]);
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadAccounts = useCallback(async (signal?: AbortSignal) => {
+    const res = await getResearchJson("/paper-accounts", signal) as { data: PaperAccountSummary[] };
+    return res.data || [];
+  }, []);
 
-  const fetchSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
-    if (!accId) return;
+  const applyAccounts = useCallback((list: PaperAccountSummary[]) => {
+    setAccounts(list);
+    setSelectedAccountId((current) => (!current && list.length > 0 ? list[0].id : current));
+  }, []);
+
+  const applyAccountsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load paper accounts."));
+  }, []);
+
+  const loadSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
+    const res = await getResearchJson(`/paper-accounts/${accId}/summary`, signal) as { data: PaperAccountFullSummary };
+    return res.data;
+  }, []);
+
+  const applySummary = useCallback((data: PaperAccountFullSummary) => {
+    setSummary(data);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applySummaryError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load account summary."));
+    setLoading(false);
+  }, []);
+
+  const refreshSummary = useCallback((accId: string) => {
+    if (!accId) return Promise.resolve();
     setLoading(true);
     setError(null);
-    try {
-      const res = await getResearchJson(`/paper-accounts/${accId}/summary`, signal) as { data: PaperAccountFullSummary };
-      setSummary(res.data);
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load account summary.");
-      }
-    } finally {
-      setLoading(false);
-    }
+    return loadSummary(accId).then(applySummary, applySummaryError);
+  }, [loadSummary, applySummary, applySummaryError]);
+
+  // The summary effect may not raise `loading` itself, so account switches have to
+  // raise it from the event handler that triggers them.
+  const selectAccount = useCallback((accId: string) => {
+    setSelectedAccountId(accId);
+    setLoading(true);
+    setError(null);
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchAccounts(controller.signal);
+    void loadAccounts(controller.signal).then(applyAccounts, applyAccountsError);
     return () => controller.abort();
-  }, [fetchAccounts]);
+  }, [loadAccounts, applyAccounts, applyAccountsError]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     const controller = new AbortController();
-    fetchSummary(selectedAccountId, controller.signal);
+    void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
     return () => controller.abort();
-  }, [selectedAccountId, fetchSummary]);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -112,9 +130,9 @@ export function PaperTradingDashboard() {
       }) as { data: PaperAccountSummary };
       setShowCreateModal(false);
       setAccounts((prev) => [...prev, res.data]);
-      setSelectedAccountId(res.data.id);
-    } catch (err: any) {
-      setCreateError(err.message || "Failed to create account.");
+      selectAccount(res.data.id);
+    } catch (err: unknown) {
+      setCreateError(errorMessage(err, "Failed to create account."));
     }
   };
 
@@ -127,9 +145,9 @@ export function PaperTradingDashboard() {
         data: { openTradesRead: number; eligibleCandlesRead: number; tradesClosed: number };
       };
       setEvalMessage(`Evaluated ${res.data.openTradesRead} open trades against ${res.data.eligibleCandlesRead} historical candles. Closed ${res.data.tradesClosed} trades based on stop-loss/take-profit rules.`);
-      await fetchSummary(selectedAccountId);
-    } catch (err: any) {
-      setEvalMessage(`Error evaluating trades: ${err.message}`);
+      await refreshSummary(selectedAccountId);
+    } catch (err: unknown) {
+      setEvalMessage(`Error evaluating trades: ${errorMessage(err, "Unknown error")}`);
     } finally {
       setEvaluating(false);
     }
@@ -147,7 +165,7 @@ export function PaperTradingDashboard() {
         setSelectedIdeaId(first.id);
         setOpenFillPrice(first.entryPrice || 0);
       }
-    } catch (err) {
+    } catch {
       // ignore
     }
   };
@@ -176,9 +194,9 @@ export function PaperTradingDashboard() {
         expiryDate: openExpiryDate,
       });
       setShowOpenModal(false);
-      await fetchSummary(selectedAccountId);
-    } catch (err: any) {
-      setOpenError(err.message || "Failed to open simulated trade.");
+      await refreshSummary(selectedAccountId);
+    } catch (err: unknown) {
+      setOpenError(errorMessage(err, "Failed to open simulated trade."));
     }
   };
 
@@ -203,10 +221,10 @@ export function PaperTradingDashboard() {
       setShowCloseModal(false);
       setTradeToClose(null);
       if (selectedAccountId) {
-        await fetchSummary(selectedAccountId);
+        await refreshSummary(selectedAccountId);
       }
-    } catch (err: any) {
-      setCloseError(err.message || "Failed to close trade.");
+    } catch (err: unknown) {
+      setCloseError(errorMessage(err, "Failed to close trade."));
     }
   };
 
@@ -240,7 +258,7 @@ export function PaperTradingDashboard() {
                 <select
                   id="acc-select"
                   value={selectedAccountId}
-                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  onChange={(e) => selectAccount(e.target.value)}
                   className="bg-transparent text-sm font-semibold text-white focus:outline-none focus:ring-2 focus:ring-cyan-400 cursor-pointer"
                 >
                   {accounts.map((acc) => (
@@ -286,7 +304,7 @@ export function PaperTradingDashboard() {
                 type="button"
                 onClick={openTradeModalWithIdeas}
                 disabled={!selectedAccountId}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-1.5"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-1.5"
               >
                 <span>🚀 Simulate Trade</span>
               </button>
