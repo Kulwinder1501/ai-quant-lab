@@ -45,6 +45,176 @@ Verification recorded on the active v2 stack:
 - API tests: 317 passed; API and web production builds passed; web lint passed;
 - deployed API returned 60 flow sessions and 60 VIX sessions; dashboard returned HTTP 200.
 
+## Stage 0 addendum: database consolidation (2026-08-03)
+
+The Stage-0 record above is accurate but was written against a database that did not
+hold the research window. Re-baselining on 2026-08-03 found the project running two
+Postgres instances with disjoint contents:
+
+| | v1 — `ai-quant-lab-db`, port 5432 | v2 — `ai-quant-lab-db-v2`, port 5433 |
+|---|---|---|
+| NIFTY50 `1d` | 883 bars from 2023-01-03 | 99 bars from 2026-03-10 |
+| Twenty research equities | 20 symbols, 17,720 bars | 20 symbols, **0 bars** |
+| India VIX | 629 daily, stale, unscheduled | 632 daily + intraday, scheduled |
+| FII/DII | 1 row | 70 rows with provenance |
+| Migration `028-market-context-integrity` | not applied | applied |
+| `model_versions` | 66 | 2 |
+| Host `.env` `DATABASE_URL` | pointed here | — |
+
+Every Phase 24 measurement came from v1; every Stage-0 remediation landed on v2. Host-run
+CLI and ML commands hit v1, meaning any training run would have used the single-row FII/DII
+table and unscheduled VIX that Stage 0 exists to fix. **Neither database could satisfy the
+Stage 0 exit criterion on its own.**
+
+**Decision: v2 is the system of record.** It carries the newer schema, the applied
+migration, the running collectors, and the dashboard. v1's history is Yahoo-sourced and
+therefore re-fetchable, so it was re-collected into v2 rather than copied — this keeps a
+single provider lineage per series and satisfies invariant 4 (provider consistency)
+instead of importing rows of uncertain origin.
+
+Actions taken on 2026-08-03, all additive and idempotent (`--skip-existing`):
+
+| Action | Result |
+|---|---|
+| NIFTY50 `1d`, Yahoo, 2023-01-01 → 2026-08-03 | 785 persisted, 98 skipped → **883 bars from 2023-01-03** |
+| BANKNIFTY `1d`, same range | 784 persisted, 98 skipped → **882 bars** |
+| INDIAVIX `1d`, same range | 246 persisted, 632 skipped → **878 bars from 2023-01-03**, closing the pre-2024 gap Phase 24 §5 flagged |
+| Twenty research equities `1d`, same range | 887 bars each, **17,740 total, 99.4% with real traded volume** |
+| `analysis:calculate-indicators` over all 23 instruments on `1d` | Full `ta-v1` coverage: ATR, BOLLINGER_BANDS, EMA, MACD, RSI, SMA, SUPERTREND across all 23; VWAP across 22 (INDIAVIX has no volume, correctly absent) |
+| Host `.env` `DATABASE_URL` repointed to port 5433 | **Corrected 2026-08-03 — this was only half done.** See the correction below |
+
+v1 was **not** deleted. It remains running and readable as an audit trail for the 66
+historical `model_versions` rows, which were not migrated because they were trained on a
+feature space that the planned `ml-feature-v6` bump retires anyway.
+
+Residual gaps after this consolidation:
+
+- FII/DII still covers 70 sessions (2026-03-30 → 07-31), not a multi-year window. The two
+  flow features are thin rather than dead; their trailing normalisation window is short.
+- Intraday remains Yahoo-sourced, 100% zero-volume on both indices. Unchanged by this work
+  and addressed only by Workstream D.
+- GIFT Nifty remains `PROVIDER_NOT_CONFIGURED` with zero rows.
+- The Workstream A audit script does not exist yet. The table above is a hand-run snapshot,
+  not the repeatable machine-readable report Stage 0 requires. **Stage 0 is therefore not
+  yet complete**, though its data preconditions now hold.
+
+### Correction: the repoint was incomplete (2026-08-03)
+
+The consolidation above claimed the host `DATABASE_URL` was repointed and that "neither
+compose stack reads this value, so only host CLI/ML runs are affected." Both halves were
+wrong, and the error surfaced only when the operator ran a CLI command directly and got
+`relation "provider_credentials" does not exist`.
+
+Only the repository-root `.env` had been changed. Four env files exist, and three still
+pointed at v1:
+
+| File | Was | Now |
+|---|---|---|
+| `.env` | 5433 | 5433 |
+| `apps/api/.env` | **5432** | 5433 |
+| `apps/ml/.env` | **5432** | 5433 |
+| `apps/web/.env` | **5432** | 5433 |
+
+`apps/ml/.env` is the consequential one: model training reads it, so any training run
+would have used v1 — 99 daily bars instead of 883, zero equity bars, one FII/DII row.
+The exact split-brain the consolidation claimed to resolve was still live for the ML
+path.
+
+Two things hid it. Verification used `export DATABASE_URL=...` before each command, and
+`dotenv` does not override an already-set variable, so every check passed against v2
+while the files still said v1. And npm workspace scripts set the working directory to
+the workspace root, so `apps/api/.env` — not the repository-root file — is what a CLI
+run actually loads.
+
+Backups are written beside each file as `.env.bak-pre-v2-repoint`, and `.env.bak*` is
+now in `.gitignore`; the first such backup had been left committable while holding live
+credentials.
+
+### Workstream D1 decision (2026-08-03), revised the same day
+
+The initial D1 choice was NIFTY/BANKNIFTY futures. Measurement against the live Fyers
+endpoint forced a revision, because **futures cannot supply history**:
+
+| Probe | Result |
+|---|---|
+| `NSE:NIFTY26AUGFUT` (live) | 375 bars, 100% volume |
+| `NSE:BANKNIFTY26AUGFUT` (live) | 375 bars, 100% volume |
+| `NSE:NIFTY26JULFUT` (expired ~1 month) | `-300 Invalid symbol provided` |
+| `NSE:NIFTY26JUNFUT`, `26MARFUT`, `25DECFUT`, `25JUNFUT` | all `-300 Invalid symbol` |
+
+Fyers' history endpoint serves only currently listed contracts. Note also that futures
+use `BANKNIFTY` while the index is `NIFTYBANK` — `NSE:NIFTYBANK26AUGFUT` is invalid.
+
+`cont_flag=1` appears to supply the missing history, and must not be used:
+
+| Window | `cont_flag=0` | `cont_flag=1` |
+|---|---|---|
+| Jan 2026 (contract not yet trading) | no data | 375 bars |
+| Jul 2026 (contract live) | firstClose 24305 | firstClose 24208 |
+
+So it invents bars for periods a contract never traded and back-adjusts the ones it did,
+by an undocumented method. A back-adjusted price at time T embeds roll factors fixed
+after T — look-ahead by construction — and rewriting stored bars is impossible anyway
+because completed candles are immutable. The adapter now pins `cont_flag=0` with a test.
+Verified to make no difference for index symbols, so index bars already collected are
+unaffected.
+
+**Revised decision: a liquid ETF proxy is the intraday instrument, with futures reserved
+for a record-forward series.** `NIFTYBEES` is measured at 100% non-zero volume on 1m and
+5m back to 2023-01 and is genuinely tradable, which the spot index is not. Registered by
+migration `031-etf-index-proxies` alongside the much thinner `BANKBEES` (median 5m volume
+~2.4k units, an order of magnitude below NIFTYBEES — a candidate, not an equal). Both are
+`is_active = FALSE`.
+
+The spot index is rejected as a training series for volume-dependent features regardless
+of its depth: `NSE:NIFTY50-INDEX` 5m reports 0% non-zero volume through 2025 and 100%
+from 2026, so any volume feature over a multi-year span is a calendar proxy rather than a
+participation measure.
+
+Futures remain correct for forward recording, and every session not recorded is
+permanently unavailable — Fyers will not sell it back later. That argues for standing up
+contract discovery and a scheduled collector sooner rather than later, but it is a
+separate build from this backfill and needs a documented point-in-time rollover policy
+first.
+
+### Intraday backfill result (2026-08-03)
+
+`NIFTYBEES`, Fyers, native intervals, no resampling:
+
+| Timeframe | Bars | Sessions | Range | Non-zero volume |
+|---|---|---|---|---|
+| `1m` | **331,141** | 887 | 2023-01-02 → 2026-07-31 | 100% |
+| `5m` | **66,229** | 887 | 2023-01-02 → 2026-07-31 | 100% |
+
+Against the Workstream D gates: the **1m gate is met** — ≥200,000 clean bars, ≥250
+distinct sessions, genuine volume, native interval. The 5m gate (≥100,000) is not; Fyers
+serves 1m back to 2017-08, so extending the window would close it, at the cost of
+including 2019-era liquidity where NIFTYBEES 1m shows only 68% non-zero volume.
+
+Meeting a bar-count gate is necessary and not sufficient. Overlapping windows do not
+create independent observations, and no research gate has been evaluated.
+
+Two operational findings from the same work:
+
+- Fyers answers `429 request limit reached` after roughly a dozen rapid requests. The
+  adapter now honours `Retry-After`, falls back to exponential backoff capped at 30s, and
+  fails loudly once the retry budget is spent. Without this a multi-year 1m campaign dies
+  partway and leaves a gap indistinguishable from missing market data.
+- One bar in 25,159 was corrupt upstream: the `NIFTYBEES` 5m bar opening 2023-09-21
+  09:15 IST reported `open` 213 against its own `low` of 218.33. The importer correctly
+  aborted the whole batch. `ImportHistoricalMarketData` gained an opt-in `skipInvalid`
+  that counts and reports rejected candles with samples instead of aborting; the strict
+  abort remains the default, since for a CSV fixture an invalid row means the file is
+  wrong. Exactly one candle was rejected across both timeframes.
+
+The intraday provider is **Fyers**, per `phase-23-fyers-market-data.md`; the operator
+opened an account on 2026-08-03, which settles that document's "check Kite first"
+question. Phase 23's reserved migration IDs collided with the applied
+`028-market-context-integrity` and were renumbered: `029-provider-credentials` is
+applied, and the purge is `030-purge-yahoo-scalp-candles`, deliberately **not**
+registered in `migrations/index.ts` — it deletes the Yahoo scalp series and must not run
+until Fyers has replaced it. The ETF registration that followed took `031`.
+
 This plan consolidates:
 
 - the data-first conclusions in `phase-24-model-capacity-discipline.md`;
@@ -740,6 +910,303 @@ because the previous code merged.
 
 **Exit:** swing data gate passes and missing evidence is visible rather than silently
 neutralized.
+
+
+## Stage 2 record: validation activation (2026-08-03)
+
+Status: **validation activation done and measured. The feature-capacity half — the
+`ml-feature-v6` bump — is not done.**
+
+### What was wrong
+
+`train.py:267` defaults `--folds` to 1, and a search of `apps/api/src`, `scripts`, and
+every `package.json` confirmed **nothing passed it**. `--cpcv-groups` was likewise never
+passed, so the Combinatorial Purged CV implemented in `validation.py` had never once
+run. Every promotion decision in the project's history rested on a single trailing
+block.
+
+Separately, and larger: the EOD pipeline trained on `--timeframe 15m --from 2024-01-01`.
+15m is Yahoo-owned and Yahoo serves roughly 60 days at that interval. The request did not
+fail — it silently returned about six weeks. That is why these models trained on ~780
+rows, and it was never the algorithm.
+
+### Measurements, NIFTY50, LightGBM, identical features and folds
+
+| | 15m direction (status quo) | 1d direction | 1d volatility-expansion |
+|---|---|---|---|
+| Labelled rows | 782 | 877 | 873 |
+| Window covered | ~6 weeks | 3.5 years | 3.5 years |
+| Training macro-F1 | 0.9341 | — | — |
+| Holdout macro-F1 | 0.2928 | 0.1922 | **0.3897** |
+| Holdout accuracy | 0.3418 | 0.2586 | **0.4023** |
+| Fold macro-F1 | single block | [0.201, 0.253, 0.192] | [0.296, 0.390] |
+| CPCV macro-F1 vs trivial | not run | 0.3100 vs 0.2062, **won 100%** | 0.3982 vs 0.1595, **won 100%** |
+| CPCV accuracy vs trivial | not run | 0.3806 vs 0.4492, **won 7%** | 0.4043 vs 0.3148, **won 100%** |
+
+Three conclusions, all measured rather than argued:
+
+1. **The directional target does not work, and CPCV is what proves it.** It beats the
+   trivial predictor on macro-F1 on every split while *losing* on accuracy on 93% of
+   them. That is the signature of a model spreading predictions across classes, which
+   macro-F1 rewards and accuracy exposes. A single-metric gate cannot see it. The 15m
+   model's 0.9341 training against 0.2928 holdout — below the 0.333 three-class random
+   baseline — is the same story with the folds turned off.
+2. **Volatility expansion works on the same rows.** It wins macro-F1 *and* accuracy on
+   100% of splits. This reproduces the earlier volatility-expansion result under proper
+   walk-forward and CPCV, on the current database.
+3. **Fold count is bounded by rows, and the bound is already binding.** 3 folds on 877
+   rows leaves 58 validation rows against the gate's own 60-row floor, and the run is
+   correctly refused as `INSUFFICIENT_VALIDATION_EVIDENCE`. 2 folds leaves 87 and
+   passes. More folds requires more rows, not a lower floor.
+
+### Changes made
+
+- `WALK_FORWARD_FOLDS = 2` and `CPCV_GROUPS = 6` are now passed on every training run in
+  the EOD pipeline. CPCV remains report-only and out of the gate, for the reason
+  `train.py` already documents.
+- The 15m run's window is now `sixtyDaysAgo` rather than a 2.5-year request the provider
+  silently truncates. Its ceiling is stated, not implied.
+- A `1d` directional run was added — the only timeframe whose depth lets folds span more
+  than one regime.
+- A `1d` volatility-expansion run was added, on its own label alphabet. It cannot reach a
+  directional consumer: `postgres-model-competition-repository.ts` and
+  `postgres-model-prediction-settlement-repository.ts` both filter on
+  `validationProtocol.labelScheme`, so the separation is structural, not conventional.
+
+### Not done, and what it needs
+
+The `ml-feature-v6` bump — cutting 113 features to roughly 30 and adding point-in-time
+breadth features — is **not** implemented. Two findings shape it:
+
+- Phase 24's open question 4 is answered: **multi-instrument training is not supported.**
+  `train.py:175` takes a single required `--instrument`. Its guess that the 1,933-row
+  runs implied pooled training was wrong. Pooling the 20 research equities is worth
+  17,740 rows against the current 877 — a 20x increase and by far the cheapest route to
+  a fold count above 2 — but it needs a real change to the loader and an explicit
+  assumption of shared cross-sectional dynamics.
+- Open question 3 is answered: **the ML evidence query does reach inactive instruments.**
+  `postgres_repository.py` applies no `is_active` filter on any of its four instrument
+  joins, so the research equities are readable today.
+
+**Stage 2 exit is therefore not met.** Validation activation is complete and has already
+changed a conclusion; the capacity half remains.
+
+
+## Stage 2 record: multi-instrument pooling (2026-08-03)
+
+The cheapest route past the fold ceiling, and the first configuration in the project's
+history to clear the promotion gate's initial baseline.
+
+### Why row concatenation alone would have been wrong
+
+`walk_forward_splits` and `chronological_purged_split` do row-index arithmetic on a
+sorted list, with the purge expressed as `train_end = validation_start - horizon_bars`.
+For one instrument a row is a bar, so that is correct. Pooled across twenty instruments
+it fails twice:
+
+- the train/validation boundary lands *inside* a session, putting some instruments' bars
+  for a timestamp in training and their siblings in validation — contemporaneous
+  cross-sectional leakage, and invisible in the resulting scores; and
+- a five-bar purge becomes five rows, roughly a quarter of one session, so training
+  labels overlap the validation block almost entirely while the code still reads
+  correctly.
+
+`pooled_walk_forward_splits` cuts folds on distinct `observed_at` values and purges on
+real timestamps — dropping a training example when its `label_available_at` reaches into
+the validation block — which is the defence `combinatorial_purged_splits` already
+applied and the walk-forward path never did. Seven tests cover the grouping, the
+timestamp purge scaling with the label horizon, sibling integrity, and the two refusal
+paths. CPCV needed no change: its block bounds are row-based but its purge was always
+timestamp-based, so pooled leakage was already caught.
+
+### Result: pooling helps volatility and does nothing for direction
+
+Identical features, folds, window and cutoff. LightGBM, `1d`, 2023-01-01 onward.
+
+| | Single instrument | Pooled (20 equities) |
+|---|---|---|
+| Labelled rows | 873–877 | **17,540** |
+| Validation rows per fold | 87 | **700** |
+| Folds the 60-row floor permits | 2 | **5** |
+| Volatility mean macro-F1 | 0.3427 | **0.4404** (spread 0.1383) |
+| Volatility CPCV macro-F1 vs trivial | +0.2386, won 100% | **+0.2874**, won 100% |
+| Volatility CPCV accuracy vs trivial | +0.0896, won 100% | **+0.1416**, won 100% |
+| Direction CPCV macro-F1 vs trivial | +0.1038, won 100% | +0.1042, won 100% |
+| Direction CPCV accuracy vs trivial | −0.0686, won 7% | −0.0129, won 27% |
+| Volatility gate decision | THRESHOLD_NOT_MET | **INITIAL_BASELINE_THRESHOLD_MET** |
+
+**Twenty times the data moved the directional CPCV macro-F1 edge by 0.0004, and its
+accuracy still lost to trivial.** That is the controlled evidence that direction's
+failure is the target rather than the sample size — the objection that "it would work
+with more data" is now measured and answered. Volatility improved on both metrics with
+the same increase.
+
+Two honest caveats on the passing model:
+
+- Fold spread is 0.1383, from 0.3766 to 0.5149, and the gate scores the *final* fold —
+  which happens to be the best of the five. The mean, 0.4404, is the more
+  representative number, and it also clears the 0.40 volatility floor.
+- Highly overlapping windows do not create twenty times the independent information.
+  Twenty instruments in one market share most of their systematic variance, so the
+  effective sample is far below 17,540. The gate's minimum-row rules are satisfied;
+  statistical sufficiency is not thereby proven.
+
+### Contract notes
+
+- Pooled models carry method `POOLED_PURGED_CHRONOLOGICAL_V1`, and the roster,
+  per-instrument row counts, and distinct observation-time count are recorded in
+  `validationProtocol`. A pooled score averages over a different distribution than a
+  single-instrument score and must not be ranked against one.
+- The model key encodes the pool as `pool20-<8-hex-digest>` of the sorted roster, so a
+  pooled model cannot inherit NIFTY50's promotion lineage. The digest keeps the key and
+  artifact path usable where twenty spelled-out symbols would not.
+- Each instrument is loaded and labelled against its own history; pooling happens only
+  after labelling. A forward return or trailing window computed across a concatenated
+  frame would be meaningless.
+- The pooled volatility run is now in the EOD pipeline. No pooled *directional* run is
+  scheduled, on the evidence above.
+- The research equities remain `is_active = FALSE`. Pooling them for research does not
+  activate them for the scanner or strategy engine.
+
+### Still outstanding for Stage 2 exit
+
+The feature cut — 113 features to roughly 30 — is not done. Note that the capacity
+argument has weakened considerably: at 17,540 rows the ratio is 155 rows per feature,
+not 5.5. The cut is now a variance-reduction and interpretability exercise rather than a
+rescue, and it should be measured under these folds rather than assumed to help.
+
+
+## Volatility settlement path (2026-08-03)
+
+Status: **grading and settlement built and tested. The loop is not closed — nothing
+writes volatility predictions yet.**
+
+### The problem
+
+`auxiliary_model_predictions` was write-only. It recorded what a non-directional model
+predicted and had no column for what happened: no realised label, no settled_at, no
+outcome of any kind, and nothing in the codebase settled it. The exclusion was correct
+when it was made — `competition-eligibility.ts` documents a real bug where a volatility
+model sat "permanently unpromotable at the top of" a directional competition — but the
+consequence inverted once volatility became the only target beating trivial on both
+macro-F1 and accuracy. The architecture guaranteed that the one thing that works could
+never satisfy invariant 9, "shadow before primary".
+
+### Built
+
+- Migration `031-auxiliary-prediction-settlement` adds `realized_label`,
+  `realized_ratio`, `realized_forward_range`, `realized_trailing_range`,
+  `label_available_at`, `settled_at`, and `unsettleable_reason`, plus partial indexes for
+  the unsettled tail and the settled scoreboard. `realized_ratio` is stored because the
+  label is only that ratio thresholded, so a band change stays re-scorable from history
+  instead of invalidating every settled row.
+- `expansionBand` is now recorded in `validationProtocol` and cross-checked by the
+  artifact gate for the scheme it governs. Previously the band — which *is* the label
+  rule — existed only inside the model key, while the protocol recorded a
+  `neutralThresholdBps` that means nothing for this target. Settlement reads the band
+  from the model's own protocol and refuses to grade a model that lacks it.
+- `volatility-expansion-label.ts` grades an outcome, deliberately as a second
+  implementation of the Python labeller. **Both are pinned to shared golden vectors** in
+  `volatility-expansion-golden.json`, asserted by the TypeScript suite and by
+  `GoldenVectorParityTests` in `apps/ml`. Nothing else forces training and settlement to
+  agree, and a divergence would silently make a live scoreboard measure a different
+  target than the model learned.
+- `SettleAuxiliaryPredictions` plus its Postgres repository and
+  `npm run models:settle-auxiliary`, wired into the EOD pipeline as step 2b. Only
+  completed candles are read: a provisional bar's envelope is still forming and would
+  bias narrow, manufacturing CONTRACTION.
+- Refusal is preserved end to end. A flat trailing window and an incomplete forward
+  window are reported as unmeasurable, never graded STABLE — that would manufacture
+  agreement exactly where evidence is absent, and at the most recent end of the series.
+
+### Not built: the write side
+
+`models:settle-auxiliary` runs clean and reports `examined: 0`, because
+`auxiliary_model_predictions` is empty. `save_auxiliary_prediction` exists in the Python
+repository, but `ml:predict --competition-pool` scores enrolled *directional* pool
+members, and volatility models are excluded from that pool by design. So:
+
+1. volatility candidates need a shadow-prediction path — most plausibly their own pool,
+   scoped by label scheme, rather than relaxing the directional pool's filter; and
+2. a volatility scoreboard and competition is needed before promotion can be decided on
+   settled outcomes, mirroring the directional rolling metrics.
+
+Until (1) lands, settlement is correct and idle. The grading rule and the storage are the
+parts that had to be right first; generating predictions into a path that could not score
+them was what created this situation.
+
+
+## Volatility scoreboard and competition (2026-08-03)
+
+Completes the chain. Every stage is in the EOD pipeline:
+
+```
+train (pooled, gate MET) -> shadow-predict (4b) -> settle (2b) -> compete (5b) -> PRIMARY
+```
+
+### Design decisions
+
+- **Metric arithmetic generalised, not duplicated.** `computeSettledMetrics` was bound to
+  the directional labels, but the computation -- including `trivialAccuracy` -- is
+  alphabet-agnostic. It moved to `settled-metrics.ts` and the directional entry point is
+  now a thin binding; all 15 pre-existing directional tests pass unchanged. Copying it
+  would have meant maintaining the trivial-accuracy reasoning in two places, and that is
+  the single guard that exposed the directional target.
+- **The qualifying gate requires macro-F1 *and* accuracy above trivial.** Directly
+  encodes the CPCV result: the directional target beat trivial on macro-F1 on 100% of
+  splits while losing on accuracy on 93%. A macro-F1-only ranking promotes the
+  class-spreader. A test constructs exactly that spreader and asserts exclusion.
+- **Settled floor of 300, against the directional 60.** A pooled model writes one
+  prediction per instrument per session, so 60 rows can be three sessions of twenty
+  correlated names. 300 is roughly fifteen sessions.
+- **No head-to-head daily-wins rule yet.** The directional 6-of-7 is calibrated against a
+  coin-flip pass rate. With zero settled volatility predictions in existence, calibrating
+  an equivalent would be inventing a threshold rather than measuring one. Recorded as
+  deliberately absent.
+- **Separate table, database-enforced.** `volatility_competition_state` with a unique
+  partial index on `(label_scheme) WHERE role = 'PRIMARY'`. Verified by attempting to
+  insert two PRIMARY rows; Postgres rejected it. A bug producing two champions fails
+  loudly rather than leaving risk consumers reading whichever row they select.
+- **Quarantine paths vacate the slot.** A PRIMARY that goes silent past the tolerance, or
+  falls to or below trivial, is removed even when no challenger qualifies. The role write
+  happens even when the assignment list is empty, or a demoted model would keep its
+  authority.
+
+### Verified against v2
+
+```
+candidatesExamined: 5, qualifying: 0, excludedForSample: 5,
+decision: NO_QUALIFYING_MODEL, primaryModelKey: null
+```
+
+Correct: five volatility models exist and none has a settled prediction yet. It will sit
+here until roughly fifteen sessions of settled outcomes accumulate. That is the design.
+
+### Scope limit
+
+A volatility PRIMARY authorises **risk and regime context only**. No directional consumer
+reads `volatility_competition_state`, and no risk consumer reads it yet either -- wiring
+that is a separate, explicit decision.
+
+## Timeframe naming collision resolved (2026-08-03)
+
+`1h` and `60m` were two names for one interval. `1h` is absent from
+`supportedHistoricalTimeframes`, so no collector could produce it; the only rows carrying
+it came from `seed-market-data.ts`.
+
+It was not cosmetic. `postgres-trade-review-repository.ts` ranked timeframes finest-first
+and listed `1h` but **not** `60m`, so every trade review searched 108 fabricated seed bars
+while 78,000 real `60m` bars sat under the canonical name -- and fell through to `1d`
+whenever the seed bars did not span the holding period, silently loosening the MAE/MFE
+bound to a whole daily range. `30m` was missing from the ladder too, despite 11,846
+stored bars.
+
+Fixed: the ladder now reads `1m, 3m, 5m, 10m, 15m, 30m, 60m, 1d`; the seed emits `60m`;
+and migration `033-purge-seeded-1h-candles` removes the 108 rows (466 dependent indicator
+snapshots cascading). 84 of the 108 aligned to a real `60m` open time, 24 did not, and 18
+were not on the `:45` session grid -- seed interval arithmetic, not market observations,
+so the deletion removes fabricated evidence rather than coverage. Same reasoning as
+`013-purge-fabricated-rsi`.
 
 ### Stage 2: Feature discipline and validation activation
 

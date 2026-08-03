@@ -3,6 +3,39 @@
 Status: **plan only**. No code in this phase has been written yet. This document is the
 design and the decision record; implementation follows in a separate change.
 
+> **Re-baselined 2026-08-03 — read this before trusting any count below.**
+>
+> Every measurement in this document was taken on 2026-07-31 against the **v1** database
+> (`ai-quant-lab-db`, host port 5432). Phase 25's Stage 0 market-context work was
+> implemented against the **v2** database (`ai-quant-lab-db-v2`, port 5433). The two had
+> disjoint contents: v1 held the research history and no institutional data, v2 held the
+> institutional data and no research history. Neither could train this phase.
+>
+> That split was resolved on 2026-08-03 in favour of v2. See the consolidation record in
+> `phase-25-data-readiness-catboost-tcn-stacking.md`. Corrected figures:
+>
+> | Claim below | Was (v1, 07-31) | Now (v2, 08-03) |
+> |---|---|---|
+> | Last promoted model trained on | 653 rows | 827–832 rows on v1's latest logistic runs; 624 on v2's trees. Recompute after the v6 bump |
+> | `institutional_flows` holds | 1 row | 70 rows with provenance and `is_provisional` |
+> | India VIX daily bars | 629, from 2024-01-02, unscheduled | 878, from 2023-01-03, three scheduled jobs |
+> | Twenty equities | 886 bars each, v1 only | 887 bars each, 17,740 total, 99.4% real volume, full `ta-v1` daily coverage |
+> | NIFTY50 / BANKNIFTY `1d` | 883 / 882 | 883 / 882 — unchanged, now on v2 |
+>
+> Consequences for the work items:
+>
+> - **§5 "nothing refreshes India VIX on a schedule" is fixed.** Three jobs run.
+> - **§5's FII/DII backfill is done** to 70 sessions (2026-03-30 → 07-31). This still does
+>   not populate a multi-year trailing normalisation window, so the two flow features
+>   remain thin rather than dead.
+> - **Open question 3 is answered: yes.** `apps/ml/ai_quant_lab_ml/postgres_repository.py`
+>   applies no `is_active` filter on any of its four instrument joins, so the evidence
+>   query reaches the `is_active = FALSE` research equities. Work item 4 is unblocked.
+> - **Open question 5 is settled** by the operator opening a Fyers account. Kite's ₹2000/mo
+>   historical subscription is not being taken.
+> - The intraday table still holds directionally: `1m` is now ~2,380 bars over 8 sessions,
+>   still 100% zero-volume. The TCN gates remain unmet by roughly two orders of magnitude.
+
 This phase exists because of a specific question: should the stack add CatBoost, Temporal
 Fusion Transformers, LSTMs/TCNs, TabNet, or PPO alongside the existing tree models? The
 answer, measured against the current database rather than argued in the abstract, is *one
