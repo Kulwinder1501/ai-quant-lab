@@ -12,8 +12,15 @@ export interface HoldingPeriodCandles {
  * single daily bar containing a whole trade reports its full range as excursion. So
  * the finest timeframe that actually covers the holding period is preferred, and
  * whichever is used is recorded on the review.
+ *
+ * `60m` replaced `1h` here on 2026-08-03, and `30m` was added. `1h` is not a member of
+ * `supportedHistoricalTimeframes`, so no collector can produce it — the only rows that
+ * ever carried it came from `seed-market-data.ts`. This ladder was therefore looking for
+ * 98 seed bars across two instruments while 78,000 real `60m` bars existed under the
+ * canonical name, and falling through to `1d` whenever those seed bars did not cover the
+ * holding period. `30m` was simply missing despite 11,846 stored bars.
  */
-const TIMEFRAME_PRECISION_ORDER = ["1m", "3m", "5m", "10m", "15m", "1h", "1d"] as const;
+const TIMEFRAME_PRECISION_ORDER = ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "1d"] as const;
 
 export class PostgresTradeReviewRepository {
   constructor(private readonly client: DatabaseClient) {}

@@ -1,0 +1,68 @@
+{
+  "description": "Shared golden vectors for the volatility-expansion label rule. Read by BOTH apps/api (TypeScript settlement) and apps/ml (Python labelling). The two are separate implementations of one rule; if they diverge, a model's live scoreboard measures something other than what it was trained to predict. Edit this file only when the rule itself changes, and expect both suites to move together.",
+  "cases": [
+    {
+      "name": "expansion at exactly 1 + band",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [106.25, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [93.75, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "EXPANSION",
+      "expectedRatio": 1.25
+    },
+    {
+      "name": "contraction at the reciprocal threshold 1/(1+band)",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [104.0, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [96.0, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "CONTRACTION",
+      "expectedRatio": 0.8
+    },
+    {
+      "name": "ratio between 1-band and 1/(1+band) is CONTRACTION, proving the reciprocal rule",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [103.95, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [96.05, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "CONTRACTION",
+      "expectedRatio": 0.79
+    },
+    {
+      "name": "unchanged envelope is STABLE",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [105.0, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [95.0, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "STABLE",
+      "expectedRatio": 1.0
+    },
+    {
+      "name": "just inside the expansion threshold is STABLE",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [106.2, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [93.8, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "STABLE",
+      "expectedRatio": 1.24
+    },
+    {
+      "name": "same ratio, wider band, reclassified as STABLE",
+      "band": 0.5,
+      "trailingRange": 10.0,
+      "forwardHighs": [106.25, 100.0, 100.0, 100.0, 100.0],
+      "forwardLows": [93.75, 100.0, 100.0, 100.0, 100.0],
+      "expectedLabel": "STABLE",
+      "expectedRatio": 1.25
+    },
+    {
+      "name": "forward envelope spans multiple bars, not just the widest one",
+      "band": 0.25,
+      "trailingRange": 10.0,
+      "forwardHighs": [104.0, 107.0, 102.0, 101.0, 100.0],
+      "forwardLows": [99.0, 98.0, 94.0, 100.0, 100.0],
+      "expectedLabel": "EXPANSION",
+      "expectedRatio": 1.3
+    }
+  ]
+}

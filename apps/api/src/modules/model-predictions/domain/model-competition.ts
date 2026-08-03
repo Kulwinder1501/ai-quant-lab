@@ -8,10 +8,19 @@
  * challenger must beat the champion repeatedly before it takes over.
  */
 
+import { computeAlphabetSettledMetrics, type LabelAlphabet } from "./settled-metrics.js";
+
 export type CompetitionRole = "PRIMARY" | "SECONDARY" | "COMPETITOR";
 
 export const DIRECTIONAL_LABELS = ["BULLISH", "BEARISH", "NEUTRAL"] as const;
 export type DirectionalLabel = (typeof DIRECTIONAL_LABELS)[number];
+
+/** NEUTRAL is the directional abstain: the call that declines to pick a side. */
+const DIRECTIONAL_ALPHABET: LabelAlphabet<DirectionalLabel> = {
+  labels: DIRECTIONAL_LABELS,
+  abstainLabel: "NEUTRAL",
+  name: "directional",
+};
 
 /** One (predicted, realized) cell of a confusion matrix with its observation count. */
 export interface ConfusionCell {
@@ -41,81 +50,30 @@ export interface SettledMetrics {
   trivialAccuracy: number | null;
 }
 
-function assertCell(cell: ConfusionCell): void {
-  if (!DIRECTIONAL_LABELS.includes(cell.prediction) || !DIRECTIONAL_LABELS.includes(cell.realizedLabel)) {
-    throw new Error("Confusion cell labels must be BULLISH, BEARISH, or NEUTRAL.");
-  }
-  if (!Number.isInteger(cell.count) || cell.count < 0) {
-    throw new Error("Confusion cell count must be a non-negative integer.");
-  }
-}
-
 /**
  * Metrics from a settled-prediction confusion matrix.
  *
- * Macro F1 mirrors scikit-learn's `f1_score(average="macro")` over the three
- * directional classes — the same definition the training-time gate uses, so a
- * live score is comparable to a holdout score. Classes absent from both
- * predictions and outcomes contribute an F1 of 0, exactly as sklearn scores a
- * label listed in `labels=` but never observed.
+ * A thin directional binding of `computeAlphabetSettledMetrics`. The arithmetic moved
+ * there when the volatility scoreboard needed the identical computation over
+ * CONTRACTION/STABLE/EXPANSION; keeping two copies would have meant maintaining the
+ * `trivialAccuracy` reasoning twice. Behaviour here is unchanged, including
+ * `directionalHitRate`, which is the committed-call hit rate under its directional name.
+ *
+ * Macro F1 mirrors scikit-learn's `f1_score(average="macro")` over the three directional
+ * classes - the same definition the training-time gate uses, so a live score is
+ * comparable to a holdout score. Classes absent from both predictions and outcomes
+ * contribute an F1 of 0, exactly as sklearn scores a label listed in `labels=` but never
+ * observed.
  */
 export function computeSettledMetrics(cells: ConfusionCell[]): SettledMetrics {
-  let sampleCount = 0;
-  let correctCount = 0;
-  let directionalCount = 0;
-  let directionalCorrect = 0;
-  const truePositive = new Map<DirectionalLabel, number>();
-  const predictedTotal = new Map<DirectionalLabel, number>();
-  const realizedTotal = new Map<DirectionalLabel, number>();
-
-  for (const cell of cells) {
-    assertCell(cell);
-    sampleCount += cell.count;
-    predictedTotal.set(cell.prediction, (predictedTotal.get(cell.prediction) ?? 0) + cell.count);
-    realizedTotal.set(cell.realizedLabel, (realizedTotal.get(cell.realizedLabel) ?? 0) + cell.count);
-    if (cell.prediction === cell.realizedLabel) {
-      correctCount += cell.count;
-      truePositive.set(cell.prediction, (truePositive.get(cell.prediction) ?? 0) + cell.count);
-    }
-    if (cell.prediction !== "NEUTRAL") {
-      directionalCount += cell.count;
-      if (cell.prediction === cell.realizedLabel) {
-        directionalCorrect += cell.count;
-      }
-    }
-  }
-
-  if (sampleCount === 0) {
-    return {
-      sampleCount: 0,
-      correctCount: 0,
-      accuracy: null,
-      macroF1: null,
-      directionalHitRate: null,
-      trivialAccuracy: null,
-    };
-  }
-
-  let f1Sum = 0;
-  for (const label of DIRECTIONAL_LABELS) {
-    const tp = truePositive.get(label) ?? 0;
-    const predicted = predictedTotal.get(label) ?? 0;
-    const realized = realizedTotal.get(label) ?? 0;
-    // F1 = 2tp / (predicted + realized); zero when the label never appears.
-    f1Sum += predicted + realized === 0 ? 0 : (2 * tp) / (predicted + realized);
-  }
-
-  // The majority class is read from realized outcomes, not predictions: the baseline is
-  // "what would always guessing the commonest actual outcome have scored".
-  const largestRealized = Math.max(...DIRECTIONAL_LABELS.map((label) => realizedTotal.get(label) ?? 0));
-
+  const metrics = computeAlphabetSettledMetrics(cells, DIRECTIONAL_ALPHABET);
   return {
-    sampleCount,
-    correctCount,
-    accuracy: correctCount / sampleCount,
-    macroF1: f1Sum / DIRECTIONAL_LABELS.length,
-    directionalHitRate: directionalCount === 0 ? null : directionalCorrect / directionalCount,
-    trivialAccuracy: largestRealized / sampleCount,
+    sampleCount: metrics.sampleCount,
+    correctCount: metrics.correctCount,
+    accuracy: metrics.accuracy,
+    macroF1: metrics.macroF1,
+    directionalHitRate: metrics.committedHitRate,
+    trivialAccuracy: metrics.trivialAccuracy,
   };
 }
 
