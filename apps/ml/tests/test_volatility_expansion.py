@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
 from ai_quant_lab_ml.contracts import ForwardBar
@@ -121,3 +123,53 @@ class VolatilityExpansionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoldenVectorParityTests(unittest.TestCase):
+    """The same vectors apps/api asserts against its TypeScript settlement grader.
+
+    The volatility rule has two implementations: this module labels bars for training,
+    and ``volatility-expansion-label.ts`` grades live predictions at settlement.
+    Nothing in either codebase forces them to agree, so a drift would silently make a
+    model's live scoreboard measure something other than what it was trained on. These
+    vectors are the only thing pinning them together -- if this test fails, the
+    TypeScript suite is now wrong too, and vice versa.
+    """
+
+    GOLDEN = (
+        Path(__file__).resolve().parents[2]
+        / "api" / "src" / "modules" / "model-predictions" / "domain"
+        / "volatility-expansion-golden.json"
+    )
+
+    def test_golden_file_is_present(self) -> None:
+        self.assertTrue(
+            self.GOLDEN.is_file(),
+            f"Shared golden vectors missing at {self.GOLDEN}. The two implementations are unpinned.",
+        )
+
+    def test_python_labeller_matches_every_shared_vector(self) -> None:
+        payload = json.loads(self.GOLDEN.read_text(encoding="utf-8"))
+        self.assertGreater(len(payload["cases"]), 0, "The golden file declares no cases.")
+
+        for case in payload["cases"]:
+            with self.subTest(case=case["name"]):
+                forward_path = [
+                    ForwardBar(
+                        high=high,
+                        low=case["forwardLows"][index],
+                        close=high,
+                        close_time=datetime(2026, 1, 5 + index, tzinfo=UTC),
+                    )
+                    for index, high in enumerate(case["forwardHighs"])
+                ]
+                result = volatility_expansion_label(
+                    trailing_range=case["trailingRange"],
+                    forward_path=forward_path,
+                    expected_forward_bars=len(forward_path),
+                    band=case["band"],
+                )
+                self.assertIsNotNone(result, "Vector should be measurable.")
+                assert result is not None
+                self.assertEqual(result.label, case["expectedLabel"])
+                self.assertAlmostEqual(result.range_ratio, case["expectedRatio"], places=8)

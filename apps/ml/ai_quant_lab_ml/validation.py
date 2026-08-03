@@ -265,3 +265,113 @@ __all__ = [
     "purged_chronological_split",
     "walk_forward_splits",
 ]
+
+
+#: The chronological method used when a dataset pools several instruments. Named
+#: distinctly from ``WALK_FORWARD_METHOD_NAME`` for the same reason CPCV is: a
+#: pooled score and a single-instrument score are averages over different
+#: distributions, so the method travels with the number and the promotion gate can
+#: refuse to rank one against the other.
+POOLED_WALK_FORWARD_METHOD_NAME = "POOLED_PURGED_CHRONOLOGICAL_V1"
+
+
+def _observation_groups(
+    examples: Sequence[LabeledExample],
+) -> list[tuple[datetime, tuple[LabeledExample, ...]]]:
+    """Group examples by ``observed_at``, ordered in time.
+
+    A pooled dataset has one row per instrument per session, so a *row* index no
+    longer measures time. Splitting on rows would cut through a session, putting
+    some instruments' bars for a given timestamp in training and their siblings in
+    validation -- contemporaneous cross-sectional leakage, and invisible in the
+    resulting scores.
+    """
+
+    grouped: dict[datetime, list[LabeledExample]] = {}
+    for example in examples:
+        grouped.setdefault(example.observed_at, []).append(example)
+    return [
+        (
+            observed_at,
+            tuple(sorted(grouped[observed_at], key=lambda item: (item.label_available_at, item.candle_id))),
+        )
+        for observed_at in sorted(grouped)
+    ]
+
+
+def pooled_walk_forward_splits(
+    examples: Sequence[LabeledExample],
+    *,
+    folds: int,
+    validation_fraction: float = 0.2,
+) -> list[TemporalSplit]:
+    """Walk-forward splits for a dataset pooling several instruments.
+
+    Differs from :func:`walk_forward_splits` in the two places row arithmetic stops
+    being a valid proxy for time once more than one instrument shares a timestamp:
+
+    ``grouping``  folds are cut on distinct ``observed_at`` values, never on row
+        offsets, so every instrument's bar for a session lands on the same side of
+        the boundary.
+
+    ``purge``  a training example is dropped when its ``label_available_at`` reaches
+        into the validation block, evaluated on real timestamps rather than a bar
+        count. The row-count purge in ``walk_forward_splits`` would shrink by a
+        factor of the instrument count here -- a five-bar gap across twenty
+        instruments is five rows, roughly a quarter of one session -- so training
+        labels would overlap validation almost entirely while the code looked right.
+        This is the same defence ``combinatorial_purged_splits`` already applies, and
+        it is exact rather than conservative: a label that resolved early purges only
+        as much as it must.
+
+    Sibling rows inside a validation block are kept whole; the block is defined by
+    time, so its own internal composition needs no adjustment.
+    """
+
+    if isinstance(folds, bool) or not isinstance(folds, int) or folds <= 0:
+        raise TemporalSplitError("folds must be a positive integer.")
+    if not math.isfinite(validation_fraction) or not 0 < validation_fraction < 1:
+        raise TemporalSplitError("validation_fraction must be strictly between zero and one.")
+    if not examples:
+        raise TemporalSplitError("At least one labeled example is required.")
+
+    groups = _observation_groups(examples)
+    if len(groups) < folds + 1:
+        raise TemporalSplitError(
+            f"{len(groups)} distinct observation times cannot populate {folds} folds and a training window."
+        )
+
+    total_validation_groups = max(folds, math.ceil(len(groups) * validation_fraction))
+    if total_validation_groups >= len(groups):
+        raise TemporalSplitError("The validation fraction leaves no training observations.")
+
+    validation_start_index = len(groups) - total_validation_groups
+    fold_size, remainder = divmod(total_validation_groups, folds)
+    if fold_size == 0:
+        raise TemporalSplitError("Not enough distinct observation times to give every fold a validation block.")
+
+    splits: list[TemporalSplit] = []
+    cursor = validation_start_index
+    for fold_index in range(folds):
+        block_size = fold_size + (1 if fold_index < remainder else 0)
+        block = groups[cursor:cursor + block_size]
+        validation = tuple(example for _, members in block for example in members)
+        if not validation:
+            raise TemporalSplitError(f"Validation set cannot be empty for fold {fold_index + 1}.")
+
+        # Everything strictly before the block is a training *candidate*; the purge
+        # then removes those whose labels resolve at or after the block opens.
+        block_opens_at = block[0][0]
+        candidates = [example for _, members in groups[:cursor] for example in members]
+        train = tuple(example for example in candidates if example.label_available_at < block_opens_at)
+        purged = len(candidates) - len(train)
+        if not train:
+            raise TemporalSplitError(
+                f"Fold {fold_index + 1} has no training examples left once labels overlapping the "
+                "validation block are purged. Widen the data window or reduce the label horizon."
+            )
+
+        splits.append(TemporalSplit(train=train, validation=validation, purge_count=purged))
+        cursor += block_size
+
+    return splits

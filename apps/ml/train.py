@@ -12,9 +12,11 @@ import json
 import math
 import os
 import re
+import dataclasses
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from hashlib import sha256
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -55,7 +57,13 @@ from ai_quant_lab_ml.training import (
     training_metadata,
 )
 from ai_quant_lab_ml.leakage import run_leakage_audit
-from ai_quant_lab_ml.validation import CPCV_METHOD_NAME, combinatorial_purged_splits, walk_forward_splits
+from ai_quant_lab_ml.validation import (
+    CPCV_METHOD_NAME,
+    POOLED_WALK_FORWARD_METHOD_NAME,
+    combinatorial_purged_splits,
+    pooled_walk_forward_splits,
+    walk_forward_splits,
+)
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -172,7 +180,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train a cutoff-bound, chronologically validated local market-direction model.",
     )
-    parser.add_argument("--instrument", required=True, type=non_blank, help="Registered NSE symbol, for example NIFTY50.")
+    instruments = parser.add_mutually_exclusive_group(required=True)
+    instruments.add_argument("--instrument", type=non_blank, help="Registered NSE symbol, for example NIFTY50.")
+    # Pooled cross-sectional training. The swing schema's features are all scale-free
+    # (basis points and ratios), which is what makes one model over many instruments
+    # coherent at all -- a raw-price feature would just learn which symbol it is
+    # looking at. Rows multiply by the instrument count: twenty research equities on
+    # `1d` is ~17,700 labelled rows against ~880 for NIFTY50 alone, and that is the
+    # only route to a fold count above two while the 60-row validation floor holds.
+    instruments.add_argument(
+        "--instruments",
+        type=non_blank,
+        help=(
+            "Comma-separated symbols to pool into one cross-sectional dataset, for example "
+            "SBIN,INFY,TCS. Assumes shared dynamics across the pool; use --instrument for a "
+            "single-instrument model."
+        ),
+    )
     parser.add_argument("--timeframe", required=True, type=non_blank, help="Completed candle timeframe, for example 1d.")
     parser.add_argument("--from", dest="data_window_start", required=True, help="Inclusive data-window start (YYYY-MM-DD or ISO-8601).")
     parser.add_argument("--to", dest="data_window_end", required=True, help="Inclusive data-window end (YYYY-MM-DD or ISO-8601).")
@@ -466,6 +490,7 @@ def default_model_key(
     request: DatasetRequest,
     algorithm_choice: str,
     schema_version: str = FEATURE_SCHEMA_VERSION,
+    pooled_instruments: Sequence[str] = (),
 ) -> str:
     """Return a model family key that cannot accidentally span incompatible experiments.
 
@@ -483,9 +508,20 @@ def default_model_key(
     # "market-direction": the key is the model's identity and appears in the
     # artifact path, the promotion lineage, and every log line.
     family = "volatility-expansion" if is_volatility else "market-direction"
+    # A pooled model answers a different question from a single-instrument one and
+    # its score is an average over a different distribution, so it must not inherit
+    # NIFTY50's promotion lineage. The member list is hashed rather than spelled out:
+    # twenty symbols would make the key unreadable and the artifact path unusable,
+    # while the full roster is recorded in validationProtocol.pooledInstruments.
+    if pooled_instruments:
+        roster = ",".join(sorted(symbol.upper() for symbol in pooled_instruments))
+        digest = sha256(roster.encode("utf-8")).hexdigest()[:8]
+        instrument_component = f"pool{len(pooled_instruments)}-{digest}"
+    else:
+        instrument_component = component(request.instrument_symbol.upper())
     parts = [
         f"{family}-{component(algorithm_choice)}",
-        component(request.instrument_symbol.upper()),
+        instrument_component,
         component(request.timeframe),
         f"h{request.horizon_bars}",
     ]
@@ -563,6 +599,13 @@ def validate_candidate_artifact(
         # Absent means an artifact written before schemes existed, which was
         # necessarily fixed-horizon.
         or protocol.get("labelScheme", LABEL_SCHEME_FIXED_HORIZON) != request.label_scheme
+        # Band drift must fail loudly for the scheme it governs. Absent is tolerated
+        # only for artifacts written before the field existed, which are necessarily
+        # not volatility models, since those could not settle at all back then.
+        or (
+            request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION
+            and protocol.get("expansionBand") != request.expansion_band
+        )
         or protocol.get("indicatorAlgorithmVersion") != request.indicator_algorithm_version
         or protocol.get("patternAlgorithmVersion") != request.pattern_algorithm_version
         or protocol.get("priceActionAlgorithmVersion") != request.price_action_algorithm_version
@@ -590,6 +633,12 @@ def validation_protocol(
         "labelScheme": request.label_scheme,
         "barrierUpperMultiple": request.barrier_upper_multiple,
         "barrierLowerMultiple": request.barrier_lower_multiple,
+        # The band *is* the volatility label rule: EXPANSION at ratio >= 1 + band,
+        # CONTRACTION at <= 1 / (1 + band). Settlement has to grade a live prediction
+        # against the same rule the model was trained on, and until this was recorded
+        # the only trace of it was the model key. `neutralThresholdBps` above is
+        # recorded for shape but means nothing for this target.
+        "expansionBand": request.expansion_band,
         "indicatorAlgorithmVersion": request.indicator_algorithm_version,
         "patternAlgorithmVersion": request.pattern_algorithm_version,
         "priceActionAlgorithmVersion": request.price_action_algorithm_version,
@@ -830,8 +879,26 @@ def main() -> int:
     database_url = args.database_url or os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL is required (pass --database-url or define it in .env/environment).")
+    # One canonical symbol drives the DatasetRequest so every downstream contract
+    # (labelling, schema, artifact gate) keeps exactly one shape. For a pooled run it
+    # is the first member, and the full roster travels separately.
+    pooled_instruments: tuple[str, ...] = ()
+    if args.instruments:
+        seen: list[str] = []
+        for raw in args.instruments.split(","):
+            symbol = raw.strip().upper()
+            if not symbol:
+                continue
+            if symbol in seen:
+                parser.error(f"--instruments lists {symbol} more than once.")
+            seen.append(symbol)
+        if len(seen) < 2:
+            parser.error("--instruments needs at least two symbols; use --instrument for one.")
+        pooled_instruments = tuple(seen)
+    primary_symbol = pooled_instruments[0] if pooled_instruments else args.instrument.upper()
+
     request = DatasetRequest(
-        instrument_symbol=args.instrument.upper(),
+        instrument_symbol=primary_symbol,
         timeframe=args.timeframe,
         data_window_start=parse_timestamp(args.data_window_start),
         data_window_end=parse_timestamp(args.data_window_end, end_of_day=True),
@@ -870,7 +937,9 @@ def main() -> int:
         else (0.40 if is_volatility else 0.38)
     )
     schema_version = schema_version_for(args.timeframe)
-    model_key = args.model_key or default_model_key(request, args.algorithm, schema_version)
+    model_key = args.model_key or default_model_key(
+        request, args.algorithm, schema_version, pooled_instruments=pooled_instruments
+    )
 
     try:
         import psycopg
@@ -883,19 +952,59 @@ def main() -> int:
     # model mutations use the repository's explicit, atomic transactions.
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = PostgresMlRepository(connection)
-        records = repository.load_candle_evidence(request)
-        if request.label_scheme == LABEL_SCHEME_TRIPLE_BARRIER:
-            examples = build_triple_barrier_examples(records, request)
-        elif is_volatility:
-            examples = build_volatility_expansion_examples(records, request)
+
+        def label(records_for_symbol: Sequence[Any], symbol_request: DatasetRequest) -> Sequence[LabeledExample]:
+            if symbol_request.label_scheme == LABEL_SCHEME_TRIPLE_BARRIER:
+                return build_triple_barrier_examples(records_for_symbol, symbol_request)
+            if is_volatility:
+                return build_volatility_expansion_examples(records_for_symbol, symbol_request)
+            return build_labeled_examples(records_for_symbol, symbol_request)
+
+        # Each instrument is loaded and labelled against its *own* history. Labels and
+        # trailing-window features must never be computed across a concatenated frame:
+        # SBIN's forward return is not INFY's, and a rolling window that straddles two
+        # symbols is meaningless. Pooling happens only after labelling, on rows.
+        per_instrument_rows: dict[str, int] = {}
+        if pooled_instruments:
+            pooled: list[LabeledExample] = []
+            records = []
+            for symbol in pooled_instruments:
+                symbol_request = dataclasses.replace(request, instrument_symbol=symbol)
+                symbol_records = repository.load_candle_evidence(symbol_request)
+                symbol_examples = list(label(symbol_records, symbol_request))
+                per_instrument_rows[symbol] = len(symbol_examples)
+                if not symbol_examples:
+                    print(
+                        f"warning: {symbol} contributed no labelled rows and is absent from the pool.",
+                        file=sys.stderr,
+                    )
+                records.extend(symbol_records)
+                pooled.extend(symbol_examples)
+            if not pooled:
+                raise SystemExit("No pooled instrument produced a labelled row.")
+            examples = pooled
         else:
-            examples = build_labeled_examples(records, request)
-        splits = walk_forward_splits(
-            examples,
-            horizon_bars=request.horizon_bars,
-            folds=args.folds,
-            validation_fraction=args.validation_fraction,
-        )
+            records = repository.load_candle_evidence(request)
+            examples = list(label(records, request))
+            per_instrument_rows[request.instrument_symbol] = len(examples)
+
+        if pooled_instruments:
+            # Row offsets stop measuring time once instruments share a timestamp, so
+            # folds are cut on sessions and the purge is evaluated on real label
+            # timestamps. See pooled_walk_forward_splits for what row arithmetic would
+            # have leaked here.
+            splits = pooled_walk_forward_splits(
+                examples,
+                folds=args.folds,
+                validation_fraction=args.validation_fraction,
+            )
+        else:
+            splits = walk_forward_splits(
+                examples,
+                horizon_bars=request.horizon_bars,
+                folds=args.folds,
+                validation_fraction=args.validation_fraction,
+            )
         # Progress goes to stderr: stdout carries exactly one JSON object so the
         # command stays machine-readable.
         print(f"Created {len(splits)} temporal split(s).", file=sys.stderr)
@@ -1000,6 +1109,13 @@ def main() -> int:
         }
         if len(splits) > 1:
             protocol["method"] = "WALK_FORWARD_PURGED_V1"
+        if pooled_instruments:
+            # Overrides any chronological name above: the distribution this score
+            # averages over is different, and the gate must be able to tell.
+            protocol["method"] = POOLED_WALK_FORWARD_METHOD_NAME
+            protocol["pooledInstruments"] = list(pooled_instruments)
+            protocol["pooledRowsByInstrument"] = per_instrument_rows
+            protocol["pooledObservationTimes"] = len({item.observed_at for item in examples})
         if cpcv is not None:
             protocol["crossValidation"] = cpcv
         artifact_metadata = {
@@ -1010,6 +1126,11 @@ def main() -> int:
                 "instrument": request.instrument_symbol,
                 "timeframe": request.timeframe,
                 "labeledRows": len(examples),
+                # Recorded so inference can tell a pooled artifact from a
+                # single-instrument one and admit exactly the members it saw. Absent for
+                # a single-instrument run, which keeps every existing artifact's
+                # metadata byte-identical.
+                **({"pooledInstruments": list(pooled_instruments)} if pooled_instruments else {}),
             },
             # The artifact gate and Phase 11 inference both require this block, so
             # it must travel inside the checksummed payload, not only in the

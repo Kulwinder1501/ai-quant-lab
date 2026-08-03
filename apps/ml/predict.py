@@ -169,6 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Score every enrolled competition-pool member (shadow predictions for challengers).",
     )
     parser.add_argument(
+        "--shadow-scheme",
+        type=non_blank,
+        help=(
+            "Shadow-predict for every current candidate of a NON-directional label scheme, "
+            "for example volatility-expansion-v1. These models are excluded from the "
+            "directional competition pool by design, so without this they never write a "
+            "prediction and can never build settled evidence."
+        ),
+    )
+    parser.add_argument(
         "--as-of",
         "--data-cutoff-at",
         dest="data_cutoff_at",
@@ -429,6 +439,65 @@ def score_model(
     }
 
 
+def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, as_of: datetime) -> int:
+    """Shadow-predict for non-directional candidates.
+
+    Identical in shape to ``run_competition_pool`` -- one broken artifact must not
+    silence the rest -- but draws its members from ``list_shadow_pool``, which is scoped
+    by label scheme rather than by enrollment. Predictions land in
+    ``auxiliary_model_predictions`` because ``score_model`` routes by the model's own
+    alphabet, so nothing directional is touched.
+    """
+
+    members = repository.list_shadow_pool(args.shadow_scheme, args.model_key)
+    results: list[dict[str, Any]] = []
+    created = 0
+    failed = 0
+    for member in members:
+        model_version = member["model_version"]
+        try:
+            result = score_model(
+                repository,
+                model_version,
+                symbol=args.instrument,
+                timeframe=args.timeframe,
+                as_of=as_of,
+                maximum_features=args.maximum_features,
+                similar_neighbors=args.similar_neighbors,
+                enrolled_at=member["enrolled_at"],
+            )
+            result["shadowRole"] = member["role"]
+            result["modelKey"] = model_version.model_key
+            if result.get("predictionCreated"):
+                created += 1
+            results.append(result)
+        except Exception as error:  # noqa: BLE001 - one broken artifact must not stop the others.
+            failed += 1
+            results.append(
+                {
+                    "level": "error",
+                    "message": str(error),
+                    "errorType": type(error).__name__,
+                    "modelVersionId": model_version.id,
+                    "modelKey": model_version.model_key,
+                    "shadowRole": member["role"],
+                    "predictionCreated": False,
+                }
+            )
+    json_output(
+        {
+            "level": "info",
+            "message": "Shadow-pool scoring complete",
+            "labelScheme": args.shadow_scheme,
+            "membersScored": len(members),
+            "predictionsCreated": created,
+            "failures": failed,
+            "results": results,
+        }
+    )
+    return 1 if failed and not created else 0
+
+
 def run_competition_pool(repository: PostgresMlRepository, args: argparse.Namespace, as_of: datetime) -> int:
     """Shadow-predict for every enrolled pool member; one failure never silences the rest."""
 
@@ -489,14 +558,21 @@ def main() -> int:
     database_url = args.database_url or os.environ.get("DATABASE_URL")
     if not database_url:
         parser.error("DATABASE_URL is required (pass --database-url or define it in .env/environment).")
-    if not args.competition_pool:
+    if args.competition_pool and args.shadow_scheme:
+        parser.error("--competition-pool and --shadow-scheme are different pools; pass one.")
+    if not args.competition_pool and not args.shadow_scheme:
         if not args.instrument or not args.timeframe or not args.model_key:
-            parser.error("--instrument, --timeframe, and --model-key are required unless --competition-pool is used.")
+            parser.error(
+                "--instrument, --timeframe, and --model-key are required unless "
+                "--competition-pool or --shadow-scheme is used."
+            )
     as_of = parse_as_of(args.data_cutoff_at) if args.data_cutoff_at else datetime.now(timezone.utc)
 
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = PostgresMlRepository(connection)
 
+        if args.shadow_scheme:
+            return run_shadow_pool(repository, args, as_of)
         if args.competition_pool:
             return run_competition_pool(repository, args, as_of)
 

@@ -326,3 +326,46 @@ class InferenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PooledArtifactInstrumentGuardTests(unittest.TestCase):
+    """A pooled artifact may score its members and nothing else.
+
+    `dataset.instrument` records only the primary member of a pooled run, so the
+    single-instrument equality check would reject every other member -- which would make
+    a pooled model unable to predict at all, and therefore unable to build the settled
+    evidence promotion requires. Admitting the recorded pool is not a relaxation: an
+    instrument absent from the pool is still refused.
+    """
+
+    POOL = ["ASIANPAINT", "SBIN", "INFY"]
+
+    def test_a_pool_member_is_admitted(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        for symbol in self.POOL:
+            with self.subTest(symbol=symbol):
+                self.assertTrue(self._admits(dataset, symbol, "1d"))
+
+    def test_an_instrument_outside_the_pool_is_refused(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        self.assertFalse(self._admits(dataset, "NIFTY50", "1d"))
+
+    def test_a_single_instrument_artifact_still_requires_an_exact_match(self) -> None:
+        dataset = {"instrument": "NIFTY50", "timeframe": "1d"}
+        self.assertTrue(self._admits(dataset, "NIFTY50", "1d"))
+        self.assertFalse(self._admits(dataset, "SBIN", "1d"))
+
+    def test_the_timeframe_is_never_widened_by_pooling(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        self.assertFalse(self._admits(dataset, "SBIN", "5m"))
+
+    @staticmethod
+    def _admits(dataset: dict[str, object], symbol: str, timeframe: str) -> bool:
+        """Mirrors the guard in inference._validate_artifact_metadata."""
+
+        if dataset.get("timeframe") != timeframe:
+            return False
+        pooled = dataset.get("pooledInstruments")
+        if isinstance(pooled, (list, tuple)) and pooled:
+            return symbol.upper() in {str(member).upper() for member in pooled}
+        return dataset.get("instrument") == symbol.upper()

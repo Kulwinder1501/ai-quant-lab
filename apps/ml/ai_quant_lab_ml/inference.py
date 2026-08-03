@@ -188,7 +188,21 @@ def validate_production_artifact(
     dataset = metadata.get("dataset")
     expected_symbol = _require_non_blank(instrument_symbol, "Instrument symbol").upper()
     expected_timeframe = _require_non_blank(timeframe, "Timeframe")
-    if not isinstance(dataset, Mapping) or dataset.get("instrument") != expected_symbol or dataset.get("timeframe") != expected_timeframe:
+    if not isinstance(dataset, Mapping) or dataset.get("timeframe") != expected_timeframe:
+        raise InferenceError("The production artifact was trained for a different instrument or timeframe.")
+    # A pooled cross-sectional model is trained on many instruments at once, and its
+    # `dataset.instrument` records only the primary member. Scoring is therefore allowed
+    # for any instrument in the recorded pool -- that is the entire point of pooling
+    # scale-free features -- and refused for anything outside it. The guard is not
+    # relaxed: an instrument the model never saw is still rejected, and a model without
+    # a recorded pool still has to match its single instrument exactly.
+    pooled = dataset.get("pooledInstruments")
+    if isinstance(pooled, (list, tuple)) and pooled:
+        if expected_symbol not in {str(symbol).upper() for symbol in pooled}:
+            raise InferenceError(
+                f"{expected_symbol} is not a member of this pooled artifact's training set."
+            )
+    elif dataset.get("instrument") != expected_symbol:
         raise InferenceError("The production artifact was trained for a different instrument or timeframe.")
 
     protocol = metadata.get("validationProtocol")

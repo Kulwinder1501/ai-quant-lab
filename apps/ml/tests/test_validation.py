@@ -9,6 +9,7 @@ from ai_quant_lab_ml.validation import (
     TemporalSplitError,
     chronological_purged_split,
     combinatorial_purged_splits,
+    pooled_walk_forward_splits,
     walk_forward_splits,
 )
 
@@ -237,4 +238,96 @@ class CombinatorialPurgedSplitTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    unittest.main()
+
+
+def pooled_example(index: int, symbol: str, *, label_days: int = 2) -> LabeledExample:
+    """One instrument's bar for session ``index``. Siblings share ``observed_at``."""
+
+    observed_at = START + timedelta(days=index)
+    return LabeledExample(
+        candle_id=f"{symbol}-candle-{index}",
+        instrument_id=f"instrument-{symbol}",
+        symbol=symbol,
+        timeframe="1d",
+        observed_at=observed_at,
+        label_available_at=observed_at + timedelta(days=label_days),
+        forward_return=0.01,
+        label="BULLISH" if index % 2 else "BEARISH",
+        features={"x": float(index)},
+    )
+
+
+POOL = ("NIFTY50", "SBIN", "INFY", "TCS")
+
+
+def pooled_rows(sessions: int, symbols: Sequence[str] = POOL) -> list[LabeledExample]:
+    return [pooled_example(index, symbol) for index in range(sessions) for symbol in symbols]
+
+
+class PooledWalkForwardSplitTests(unittest.TestCase):
+    """A pooled dataset has N rows per session, so row offsets stop measuring time."""
+
+    def test_never_splits_a_session_across_train_and_validation(self) -> None:
+        splits = pooled_walk_forward_splits(pooled_rows(50), folds=2, validation_fraction=0.2)
+
+        for split in splits:
+            train_times = {item.observed_at for item in split.train}
+            validation_times = {item.observed_at for item in split.validation}
+            # The failure this guards against is contemporaneous cross-sectional
+            # leakage: SBIN's bar for a session in training while TCS's is in
+            # validation. Row-index splitting produces exactly that.
+            self.assertEqual(train_times & validation_times, set())
+
+    def test_keeps_every_sibling_of_a_validation_session_together(self) -> None:
+        splits = pooled_walk_forward_splits(pooled_rows(50), folds=2, validation_fraction=0.2)
+
+        for split in splits:
+            by_time: dict[datetime, set[str]] = {}
+            for item in split.validation:
+                by_time.setdefault(item.observed_at, set()).add(item.symbol)
+            for symbols in by_time.values():
+                self.assertEqual(symbols, set(POOL))
+
+    def test_purges_on_timestamps_not_row_counts(self) -> None:
+        # Labels resolve 2 sessions out, so the last two training sessions before a
+        # validation block must be dropped -- 2 sessions x 4 instruments = 8 rows.
+        # A row-count purge of 2 would have removed half a session.
+        splits = pooled_walk_forward_splits(pooled_rows(50), folds=1, validation_fraction=0.2)
+        split = splits[0]
+
+        opens_at = min(item.observed_at for item in split.validation)
+        self.assertTrue(all(item.label_available_at < opens_at for item in split.train))
+        self.assertEqual(split.purge_count, 2 * len(POOL))
+
+    def test_a_longer_label_horizon_purges_proportionally_more(self) -> None:
+        rows = [pooled_example(index, symbol, label_days=5) for index in range(50) for symbol in POOL]
+        split = pooled_walk_forward_splits(rows, folds=1, validation_fraction=0.2)[0]
+
+        self.assertEqual(split.purge_count, 5 * len(POOL))
+
+    def test_folds_are_contiguous_and_ordered(self) -> None:
+        splits = pooled_walk_forward_splits(pooled_rows(60), folds=3, validation_fraction=0.3)
+
+        block_starts = [min(item.observed_at for item in split.validation) for split in splits]
+        self.assertEqual(block_starts, sorted(block_starts))
+        for earlier, later in zip(splits, splits[1:]):
+            self.assertLess(
+                max(item.observed_at for item in earlier.validation),
+                min(item.observed_at for item in later.validation),
+            )
+
+    def test_rejects_too_few_distinct_sessions_for_the_fold_count(self) -> None:
+        # 200 rows but only 3 sessions: a row-based split would happily make 5 folds.
+        rows = [pooled_example(index, f"SYM{n}") for index in range(3) for n in range(50)]
+        with self.assertRaises(TemporalSplitError):
+            pooled_walk_forward_splits(rows, folds=5, validation_fraction=0.2)
+
+    def test_rejects_a_horizon_that_purges_the_whole_training_window(self) -> None:
+        rows = [pooled_example(index, symbol, label_days=400) for index in range(20) for symbol in POOL]
+        with self.assertRaises(TemporalSplitError):
+            pooled_walk_forward_splits(rows, folds=1, validation_fraction=0.2)
+
+
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

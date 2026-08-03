@@ -20,6 +20,7 @@ except ImportError:  # Allows pure fake-connection unit tests before optional ru
 
 from .contracts import (
     CandleEvidence,
+    DIRECTIONAL_LABEL_SCHEMES,
     DatasetRequest,
     HistoricalPredictionReliability,
     AnyLabel,
@@ -1286,6 +1287,68 @@ class PostgresMlRepository:
                 "role": _require_non_blank(str(row["competition_role"]), "Competition role"),
                 "enrolled_at": _require_valid_datetime(row["competition_enrolled_at"], "Competition enrolled at"),
                 "competition_group": _require_non_blank(str(row["competition_group"]), "Competition group"),
+            }
+            for row in rows
+        ]
+
+    def list_shadow_pool(self, label_scheme: str, model_key: str | None = None) -> list[dict[str, Any]]:
+        """Latest CANDIDATE per model family for a *non-directional* label scheme.
+
+        The directional competition pool cannot serve these. ``model_competition_state``
+        enrolls only directional models, deliberately: a volatility model was once
+        enrolled as PRIMARY of a BULLISH/BEARISH/NEUTRAL competition and sat permanently
+        unpromotable at the top of a group it could never score in. Relaxing that filter
+        would reintroduce exactly that bug.
+
+        So a non-directional candidate shadow-predicts from here instead, and the clock
+        that guards it against backdating is its own ``trained_at`` rather than an
+        enrollment timestamp. That is the honest equivalent: a prediction for a candle
+        that closed before the model was trained is in-sample, and the caller's existing
+        ``enrolled_at`` guard enforces it unchanged once this supplies the value.
+
+        One row per ``model_key`` — the newest. Older versions of the same family would
+        otherwise each write a prediction for the same candle and inflate the record of a
+        family that has only one current answer.
+        """
+
+        query = """
+            SELECT DISTINCT ON (model_versions.model_key)
+                model_versions.id,
+                model_versions.model_key,
+                model_versions.version,
+                model_versions.algorithm,
+                model_versions.stage,
+                model_versions.artifact_uri,
+                model_versions.artifact_checksum,
+                model_versions.feature_schema,
+                model_versions.validation_metrics,
+                model_versions.trained_at,
+                model_versions.promoted_at
+            FROM model_versions
+            WHERE (model_versions.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = %s
+              AND model_versions.stage IN ('CANDIDATE', 'PRODUCTION')
+        """
+        parameters: list[Any] = [_require_non_blank(label_scheme, "Label scheme")]
+        if label_scheme in DIRECTIONAL_LABEL_SCHEMES:
+            raise ValueError(
+                f"{label_scheme} is directional and belongs to the competition pool, not the shadow pool."
+            )
+        if model_key is not None:
+            query += " AND model_versions.model_key = %s"
+            parameters.append(_require_non_blank(model_key, "Model key"))
+        query += " ORDER BY model_versions.model_key, model_versions.trained_at DESC"
+
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(query, tuple(parameters))
+            rows = list(cursor.fetchall())
+        return [
+            {
+                "model_version": _to_model_version(row),
+                "role": "SHADOW",
+                # Guarding by trained_at keeps the no-backdating property with a clock
+                # that actually exists for an unenrolled candidate.
+                "enrolled_at": _require_valid_datetime(row["trained_at"], "Trained at"),
+                "competition_group": _require_non_blank(str(row["model_key"]), "Model key"),
             }
             for row in rows
         ]
