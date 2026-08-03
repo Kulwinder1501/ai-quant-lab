@@ -10,6 +10,8 @@ export interface ClosePaperTradeRequest {
   closedAt?: Date;
   /** When true (default), compute Zerodha options exit fees from premium × qty. */
   applyBrokerageFees?: boolean;
+  exitPriceSource?: "MANUAL_INPUT" | "SERVER_OPTION_MARK";
+  valuationDetails?: Record<string, unknown>;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -33,7 +35,11 @@ export class ClosePaperTrade {
     if (!trade) {
       throw new Error(`Open paper trade ${input.paperTradeId} was not found.`);
     }
-    assertPositiveFinite(input.exitPrice, "Exit price");
+    if (trade.optionType === "CE" || trade.optionType === "PE") {
+      assertNonNegativeFinite(input.exitPrice, "Exit price");
+    } else {
+      assertPositiveFinite(input.exitPrice, "Exit price");
+    }
     const applyFees = input.applyBrokerageFees !== false;
     const exitBreakdown = applyFees ? calculateExitFees(input.exitPrice, trade.quantity) : null;
     const exitFees = input.exitFees ?? exitBreakdown?.total ?? 0;
@@ -52,7 +58,11 @@ export class ClosePaperTrade {
       exitFees,
       exitSlippage,
       feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
-      details: { source: "MANUAL", notes: input.notes?.trim() ?? "" },
+      details: {
+        source: input.exitPriceSource ?? "MANUAL_INPUT",
+        notes: input.notes?.trim() ?? "",
+        ...(input.valuationDetails ? { valuation: input.valuationDetails } : {}),
+      },
     });
   }
 }

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tooltip } from "../../../components/ui/tooltip";
 import { getResearchJson } from "../../research/api";
+import { MarketContextHistoryChart } from "./market-context-history-chart";
 
 export type InstitutionalFlowStance =
   | "BOTH_ACCUMULATING"
@@ -19,6 +20,8 @@ interface FlowSession {
   diiCashNetCr: number | null;
   combinedNetCr: number | null;
   publishedAt: string;
+  source: string;
+  isProvisional: boolean;
 }
 
 interface FlowSummary {
@@ -42,11 +45,23 @@ interface GiftNiftyStatus {
   domesticClose: number | null;
   impliedGapBps: number | null;
   configuredSymbol: string | null;
+  history: Array<{ date: string; closePrice: number; domesticClose: number | null; impliedGapBps: number | null; publishedAt: string }>;
+  ageInDays: number | null;
+  isStale: boolean;
+}
+
+interface IndiaVixStatus {
+  available: boolean;
+  latest: { date: string; close: number; receivedAt: string; source: string } | null;
+  history: Array<{ date: string; close: number; receivedAt: string; source: string }>;
+  ageInDays: number | null;
+  isStale: boolean;
 }
 
 interface InstitutionalContext {
   flows: FlowSummary;
   giftNifty: GiftNiftyStatus;
+  indiaVix: IndiaVixStatus;
 }
 
 const STANCE_COPY: Record<InstitutionalFlowStance, { label: string; tone: string; detail: string }> = {
@@ -107,7 +122,7 @@ export function InstitutionalContextCards() {
 
   // Pure I/O: no state writes, so an effect can call it without cascading a render.
   const loadContext = useCallback(async () => {
-    const response = (await getResearchJson("/institutional-context?sessions=10")) as {
+    const response = (await getResearchJson("/institutional-context?sessions=60")) as {
       data: InstitutionalContext;
     };
     return response.data;
@@ -156,11 +171,12 @@ export function InstitutionalContextCards() {
     );
   }
 
-  const { flows, giftNifty } = context;
+  const { flows, giftNifty, indiaVix } = context;
   const stance = STANCE_COPY[flows.stance];
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       {/* FII / DII Institutional Flows */}
       <GlassPanel className="flex flex-col p-6 border-white/10 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20">
         <div className="flex items-start justify-between gap-3">
@@ -235,7 +251,7 @@ export function InstitutionalContextCards() {
                 </span>
               </div>
               <ul className="mt-2 space-y-1">
-                {flows.history.map((session) => (
+                {flows.history.slice(0, 10).map((session) => (
                   <li
                     key={session.date}
                     className="flex items-center justify-between rounded-lg bg-white/[0.02] px-2 py-1 font-mono text-[11px]"
@@ -354,6 +370,8 @@ export function InstitutionalContextCards() {
           </>
         )}
       </GlassPanel>
+      </div>
+      <MarketContextHistoryChart flows={flows.history} indiaVix={indiaVix} giftNifty={giftNifty} />
     </div>
   );
 }

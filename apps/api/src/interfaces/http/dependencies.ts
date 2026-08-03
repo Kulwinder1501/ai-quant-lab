@@ -5,6 +5,7 @@ import { PostgresDashboardQueryRepository } from "../../infrastructure/database/
 import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresMarketScannerQueryRepository } from "../../infrastructure/database/repositories/postgres-market-scanner-query-repository.js";
+import { PostgresMarketContextReader } from "../../infrastructure/database/repositories/postgres-market-context-reader.js";
 import { PostgresModelPerformanceQueryRepository } from "../../infrastructure/database/repositories/postgres-model-performance-query-repository.js";
 import { PostgresModelPredictionQueryRepository } from "../../infrastructure/database/repositories/postgres-model-prediction-query-repository.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
@@ -98,6 +99,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       new PostgresInstitutionalFlowRepository(pool),
       new PostgresOffshoreDerivativeRepository(pool),
       candleRepository,
+      new PostgresMarketContextReader(pool),
     ),
     aiAutonomousAgent,
   };

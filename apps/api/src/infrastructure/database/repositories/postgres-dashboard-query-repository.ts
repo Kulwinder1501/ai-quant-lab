@@ -140,6 +140,7 @@ export class PostgresDashboardQueryRepository {
         pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, '1d') AS timeframe, pt.side, pt.status,
         pt.quantity, pt.entry_price, pt.stop_loss, pt.target_price, pt.opened_at, pt.closed_at,
         pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.fee_breakdown, pt.slippage, pt.notes,
+        pt.option_strike, pt.option_expiry, pt.option_type, pt.underlying_symbol, pt.entry_iv,
         COALESCE(i.symbol, 'NIFTY50') AS instrument_symbol,
         COALESCE(i.display_name, 'NIFTY 50 Index') AS instrument_name
       FROM paper_trades pt
@@ -187,6 +188,15 @@ export class PostgresDashboardQueryRepository {
         realizedPnl,
         returnPercent,
         notes: row.notes ? String(row.notes) : "",
+        optionStrike: row.option_strike === null || row.option_strike === undefined
+          ? null
+          : toNumber(row.option_strike),
+        optionExpiry: row.option_expiry instanceof Date
+          ? row.option_expiry.toISOString()
+          : row.option_expiry ? String(row.option_expiry) : null,
+        optionType: row.option_type ? String(row.option_type) : null,
+        underlyingSymbol: row.underlying_symbol ? String(row.underlying_symbol) : null,
+        entryIv: row.entry_iv === null || row.entry_iv === undefined ? null : toNumber(row.entry_iv),
       };
     });
 

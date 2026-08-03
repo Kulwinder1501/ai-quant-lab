@@ -251,6 +251,8 @@ export class NseApiClient {
       fiiIndexFuturesNetCr: null,
       fiiIndexOptionsNetCr: null,
       publishedAt: new Date(),
+      source: "NSE_CURRENT_API",
+      isProvisional: true,
     };
   }
 

@@ -13,6 +13,12 @@ import type { TradeOutcomeFilter } from "../../domain/paper-trade-history.js";
 import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-trading.js";
 import { lotsToQuantity } from "../../domain/lot-size-validator.js";
 import { mapIdeaToOptionBuyerFill } from "../../domain/option-buyer-fill.js";
+import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
+import {
+  hasAnyOptionContractField,
+  valuePaperTrade,
+} from "../../domain/paper-trade-live-valuation.js";
+import { PostgresIndiaVixImpliedVolatilitySource } from "../../infrastructure/india-vix-implied-volatility-source.js";
 import { regimeSourceInstrumentSymbol } from "../../../strategy-engine/domain/regime.js";
 import type { TradeSide } from "../../../strategy-engine/domain/strategy.js";
 
@@ -119,18 +125,25 @@ export function registerPaperTradingRoutes(
 
   app.get("/api/v1/paper-accounts/:id/summary", async (request, response) => {
     try {
+      const accountId = request.params.id || "";
+      const asOf = new Date();
+      let livePrices: Record<string, number> = {};
       try {
-        const accountId = request.params.id || "";
         const openTrades = await dependencies.paperTradeRepository.listOpenByAccount(accountId);
+        const pendingTrades = await dependencies.paperTradeRepository.listPendingByAccount(accountId);
         const activeSymbols = [...new Set(
-          openTrades.map((trade) => trade.instrumentSymbol?.toUpperCase()).filter(
+          [...openTrades, ...pendingTrades].flatMap((trade) => [
+            trade.underlyingSymbol?.toUpperCase(),
+            trade.instrumentSymbol?.toUpperCase(),
+          ]).filter(
             (symbol): symbol is string => typeof symbol === "string" && symbol.length > 0,
           ),
         )];
+        livePrices = await loadLivePrices(activeSymbols);
         const result = await dependencies.evaluateOpenPaperTrades.execute({
           accountId,
-          asOf: new Date(),
-          livePrices: await loadLivePrices(activeSymbols),
+          asOf,
+          livePrices,
         });
         if (result.tradesClosed > 0) {
           for (const closedId of result.closedTradeIds) {
@@ -140,9 +153,36 @@ export function registerPaperTradingRoutes(
       } catch {
         // Live evaluation is best effort during summary polling.
       }
-      const accountId = request.params.id || "";
       const summary = await dependencies.getPaperAccountSummary.execute(accountId);
       const fullSummary = await dependencies.dashboardRepository.getPaperAccountFullSummary(accountId, summary);
+      const currentOpenTrades = await dependencies.paperTradeRepository.listOpenByAccount(accountId);
+      let currentVolatility: number | null = null;
+      try {
+        currentVolatility = await new PostgresIndiaVixImpliedVolatilitySource(
+          dependencies.database,
+        ).resolveAsOf(asOf);
+      } catch {
+        // Each option valuation can still fall back to its persisted entry IV.
+      }
+      const valuations = new Map(currentOpenTrades.map((trade) => [
+        trade.id,
+        valuePaperTrade({ trade, livePrices, asOf, currentVolatility }),
+      ]));
+      fullSummary.openTrades = fullSummary.openTrades.map((trade) => ({
+        ...trade,
+        liveValuation: valuations.get(String(trade.id)) ?? {
+          status: "UNAVAILABLE",
+          source: "UNAVAILABLE",
+          markPrice: null,
+          underlyingPrice: null,
+          unrealizedPnl: null,
+          returnPercent: null,
+          asOf: asOf.toISOString(),
+          volatility: null,
+          volatilitySource: null,
+          reason: "No live valuation was produced for this open trade.",
+        },
+      }));
       response.status(200).json({ data: fullSummary });
     } catch (error: any) {
       response.status(404).json({ error: error.message || "Account not found" });
@@ -356,14 +396,72 @@ export function registerPaperTradingRoutes(
         response.status(400).json({ error: "paperTradeId and exitPrice (number) are required." });
         return;
       }
+      const openTrade = await dependencies.paperTradeRepository.findOpenById(paperTradeId);
+      if (!openTrade) {
+        response.status(404).json({ error: `Open paper trade ${paperTradeId} was not found.` });
+        return;
+      }
+
+      const closedAt = new Date();
+      let appliedExitPrice = exitPrice;
+      let exitPriceSource: "MANUAL_INPUT" | "SERVER_OPTION_MARK" = "MANUAL_INPUT";
+      let valuationDetails: Record<string, unknown> | undefined;
+
+      if (hasAnyOptionContractField(openTrade)) {
+        if (!isOptionBuyerTrade(openTrade)) {
+          response.status(409).json({ error: "Option position has incomplete contract metadata and cannot be closed safely." });
+          return;
+        }
+        const symbol = openTrade.underlyingSymbol ?? openTrade.instrumentSymbol;
+        const livePrices = symbol ? await loadLivePrices([symbol.toUpperCase()]) : {};
+        let currentVolatility: number | null = null;
+        try {
+          currentVolatility = await new PostgresIndiaVixImpliedVolatilitySource(
+            dependencies.database,
+          ).resolveAsOf(closedAt);
+        } catch {
+          // valuePaperTrade will use the persisted entry IV or fail closed.
+        }
+        const valuation = valuePaperTrade({
+          trade: openTrade,
+          livePrices,
+          asOf: closedAt,
+          currentVolatility,
+        });
+        if (valuation.status !== "AVAILABLE" || valuation.markPrice === null) {
+          response.status(409).json({
+            error: `Option position cannot be closed safely: ${valuation.reason ?? "premium mark is unavailable."}`,
+          });
+          return;
+        }
+        appliedExitPrice = valuation.markPrice;
+        exitPriceSource = "SERVER_OPTION_MARK";
+        valuationDetails = {
+          requestedExitPrice: exitPrice,
+          appliedExitPrice,
+          underlyingPrice: valuation.underlyingPrice,
+          volatility: valuation.volatility,
+          volatilitySource: valuation.volatilitySource,
+          asOf: valuation.asOf,
+          optionStrike: openTrade.optionStrike,
+          optionExpiry: openTrade.optionExpiry?.toISOString(),
+          optionType: openTrade.optionType,
+        };
+      }
+
       const trade = await dependencies.closePaperTrade.execute({
         paperTradeId,
-        exitPrice,
-        closedAt: new Date(),
+        exitPrice: appliedExitPrice,
+        closedAt,
         exitSlippage: 0,
         notes: notes || "Manually closed from UI",
+        exitPriceSource,
+        valuationDetails,
       });
-      response.status(200).json({ data: trade });
+      response.status(200).json({
+        data: trade,
+        execution: { requestedExitPrice: exitPrice, appliedExitPrice, exitPriceSource },
+      });
     } catch (error: any) {
       response.status(400).json({ error: error.message || "Failed to close trade" });
     }

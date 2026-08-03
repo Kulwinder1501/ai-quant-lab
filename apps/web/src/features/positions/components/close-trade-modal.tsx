@@ -1,7 +1,11 @@
 import React from "react";
 import { formatNumber } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
-import type { PaperTradeRow } from "../../paper-trading/domain";
+import {
+  isOptionPaperTrade,
+  paperTradeContractLabel,
+  type PaperTradeRow,
+} from "../../paper-trading/domain";
 
 interface CloseTradeModalProps {
   tradeToClose: PaperTradeRow | null;
@@ -27,6 +31,7 @@ export function CloseTradeModal({
   onSubmit
 }: CloseTradeModalProps) {
   if (!tradeToClose) return null;
+  const isOption = isOptionPaperTrade(tradeToClose);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-md">
@@ -46,25 +51,30 @@ export function CloseTradeModal({
 
         <form onSubmit={onSubmit} className="mt-4 space-y-4">
           <div className="p-3 rounded-xl bg-slate-950/80 border border-white/5 text-xs text-slate-300 space-y-1">
-            <div>Instrument: <strong className="text-white">{tradeToClose.instrumentSymbol || "NIFTY50"}</strong></div>
+            <div>Instrument: <strong className="text-white">{paperTradeContractLabel(tradeToClose)}</strong></div>
             <div>Side &amp; Qty: <strong className="text-cyan-300">{tradeToClose.side} {tradeToClose.quantity} Qty</strong></div>
             <div>Entry Price: <strong className="text-white">₹{formatNumber(tradeToClose.fillPrice, 2)}</strong></div>
           </div>
 
           <div>
             <label htmlFor="exit-price" className="block text-xs font-bold text-slate-300 mb-1">
-              Exit Price (₹):
+              {isOption ? "Server Option Mark (₹):" : "Exit Price (₹):"}
             </label>
             <input
               id="exit-price"
               type="number"
               step="0.05"
               required
+              readOnly={isOption}
               value={closeExitPrice}
               onChange={(e) => setCloseExitPrice(Number(e.target.value))}
-              className="w-full rounded-xl bg-slate-950 border border-white/20 px-3 py-2 text-sm font-bold text-white focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              className="w-full rounded-xl bg-slate-950 border border-white/20 px-3 py-2 text-sm font-bold text-white focus:outline-none focus:ring-2 focus:ring-cyan-500 read-only:cursor-not-allowed read-only:text-cyan-200"
             />
-            <p className="mt-1 text-[11px] text-slate-500">Pre-filled with latest market valuation.</p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              {isOption
+                ? "The server re-prices this contract at confirmation; BANKNIFTY/NIFTY spot can never be submitted as the option exit premium."
+                : "Pre-filled with the latest market valuation."}
+            </p>
           </div>
 
           <div>

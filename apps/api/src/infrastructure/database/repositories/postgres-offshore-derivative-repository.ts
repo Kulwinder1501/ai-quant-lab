@@ -58,6 +58,18 @@ export class PostgresOffshoreDerivativeRepository {
     );
     return toDerivative(result.rows[0]);
   }
+
+  async listRecent(instrumentId: string, limit: number): Promise<OffshoreDerivative[]> {
+    const bounded = Math.max(1, Math.min(Math.trunc(limit), 250));
+    const result = await this.database.query(`
+      SELECT instrument_id, date, close_price, published_at
+      FROM offshore_derivatives
+      WHERE instrument_id = $1
+      ORDER BY date DESC
+      LIMIT $2
+    `, [instrumentId, bounded]);
+    return result.rows.map((row) => toDerivative(row)).filter((row): row is OffshoreDerivative => row !== null);
+  }
 }
 
 function toDerivative(row: Record<string, unknown> | undefined): OffshoreDerivative | null {

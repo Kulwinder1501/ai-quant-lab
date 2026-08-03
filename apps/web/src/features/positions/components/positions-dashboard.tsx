@@ -8,9 +8,14 @@ import { formatNumber } from "../../research/presentation";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 
-import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
+import {
+  isOptionPaperTrade,
+  type PaperAccountSummary,
+  type PaperAccountFullSummary,
+  type PaperTradeRow,
+} from "../../paper-trading/domain";
 import { LivePortfolioMetrics } from "./live-portfolio-metrics";
-import { ActivePositionsTable, resolveLiveQuote } from "./active-positions-table";
+import { ActivePositionsTable } from "./active-positions-table";
 import type { LiveQuote, LiveQuoteMap } from "./active-positions-table";
 import { CloseTradeModal } from "./close-trade-modal";
 
@@ -206,18 +211,18 @@ export function PositionsDashboard({ navigation }: { navigation?: ReactNode } = 
     let totalInvestedMargin = 0;
     let winningPositions = 0;
     let losingPositions = 0;
+    let unavailablePositions = 0;
 
     openTrades.forEach((trade) => {
-      const sym = trade.instrumentSymbol || "NIFTY50";
-      const resolved = resolveLiveQuote(sym, liveQuotes);
-      const currentPrice = resolved?.livePrice || trade.fillPrice;
-      const isBuy = trade.side === "BUY";
-      const priceDiff = isBuy ? currentPrice - trade.fillPrice : trade.fillPrice - currentPrice;
-      const tradePnl = priceDiff * trade.quantity;
-
-      totalUnrealizedPnl += tradePnl;
       totalInvestedMargin += trade.fillPrice * trade.quantity;
-
+      const tradePnl = trade.liveValuation?.status === "AVAILABLE"
+        ? trade.liveValuation.unrealizedPnl
+        : null;
+      if (tradePnl === null || tradePnl === undefined) {
+        unavailablePositions++;
+        return;
+      }
+      totalUnrealizedPnl += tradePnl;
       if (tradePnl > 0) winningPositions++;
       else if (tradePnl < 0) losingPositions++;
     });
@@ -233,18 +238,27 @@ export function PositionsDashboard({ navigation }: { navigation?: ReactNode } = 
       totalInvestedMargin,
       winningPositions,
       losingPositions,
+      unavailablePositions,
       liveEquity,
       totalReturnPercent,
     };
-  }, [summary, liveQuotes]);
+  }, [summary]);
 
   const handleOpenCloseModal = (trade: PaperTradeRow) => {
-    const sym = trade.instrumentSymbol || "NIFTY50";
-    const resolved = resolveLiveQuote(sym, liveQuotes);
-    const currentPrice = resolved?.livePrice || trade.fillPrice;
+    const currentPrice = trade.liveValuation?.status === "AVAILABLE"
+      ? trade.liveValuation.markPrice
+      : null;
+    if (currentPrice === null || currentPrice === undefined) {
+      setCloseError(trade.liveValuation?.reason || "A safe live mark is required before this position can be closed.");
+      return;
+    }
     setTradeToClose(trade);
     setCloseExitPrice(currentPrice);
-    setCloseNotes(`Manually closed at ₹${currentPrice.toFixed(2)} from Positions Monitor`);
+    setCloseNotes(
+      isOptionPaperTrade(trade)
+        ? "Close at server-verified option mark from Positions Monitor"
+        : `Manually closed at ₹${currentPrice.toFixed(2)} from Positions Monitor`,
+    );
     setCloseError(null);
   };
 

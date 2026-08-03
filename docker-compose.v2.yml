@@ -28,6 +28,8 @@ services:
       NODE_ENV: production
       API_PORT: 4000
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+      GIFT_NIFTY_YAHOO_SYMBOL: ${GIFT_NIFTY_YAHOO_SYMBOL:-}
+      FII_DII_HISTORY_URL: ${FII_DII_HISTORY_URL:-}
     ports:
       - "4001:4000"
     depends_on:
@@ -47,6 +49,8 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+      GIFT_NIFTY_YAHOO_SYMBOL: ${GIFT_NIFTY_YAHOO_SYMBOL:-}
+      FII_DII_HISTORY_URL: ${FII_DII_HISTORY_URL:-}
     volumes:
       # Trained pickle artifacts must outlive the container: model_versions rows
       # reference them by absolute path, and the competition pool reloads them

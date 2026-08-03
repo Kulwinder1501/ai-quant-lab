@@ -10,6 +10,7 @@ interface LivePortfolioMetricsProps {
     openCount: number;
     winningPositions: number;
     losingPositions: number;
+    unavailablePositions: number;
     totalInvestedMargin: number;
   };
 }
@@ -36,6 +37,9 @@ export function LivePortfolioMetrics({ livePortfolioStats }: LivePortfolioMetric
         </div>
         <p className="mt-1 text-xs text-slate-400">
           Active Open Trades: <strong className="text-white">{livePortfolioStats.openCount}</strong>
+          {livePortfolioStats.unavailablePositions > 0 && (
+            <span className="ml-1 text-amber-300">({livePortfolioStats.unavailablePositions} awaiting mark; excluded)</span>
+          )}
         </p>
       </GlassPanel>
 

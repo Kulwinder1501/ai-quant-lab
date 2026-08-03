@@ -21,6 +21,7 @@ export class PostgresIndiaVixImpliedVolatilitySource implements ImpliedVolatilit
         AND c.timeframe = '1d'
         AND c.is_complete = TRUE
         AND c.close_time <= $2
+        AND c.close_time >= $2 - INTERVAL '7 days'
       ORDER BY c.close_time DESC
       LIMIT 1
     `, [regimeSourceInstrumentSymbol, asOf]);

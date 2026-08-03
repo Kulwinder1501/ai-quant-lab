@@ -20,14 +20,18 @@ export class PostgresInstitutionalFlowRepository {
         dii_cash_net_cr,
         fii_index_futures_net_cr,
         fii_index_options_net_cr,
-        published_at
-      ) VALUES ($1, $2, $3, $4, $5, $6)
+        published_at,
+        source,
+        is_provisional
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (date) DO UPDATE SET
         fii_cash_net_cr = EXCLUDED.fii_cash_net_cr,
         dii_cash_net_cr = EXCLUDED.dii_cash_net_cr,
         fii_index_futures_net_cr = EXCLUDED.fii_index_futures_net_cr,
         fii_index_options_net_cr = EXCLUDED.fii_index_options_net_cr,
         published_at = EXCLUDED.published_at,
+        source = EXCLUDED.source,
+        is_provisional = EXCLUDED.is_provisional,
         updated_at = NOW()
     `,
       [
@@ -37,6 +41,8 @@ export class PostgresInstitutionalFlowRepository {
         flow.fiiIndexFuturesNetCr,
         flow.fiiIndexOptionsNetCr,
         flow.publishedAt,
+        flow.source ?? "NSE_CURRENT_API",
+        flow.isProvisional ?? true,
       ],
     );
   }
@@ -45,7 +51,7 @@ export class PostgresInstitutionalFlowRepository {
     const result = await this.database.query(
       `
       SELECT date, fii_cash_net_cr, dii_cash_net_cr,
-             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at, source, is_provisional
       FROM institutional_flows
       WHERE date = $1
     `,
@@ -66,7 +72,7 @@ export class PostgresInstitutionalFlowRepository {
     const result = await this.database.query(
       `
       SELECT date, fii_cash_net_cr, dii_cash_net_cr,
-             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at, source, is_provisional
       FROM institutional_flows
       WHERE ($1::int IS NULL OR date >= CURRENT_DATE - $1::int)
       ORDER BY date DESC
@@ -83,7 +89,7 @@ export class PostgresInstitutionalFlowRepository {
     const result = await this.database.query(
       `
       SELECT date, fii_cash_net_cr, dii_cash_net_cr,
-             fii_index_futures_net_cr, fii_index_options_net_cr, published_at
+             fii_index_futures_net_cr, fii_index_options_net_cr, published_at, source, is_provisional
       FROM institutional_flows
       ORDER BY date DESC
       LIMIT $1
@@ -103,5 +109,7 @@ function toFlow(row: Record<string, unknown> | undefined): InstitutionalFlow | n
     fiiIndexFuturesNetCr: toNumberOrNull(row.fii_index_futures_net_cr),
     fiiIndexOptionsNetCr: toNumberOrNull(row.fii_index_options_net_cr),
     publishedAt: row.published_at as Date,
+    source: String(row.source ?? "NSE_CURRENT_API"),
+    isProvisional: row.is_provisional === undefined ? true : Boolean(row.is_provisional),
   };
 }

@@ -25,6 +25,7 @@ import { weeklyExpiryProvenanceMigration } from "./024-weekly-expiry-provenance.
 import { modelCompetitionMigration } from "./025-model-competition.js";
 import { purgeFabricatedPredictionsMigration } from "./026-purge-fabricated-predictions.js";
 import { equityTrainingUniverseMigration } from "./027-equity-training-universe.js";
+import { marketContextIntegrityMigration } from "./028-market-context-integrity.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -54,4 +55,5 @@ export const migrations = [
   modelCompetitionMigration,
   purgeFabricatedPredictionsMigration,
   equityTrainingUniverseMigration,
+  marketContextIntegrityMigration,
 ];

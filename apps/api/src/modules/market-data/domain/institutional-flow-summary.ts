@@ -38,6 +38,8 @@ export interface InstitutionalFlowSession {
   /** Null when either leg is absent — summing an unknown with a number is not a total. */
   combinedNetCr: number | null;
   publishedAt: string;
+  source: string;
+  isProvisional: boolean;
 }
 
 export interface InstitutionalFlowSummary {
@@ -65,6 +67,8 @@ function toSession(flow: InstitutionalFlow): InstitutionalFlowSession {
         ? null
         : Number((fiiCashNetCr + diiCashNetCr).toFixed(2)),
     publishedAt: flow.publishedAt.toISOString(),
+    source: flow.source ?? "NSE_CURRENT_API",
+    isProvisional: flow.isProvisional ?? true,
   };
 }
 

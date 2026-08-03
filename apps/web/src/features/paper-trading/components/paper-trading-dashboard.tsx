@@ -201,16 +201,21 @@ export function PaperTradingDashboard() {
   };
 
   const openCloseTradeModal = (trade: PaperTradeRow) => {
+    const markPrice = trade.liveValuation?.status === "AVAILABLE"
+      ? trade.liveValuation.markPrice
+      : null;
     setTradeToClose(trade);
-    setCloseExitPrice(trade.fillPrice);
-    setCloseNotes("Closed from UI");
-    setCloseError(null);
+    setCloseExitPrice(markPrice ?? 0);
+    setCloseNotes("Close at current server-verified market mark");
+    setCloseError(markPrice === null
+      ? trade.liveValuation?.reason || "A safe live mark is required before this position can be closed."
+      : null);
     setShowCloseModal(true);
   };
 
   const handleCloseTradeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!tradeToClose) return;
+    if (!tradeToClose || tradeToClose.liveValuation?.status !== "AVAILABLE" || closeExitPrice < 0) return;
     setCloseError(null);
     try {
       await postResearchJson("/paper-trades/close", {

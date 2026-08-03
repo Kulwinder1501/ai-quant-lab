@@ -1,6 +1,6 @@
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { formatNumber, formatTimestamp } from "../../research/presentation";
-import type { PaperTradeRow } from "../domain";
+import { paperTradeContractLabel, type PaperTradeRow } from "../domain";
 
 function lotSizeForSymbol(symbol?: string): number {
   if (symbol === "BANKNIFTY") return 15;
@@ -49,6 +49,7 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                 <th className="py-3 px-4">Side</th>
                 <th className="py-3 px-4">Qty</th>
                 <th className="py-3 px-4">Entry Price</th>
+                <th className="py-3 px-4">Live Mark</th>
                 <th className="py-3 px-4">Fees</th>
                 <th className="py-3 px-4">Opened At</th>
                 <th className="py-3 px-4">Notes</th>
@@ -59,7 +60,7 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
               {activeTrades.map((trade) => (
                 <tr key={trade.id} className="hover:bg-white/[0.02] transition">
                   <td className="py-3.5 px-4 font-bold text-white">
-                    {trade.instrumentSymbol || "NIFTY50"}
+                    {paperTradeContractLabel(trade)}
                     <span className="block text-xs font-normal text-slate-500">{trade.timeframe || "1d"}</span>
                   </td>
                   <td className="py-3.5 px-4">
@@ -80,6 +81,11 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                     {formatLots(trade.quantity, trade.instrumentSymbol)}
                   </td>
                   <td className="py-3.5 px-4 font-semibold text-white">₹{formatNumber(trade.fillPrice, 2)}</td>
+                  <td className="py-3.5 px-4 font-semibold text-white">
+                    {trade.liveValuation?.status === "AVAILABLE" && trade.liveValuation.markPrice !== null
+                      ? `₹${formatNumber(trade.liveValuation.markPrice, 2)}`
+                      : <span className="text-amber-300" title={trade.liveValuation?.reason || "Live valuation unavailable"}>Unavailable</span>}
+                  </td>
                   <td className="py-3.5 px-4 text-xs text-slate-300" title={JSON.stringify(trade.feeBreakdown || {})}>
                     ₹{formatNumber(trade.entryFees || 0, 2)}
                   </td>
@@ -89,7 +95,9 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                     <button
                       type="button"
                       onClick={() => onCloseTrade(trade)}
-                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 border border-rose-500/30 transition"
+                      disabled={trade.liveValuation?.status !== "AVAILABLE" || trade.liveValuation.markPrice === null}
+                      title={trade.liveValuation?.status !== "AVAILABLE" ? trade.liveValuation?.reason || "A safe live mark is required before closing." : undefined}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 border border-rose-500/30 transition disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       Close Position
                     </button>

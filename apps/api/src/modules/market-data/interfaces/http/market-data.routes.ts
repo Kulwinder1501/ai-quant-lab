@@ -197,8 +197,8 @@ export function registerMarketDataRoutes(
     try {
       const sessionsText = queryString(request, "sessions");
       const sessions = sessionsText ? Number(sessionsText) : undefined;
-      if (sessions !== undefined && (!Number.isFinite(sessions) || sessions < 1)) {
-        response.status(400).json({ error: "`sessions` must be a positive integer." });
+      if (sessions !== undefined && (!Number.isInteger(sessions) || sessions < 1 || sessions > 250)) {
+        response.status(400).json({ error: "`sessions` must be an integer between 1 and 250." });
         return;
       }
       response.status(200).json({

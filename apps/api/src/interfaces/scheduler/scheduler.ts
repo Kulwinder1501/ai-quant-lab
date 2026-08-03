@@ -26,6 +26,10 @@ import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/sch
 const IST = "Asia/Kolkata";
 const processIdentity = `${hostname()}:${process.pid}`;
 
+function istDateKey(instant: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(instant);
+}
+
 // apps/api/{src|dist}/interfaces/scheduler → five levels up is the repo root.
 // Spawned npm scripts are resolved against the root package.json explicitly,
 // because the process cwd differs between host runs (apps/api) and the
@@ -108,6 +112,45 @@ async function main(): Promise<void> {
     void schedule("INSTITUTIONAL_FLOWS", () => runCommand("npm", ["run", "data:collect:institutional"]));
   }, { timezone: IST });
 
+  // NSE sometimes publishes the provisional cash print late. These idempotent
+  // retries close the gap the original one-shot 18:30 schedule left overnight.
+  cron.schedule("15 19,20 * * 1-5", () => {
+    void schedule("INSTITUTIONAL_FLOWS_RETRY", () => runCommand("npm", ["run", "data:collect:institutional"]));
+  }, { timezone: IST });
+
+  const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
+    const now = new Date();
+    const lookback = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+    for (const timeframe of timeframes) {
+      await runCommand("npm", [
+        "run", "data:collect:historical", "--",
+        "--provider", "yahoo",
+        "--instrument", "INDIAVIX",
+        "--timeframe", timeframe,
+        "--from", istDateKey(lookback),
+        "--to", istDateKey(now),
+        "--skip-existing",
+      ]);
+      await runCommand("npm", [
+        "run", "analysis:calculate-indicators", "--",
+        "--instrument", "INDIAVIX", "--timeframe", timeframe,
+      ]);
+    }
+  };
+
+  cron.schedule("30 16 * * 1-5", () => {
+    void schedule("INDIA_VIX_EOD", () => collectIndiaVix(["1d"], 10));
+  }, { timezone: IST });
+  cron.schedule("15 17,18 * * 1-5", () => {
+    void schedule("INDIA_VIX_EOD_RETRY", () => collectIndiaVix(["1d"], 10));
+  }, { timezone: IST });
+
+  // Exact-timeframe VIX bars keep the existing point-in-time feature contract
+  // valid for intraday and scalp models; no daily value is silently borrowed.
+  cron.schedule("*/5 9-15 * * 1-5", () => {
+    void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
+  }, { timezone: IST });
+
   // Every three minutes, matching the interval this replaced. It claims its due minute
   // like everything else, so replicas share the work rather than each ingesting the same
   // feeds and racing on the same article rows.
@@ -116,7 +159,16 @@ async function main(): Promise<void> {
   });
 
   log("Scheduler started", {
-    jobs: ["EOD_PIPELINE", "INTRADAY_MODEL_PREDICTIONS", "INSTITUTIONAL_FLOWS", "RSS_NEWS_INGESTION"],
+    jobs: [
+      "EOD_PIPELINE",
+      "INTRADAY_MODEL_PREDICTIONS",
+      "INSTITUTIONAL_FLOWS",
+      "INSTITUTIONAL_FLOWS_RETRY",
+      "INDIA_VIX_EOD",
+      "INDIA_VIX_EOD_RETRY",
+      "INDIA_VIX_INTRADAY",
+      "RSS_NEWS_INGESTION",
+    ],
     timezone: IST,
   });
 

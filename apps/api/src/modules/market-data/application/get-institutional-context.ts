@@ -21,6 +21,18 @@ export interface InstitutionalFlowReader {
 
 export interface OffshoreDerivativeReader {
   findLatest(instrumentId: string): Promise<OffshoreDerivative | null>;
+  listRecent?(instrumentId: string, limit: number): Promise<OffshoreDerivative[]>;
+}
+
+export interface VolatilityIndexClose {
+  date: Date;
+  close: number;
+  receivedAt: Date;
+  source: string;
+}
+
+export interface VolatilityIndexReader {
+  listDailyCloses(symbol: string, limit: number): Promise<VolatilityIndexClose[]>;
 }
 
 /**
@@ -33,7 +45,27 @@ export interface DomesticCloseReader {
 
 export interface InstitutionalContext {
   flows: InstitutionalFlowSummary;
-  giftNifty: GiftNiftyStatus;
+  giftNifty: GiftNiftyStatus & {
+    history: Array<{ date: string; closePrice: number; domesticClose: number | null; impliedGapBps: number | null; publishedAt: string }>;
+    ageInDays: number | null;
+    isStale: boolean;
+  };
+  indiaVix: {
+    available: boolean;
+    latest: { date: string; close: number; receivedAt: string; source: string } | null;
+    history: Array<{ date: string; close: number; receivedAt: string; source: string }>;
+    ageInDays: number | null;
+    isStale: boolean;
+  };
+}
+
+const INDIA_VIX_SYMBOL = "INDIAVIX";
+const MARKET_CONTEXT_STALENESS_DAYS = 5;
+
+function ageInDays(date: Date, now: Date): number {
+  const session = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.max(0, Math.floor((today - session) / 86_400_000));
 }
 
 /**
@@ -48,6 +80,7 @@ export class GetInstitutionalContextService {
     private readonly flows: InstitutionalFlowReader,
     private readonly offshore: OffshoreDerivativeReader,
     private readonly domesticCloses: DomesticCloseReader,
+    private readonly volatility: VolatilityIndexReader,
     private readonly configuredGiftNiftySymbol: string | null = process.env.GIFT_NIFTY_YAHOO_SYMBOL ?? null,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -57,22 +90,62 @@ export class GetInstitutionalContextService {
   ): Promise<InstitutionalContext> {
     const historySessions = options.historySessions ?? DEFAULT_FLOW_HISTORY_SESSIONS;
 
-    const [flowRows, print] = await Promise.all([
+    const [flowRows, print, vixRows] = await Promise.all([
       this.flows.listRecent(historySessions),
       this.offshore.findLatest(GIFT_NIFTY_INSTRUMENT_ID),
+      this.volatility.listDailyCloses(INDIA_VIX_SYMBOL, historySessions),
     ]);
+
+    const offshoreRows = this.offshore.listRecent
+      ? await this.offshore.listRecent(GIFT_NIFTY_INSTRUMENT_ID, historySessions)
+      : print ? [print] : [];
+
+    const offshoreHistory = await Promise.all(offshoreRows.map(async (row) => {
+      const domesticCloseForSession = await this.domesticCloses.findCloseOn(GIFT_NIFTY_DOMESTIC_SYMBOL, row.date);
+      return {
+        date: row.date.toISOString().slice(0, 10),
+        closePrice: row.closePrice,
+        domesticClose: domesticCloseForSession,
+        impliedGapBps: domesticCloseForSession === null ? null :
+          Number((((row.closePrice - domesticCloseForSession) / domesticCloseForSession) * 10_000).toFixed(2)),
+        publishedAt: row.publishedAt.toISOString(),
+      };
+    }));
 
     const domesticClose = print
       ? await this.domesticCloses.findCloseOn(GIFT_NIFTY_DOMESTIC_SYMBOL, print.date)
       : null;
 
+    const now = this.now();
+    const giftAge = print ? ageInDays(print.date, now) : null;
+    const vixHistory = vixRows.map((row) => ({
+      date: row.date.toISOString().slice(0, 10),
+      close: row.close,
+      receivedAt: row.receivedAt.toISOString(),
+      source: row.source,
+    }));
+    const vixAge = vixRows[0] ? ageInDays(vixRows[0].date, now) : null;
+    const giftStatus = buildGiftNiftyStatus({
+      print,
+      domesticClose,
+      configuredSymbol: this.configuredGiftNiftySymbol?.trim() || null,
+    });
+
     return {
       flows: summariseInstitutionalFlows(flowRows, this.now()),
-      giftNifty: buildGiftNiftyStatus({
-        print,
-        domesticClose,
-        configuredSymbol: this.configuredGiftNiftySymbol?.trim() || null,
-      }),
+      giftNifty: {
+        ...giftStatus,
+        history: offshoreHistory,
+        ageInDays: giftAge,
+        isStale: giftAge === null || giftAge > MARKET_CONTEXT_STALENESS_DAYS,
+      },
+      indiaVix: {
+        available: vixHistory.length > 0,
+        latest: vixHistory[0] ?? null,
+        history: vixHistory,
+        ageInDays: vixAge,
+        isStale: vixAge === null || vixAge > MARKET_CONTEXT_STALENESS_DAYS,
+      },
     };
   }
 }

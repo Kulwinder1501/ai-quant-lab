@@ -33,6 +33,42 @@ export interface PaperTradeRow {
   realizedPnl?: number | null;
   returnPercent?: number | null;
   notes?: string;
+  optionStrike?: number | null;
+  optionExpiry?: string | null;
+  optionType?: "CE" | "PE" | null;
+  underlyingSymbol?: string | null;
+  entryIv?: number | null;
+  liveValuation?: PaperTradeLiveValuation;
+}
+
+export interface PaperTradeLiveValuation {
+  status: "AVAILABLE" | "UNAVAILABLE";
+  source: "OPTION_MODEL" | "UNDERLYING_SPOT" | "UNAVAILABLE";
+  markPrice: number | null;
+  underlyingPrice: number | null;
+  unrealizedPnl: number | null;
+  returnPercent: number | null;
+  asOf: string;
+  volatility: number | null;
+  volatilitySource: "INDIA_VIX" | "ENTRY_IV" | null;
+  reason: string | null;
+}
+
+export function isLongTradeSide(side: PaperTradeRow["side"]): boolean {
+  return side === "LONG" || side === "BUY";
+}
+
+export function isOptionPaperTrade(trade: PaperTradeRow): boolean {
+  return trade.optionStrike != null
+    && typeof trade.optionExpiry === "string"
+    && (trade.optionType === "CE" || trade.optionType === "PE")
+    && typeof trade.underlyingSymbol === "string"
+    && trade.underlyingSymbol.length > 0;
+}
+
+export function paperTradeContractLabel(trade: PaperTradeRow): string {
+  if (!isOptionPaperTrade(trade)) return trade.instrumentSymbol || "NIFTY50";
+  return `${trade.underlyingSymbol} ${trade.optionStrike} ${trade.optionType}`;
 }
 
 export interface PaperAccountFullSummary {

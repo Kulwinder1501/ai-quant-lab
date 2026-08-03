@@ -29,19 +29,22 @@ function build(overrides: {
   print?: OffshoreDerivative | null;
   domesticClose?: number | null;
   symbol?: string | null;
+  vix?: Array<{ date: Date; close: number; receivedAt: Date; source: string }>;
 } = {}) {
   const listRecent = vi.fn().mockResolvedValue(overrides.flows ?? [flowRow]);
   const findLatest = vi.fn().mockResolvedValue(overrides.print ?? null);
   const findCloseOn = vi.fn().mockResolvedValue(overrides.domesticClose ?? null);
+  const listDailyCloses = vi.fn().mockResolvedValue(overrides.vix ?? []);
 
   const service = new GetInstitutionalContextService(
     { listRecent },
     { findLatest },
     { findCloseOn },
+    { listDailyCloses },
     overrides.symbol ?? null,
     () => new Date("2026-07-31T07:00:00.000Z"),
   );
-  return { service, listRecent, findLatest, findCloseOn };
+  return { service, listRecent, findLatest, findCloseOn, listDailyCloses };
 }
 
 describe("GetInstitutionalContextService", () => {
@@ -93,5 +96,20 @@ describe("GetInstitutionalContextService", () => {
     expect(result.flows.latest).toBeNull();
     expect(result.flows.stance).toBe("UNKNOWN");
     expect(result.flows.sessionsCovered).toBe(0);
+  });
+
+  it("reports VIX history and freshness independently of institutional flows", async () => {
+    const { service } = build({
+      vix: [{
+        date: new Date("2026-07-30T00:00:00.000Z"),
+        close: 13.25,
+        receivedAt: new Date("2026-07-30T12:00:00.000Z"),
+        source: "yahoo-historical-v1",
+      }],
+    });
+    const result = await service.execute();
+    expect(result.indiaVix.available).toBe(true);
+    expect(result.indiaVix.latest?.close).toBe(13.25);
+    expect(result.indiaVix.isStale).toBe(false);
   });
 });

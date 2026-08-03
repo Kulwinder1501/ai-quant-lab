@@ -17,6 +17,16 @@ const coreInstruments = [
     lotSize: 15,
     metadata: { market: "India", canonicalName: "NIFTY BANK", kiteQuoteSymbol: "NSE:NIFTY BANK" },
   },
+  {
+    exchange: "NSE" as const,
+    symbol: "INDIAVIX",
+    displayName: "India VIX",
+    instrumentType: "INDEX" as const,
+    lotSize: 1,
+    tickSize: "0.01",
+    isActive: false,
+    metadata: { market: "India", canonicalName: "India VIX", purpose: "volatility-regime", yahooSymbol: "^INDIAVIX" },
+  },
 ];
 export async function seedCoreInstruments(repository: InstrumentRepository): Promise<Instrument[]> {
   return Promise.all(coreInstruments.map((instrument) => repository.upsert(instrument)));

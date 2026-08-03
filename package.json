@@ -15,6 +15,7 @@
     "data:collect:historical": "npm run data:collect:historical --workspace @ai-quant-lab/api --",
     "data:collect:live": "npm run data:collect:live --workspace @ai-quant-lab/api --",
     "data:collect:institutional": "npm run data:collect:institutional --workspace @ai-quant-lab/api --",
+    "data:backfill:institutional": "npm run data:backfill:institutional --workspace @ai-quant-lab/api --",
     "analysis:calculate-indicators": "npm run analysis:calculate-indicators --workspace @ai-quant-lab/api --",
     "analysis:detect-patterns": "npm run analysis:detect-patterns --workspace @ai-quant-lab/api --",
     "analysis:generate-trade-ideas": "npm run analysis:generate-trade-ideas --workspace @ai-quant-lab/api --",
@@ -44,7 +45,7 @@
     "scheduler": "npm run scheduler --workspace @ai-quant-lab/api"
   },
   "engines": {
-    "node": ">=20.11.0",
+    "node": ">=22.0.0",
     "npm": ">=10.0.0"
   }
 }

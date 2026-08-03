@@ -22,4 +22,8 @@ export interface InstitutionalFlow {
    * on `date`.
    */
   publishedAt: Date;
+  /** Upstream provenance. Old callers may omit it; persistence defaults to NSE_CURRENT_API. */
+  source?: string;
+  /** NSE's same-evening cash figures are provisional pending custodial confirmation. */
+  isProvisional?: boolean;
 }

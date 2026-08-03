@@ -13,6 +13,7 @@
     "data:collect:historical": "tsx src/interfaces/cli/collect-historical-data.ts",
     "data:collect:live": "tsx src/interfaces/cli/collect-live-market-data.ts",
     "data:collect:institutional": "tsx src/interfaces/cli/collect-institutional-data.ts",
+    "data:backfill:institutional": "tsx src/interfaces/cli/backfill-institutional-flows.ts",
     "pipeline:eod": "tsx src/interfaces/cli/run-eod-pipeline.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
     "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",

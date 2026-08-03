@@ -117,7 +117,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
                   {section.title}
                 </div>
               )}
-              <div className={classNames("flex flex-col", collapsed ? "items-center gap-1.5" : "gap-1.5")}>
+              <div className={classNames("flex flex-col", collapsed ? "items-center gap-1" : "gap-1")}>
                 {section.items.map((item) => (
                   <Link
                     key={item.href}

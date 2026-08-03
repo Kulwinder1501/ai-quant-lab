@@ -1,6 +1,6 @@
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { formatNumber } from "../../research/presentation";
-import type { PaperTradeRow } from "../domain";
+import { isOptionPaperTrade, paperTradeContractLabel, type PaperTradeRow } from "../domain";
 
 interface CloseTradeModalProps {
   show: boolean;
@@ -26,27 +26,36 @@ export function CloseTradeModal({
   closeError
 }: CloseTradeModalProps) {
   if (!show || !tradeToClose) return null;
+  const isOption = isOptionPaperTrade(tradeToClose);
+  const canClose = tradeToClose.liveValuation?.status === "AVAILABLE"
+    && tradeToClose.liveValuation.markPrice !== null;
   
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <GlassPanel className="w-full max-w-md p-6 border-rose-500/30 bg-slate-950 shadow-2xl">
         <h3 className="text-xl font-bold text-white">Manual Position Exit</h3>
         <p className="text-xs text-slate-400 mt-1">
-          Closing simulated {tradeToClose.side} position on {tradeToClose.instrumentSymbol} ({tradeToClose.quantity} units entered at ₹{formatNumber(tradeToClose.fillPrice, 2)}).
+          Closing simulated {tradeToClose.side} position on {paperTradeContractLabel(tradeToClose)} ({tradeToClose.quantity} units entered at ₹{formatNumber(tradeToClose.fillPrice, 2)}).
         </p>
         {closeError && <p className="mt-3 text-xs text-rose-400 bg-rose-500/10 p-2 rounded border border-rose-500/20">{closeError}</p>}
         <form onSubmit={onSubmit} className="mt-4 space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Exit Price (₹)</label>
+            <label className="block text-xs font-semibold text-slate-300 uppercase">
+              {isOption ? "Server Option Mark (₹)" : "Simulated Exit Price (₹)"}
+            </label>
             <input
               type="number"
               required
               step="0.05"
-              min="0.05"
+              min="0"
+              readOnly={isOption}
               value={closeExitPrice}
               onChange={(e) => setCloseExitPrice(Number(e.target.value))}
-              className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-rose-400"
+              className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-rose-400 read-only:cursor-not-allowed read-only:text-cyan-200"
             />
+            {isOption && (
+              <p className="mt-1 text-[11px] text-slate-500">Re-priced and verified by the server again when you confirm.</p>
+            )}
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase">Exit Notes</label>
@@ -68,7 +77,8 @@ export function CloseTradeModal({
             </button>
             <button
               type="submit"
-              className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-500/20"
+              disabled={!canClose}
+              className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Close Position
             </button>
