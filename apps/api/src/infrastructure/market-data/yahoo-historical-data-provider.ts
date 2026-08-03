@@ -7,17 +7,28 @@ import type {
 import { resolveYahooSymbol } from "../../modules/market-data/domain/yahoo-symbol-resolver.js";
 import { YAHOO_PROVIDER_ID } from "../../modules/market-data/domain/candle-provenance.js";
 
+/**
+ * Only timeframes Yahoo serves natively are mapped. `3m` and `10m` are absent
+ * deliberately: Yahoo has no such interval, and the previous mapping to `1m`/`5m`
+ * returned finer bars that the caller then stamped with the coarser duration. That
+ * produced overlapping windows carrying a shorter bar's high/low/close — fabricated
+ * candles, not a resample. Honest downsampling would have to aggregate the finer
+ * series; until something does that, these timeframes fail closed here.
+ */
 function getYahooInterval(timeframe: string): "1m" | "2m" | "5m" | "15m" | "30m" | "60m" | "90m" | "1h" | "1d" | "5d" | "1wk" | "1mo" | "3mo" {
   switch (timeframe) {
     case "1m": return "1m";
-    case "3m": return "1m"; // Yahoo doesn't support 3m natively
     case "5m": return "5m";
-    case "10m": return "5m";
     case "15m": return "15m";
     case "30m": return "30m";
     case "60m": return "60m";
     case "1d": return "1d";
-    default: return "1d";
+    default:
+      throw new Error(
+        `Yahoo has no native "${timeframe}" interval. Serving it would mean relabelling a `
+        + `finer bar with a coarser duration. Use 1m, 5m, 15m, 30m, 60m or 1d, or collect `
+        + `this timeframe from a provider that supports it natively.`,
+      );
   }
 }
 

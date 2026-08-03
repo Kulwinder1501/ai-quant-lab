@@ -202,3 +202,88 @@ describe("ImportHistoricalMarketData", () => {
     expect(ingestion.failures).toHaveLength(1);
   });
 });
+
+describe("ImportHistoricalMarketData invalid-candle handling", () => {
+  function repository(stored: UpsertCandleInput[]): CandleRepository {
+    return {
+      upsert: async (input): Promise<PersistedCandle> => {
+        stored.push(input);
+        return { id: "candle", ...input, ingestionId: input.ingestionId ?? null, sourceMetadata: input.sourceMetadata ?? {} };
+      },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+  }
+
+  // Fyers returned exactly this shape for one NIFTYBEES 5m opening bar on
+  // 2023-09-21: an `open` of 213 sitting below the bar's own `low` of 218.33.
+  const corrupt = {
+    openTime: new Date("2023-09-21T03:45:00Z"),
+    closeTime: new Date("2023-09-21T03:50:00Z"),
+    open: "213", high: "219.29", low: "218.33", close: "218.57", volume: "100489",
+  };
+  const sound = {
+    openTime: new Date("2023-09-21T03:50:00Z"),
+    closeTime: new Date("2023-09-21T03:55:00Z"),
+    open: "218.5", high: "219", low: "218.2", close: "218.9", volume: "5000",
+  };
+
+  function providerWith(candles: typeof sound[]): HistoricalMarketDataProvider {
+    return { id: "test-provider", fetchCandles: async () => candles };
+  }
+
+  const window = {
+    instrument,
+    providerInstrumentId: "NSE:NIFTYBEES-EQ",
+    timeframe: "5m" as const,
+    from: new Date("2023-09-21T00:00:00Z"),
+    to: new Date("2023-09-21T23:59:59Z"),
+  };
+
+  it("aborts on a corrupt candle by default, writing nothing", async () => {
+    const stored: UpsertCandleInput[] = [];
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, repository(stored));
+
+    await expect(service.execute({ ...window, provider: providerWith([corrupt, sound]) }))
+      .rejects.toThrow(/OHLC bounds/);
+    expect(stored).toHaveLength(0);
+    expect(ingestion.completed).toEqual([]);
+  });
+
+  it("drops the corrupt candle under skipInvalid, keeps the sound one, and reports both", async () => {
+    const stored: UpsertCandleInput[] = [];
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, repository(stored));
+
+    const result = await service.execute({
+      ...window,
+      provider: providerWith([corrupt, sound]),
+      skipInvalid: true,
+    });
+
+    expect(result).toMatchObject({ candlesFetched: 2, candlesPersisted: 1, candlesRejected: 1 });
+    // A silent drop would be indistinguishable from a market holiday, so the
+    // rejection must be diagnosable from the result alone.
+    expect(result.rejectedSamples).toEqual([
+      { openTime: "2023-09-21T03:45:00.000Z", reason: expect.stringMatching(/OHLC bounds/) },
+    ]);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].open).toBe("218.5");
+  });
+
+  it("reports zero rejections when every candle is sound", async () => {
+    const stored: UpsertCandleInput[] = [];
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, repository(stored));
+
+    const result = await service.execute({
+      ...window,
+      provider: providerWith([sound]),
+      skipInvalid: true,
+    });
+
+    expect(result).toMatchObject({ candlesRejected: 0, rejectedSamples: [] });
+  });
+});

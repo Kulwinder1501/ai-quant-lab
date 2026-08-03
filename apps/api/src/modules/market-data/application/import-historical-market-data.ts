@@ -18,6 +18,18 @@ export interface ImportHistoricalMarketDataInput {
    * idempotent. Default false preserves the strict behaviour.
    */
   skipExisting?: boolean;
+  /**
+   * When true, a candle that fails validation is counted and dropped instead of
+   * aborting the batch. Upstream data carries occasional corrupt prints — Fyers
+   * returned one NIFTYBEES 5m opening bar whose `open` sat below its own `low`, one
+   * bar in 25,159 — and letting a single bad tick block a multi-year backfill is the
+   * wrong trade. The rejected count and samples are reported, never swallowed: a
+   * silent drop would be indistinguishable from a market holiday.
+   *
+   * Default false preserves the strict abort, which is correct for CSV fixtures where
+   * any invalid row means the file is wrong.
+   */
+  skipInvalid?: boolean;
 }
 
 export interface ImportHistoricalMarketDataResult {
@@ -27,6 +39,10 @@ export interface ImportHistoricalMarketDataResult {
   candlesPersisted: number;
   /** Completed candles left untouched because they were already stored (skipExisting). */
   candlesSkipped: number;
+  /** Candles dropped for failing validation under `skipInvalid`. Zero when strict. */
+  candlesRejected: number;
+  /** Up to five rejected candles, so a bad upstream print is diagnosable. */
+  rejectedSamples: Array<{ openTime: string; reason: string }>;
 }
 
 function isPositiveDecimal(value: string): boolean {
@@ -118,19 +134,37 @@ export class ImportHistoricalMarketData {
         to: input.to,
       });
       const timestamps = new Set<number>();
-      const candles = fetched
+      const inRange = fetched
         .filter((candle) => candle.openTime >= input.from && candle.openTime <= input.to)
         .sort((left, right) => left.openTime.getTime() - right.openTime.getTime());
 
       // Validate the whole batch before any write, preventing malformed files
       // from creating a partially imported sequence.
-      for (const candle of candles) {
-        validateCandle(candle);
+      const candles: HistoricalMarketCandle[] = [];
+      const rejectedSamples: Array<{ openTime: string; reason: string }> = [];
+      let candlesRejected = 0;
+      for (const candle of inRange) {
+        try {
+          validateCandle(candle);
+        } catch (error) {
+          if (!input.skipInvalid) throw error;
+          candlesRejected += 1;
+          if (rejectedSamples.length < 5) {
+            rejectedSamples.push({
+              openTime: candle.openTime instanceof Date && !Number.isNaN(candle.openTime.getTime())
+                ? candle.openTime.toISOString()
+                : "unparseable timestamp",
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
+          continue;
+        }
         const timestamp = candle.openTime.getTime();
         if (timestamps.has(timestamp)) {
           throw new Error(`Provider returned duplicate candle timestamp ${candle.openTime.toISOString()}.`);
         }
         timestamps.add(timestamp);
+        candles.push(candle);
       }
       let candlesSkipped = 0;
       const now = new Date();
@@ -162,6 +196,8 @@ export class ImportHistoricalMarketData {
         candlesFetched: fetched.length,
         candlesPersisted,
         candlesSkipped,
+        candlesRejected,
+        rejectedSamples,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown historical import failure.";

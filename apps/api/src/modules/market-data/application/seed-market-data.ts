@@ -65,7 +65,10 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
 
         const timeframes = [
           { tf: "1d", count: 100, intervalMs: 24 * 3600 * 1000 },
-          { tf: "1h", count: 100, intervalMs: 3600 * 1000 },
+          // "60m", not "1h": `1h` is absent from supportedHistoricalTimeframes, so seeding it
+          // created a timeframe no collector could ever extend and that duplicated the
+          // semantics of real 60m bars under a second name.
+          { tf: "60m", count: 100, intervalMs: 3600 * 1000 },
           { tf: "15m", count: 100, intervalMs: 15 * 60 * 1000 },
           { tf: "5m", count: 100, intervalMs: 5 * 60 * 1000 },
           { tf: "1m", count: 100, intervalMs: 60 * 1000 },

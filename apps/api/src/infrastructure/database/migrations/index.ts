@@ -26,6 +26,11 @@ import { modelCompetitionMigration } from "./025-model-competition.js";
 import { purgeFabricatedPredictionsMigration } from "./026-purge-fabricated-predictions.js";
 import { equityTrainingUniverseMigration } from "./027-equity-training-universe.js";
 import { marketContextIntegrityMigration } from "./028-market-context-integrity.js";
+import { providerCredentialsMigration } from "./029-provider-credentials.js";
+import { etfIndexProxiesMigration } from "./030-etf-index-proxies.js";
+import { auxiliaryPredictionSettlementMigration } from "./031-auxiliary-prediction-settlement.js";
+import { volatilityCompetitionMigration } from "./032-volatility-competition.js";
+import { purgeSeeded1hCandlesMigration } from "./033-purge-seeded-1h-candles.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -56,4 +61,9 @@ export const migrations = [
   purgeFabricatedPredictionsMigration,
   equityTrainingUniverseMigration,
   marketContextIntegrityMigration,
+  providerCredentialsMigration,
+  etfIndexProxiesMigration,
+  auxiliaryPredictionSettlementMigration,
+  volatilityCompetitionMigration,
+  purgeSeeded1hCandlesMigration,
 ];

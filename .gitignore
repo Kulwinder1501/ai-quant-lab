@@ -9,3 +9,9 @@ __pycache__/
 data/
 models/
 postgres-data/
+
+# Local .env backups — never commit; they hold live secrets.
+.env.bak*
+
+# TypeScript incremental build artifacts — regenerated, never reviewed.
+*.tsbuildinfo
