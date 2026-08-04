@@ -215,3 +215,67 @@ export function midPriceForIv(bid: number | null, ask: number | null): number | 
   if (bid <= 0 || ask <= 0 || ask < bid) return null;
   return (bid + ask) / 2;
 }
+
+export interface ParityPair {
+  strike: number;
+  /** Mid of the call at this strike. */
+  callMid: number;
+  /** Mid of the put at the same strike and expiry. */
+  putMid: number;
+}
+
+/**
+ * The forward the option market itself is pricing, recovered from put-call parity.
+ *
+ * Black-Scholes on spot with only a risk-free rate assumes a forward of `S*e^(rT)`, which
+ * is wrong for an index whose constituents pay dividends: the real forward sits *below*
+ * spot, not above. Measured on a live BANKNIFTY chain — spot 57,907, r-only forward
+ * ~58,118, parity-implied forward ~57,712. A 406-point error, 0.7% of spot, and it showed
+ * up as a 7.5 percentage-point gap between call IV (9.00%) and put IV (16.52%) at the
+ * same strike, which put-call parity forbids.
+ *
+ * Deriving the forward removes the carry assumption entirely: the market states its own.
+ * `F = (C - P)/e^(-rT) + K` for any strike where both legs are quoted two-sided.
+ *
+ * The **median** across strikes, not the mean, because one stale quote in the set would
+ * drag an average while leaving a median untouched. On the live chain the per-strike
+ * estimates spanned 57,710 to 57,717 — a seven-point spread on a 57,700 strike — so the
+ * quantity is well determined and disagreement is a quote problem, not a modelling one.
+ */
+export function impliedForwardFromParity(
+  pairs: readonly ParityPair[],
+  riskFreeRate: number,
+  timeToExpiryYears: number,
+): number | null {
+  if (timeToExpiryYears <= 0 || !Number.isFinite(timeToExpiryYears)) return null;
+  const discount = Math.exp(-riskFreeRate * timeToExpiryYears);
+  const forwards: number[] = [];
+  for (const pair of pairs) {
+    if (!Number.isFinite(pair.strike) || pair.strike <= 0) continue;
+    if (!Number.isFinite(pair.callMid) || !Number.isFinite(pair.putMid)) continue;
+    if (pair.callMid <= 0 || pair.putMid <= 0) continue;
+    const forward = (pair.callMid - pair.putMid) / discount + pair.strike;
+    if (Number.isFinite(forward) && forward > 0) forwards.push(forward);
+  }
+  if (forwards.length === 0) return null;
+  forwards.sort((left, right) => left - right);
+  const middle = Math.floor(forwards.length / 2);
+  return forwards.length % 2 === 1
+    ? forwards[middle]!
+    : (forwards[middle - 1]! + forwards[middle]!) / 2;
+}
+
+/**
+ * The spot to feed a Black-Scholes call so it reproduces a given forward.
+ *
+ * BS-on-spot implies `forward = spot*e^(rT)`, so passing `F*e^(-rT)` makes the model's
+ * own forward equal `F` exactly. This is how a forward-consistent IV is obtained without
+ * replacing the pricing engine with a Black-76 variant.
+ */
+export function effectiveSpotForForward(
+  forward: number,
+  riskFreeRate: number,
+  timeToExpiryYears: number,
+): number {
+  return forward * Math.exp(-riskFreeRate * timeToExpiryYears);
+}

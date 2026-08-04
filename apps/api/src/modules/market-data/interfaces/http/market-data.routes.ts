@@ -11,8 +11,10 @@ import {
   quoteSpread,
   summariseLiquidity,
 } from "../../domain/option-chain.js";
-import { yearsToExpiry } from "../../../pricing/domain/black-scholes-engine.js";
+import { priceEuropeanOption, yearsToExpiry } from "../../../pricing/domain/black-scholes-engine.js";
 import {
+  effectiveSpotForForward,
+  impliedForwardFromParity,
   impliedVolatilityFromPremium,
   midPriceForIv,
 } from "../../../pricing/domain/implied-volatility.js";
@@ -269,6 +271,42 @@ export function registerMarketDataRoutes(
       const atmStrike = snapshot.underlyingValue === null
         ? null
         : atmStrikeOf(snapshot.quotes, snapshot.underlyingValue);
+
+      /*
+       * The forward the option market is pricing, per expiry, from put-call parity.
+       *
+       * Using spot with only a risk-free rate assumes a forward of S*e^(rT), which is
+       * wrong for a dividend-paying index: the real forward sits below spot. Measured on
+       * a live BANKNIFTY chain the error was 406 points, 0.7% of spot, and it surfaced as
+       * a 7.5-point gap between call IV (9.00%) and put IV (16.52%) at the same strike —
+       * something put-call parity forbids, so it was a modelling fault rather than a
+       * market one. Deriving the forward removes the carry assumption entirely.
+       *
+       * Falls back to spot when parity cannot be evaluated, which keeps a chain with
+       * one-sided quotes usable while leaving the same-strike IV gap visible rather than
+       * papered over.
+       */
+      const forwardByExpiry = new Map<string, number>();
+      for (const entry of expiriesOf(snapshot)) {
+        const expiryKey = entry.expiryDate.toISOString().slice(0, 10);
+        const timeToExpiry = yearsToExpiry(snapshot.observedAt, entry.expiryDate);
+        if (timeToExpiry <= 0) continue;
+        const midByStrike = new Map<number, { callMid?: number; putMid?: number }>();
+        for (const quote of snapshot.quotes) {
+          if (quote.expiryDate.toISOString().slice(0, 10) !== expiryKey) continue;
+          const mid = midPriceForIv(quote.bid, quote.ask);
+          if (mid === null) continue;
+          const slot = midByStrike.get(quote.strikePrice) ?? {};
+          if (quote.optionType === "CE") slot.callMid = mid;
+          else slot.putMid = mid;
+          midByStrike.set(quote.strikePrice, slot);
+        }
+        const pairs = [...midByStrike.entries()]
+          .filter(([, slot]) => slot.callMid !== undefined && slot.putMid !== undefined)
+          .map(([strike, slot]) => ({ strike, callMid: slot.callMid!, putMid: slot.putMid! }));
+        const forward = impliedForwardFromParity(pairs, RISK_FREE_RATE, timeToExpiry);
+        if (forward !== null) forwardByExpiry.set(expiryKey, forward);
+      }
       const ratios = putCallRatios(snapshot.quotes);
       const liquidity = summariseLiquidity(snapshot.quotes, costBudgetPercent);
       const heaviest = largestOpenInterestStrikes(snapshot.quotes);
@@ -292,16 +330,38 @@ export function registerMarketDataRoutes(
         // from it would look identical to one derived from a live market. A refusal
         // carries its reason so the UI can say why rather than showing a blank.
         const midForIv = midPriceForIv(quote.bid, quote.ask);
-        const ivResult = snapshot.underlyingValue === null || midForIv === null
+        const quoteExpiryKey = quote.expiryDate.toISOString().slice(0, 10);
+        const quoteTime = yearsToExpiry(snapshot.observedAt, quote.expiryDate);
+        const impliedForward = forwardByExpiry.get(quoteExpiryKey) ?? null;
+        // The spot that makes the model's own forward equal the market's.
+        const pricingSpot = impliedForward !== null && quoteTime > 0
+          ? effectiveSpotForForward(impliedForward, RISK_FREE_RATE, quoteTime)
+          : snapshot.underlyingValue;
+        const ivResult = pricingSpot === null || midForIv === null
           ? null
           : impliedVolatilityFromPremium({
-            spot: snapshot.underlyingValue,
+            spot: pricingSpot,
             strike: quote.strikePrice,
-            timeToExpiryYears: yearsToExpiry(snapshot.observedAt, quote.expiryDate),
+            timeToExpiryYears: quoteTime,
             riskFreeRate: RISK_FREE_RATE,
             optionType: quote.optionType,
             premium: midForIv,
           });
+        // Greeks are computed AT the solved IV, so they inherit its refusals exactly.
+        // Falling back to a house volatility would produce a full set of confident greeks
+        // for a contract whose price could not support any of them -- the same failure the
+        // IV solver refuses, one layer later and harder to spot.
+        const greeks = ivResult?.measurable && pricingSpot !== null
+          ? priceEuropeanOption({
+            spot: pricingSpot,
+            strike: quote.strikePrice,
+            timeToExpiryYears: quoteTime,
+            riskFreeRate: RISK_FREE_RATE,
+            volatility: ivResult.impliedVolatility,
+            optionType: quote.optionType,
+          })
+          : null;
+
         const leg = {
           lastPrice: quote.lastPrice,
           bid: quote.bid,
@@ -322,6 +382,20 @@ export function registerMarketDataRoutes(
           impliedVolatilityRefusal: ivResult === null
             ? (snapshot.underlyingValue === null ? "NO_UNDERLYING" : "NO_TWO_SIDED_QUOTE")
             : ivResult.measurable ? null : ivResult.reason,
+          // Null together with IV, never independently: a greek without the volatility it
+          // was computed from is not a measurement.
+          delta: greeks?.delta ?? null,
+          gamma: greeks?.gamma ?? null,
+          // Currency change per calendar day, and negative for a long option -- the buyer
+          // pays theta. Presented as the engine reports it rather than sign-flipped.
+          theta: greeks?.theta ?? null,
+          // Per one absolute percentage point of IV, which is the convention a trader
+          // reads; unlike delta it is positive for both calls and puts.
+          vega: greeks?.vega ?? null,
+          modelPremium: greeks?.premium ?? null,
+          intrinsicValue: greeks?.intrinsicValue ?? null,
+          timeValue: greeks?.timeValue ?? null,
+          daysToExpiry: quoteTime > 0 ? quoteTime * 365 : 0,
         };
         row[quote.optionType === "CE" ? "call" : "put"] = leg;
       }
@@ -334,6 +408,8 @@ export function registerMarketDataRoutes(
           observedAt: snapshot.observedAt.toISOString(),
           underlyingValue: snapshot.underlyingValue,
           atmStrike,
+          // Exposed so the carry assumption is auditable rather than hidden in the IV.
+          impliedForwardByExpiry: Object.fromEntries(forwardByExpiry),
           expiries: expiriesOf(snapshot).map((entry) => ({
             expiryDate: entry.expiryDate.toISOString().slice(0, 10),
             expiryKind: entry.expiryKind,

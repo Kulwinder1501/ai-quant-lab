@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { priceEuropeanOption } from "./black-scholes-engine.js";
-import { impliedVolatilityFromPremium, midPriceForIv } from "./implied-volatility.js";
+import {
+  effectiveSpotForForward,
+  impliedForwardFromParity,
+  impliedVolatilityFromPremium,
+  midPriceForIv,
+} from "./implied-volatility.js";
 
 const BASE = {
   spot: 24_000,
@@ -159,5 +164,68 @@ describe("midPriceForIv", () => {
     ["crossed", 101, 99],
   ])("returns null for %s rather than falling back to a stale price", (_label, bid, ask) => {
     expect(midPriceForIv(bid, ask)).toBeNull();
+  });
+});
+
+describe("impliedForwardFromParity", () => {
+  const T = 21 / 365;
+  const r = 0.065;
+
+  /** Call and put mids consistent with a chosen forward, so it can be recovered. */
+  function pairsFor(forward: number, strikes: number[]) {
+    const discount = Math.exp(-r * T);
+    return strikes.map((strike) => {
+      // Any pair satisfying C - P = (F - K) * discount is parity-consistent; the split
+      // between them does not affect the implied forward.
+      const difference = (forward - strike) * discount;
+      const putMid = 500;
+      return { strike, callMid: putMid + difference, putMid };
+    });
+  }
+
+  it("recovers a forward that sits below spot, as a dividend-paying index implies", () => {
+    // The live case: spot 57,907 but the option market pricing 57,712.
+    const forward = 57_712;
+    const result = impliedForwardFromParity(pairsFor(forward, [57_700, 57_800, 57_900]), r, T);
+
+    expect(result).not.toBeNull();
+    expect(result!).toBeCloseTo(forward, 6);
+  });
+
+  // The median exists so one stale quote cannot drag the estimate, which an average would.
+  it("ignores a single stale quote that would skew a mean", () => {
+    const pairs = [...pairsFor(57_712, [57_700, 57_800, 57_900])];
+    pairs.push({ strike: 58_000, callMid: 5_000, putMid: 1 }); // nonsense, far off parity
+
+    const result = impliedForwardFromParity(pairs, r, T);
+
+    // A mean over these four would land thousands of points high.
+    expect(result!).toBeGreaterThan(57_700);
+    expect(result!).toBeLessThan(57_900);
+  });
+
+  it("returns null when no strike has two usable mids", () => {
+    expect(impliedForwardFromParity([{ strike: 100, callMid: 0, putMid: 5 }], r, T)).toBeNull();
+    expect(impliedForwardFromParity([], r, T)).toBeNull();
+  });
+
+  it("returns null once time to expiry has run out", () => {
+    expect(impliedForwardFromParity(pairsFor(57_712, [57_700]), r, 0)).toBeNull();
+  });
+});
+
+describe("effectiveSpotForForward", () => {
+  // The point of the helper: BS-on-spot implies forward = spot*e^(rT), so feeding
+  // F*e^(-rT) makes the model reproduce F exactly.
+  it("round-trips to the forward through the model's own carry", () => {
+    const forward = 57_712;
+    const r = 0.065;
+    const T = 21 / 365;
+
+    const spot = effectiveSpotForForward(forward, r, T);
+
+    expect(spot * Math.exp(r * T)).toBeCloseTo(forward, 6);
+    // And it is below the forward, since carry is being removed rather than added.
+    expect(spot).toBeLessThan(forward);
   });
 });

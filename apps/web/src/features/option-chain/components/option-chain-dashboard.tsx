@@ -13,6 +13,14 @@ const DEFAULT_COST_BUDGET_PERCENT = 1.0;
 
 const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
 
+/**
+ * Quotes and greeks are separate views rather than one table.
+ *
+ * Both sides of the ladder need seven columns each; showing greeks alongside would be
+ * twenty-two columns, which is unreadable at any width.
+ */
+type ChainView = "quotes" | "greeks";
+
 interface Leg {
   lastPrice: number | null;
   bid: number | null;
@@ -28,6 +36,14 @@ interface Leg {
   /** Solved from the mid, not published by the exchange. Null carries a reason. */
   impliedVolatility: number | null;
   impliedVolatilityRefusal: string | null;
+  /** Computed at the solved IV, so null together with it - never at a house volatility. */
+  delta: number | null;
+  gamma: number | null;
+  /** Currency per calendar day. Negative for a long option: the buyer pays theta. */
+  theta: number | null;
+  /** Per one absolute percentage point of IV. Positive for calls and puts alike. */
+  vega: number | null;
+  daysToExpiry: number | null;
 }
 
 interface StrikeRow {
@@ -46,6 +62,7 @@ interface ChainResponse {
   underlyingValue?: number | null;
   atmStrike?: number | null;
   atmImpliedVolatility?: number | null;
+  impliedForwardByExpiry?: Record<string, number>;
   expiries?: Array<{ expiryDate: string; expiryKind: string }>;
   putCall?: {
     openInterestRatio: number | null;
@@ -97,6 +114,11 @@ function ivLabel(leg: Leg | null): string {
   }
 }
 
+/** Fixed decimals, or an em dash when the greek could not be computed. */
+function fixed(value: number | null, places: number): string {
+  return value === null || !Number.isFinite(value) ? "—" : value.toFixed(places);
+}
+
 function signed(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   return `${value > 0 ? "+" : ""}${compact(value)}`;
@@ -105,6 +127,7 @@ function signed(value: number | null): string {
 export function OptionChainDashboard() {
   const [underlying, setUnderlying] = useState<string>("NIFTY50");
   const [expiry, setExpiry] = useState<string>("");
+  const [view, setView] = useState<ChainView>("quotes");
   const [chain, setChain] = useState<ChainResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -191,6 +214,20 @@ export function OptionChainDashboard() {
             {symbol}
           </button>
         ))}
+        <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
+          {(["quotes", "greeks"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => setView(option)}
+              className={`rounded-lg px-3 py-1 text-xs font-bold capitalize transition ${
+                view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
         {(chain?.expiries ?? []).length > 1 && (
           <select
             value={expiry}
@@ -237,7 +274,11 @@ export function OptionChainDashboard() {
                 {formatNumber(chain.underlyingValue ?? 0, 2)}
               </p>
               <p className="mt-1 text-xs text-slate-400">
-                ATM strike {chain.atmStrike ?? "—"} · ATM IV{" "}
+                fwd{" "}
+                {Object.values(chain.impliedForwardByExpiry ?? {})[0] === undefined
+                  ? "—"
+                  : formatNumber(Object.values(chain.impliedForwardByExpiry ?? {})[0]!, 0)}
+                {" · "}ATM {chain.atmStrike ?? "—"} · IV{" "}
                 {chain.atmImpliedVolatility === null || chain.atmImpliedVolatility === undefined
                   ? "unmeasurable"
                   : `${(chain.atmImpliedVolatility * 100).toFixed(2)}%`}
@@ -304,21 +345,49 @@ export function OptionChainDashboard() {
               <table className="w-full min-w-[1000px] text-right text-xs">
                 <thead className="text-[10px] uppercase tracking-wider text-slate-500">
                   <tr className="border-b border-white/5">
-                    <th className="px-3 py-2 text-right">OI chg</th>
-                    <th className="px-3 py-2 text-right">OI</th>
-                    <th className="px-3 py-2 text-right">Vol</th>
-                    <th className="px-3 py-2 text-right">IV</th>
-                    <th className="px-3 py-2 text-right">Spread</th>
-                    <th className="px-3 py-2 text-right">Bid</th>
-                    <th className="px-3 py-2 text-right">Ask</th>
+                    {view === "quotes" ? (
+                      <>
+                        <th className="px-3 py-2 text-right">OI chg</th>
+                        <th className="px-3 py-2 text-right">OI</th>
+                        <th className="px-3 py-2 text-right">Vol</th>
+                        <th className="px-3 py-2 text-right">IV</th>
+                        <th className="px-3 py-2 text-right">Spread</th>
+                        <th className="px-3 py-2 text-right">Bid</th>
+                        <th className="px-3 py-2 text-right">Ask</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="px-3 py-2 text-right">Vega</th>
+                        <th className="px-3 py-2 text-right">Theta</th>
+                        <th className="px-3 py-2 text-right">Gamma</th>
+                        <th className="px-3 py-2 text-right">Delta</th>
+                        <th className="px-3 py-2 text-right">IV</th>
+                        <th className="px-3 py-2 text-right">Bid</th>
+                        <th className="px-3 py-2 text-right">Ask</th>
+                      </>
+                    )}
                     <th className="px-3 py-2 text-center text-cyan-300">Strike</th>
-                    <th className="px-3 py-2 text-left">Bid</th>
-                    <th className="px-3 py-2 text-left">Ask</th>
-                    <th className="px-3 py-2 text-left">Spread</th>
-                    <th className="px-3 py-2 text-left">IV</th>
-                    <th className="px-3 py-2 text-left">Vol</th>
-                    <th className="px-3 py-2 text-left">OI</th>
-                    <th className="px-3 py-2 text-left">OI chg</th>
+                    {view === "quotes" ? (
+                      <>
+                        <th className="px-3 py-2 text-left">Bid</th>
+                        <th className="px-3 py-2 text-left">Ask</th>
+                        <th className="px-3 py-2 text-left">Spread</th>
+                        <th className="px-3 py-2 text-left">IV</th>
+                        <th className="px-3 py-2 text-left">Vol</th>
+                        <th className="px-3 py-2 text-left">OI</th>
+                        <th className="px-3 py-2 text-left">OI chg</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="px-3 py-2 text-left">Bid</th>
+                        <th className="px-3 py-2 text-left">Ask</th>
+                        <th className="px-3 py-2 text-left">IV</th>
+                        <th className="px-3 py-2 text-left">Delta</th>
+                        <th className="px-3 py-2 text-left">Gamma</th>
+                        <th className="px-3 py-2 text-left">Theta</th>
+                        <th className="px-3 py-2 text-left">Vega</th>
+                      </>
+                    )}
                   </tr>
                   <tr className="border-b border-white/10 text-[10px]">
                     <th colSpan={7} className="px-3 py-1 text-center font-bold text-emerald-300/80">CALLS</th>
@@ -327,67 +396,93 @@ export function OptionChainDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => (
-                    <tr
-                      key={row.strikePrice}
-                      className={`border-b border-white/5 ${
-                        row.isAtm ? "bg-cyan-500/10" : "hover:bg-white/[0.03]"
-                      }`}
-                    >
-                      <td className={row.call?.openInterestChange && row.call.openInterestChange > 0 ? "px-3 py-1.5 text-emerald-300" : "px-3 py-1.5 text-rose-300"}>
-                        {signed(row.call?.openInterestChange ?? null)}
-                      </td>
-                      <td className="px-3 py-1.5 text-slate-300">{compact(row.call?.openInterest ?? null)}</td>
-                      <td className="px-3 py-1.5 text-slate-400">{compact(row.call?.volume ?? null)}</td>
+                  {rows.map((row) => {
+                    const ivCell = (leg: Leg | null, align: string) => (
                       <td
-                        className={`px-3 py-1.5 ${
-                          row.call?.impliedVolatility === null ? "text-slate-600 italic" : "text-violet-300"
+                        className={`px-3 py-1.5 ${align} ${
+                          leg?.impliedVolatility === null ? "text-slate-600 italic" : "text-violet-300"
                         }`}
-                        title={row.call?.impliedVolatilityRefusal ?? undefined}
+                        title={leg?.impliedVolatilityRefusal ?? undefined}
                       >
-                        {ivLabel(row.call)}
+                        {ivLabel(leg)}
                       </td>
-                      <td className={`px-3 py-1.5 font-bold ${spreadTone(row.call)}`}>
-                        {row.call?.spreadPercentOfMid === null || !row.call
-                          ? "—"
-                          : `${row.call.spreadPercentOfMid.toFixed(2)}%`}
-                      </td>
-                      <td className="px-3 py-1.5 text-slate-300">{row.call?.bid ?? "—"}</td>
-                      <td className="px-3 py-1.5 text-slate-300">{row.call?.ask ?? "—"}</td>
-                      <td
-                        className={`px-3 py-1.5 text-center font-black ${
-                          row.isAtm ? "text-cyan-200" : "text-white"
+                    );
+                    return (
+                      <tr
+                        key={row.strikePrice}
+                        className={`border-b border-white/5 ${
+                          row.isAtm ? "bg-cyan-500/10" : "hover:bg-white/[0.03]"
                         }`}
                       >
-                        {row.strikePrice}
-                      </td>
-                      <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.bid ?? "—"}</td>
-                      <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.ask ?? "—"}</td>
-                      <td className={`px-3 py-1.5 text-left font-bold ${spreadTone(row.put)}`}>
-                        {row.put?.spreadPercentOfMid === null || !row.put
-                          ? "—"
-                          : `${row.put.spreadPercentOfMid.toFixed(2)}%`}
-                      </td>
-                      <td
-                        className={`px-3 py-1.5 text-left ${
-                          row.put?.impliedVolatility === null ? "text-slate-600 italic" : "text-violet-300"
-                        }`}
-                        title={row.put?.impliedVolatilityRefusal ?? undefined}
-                      >
-                        {ivLabel(row.put)}
-                      </td>
-                      <td className="px-3 py-1.5 text-left text-slate-400">{compact(row.put?.volume ?? null)}</td>
-                      <td className="px-3 py-1.5 text-left text-slate-300">{compact(row.put?.openInterest ?? null)}</td>
-                      <td className={row.put?.openInterestChange && row.put.openInterestChange > 0 ? "px-3 py-1.5 text-left text-emerald-300" : "px-3 py-1.5 text-left text-rose-300"}>
-                        {signed(row.put?.openInterestChange ?? null)}
-                      </td>
-                    </tr>
-                  ))}
+                        {view === "quotes" ? (
+                          <>
+                            <td className={`px-3 py-1.5 ${(row.call?.openInterestChange ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                              {signed(row.call?.openInterestChange ?? null)}
+                            </td>
+                            <td className="px-3 py-1.5 text-slate-300">{compact(row.call?.openInterest ?? null)}</td>
+                            <td className="px-3 py-1.5 text-slate-400">{compact(row.call?.volume ?? null)}</td>
+                            {ivCell(row.call, "text-right")}
+                            <td className={`px-3 py-1.5 font-bold ${spreadTone(row.call)}`}>
+                              {row.call?.spreadPercentOfMid == null ? "—" : `${row.call.spreadPercentOfMid.toFixed(2)}%`}
+                            </td>
+                            <td className="px-3 py-1.5 text-slate-300">{row.call?.bid ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-slate-300">{row.call?.ask ?? "—"}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="px-3 py-1.5 text-sky-300">{fixed(row.call?.vega ?? null, 2)}</td>
+                            <td className="px-3 py-1.5 text-amber-300">{fixed(row.call?.theta ?? null, 2)}</td>
+                            <td className="px-3 py-1.5 text-slate-400">{fixed(row.call?.gamma ?? null, 6)}</td>
+                            <td className="px-3 py-1.5 font-bold text-emerald-300">{fixed(row.call?.delta ?? null, 4)}</td>
+                            {ivCell(row.call, "text-right")}
+                            <td className="px-3 py-1.5 text-slate-300">{row.call?.bid ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-slate-300">{row.call?.ask ?? "—"}</td>
+                          </>
+                        )}
+                        <td className={`px-3 py-1.5 text-center font-black ${row.isAtm ? "text-cyan-200" : "text-white"}`}>
+                          {row.strikePrice}
+                        </td>
+                        {view === "quotes" ? (
+                          <>
+                            <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.bid ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.ask ?? "—"}</td>
+                            <td className={`px-3 py-1.5 text-left font-bold ${spreadTone(row.put)}`}>
+                              {row.put?.spreadPercentOfMid == null ? "—" : `${row.put.spreadPercentOfMid.toFixed(2)}%`}
+                            </td>
+                            {ivCell(row.put, "text-left")}
+                            <td className="px-3 py-1.5 text-left text-slate-400">{compact(row.put?.volume ?? null)}</td>
+                            <td className="px-3 py-1.5 text-left text-slate-300">{compact(row.put?.openInterest ?? null)}</td>
+                            <td className={`px-3 py-1.5 text-left ${(row.put?.openInterestChange ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                              {signed(row.put?.openInterestChange ?? null)}
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.bid ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.ask ?? "—"}</td>
+                            {ivCell(row.put, "text-left")}
+                            <td className="px-3 py-1.5 text-left font-bold text-rose-300">{fixed(row.put?.delta ?? null, 4)}</td>
+                            <td className="px-3 py-1.5 text-left text-slate-400">{fixed(row.put?.gamma ?? null, 6)}</td>
+                            <td className="px-3 py-1.5 text-left text-amber-300">{fixed(row.put?.theta ?? null, 2)}</td>
+                            <td className="px-3 py-1.5 text-left text-sky-300">{fixed(row.put?.vega ?? null, 2)}</td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
             <p className="border-t border-white/5 px-4 py-3 text-[11px] text-slate-500">
+              {view === "greeks" && (
+                <>
+                  Theta is currency per calendar day and is negative for a long option — the buyer
+                  pays it. Vega is per one absolute percentage point of IV and is positive for calls
+                  and puts alike. Every greek is computed <strong>at the solved IV</strong>, so it is
+                  blank exactly when IV is, never at a substituted volatility.{" "}
+                </>
+              )}
               IV is <strong>derived</strong>: the volatility that reproduces the observed mid under
               Black-Scholes, solved from a two-sided quote only — never from a last price, which can be
               hours stale. An italic entry names why it could not be solved rather than showing a blank.
