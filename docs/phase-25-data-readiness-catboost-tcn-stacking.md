@@ -1488,6 +1488,75 @@ were not on the `:45` session grid -- seed interval arithmetic, not market obser
 so the deletion removes fabricated evidence rather than coverage. Same reasoning as
 `013-purge-fabricated-rsi`.
 
+
+## Straddle cost study: what the volatility signal must achieve (2026-08-03)
+
+The first attempt to price the volatility signal as a straddle produced an 80.5% win rate.
+That was wrong, and the error is worth recording because it is the exact failure this
+project's purging machinery exists to prevent.
+
+**Error 1 - conditioning on the outcome.** The study selected bars whose *realised* label
+was EXPANSION. That label is computed from the forward window, so it selects the bars where
+the future move was large and then measures whether the future move was large. There was no
+model in the study at all.
+
+**Error 2 - tenor mismatch.** The straddle was priced to the next Thursday, sometimes one
+day away and therefore very cheap, while the payoff was measured over five days. A cheap
+option against a long measurement window manufactures profit; it accounted for the entire
+apparent +56 pts baseline in the corrected-selection run.
+
+With the tenor matched to the label horizon (a synthetic five-trading-day option, which is
+the right research construct for asking whether predicted range beats implied move over the
+*same* window), NIFTY50 `1d`, 2023-01 onward, IV from that session's India VIX, held to
+expiry and valued at intrinsic:
+
+| Panel | Entries | Win rate | Mean P&L per unit |
+|---|---|---|---|
+| **A - buy every actionable straddle (no signal)** | 765 | 36.9% | **-43.5 pts** |
+| C - selecting on the realised label (INVALID) | 211 | 73.9% | +145.2 pts |
+
+Panel A is the honest baseline and it is *negative*, as theory requires: buying premium
+loses to the variance risk premium. The 36.9% win rate is squarely in the expected range
+for a long straddle held to expiry. The gap between the two panels is look-ahead, not edge.
+
+### The decision-relevant number
+
+Splitting the baseline by realised outcome and solving for the precision at which expected
+P&L reaches zero:
+
+| | |
+|---|---|
+| Mean P&L when range did expand | +145.2 pts (n=211) |
+| Mean P&L when it did not | -115.4 pts (n=554) |
+| EXPANSION base rate — a no-skill model's precision | 27.6% |
+| **Breakeven EXPANSION precision, before fees** | **44.3%** |
+| Required lift over the base rate | **1.61x** |
+
+So the model must reach roughly 44% precision on the EXPANSION class before the strategy
+stops losing money, and that is before two legs of brokerage and STT. Fees push it higher.
+
+### The gap this exposes
+
+**Per-class precision is not recorded anywhere.** The pooled model's stored
+`validationMetrics` carries macro-F1, accuracy, balanced accuracy, coverage, class counts,
+and a committed hit rate — but no per-class precision. The promotion gate scores macro-F1;
+the trading decision needs EXPANSION precision specifically. Those are different
+quantities, and only the second determines whether the straddle makes money.
+
+The closest available proxy is the committed hit rate of 0.5532 over 479 committed calls,
+which is above the 44.3% breakeven. That is encouraging and it is **not** a measurement of
+what matters: it pools CONTRACTION with EXPANSION, and only EXPANSION is tradeable at all
+under `023-option-contract-requires-long`.
+
+Recording per-class precision and recall in `validationMetrics` is therefore the next
+concrete step, and it is a prerequisite for any decision about trading this signal. It also
+satisfies invariant 8 directly: a classification gain that does not improve net-of-cost
+utility is not an improvement, and until per-class precision is recorded that cannot be
+evaluated.
+
+The economics gate itself refuses 12.1% of bars, 78 of them because the option chain
+already prices a move larger than the signal predicts.
+
 ### Stage 2: Feature discipline and validation activation
 
 - Evaluate aggregate/drop alternatives for sparse features.
