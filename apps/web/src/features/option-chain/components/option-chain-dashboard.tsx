@@ -25,6 +25,9 @@ interface Leg {
   withinCostBudget: boolean | null;
   moneyness: "ITM" | "ATM" | "OTM" | null;
   providerSymbol: string;
+  /** Solved from the mid, not published by the exchange. Null carries a reason. */
+  impliedVolatility: number | null;
+  impliedVolatilityRefusal: string | null;
 }
 
 interface StrikeRow {
@@ -42,6 +45,7 @@ interface ChainResponse {
   observedAt?: string;
   underlyingValue?: number | null;
   atmStrike?: number | null;
+  atmImpliedVolatility?: number | null;
   expiries?: Array<{ expiryDate: string; expiryKind: string }>;
   putCall?: {
     openInterestRatio: number | null;
@@ -71,6 +75,26 @@ function compact(value: number | null): string {
   if (abs >= 1e5) return `${(value / 1e5).toFixed(2)}L`;
   if (abs >= 1e3) return `${(value / 1e3).toFixed(1)}k`;
   return String(Math.round(value));
+}
+
+/**
+ * IV as a percentage, or a short reason why it could not be solved.
+ *
+ * A blank would read as "no data"; the reason distinguishes an expired contract from an
+ * unquoted one from a stale price below intrinsic, and those imply different actions.
+ */
+function ivLabel(leg: Leg | null): string {
+  if (!leg) return "—";
+  if (leg.impliedVolatility !== null) return `${(leg.impliedVolatility * 100).toFixed(1)}%`;
+  switch (leg.impliedVolatilityRefusal) {
+    case "EXPIRED_OR_ZERO_TIME": return "expired";
+    case "NO_TWO_SIDED_QUOTE": return "no quote";
+    case "BELOW_INTRINSIC": return "sub-intr.";
+    case "ABOVE_UPPER_BOUND": return "over cap";
+    case "EXTRINSIC_BELOW_PRICE_RESOLUTION": return "no extr.";
+    case "NO_UNDERLYING": return "no spot";
+    default: return "—";
+  }
 }
 
 function signed(value: number | null): string {
@@ -212,7 +236,12 @@ export function OptionChainDashboard() {
               <p className="mt-1 text-2xl font-black text-white">
                 {formatNumber(chain.underlyingValue ?? 0, 2)}
               </p>
-              <p className="mt-1 text-xs text-slate-400">ATM strike {chain.atmStrike ?? "—"}</p>
+              <p className="mt-1 text-xs text-slate-400">
+                ATM strike {chain.atmStrike ?? "—"} · ATM IV{" "}
+                {chain.atmImpliedVolatility === null || chain.atmImpliedVolatility === undefined
+                  ? "unmeasurable"
+                  : `${(chain.atmImpliedVolatility * 100).toFixed(2)}%`}
+              </p>
             </GlassPanel>
 
             <GlassPanel className="p-4">
@@ -278,6 +307,7 @@ export function OptionChainDashboard() {
                     <th className="px-3 py-2 text-right">OI chg</th>
                     <th className="px-3 py-2 text-right">OI</th>
                     <th className="px-3 py-2 text-right">Vol</th>
+                    <th className="px-3 py-2 text-right">IV</th>
                     <th className="px-3 py-2 text-right">Spread</th>
                     <th className="px-3 py-2 text-right">Bid</th>
                     <th className="px-3 py-2 text-right">Ask</th>
@@ -285,14 +315,15 @@ export function OptionChainDashboard() {
                     <th className="px-3 py-2 text-left">Bid</th>
                     <th className="px-3 py-2 text-left">Ask</th>
                     <th className="px-3 py-2 text-left">Spread</th>
+                    <th className="px-3 py-2 text-left">IV</th>
                     <th className="px-3 py-2 text-left">Vol</th>
                     <th className="px-3 py-2 text-left">OI</th>
                     <th className="px-3 py-2 text-left">OI chg</th>
                   </tr>
                   <tr className="border-b border-white/10 text-[10px]">
-                    <th colSpan={6} className="px-3 py-1 text-center font-bold text-emerald-300/80">CALLS</th>
+                    <th colSpan={7} className="px-3 py-1 text-center font-bold text-emerald-300/80">CALLS</th>
                     <th />
-                    <th colSpan={6} className="px-3 py-1 text-center font-bold text-rose-300/80">PUTS</th>
+                    <th colSpan={7} className="px-3 py-1 text-center font-bold text-rose-300/80">PUTS</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -308,6 +339,14 @@ export function OptionChainDashboard() {
                       </td>
                       <td className="px-3 py-1.5 text-slate-300">{compact(row.call?.openInterest ?? null)}</td>
                       <td className="px-3 py-1.5 text-slate-400">{compact(row.call?.volume ?? null)}</td>
+                      <td
+                        className={`px-3 py-1.5 ${
+                          row.call?.impliedVolatility === null ? "text-slate-600 italic" : "text-violet-300"
+                        }`}
+                        title={row.call?.impliedVolatilityRefusal ?? undefined}
+                      >
+                        {ivLabel(row.call)}
+                      </td>
                       <td className={`px-3 py-1.5 font-bold ${spreadTone(row.call)}`}>
                         {row.call?.spreadPercentOfMid === null || !row.call
                           ? "—"
@@ -329,6 +368,14 @@ export function OptionChainDashboard() {
                           ? "—"
                           : `${row.put.spreadPercentOfMid.toFixed(2)}%`}
                       </td>
+                      <td
+                        className={`px-3 py-1.5 text-left ${
+                          row.put?.impliedVolatility === null ? "text-slate-600 italic" : "text-violet-300"
+                        }`}
+                        title={row.put?.impliedVolatilityRefusal ?? undefined}
+                      >
+                        {ivLabel(row.put)}
+                      </td>
                       <td className="px-3 py-1.5 text-left text-slate-400">{compact(row.put?.volume ?? null)}</td>
                       <td className="px-3 py-1.5 text-left text-slate-300">{compact(row.put?.openInterest ?? null)}</td>
                       <td className={row.put?.openInterestChange && row.put.openInterestChange > 0 ? "px-3 py-1.5 text-left text-emerald-300" : "px-3 py-1.5 text-left text-rose-300"}>
@@ -341,6 +388,9 @@ export function OptionChainDashboard() {
             </div>
 
             <p className="border-t border-white/5 px-4 py-3 text-[11px] text-slate-500">
+              IV is <strong>derived</strong>: the volatility that reproduces the observed mid under
+              Black-Scholes, solved from a two-sided quote only — never from a last price, which can be
+              hours stale. An italic entry names why it could not be solved rather than showing a blank.
               Spread is coloured against a {DEFAULT_COST_BUDGET_PERCENT}% of mid budget — the level at
               which a measured volatility edge of +0.117% of spot is consumed by four option legs. A
               dash means one side was unquoted, which is an unknown spread rather than a cheap one.

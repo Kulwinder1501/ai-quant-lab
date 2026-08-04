@@ -11,6 +11,14 @@ import {
   quoteSpread,
   summariseLiquidity,
 } from "../../domain/option-chain.js";
+import { yearsToExpiry } from "../../../pricing/domain/black-scholes-engine.js";
+import {
+  impliedVolatilityFromPremium,
+  midPriceForIv,
+} from "../../../pricing/domain/implied-volatility.js";
+
+/** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
+const RISK_FREE_RATE = 0.065;
 
 export function registerMarketDataRoutes(
   app: Express,
@@ -279,6 +287,21 @@ export function registerMarketDataRoutes(
           byStrike.set(quote.strikePrice, row);
         }
         const spread = quoteSpread(quote);
+        // IV is solved from the MID of a two-sided quote, never from the last traded
+        // price: a last price can be hours stale on an illiquid strike, and an IV derived
+        // from it would look identical to one derived from a live market. A refusal
+        // carries its reason so the UI can say why rather than showing a blank.
+        const midForIv = midPriceForIv(quote.bid, quote.ask);
+        const ivResult = snapshot.underlyingValue === null || midForIv === null
+          ? null
+          : impliedVolatilityFromPremium({
+            spot: snapshot.underlyingValue,
+            strike: quote.strikePrice,
+            timeToExpiryYears: yearsToExpiry(snapshot.observedAt, quote.expiryDate),
+            riskFreeRate: RISK_FREE_RATE,
+            optionType: quote.optionType,
+            premium: midForIv,
+          });
         const leg = {
           lastPrice: quote.lastPrice,
           bid: quote.bid,
@@ -293,6 +316,12 @@ export function registerMarketDataRoutes(
             ? null
             : moneynessOf(quote, snapshot.underlyingValue, atmStrike),
           providerSymbol: quote.providerSymbol,
+          // Derived, and labelled as such: the volatility that would reproduce the
+          // observed mid under Black-Scholes, not a figure the exchange published.
+          impliedVolatility: ivResult?.measurable ? ivResult.impliedVolatility : null,
+          impliedVolatilityRefusal: ivResult === null
+            ? (snapshot.underlyingValue === null ? "NO_UNDERLYING" : "NO_TWO_SIDED_QUOTE")
+            : ivResult.measurable ? null : ivResult.reason,
         };
         row[quote.optionType === "CE" ? "call" : "put"] = leg;
       }
@@ -314,6 +343,19 @@ export function registerMarketDataRoutes(
           // Named for what it is. A heavy-OI strike is where positions sit, not a level
           // price must respect, so it is never labelled support or resistance.
           largestOpenInterest: heaviest,
+          // The single IV a "is IV unusually high?" check reads. Averaged across the ATM
+          // call and put when both solve, because either alone carries the skew of its
+          // own side.
+          atmImpliedVolatility: (() => {
+            if (atmStrike === null) return null;
+            const solved = [...byStrike.values()]
+              .filter((row) => row.strikePrice === atmStrike)
+              .flatMap((row) => [row.call, row.put])
+              .map((leg) => (leg as { impliedVolatility: number | null } | null)?.impliedVolatility ?? null)
+              .filter((iv): iv is number => iv !== null);
+            if (solved.length === 0) return null;
+            return solved.reduce((total, iv) => total + iv, 0) / solved.length;
+          })(),
           strikes: [...byStrike.values()].sort(
             (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
           ),
