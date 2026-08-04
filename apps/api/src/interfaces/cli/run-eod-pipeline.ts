@@ -73,6 +73,27 @@ async function runCommand(command: string, args: string[]): Promise<void> {
   });
 }
 
+const trainingFailures: string[] = [];
+
+/**
+ * Training steps are isolated: a refused or failed training run must not stop
+ * settlement, shadow prediction, or the competitions that follow it. The
+ * data-readiness gate in `train.py` refuses with a non-zero exit when a series
+ * is not READY — that refusal is the gate working, and the correct pipeline
+ * response is to record it loudly, skip that candidate, and keep grading the
+ * models that already exist. The pipeline still exits non-zero at the end when
+ * any training step failed, so the failure is never silent.
+ */
+async function runTrainingStep(description: string, args: string[]): Promise<void> {
+  try {
+    await runCommand("npm", args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    trainingFailures.push(`${description}: ${message}`);
+    console.error(`\n⚠️ Training step failed and was skipped — ${description}: ${message}`);
+  }
+}
+
 async function main(): Promise<void> {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -95,6 +116,13 @@ async function main(): Promise<void> {
       "--skip-existing"
     ]);
 
+    // 1b. Data-readiness audit (Phase 25, Workstream A). Measures every stored
+    // series, assigns READY/DEGRADED/STALE/INVALID, and persists the report the
+    // training gate reads. Runs after collection so tonight's bars are measured,
+    // before training so no model fits unaudited data. The audit itself exits 0
+    // on findings — a DEGRADED series is a finding, not an audit failure.
+    await runCommand("npm", ["run", "data:audit"]);
+
     // 2. Settle matured shadow predictions against the candles just collected,
     // updating each pool model's live daily scoreboard.
     await runCommand("npm", ["run", "models:settle-predictions"]);
@@ -108,6 +136,37 @@ async function main(): Promise<void> {
     // production.
     await runCommand("npm", ["run", "models:settle-auxiliary"]);
 
+    // 2c. Shadow-predict the non-directional candidates. They are excluded from the
+    // directional competition pool by design — a volatility model enrolled there once
+    // sat permanently unpromotable at the top of a group it could not score in — so they
+    // need their own pass or they never write a prediction and settlement (step 2b) has
+    // nothing to grade. Scoped by label scheme; writes only to
+    // auxiliary_model_predictions.
+    //
+    // No --instrument: each model scores its own scope. A pooled artifact fans out
+    // across its recorded roster; a single-instrument artifact scores its own symbol.
+    // Pinning NIFTY50 here made every pooled model (trained on the 20 research
+    // equities, which exclude NIFTY50) fail its shadow pass, so the one configuration
+    // that cleared the promotion gate could never build settled evidence — and one
+    // prediction per session would never reach the volatility competition's 300-row
+    // floor anyway, which assumes a pooled model writes one row per member per session.
+    //
+    // ORDER IS LOAD-BEARING: this must run BEFORE the training steps, and it used to run
+    // after them. `deployment_not_before` is max(trainingLabelAvailableEnd, dataCutoffAt)
+    // and the training steps pass `--to nowIso`, so a model trained in this run carries a
+    // cutoff later than the candle it would score. `list_shadow_pool` takes the newest
+    // candidate per family, so after training the freshest model was always the
+    // un-scorable one: every prediction was refused with "at or before this model's
+    // training-information boundary" and the chain would have run indefinitely
+    // accumulating zero evidence while every step reported success.
+    //
+    // Predicting first uses the model from a previous run, whose cutoff predates today's
+    // candle. Verified 2026-08-04: 61 predictions created after the move, 0 before it.
+    await runCommand("npm", [
+      "run", "ml:predict", "--",
+      "--shadow-scheme", "volatility-expansion-v1",
+    ]);
+
     // 3. Train fresh candidates. Deliberately *without* --promote: a one-shot
     // holdout comparison no longer decides production. New candidates enter the
     // competition pool (step 5) and must outperform the champion on live,
@@ -120,7 +179,7 @@ async function main(): Promise<void> {
     // 0.333 random baseline. It is kept because the intraday prediction job consumes
     // 15m models, and its window is now stated honestly rather than implied.
     for (const algo of ML_ALGORITHMS) {
-      await runCommand("npm", [
+      await runTrainingStep(`${algo} NIFTY50 15m directional`, [
         "run", `ml:train:${algo}`, "--",
         "--instrument", "NIFTY50",
         "--timeframe", "15m",
@@ -138,7 +197,7 @@ async function main(): Promise<void> {
     // folds span more than one market regime. Same row count as the 15m run, vastly
     // better regime coverage.
     for (const algo of ML_ALGORITHMS) {
-      await runCommand("npm", [
+      await runTrainingStep(`${algo} NIFTY50 1d directional`, [
         "run", `ml:train:${algo}`, "--",
         "--instrument", "NIFTY50",
         "--timeframe", "1d",
@@ -159,7 +218,7 @@ async function main(): Promise<void> {
     // `validationProtocol.labelScheme`, so a volatility model is invisible to the
     // directional pool by construction, and may inform risk only.
     for (const algo of ML_ALGORITHMS) {
-      await runCommand("npm", [
+      await runTrainingStep(`${algo} NIFTY50 1d volatility`, [
         "run", `ml:train:${algo}`, "--",
         "--instrument", "NIFTY50",
         "--timeframe", "1d",
@@ -183,7 +242,7 @@ async function main(): Promise<void> {
     // still lost to trivial. That is the evidence that direction's failure is the
     // target and not the sample size, so no pooled directional run is scheduled.
     for (const algo of ML_ALGORITHMS) {
-      await runCommand("npm", [
+      await runTrainingStep(`${algo} pooled 1d volatility`, [
         "run", `ml:train:${algo}`, "--",
         "--instruments", RESEARCH_EQUITY_POOL,
         "--timeframe", "1d",
@@ -199,19 +258,6 @@ async function main(): Promise<void> {
     // still records at least one prediction per model (idempotent per candle).
     await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
 
-    // 4b. Shadow-predict the non-directional candidates. They are excluded from the
-    // directional competition pool by design — a volatility model enrolled there once
-    // sat permanently unpromotable at the top of a group it could not score in — so they
-    // need their own pass or they never write a prediction and settlement (step 2b) has
-    // nothing to grade. Scoped by label scheme; writes only to
-    // auxiliary_model_predictions.
-    await runCommand("npm", [
-      "run", "ml:predict", "--",
-      "--shadow-scheme", "volatility-expansion-v1",
-      "--instrument", "NIFTY50",
-      "--timeframe", "1d",
-    ]);
-
     // 5. Daily competition: enroll qualifying fresh candidates, rank the pool on
     // rolling settled macro-F1, and promote the challenger only after consistent
     // live outperformance.
@@ -224,6 +270,12 @@ async function main(): Promise<void> {
     // here informs risk and regime context only.
     await runCommand("npm", ["run", "models:compete:volatility"]);
 
+    if (trainingFailures.length > 0) {
+      console.error("\n============== EOD PIPELINE COMPLETE WITH TRAINING FAILURES ==============");
+      for (const failure of trainingFailures) console.error(` - ${failure}`);
+      process.exitCode = 1;
+      return;
+    }
     console.info("============== EOD PIPELINE COMPLETE ==============");
   } catch (error) {
     console.error("EOD Pipeline failed:", error);
