@@ -12,7 +12,10 @@ import { calculateEntryFees } from "../../domain/brokerage-calculator.js";
 import type { TradeOutcomeFilter } from "../../domain/paper-trade-history.js";
 import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-trading.js";
 import { lotsToQuantity } from "../../domain/lot-size-validator.js";
-import { mapIdeaToOptionBuyerFill } from "../../domain/option-buyer-fill.js";
+import {
+  mapIdeaToOptionBuyerFill,
+  resolveOptionExpiryInstant,
+} from "../../domain/option-buyer-fill.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
   hasAnyOptionContractField,
@@ -314,7 +317,8 @@ export function registerPaperTradingRoutes(
           });
           return;
         }
-        const expiry = new Date(expiryDate);
+        // A date-only expiry means that day's 15:30 IST settlement, not midnight UTC.
+        const expiry = resolveOptionExpiryInstant(expiryDate);
         if (Number.isNaN(expiry.getTime())) {
           response.status(422).json({ error: `expiryDate "${expiryDate}" is not a valid date.` });
           return;

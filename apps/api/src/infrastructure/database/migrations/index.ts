@@ -35,6 +35,7 @@ import { dataReadinessReportsMigration } from "./034-data-readiness-reports.js";
 import { purgeExpiredProvisionalCandlesMigration } from "./035-purge-expired-provisional-candles.js";
 import { sequenceReadinessReportsMigration } from "./036-sequence-readiness-reports.js";
 import { optionChainSnapshotsMigration } from "./037-option-chain-snapshots.js";
+import { confirmedExpiryCalendarMigration } from "./038-confirmed-expiry-calendar.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -74,4 +75,5 @@ export const migrations = [
   purgeExpiredProvisionalCandlesMigration,
   sequenceReadinessReportsMigration,
   optionChainSnapshotsMigration,
+  confirmedExpiryCalendarMigration,
 ];

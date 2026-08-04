@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   nextWeeklyExpiry,
   mapIdeaToOptionBuyerFill,
+  resolveOptionExpiryInstant,
   type OptionBuyerFillInput,
 } from "./option-buyer-fill.js";
 
@@ -130,5 +131,37 @@ describe("nextWeeklyExpiry", () => {
   it("rejects a weekday outside the week", () => {
     expect(() => nextWeeklyExpiry(NOW, 7)).toThrow(/weekday/);
     expect(() => nextWeeklyExpiry(NOW, -1)).toThrow(/weekday/);
+  });
+});
+
+describe("resolveOptionExpiryInstant", () => {
+  it("reads a date-only expiry as that day's 15:30 IST close", () => {
+    // The defect this replaces: new Date("2026-08-04") is 00:00 UTC = 05:30 IST, and the
+    // expiry evaluator force-closes at that instant -- before the market opens.
+    expect(resolveOptionExpiryInstant("2026-08-04").toISOString())
+      .toBe("2026-08-04T10:00:00.000Z");
+    expect(new Date("2026-08-04").toISOString()).toBe("2026-08-04T00:00:00.000Z");
+  });
+
+  it("keeps a full timestamp as supplied, since a caller who gave a time meant it", () => {
+    expect(resolveOptionExpiryInstant("2026-08-25T09:15:00.000Z").toISOString())
+      .toBe("2026-08-25T09:15:00.000Z");
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    expect(resolveOptionExpiryInstant("  2026-08-25  ").toISOString())
+      .toBe("2026-08-25T10:00:00.000Z");
+  });
+
+  it("refuses a date that does not exist rather than rolling it forward", () => {
+    // Date.UTC(2026, 12, 32) silently becomes a real instant in the next year, which would
+    // price a contract on a day the caller never named.
+    expect(Number.isNaN(resolveOptionExpiryInstant("2026-02-30").getTime())).toBe(true);
+    expect(Number.isNaN(resolveOptionExpiryInstant("2026-13-01").getTime())).toBe(true);
+  });
+
+  it("reports an unparseable expiry as NaN for the caller to reject", () => {
+    expect(Number.isNaN(resolveOptionExpiryInstant("next Tuesday").getTime())).toBe(true);
+    expect(Number.isNaN(resolveOptionExpiryInstant("").getTime())).toBe(true);
   });
 });

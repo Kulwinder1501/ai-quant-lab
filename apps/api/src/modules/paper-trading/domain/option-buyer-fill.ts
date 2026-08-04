@@ -136,6 +136,41 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
 /** 15:30 IST, the NSE close, expressed in UTC. */
 const EXPIRY_HOUR_UTC = 10;
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Turns a caller-supplied expiry into the instant the contract actually settles.
+ *
+ * `new Date("2026-08-04")` is midnight UTC, which is 05:30 IST — ten hours before the
+ * 15:30 IST settlement. That is not a rounding difference: the expiry evaluator
+ * force-closes as soon as `asOf >= expiry`, so a date-only expiry settled positions at
+ * the *pre-open* of expiry day against the previous session's spot, discarding the whole
+ * final trading day. It cost 64.40 per contract on the one option position that reached
+ * expiry — settled at 142.80 off a mid-session 57,842.80 when the day closed at
+ * 57,907.20, where intrinsic was 207.20.
+ *
+ * A date-only string therefore means "that day's close". A full timestamp is taken as
+ * given, because a caller who supplied a time meant it.
+ */
+export function resolveOptionExpiryInstant(input: string): Date {
+  const trimmed = input.trim();
+  if (DATE_ONLY.test(trimmed)) {
+    const [year, month, day] = trimmed.split("-").map(Number);
+    const instant = new Date(Date.UTC(year, month - 1, day, EXPIRY_HOUR_UTC, 0, 0, 0));
+    // Date.UTC rolls impossible dates over (month 13, day 32), which would silently price
+    // a contract on a day the caller did not name.
+    if (
+      instant.getUTCFullYear() !== year
+      || instant.getUTCMonth() !== month - 1
+      || instant.getUTCDate() !== day
+    ) {
+      return new Date(NaN);
+    }
+    return instant;
+  }
+  return new Date(trimmed);
+}
+
 /**
  * The next weekly expiry at 15:30 IST for an instrument that expires on `weekday`,
  * **including today when today is expiry day and the close has not passed**.
