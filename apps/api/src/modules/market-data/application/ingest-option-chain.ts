@@ -5,6 +5,10 @@ import {
   summariseLiquidity,
   type OptionChainSnapshot,
 } from "../domain/option-chain.js";
+import {
+  assertCalendarStorable,
+  type OptionExpiryCalendar,
+} from "../domain/option-expiry-calendar.js";
 
 export interface OptionChainSource {
   fetchChain(input: { underlyingSymbol: string; strikeCount?: number }): Promise<OptionChainSnapshot>;
@@ -12,6 +16,7 @@ export interface OptionChainSource {
 
 export interface OptionChainStore {
   saveSnapshot(snapshot: OptionChainSnapshot): Promise<{ inserted: number; skipped: number }>;
+  saveExpiryCalendar(calendar: OptionExpiryCalendar): Promise<{ inserted: number }>;
 }
 
 export interface IngestedChain {
@@ -21,6 +26,8 @@ export interface IngestedChain {
   inserted: number;
   skipped: number;
   expiries: Array<{ expiryDate: string; expiryKind: string }>;
+  /** Contracts the provider lists, which is what a requested expiry is checked against. */
+  listedExpiries: Array<{ expiryDate: string; expiryKind: string }>;
   putCallOpenInterestRatio: number | null;
   medianSpreadPercent: number | null;
   /** Contracts whose spread fits the cost budget the measured edge can afford. */
@@ -70,6 +77,17 @@ export class IngestOptionChain {
         // Validated before the write, so a provider fault never reaches the raw table.
         assertSnapshotStorable(snapshot);
         const saved = await this.store.saveSnapshot(snapshot);
+        // Stored even though nothing derived is: this is a raw observation of which
+        // contracts exist, and it is the only thing standing between a hand-supplied
+        // expiry and a contract that never traded.
+        const calendar: OptionExpiryCalendar = {
+          underlyingSymbol: snapshot.underlyingSymbol,
+          provider: snapshot.provider,
+          observedAt: snapshot.observedAt,
+          expiries: snapshot.listedExpiries,
+        };
+        assertCalendarStorable(calendar);
+        await this.store.saveExpiryCalendar(calendar);
         const ratios = putCallRatios(snapshot.quotes);
         const liquidity = summariseLiquidity(snapshot.quotes, input.costBudgetPercent);
 
@@ -80,6 +98,10 @@ export class IngestOptionChain {
           inserted: saved.inserted,
           skipped: saved.skipped,
           expiries: expiriesOf(snapshot).map((entry) => ({
+            expiryDate: entry.expiryDate.toISOString().slice(0, 10),
+            expiryKind: entry.expiryKind,
+          })),
+          listedExpiries: snapshot.listedExpiries.map((entry) => ({
             expiryDate: entry.expiryDate.toISOString().slice(0, 10),
             expiryKind: entry.expiryKind,
           })),

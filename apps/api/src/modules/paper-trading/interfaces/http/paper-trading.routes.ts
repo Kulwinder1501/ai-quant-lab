@@ -16,6 +16,7 @@ import {
   mapIdeaToOptionBuyerFill,
   resolveOptionExpiryInstant,
 } from "../../domain/option-buyer-fill.js";
+import { resolveListedExpiry } from "../../../market-data/domain/option-expiry-calendar.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
   hasAnyOptionContractField,
@@ -329,6 +330,20 @@ export function registerPaperTradingRoutes(
           });
           return;
         }
+        // A well-formed future date is not yet a contract. Two trades were booked against a
+        // BANKNIFTY 2026-08-04 expiry that underlying does not list, and priced cleanly the
+        // whole way through, so the requested expiry is checked against the provider's own
+        // calendar before anything is derived from it.
+        const calendar = await dependencies.optionChainRepository
+          .latestExpiryCalendar(String(idea.symbol).toUpperCase());
+        const listed = resolveListedExpiry(calendar, expiry, String(idea.symbol).toUpperCase());
+        if (!listed.usable) {
+          response.status(422).json({ error: listed.explanation, reason: listed.reason });
+          return;
+        }
+        // The calendar's own instant, so a caller who passed a bare date does not end up
+        // with a settlement time that disagrees with the contract.
+        const settlementExpiry = listed.expiryDate;
 
         let mapped: ReturnType<typeof mapIdeaToOptionBuyerFill>;
         try {
@@ -338,7 +353,7 @@ export function registerPaperTradingRoutes(
             underlyingStop: Number(idea.stop_loss),
             underlyingTarget: Number(idea.target_price),
             impliedVolatility: iv,
-            expiryDate: expiry,
+            expiryDate: settlementExpiry,
             strikeStep,
           });
         } catch (error) {
@@ -353,7 +368,7 @@ export function registerPaperTradingRoutes(
         sideOverride = mapped.side;
         optionContract = {
           optionStrike: mapped.strike,
-          optionExpiry: expiry,
+          optionExpiry: settlementExpiry,
           optionType: mapped.optionType,
           underlyingSymbol: idea.symbol,
           entryIv: iv,

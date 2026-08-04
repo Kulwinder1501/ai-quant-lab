@@ -21,6 +21,8 @@
  *   than implied by whichever strike happened to be nearest.
  */
 
+import type { ListedExpiry } from "./option-expiry-calendar.js";
+
 export type OptionType = "CE" | "PE";
 export type ExpiryKind = "WEEKLY" | "MONTHLY";
 export type Moneyness = "ITM" | "ATM" | "OTM";
@@ -50,6 +52,12 @@ export interface OptionChainSnapshot {
   observedAt: Date;
   underlyingValue: number | null;
   quotes: OptionChainQuote[];
+  /**
+   * Every expiry the provider lists for this underlying, not only the one these quotes
+   * cover. A single chain request returns one expiry's book but the whole calendar in its
+   * header, and that calendar is the only authority on which contracts exist.
+   */
+  listedExpiries: ListedExpiry[];
 }
 
 export class OptionChainError extends Error {}
@@ -229,6 +237,11 @@ export function assertSnapshotStorable(snapshot: OptionChainSnapshot): void {
     throw new OptionChainError(
       `The ${snapshot.underlyingSymbol} chain returned no contracts. An empty book is a provider `
       + "fault, not an observation, so it is refused rather than stored as a snapshot with no rows.",
+    );
+  }
+  if (snapshot.listedExpiries.length === 0) {
+    throw new OptionChainError(
+      `The ${snapshot.underlyingSymbol} chain returned no expiry calendar. Storing the book \nwithout it would leave no record of which contracts exist, which is what let a phantom \nexpiry be traded.`,
     );
   }
   const seen = new Set<string>();

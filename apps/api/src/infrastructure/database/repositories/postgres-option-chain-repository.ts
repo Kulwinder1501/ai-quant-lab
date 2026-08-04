@@ -1,12 +1,28 @@
 import type { DatabasePool } from "../database.js";
 import { yearsToExpiry } from "../../../modules/pricing/domain/black-scholes-engine.js";
 import { impliedForwardFromParity } from "../../../modules/pricing/domain/implied-volatility.js";
+import type { OptionExpiryCalendar } from "../../../modules/market-data/domain/option-expiry-calendar.js";
 import type {
   ExpiryKind,
   OptionChainQuote,
   OptionChainSnapshot,
   OptionType,
 } from "../../../modules/market-data/domain/option-chain.js";
+
+/**
+ * `pg` hands back a DATE column as either a Date (local midnight) or a string, depending on
+ * parser configuration. Taking `.toISOString()` of a local-midnight Date shifts the day
+ * backwards east of UTC, which would silently move every expiry by one.
+ */
+function toDateKey(value: unknown): string {
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  return String(value).slice(0, 10);
+}
 
 function toNumberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
@@ -154,6 +170,58 @@ export class PostgresOptionChainRepository {
     return { ...target, observedAt, impliedForward };
   }
 
+  /** Persists one observation of which contracts an underlying lists. */
+  async saveExpiryCalendar(calendar: OptionExpiryCalendar): Promise<{ inserted: number }> {
+    let inserted = 0;
+    for (const entry of calendar.expiries) {
+      const result = await this.pool.query(`
+        INSERT INTO option_expiry_calendar (
+          underlying_symbol, provider, observed_at, expiry_date, expiry_kind
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (underlying_symbol, observed_at, expiry_date) DO NOTHING
+      `, [
+        calendar.underlyingSymbol,
+        calendar.provider,
+        calendar.observedAt,
+        entry.expiryDate,
+        entry.expiryKind,
+      ]);
+      inserted += result.rowCount ?? 0;
+    }
+    return { inserted };
+  }
+
+  /**
+   * The newest observed expiry list for one underlying.
+   *
+   * Scoped to a single `observed_at`, like `latestSnapshot`: a union across observations
+   * would report a calendar that never existed at any instant, and the whole point of this
+   * lookup is to answer "does this contract trade?" from something that was actually seen.
+   */
+  async latestExpiryCalendar(underlyingSymbol: string): Promise<OptionExpiryCalendar | null> {
+    const result = await this.pool.query(`
+      SELECT provider, observed_at, expiry_date, expiry_kind
+      FROM option_expiry_calendar
+      WHERE underlying_symbol = $1
+        AND observed_at = (
+          SELECT max(observed_at) FROM option_expiry_calendar WHERE underlying_symbol = $1
+        )
+      ORDER BY expiry_date
+    `, [underlyingSymbol]);
+    if (result.rows.length === 0) return null;
+
+    return {
+      underlyingSymbol,
+      provider: String(result.rows[0].provider),
+      observedAt: result.rows[0].observed_at as Date,
+      expiries: result.rows.map((row) => ({
+        // DATE comes back at midnight; the contract settles at 15:30 IST.
+        expiryDate: new Date(`${toDateKey(row.expiry_date)}T10:00:00.000Z`),
+        expiryKind: String(row.expiry_kind) as ExpiryKind,
+      })),
+    };
+  }
+
   /** Distinct underlyings with a stored chain, and how fresh each is. */
   async listUnderlyings(): Promise<Array<{
     underlyingSymbol: string;
@@ -225,12 +293,27 @@ export class PostgresOptionChainRepository {
       openInterestChange: toNumberOrNull(row.open_interest_change),
     }));
 
+    // The calendar written by the same collection, matched on the same instant. Empty for
+    // snapshots taken before the calendar table existed; a reader must not mistake that for
+    // "this underlying lists nothing", which is why `resolveListedExpiry` treats an empty
+    // list as "no calendar" rather than as a refusal of every contract.
+    const calendarRows = await this.pool.query(`
+      SELECT expiry_date, expiry_kind
+      FROM option_expiry_calendar
+      WHERE underlying_symbol = $1 AND observed_at = $2
+      ORDER BY expiry_date
+    `, [input.underlyingSymbol, observedAt]);
+
     return {
       underlyingSymbol: input.underlyingSymbol,
       provider: String(result.rows[0].provider),
       observedAt,
       underlyingValue: toNumberOrNull(result.rows[0].underlying_value),
       quotes,
+      listedExpiries: calendarRows.rows.map((row) => ({
+        expiryDate: new Date(`${toDateKey(row.expiry_date)}T10:00:00.000Z`),
+        expiryKind: String(row.expiry_kind) as ExpiryKind,
+      })),
     };
   }
 }

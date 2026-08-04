@@ -161,6 +161,13 @@ export class FyersOptionChainClient {
       observedAt: this.now(),
       underlyingValue,
       quotes,
+      // The header's whole list, independent of which expiry the rows belong to.
+      listedExpiries: [...expiryKindByDate.entries()]
+        .map(([date, expiryKind]) => ({
+          expiryDate: new Date(`${date}T10:00:00.000Z`),
+          expiryKind,
+        }))
+        .sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime()),
     };
   }
 }

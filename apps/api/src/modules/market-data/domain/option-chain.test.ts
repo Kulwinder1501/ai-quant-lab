@@ -40,6 +40,10 @@ function snapshot(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnap
     observedAt: new Date("2026-08-04T09:30:00Z"),
     underlyingValue: 24_010,
     quotes: [quote()],
+    listedExpiries: [
+      { expiryDate: new Date("2026-08-11T10:00:00.000Z"), expiryKind: "WEEKLY" },
+      { expiryDate: new Date("2026-08-25T10:00:00.000Z"), expiryKind: "MONTHLY" },
+    ],
     ...overrides,
   };
 }

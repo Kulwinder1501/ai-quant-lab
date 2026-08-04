@@ -62,6 +62,40 @@ describe("FyersOptionChainClient", () => {
     expect(snapshot.quotes[0]!.expiryDate.toISOString().slice(0, 10)).toBe("2026-08-04");
   });
 
+  it("surfaces the whole expiry calendar, not only the expiry these quotes cover", async () => {
+    // One request returns one expiry's book but the header's full calendar. That calendar is
+    // the only authority on which contracts exist, and discarding it is what allowed a
+    // BANKNIFTY weekly — an expiry that underlying does not carry — to be traded.
+    const client = build(async () => chainBody({
+      expiryData: [
+        { date: "25-08-2026", expiry: "1", expiry_flag: "M" },
+        { date: "04-08-2026", expiry: "2", expiry_flag: "W" },
+        { date: "29-09-2026", expiry: "3", expiry_flag: "M" },
+      ],
+    }));
+
+    const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+    // Ascending, so "nearest listed" in a refusal message reads in date order.
+    expect(snapshot.listedExpiries.map((entry) => [
+      entry.expiryDate.toISOString(), entry.expiryKind,
+    ])).toEqual([
+      ["2026-08-04T10:00:00.000Z", "WEEKLY"],
+      ["2026-08-25T10:00:00.000Z", "MONTHLY"],
+      ["2026-09-29T10:00:00.000Z", "MONTHLY"],
+    ]);
+  });
+
+  it("stamps every listed expiry at the 15:30 IST close", async () => {
+    // Midnight would settle a position at 05:30 IST on expiry day, before the market opens.
+    const client = build(async () => chainBody());
+
+    const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+    expect(snapshot.listedExpiries).toHaveLength(1);
+    expect(snapshot.listedExpiries[0]!.expiryDate.toISOString()).toBe("2026-08-04T10:00:00.000Z");
+  });
+
   // Fyers reports "nobody is quoting" as 0. A zero bid would claim someone was willing
   // to pay nothing, which would make the most illiquid strikes look the cheapest.
   it("treats a zero bid as absent, not as a price of zero", async () => {
