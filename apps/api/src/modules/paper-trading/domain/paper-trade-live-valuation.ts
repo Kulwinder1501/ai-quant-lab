@@ -1,8 +1,25 @@
 import type { PaperTrade } from "./paper-trading.js";
 import { isOptionBuyerTrade, priceOptionMark } from "./option-mark-to-market.js";
+import { priceEuropeanOption, yearsToExpiry } from "../../pricing/domain/black-scholes-engine.js";
+import {
+  effectiveSpotForForward,
+  impliedVolatilityFromPremium,
+} from "../../pricing/domain/implied-volatility.js";
 
-export type LiveValuationSource = "OPTION_MODEL" | "UNDERLYING_SPOT" | "UNAVAILABLE";
-export type LiveValuationVolatilitySource = "INDIA_VIX" | "ENTRY_IV" | null;
+/**
+ * How the mark was obtained, in descending order of authority.
+ *
+ * `OPTION_CHAIN_MID` is a price someone was actually quoting. `OPTION_MODEL` is this
+ * project's opinion of what the contract is worth, which is a fallback and not an
+ * improvement on an observed market.
+ */
+export type LiveValuationSource =
+  | "OPTION_CHAIN_MID"
+  | "OPTION_MODEL"
+  | "UNDERLYING_SPOT"
+  | "UNAVAILABLE";
+/** `CHAIN_IMPLIED` is solved from the observed mid, so it needs no external vol input. */
+export type LiveValuationVolatilitySource = "CHAIN_IMPLIED" | "INDIA_VIX" | "ENTRY_IV" | null;
 
 /**
  * Position greeks, at the same volatility the mark was computed from.
@@ -41,12 +58,48 @@ export interface PaperTradeLiveValuation {
   reason: string | null;
 }
 
+/**
+ * A quote for this exact contract, read from a stored option-chain snapshot.
+ *
+ * When present and fresh this becomes the mark, because a price someone was quoting
+ * beats a model's estimate of one. The model remains the fallback for contracts no
+ * snapshot covers, which is most single-stock strikes and every expiry outside the
+ * collected range.
+ */
+export interface ObservedOptionQuote {
+  /** Mid of a two-sided quote. A one-sided market must not reach here. */
+  mid: number;
+  bid: number | null;
+  ask: number | null;
+  observedAt: Date;
+  /**
+   * Put-call parity forward for this expiry, when the snapshot could supply one.
+   *
+   * Without it the IV solved from the mid inherits the same carry error the chain route
+   * had before it was fixed: assuming a forward of S*e^(rT) put a live BANKNIFTY forward
+   * 211 points above spot when the market priced it 193 below, a 0.7% error landing
+   * straight in the delta.
+   */
+  impliedForward: number | null;
+}
+
 export interface ValuePaperTradeInput {
   trade: PaperTrade;
   livePrices: Readonly<Record<string, number>>;
   asOf: Date;
   currentVolatility?: number | null;
+  observedQuote?: ObservedOptionQuote | null;
+  /**
+   * How old an observed quote may be and still be a mark. Defaults to 40 minutes:
+   * the collector runs every 15, so this tolerates a missed cycle without letting a
+   * stale book price a live position.
+   */
+  maxQuoteAgeMs?: number;
 }
+
+const DEFAULT_MAX_QUOTE_AGE_MS = 40 * 60 * 1000;
+/** Same rate the chain route uses, so a chain-marked IV is comparable to a chain IV. */
+const CHAIN_RISK_FREE_RATE = 0.065;
 
 function validPositive(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -129,6 +182,65 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
     }
     if (spot === null) {
       return unavailable(asOf, `No live underlying price is available for ${trade.underlyingSymbol}.`);
+    }
+
+    // An observed two-sided quote outranks the model: it is a price someone was
+    // willing to trade at, where the model is only an estimate of one.
+    const observed = input.observedQuote ?? null;
+    const quoteAgeMs = observed === null
+      ? null
+      : asOf.getTime() - observed.observedAt.getTime();
+    const maxAge = input.maxQuoteAgeMs ?? DEFAULT_MAX_QUOTE_AGE_MS;
+    if (observed !== null && validPositive(observed.mid) && quoteAgeMs !== null
+      && quoteAgeMs >= 0 && quoteAgeMs <= maxAge) {
+      const timeToExpiry = yearsToExpiry(asOf, trade.optionExpiry as Date);
+      // The forward the option market itself prices, when the snapshot could supply
+      // it; spot only as a last resort, and the bias is then the known one.
+      const pricingSpot = observed.impliedForward !== null && timeToExpiry > 0
+        ? effectiveSpotForForward(observed.impliedForward, CHAIN_RISK_FREE_RATE, timeToExpiry)
+        : spot;
+      const solved = impliedVolatilityFromPremium({
+        spot: pricingSpot,
+        strike: trade.optionStrike as number,
+        timeToExpiryYears: timeToExpiry,
+        riskFreeRate: CHAIN_RISK_FREE_RATE,
+        optionType: trade.optionType as "CE" | "PE",
+        premium: observed.mid,
+      });
+      // Greeks require an IV. When the mid cannot be inverted the mark still stands --
+      // it is the market's own price -- but no greek is invented to accompany it.
+      const chainGreeks = solved.measurable
+        ? priceEuropeanOption({
+          spot: pricingSpot,
+          strike: trade.optionStrike as number,
+          timeToExpiryYears: timeToExpiry,
+          riskFreeRate: CHAIN_RISK_FREE_RATE,
+          volatility: solved.impliedVolatility,
+          optionType: trade.optionType as "CE" | "PE",
+        })
+        : null;
+      const chainResult = pnlForMark(trade, observed.mid);
+      return {
+        status: "AVAILABLE",
+        source: "OPTION_CHAIN_MID",
+        markPrice: observed.mid,
+        underlyingPrice: spot,
+        unrealizedPnl: chainResult.pnl,
+        returnPercent: chainResult.returnPercent,
+        asOf: asOf.toISOString(),
+        volatility: solved.measurable ? solved.impliedVolatility : null,
+        volatilitySource: solved.measurable ? "CHAIN_IMPLIED" : null,
+        greeks: chainGreeks === null ? null : {
+          delta: chainGreeks.delta,
+          gamma: chainGreeks.gamma,
+          theta: chainGreeks.theta,
+          vega: chainGreeks.vega,
+        },
+        daysToExpiry: timeToExpiry > 0 ? timeToExpiry * 365 : 0,
+        // Only populated when the greeks are missing, so the row can say why the mark
+        // is trustworthy while the greeks are absent.
+        reason: solved.measurable ? null : solved.explanation,
+      };
     }
 
     const currentVolatility = validPositive(input.currentVolatility)

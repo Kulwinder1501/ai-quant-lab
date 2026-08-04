@@ -1,4 +1,6 @@
 import type { DatabasePool } from "../database.js";
+import { yearsToExpiry } from "../../../modules/pricing/domain/black-scholes-engine.js";
+import { impliedForwardFromParity } from "../../../modules/pricing/domain/implied-volatility.js";
 import type {
   ExpiryKind,
   OptionChainQuote,
@@ -11,6 +13,9 @@ function toNumberOrNull(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
+
+/** Matches the chain route, so a chain-marked IV is comparable to a chain IV. */
+const CHAIN_RISK_FREE_RATE = 0.065;
 
 export class PostgresOptionChainRepository {
   constructor(private readonly pool: DatabasePool) {}
@@ -67,6 +72,86 @@ export class PostgresOptionChainRepository {
       client.release();
     }
     return { inserted, skipped: snapshot.quotes.length - inserted };
+  }
+
+
+  /**
+   * The freshest observed quote for one exact contract, plus the parity forward for its
+   * expiry.
+   *
+   * Both come from the SAME snapshot instant. Taking the newest quote and a forward from a
+   * different observation would price a contract against a forward that never coexisted
+   * with it, which is the subtler version of the carry error this exists to remove.
+   *
+   * Returns null when the contract is not in the latest snapshot at all, which is the
+   * common case: collection covers a bounded strike window on a few underlyings, so most
+   * positions still fall back to the model.
+   */
+  async latestContractQuote(input: {
+    underlyingSymbol: string;
+    expiryDate: Date;
+    strikePrice: number;
+    optionType: "CE" | "PE";
+  }): Promise<{
+    mid: number;
+    bid: number | null;
+    ask: number | null;
+    observedAt: Date;
+    impliedForward: number | null;
+  } | null> {
+    const expiryKey = input.expiryDate.toISOString().slice(0, 10);
+    const latest = await this.pool.query(`
+      SELECT max(observed_at) AS observed_at
+      FROM option_chain_snapshots
+      WHERE underlying_symbol = $1 AND expiry_date = $2::date
+    `, [input.underlyingSymbol, expiryKey]);
+    const observedAt = latest.rows[0]?.observed_at as Date | null | undefined;
+    if (!observedAt) return null;
+
+    const rows = await this.pool.query(`
+      SELECT strike_price, option_type, bid, ask
+      FROM option_chain_snapshots
+      WHERE underlying_symbol = $1 AND expiry_date = $2::date AND observed_at = $3
+    `, [input.underlyingSymbol, expiryKey, observedAt]);
+    if (rows.rows.length === 0) return null;
+
+    const midOf = (bid: unknown, ask: unknown): number | null => {
+      const b = toNumberOrNull(bid);
+      const a = toNumberOrNull(ask);
+      // A one-sided market has no mid. Substituting the quoted side would mark the
+      // position at a price nobody was prepared to take the other half of.
+      if (b === null || a === null || b <= 0 || a <= 0 || a < b) return null;
+      return (b + a) / 2;
+    };
+
+    let target: { mid: number; bid: number | null; ask: number | null } | null = null;
+    const pairs = new Map<number, { callMid?: number; putMid?: number }>();
+    for (const row of rows.rows) {
+      const strike = Number(row.strike_price);
+      const optionType = String(row.option_type) as "CE" | "PE";
+      const mid = midOf(row.bid, row.ask);
+      if (mid !== null) {
+        const slot = pairs.get(strike) ?? {};
+        if (optionType === "CE") slot.callMid = mid;
+        else slot.putMid = mid;
+        pairs.set(strike, slot);
+      }
+      if (strike === input.strikePrice && optionType === input.optionType && mid !== null) {
+        target = { mid, bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask) };
+      }
+    }
+    if (target === null) return null;
+
+    const timeToExpiry = yearsToExpiry(observedAt, input.expiryDate);
+    const impliedForward = impliedForwardFromParity(
+      [...pairs.entries()]
+        .filter(([, slot]) => slot.callMid !== undefined && slot.putMid !== undefined)
+        .map(([strike, slot]) => ({ strike, callMid: slot.callMid!, putMid: slot.putMid! })),
+      CHAIN_RISK_FREE_RATE,
+      timeToExpiry,
+    );
+
+    return { ...target, observedAt, impliedForward };
   }
 
   /** Distinct underlyings with a stored chain, and how fresh each is. */

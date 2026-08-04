@@ -43,14 +43,19 @@ export interface PaperTradeRow {
 
 export interface PaperTradeLiveValuation {
   status: "AVAILABLE" | "UNAVAILABLE";
-  source: "OPTION_MODEL" | "UNDERLYING_SPOT" | "UNAVAILABLE";
+  /**
+   * `OPTION_CHAIN_MID` is a price the market was quoting; `OPTION_MODEL` is this project's
+   * estimate of one, used only where no snapshot covers the contract.
+   */
+  source: "OPTION_CHAIN_MID" | "OPTION_MODEL" | "UNDERLYING_SPOT" | "UNAVAILABLE";
   markPrice: number | null;
   underlyingPrice: number | null;
   unrealizedPnl: number | null;
   returnPercent: number | null;
   asOf: string;
   volatility: number | null;
-  volatilitySource: "INDIA_VIX" | "ENTRY_IV" | null;
+  /** `CHAIN_IMPLIED` is solved from the observed mid, so it needs no external vol input. */
+  volatilitySource: "CHAIN_IMPLIED" | "INDIA_VIX" | "ENTRY_IV" | null;
   /**
    * Per contract, at the same volatility the mark used. Null for a spot-marked position,
    * which has no option contract — reporting delta 1 there would imply an option-like

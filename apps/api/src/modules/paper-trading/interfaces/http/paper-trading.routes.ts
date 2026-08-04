@@ -82,6 +82,7 @@ export function registerPaperTradingRoutes(
     | "evaluateOpenPaperTrades"
     | "closePaperTrade"
     | "aiAutonomousAgent"
+    | "optionChainRepository"
   >,
 ): void {
   app.get("/api/v1/paper-trades", async (request, response, next) => {
@@ -164,10 +165,33 @@ export function registerPaperTradingRoutes(
       } catch {
         // Each option valuation can still fall back to its persisted entry IV.
       }
-      const valuations = new Map(currentOpenTrades.map((trade) => [
-        trade.id,
-        valuePaperTrade({ trade, livePrices, asOf, currentVolatility }),
-      ]));
+      // An observed chain quote outranks the model mark, so it is looked up per
+      // contract before valuing. Absent for most positions -- collection covers a
+      // bounded strike window on a few underlyings -- and the model then applies.
+      const valuations = new Map(await Promise.all(currentOpenTrades.map(async (trade) => {
+        let observedQuote = null;
+        if (
+          trade.underlyingSymbol && trade.optionExpiry instanceof Date
+          && typeof trade.optionStrike === "number"
+          && (trade.optionType === "CE" || trade.optionType === "PE")
+        ) {
+          try {
+            observedQuote = await dependencies.optionChainRepository.latestContractQuote({
+              underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
+              expiryDate: trade.optionExpiry,
+              strikePrice: trade.optionStrike,
+              optionType: trade.optionType,
+            });
+          } catch {
+            // A chain lookup failure must not cost the position its model mark.
+            observedQuote = null;
+          }
+        }
+        return [
+          trade.id,
+          valuePaperTrade({ trade, livePrices, asOf, currentVolatility, observedQuote }),
+        ] as const;
+      })));
       fullSummary.openTrades = fullSummary.openTrades.map((trade) => ({
         ...trade,
         liveValuation: valuations.get(String(trade.id)) ?? {

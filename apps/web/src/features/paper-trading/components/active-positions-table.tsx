@@ -91,11 +91,33 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                     {trade.liveValuation?.status === "AVAILABLE" && trade.liveValuation.markPrice !== null
                       ? `₹${formatNumber(trade.liveValuation.markPrice, 2)}`
                       : <span className="text-amber-300" title={trade.liveValuation?.reason || "Live valuation unavailable"}>Unavailable</span>}
+                    {/*
+                      Which of the two marks produced this number. A chain mid is a price the
+                      market was quoting; a model mark is this project's estimate of one, and
+                      the distinction matters enough to show rather than bury in a tooltip.
+                    */}
+                    {trade.liveValuation?.status === "AVAILABLE"
+                      && (trade.liveValuation.source === "OPTION_CHAIN_MID"
+                        || trade.liveValuation.source === "OPTION_MODEL") && (
+                      <span
+                        className={`block mt-0.5 text-[10px] font-normal ${
+                          trade.liveValuation.source === "OPTION_CHAIN_MID" ? "text-violet-300" : "text-slate-500"
+                        }`}
+                        title={
+                          trade.liveValuation.source === "OPTION_CHAIN_MID"
+                            ? "Marked at the mid of the observed option chain, with IV solved from that mid."
+                            : "No stored chain snapshot covers this contract, so the mark is the Black-Scholes model's."
+                        }
+                      >
+                        {trade.liveValuation.source === "OPTION_CHAIN_MID" ? "chain mid" : "model mark"}
+                      </span>
+                    )}
                   </td>
                   <td className="py-3.5 px-4">
                     {/*
-                      Greeks exist only for a model-marked option. A spot-marked row has
-                      no contract, and a delta of 1 there would imply an option-like
+                      Greeks exist only for an option marked by the chain or the model, and
+                      are computed at whichever volatility that mark used. A spot-marked row
+                      has no contract, and a delta of 1 there would imply an option-like
                       exposure the position does not have.
                     */}
                     {trade.liveValuation?.status !== "AVAILABLE" || trade.liveValuation.greeks === null ? (

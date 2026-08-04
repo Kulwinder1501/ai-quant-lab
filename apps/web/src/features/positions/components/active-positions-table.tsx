@@ -168,12 +168,32 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
                       Underlying ₹{formatNumber(underlyingPrice, 2)}
                     </span>
                   )}
+                  {/*
+                    Which of the two marks produced this number. A chain mid is a price the
+                    market was quoting; a model mark is this project's estimate of one, and
+                    the distinction matters enough to show rather than bury in a tooltip.
+                  */}
+                  {isOption && currentPrice !== null && (
+                    <span
+                      className={`block mt-0.5 text-[10px] font-normal ${
+                        valuation?.source === "OPTION_CHAIN_MID" ? "text-violet-300" : "text-slate-500"
+                      }`}
+                      title={
+                        valuation?.source === "OPTION_CHAIN_MID"
+                          ? "Marked at the mid of the observed option chain, with IV solved from that mid."
+                          : "No stored chain snapshot covers this contract, so the mark is the Black-Scholes model's."
+                      }
+                    >
+                      {valuation?.source === "OPTION_CHAIN_MID" ? "chain mid" : "model mark"}
+                    </span>
+                  )}
                 </td>
                 <td className="py-4 px-4">
                   {/*
-                    Greeks exist only for a model-marked option. A spot-marked row has no
-                    contract, and showing delta 1 there would imply an option-like
-                    exposure the position does not have.
+                    Greeks exist only for an option marked by the chain or the model, and are
+                    computed at whichever volatility that mark used. A spot-marked row has no
+                    contract, and showing delta 1 there would imply an option-like exposure
+                    the position does not have.
                   */}
                   {greeks === null ? (
                     <span className="text-slate-500" title={valuation?.reason ?? "Not an option position"}>—</span>
