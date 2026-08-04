@@ -1615,6 +1615,102 @@ What would decide it, in order:
 - The gate reads the **stored** audit report, not a live check, so `npm run data:audit`
   must be re-run after fixing data or the training refusal cites the stale report.
 
+
+## Equity-panel straddle economics: the edge is real and costs eat it (2026-08-04)
+
+Recomputed the straddle breakeven on the 20-equity panel so the pooled model's 0.486
+EXPANSION precision faces a breakeven from the **same instruments**, closing the
+index-versus-equity mismatch the previous study left open.
+
+### How IV was obtained, and why it matters
+
+There is no per-equity implied volatility in this project. India VIX is NIFTY option IV,
+not SBIN's. Three candidate methods, two disqualified:
+
+- **India VIX for every stock** — single-stock vol exceeds index vol, so this understates
+  IV, makes straddles look cheap and biases the breakeven *down*. Flattering, therefore
+  rejected.
+- **IV = the stock's own realised vol** — deletes the variance risk premium, which is the
+  whole reason buying premium loses. The baseline would come out near zero instead of
+  negative and the study would be meaningless.
+- **Used: the stock's realised vol scaled by the index implied/realised ratio that
+  session.** Keeps the premium (via the ratio, measured at a mean of **1.254**) and each
+  stock's own vol level. Known error direction: single-stock variance risk premia are
+  typically *smaller* than index ones, because index options carry an extra correlation
+  premium, so applying the index ratio likely **overstates** single-stock IV and makes the
+  breakeven **harder**. Conservative, which is the right way to be wrong.
+
+Lot size does not enter: breakeven precision is per-unit, so the missing F&O lot specs are
+irrelevant. Strikes were set effectively at-the-money.
+
+### Result
+
+| | Equity panel | NIFTY50 index (earlier) |
+|---|---|---|
+| Actionable entries | 14,374 | 765 |
+| Baseline win rate | 35.0% | 36.9% |
+| Baseline mean P&L | **-0.37% of spot** | -43.5 pts |
+| EXPANSION base rate | 28.1% | 27.6% |
+| **Breakeven precision** | **43.7%** | 44.3% |
+
+Two independent instrument sets landing within 0.6pp of each other suggests the ~44%
+breakeven is structural rather than an artifact of either sample. The baseline is negative
+in both, as the variance risk premium requires.
+
+Against it, the pooled model's **0.486 (n=286, +/-3.0pp)** clears the equity breakeven by
+**4.9pp gross** — 1.6 SE above.
+
+### Then costs
+
+A precision margin is not money. Converting:
+
+| | |
+|---|---|
+| Gross edge per trade | **+0.117% of spot** |
+| Mean straddle premium | 2.70% of spot |
+| Cost per option leg that erases the edge | **1.09% of premium** |
+
+A straddle is **four** option legs — buy CE, buy PE, sell both to exit. Sensitivity:
+
+| Cost per leg | Net edge |
+|---|---|
+| 0.5% of premium | +0.063% |
+| 1.0% | +0.009% |
+| 2.0% | **-0.099%** |
+| 3.0% | **-0.206%** |
+
+So the entire edge is gone at roughly 1.1% cost per leg, and single-stock option bid-ask
+spreads in India routinely exceed that even in the most liquid names, before STT, exchange
+charges, GST and brokerage.
+
+### The unfortunate shape of this
+
+**The signal works where it cannot be traded cheaply, and trades cheaply where the signal
+is not shown to work.** NIFTY index options are far more liquid than single-stock options
+— spreads comfortably inside the cost budget — but NIFTY's own EXPANSION precision is
+0.385 on 13 predictions, below breakeven and statistically silent. The equity panel, where
+precision clears at 0.486 on 286 predictions, is where four legs of single-stock option
+spread consume the whole 0.117%.
+
+### One further structural problem, to verify before any build
+
+NSE single-stock options are, to the best of my knowledge, **monthly expiry only** —
+weeklies exist on indices, not stocks. If so, the synthetic five-day tenor this study
+prices is not purchasable on equities at all: the trade would be a monthly option held
+five days, paying for a month of volatility to capture a week of it, with materially
+different theta and vega. That would change these numbers and should be confirmed against
+current NSE contract specifications before anyone builds execution. It is exactly the
+class of assumption that the ASSUMED weekly-expiry flag already refuses to let the live
+path make.
+
+### Verdict
+
+Do not build execution on this. The gross edge is real, small, replicated across two
+instrument sets, and plausibly consumed by transaction costs on the only instruments where
+it has been demonstrated. The cheapest thing that would change the picture is a larger
+NIFTY EXPANSION sample — settled live evidence, not holdout — because that is the
+instrument whose costs the edge could survive.
+
 ### Stage 2: Feature discipline and validation activation
 
 - Evaluate aggregate/drop alternatives for sparse features.
