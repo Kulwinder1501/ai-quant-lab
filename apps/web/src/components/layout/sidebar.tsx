@@ -79,14 +79,14 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         ? "bg-cyan-300/15 text-cyan-100 shadow-inner shadow-cyan-200/10"
         : "text-slate-300 hover:bg-white/5 hover:text-slate-100",
       // Collapsed rail: square centered icon hits. Expanded: label + icon row.
-      collapsed ? "justify-center size-10 mx-auto" : "gap-3 px-3 py-2.5",
+      collapsed ? "justify-center size-10 mx-auto" : "gap-3 px-3 py-2",
     );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div
         className={classNames(
-          "flex shrink-0 items-center gap-3 py-5",
+          "flex shrink-0 items-center gap-3 py-4",
           collapsed ? "justify-center px-2" : "px-4 sm:px-6",
         )}
       >
@@ -105,15 +105,15 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
 
       <div
         className={classNames(
-          "min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-4 scrollbar-hide",
+          "min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-3 scrollbar-hide",
           collapsed ? "px-2" : "px-4",
         )}
       >
-        <nav aria-label="Sidebar navigation" className="flex flex-col gap-6">
+        <nav aria-label="Sidebar navigation" className="flex flex-col gap-4">
           {sections.map((section, idx) => (
             <div key={idx} className={collapsed ? "flex flex-col items-center gap-1.5" : undefined}>
               {!collapsed && (
-                <div className="mb-2 pl-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <div className="mb-1.5 pl-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   {section.title}
                 </div>
               )}
@@ -150,7 +150,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         </nav>
       </div>
 
-      <div className={classNames("shrink-0 border-t border-white/10", collapsed ? "p-2" : "p-4")}>
+      <div className={classNames("shrink-0 border-t border-white/10", collapsed ? "p-2" : "p-3")}>
         <button
           type="button"
           onClick={onToggleCollapse}

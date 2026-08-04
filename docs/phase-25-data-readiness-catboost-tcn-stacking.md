@@ -94,9 +94,9 @@ Residual gaps after this consolidation:
 - Intraday remains Yahoo-sourced, 100% zero-volume on both indices. Unchanged by this work
   and addressed only by Workstream D.
 - GIFT Nifty remains `PROVIDER_NOT_CONFIGURED` with zero rows.
-- The Workstream A audit script does not exist yet. The table above is a hand-run snapshot,
-  not the repeatable machine-readable report Stage 0 requires. **Stage 0 is therefore not
-  yet complete**, though its data preconditions now hold.
+- ~~The Workstream A audit script does not exist yet.~~ **Resolved later the same day** —
+  see "Workstream A record" below. The audit exists, is persisted and hashed, gates
+  training fail-closed, and Stage 0 is complete.
 
 ### Correction: the repoint was incomplete (2026-08-03)
 
@@ -914,8 +914,8 @@ neutralized.
 
 ## Stage 2 record: validation activation (2026-08-03)
 
-Status: **validation activation done and measured. The feature-capacity half — the
-`ml-feature-v6` bump — is not done.**
+Status: **validation activation done and measured.** (The feature-capacity half — the
+`ml-feature-v6` bump — was completed later the same day; see its own record below.)
 
 ### What was wrong
 
@@ -988,8 +988,9 @@ breadth features — is **not** implemented. Two findings shape it:
   `postgres_repository.py` applies no `is_active` filter on any of its four instrument
   joins, so the research equities are readable today.
 
-**Stage 2 exit is therefore not met.** Validation activation is complete and has already
-changed a conclusion; the capacity half remains.
+**Stage 2 exit was not met at this point.** Validation activation was complete and had
+already changed a conclusion; the capacity half remained. (Resolved later the same day —
+see the `ml-feature-v6` record below.)
 
 
 ## Stage 2 record: multi-instrument pooling (2026-08-03)
@@ -1076,6 +1077,200 @@ not 5.5. The cut is now a variance-reduction and interpretability exercise rathe
 rescue, and it should be measured under these folds rather than assumed to help.
 
 
+## Stage 2 record: feature capacity cut and breadth (`ml-feature-v6`, 2026-08-03)
+
+Status: **done and measured. Stage 2 exit criteria are met.**
+
+### What changed
+
+The swing feature schema was cut from 113 columns (`ml-feature-v5`) to 36
+(`ml-feature-v6`), and seven point-in-time market-breadth columns were added from the
+twenty-equity research panel plus the two indices. The changes, and the reasoning:
+
+- The 42 pattern one-hots and 30 price-action confidence one-hots collapse into four
+  aggregate scores: `pattern.bullish_confidence`, `pattern.bearish_confidence`, and the
+  price-action pair. On daily NIFTY50 those blocks are zero on the vast majority of
+  rows; 72 near-constant columns are variance for the imputer and noise for fold
+  estimates while carrying at most "some bullish/bearish detection fired, this
+  strongly". The two SUPPORT/RESISTANCE `level_distance_bps` columns survive as the
+  block's only dense structural content (sparse on 1d — 29 SUPPORT and 26 RESISTANCE
+  events exist with levels — but continuous and unambiguous when present).
+- Exact linear combinations are gone: Bollinger middle/upper/lower (middle *is* SMA20,
+  bands are middle ± 2σ, and the σ ratio stays), and the SuperTrend band levels (its
+  line and trend flags stay).
+- VWAP is gone from the swing schema: one bar per session makes a session-reset VWAP
+  the bar's typical price restated, and index "volume" is synthetic anyway.
+- `candle.gap_fill_bps` and `candle.is_gap_defended` are gone for their documented
+  dual-meaning and near-constant-gate pathologies.
+- Seven breadth columns arrive: advance/decline ratio, cross-sectional median return
+  and dispersion, share above SMA20, median volume ratio, the bank-vs-IT
+  relative-strength spread, and the NIFTY50-vs-BANKNIFTY daily return gap. All are
+  computed by pure functions in `apps/ml/ai_quant_lab_ml/breadth.py` from *settled
+  daily bars only*, attached to a bar as the latest panel session at or before its
+  close within a five-weekday staleness budget — the same point-in-time attach rule as
+  the VIX regime and FII/DII columns. A session below ten measurable participants
+  publishes NaN, not a quiet-looking zero.
+
+### The versioning contract changed shape
+
+Unlike every earlier bump, v5 artifacts remain loadable. Inference now validates an
+artifact against the schema version recorded in *its own metadata*
+(`ProductionInferenceContract.schema_version`), and `predict.py` builds feature vectors
+for that version, never the current default. Consequences:
+
+- The v5 volatility shadow families keep scoring and accruing settled history next to
+  fresh v6 lineages; the volatility competition ranks settled outcomes and is therefore
+  comparable across schemas.
+- The *directional* competition resets to v6 only
+  (`CURRENT_FEATURE_SCHEMA_VERSION = "ml-feature-v6"` in `competition-eligibility.ts`),
+  per this phase's rule that a capacity change resets that pool exactly once.
+- An artifact declaring a version outside `KNOWN_FEATURE_SCHEMA_VERSIONS` is rejected
+  at load time, fail-closed.
+- `train.py --feature-schema ml-feature-v5` exists as a research-only override so
+  capacity experiments run both schemas on identical rows and folds. Scalp timeframes
+  are excluded; their schema is versioned separately.
+
+### Measured, not assumed
+
+Both schemas were trained on identical windows (2023-01-01 to 2026-08-02, cutoff
+2026-08-03T14:00Z), identical fold counts, and the same audited data.
+
+| Run | v5 | v6 |
+| --- | --- | --- |
+| Pooled 1d volatility LightGBM, 5-fold walk-forward mean macro-F1 | 0.4337 | 0.4222 |
+| Pooled 1d volatility LightGBM, CPCV (15 splits) macro-F1 | 0.4426 (σ 0.0173) | 0.4352 (σ 0.0170) |
+| NIFTY50 1d volatility logistic, 2-fold mean macro-F1 | 0.3156 | **0.3636** (won both folds) |
+| NIFTY50 1d directional logistic, 2-fold mean macro-F1 | 0.2432 | **0.3235** |
+
+Reading: on the data-rich pooled task the two schemas are statistically
+indistinguishable — the CPCV gap is under half a split standard deviation — which means
+the 77 removed columns were carrying essentially no signal that LightGBM could use. On
+the scarce single-instrument tasks, exactly where the capacity argument applies, v6 wins
+outright. Both CPCV runs beat trivial on 15/15 splits under either schema. Parsimony
+wins the tie: **v6 is the default swing schema going forward.** The pooled EOD lineage
+will re-baseline under v6 while its v5 predecessors keep settling in shadow, so the
+scoreboard — not this offline table — makes the final call, per invariant 9.
+
+Breadth population was verified in the artifact itself: in a 256-row v6 reference set,
+all four aggregate scores populate on every row and the breadth columns populate on
+249–255 rows (the shortfall is the SMA20/volume warmup and one unmeasurable session),
+with the SUPPORT/RESISTANCE distances NaN throughout that particular sample — expected
+given 29/26 events across the whole series.
+
+
+## Stage 3 record: CatBoost challenger family (2026-08-03)
+
+Status: **family integrated and measured. Not enrolled in the EOD training loop.**
+
+### What was built
+
+CatBoost is a normal registry-backed model family on the same numeric `ml-feature-v6`
+contract as LightGBM/XGBoost — not a silent preprocessing fork:
+
+- Identifier `catboost-gradient-boosting-v1`, CLI choice `catboost`, npm script
+  `ml:train:catboost`, dependency pin `catboost>=1.2,<2`.
+- Trainer uses `boosting_type="Ordered"` (the inductive bias that justifies the family),
+  Bernoulli row subsample, per-split `rsm` column sample, `thread_count=1`, and records
+  `catboostVersion` in hyperparameters so artifacts stay reproducible.
+- Dedicated SHAP adapter via `get_feature_importance(type="ShapValues")`, registered in
+  `CONTRIBUTION_METHOD_BY_ALGORITHM` as `TREE_SHAP_V1`. Multiclass and binary additivity
+  tests pass: reported contributions reconstruct the selected-class raw margin.
+- `LabelEncodedClassifier.predict` now flattens CatBoost's `(n, 1)` multiclass class-index
+  shape so the shared pipeline contract stays intact.
+- API `algorithmFamily` maps the new identifier to `GRADIENT_BOOSTING`.
+
+### Measured against exact baselines
+
+Same windows, cutoff (`2026-08-03T14:00Z`), folds, and v6 schema as the Stage 2 LightGBM
+runs:
+
+| Run | LightGBM / logistic (Stage 2) | CatBoost |
+| --- | --- | --- |
+| Pooled 1d volatility, 5-fold walk-forward mean macro-F1 | LightGBM **0.4222** | 0.3904 |
+| Pooled 1d volatility, CPCV (15 splits) macro-F1 | LightGBM **0.4352** (σ 0.0170) | 0.4239 (σ 0.0252) |
+| NIFTY50 1d volatility logistic / CatBoost, 2-fold mean | logistic **0.3636** | 0.3376 |
+| NIFTY50 1d directional logistic / CatBoost, 2-fold mean | logistic **0.3235** | 0.2910 |
+
+CatBoost still beats the trivial predictor on every pooled and single-instrument
+volatility CPCV split (15/15). The directional leakage audit returns `PASS`, with the
+`NO_SKILL_TO_AUDIT` short-circuit (base holdout 0.2824 below the 0.333 random baseline)
+— a model-quality result, not a leakage finding.
+
+### Decision
+
+**Do not enroll CatBoost in the EOD `ML_ALGORITHMS` loop.** The research acceptance
+criteria require incremental out-of-sample value over existing trees on identical folds.
+Here CatBoost loses to LightGBM on the pooled volatility task that actually works, and
+loses to logistic on both single-instrument tasks. Training successfully and beating
+trivial is not enough; ordered boosting did not buy a measurable edge on this schema and
+sample.
+
+The family stays available for research (`npm run ml:train:catboost`) and for a later
+re-evaluation if a categorical schema experiment or a materially different target appears.
+Useful error diversity for stacking is also deferred: Stage 6 stacking requires base
+learners that already qualify on their own.
+
+
+## Stage 4 record: Intraday data foundation and sequence-readiness (2026-08-04)
+
+Status: **`tcn-1m` research gate PASS on NIFTYBEES. `tcn-5m` FAIL (bar count). Option-chain
+deferred. Stage 5 may open only for the PASSed candidate.**
+
+### Already in place before this stage
+
+Workstream D1/D2 work from 2026-08-03 still stands:
+
+| Series | Bars | Sessions | Non-zero volume | Indicators (`ta-v1`) | Workstream A state |
+|---|---|---|---|---|---|
+| NIFTYBEES `1m` | 331,141 | 887 | ~100% | complete (incl. VWAP) | READY |
+| NIFTYBEES `5m` | 66,229 | 887 | ~100% | complete (incl. VWAP) | READY |
+| NIFTY50 `1m`/`5m` | ~54k / ~12k | 143 / 165 | index volume | present | READY / DEGRADED |
+
+Instrument semantics remain `ETF_PROXY` for NIFTYBEES (`is_active = FALSE`). Spot-index
+series are negative controls, not TCN training instruments.
+
+### Built this stage
+
+- Domain module `sequence-readiness.ts` encodes the Workstream D gate table
+  (`tcn-1m` ≥200k bars / ≥250 sessions / ≤1% zero-volume; `tcn-5m` ≥100k; `tcn-15m`
+  ≥50k), rejects `SPOT_INDEX` semantics, requires a single `fyers-api-v3` lineage and a
+  Workstream A `READY` series, and records the default sequence contract
+  (`NO_OVERNIGHT_CROSSING`, per-instrument windows, completed candles only, independence
+  caveat).
+- Migration `036-sequence-readiness-reports` plus
+  `npm run data:audit:sequence` persist a hashed gate report Stage 5 can cite.
+- The audit reads series state from the latest Workstream A report so the two audits
+  cannot disagree about READY/DEGRADED.
+
+### Measured gate results (2026-08-04)
+
+| Candidate | Verdict | Why |
+|---|---|---|
+| NIFTYBEES `1m` (`tcn-1m`) | **PASS** | 331,141 bars, 887 sessions, 0% zero-vol, ETF_PROXY, READY, Fyers native |
+| NIFTYBEES `5m` (`tcn-5m`) | FAIL | 66,229 bars below the 100,000 floor (all other integrity checks clear) |
+| NIFTY50 `1m` | FAIL | spot-index semantics + insufficient bars/sessions |
+| NIFTY50 `5m` | BLOCKED | series DEGRADED (internal gap) plus spot-index / volume / depth failures |
+
+`anyResearchAuthorized = true` solely because of NIFTYBEES `1m`.
+
+### Explicitly not done
+
+- **5m depth extension.** A deeper Fyers backfill (2021–2022) was attempted to close the
+  100k gap and failed: refresh-token API returns SEBI-disabled (`HTTP 400, code -16`).
+  Re-authorize Fyers interactively, then extend; until then `tcn-5m` stays closed.
+- **Option-chain snapshots (D3).** No authorized historical feed. Scraping current pages
+  into the past remains prohibited.
+- **Futures record-forward collector.** Still the right long-term traded series, still
+  blocked for history by Fyers' live-contract-only endpoint; needs a point-in-time
+  rollover policy before scheduling.
+
+### Stage 4 exit
+
+Met for the **1m TCN research candidate on NIFTYBEES**. Stage 5 may implement a compact
+TCN against that series and that series only. Opening 5m or 15m research, or training on
+spot-index bars, requires a new sequence-readiness PASS.
+
+
 ## Volatility settlement path (2026-08-03)
 
 Status: **grading and settlement built and tested. The loop is not closed — nothing
@@ -1152,6 +1347,17 @@ train (pooled, gate MET) -> shadow-predict (4b) -> settle (2b) -> compete (5b) -
   now a thin binding; all 15 pre-existing directional tests pass unchanged. Copying it
   would have meant maintaining the trivial-accuracy reasoning in two places, and that is
   the single guard that exposed the directional target.
+- **Correction (2026-08-03, later):** as first written this gate compared **accuracy
+  only**, while its own doc comment claimed it required both axes. The claim in the
+  commit message and in this record was therefore wrong at the time. `trivialMacroF1` -
+  the closed-form macro-F1 of an always-majority predictor, `2p/(1+p)/N` - was added to
+  `settled-metrics.ts` and the gate now genuinely checks both. The accuracy-only form had
+  the mirror-image hole to the spreader: a majority-hugger edging past trivial accuracy
+  while discriminating no better between classes than the trivial predictor itself.
+  The **directional** gate in `model-competition.ts` had the same accuracy-only test and
+  has been brought in line, with a test for the hugger case. That change is strictly
+  narrowing - it can only exclude a pool member, never promote one - and no live PRIMARY
+  moves, since every directional model already fails on accuracy.
 - **The qualifying gate requires macro-F1 *and* accuracy above trivial.** Directly
   encodes the CPCV result: the directional target beat trivial on macro-F1 on 100% of
   splits while losing on accuracy on 93%. A macro-F1-only ranking promotes the
@@ -1188,6 +1394,80 @@ A volatility PRIMARY authorises **risk and regime context only**. No directional
 reads `volatility_competition_state`, and no risk consumer reads it yet either -- wiring
 that is a separate, explicit decision.
 
+## Workstream A record: the data-readiness audit exists and gates training (2026-08-03)
+
+Status: **built, measured, remediated, and wired into training and the EOD
+pipeline. Stage 0's missing deliverable — the repeatable machine-readable
+report — now exists, so Stage 0 is complete.**
+
+### What was built
+
+- Migration `034-data-readiness-reports`: immutable audit reports, hashed
+  (SHA-256 over canonicalised JSON) and persisted, latest-first index.
+- `npm run data:audit`: measures every stored `(instrument, timeframe)` series
+  — coverage, integrity, provenance, freshness, volume, `ta-v1` indicator
+  coverage — plus FII/DII context, and assigns each series
+  READY / DEGRADED / STALE / INVALID. Assessment rules are pure functions in
+  `market-data/domain/data-readiness.ts`, tested without a database. The audit
+  exits 0 on findings: a DEGRADED series is a finding, not an audit failure.
+- Fail-closed gate in `train.py`: before any data loads, the latest report must
+  exist, be under seven days old, and show every trained series READY —
+  a pooled run is refused listing every failing member at once. The clearing
+  report's id and hash are recorded in `validationProtocol.dataReadiness`
+  inside the checksummed artifact, so every model can prove the data health it
+  trained under. `--allow-unaudited-data` exists for scratch databases and
+  records `enforced: false` permanently.
+- EOD pipeline: the audit runs as step 1b (after collection, before training),
+  and training steps are now individually isolated — a gate refusal is recorded
+  loudly and the pipeline still settles, shadow-predicts, and competes, exiting
+  non-zero at the end if any training step failed.
+
+Measurement choices that need stating: expected bars per intraday session are
+the series' own modal bars-per-session (no exchange holiday calendar is stored,
+and the modal count needs none); freshness and gaps are measured in missed
+weekday sessions, tolerating 3 and 5 respectively; indicator coverage is
+measured over post-warm-up bars (40-bar allowance) and VWAP is reported but
+never gated, since it is undefined without traded volume.
+
+### What the first audit found
+
+The first run measured 100 series: 28 READY, 72 DEGRADED, 0 STALE, 0 INVALID.
+Three findings mattered:
+
+1. **NIFTY50 and BANKNIFTY 15m had 0–8% `ta-v1` indicator coverage.** The
+   nightly 15m models had been training against almost entirely imputed
+   indicator features, and nothing said so. Remediated by recomputing
+   indicators over the full stored range (~7,900 snapshots per index); both
+   series are now READY.
+2. **Every Yahoo intraday series carried expired provisional bars** (2–3 per
+   index series, 57–59 on the India VIX intraday series): Yahoo's chart API
+   appends the in-progress bar keyed at *last trade time* rather than the
+   timeframe grid, the importer stored it provisionally, and no later fetch
+   could ever match its off-grid key to finalise it. Fixed at the source —
+   `ImportHistoricalMarketData` now defers in-progress bars entirely
+   (settled evidence only; the forming bar belongs to the live collector) —
+   and the accumulated orphans were removed by migration
+   `035-purge-expired-provisional-candles`, same reasoning as the 013 and 033
+   purges: fabricated windows, not market coverage.
+3. **NIFTY50 5m has a 500-weekday internal gap** — a January 2026 Fyers probe
+   cluster plus the Jan–Jul 2026 backfill. Left DEGRADED deliberately; nothing
+   trains on it, and the gap is now visible instead of implied.
+
+After remediation: 32 READY, 68 DEGRADED. Every series the EOD pipeline trains
+on (NIFTY50 15m, NIFTY50 1d, the twenty research equities 1d) is READY. The
+remaining DEGRADED series are honest: equity/index 30m and 60m have no `ta-v1`
+snapshots because nothing trains there, and INDIAVIX 5m sits at 90–94%
+indicator coverage while its short history accumulates.
+
+### Verified end to end
+
+- A 30m NIFTY50 training run is refused, exit 1, citing the audit id and every
+  failing indicator floor.
+- A 1d NIFTY50 run trains and its persisted `validationProtocol.dataReadiness`
+  carries `enforced: true`, the report id, hash, and per-symbol states.
+- 21 new TypeScript domain tests and 8 new Python gate tests; full suites pass
+  (API 415, ML 171 + 195 subtests).
+
 ## Timeframe naming collision resolved (2026-08-03)
 
 `1h` and `60m` were two names for one interval. `1h` is absent from
@@ -1217,6 +1497,9 @@ so the deletion removes fabricated evidence rather than coverage. Same reasoning
 - Run CPCV as a report-only diagnostic.
 
 **Exit:** new schema beats or matches the old schema with lower capacity and stable folds.
+**Met 2026-08-03:** `ml-feature-v6` (36 columns) matches v5 (113 columns) within noise on
+the pooled CPCV and beats it outright on both single-instrument runs — see the Stage 2
+`ml-feature-v6` record above.
 
 ### Stage 3: CatBoost challenger
 
@@ -1225,6 +1508,9 @@ so the deletion removes fabricated evidence rather than coverage. Same reasoning
 - Enroll only after the research gates pass.
 
 **Exit:** retain as challenger only if value or useful error diversity is demonstrated.
+**Met partially 2026-08-03:** family + SHAP path shipped and audited; research gates did
+*not* clear for EOD enrollment (CatBoost loses to LightGBM/logistic on identical folds).
+See the Stage 3 CatBoost record above. Revisit only with new evidence.
 
 ### Stage 4: Intraday data foundation
 
@@ -1235,12 +1521,37 @@ so the deletion removes fabricated evidence rather than coverage. Same reasoning
 - Run the sequence-readiness audit.
 
 **Exit:** the relevant TCN data gate passes.
+**Met 2026-08-04 for `tcn-1m` on NIFTYBEES.** The 5m gate remains unmet (66k / 100k
+bars) and option-chain snapshots remain unauthorized — see the Stage 4 record above.
 
 ### Stage 5: Compact TCN experiment
 
 - Introduce optional deep-learning infrastructure.
 - Implement sequence contract, group-aware purge, model, artifact, and explanation.
 - Benchmark against trees with equivalent lagged information.
+
+Status: **TCN research gate PASS (NIFTYBEES 1m, tcn-1m)** — the candidate beats the strongest tabular lag baseline and trivial on every outer fold.
+
+**Measured (volatility-expansion-v1, horizon=5, lookback=64, channels=16, params=6771):**
+
+| Fold | TCN macro-F1 | lag LightGBM macro-F1 | trivial macro-F1 |
+| --- | ---: | ---: | ---: |
+| 1/3 | 0.5383 | 0.5054 | 0.1811 |
+| 2/3 | 0.5127 | 0.4894 | 0.1734 |
+| 3/3 | 0.4907 | 0.4585 | 0.1726 |
+
+| Mean (3 folds) | macro-F1 |
+| --- | ---: |
+| TCN | **0.5139** |
+| lag LightGBM | 0.4844 |
+| trivial | 0.1757 |
+
+Artifact:
+- algorithm: `pytorch-causal-tcn-v1`
+- path: `models/volatility-expansion-tcn--NIFTYBEES--1m--h5--lookback64--ml-feature-scalp-v2--volatility-expansion-v1--band0.25/20260804T071226339499Z-tcn.pkl`
+- sha256: `85ae39d07573bc26f0a96191a1721153c29c88900c92a2139239f5b2f63e993c`
+
+Enrollment decision: **defer EOD** (research-only run; no live promotion in Stage 5), but **unblock Stage 6 stacking** using the TCN + existing lag LightGBM family.
 
 **Exit:** advance only on stable incremental out-of-sample and net-of-cost value.
 
@@ -1251,6 +1562,38 @@ so the deletion removes fabricated evidence rather than coverage. Same reasoning
 - Train/evaluate the regularized meta-learner.
 - Add two-layer explanation and full lineage.
 
+Status: **research gate PASS on NIFTYBEES 1m** — OOF logistic stack beats the best
+base (TCN) on the untouched holdout fold and improves holdout log-loss/Brier.
+
+**Bases:** `pytorch-causal-tcn-v1` + lag `lightgbm-gradient-boosting-v1` (same Stage 5
+folds / sequences). CatBoost remains excluded (Stage 3 no-go).
+
+**Diversity (all OOF rows):** disagreement 32.2%, error correlation 0.505 → PASS.
+
+**Holdout fold 3 (n=2926):**
+
+| Model | macro-F1 | accuracy | log-loss | Brier |
+| --- | ---: | ---: | ---: | ---: |
+| Stack (`oof-logistic-stack-v1`) | **0.5103** | **0.5062** | **0.9759** | **0.1958** |
+| Best base (TCN) | 0.4907 | 0.4891 | 0.9779 | 0.1969 |
+| lag LightGBM | (outer fold 3) 0.4585 | — | 1.0092 | 0.2031 |
+
+Artifacts:
+- stack: `models/volatility-expansion-stack--NIFTYBEES--1m--h5--lookback64--ml-feature-scalp-v2--volatility-expansion-v1--band0.25/20260804T080245660072Z-stack.pkl`
+- sha256: `96bccc33d2e70c0b6a8aa0d7477d4552b9b8d99558a6238f591d6d7d337aeb76`
+- bases cited in stack metadata (TCN + lag LightGBM checksums)
+
+Enrollment decision: **defer EOD** (researchAdvances true; settled shadow evidence still
+required before promotion). CLI: `npm run ml:train:stack`.
+
+**Shadow enrollment (2026-08-04 follow-on):** TCN and stack are registered as
+`CANDIDATE` rows under `volatility-expansion-v1` (not EOD-trained). Sequence scoring
+is wired into `ml:predict --shadow-scheme volatility-expansion-v1` via
+`sequence_inference.py`; register with `npm run ml:register:sequence-shadow`. Torch is
+installed in the API image (`requirements-dl.txt`). Honest no-backdating refuses
+candles at/before the research cutoff (`2026-08-04T05:00:00Z`); settled evidence
+accrues once fresh NIFTYBEES 1m bars arrive and EOD steps 4b→2b→5b run.
+
 **Exit:** stack must beat the best base model by more than evaluation noise.
 
 ### Stage 7: Reconsider deferred architectures
@@ -1258,6 +1601,24 @@ so the deletion removes fabricated evidence rather than coverage. Same reasoning
 - TFT only for a large, clean, multi-horizon panel with point-in-time covariates.
 - TabNet only after sufficient tabular scale and failure of simpler models.
 - PPO only in a separately approved execution-research phase with L2/tick data.
+
+Status: **all three remain deferred / out of scope (2026-08-04).** No new architecture
+is authorized. Phase 25's staged model queue is closed at Stage 6 for implementation
+work; Stage 7 is a recorded reconsideration, not a build.
+
+Evidence against each gate (fresh sequence-readiness report
+`d18f61d8-ae03-4478-a0e9-73349df53c20` + DB probe):
+
+| Architecture | Gate | Current evidence | Decision |
+| --- | --- | --- | --- |
+| TFT | TCN gates + large multi-instrument panel + multiple explicit horizons + ≥1y PIT exogenous snapshots | Only `NIFTYBEES 1m` sequence-PASS; `tcn-5m` FAIL (66k/100k); 4 instruments with 1m history; no option-chain / dedicated exogenous snapshot tables | **Defer** |
+| TabNet | Sufficient tabular scale **and** failure of simpler models | Swing GBDTs, NIFTYBEES TCN, and OOF stack already produce usable OOS signal; all-numeric schema still favors trees | **Defer** |
+| PPO / deep RL | Recorded L2/ticks, order/fill history, independently validated fill/cost simulator | No tick / order-book / fill / execution tables in the v2 DB; no approved execution-research phase | **Out of scope** |
+
+Do **not** add TFT, TabNet, or PPO dependencies, trainers, or EOD enrollment on the basis
+of Stage 5/6 research success. The correct follow-on for accepted research candidates
+(TCN, stack) is settled shadow evidence under the existing competition/promotion rules —
+not a new architecture family.
 
 ## Rollback and recovery
 
@@ -1294,13 +1655,19 @@ This phase is complete only when:
 
 ## Recommended immediate next action
 
-Do **Stage 0 only** first: generate the current data-readiness baseline. It will determine
-whether the time-stamped counts in Phase 24 still hold and will turn the discussion from
-"which model should we add?" into a measurable queue of missing data, dead features, and
-eligible experiments.
+Stages 0–7 of this phase are complete for their intended scope: readiness gates, v6
+capacity, CatBoost (no-go), intraday sequence foundation, TCN (research advance), OOF
+stack (research advance), and deferred-architecture reconsideration (still no-go).
 
-Do not add CatBoost, PyTorch, TCN, or stacking in the same change as Stage 0. The baseline
-must exist before the architecture work so that every later result has an honest reference.
+Shadow wiring for TCN/stack is in place (candidates registered; sequence predict path
+live). Remaining operational work:
+
+1. Re-auth Fyers interactively (`npm run data:auth:fyers`) then collect **NIFTYBEES 1m**
+   past the research cutoff so EOD 4b→2b→5b can write, settle, and compete auxiliary
+   predictions. (Refresh API is SEBI-disabled — automatic token refresh fails.)
+2. api-v2/scheduler-v2 images rebuilt with torch (2026-08-04); keep them current after
+   further ML dependency changes.
+3. Keep CatBoost / TFT / TabNet / PPO out of EOD until their gates independently clear.
 
 ## Primary references
 

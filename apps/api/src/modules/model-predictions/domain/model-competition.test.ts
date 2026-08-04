@@ -16,6 +16,7 @@ describe("computeSettledMetrics", () => {
       macroF1: null,
       directionalHitRate: null,
       trivialAccuracy: null,
+      trivialMacroF1: null,
     });
   });
 
@@ -46,6 +47,9 @@ function standing(
   // Defaults to a baseline nothing can lose to, so cases about the promotion rules are
   // not silently also testing the trivial-accuracy gate.
   trivialAccuracy = 0,
+  // Same intent for the macro-F1 axis, which the gate started checking on
+  // 2026-08-03. Left at 0 so existing promotion cases are unaffected.
+  trivialMacroF1 = 0,
 ): PoolMemberStanding {
   return {
     modelVersionId: id,
@@ -57,6 +61,7 @@ function standing(
       macroF1: rollingMacroF1,
       directionalHitRate: rollingMacroF1,
       trivialAccuracy,
+      trivialMacroF1,
     },
     dailyMacroF1,
   };
@@ -213,6 +218,25 @@ describe("decideCompetition", () => {
     expect(decision.headToHead).toMatchObject({ challengerId: "challenger", winsInWindow: 7 });
     expect(decision.assignments).toContainEqual(
       expect.objectContaining({ modelVersionId: "primary", role: "PRIMARY" }));
+  });
+
+  // Mirror image of the spreader case above. Until 2026-08-03 this gate compared
+  // accuracy only, so a majority-hugger -- edging past trivial accuracy while
+  // discriminating no better between classes than the trivial predictor itself -- was
+  // eligible. The helper ties accuracy and macro-F1 together, so the fixture separates
+  // the two baselines instead: accuracy clears its baseline, macro-F1 does not.
+  it("refuses a majority-hugger that beats trivial accuracy but not trivial macro-F1", () => {
+    const days = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`2026-07-${10 + i}`, 0.5]));
+    const hugger = standing(
+      "hugger", "COMPETITOR", 0.5, 400, days,
+      /* trivialAccuracy */ 0.4,
+      /* trivialMacroF1 */ 0.6,
+    );
+
+    const decision = decideCompetition([hugger]);
+
+    expect(decision.promotion).toBeNull();
+    expect(decision.assignments.every((assignment) => assignment.role === "COMPETITOR")).toBe(true);
   });
 
   it("does not crown a bootstrap champion that loses to the trivial predictor", () => {

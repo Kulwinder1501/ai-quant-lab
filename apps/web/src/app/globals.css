@@ -194,6 +194,18 @@ body {
   color: rgb(var(--chart-tooltip-text)) !important;
 }
 
+/* Referenced by the sidebar nav; keeps overflow scrollable without a visible bar. */
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

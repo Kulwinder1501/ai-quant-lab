@@ -48,6 +48,8 @@ export interface SettledMetrics {
    * That is the same artifact that made triple-barrier look like an improvement.
    */
   trivialAccuracy: number | null;
+  /** Macro-F1 of that same always-majority strategy. See settled-metrics.ts. */
+  trivialMacroF1: number | null;
 }
 
 /**
@@ -74,6 +76,7 @@ export function computeSettledMetrics(cells: ConfusionCell[]): SettledMetrics {
     macroF1: metrics.macroF1,
     directionalHitRate: metrics.committedHitRate,
     trivialAccuracy: metrics.trivialAccuracy,
+    trivialMacroF1: metrics.trivialMacroF1,
   };
 }
 
@@ -173,9 +176,17 @@ function isEligible(member: PoolMemberStanding, rules: CompetitionRules): boolea
  * and still shows up in head-to-head reporting. It simply cannot be crowned.
  */
 function beatsTrivial(member: PoolMemberStanding): boolean {
-  const { accuracy, trivialAccuracy } = member.rolling;
-  if (accuracy === null || trivialAccuracy === null) return false;
-  return accuracy > trivialAccuracy;
+  const { accuracy, trivialAccuracy, macroF1, trivialMacroF1 } = member.rolling;
+  if (accuracy === null || trivialAccuracy === null || macroF1 === null || trivialMacroF1 === null) {
+    return false;
+  }
+  // Both axes, for the reason the volatility gate documents at length: each alone is
+  // gameable in a different direction. Accuracy-only -- what this checked until
+  // 2026-08-03 -- admits a majority-hugger that edges past trivial accuracy while
+  // discriminating no better than the trivial predictor; macro-F1-only admits the
+  // spreader, which is how the directional target looked viable for as long as it did.
+  // Strictly narrowing: this can only ever exclude a member, never promote one.
+  return accuracy > trivialAccuracy && macroF1 > trivialMacroF1;
 }
 
 /**

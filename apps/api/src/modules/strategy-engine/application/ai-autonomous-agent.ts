@@ -59,6 +59,19 @@ export const INSTITUTIONAL_FLOW_MAX_AGE_DAYS = INSTITUTIONAL_FLOW_STALENESS_DAYS
  */
 export const PRODUCTION_INDICATOR_VERSION = "ta-v1";
 
+/**
+ * Stop and target sizing for agent-executed trades, matching the trend-breakout
+ * strategy's convention (`atrStopMultiple: 1.5`, `rewardRiskMultiple: 2`).
+ *
+ * The agent previously bracketed every trade at a flat 1.5% stop / 3% target of
+ * the live price. A fixed percentage ignores both the timeframe being ticked and
+ * the prevailing volatility: on a 15m context it produced a ~370-point NIFTY
+ * stop where the measured 15m ATR is ~30 points. Scaling by ATR makes the same
+ * multiples mean the same thing on every timeframe and in every regime.
+ */
+export const AGENT_ATR_STOP_MULTIPLE = 1.5;
+export const AGENT_REWARD_RISK_MULTIPLE = 2;
+
 export interface InstitutionalFlowBias {
   /** Confidence points to add to a long-biased score. Negative discounts the trade. */
   adjustment: number;
@@ -485,8 +498,27 @@ export class AiAutonomousAgent {
       if (!stratVerId) return;
 
       const side: TradeSide = latestPattern?.direction === "BEARISH" ? "SHORT" : "LONG";
-      const slDist = livePrice * 0.015;
-      const tpDist = livePrice * 0.03;
+
+      // Volatility-scaled bracket. The production ATR snapshot is required: a
+      // stop sized without a volatility measurement is a guess, and the rest of
+      // this codebase deliberately refuses to trade on fabricated numbers.
+      const atrObj = ctx.indicators.find((i) => i.code === "ATR" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
+      const atrValue = atrObj ? Number(atrObj.values["value"] ?? Number.NaN) : Number.NaN;
+      if (!Number.isFinite(atrValue) || atrValue <= 0) {
+        this.thoughts.push({
+          id: `th-${Date.now()}-noatr`,
+          timestamp: new Date().toISOString(),
+          symbol,
+          action: "MONITORING",
+          confidence,
+          message: `Setup qualified at ${confidence}% confidence, but no production ATR(14) snapshot exists for ${symbol} on ${timeframe}. Skipping execution rather than guessing a stop distance.`,
+          details: { timeframe, missingIndicator: "ATR", algorithmVersion: PRODUCTION_INDICATOR_VERSION },
+        });
+        return;
+      }
+
+      const slDist = atrValue * AGENT_ATR_STOP_MULTIPLE;
+      const tpDist = slDist * AGENT_REWARD_RISK_MULTIPLE;
       const stopLoss = side === "LONG" ? Number((livePrice - slDist).toFixed(2)) : Number((livePrice + slDist).toFixed(2));
       const targetPrice = side === "LONG" ? Number((livePrice + tpDist).toFixed(2)) : Number((livePrice - tpDist).toFixed(2));
       const qty = symbol === "NIFTY50" ? 50 : 25; // 1 standard NSE lot
@@ -500,10 +532,17 @@ export class AiAutonomousAgent {
           entryPrice: livePrice,
           stopLoss,
           targetPrice,
-          riskReward: 2.0,
+          riskReward: AGENT_REWARD_RISK_MULTIPLE,
           confidence: confidence / 100,
           reasoning,
-          evidence: { source: "AI_AUTONOMOUS_AGENT", newsSentiment, rsiVal },
+          evidence: {
+            source: "AI_AUTONOMOUS_AGENT",
+            newsSentiment,
+            rsiVal,
+            atrValue,
+            atrStopMultiple: AGENT_ATR_STOP_MULTIPLE,
+            rewardRiskMultiple: AGENT_REWARD_RISK_MULTIPLE,
+          },
           expiresAt: new Date(Date.now() + 3600000 * 4),
           evidenceItems: [],
         });
