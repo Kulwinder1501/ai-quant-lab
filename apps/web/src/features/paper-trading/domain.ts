@@ -51,7 +51,23 @@ export interface PaperTradeLiveValuation {
   asOf: string;
   volatility: number | null;
   volatilitySource: "INDIA_VIX" | "ENTRY_IV" | null;
+  /**
+   * Per contract, at the same volatility the mark used. Null for a spot-marked position,
+   * which has no option contract — reporting delta 1 there would imply an option-like
+   * exposure the row does not represent.
+   */
+  greeks: PaperTradeGreeks | null;
+  daysToExpiry: number | null;
   reason: string | null;
+}
+
+export interface PaperTradeGreeks {
+  delta: number;
+  gamma: number;
+  /** Currency per calendar day, negative for a long option: the buyer pays theta. */
+  theta: number;
+  /** Per one absolute percentage point of IV. */
+  vega: number;
 }
 
 export function isLongTradeSide(side: PaperTradeRow["side"]): boolean {

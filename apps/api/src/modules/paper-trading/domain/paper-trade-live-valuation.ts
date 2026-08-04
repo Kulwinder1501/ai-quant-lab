@@ -4,6 +4,26 @@ import { isOptionBuyerTrade, priceOptionMark } from "./option-mark-to-market.js"
 export type LiveValuationSource = "OPTION_MODEL" | "UNDERLYING_SPOT" | "UNAVAILABLE";
 export type LiveValuationVolatilitySource = "INDIA_VIX" | "ENTRY_IV" | null;
 
+/**
+ * Position greeks, at the same volatility the mark was computed from.
+ *
+ * Null together with the mark, never independently. A greek derived from a different
+ * volatility than the P&L beside it would describe a position the account does not hold,
+ * and the two would disagree without saying so.
+ *
+ * Per contract, not per position: multiply by quantity for portfolio exposure. Reported
+ * per-unit so a greek is comparable across positions of different size, which is the form
+ * the option chain shows and the form a hedge ratio is read in.
+ */
+export interface PaperTradeGreeks {
+  delta: number;
+  gamma: number;
+  /** Currency per calendar day, negative for a long option: the buyer pays theta. */
+  theta: number;
+  /** Per one absolute percentage point of IV. Positive for calls and puts alike. */
+  vega: number;
+}
+
 export interface PaperTradeLiveValuation {
   status: "AVAILABLE" | "UNAVAILABLE";
   source: LiveValuationSource;
@@ -14,6 +34,10 @@ export interface PaperTradeLiveValuation {
   asOf: string;
   volatility: number | null;
   volatilitySource: LiveValuationVolatilitySource;
+  /** Present only for a model-marked option position; null for spot and unavailable. */
+  greeks: PaperTradeGreeks | null;
+  /** Days left on the contract, so theta has a horizon to be read against. */
+  daysToExpiry: number | null;
   reason: string | null;
 }
 
@@ -68,6 +92,8 @@ function unavailable(
     asOf: asOf.toISOString(),
     volatility: null,
     volatilitySource: null,
+    greeks: null,
+    daysToExpiry: null,
     reason,
   };
 }
@@ -127,6 +153,15 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
         asOf: asOf.toISOString(),
         volatility,
         volatilitySource: currentVolatility === null ? "ENTRY_IV" : "INDIA_VIX",
+        // Straight from the mark, so the greeks and the P&L above describe one model
+        // evaluation rather than two.
+        greeks: {
+          delta: mark.greeks.delta,
+          gamma: mark.greeks.gamma,
+          theta: mark.greeks.theta,
+          vega: mark.greeks.vega,
+        },
+        daysToExpiry: mark.timeToExpiryYears > 0 ? mark.timeToExpiryYears * 365 : 0,
         reason: null,
       };
     } catch (error) {
@@ -152,6 +187,10 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
     asOf: asOf.toISOString(),
     volatility: null,
     volatilitySource: null,
+    // A spot-marked position has no option contract, so it has no greeks. Reporting
+    // delta 1 here would imply an option-like exposure the row does not represent.
+    greeks: null,
+    daysToExpiry: null,
     reason: null,
   };
 }

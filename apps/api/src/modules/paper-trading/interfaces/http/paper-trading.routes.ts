@@ -180,6 +180,10 @@ export function registerPaperTradingRoutes(
           asOf: asOf.toISOString(),
           volatility: null,
           volatilitySource: null,
+          // Explicit nulls, not omitted keys: the client distinguishes "no greeks" from
+          // "field absent", and an undefined would read as the latter.
+          greeks: null,
+          daysToExpiry: null,
           reason: "No live valuation was produced for this open trade.",
         },
       }));

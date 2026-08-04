@@ -76,6 +76,12 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
             <th className="py-3 px-4">Entry / Premium</th>
             <th className="py-3 px-4">Target / Stop</th>
             <th className="py-3 px-4">Live Mark</th>
+            <th
+              className="py-3 px-4"
+              title="Per contract, at the same volatility the mark used. Theta is shown for the whole position in rupees per day, which is the number the account actually feels."
+            >
+              Greeks
+            </th>
             <th className="py-3 px-4">Live P&amp;L (₹)</th>
             <th className="py-3 px-4">Return %</th>
             <th className="py-3 px-4" title="Counts NSE sessions only: 09:15–15:30 IST, excluding weekends and configured holidays.">Market Time</th>
@@ -94,6 +100,7 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
             const direction = quote?.direction || "NONE";
             const isLong = isLongTradeSide(trade.side);
             const isOption = isOptionPaperTrade(trade);
+            const greeks = valuation?.status === "AVAILABLE" ? valuation.greeks : null;
             const livePnl = valuation?.status === "AVAILABLE" ? valuation.unrealizedPnl : null;
             const liveReturn = valuation?.status === "AVAILABLE" ? valuation.returnPercent : null;
             const isWinning = livePnl !== null && livePnl >= 0;
@@ -160,6 +167,33 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
                     <span className={`block mt-1 text-[10px] font-normal ${direction === "UP" ? "text-emerald-400" : direction === "DOWN" ? "text-rose-400" : "text-slate-500"}`}>
                       Underlying ₹{formatNumber(underlyingPrice, 2)}
                     </span>
+                  )}
+                </td>
+                <td className="py-4 px-4">
+                  {/*
+                    Greeks exist only for a model-marked option. A spot-marked row has no
+                    contract, and showing delta 1 there would imply an option-like
+                    exposure the position does not have.
+                  */}
+                  {greeks === null ? (
+                    <span className="text-slate-500" title={valuation?.reason ?? "Not an option position"}>—</span>
+                  ) : (
+                    <div className="flex flex-col gap-0.5 font-mono text-[11px] leading-tight">
+                      <span className="text-emerald-300" title="Delta per contract: premium change per 1 point of underlying">
+                        Δ {greeks.delta.toFixed(3)}
+                      </span>
+                      <span className="text-amber-300" title="Theta for the whole position, in rupees per calendar day. Negative: a buyer pays it.">
+                        Θ ₹{formatNumber(greeks.theta * trade.quantity, 0)}/d
+                      </span>
+                      <span className="text-sky-300" title="Vega per contract, per 1 absolute point of IV">
+                        ν {greeks.vega.toFixed(2)}
+                      </span>
+                      {typeof valuation?.daysToExpiry === "number" && (
+                        <span className="text-slate-500" title="Calendar days to expiry — the horizon theta is charged over">
+                          {valuation.daysToExpiry.toFixed(1)}d left
+                        </span>
+                      )}
+                    </div>
                   )}
                 </td>
                 <td className="py-4 px-4">

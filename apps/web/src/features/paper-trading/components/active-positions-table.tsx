@@ -50,6 +50,12 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                 <th className="py-3 px-4">Qty</th>
                 <th className="py-3 px-4">Entry Price</th>
                 <th className="py-3 px-4">Live Mark</th>
+                <th
+                  className="py-3 px-4"
+                  title="Per contract, at the same volatility the mark used. Theta is for the whole position in rupees per day."
+                >
+                  Greeks
+                </th>
                 <th className="py-3 px-4">Fees</th>
                 <th className="py-3 px-4">Opened At</th>
                 <th className="py-3 px-4">Notes</th>
@@ -85,6 +91,28 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
                     {trade.liveValuation?.status === "AVAILABLE" && trade.liveValuation.markPrice !== null
                       ? `₹${formatNumber(trade.liveValuation.markPrice, 2)}`
                       : <span className="text-amber-300" title={trade.liveValuation?.reason || "Live valuation unavailable"}>Unavailable</span>}
+                  </td>
+                  <td className="py-3.5 px-4">
+                    {/*
+                      Greeks exist only for a model-marked option. A spot-marked row has
+                      no contract, and a delta of 1 there would imply an option-like
+                      exposure the position does not have.
+                    */}
+                    {trade.liveValuation?.status !== "AVAILABLE" || trade.liveValuation.greeks === null ? (
+                      <span className="text-slate-500">—</span>
+                    ) : (
+                      <div className="flex flex-col gap-0.5 font-mono text-[11px] leading-tight">
+                        <span className="text-emerald-300" title="Delta per contract">
+                          Δ {trade.liveValuation.greeks.delta.toFixed(3)}
+                        </span>
+                        <span className="text-amber-300" title="Theta for the whole position, rupees per calendar day">
+                          Θ ₹{formatNumber(trade.liveValuation.greeks.theta * trade.quantity, 0)}/d
+                        </span>
+                        <span className="text-sky-300" title="Vega per contract, per 1 absolute point of IV">
+                          ν {trade.liveValuation.greeks.vega.toFixed(2)}
+                        </span>
+                      </div>
+                    )}
                   </td>
                   <td className="py-3.5 px-4 text-xs text-slate-300" title={JSON.stringify(trade.feeBreakdown || {})}>
                     ₹{formatNumber(trade.entryFees || 0, 2)}
