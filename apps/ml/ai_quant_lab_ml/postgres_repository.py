@@ -19,6 +19,10 @@ except ImportError:  # Allows pure fake-connection unit tests before optional ru
     dict_row = None
 
 from .contracts import (
+    BREADTH_INDEX_PRIMARY,
+    BREADTH_INDEX_SECONDARY,
+    BREADTH_UNIVERSE,
+    BreadthContext,
     CandleEvidence,
     DIRECTIONAL_LABEL_SCHEMES,
     DatasetRequest,
@@ -43,7 +47,9 @@ from .contracts import (
     REGIME_SOURCE_INDICATOR_PERIOD,
     REGIME_SOURCE_SYMBOL,
     REGIME_STALENESS_BARS,
+    SCALP_TIMEFRAMES,
 )
+from .breadth import PanelBar, compute_breadth_contexts, latest_breadth_at
 from .features import feature_definition
 
 Row = Mapping[str, Any]
@@ -102,38 +108,49 @@ def _session_partition_clause(timeframe: str) -> str:
 # the label LEAD is session-partitioned: a path crossing the overnight gap would
 # measure the gap, not the intraday move.
 _FORWARD_PATH_SQL = """
+    WITH series AS (
+      SELECT
+        id,
+        high,
+        low,
+        close,
+        close_time,
+        open_time,
+        {session_key} AS session_key,
+        ROW_NUMBER() OVER (
+          PARTITION BY {session_key}
+          ORDER BY open_time ASC, close_time ASC, id ASC
+        ) AS rn
+      FROM candles
+      WHERE instrument_id = %s
+        AND timeframe = %s
+        AND is_complete = TRUE
+        AND received_at <= %s
+        AND close_time <= %s
+    ),
+    sources AS (
+      SELECT id, session_key, rn
+      FROM series
+      WHERE id = ANY(%s::uuid[])
+    )
     SELECT
-      src.id AS source_candle_id,
-      fwd.high,
-      fwd.low,
-      fwd.close,
-      fwd.close_time
-    FROM candles AS src
-    CROSS JOIN LATERAL (
-      SELECT f.high, f.low, f.close, f.close_time, f.open_time, f.id
-      FROM candles AS f
-      WHERE f.instrument_id = src.instrument_id
-        AND f.timeframe = src.timeframe
-        AND f.is_complete = TRUE
-        AND f.received_at <= %s
-        AND f.close_time <= %s
-        AND (
-          f.open_time > src.open_time
-          OR (f.open_time = src.open_time AND f.close_time > src.close_time)
-          OR (f.open_time = src.open_time AND f.close_time = src.close_time AND f.id > src.id)
-        )
-        {session_bound}
-      ORDER BY f.open_time ASC, f.close_time ASC, f.id ASC
-      LIMIT %s
-    ) AS fwd
-    WHERE src.id = ANY(%s::uuid[])
-    ORDER BY src.id ASC, fwd.open_time ASC, fwd.close_time ASC, fwd.id ASC
+      s.id AS source_candle_id,
+      f.high,
+      f.low,
+      f.close,
+      f.close_time
+    FROM sources AS s
+    INNER JOIN series AS f
+      ON f.session_key = s.session_key
+     AND f.rn > s.rn
+     AND f.rn <= s.rn + %s
+    ORDER BY s.id ASC, f.rn ASC
 """
 
-_FORWARD_PATH_SESSION_BOUND = (
-    "AND (f.close_time AT TIME ZONE 'Asia/Kolkata')::date "
-    "= (src.close_time AT TIME ZONE 'Asia/Kolkata')::date"
-)
+# Intraday paths must not cross the IST session boundary. Daily/weekly series use a
+# constant partition key so the window is global across the instrument.
+_FORWARD_PATH_SESSION_KEY_INTRADAY = "(close_time AT TIME ZONE 'Asia/Kolkata')::date"
+_FORWARD_PATH_SESSION_KEY_SWING = "TRUE"
 
 #: Schemes whose label is decided by a *path* of later bars rather than a single
 #: later close. Only these pay for the forward-path query.
@@ -211,6 +228,35 @@ _TRAILING_CLOSE_VOLUME_SQL = """
     ORDER BY candles.close_time DESC, candles.open_time DESC, candles.id DESC
     LIMIT %s
 """
+
+# Daily bars for the breadth panel: the twenty research equities plus the two
+# indices, under the same as-of discipline as every other loader here
+# (completed bars received by the cutoff, never provisional prints). Always the
+# `1d` timeframe regardless of the timeframe being trained -- breadth is a
+# session-level statistic, and an intraday bar reads the latest settled session.
+_BREADTH_PANEL_SQL = """
+    SELECT
+      instruments.symbol,
+      candles.close_time,
+      candles.close,
+      candles.volume
+    FROM candles
+    INNER JOIN instruments ON instruments.id = candles.instrument_id
+    WHERE instruments.exchange = 'NSE'
+      AND instruments.symbol = ANY(%s)
+      AND candles.timeframe = '1d'
+      AND candles.is_complete = TRUE
+      AND candles.received_at <= %s
+      AND candles.close_time <= %s
+      AND candles.close_time >= %s
+    ORDER BY instruments.symbol ASC, candles.close_time ASC
+"""
+
+# Calendar days of panel history loaded before the first bar that needs a
+# breadth reading. The trailing windows span 20 sessions (~28 calendar days
+# plus holidays); 60 days guarantees full windows from the first attached bar
+# without loading years of panel data per request.
+_BREADTH_WARMUP_DAYS = 60
 
 _LATEST_CANDLE_EVIDENCE_SQL = """
     SELECT
@@ -673,6 +719,9 @@ class PostgresMlRepository:
 
     def __init__(self, connection: Connection[Any]) -> None:
         self._connection = connection
+        # Breadth panels are identical across a pooled run's members; see
+        # _load_breadth_contexts. Keyed by (data_cutoff_at, window_start).
+        self._breadth_cache: dict[tuple[datetime, datetime], list[BreadthContext]] = {}
 
     def load_candle_evidence(self, request: DatasetRequest) -> Sequence[CandleEvidence]:
         """Return ordered source-candle evidence with later labels kept separate from features."""
@@ -771,10 +820,21 @@ class PostgresMlRepository:
 
         regime_by_candle = self._load_vix_regime(candle_ids, timeframe, request.data_cutoff_at)
         flow_by_candle = self._load_institutional_flow(candle_ids, request.data_cutoff_at)
+        # Breadth exists only in the swing schema; scalp evidence skips the
+        # panel load entirely rather than attaching context no column reads.
+        breadth_contexts = (
+            self._load_breadth_contexts(
+                data_cutoff_at=request.data_cutoff_at,
+                window_start=request.data_window_start,
+            )
+            if timeframe not in SCALP_TIMEFRAMES
+            else []
+        )
         # Only path-based schemes read a forward path, so the fixed-horizon scheme
         # issues no extra query and its behaviour is bit-for-bit unchanged.
         forward_paths = (
             self._load_forward_paths(
+                instrument_id,
                 candle_ids,
                 timeframe,
                 request.horizon_bars,
@@ -825,6 +885,7 @@ class PostgresMlRepository:
                     fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
                     dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
                     institutional_flow_date=None if flow is None else flow.flow_date,
+                    breadth=latest_breadth_at(breadth_contexts, close_time),
                     forward_path=forward_paths.get(candle_id, ()),
                 )
             )
@@ -832,27 +893,41 @@ class PostgresMlRepository:
 
     def _load_forward_paths(
         self,
+        instrument_id: str,
         candle_ids: Sequence[str],
         timeframe: str,
         horizon_bars: int,
         data_cutoff_at: datetime,
         data_window_end: datetime,
     ) -> dict[str, tuple[ForwardBar, ...]]:
-        """Map each source candle to its forward path for triple-barrier labelling.
+        """Map each source candle to its forward path for path-based labelling.
 
-        A candle missing from the result, or present with fewer than ``horizon_bars``
-        bars, is right-censored at the end of the data: the builder treats a short
-        no-touch path as unknown rather than a genuine time-out.
+        Uses a single windowed scan of the instrument series instead of a
+        correlated LATERAL subquery per source id. On 1m history the LATERAL
+        form was multi-minute; the window form stays proportional to series
+        length. A candle missing from the result, or present with fewer than
+        ``horizon_bars`` bars, is right-censored.
         """
 
         if not candle_ids:
             return {}
 
-        session_bound = _FORWARD_PATH_SESSION_BOUND if _is_intraday_timeframe(timeframe) else ""
+        session_key = (
+            _FORWARD_PATH_SESSION_KEY_INTRADAY
+            if _is_intraday_timeframe(timeframe)
+            else _FORWARD_PATH_SESSION_KEY_SWING
+        )
         with self._connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                _FORWARD_PATH_SQL.format(session_bound=session_bound),
-                (data_cutoff_at, data_window_end, horizon_bars, list(candle_ids)),
+                _FORWARD_PATH_SQL.format(session_key=session_key),
+                (
+                    instrument_id,
+                    timeframe,
+                    data_cutoff_at,
+                    data_window_end,
+                    list(candle_ids),
+                    horizon_bars,
+                ),
             )
             rows = list(cursor.fetchall())
 
@@ -977,6 +1052,60 @@ class PostgresMlRepository:
                 _require_valid_datetime(row["vix_close_time"], "VIX close time"),
             )
         return regime_by_candle
+
+    def _load_breadth_contexts(
+        self,
+        *,
+        data_cutoff_at: datetime,
+        window_start: datetime,
+    ) -> list[BreadthContext]:
+        """Per-session breadth contexts observable under this cutoff, ascending.
+
+        The result is memoised per (cutoff, start): a pooled training run loads
+        evidence once per roster member, and the panel is identical for all of
+        them. All statistics are computed by the pure functions in
+        :mod:`breadth`, so training and inference cannot drift apart.
+        """
+
+        cache_key = (data_cutoff_at, window_start)
+        cached = self._breadth_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        fetch_from = window_start - timedelta(days=_BREADTH_WARMUP_DAYS)
+        symbols = [*BREADTH_UNIVERSE, BREADTH_INDEX_PRIMARY, BREADTH_INDEX_SECONDARY]
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                _BREADTH_PANEL_SQL,
+                (symbols, data_cutoff_at, data_cutoff_at, fetch_from),
+            )
+            rows = list(cursor.fetchall())
+
+        panel: dict[str, list[PanelBar]] = defaultdict(list)
+        primary_index_bars: list[PanelBar] = []
+        secondary_index_bars: list[PanelBar] = []
+        universe = set(BREADTH_UNIVERSE)
+        for row in rows:
+            symbol = _require_non_blank(str(row["symbol"]), "Instrument symbol").upper()
+            bar = PanelBar(
+                close_time=_require_valid_datetime(row["close_time"], "Panel candle close time"),
+                close=_to_float(row["close"], "panel candle close"),
+                volume=_to_float(row["volume"], "panel candle volume"),
+            )
+            if symbol in universe:
+                panel[symbol].append(bar)
+            elif symbol == BREADTH_INDEX_PRIMARY:
+                primary_index_bars.append(bar)
+            elif symbol == BREADTH_INDEX_SECONDARY:
+                secondary_index_bars.append(bar)
+
+        contexts = compute_breadth_contexts(
+            panel,
+            primary_index_bars=primary_index_bars,
+            secondary_index_bars=secondary_index_bars,
+        )
+        self._breadth_cache[cache_key] = contexts
+        return contexts
 
     def load_trailing_close_volume_series(
         self,
@@ -1119,6 +1248,19 @@ class PostgresMlRepository:
         # constant.
         regime = self._load_vix_regime([candle_id], timeframe, request.data_cutoff_at).get(candle_id)
         flow = self._load_institutional_flow([candle_id], request.data_cutoff_at).get(candle_id)
+        breadth = (
+            latest_breadth_at(
+                self._load_breadth_contexts(
+                    data_cutoff_at=request.data_cutoff_at,
+                    # Only the freshest context can attach to the single scored
+                    # bar, so the panel window is just the warmup depth.
+                    window_start=request.data_cutoff_at,
+                ),
+                close_time,
+            )
+            if timeframe not in SCALP_TIMEFRAMES
+            else None
+        )
         return CandleEvidence(
             candle_id=candle_id,
             instrument_id=str(candle_row["instrument_id"]),
@@ -1141,6 +1283,7 @@ class PostgresMlRepository:
             fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
             dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
             institutional_flow_date=None if flow is None else flow.flow_date,
+            breadth=breadth,
         )
 
     def create_candidate_model(
@@ -1336,7 +1479,9 @@ class PostgresMlRepository:
         if model_key is not None:
             query += " AND model_versions.model_key = %s"
             parameters.append(_require_non_blank(model_key, "Model key"))
-        query += " ORDER BY model_versions.model_key, model_versions.trained_at DESC"
+        # Prefer the newest trained_at, then the highest version when clocks tie
+        # (re-registration of the same research artifact keeps trained_at fixed).
+        query += " ORDER BY model_versions.model_key, model_versions.trained_at DESC, model_versions.version DESC"
 
         with self._connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, tuple(parameters))

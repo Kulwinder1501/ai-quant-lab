@@ -1,12 +1,14 @@
 """Deterministic local model training, with every library imported lazily.
 
-Three model families share one pipeline contract — ``imputer``, ``scaler``,
+Four model families share one pipeline contract — ``imputer``, ``scaler``,
 ``classifier`` — so an artifact from any of them can be scored, compared, and
 promoted by the same code:
 
 * the scikit-learn logistic-regression baseline, explained by linear terms;
 * an XGBoost gradient-boosted forest, explained by exact TreeSHAP values;
-* a LightGBM gradient-boosted forest, explained the same way.
+* a LightGBM gradient-boosted forest, explained the same way;
+* a CatBoost ordered-boosting forest, explained by CatBoost's own exact
+  TreeSHAP implementation.
 
 The boosted models do not need the scaler (a split point is scale-invariant) or
 the imputer (both libraries route missing values down a learned default branch),
@@ -24,6 +26,7 @@ from typing import Any
 
 from .contracts import (
     ALGORITHM_BY_CHOICE,
+    CATBOOST_ALGORITHM,
     DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     LABELS,
@@ -31,6 +34,7 @@ from .contracts import (
     LOGISTIC_BASELINE_ALGORITHM,
     XGBOOST_ALGORITHM,
     AnyLabel,
+    ClassMetrics,
     EvaluationMetrics,
     LabelAlphabet,
     LabeledExample,
@@ -117,7 +121,12 @@ def evaluate_predictions(
         raise TrainingError(f"Labels must be one of {', '.join(alphabet.labels)}.")
 
     try:
-        from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+        from sklearn.metrics import (
+            accuracy_score,
+            balanced_accuracy_score,
+            f1_score,
+            precision_recall_fscore_support,
+        )
     except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
         raise RuntimeError("scikit-learn is required to evaluate model predictions. Install apps/ml requirements first.") from error
 
@@ -137,6 +146,28 @@ def evaluate_predictions(
         else None
     )
 
+    # Per-class breakdown. macro-F1 averages away the only number a strategy acting on a
+    # single class can use: a straddle is taken on a predicted EXPANSION, so its precision
+    # is what decides whether the trade pays.
+    precision, recall, per_class_f1, actual_support = precision_recall_fscore_support(
+        actual, predicted, labels=list(alphabet.labels), zero_division=0
+    )
+    predicted_counts = Counter(predicted)
+    per_class: dict[str, ClassMetrics] = {}
+    for index, label in enumerate(alphabet.labels):
+        predicted_count = int(predicted_counts.get(label, 0))
+        actual_count = int(actual_support[index])
+        per_class[str(label)] = ClassMetrics(
+            # None rather than 0.0 when the class was never predicted or never occurred:
+            # "never attempted" and "always wrong" are opposite facts, and sklearn's
+            # zero_division=0 collapses them into the same number.
+            precision=float(precision[index]) if predicted_count > 0 else None,
+            recall=float(recall[index]) if actual_count > 0 else None,
+            f1=float(per_class_f1[index]),
+            predicted_count=predicted_count,
+            actual_count=actual_count,
+        )
+
     return EvaluationMetrics(
         accuracy=float(accuracy_score(actual, predicted)),
         balanced_accuracy=float(balanced_accuracy_score(actual, predicted)),
@@ -146,6 +177,7 @@ def evaluate_predictions(
         coverage=coverage,
         sample_count=sample_count,
         class_counts=_class_counts(actual, alphabet),
+        per_class=per_class,
     )
 
 
@@ -490,10 +522,95 @@ def train_lightgbm_classifier(
     )
 
 
+def train_catboost_classifier(
+    split: TemporalSplit,
+    *,
+    schema: Sequence[str] | None = None,
+    random_state: int = 42,
+    n_estimators: int = 300,
+    max_depth: int = 4,
+    learning_rate: float = 0.05,
+    subsample: float = 0.8,
+    colsample_bytree: float = 0.8,
+    reg_lambda: float = 3.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> BaselineTrainingResult:
+    """Fit a deterministic CatBoost forest on the same purged temporal split.
+
+    The keyword names deliberately mirror the other boosted trainers so one CLI
+    flag means one thing everywhere; they are mapped onto CatBoost's own
+    vocabulary here (``max_depth`` -> ``depth``, ``colsample_bytree`` -> ``rsm``,
+    ``reg_lambda`` -> ``l2_leaf_reg``).
+
+    ``boosting_type="Ordered"`` is the reason this family exists at all: each
+    tree's leaf values are estimated on permutation prefixes the tree was not
+    fitted on, which is a prediction-shift control that neither XGBoost nor
+    LightGBM has. Plain-mode CatBoost would be a third copy of the same bias.
+    Ordered boosting does **not** replace chronological splitting, purge, or the
+    leakage audit; it only changes how each tree is regularised internally.
+    """
+
+    selected_schema, train_labels, validation_labels = _prepared_split(
+        split, schema, algorithm_label="CatBoost", alphabet=alphabet,
+    )
+    hyperparameters = {
+        "nEstimators": _positive_int(n_estimators, "n_estimators"),
+        "maxDepth": _positive_int(max_depth, "max_depth"),
+        "learningRate": _positive_float(learning_rate, "learning_rate"),
+        "subsample": _fraction(subsample, "subsample"),
+        "colsampleByTree": _fraction(colsample_bytree, "colsample_bytree"),
+        "regLambda": _non_negative_float(reg_lambda, "reg_lambda"),
+        "boostingType": "Ordered",
+        "bootstrapType": "Bernoulli",
+        "randomState": random_state,
+    }
+
+    try:
+        import catboost
+        from catboost import CatBoostClassifier
+    except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
+        raise RuntimeError("catboost is required for gradient-boosted training. Install apps/ml requirements first.") from error
+
+    # The library version is recorded because CatBoost's ordered-boosting
+    # internals have changed across releases; an artifact's numbers are only
+    # reproducible against the version that produced them.
+    hyperparameters["catboostVersion"] = str(catboost.__version__)
+
+    # thread_count=1 and a fixed seed keep repeated runs on the same split
+    # byte-identical, which the artifact checksum relies on. Bernoulli bootstrap
+    # is the direct analogue of the row subsampling the other two families use;
+    # rsm is CatBoost's per-split column subsampling.
+    classifier = CatBoostClassifier(
+        iterations=hyperparameters["nEstimators"],
+        depth=hyperparameters["maxDepth"],
+        learning_rate=hyperparameters["learningRate"],
+        subsample=hyperparameters["subsample"],
+        rsm=hyperparameters["colsampleByTree"],
+        l2_leaf_reg=hyperparameters["regLambda"],
+        boosting_type="Ordered",
+        bootstrap_type="Bernoulli",
+        random_seed=random_state,
+        thread_count=1,
+        allow_writing_files=False,
+        verbose=0,
+    )
+    return _fitted_result(
+        algorithm=CATBOOST_ALGORITHM,
+        pipeline=_boosting_pipeline(classifier, alphabet),
+        split=split,
+        selected_schema=selected_schema,
+        train_labels=train_labels,
+        validation_labels=validation_labels,
+        hyperparameters=hyperparameters,
+        alphabet=alphabet,
+    )
+
+
 TRAINERS = {
     "logistic": train_logistic_regression_baseline,
     "xgboost": train_xgboost_classifier,
     "lightgbm": train_lightgbm_classifier,
+    "catboost": train_catboost_classifier,
 }
 
 
@@ -575,6 +692,7 @@ __all__ = [
     "algorithm_identifier",
     "evaluate_predictions",
     "predict_labels",
+    "train_catboost_classifier",
     "train_lightgbm_classifier",
     "train_logistic_regression_baseline",
     "train_model",

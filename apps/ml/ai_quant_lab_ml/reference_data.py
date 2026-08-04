@@ -25,7 +25,7 @@ from typing import Any
 from .contracts import (
     DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
-    FEATURE_SCHEMA_VERSION_SCALP,
+    KNOWN_FEATURE_SCHEMA_VERSIONS,
     AnyLabel,
     LabelAlphabet,
     LabeledExample,
@@ -147,7 +147,7 @@ def _known_schemas() -> Mapping[tuple[str, ...], str]:
 
     return {
         tuple(feature_schema(version)): version
-        for version in (FEATURE_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION_SCALP)
+        for version in KNOWN_FEATURE_SCHEMA_VERSIONS
     }
 
 
@@ -167,7 +167,7 @@ def _fixed_schema(schema: Sequence[str] | None) -> tuple[str, ...]:
     if selected not in _known_schemas():
         raise ReferenceDataError(
             "Reference data must use a known feature schema "
-            f"({FEATURE_SCHEMA_VERSION} or {FEATURE_SCHEMA_VERSION_SCALP}) in its declared order."
+            f"({', '.join(KNOWN_FEATURE_SCHEMA_VERSIONS)}) in its declared order."
         )
     return selected
 

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ai_quant_lab_ml.contracts import ALGORITHM_CHOICES, DatasetRequest
+from ai_quant_lab_ml.contracts import ALGORITHM_CHOICES, DatasetRequest, schema_version_for
 from ai_quant_lab_ml.features import build_labeled_examples, feature_schema
 from ai_quant_lab_ml.leakage import run_leakage_audit
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
@@ -124,7 +124,7 @@ def main() -> int:
             examples,
             algorithm=args.algorithm,
             horizon_bars=request.horizon_bars,
-            schema=feature_schema(),
+            schema=feature_schema(schema_version_for(request.timeframe)),
             hyperparameters=hyperparameters,
             random_state=args.random_state,
             validation_fraction=args.validation_fraction,

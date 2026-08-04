@@ -75,8 +75,33 @@ DIRECTIONAL_ALPHABET = LabelAlphabet(name="direction", labels=LABELS, abstain_la
 # exists. Both v4 and scalp-v1 artifacts were built against the old column set and
 # must be retrained; redefining either name in place is the mismatch the paragraph
 # above describes.
-FEATURE_SCHEMA_VERSION = "ml-feature-v5"
+#
+# v6 rather than v5 is the Phase 25 Stage 2 capacity bump, and it is the first
+# version change made for statistical rather than plumbing reasons. v5 carried
+# 113 columns, 82 of which were the pattern and price-action one-hot blocks that
+# are zero on almost every row; v6 collapses those into four aggregate scores,
+# drops columns that are linear combinations of others (Bollinger middle/upper/
+# lower given SMA20 and the band deviation, SuperTrend bands given its level),
+# drops VWAP (degenerate on a daily bar: one bar per session means it is the
+# typical price restated), and drops the two gap-derivative columns whose
+# documented pathologies (dual meaning, near-constant gate) apply on every
+# timeframe. In their place it adds seven point-in-time market-breadth columns
+# computed from the twenty-equity research panel and the two indices. Unlike
+# earlier bumps, v5 artifacts remain loadable and scorable: inference validates
+# an artifact against the schema version *recorded in its own metadata*, so the
+# volatility shadow families trained under v5 keep building settled history
+# while v6 lineages start fresh.
+FEATURE_SCHEMA_VERSION = "ml-feature-v6"
+FEATURE_SCHEMA_VERSION_V5 = "ml-feature-v5"
 FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v2"
+
+#: Every schema version this codebase can still construct feature vectors for.
+#: An artifact recorded under any other version is rejected at load time.
+KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
+    FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_SCALP,
+)
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
 # and daily-gap columns are either absent or degenerate inside a single session,
@@ -137,6 +162,76 @@ REGIME_SOURCE_INDICATOR_PERIOD = 20
 REGIME_SOURCE_INDICATOR_ALGORITHM_VERSION = "ta-v1"
 REGIME_STALENESS_BARS = 5
 
+# Market breadth reads a *panel* of other instruments, so its sources are part of
+# the v6 schema contract exactly the way the VIX regime's source is: changing the
+# roster, the windows, or the participation floor changes what a stored feature
+# value meant and therefore requires a new schema version.
+#
+# The roster is the twenty research equities from API migration 027. They are the
+# instruments whose daily history this project actually collects and audits; a
+# free-floating "Nifty 50 constituents" list would drift from the data that
+# exists. Breadth is always computed from *daily* completed bars regardless of
+# the timeframe being trained: an intraday bar reads the latest fully settled
+# session, never a same-day partial print, which keeps the columns point-in-time
+# by construction.
+BREADTH_UNIVERSE: tuple[str, ...] = (
+    "ASIANPAINT", "AXISBANK", "BAJFINANCE", "BHARTIARTL", "HDFCBANK",
+    "HINDUNILVR", "ICICIBANK", "INFY", "ITC", "KOTAKBANK",
+    "LT", "MARUTI", "NESTLEIND", "RELIANCE", "SBIN",
+    "SUNPHARMA", "TCS", "TITAN", "ULTRACEMCO", "WIPRO",
+)
+
+# The banking-versus-IT relative-strength spread needs sector membership. Only
+# roster members appear here; both sides must clear BREADTH_SECTOR_MINIMUM
+# members on a session or the spread is unmeasurable rather than a two-name
+# accident.
+BREADTH_BANK_SYMBOLS: tuple[str, ...] = ("AXISBANK", "HDFCBANK", "ICICIBANK", "KOTAKBANK", "SBIN")
+BREADTH_IT_SYMBOLS: tuple[str, ...] = ("INFY", "TCS", "WIPRO")
+BREADTH_SECTOR_MINIMUM = 2
+
+# Trailing windows, in sessions, for the share-above-SMA and volume-ratio
+# members. Both include the session being scored and never a later one.
+BREADTH_SMA_SESSIONS = 20
+BREADTH_VOLUME_MEDIAN_SESSIONS = 20
+
+# A session must have this many members with a measurable return before any
+# breadth statistic is published for it. Three names say nothing about breadth;
+# an unmeasured session stays NaN rather than masquerading as a quiet one.
+BREADTH_MINIMUM_PARTICIPANTS = 10
+
+# How stale a breadth print may be and still describe the bar being scored,
+# mirroring INSTITUTIONAL_FLOW_STALENESS_DAYS: NSE trades every weekday, so a
+# wider gap means collection was down and the feature is unmeasurable.
+BREADTH_STALENESS_DAYS = 5
+
+# The cross-index relative-return column compares these two symbols' daily
+# closes. Part of the contract for the same reason the VIX source symbol is.
+BREADTH_INDEX_PRIMARY = "NIFTY50"
+BREADTH_INDEX_SECONDARY = "BANKNIFTY"
+
+
+@dataclass(frozen=True)
+class BreadthContext:
+    """One settled session's cross-sectional breadth, attachable to any later bar.
+
+    ``observed_at`` is the panel session's close time; the attach rule is the
+    same as the VIX regime's -- the latest context whose ``observed_at`` is at or
+    before the bar's own close, within the staleness budget. ``None`` members
+    mean that statistic was unmeasurable for the session (too few participants,
+    incomplete trailing windows) and become NaN in the feature vector rather
+    than a learned fill value.
+    """
+
+    observed_at: datetime
+    advance_decline: float | None
+    median_return_bps: float | None
+    return_dispersion_bps: float | None
+    above_sma20_share: float | None
+    median_volume_ratio: float | None
+    bank_it_spread_bps: float | None
+    index_return_gap_bps: float | None
+
+
 # Labelling schemes. Distinct from FEATURE_SCHEMA_VERSION on purpose: the feature
 # *columns* are identical across schemes, only the *target* differs, so a scheme
 # is tracked separately. A model's provenance records both, and the
@@ -196,17 +291,34 @@ INSTITUTIONAL_FLOW_STALENESS_DAYS = 5
 LOGISTIC_BASELINE_ALGORITHM = "sklearn-logistic-regression-v1"
 XGBOOST_ALGORITHM = "xgboost-gradient-boosting-v1"
 LIGHTGBM_ALGORITHM = "lightgbm-gradient-boosting-v1"
+# Phase 25, Workstream C. CatBoost's ordered boosting fits each tree on
+# permutation-prefix targets, a genuinely different variance-control bias from
+# XGBoost's level-wise and LightGBM's leaf-wise growth. It enters as a normal
+# challenger family on the same numeric schema — native categorical handling
+# would be a separate, explicitly versioned schema experiment.
+CATBOOST_ALGORITHM = "catboost-gradient-boosting-v1"
 
 # Gradient-boosted forests cannot be explained with linear-coefficient language,
 # so the inference layer routes them to an exact TreeSHAP explainer instead.
-TREE_ENSEMBLE_ALGORITHMS: tuple[str, ...] = (XGBOOST_ALGORITHM, LIGHTGBM_ALGORITHM)
-SUPPORTED_ALGORITHMS: tuple[str, ...] = (LOGISTIC_BASELINE_ALGORITHM, *TREE_ENSEMBLE_ALGORITHMS)
+TREE_ENSEMBLE_ALGORITHMS: tuple[str, ...] = (XGBOOST_ALGORITHM, LIGHTGBM_ALGORITHM, CATBOOST_ALGORITHM)
+# Sequence research families (Stage 5/6). Shadow-scorable once registered as
+# CANDIDATE; not part of the EOD train loop. Identifiers are owned by
+# tcn_model / stacking modules and duplicated here so contracts stay import-light.
+TCN_ALGORITHM = "pytorch-causal-tcn-v1"
+STACK_ALGORITHM = "oof-logistic-stack-v1"
+SEQUENCE_SHADOW_ALGORITHMS: tuple[str, ...] = (TCN_ALGORITHM, STACK_ALGORITHM)
+SUPPORTED_ALGORITHMS: tuple[str, ...] = (
+    LOGISTIC_BASELINE_ALGORITHM,
+    *TREE_ENSEMBLE_ALGORITHMS,
+    *SEQUENCE_SHADOW_ALGORITHMS,
+)
 
 # The CLI-facing short name for each trainable algorithm.
 ALGORITHM_BY_CHOICE: Mapping[str, str] = {
     "logistic": LOGISTIC_BASELINE_ALGORITHM,
     "xgboost": XGBOOST_ALGORITHM,
     "lightgbm": LIGHTGBM_ALGORITHM,
+    "catboost": CATBOOST_ALGORITHM,
 }
 ALGORITHM_CHOICES: tuple[str, ...] = tuple(ALGORITHM_BY_CHOICE)
 
@@ -326,6 +438,11 @@ class CandleEvidence:
     # The trading session whose published flows the two ratios above came from.
     # Carried so a leakage audit can assert it precedes this bar's own session.
     institutional_flow_date: date | None = None
+    # The latest settled panel session's breadth at or before this bar's close
+    # (v6 schema only; None for scalp evidence and when no fresh panel session
+    # exists). Populated by the repository, never computed inside features.py,
+    # so training and inference share one loader and cannot skew.
+    breadth: BreadthContext | None = None
     # Label-only: the forward bars used by triple-barrier labelling, bounded to the
     # vertical barrier and obeying the same as-of cutoff as ``future_close``. Empty
     # for the fixed-horizon scheme, which never reads it. Never a feature.
@@ -371,6 +488,36 @@ class EvaluationMetrics:
     directional_predictions: int | None = None
     directional_hit_rate: float | None = None
     coverage: float | None = None
+    # Per-class breakdown, optional for the same reason the fields above are: a metrics
+    # block written before it existed still deserialises. Keyed by label.
+    per_class: Mapping[str, ClassMetrics] | None = None
+
+
+@dataclass(frozen=True)
+class ClassMetrics:
+    """Per-class precision, recall and F1 for one label.
+
+    Added because macro-F1 cannot answer a trading question. A straddle is only taken on
+    a predicted EXPANSION, so what decides whether the strategy pays is the precision of
+    that one class -- measured 2026-08-03 as needing to reach 44.3% against a 27.6% base
+    rate before fees. Macro-F1 averages exactly that away, and the promotion gate scored
+    macro-F1 alone.
+
+    ``precision`` is None when the model never predicted the class, rather than 0.0.
+    sklearn's ``zero_division=0`` reports 0.0 there, which reads as "always wrong" when
+    the truth is "never attempted" -- the difference between a model that is bad at
+    EXPANSION and one that abstains from it entirely, which are opposite situations for a
+    strategy that only acts on that class. ``recall`` is None by the same rule when the
+    class never occurred.
+    """
+
+    precision: float | None
+    recall: float | None
+    f1: float
+    #: How often the model predicted this class. The denominator behind ``precision``.
+    predicted_count: int
+    #: How often the class actually occurred. The denominator behind ``recall``.
+    actual_count: int
 
 
 @dataclass(frozen=True)

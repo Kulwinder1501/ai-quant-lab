@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ai_quant_lab_ml.artifacts import load_model_artifact
-from ai_quant_lab_ml.contracts import InferenceRequest, PersistedModelVersion, schema_version_for
+from ai_quant_lab_ml.contracts import InferenceRequest, PersistedModelVersion
 from ai_quant_lab_ml.features import VOLUME_MEDIAN_WINDOW, build_feature_vector, trailing_feature_context
 from ai_quant_lab_ml.inference import (
     InferenceError,
@@ -42,6 +42,11 @@ from ai_quant_lab_ml.contracts import (
     LabelAlphabet,
 )
 from ai_quant_lab_ml.reference_data import ReferenceDataError, nearest_reference_label_agreement
+from ai_quant_lab_ml.sequence_inference import (
+    is_sequence_shadow_algorithm,
+    score_sequence_prediction,
+    validate_sequence_shadow_artifact,
+)
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 
 
@@ -258,120 +263,167 @@ def score_model(
     )
     is_directional = label_scheme in DIRECTIONAL_LABEL_SCHEMES
     alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET if is_directional else VOLATILITY_ALPHABET
-    contract = validate_production_artifact(
-        model_version,
-        loaded_artifact.metadata,
-        instrument_symbol=symbol,
-        timeframe=timeframe,
-        alphabet=alphabet,
-        # An enrolled pool CANDIDATE shadow-predicts for the daily competition;
-        # its no-backdating guard below uses enrolled_at instead of promoted_at.
-        allow_candidate_pool_member=enrolled_at is not None,
-    )
-    inference_request = InferenceRequest(
-        instrument_symbol=symbol,
-        timeframe=timeframe,
-        data_cutoff_at=as_of,
-        indicator_algorithm_version=contract.indicator_algorithm_version,
-        pattern_algorithm_version=contract.pattern_algorithm_version,
-        price_action_algorithm_version=contract.price_action_algorithm_version,
-    )
-    evidence = repository.load_latest_completed_candle_evidence(inference_request)
-    if evidence is None:
-        return {
-            "level": "info",
-            "message": "No completed candle is available at the selected as-of cutoff",
-            "modelKey": contract.model_key,
-            "modelVersionId": model_version.id,
-            "instrument": symbol,
-            "timeframe": timeframe,
-            "asOf": as_of.isoformat(),
-            "predictionCreated": False,
-        }
-    require_prediction_after_training_boundary(evidence.close_time, contract)
-    # A PRODUCTION model keeps its promotion guard. A pool CANDIDATE is guarded
-    # by its enrollment instead: same no-backdating property, different clock.
-    if model_version.stage == "PRODUCTION":
-        require_prediction_after_production_promotion(evidence.close_time, model_version)
-    elif enrolled_at is not None and model_version.stage == "CANDIDATE":
-        require_prediction_after_pool_enrollment(evidence.close_time, enrolled_at)
+    sequence_model = is_sequence_shadow_algorithm(model_version.algorithm)
+    if sequence_model:
+        contract = validate_sequence_shadow_artifact(
+            model_version,
+            loaded_artifact.metadata,
+            instrument_symbol=symbol,
+            timeframe=timeframe,
+            alphabet=alphabet,
+            allow_candidate_pool_member=enrolled_at is not None,
+        )
     else:
-        raise InferenceError(
-            "Only a PRODUCTION model or an enrolled competition-pool CANDIDATE may create a prediction."
+        contract = validate_production_artifact(
+            model_version,
+            loaded_artifact.metadata,
+            instrument_symbol=symbol,
+            timeframe=timeframe,
+            alphabet=alphabet,
+            # An enrolled pool CANDIDATE shadow-predicts for the daily competition;
+            # its no-backdating guard below uses enrolled_at instead of promoted_at.
+            allow_candidate_pool_member=enrolled_at is not None,
         )
 
-    # The stationary schema needs the previous close and a rolling median
-    # volume. Both come from the same as-of cutoff as the scored candle, so
-    # inference sees exactly the trailing context training saw — anything less
-    # would leave two features missing at prediction time only, and the
-    # imputer would quietly paper over the skew with a training-fold median.
-    trailing_series = repository.load_trailing_close_volume_series(
-        inference_request,
-        bars=VOLUME_MEDIAN_WINDOW,
-    )
-    prior_close, median_volume = trailing_feature_context(trailing_series)
-    schema_version = schema_version_for(timeframe)
-    feature_values = build_feature_vector(
-        evidence,
-        prior_close=prior_close,
-        median_volume=median_volume,
-        schema_version=schema_version,
-        indicator_algorithm_version=contract.indicator_algorithm_version,
-        pattern_algorithm_version=contract.pattern_algorithm_version,
-        price_action_algorithm_version=contract.price_action_algorithm_version,
-    )
-    # The persisted algorithm chooses the explainer: linear terms for the
-    # baseline, exact TreeSHAP contributions for a boosted forest.
-    explained_prediction = explain_prediction(
-        loaded_artifact.model,
-        feature_values,
-        algorithm=model_version.algorithm,
-        schema=contract.feature_schema,
-        maximum_features=maximum_features,
-        alphabet=alphabet,
-    )
-    try:
-        similar_setup = nearest_reference_label_agreement(
-            pipeline=loaded_artifact.model,
-            features=feature_values,
-            predicted_label=explained_prediction.prediction,
-            reference_metadata=contract.training_reference_data,
-            k=similar_neighbors,
-            expected_schema=contract.feature_schema,
+    if sequence_model:
+        evidence, explained_prediction = score_sequence_prediction(
+            repository,
+            model_version,
+            loaded_artifact,
+            contract,
+            as_of=as_of,
             alphabet=alphabet,
-        ).as_dict()
-    except ReferenceDataError as error:
-        raise InferenceError(f"Could not calculate training-only similar-setup label agreement: {error}") from error
-    # This reliability measure asks whether earlier same-label calls came true
-    # by comparing a forward close against the directional neutral band. That
-    # question only exists for a directional target, so for any other scheme it
-    # is reported as not applicable instead of being computed misleadingly.
-    if is_directional:
-        observed_prior_predictions = repository.historical_prediction_reliability(
-            model_version_id=model_version.id,
-            instrument_id=evidence.instrument_id,
-            timeframe=evidence.timeframe,
-            prediction=explained_prediction.prediction,
-            reference_close_time=evidence.close_time,
-            data_cutoff_at=as_of,
-            horizon_bars=contract.horizon_bars,
-            neutral_threshold_bps=contract.neutral_threshold_bps,
         )
-        earlier_same_label = {
-            "method": "EARLIER_SAME_LABEL_PREDICTION_OUTCOMES_V1",
-            "evaluatedPredictions": observed_prior_predictions.evaluated_predictions,
-            "correctPredictions": observed_prior_predictions.correct_predictions,
-            "accuracy": observed_prior_predictions.accuracy,
+        require_prediction_after_training_boundary(evidence.close_time, contract)
+        if model_version.stage == "PRODUCTION":
+            require_prediction_after_production_promotion(evidence.close_time, model_version)
+        elif enrolled_at is not None and model_version.stage == "CANDIDATE":
+            require_prediction_after_pool_enrollment(evidence.close_time, enrolled_at)
+        else:
+            raise InferenceError(
+                "Only a PRODUCTION model or an enrolled competition-pool CANDIDATE may create a prediction."
+            )
+        similar_setup = {
+            "method": "NOT_APPLICABLE_FOR_SEQUENCE_MODEL",
+            "algorithm": model_version.algorithm,
+            "neighborCount": 0,
+            "labelAgreement": None,
         }
-    else:
         earlier_same_label = {
             "method": "NOT_APPLICABLE_FOR_NON_DIRECTIONAL_TARGET",
             "labelScheme": label_scheme,
         }
-    historical_reference = {
-        "trainingOnlySimilarSetups": similar_setup,
-        "earlierSameLabelPredictions": earlier_same_label,
-    }
+        historical_reference = {
+            "trainingOnlySimilarSetups": similar_setup,
+            "earlierSameLabelPredictions": earlier_same_label,
+        }
+    else:
+        inference_request = InferenceRequest(
+            instrument_symbol=symbol,
+            timeframe=timeframe,
+            data_cutoff_at=as_of,
+            indicator_algorithm_version=contract.indicator_algorithm_version,
+            pattern_algorithm_version=contract.pattern_algorithm_version,
+            price_action_algorithm_version=contract.price_action_algorithm_version,
+        )
+        evidence = repository.load_latest_completed_candle_evidence(inference_request)
+        if evidence is None:
+            return {
+                "level": "info",
+                "message": "No completed candle is available at the selected as-of cutoff",
+                "modelKey": contract.model_key,
+                "modelVersionId": model_version.id,
+                "instrument": symbol,
+                "timeframe": timeframe,
+                "asOf": as_of.isoformat(),
+                "predictionCreated": False,
+            }
+        require_prediction_after_training_boundary(evidence.close_time, contract)
+        # A PRODUCTION model keeps its promotion guard. A pool CANDIDATE is guarded
+        # by its enrollment instead: same no-backdating property, different clock.
+        if model_version.stage == "PRODUCTION":
+            require_prediction_after_production_promotion(evidence.close_time, model_version)
+        elif enrolled_at is not None and model_version.stage == "CANDIDATE":
+            require_prediction_after_pool_enrollment(evidence.close_time, enrolled_at)
+        else:
+            raise InferenceError(
+                "Only a PRODUCTION model or an enrolled competition-pool CANDIDATE may create a prediction."
+            )
+
+        # The stationary schema needs the previous close and a rolling median
+        # volume. Both come from the same as-of cutoff as the scored candle, so
+        # inference sees exactly the trailing context training saw — anything less
+        # would leave two features missing at prediction time only, and the
+        # imputer would quietly paper over the skew with a training-fold median.
+        trailing_series = repository.load_trailing_close_volume_series(
+            inference_request,
+            bars=VOLUME_MEDIAN_WINDOW,
+        )
+        prior_close, median_volume = trailing_feature_context(trailing_series)
+        # The artifact's own recorded schema version, never the timeframe's current
+        # default: after the v6 bump both v5 and v6 swing artifacts are live at the
+        # same time, and each must be scored against the columns it trained on.
+        feature_values = build_feature_vector(
+            evidence,
+            prior_close=prior_close,
+            median_volume=median_volume,
+            schema_version=contract.schema_version,
+            indicator_algorithm_version=contract.indicator_algorithm_version,
+            pattern_algorithm_version=contract.pattern_algorithm_version,
+            price_action_algorithm_version=contract.price_action_algorithm_version,
+        )
+        # The persisted algorithm chooses the explainer: linear terms for the
+        # baseline, exact TreeSHAP contributions for a boosted forest.
+        explained_prediction = explain_prediction(
+            loaded_artifact.model,
+            feature_values,
+            algorithm=model_version.algorithm,
+            schema=contract.feature_schema,
+            maximum_features=maximum_features,
+            alphabet=alphabet,
+        )
+        try:
+            similar_setup = nearest_reference_label_agreement(
+                pipeline=loaded_artifact.model,
+                features=feature_values,
+                predicted_label=explained_prediction.prediction,
+                reference_metadata=contract.training_reference_data,
+                k=similar_neighbors,
+                expected_schema=contract.feature_schema,
+                alphabet=alphabet,
+            ).as_dict()
+        except ReferenceDataError as error:
+            raise InferenceError(f"Could not calculate training-only similar-setup label agreement: {error}") from error
+        # This reliability measure asks whether earlier same-label calls came true
+        # by comparing a forward close against the directional neutral band. That
+        # question only exists for a directional target, so for any other scheme it
+        # is reported as not applicable instead of being computed misleadingly.
+        if is_directional:
+            observed_prior_predictions = repository.historical_prediction_reliability(
+                model_version_id=model_version.id,
+                instrument_id=evidence.instrument_id,
+                timeframe=evidence.timeframe,
+                prediction=explained_prediction.prediction,
+                reference_close_time=evidence.close_time,
+                data_cutoff_at=as_of,
+                horizon_bars=contract.horizon_bars,
+                neutral_threshold_bps=contract.neutral_threshold_bps,
+            )
+            earlier_same_label = {
+                "method": "EARLIER_SAME_LABEL_PREDICTION_OUTCOMES_V1",
+                "evaluatedPredictions": observed_prior_predictions.evaluated_predictions,
+                "correctPredictions": observed_prior_predictions.correct_predictions,
+                "accuracy": observed_prior_predictions.accuracy,
+            }
+        else:
+            earlier_same_label = {
+                "method": "NOT_APPLICABLE_FOR_NON_DIRECTIONAL_TARGET",
+                "labelScheme": label_scheme,
+            }
+        historical_reference = {
+            "trainingOnlySimilarSetups": similar_setup,
+            "earlierSameLabelPredictions": earlier_same_label,
+        }
     explanation = build_prediction_explanation(
         candle=evidence,
         contract=contract,
@@ -439,6 +491,18 @@ def score_model(
     }
 
 
+def _pooled_roster(model_version: PersistedModelVersion) -> list[str]:
+    """The pooled-training roster train.py records, or [] for a single-instrument model."""
+
+    protocol = model_version.validation_metrics.get("validationProtocol")
+    if not isinstance(protocol, Mapping):
+        return []
+    pooled = protocol.get("pooledInstruments")
+    if not isinstance(pooled, (list, tuple)):
+        return []
+    return [str(symbol).strip().upper() for symbol in pooled if str(symbol).strip()]
+
+
 def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, as_of: datetime) -> int:
     """Shadow-predict for non-directional candidates.
 
@@ -447,6 +511,13 @@ def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, 
     by label scheme rather than by enrollment. Predictions land in
     ``auxiliary_model_predictions`` because ``score_model`` routes by the model's own
     alphabet, so nothing directional is touched.
+
+    Each member is scored against its own scope: a pooled artifact fans out across its
+    recorded roster, a single-instrument artifact scores its own instrument. Pinning one
+    CLI symbol here (the original behaviour) made every model whose pool excluded that
+    symbol fail its pass -- so a pooled champion could never write a prediction, never
+    settle, and never satisfy "shadow before primary". ``--instrument`` remains an
+    explicit operator override for scoring one symbol only.
     """
 
     members = repository.list_shadow_pool(args.shadow_scheme, args.model_key)
@@ -455,35 +526,45 @@ def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, 
     failed = 0
     for member in members:
         model_version = member["model_version"]
-        try:
-            result = score_model(
-                repository,
-                model_version,
-                symbol=args.instrument,
-                timeframe=args.timeframe,
-                as_of=as_of,
-                maximum_features=args.maximum_features,
-                similar_neighbors=args.similar_neighbors,
-                enrolled_at=member["enrolled_at"],
-            )
-            result["shadowRole"] = member["role"]
-            result["modelKey"] = model_version.model_key
-            if result.get("predictionCreated"):
-                created += 1
-            results.append(result)
-        except Exception as error:  # noqa: BLE001 - one broken artifact must not stop the others.
-            failed += 1
-            results.append(
-                {
-                    "level": "error",
-                    "message": str(error),
-                    "errorType": type(error).__name__,
-                    "modelVersionId": model_version.id,
-                    "modelKey": model_version.model_key,
-                    "shadowRole": member["role"],
-                    "predictionCreated": False,
-                }
-            )
+        roster = _pooled_roster(model_version)
+        if args.instrument:
+            symbols: list[str | None] = [args.instrument]
+        elif roster:
+            symbols = list(roster)
+        else:
+            # score_model resolves the artifact's own instrument and timeframe.
+            symbols = [None]
+        for symbol in symbols:
+            try:
+                result = score_model(
+                    repository,
+                    model_version,
+                    symbol=symbol,
+                    timeframe=args.timeframe,
+                    as_of=as_of,
+                    maximum_features=args.maximum_features,
+                    similar_neighbors=args.similar_neighbors,
+                    enrolled_at=member["enrolled_at"],
+                )
+                result["shadowRole"] = member["role"]
+                result["modelKey"] = model_version.model_key
+                if result.get("predictionCreated"):
+                    created += 1
+                results.append(result)
+            except Exception as error:  # noqa: BLE001 - one broken artifact or symbol must not stop the others.
+                failed += 1
+                results.append(
+                    {
+                        "level": "error",
+                        "message": str(error),
+                        "errorType": type(error).__name__,
+                        "modelVersionId": model_version.id,
+                        "modelKey": model_version.model_key,
+                        "instrument": symbol,
+                        "shadowRole": member["role"],
+                        "predictionCreated": False,
+                    }
+                )
     json_output(
         {
             "level": "info",

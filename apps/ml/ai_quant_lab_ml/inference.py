@@ -23,8 +23,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import (
+    CATBOOST_ALGORITHM,
     DIRECTIONAL_ALPHABET,
-    FEATURE_SCHEMA_VERSION,
+    KNOWN_FEATURE_SCHEMA_VERSIONS,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     SUPPORTED_ALGORITHMS,
@@ -47,6 +48,14 @@ CONTRIBUTION_METHOD_BY_ALGORITHM: Mapping[str, str] = {
     LOGISTIC_BASELINE_ALGORITHM: LINEAR_CONTRIBUTION_METHOD,
     XGBOOST_ALGORITHM: TREE_CONTRIBUTION_METHOD,
     LIGHTGBM_ALGORITHM: TREE_CONTRIBUTION_METHOD,
+    # CatBoost's ShapValues importance is also an exact TreeSHAP decomposition
+    # of the selected class's raw margin, so the persisted method name is
+    # shared; the adapter that produces it is CatBoost-specific below.
+    CATBOOST_ALGORITHM: TREE_CONTRIBUTION_METHOD,
+    # Sequence families use dedicated explainers in sequence_inference.py;
+    # these entries document the persisted method names for dashboards.
+    "pytorch-causal-tcn-v1": "TEMPORAL_OCCLUSION_V1",
+    "oof-logistic-stack-v1": "STACK_META_COEFFICIENT_V1",
 }
 
 
@@ -62,6 +71,10 @@ class ProductionInferenceContract:
     instrument_symbol: str
     timeframe: str
     feature_schema: tuple[str, ...]
+    # The schema version recorded in the artifact's own metadata. Feature
+    # construction at scoring time must use this, never the current default:
+    # a v5 artifact scored against v6-built columns is silent garbage.
+    schema_version: str
     horizon_bars: int
     neutral_threshold_bps: float
     indicator_algorithm_version: str
@@ -170,15 +183,24 @@ def validate_production_artifact(
             f"No local explainer exists for {model_version.algorithm}; "
             f"supported algorithms are {', '.join(SUPPORTED_ALGORITHMS)}."
         )
-    expected_schema = feature_schema()
+    # The artifact declares its own schema version, and every subsequent check
+    # is made against *that* version's contract. A version this codebase cannot
+    # construct features for is rejected outright; a known older version (v5)
+    # stays scorable, which is what keeps the volatility shadow families alive
+    # across the v6 capacity bump.
+    schema_version = metadata.get("featureSchemaVersion")
+    if schema_version not in KNOWN_FEATURE_SCHEMA_VERSIONS:
+        raise InferenceError(
+            f"The production artifact declares unknown feature-schema version {schema_version!r}; "
+            f"known versions are {', '.join(KNOWN_FEATURE_SCHEMA_VERSIONS)}."
+        )
+    expected_schema = feature_schema(schema_version)
     if _schema_names(model_version.feature_schema) != expected_schema:
         raise InferenceError("The production model has an incompatible persisted feature schema.")
     metadata_schema = metadata.get("featureSchema")
     if not isinstance(metadata_schema, list) or tuple(metadata_schema) != expected_schema:
         raise InferenceError("The production artifact does not match the fixed feature schema.")
-    if metadata.get("featureSchemaVersion") != FEATURE_SCHEMA_VERSION:
-        raise InferenceError("The production artifact has an incompatible feature-schema version.")
-    if metadata.get("featureDefinition") != feature_definition():
+    if metadata.get("featureDefinition") != feature_definition(schema_version):
         raise InferenceError("The production artifact has an incompatible feature definition.")
     if metadata.get("algorithm") != model_version.algorithm:
         raise InferenceError("The production artifact algorithm does not match its persisted model version.")
@@ -241,6 +263,7 @@ def validate_production_artifact(
         instrument_symbol=expected_symbol,
         timeframe=expected_timeframe,
         feature_schema=expected_schema,
+        schema_version=schema_version,
         horizon_bars=_positive_integer(protocol.get("horizonBars"), "Artifact horizonBars"),
         neutral_threshold_bps=_non_negative_finite(protocol.get("neutralThresholdBps"), "Artifact neutralThresholdBps"),
         indicator_algorithm_version=_require_non_blank(protocol.get("indicatorAlgorithmVersion"), "Artifact indicator algorithm version"),
@@ -404,6 +427,29 @@ def _lightgbm_contribution_rows(estimator: Any, standardized: Sequence[float], w
     return _contribution_rows(raw, width=width, class_count=class_count, source="The LightGBM booster")
 
 
+def _catboost_contribution_rows(estimator: Any, standardized: Sequence[float], width: int, class_count: int) -> list[list[float]]:
+    """Read exact TreeSHAP values from the fitted CatBoost model.
+
+    CatBoost exposes SHAP through ``get_feature_importance(type="ShapValues")``
+    rather than a ``pred_contrib`` predict flag, which is why this family needs
+    its own adapter. The output is one ``width + 1`` block per scored class
+    (binary models emit a single block for the positive class), the same layout
+    ``_contribution_rows`` already normalises for the other two boosters.
+    """
+
+    try:
+        from catboost import Pool
+    except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
+        raise InferenceError("catboost is required to explain a CatBoost artifact. Install apps/ml requirements first.") from error
+    if not hasattr(estimator, "get_feature_importance"):
+        raise InferenceError("The promoted CatBoost classifier does not expose SHAP feature importances.")
+    try:
+        raw = estimator.get_feature_importance(data=Pool([list(standardized)]), type="ShapValues")
+    except Exception as error:  # noqa: BLE001 - any library failure is an explanation failure here.
+        raise InferenceError(f"The promoted CatBoost model could not produce TreeSHAP contributions: {error}") from error
+    return _contribution_rows(raw, width=width, class_count=class_count, source="The CatBoost model")
+
+
 def _tree_contributions(
     classifier: Any,
     standardized: Sequence[float],
@@ -417,11 +463,12 @@ def _tree_contributions(
     estimator = getattr(classifier, "estimator", None)
     if estimator is None:
         raise InferenceError("The promoted boosted artifact does not expose its underlying booster.")
-    rows = (
-        _xgboost_contribution_rows(estimator, standardized, width, len(classes))
-        if algorithm == XGBOOST_ALGORITHM
-        else _lightgbm_contribution_rows(estimator, standardized, width, len(classes))
-    )
+    if algorithm == XGBOOST_ALGORITHM:
+        rows = _xgboost_contribution_rows(estimator, standardized, width, len(classes))
+    elif algorithm == CATBOOST_ALGORITHM:
+        rows = _catboost_contribution_rows(estimator, standardized, width, len(classes))
+    else:
+        rows = _lightgbm_contribution_rows(estimator, standardized, width, len(classes))
 
     if len(rows) == 1:
         if len(classes) != 2:
@@ -681,7 +728,7 @@ def build_prediction_explanation(
             "details": {
                 "modelKey": contract.model_key,
                 "artifactChecksum": artifact_checksum,
-                "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+                "featureSchemaVersion": contract.schema_version,
                 "sourceCandleId": candle.candle_id,
                 "sourceCandleCloseTime": candle.close_time.isoformat(),
                 "evidenceCutoffAt": evidence_cutoff_at.isoformat(),
@@ -727,6 +774,7 @@ def build_prediction_explanation(
 
 
 __all__ = [
+    "CATBOOST_ALGORITHM",
     "CONTRIBUTION_METHOD_BY_ALGORITHM",
     "LIGHTGBM_ALGORITHM",
     "LINEAR_CONTRIBUTION_METHOD",

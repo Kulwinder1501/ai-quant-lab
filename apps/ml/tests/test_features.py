@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 import unittest
@@ -8,6 +9,8 @@ from typing import Any
 
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V5,
+    BreadthContext,
     CandleEvidence,
     DatasetRequest,
     IndicatorEvidence,
@@ -16,10 +19,13 @@ from ai_quant_lab_ml.contracts import (
 )
 from ai_quant_lab_ml.features import (
     FEATURE_SCHEMA,
+    FEATURE_SCHEMA_V5,
     VOLUME_MEDIAN_WINDOW,
+    FeatureConstructionError,
     build_feature_vector,
     build_labeled_examples,
     feature_definition,
+    feature_schema,
     label_from_future_close,
     trailing_feature_context,
 )
@@ -205,10 +211,79 @@ class FeatureConstructionTests(unittest.TestCase):
         self.assertEqual(first["indicator.RSI.value"], 54.5)
         self.assertTrue(math.isnan(first["indicator.MACD.signal"]))
         self.assertEqual(first["indicator.SUPERTREND.trend_up"], 1.0)
+        self.assertEqual(first["pattern.bullish_confidence"], 0.8)
+        self.assertEqual(first["price_action.bullish_confidence"], 0.7)
+        self.assertTrue(math.isnan(first["price_action.SUPPORT.level_distance_bps"]))
+
+    def test_v5_schema_still_constructs_per_code_columns(self) -> None:
+        """The legacy swing schema must stay reconstructible bit-for-bit.
+
+        v5 artifacts remain loadable after the v6 bump -- the volatility shadow
+        families keep scoring -- so the per-code pattern and price-action
+        columns those models trained on must keep meaning exactly what they
+        meant, per-event level distances included.
+        """
+
+        first = features_of(evidence(), schema_version=FEATURE_SCHEMA_VERSION_V5)
+
+        self.assertEqual(tuple(first), FEATURE_SCHEMA_V5)
         self.assertEqual(first["pattern.HAMMER.bullish_confidence"], 0.8)
         self.assertEqual(first["price_action.BREAKOUT.bullish_confidence"], 0.7)
         self.assertAlmostEqual(first["price_action.BREAKOUT.level_distance_bps"], -99.0099009901, places=6)
         self.assertTrue(math.isnan(first["price_action.SUPPORT.level_distance_bps"]))
+        # The v6 aggregates and breadth columns must not bleed into a v5 vector.
+        self.assertNotIn("pattern.bullish_confidence", first)
+        self.assertNotIn("breadth.advance_decline_ratio", first)
+
+    def test_unknown_schema_version_is_rejected(self) -> None:
+        with self.assertRaises(FeatureConstructionError):
+            feature_schema("ml-feature-v99")
+        with self.assertRaises(FeatureConstructionError):
+            features_of(evidence(), schema_version="ml-feature-v99")
+
+    def test_breadth_context_reaches_the_v6_feature_vector(self) -> None:
+        """The seven breadth columns must be fed by the attached context.
+
+        A declared column with no loader is the institutional-flow bug again: a
+        guaranteed-NaN feature silently imputed to a training-fold constant.
+        """
+
+        source = evidence()
+        with_breadth = dataclasses.replace(
+            source,
+            breadth=BreadthContext(
+                observed_at=source.close_time,
+                advance_decline=0.4,
+                median_return_bps=35.0,
+                return_dispersion_bps=120.0,
+                above_sma20_share=0.65,
+                median_volume_ratio=1.1,
+                bank_it_spread_bps=-42.0,
+                index_return_gap_bps=18.0,
+            ),
+        )
+
+        observed = features_of(with_breadth)
+        self.assertAlmostEqual(observed["breadth.advance_decline_ratio"], 0.4, places=10)
+        self.assertAlmostEqual(observed["breadth.median_return_bps"], 35.0, places=10)
+        self.assertAlmostEqual(observed["breadth.return_dispersion_bps"], 120.0, places=10)
+        self.assertAlmostEqual(observed["breadth.above_sma20_ratio"], 0.65, places=10)
+        self.assertAlmostEqual(observed["breadth.median_volume_ratio"], 1.1, places=10)
+        self.assertAlmostEqual(observed["breadth.bank_it_spread_bps"], -42.0, places=10)
+        self.assertAlmostEqual(observed["cross.nifty_banknifty_return_gap_bps"], 18.0, places=10)
+
+        # No context is missing evidence, never a silent zero.
+        absent = features_of(source)
+        for name in (
+            "breadth.advance_decline_ratio",
+            "breadth.median_return_bps",
+            "breadth.return_dispersion_bps",
+            "breadth.above_sma20_ratio",
+            "breadth.median_volume_ratio",
+            "breadth.bank_it_spread_bps",
+            "cross.nifty_banknifty_return_gap_bps",
+        ):
+            self.assertTrue(math.isnan(absent[name]), name)
 
     def test_duplicate_evidence_order_does_not_change_feature_values(self) -> None:
         first = evidence(
@@ -228,7 +303,9 @@ class FeatureConstructionTests(unittest.TestCase):
 
         self.assert_feature_mappings_equal(features_of(first), features_of(reordered))
         self.assertEqual(features_of(first)["indicator.RSI.value"], 50.0)
-        self.assertEqual(features_of(first)["pattern.DOJI.neutral_confidence"], 0.6)
+        # The per-code neutral column exists only in the v5 contract.
+        v5_features = features_of(first, schema_version=FEATURE_SCHEMA_VERSION_V5)
+        self.assertEqual(v5_features["pattern.DOJI.neutral_confidence"], 0.6)
 
     def test_uses_only_the_explicit_algorithm_versions(self) -> None:
         mixed_versions = evidence(
@@ -246,12 +323,11 @@ class FeatureConstructionTests(unittest.TestCase):
         )
 
         self.assertTrue(math.isnan(default_features["indicator.RSI.value"]))
-        self.assertEqual(default_features["pattern.HAMMER.bullish_confidence"], 0.0)
-        self.assertEqual(default_features["price_action.BREAKOUT.bullish_confidence"], 0.0)
-        self.assertTrue(math.isnan(default_features["price_action.BREAKOUT.level_distance_bps"]))
+        self.assertEqual(default_features["pattern.bullish_confidence"], 0.0)
+        self.assertEqual(default_features["price_action.bullish_confidence"], 0.0)
         self.assertEqual(selected_features["indicator.RSI.value"], 99.0)
-        self.assertEqual(selected_features["pattern.HAMMER.bullish_confidence"], 0.99)
-        self.assertEqual(selected_features["price_action.BREAKOUT.bullish_confidence"], 0.99)
+        self.assertEqual(selected_features["pattern.bullish_confidence"], 0.99)
+        self.assertEqual(selected_features["price_action.bullish_confidence"], 0.99)
 
     def test_same_version_with_non_default_indicator_parameters_is_not_a_v1_feature(self) -> None:
         non_default = evidence(indicators=(IndicatorEvidence("RSI", "ta-v1", {"period": 21, "smoothing": "WILDER"}, {"value": 61.0}),))

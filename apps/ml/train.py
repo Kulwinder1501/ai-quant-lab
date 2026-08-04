@@ -24,6 +24,8 @@ from ai_quant_lab_ml.artifacts import ArtifactError, load_model_artifact, write_
 from ai_quant_lab_ml.contracts import (
     ALGORITHM_CHOICES,
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V5,
+    SCALP_TIMEFRAMES,
     DIRECTIONAL_ALPHABET,
     LABEL_SCHEME_FIXED_HORIZON,
     LABEL_SCHEME_TRIPLE_BARRIER,
@@ -55,6 +57,11 @@ from ai_quant_lab_ml.training import (
     predict_labels,
     train_model,
     training_metadata,
+)
+from ai_quant_lab_ml.data_readiness import (
+    DataReadinessError,
+    load_latest_report,
+    require_series_ready,
 )
 from ai_quant_lab_ml.leakage import run_leakage_audit
 from ai_quant_lab_ml.validation import (
@@ -90,12 +97,12 @@ MINIMUM_DIRECTIONAL_PREDICTIONS = 30
 # error rather than a silent no-op.
 HYPERPARAMETER_APPLICABILITY: Mapping[str, tuple[str, ...]] = {
     "max_iter": ("logistic",),
-    "n_estimators": ("xgboost", "lightgbm"),
-    "learning_rate": ("xgboost", "lightgbm"),
-    "max_depth": ("xgboost", "lightgbm"),
-    "subsample": ("xgboost", "lightgbm"),
-    "colsample_bytree": ("xgboost", "lightgbm"),
-    "reg_lambda": ("xgboost", "lightgbm"),
+    "n_estimators": ("xgboost", "lightgbm", "catboost"),
+    "learning_rate": ("xgboost", "lightgbm", "catboost"),
+    "max_depth": ("xgboost", "lightgbm", "catboost"),
+    "subsample": ("xgboost", "lightgbm", "catboost"),
+    "colsample_bytree": ("xgboost", "lightgbm", "catboost"),
+    "reg_lambda": ("xgboost", "lightgbm", "catboost"),
     "min_child_weight": ("xgboost",),
     "num_leaves": ("lightgbm",),
     "min_child_samples": ("lightgbm",),
@@ -254,12 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIRECTORY, help="Local directory for immutable pickle artifacts.")
     parser.add_argument("--random-state", type=int, default=42, help="Deterministic library random state (default: 42).")
     parser.add_argument("--max-iter", type=positive_int, help="logistic: maximum solver iterations (default: 1000).")
-    parser.add_argument("--n-estimators", type=positive_int, help="xgboost/lightgbm: boosting rounds (default: 300).")
-    parser.add_argument("--learning-rate", type=positive_float, help="xgboost/lightgbm: shrinkage per round (default: 0.05).")
-    parser.add_argument("--max-depth", type=positive_int, help="xgboost/lightgbm: maximum tree depth (default: 3 and 4).")
-    parser.add_argument("--subsample", type=fraction, help="xgboost/lightgbm: row sampling fraction per round (default: 0.8).")
-    parser.add_argument("--colsample-bytree", type=fraction, help="xgboost/lightgbm: feature sampling fraction per tree (default: 0.8).")
-    parser.add_argument("--reg-lambda", type=non_negative_float, help="xgboost/lightgbm: L2 leaf-weight penalty (default: 1.0).")
+    parser.add_argument("--n-estimators", type=positive_int, help="boosted families: boosting rounds (default: 300).")
+    parser.add_argument("--learning-rate", type=positive_float, help="boosted families: shrinkage per round (default: 0.05).")
+    parser.add_argument("--max-depth", type=positive_int, help="boosted families: maximum tree depth (default: xgboost 3, lightgbm/catboost 4).")
+    parser.add_argument("--subsample", type=fraction, help="boosted families: row sampling fraction per round (default: 0.8).")
+    parser.add_argument("--colsample-bytree", type=fraction, help="boosted families: feature sampling fraction (default: 0.8; catboost applies it per split as rsm).")
+    parser.add_argument("--reg-lambda", type=non_negative_float, help="boosted families: L2 leaf penalty (default: 1.0; catboost 3.0 as l2_leaf_reg).")
     parser.add_argument("--min-child-weight", type=non_negative_float, help="xgboost: minimum child hessian weight (default: 5).")
     parser.add_argument("--num-leaves", type=positive_int, help="lightgbm: maximum leaves per tree (default: 15).")
     parser.add_argument("--min-child-samples", type=positive_int, help="lightgbm: minimum observations per leaf (default: 20).")
@@ -305,6 +312,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.01,
         help="Share of the series embargoed after each CPCV test block (default: 0.01).",
     )
+    # The escape hatch exists for scratch databases and deliberate local
+    # experiments, not for routine runs: an artifact trained this way carries
+    # `dataReadiness.enforced = false` in its protocol, permanently.
+    parser.add_argument(
+        "--allow-unaudited-data",
+        action="store_true",
+        help=(
+            "Skip the data-readiness gate. Every gated run must otherwise be cleared by a fresh "
+            "`npm run data:audit` report with every trained series READY."
+        ),
+    )
+    # Research-only override so a capacity experiment can train the previous
+    # swing schema and the current one on identical rows and folds. Scalp
+    # timeframes are excluded: their schema is not versioned by this pair.
+    parser.add_argument(
+        "--feature-schema",
+        choices=(FEATURE_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION_V5),
+        default=None,
+        help=(
+            "Override the swing feature-schema version for an A/B capacity comparison "
+            f"(default: the timeframe's current mapping, {FEATURE_SCHEMA_VERSION} for swing)."
+        ),
+    )
     return parser
 
 
@@ -320,6 +350,25 @@ def metrics_to_mapping(metrics: EvaluationMetrics) -> dict[str, Any]:
         "coverage": metrics.coverage,
         "sampleCount": metrics.sample_count,
         "classCounts": dict(metrics.class_counts),
+        # Per-class breakdown. macro-F1 cannot answer whether a strategy acting on one
+        # class pays: a straddle is taken only on a predicted EXPANSION, so that class's
+        # precision is the number that decides it. Nulls are meaningful -- a null
+        # precision means the class was never predicted, which is a different fact from a
+        # precision of zero.
+        "perClass": (
+            {
+                label: {
+                    "precision": entry.precision,
+                    "recall": entry.recall,
+                    "f1": entry.f1,
+                    "predictedCount": entry.predicted_count,
+                    "actualCount": entry.actual_count,
+                }
+                for label, entry in metrics.per_class.items()
+            }
+            if metrics.per_class is not None
+            else None
+        ),
     }
 
 
@@ -936,7 +985,9 @@ def main() -> int:
         if args.minimum_initial_macro_f1 is not None
         else (0.40 if is_volatility else 0.38)
     )
-    schema_version = schema_version_for(args.timeframe)
+    if args.feature_schema is not None and args.timeframe in SCALP_TIMEFRAMES:
+        parser.error("--feature-schema applies only to swing timeframes; scalp timeframes keep their own schema.")
+    schema_version = args.feature_schema or schema_version_for(args.timeframe)
     model_key = args.model_key or default_model_key(
         request, args.algorithm, schema_version, pooled_instruments=pooled_instruments
     )
@@ -952,6 +1003,41 @@ def main() -> int:
     # model mutations use the repository's explicit, atomic transactions.
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = PostgresMlRepository(connection)
+
+        # Fail-closed data-readiness gate (Phase 25, Workstream A): no fitting
+        # until the latest audit clears every series this run will read. The
+        # provenance travels in validationProtocol.dataReadiness so the artifact
+        # can prove which audit it trained under.
+        gated_symbols = list(pooled_instruments) if pooled_instruments else [primary_symbol]
+        if args.allow_unaudited_data:
+            data_readiness: dict[str, Any] = {"enforced": False, "reason": "--allow-unaudited-data"}
+            print(
+                "warning: data-readiness gate skipped via --allow-unaudited-data; "
+                "this artifact will record that it trained unaudited.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                data_readiness = {
+                    "enforced": True,
+                    **require_series_ready(
+                        load_latest_report(connection),
+                        gated_symbols,
+                        args.timeframe,
+                        trained_at,
+                    ),
+                }
+            except DataReadinessError as error:
+                json_output(
+                    {
+                        "level": "error",
+                        "message": "Training refused by the data-readiness gate",
+                        "reason": str(error),
+                        "instruments": gated_symbols,
+                        "timeframe": args.timeframe,
+                    }
+                )
+                return 1
 
         def label(records_for_symbol: Sequence[Any], symbol_request: DatasetRequest) -> Sequence[LabeledExample]:
             if symbol_request.label_scheme == LABEL_SCHEME_TRIPLE_BARRIER:
@@ -1106,6 +1192,9 @@ def main() -> int:
                 split_validation=final_split.validation,
             ),
             "walkForward": folds,
+            # Which data-readiness audit cleared this run (or the recorded fact
+            # that the gate was skipped). Part of the checksummed artifact.
+            "dataReadiness": data_readiness,
         }
         if len(splits) > 1:
             protocol["method"] = "WALK_FORWARD_PURGED_V1"

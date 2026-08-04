@@ -28,6 +28,8 @@ from typing import Any
 from .contracts import (
     FEATURE_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_V5,
+    KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
     IndicatorEvidence,
@@ -187,7 +189,7 @@ _PRICE_ACTION_EVENT_TYPES: tuple[str, ...] = (
 _DIRECTIONS: tuple[str, ...] = ("BULLISH", "BEARISH", "NEUTRAL")
 
 
-def _build_feature_schema() -> tuple[str, ...]:
+def _build_feature_schema_v5() -> tuple[str, ...]:
     indicator_features = tuple(
         f"indicator.{code}.{field}"
         for code, fields in _INDICATOR_VALUE_FIELDS.items()
@@ -219,48 +221,136 @@ def _build_feature_schema_scalp() -> tuple[str, ...]:
     return _SCALP_CANDLE_FEATURES + indicator_features + supertrend_features + _MARKET_FEATURES
 
 
+# The v6 swing schema: 36 columns against v5's 113. Explicit rather than
+# generated, because the whole point of the version is *which columns exist*;
+# a builder that derives the list from shared tables invites an accidental
+# contract change when a table gains an entry.
+#
+# What changed against v5, and why:
+#
+# * The 42 pattern and 30 price-action confidence one-hots collapse into four
+#   aggregate scores. On daily NIFTY50 those blocks are zero on the vast
+#   majority of rows, and 72 near-constant columns are variance for the
+#   imputer and noise for the fold estimates while carrying at most "some
+#   bullish/bearish detection fired, this strongly".
+# * The two SUPPORT/RESISTANCE level distances survive as the only per-event
+#   columns: they are the price-action block's dense structural content.
+# * Bollinger middle/upper/lower are gone: middle *is* SMA20, and the bands
+#   are middle +/- 2 standard deviations, so given `indicator.SMA.value_bps`
+#   and the deviation ratio all three are exact linear combinations. The same
+#   reasoning removes the SuperTrend band levels in favour of its line and
+#   trend flags.
+# * VWAP is gone from the swing schema: with one bar per session, a
+#   session-reset VWAP is the bar's typical price restated, and on index
+#   series the volume weighting is meaningless because index "volume" is
+#   synthetic or zero.
+# * `candle.gap_fill_bps` and `candle.is_gap_defended` are gone. The dual
+#   meaning of gap_fill (open->low on up-gaps, open->high on down-gaps) makes
+#   one column carry two opposite quantities on every timeframe, not just
+#   intraday; the wick columns already carry the same evidence unambiguously.
+# * Seven point-in-time breadth columns arrive from the twenty-equity research
+#   panel and the two indices (Phase 25, Workstream B4). Their sources,
+#   windows, and floors are part of the contract; see the BREADTH_* constants.
+FEATURE_SCHEMA_V6: tuple[str, ...] = (
+    "candle.close_return_bps",
+    "candle.overnight_gap_bps",
+    "candle.high_atr_ratio",
+    "candle.low_atr_ratio",
+    "candle.volume_median_ratio",
+    "candle.body_return_bps",
+    "candle.range_bps",
+    "candle.upper_wick_bps",
+    "candle.lower_wick_bps",
+    "indicator.SMA.value_bps",
+    "indicator.EMA.value_bps",
+    "indicator.RSI.value",
+    "indicator.MACD.macd",
+    "indicator.MACD.signal",
+    "indicator.MACD.histogram",
+    "indicator.ATR.value_ratio",
+    "indicator.BOLLINGER_BANDS.standardDeviation_ratio",
+    "indicator.SUPERTREND.value_bps",
+    "indicator.SUPERTREND.trend_up",
+    "indicator.SUPERTREND.trend_down",
+    "pattern.bullish_confidence",
+    "pattern.bearish_confidence",
+    "price_action.bullish_confidence",
+    "price_action.bearish_confidence",
+    "price_action.SUPPORT.level_distance_bps",
+    "price_action.RESISTANCE.level_distance_bps",
+    "regime.vix_sma20.value_ratio",
+    "market.fii_net_flow_ratio",
+    "market.dii_net_flow_ratio",
+    "breadth.advance_decline_ratio",
+    "breadth.median_return_bps",
+    "breadth.return_dispersion_bps",
+    "breadth.above_sma20_ratio",
+    "breadth.median_volume_ratio",
+    "breadth.bank_it_spread_bps",
+    "cross.nifty_banknifty_return_gap_bps",
+)
+
 # A tuple, rather than a data-dependent list, is the versioned model contract.
-FEATURE_SCHEMA: tuple[str, ...] = _build_feature_schema()
+# FEATURE_SCHEMA is always the *current* swing schema; the v5 tuple stays
+# importable because v5 artifacts remain loadable and their feature vectors
+# must be reconstructible bit-for-bit at inference.
+FEATURE_SCHEMA_V5: tuple[str, ...] = _build_feature_schema_v5()
+FEATURE_SCHEMA: tuple[str, ...] = FEATURE_SCHEMA_V6
 FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp()
 
-# The public constant is made entirely of JSON values so a CLI can embed it in
-# artifact metadata or model-version provenance without a custom encoder.
-_FEATURE_DEFINITION: dict[str, Any] = {
-    "schemaVersion": FEATURE_SCHEMA_VERSION,
-    "features": list(FEATURE_SCHEMA),
-    "indicatorAlgorithmVersion": "ta-v1",
-    "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
-    "patternAlgorithmVersion": "candlestick-v1",
-    "priceActionAlgorithmVersion": "price-action-v2",
+# The ordered contract for every schema version this codebase can construct.
+# An unknown version is a hard error rather than a silent fallback: falling
+# back to "the current swing schema" is exactly how a v5 artifact would end up
+# scored against v6 columns.
+_SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
+    FEATURE_SCHEMA_VERSION: FEATURE_SCHEMA_V6,
+    FEATURE_SCHEMA_VERSION_V5: FEATURE_SCHEMA_V5,
+    FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
+}
+assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
+
+
+def _definition_for(schema_version: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": schema_version,
+        "features": list(_SCHEMA_BY_VERSION[schema_version]),
+        "indicatorAlgorithmVersion": "ta-v1",
+        "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
+        "patternAlgorithmVersion": "candlestick-v1",
+        "priceActionAlgorithmVersion": "price-action-v2",
+    }
+
+
+_FEATURE_DEFINITION_BY_VERSION: Mapping[str, dict[str, Any]] = {
+    version: _definition_for(version) for version in _SCHEMA_BY_VERSION
 }
 
-_FEATURE_DEFINITION_SCALP: dict[str, Any] = {
-    "schemaVersion": FEATURE_SCHEMA_VERSION_SCALP,
-    "features": list(FEATURE_SCHEMA_SCALP),
-    "indicatorAlgorithmVersion": "ta-v1",
-    "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
-    "patternAlgorithmVersion": "candlestick-v1",
-    "priceActionAlgorithmVersion": "price-action-v2",
-}
-
-# Kept as a convenient JSON-safe public constant.  Runtime code should call
+# Kept as convenient JSON-safe public constants.  Runtime code should call
 # feature_definition() so an accidental caller mutation cannot affect future
 # artifact metadata.
-FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
-FEATURE_DEFINITION_SCALP: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_SCALP, sort_keys=True))
+FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[FEATURE_SCHEMA_VERSION], sort_keys=True))
+FEATURE_DEFINITION_SCALP: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[FEATURE_SCHEMA_VERSION_SCALP], sort_keys=True))
+
+
+def _require_known_version(schema_version: str) -> str:
+    if schema_version not in _SCHEMA_BY_VERSION:
+        raise FeatureConstructionError(
+            f"Unknown feature-schema version {schema_version!r}; "
+            f"known versions are {', '.join(KNOWN_FEATURE_SCHEMA_VERSIONS)}."
+        )
+    return schema_version
+
 
 def feature_schema(schema_version: str = FEATURE_SCHEMA_VERSION) -> tuple[str, ...]:
     """Return the immutable ordered feature names for a given schema version."""
-    if schema_version == FEATURE_SCHEMA_VERSION_SCALP:
-        return FEATURE_SCHEMA_SCALP
-    return FEATURE_SCHEMA
+
+    return _SCHEMA_BY_VERSION[_require_known_version(schema_version)]
 
 
 def feature_definition(schema_version: str = FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
     """Return an independent JSON-safe description of the contract."""
-    if schema_version == FEATURE_SCHEMA_VERSION_SCALP:
-        return json.loads(json.dumps(_FEATURE_DEFINITION_SCALP, sort_keys=True))
-    return json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+
+    return json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[_require_known_version(schema_version)], sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -480,6 +570,45 @@ def build_feature_vector(
             values[f"price_action.{event_type}.level_distance_bps"] = _ratio_bps(
                 _numeric_or_nan(level_event.level), close_price
             )
+
+    # v6 aggregates: the strongest bullish and bearish detection across the
+    # whole block, replacing the per-code/per-type one-hots. The default 0.0
+    # (not NaN) keeps the v5 convention that "nothing fired" is evidence of
+    # absence, not a missing measurement. Computed unconditionally; the final
+    # schema filter drops them for versions that do not declare them.
+    values["pattern.bullish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(pattern.confidence)
+        for pattern in candle.patterns
+        if pattern.algorithm_version == pattern_algorithm_version and pattern.direction.upper() == "BULLISH"
+    )
+    values["pattern.bearish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(pattern.confidence)
+        for pattern in candle.patterns
+        if pattern.algorithm_version == pattern_algorithm_version and pattern.direction.upper() == "BEARISH"
+    )
+    values["price_action.bullish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(event.confidence)
+        for event in candle.price_action_events
+        if event.algorithm_version == price_action_algorithm_version and event.direction.upper() == "BULLISH"
+    )
+    values["price_action.bearish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(event.confidence)
+        for event in candle.price_action_events
+        if event.algorithm_version == price_action_algorithm_version and event.direction.upper() == "BEARISH"
+    )
+
+    # v6 breadth: attached by the repository as the latest settled panel
+    # session at or before this bar's close. None -- either no context or an
+    # unmeasurable member statistic -- stays NaN for the imputer, because "the
+    # panel was not observable" is missing evidence, unlike a silent zero.
+    breadth = candle.breadth
+    values["breadth.advance_decline_ratio"] = _numeric_or_nan(None if breadth is None else breadth.advance_decline)
+    values["breadth.median_return_bps"] = _numeric_or_nan(None if breadth is None else breadth.median_return_bps)
+    values["breadth.return_dispersion_bps"] = _numeric_or_nan(None if breadth is None else breadth.return_dispersion_bps)
+    values["breadth.above_sma20_ratio"] = _numeric_or_nan(None if breadth is None else breadth.above_sma20_share)
+    values["breadth.median_volume_ratio"] = _numeric_or_nan(None if breadth is None else breadth.median_volume_ratio)
+    values["breadth.bank_it_spread_bps"] = _numeric_or_nan(None if breadth is None else breadth.bank_it_spread_bps)
+    values["cross.nifty_banknifty_return_gap_bps"] = _numeric_or_nan(None if breadth is None else breadth.index_return_gap_bps)
 
     return {k: v for k, v in values.items() if k in schema_keys}
 
@@ -849,10 +978,13 @@ def build_volatility_expansion_examples(
 
 __all__ = [
     "FEATURE_SCHEMA",
+    "FEATURE_SCHEMA_V5",
+    "FEATURE_SCHEMA_V6",
     "FEATURE_SCHEMA_SCALP",
     "FEATURE_DEFINITION",
     "FEATURE_DEFINITION_SCALP",
     "FEATURE_SCHEMA_VERSION",
+    "FEATURE_SCHEMA_VERSION_V5",
     "FEATURE_SCHEMA_VERSION_SCALP",
     "FeatureConstructionError",
     "LabelResult",

@@ -117,6 +117,15 @@ class LabelEncodedClassifier:
         classes = self._require_fitted()
         decoded: list[MarketLabel] = []
         for code in self.estimator.predict(X):
+            # CatBoost returns shape (n, 1) for multiclass class indices, so each
+            # row is an array-like singleton rather than a Python scalar. Flatten
+            # one step before coercing so every booster family shares this path.
+            if hasattr(code, "__len__") and not isinstance(code, (str, bytes)):
+                try:
+                    if len(code) == 1:
+                        code = code[0]
+                except TypeError:
+                    pass
             index = int(round(float(code)))
             if index < 0 or index >= len(classes):
                 raise LabelEncodingError("The wrapped estimator returned a code outside the fitted label space.")

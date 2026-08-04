@@ -1557,6 +1557,64 @@ evaluated.
 The economics gate itself refuses 12.1% of bars, 78 of them because the option chain
 already prices a move larger than the signal predicts.
 
+
+## Per-class precision recorded, and what it says about the straddle (2026-08-04)
+
+`EvaluationMetrics` now carries a `per_class` block -- precision, recall, F1, predicted
+count and actual count for every label -- serialised into `validationMetrics.perClass`.
+Added because macro-F1 cannot answer a trading question: a straddle is taken only on a
+predicted EXPANSION, so that one class's precision decides whether the strategy pays, and
+macro-F1 averages exactly that away.
+
+**`precision` is null, not zero, when a class was never predicted.** sklearn's
+`zero_division=0` reports 0.0 there, which reads as "always wrong" when the truth is
+"never attempted" -- opposite situations for a strategy that only acts on one class. Same
+rule for `recall` when a class never occurred. Five tests pin this.
+
+### The answer, and it is not the encouraging one
+
+Against the 44.3% breakeven EXPANSION precision established by the straddle cost study:
+
+| Model | EXPANSION precision | n | Std. error | vs 44.3% breakeven |
+|---|---|---|---|---|
+| Pooled 19 equities, 5 folds | **0.486** | 286 | +/-3.0pp | 1.45 SE **above** |
+| NIFTY50 single instrument, 2 folds | **0.385** | 13 | +/-13.5pp | 0.43 SE **below** |
+
+The two point in opposite directions, and the mismatch is the finding:
+
+- The **pooled equity** model clears the breakeven with a tight error bar -- but the
+  breakeven was computed on **NIFTY50 index** straddles. Equity options have different
+  liquidity, lot sizes and IV surfaces, so that 0.486 does not transfer to the
+  instrument the economics were measured on.
+- The **NIFTY50** model, whose instrument actually has a liquid straddle, sits *below*
+  breakeven -- on **13 predictions**. At that sample the standard error is 13.5pp and the
+  breakeven is well inside one SE, so this is **inconclusive, not decisively negative**.
+  It also barely calls EXPANSION at all: recall 0.167.
+
+So the honest position: **the signal that has a tradeable options market cannot yet be
+shown to clear its breakeven, and the model that clears a breakeven trades instruments
+whose straddle economics have not been measured.** Nothing here justifies trading, and
+nothing here rules it out. Thirteen predictions cannot decide a 6pp question.
+
+What would decide it, in order:
+
+1. Straddle economics computed on the **equity panel**, so the 0.486 can be compared
+   against a breakeven from the same instruments. Equity option liquidity is the risk.
+2. A NIFTY50 EXPANSION sample large enough to have an error bar under ~3pp, which means
+   roughly 250 predictions rather than 13 -- i.e. settled live evidence, not holdout.
+3. Fees. Both figures are pre-cost, and two legs of brokerage plus STT eat directly into
+   a 4pp margin.
+
+### Operational notes from this run
+
+- The data-readiness gate refused training twice, correctly. First for 20 stale
+  provisional daily bars whose window had closed unfinalised; re-collecting finalised 18
+  of them. Then for TITAN alone, whose bar the importer defers because Yahoo has no
+  settled value for it. TITAN was **excluded from the pool** rather than having its data
+  deleted to make a gate pass -- hence `pool19` and a different model key.
+- The gate reads the **stored** audit report, not a live check, so `npm run data:audit`
+  must be re-run after fixing data or the training refusal cites the stale report.
+
 ### Stage 2: Feature discipline and validation activation
 
 - Evaluate aggregate/drop alternatives for sparse features.

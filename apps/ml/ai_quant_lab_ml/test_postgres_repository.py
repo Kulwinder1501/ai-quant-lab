@@ -193,6 +193,9 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                     "dii_scale": "900",
                 },
             ],
+            # Breadth panel: empty here — a panel below the participation floor
+            # publishes no context, and the evidence carries breadth=None.
+            [],
         ])
 
         records = PostgresMlRepository(connection).load_candle_evidence(request())  # type: ignore[arg-type]
@@ -271,6 +274,22 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         # Strictly prior sessions, so an outlier cannot normalise itself away.
         self.assertIn("ROWS BETWEEN %s PRECEDING AND 1 PRECEDING", flow_sql)
         self.assertEqual(flow_params, (at(31, 23), 20, 5, ["candle-1", "candle-2"]))
+
+        # The breadth panel is loaded under the same as-of discipline: completed
+        # daily bars received by the cutoff, warmed up before the window start.
+        breadth_sql, breadth_params = connection.calls[7]
+        self.assertIn("candles.timeframe = '1d'", breadth_sql)
+        self.assertIn("candles.is_complete = TRUE", breadth_sql)
+        self.assertIn("candles.received_at <= %s", breadth_sql)
+        self.assertIsNotNone(breadth_params)
+        self.assertIn("HDFCBANK", breadth_params[0])
+        self.assertIn("NIFTY50", breadth_params[0])
+        self.assertIn("BANKNIFTY", breadth_params[0])
+        self.assertEqual(breadth_params[1], at(31, 23))
+        self.assertEqual(breadth_params[3], at(1) - timedelta(days=60))
+        # An empty panel publishes no context; evidence stays None, never zero.
+        self.assertIsNone(records[0].breadth)
+        self.assertIsNone(records[1].breadth)
 
     def test_skips_evidence_queries_when_window_has_no_completed_candles(self) -> None:
         connection = FakeConnection([
@@ -500,6 +519,8 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                 "fii_scale": "1500",
                 "dii_scale": None,
             }],
+            # Breadth panel (empty: below the participation floor, no context).
+            [],
         ])
 
         evidence = PostgresMlRepository(connection).load_latest_completed_candle_evidence(  # type: ignore[arg-type]
@@ -543,6 +564,13 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         # One side missing must not drag the other down with it.
         self.assertIsNone(evidence.dii_net_flow_ratio)
         self.assertEqual(connection.calls[6][1], (at(31, 23), 20, 5, ["candle-31"]))
+
+        # Breadth is resolved through the shared loader on the inference path
+        # too; an unmeasurable panel is absent evidence, never a default.
+        breadth_sql, breadth_params = connection.calls[7]
+        self.assertIn("candles.timeframe = '1d'", breadth_sql)
+        self.assertEqual(breadth_params[1], at(31, 23))
+        self.assertIsNone(evidence.breadth)
 
     def test_upserts_one_prediction_per_model_and_source_candle(self) -> None:
         connection = FakeConnection([

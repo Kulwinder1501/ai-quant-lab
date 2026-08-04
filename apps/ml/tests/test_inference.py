@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
 
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V5,
     CandleEvidence,
     LabeledExample,
     PersistedModelVersion,
@@ -238,6 +240,60 @@ class InferenceTests(unittest.TestCase):
             validate_production_artifact(
                 production_model(),
                 early_cutoff,
+                instrument_symbol="NIFTY50",
+                timeframe="1d",
+            )
+
+    def test_a_legacy_v5_artifact_remains_loadable_after_the_v6_bump(self) -> None:
+        """The capacity bump must not orphan v5 models.
+
+        The volatility shadow families were trained under ml-feature-v5 and keep
+        building settled history after v6 becomes current, so an artifact is
+        validated against the schema version recorded in its own metadata and the
+        contract carries that version forward to feature construction.
+        """
+
+        v5_schema = feature_schema(FEATURE_SCHEMA_VERSION_V5)
+        v5_examples = [
+            dataclasses.replace(
+                reference_example(index, label),
+                features={name: float(index) for name in v5_schema},
+            )
+            for index, label in ((0, "BEARISH"), (1, "BULLISH"))
+        ]
+        model = dataclasses.replace(
+            production_model(),
+            feature_schema=tuple(
+                {"name": name, "dtype": "float64", "schemaVersion": FEATURE_SCHEMA_VERSION_V5}
+                for name in v5_schema
+            ),
+        )
+        metadata = compatible_metadata()
+        metadata["featureSchema"] = list(v5_schema)
+        metadata["featureSchemaVersion"] = FEATURE_SCHEMA_VERSION_V5
+        metadata["featureDefinition"] = feature_definition(FEATURE_SCHEMA_VERSION_V5)
+        metadata["trainingReferenceSet"] = build_reference_metadata(
+            v5_examples, schema=v5_schema, maximum_examples=2
+        )
+
+        contract = validate_production_artifact(
+            model,
+            metadata,
+            instrument_symbol="NIFTY50",
+            timeframe="1d",
+        )
+
+        self.assertEqual(contract.schema_version, FEATURE_SCHEMA_VERSION_V5)
+        self.assertEqual(contract.feature_schema, v5_schema)
+
+    def test_an_artifact_with_an_unknown_schema_version_is_rejected(self) -> None:
+        metadata = compatible_metadata()
+        metadata["featureSchemaVersion"] = "ml-feature-v99"
+
+        with self.assertRaisesRegex(InferenceError, "unknown feature-schema version"):
+            validate_production_artifact(
+                production_model(),
+                metadata,
                 instrument_symbol="NIFTY50",
                 timeframe="1d",
             )

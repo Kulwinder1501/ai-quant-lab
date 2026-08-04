@@ -6,6 +6,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from ai_quant_lab_ml.contracts import LabeledExample, TemporalSplit
+from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 from ai_quant_lab_ml.training import (
     evaluate_predictions,
     predict_labels,
@@ -104,3 +105,90 @@ class DirectionalMetricTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerClassMetricsTests(unittest.TestCase):
+    """Per-class precision, and the null that macro-F1 hides.
+
+    A straddle is taken only on a predicted EXPANSION, so that one class's precision --
+    not macro-F1 -- decides whether the strategy pays. Measured 2026-08-03, it has to
+    reach 44.3% against a 27.6% base rate before fees, and nothing recorded it.
+    """
+
+    def test_precision_and_recall_match_their_denominators(self) -> None:
+        metrics = evaluate_predictions(
+            ["EXPANSION"] * 30 + ["STABLE"] * 40,
+            ["EXPANSION"] * 20 + ["STABLE"] * 10 + ["STABLE"] * 40,
+            alphabet=VOLATILITY_ALPHABET,
+        )
+
+        assert metrics.per_class is not None
+        expansion = metrics.per_class["EXPANSION"]
+        # 20 EXPANSION calls, all correct.
+        self.assertEqual(expansion.predicted_count, 20)
+        self.assertEqual(expansion.actual_count, 30)
+        self.assertAlmostEqual(expansion.precision or 0.0, 1.0, places=10)
+        self.assertAlmostEqual(expansion.recall or 0.0, 20 / 30, places=10)
+
+        stable = metrics.per_class["STABLE"]
+        # 50 STABLE calls, 40 correct.
+        self.assertEqual(stable.predicted_count, 50)
+        self.assertAlmostEqual(stable.precision or 0.0, 40 / 50, places=10)
+        self.assertAlmostEqual(stable.recall or 0.0, 1.0, places=10)
+
+    def test_a_never_predicted_class_has_null_precision_not_zero(self) -> None:
+        """The distinction the whole field exists for.
+
+        sklearn's ``zero_division=0`` reports precision 0.0 for a class the model never
+        predicted, which reads as "always wrong". The truth is "never attempted", and for
+        a strategy that only acts on EXPANSION those are opposite situations: one model is
+        bad at the trade, the other never takes it.
+        """
+
+        metrics = evaluate_predictions(
+            ["CONTRACTION"] * 30 + ["STABLE"] * 30,
+            ["STABLE"] * 60,
+            alphabet=VOLATILITY_ALPHABET,
+        )
+
+        assert metrics.per_class is not None
+        contraction = metrics.per_class["CONTRACTION"]
+        self.assertEqual(contraction.predicted_count, 0)
+        self.assertIsNone(contraction.precision)
+        # It did occur, and was never caught, so recall is a real zero.
+        self.assertEqual(contraction.actual_count, 30)
+        self.assertEqual(contraction.recall, 0.0)
+
+    def test_a_never_occurring_class_has_null_recall(self) -> None:
+        metrics = evaluate_predictions(
+            ["STABLE"] * 40,
+            ["STABLE"] * 30 + ["EXPANSION"] * 10,
+            alphabet=VOLATILITY_ALPHABET,
+        )
+
+        assert metrics.per_class is not None
+        expansion = metrics.per_class["EXPANSION"]
+        self.assertEqual(expansion.actual_count, 0)
+        self.assertIsNone(expansion.recall)
+        # It was predicted 10 times and never right, which is a real zero.
+        self.assertEqual(expansion.predicted_count, 10)
+        self.assertEqual(expansion.precision, 0.0)
+
+    def test_every_alphabet_label_is_present(self) -> None:
+        # A missing key would make a consumer's lookup silently undefined rather than
+        # explicitly null.
+        metrics = evaluate_predictions(["STABLE"] * 5, ["STABLE"] * 5, alphabet=VOLATILITY_ALPHABET)
+
+        assert metrics.per_class is not None
+        self.assertEqual(set(metrics.per_class), set(VOLATILITY_ALPHABET.labels))
+
+    def test_the_directional_alphabet_is_broken_out_too(self) -> None:
+        metrics = evaluate_predictions(
+            ["BULLISH"] * 10 + ["BEARISH"] * 10,
+            ["BULLISH"] * 15 + ["BEARISH"] * 5,
+        )
+
+        assert metrics.per_class is not None
+        self.assertEqual(set(metrics.per_class), {"BULLISH", "BEARISH", "NEUTRAL"})
+        self.assertAlmostEqual(metrics.per_class["BULLISH"].precision or 0.0, 10 / 15, places=10)
+        self.assertIsNone(metrics.per_class["NEUTRAL"].precision)
