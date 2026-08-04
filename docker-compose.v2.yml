@@ -55,7 +55,16 @@ services:
       # Trained pickle artifacts must outlive the container: model_versions rows
       # reference them by absolute path, and the competition pool reloads them
       # for shadow predictions on every intraday run.
-      - ml-models-v2:/app/models
+      #
+      # A bind mount to the repository's own models/ directory, not a named volume.
+      # A named volume outlives the container but is invisible to the host, and this
+      # project trains from both: the host writes a Windows path under models/ while
+      # the container wrote /app/models/... into a store the host could not see. The
+      # two artifact stores diverged silently, and a host-run shadow-prediction pass
+      # reported 'Could not read a valid pickle artifact' while skipping every
+      # container-trained model. One shared directory removes the divergence;
+      # resolve_artifact_path handles the differing path spellings.
+      - ./models:/app/models
     depends_on:
       database-v2:
         condition: service_healthy
@@ -81,4 +90,6 @@ services:
 
 volumes:
   postgres-data-v2:
-  ml-models-v2:
+  # ml-models-v2 is intentionally gone: /app/models is now a bind mount to ./models so
+  # host-trained and container-trained artifacts share one store. Its former contents
+  # were copied into ./models before the switch, so no artifact was orphaned.
