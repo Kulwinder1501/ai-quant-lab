@@ -31,6 +31,10 @@ import { etfIndexProxiesMigration } from "./030-etf-index-proxies.js";
 import { auxiliaryPredictionSettlementMigration } from "./031-auxiliary-prediction-settlement.js";
 import { volatilityCompetitionMigration } from "./032-volatility-competition.js";
 import { purgeSeeded1hCandlesMigration } from "./033-purge-seeded-1h-candles.js";
+import { dataReadinessReportsMigration } from "./034-data-readiness-reports.js";
+import { purgeExpiredProvisionalCandlesMigration } from "./035-purge-expired-provisional-candles.js";
+import { sequenceReadinessReportsMigration } from "./036-sequence-readiness-reports.js";
+import { optionChainSnapshotsMigration } from "./037-option-chain-snapshots.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -66,4 +70,8 @@ export const migrations = [
   auxiliaryPredictionSettlementMigration,
   volatilityCompetitionMigration,
   purgeSeeded1hCandlesMigration,
+  dataReadinessReportsMigration,
+  purgeExpiredProvisionalCandlesMigration,
+  sequenceReadinessReportsMigration,
+  optionChainSnapshotsMigration,
 ];

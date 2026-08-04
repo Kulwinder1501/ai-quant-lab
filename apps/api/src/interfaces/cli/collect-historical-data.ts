@@ -63,13 +63,24 @@ const timeframeOwner: Record<string, "fyers" | "yahoo"> = {
   "15m": "yahoo", "30m": "yahoo", "60m": "yahoo", "1d": "yahoo",
 };
 
-function assertProviderOwnsTimeframe(provider: string, timeframe: string): void {
-  const owner = timeframeOwner[timeframe];
+/**
+ * Instruments whose every timeframe stays Yahoo-owned regardless of the table above.
+ *
+ * The Fyers partition exists for tradable price series (indices, ETF proxies,
+ * futures) where intraday history was re-sourced from Fyers. INDIAVIX is not part of
+ * that program: its 1m/5m/15m series has only ever been Yahoo-sourced, the
+ * INDIA_VIX_INTRADAY scheduler job collects it via Yahoo every five minutes, and
+ * re-sourcing it would itself be the provider mix the partition forbids.
+ */
+const yahooOwnedInstruments = new Set(["INDIAVIX"]);
+
+function assertProviderOwnsTimeframe(provider: string, timeframe: string, symbol: string): void {
+  const owner = yahooOwnedInstruments.has(symbol.toUpperCase()) ? "yahoo" : timeframeOwner[timeframe];
   // csv and kite are manual escape hatches and are not part of the partition.
   if (!owner || (provider !== "fyers" && provider !== "yahoo")) return;
   if (provider !== owner) {
     throw new Error(
-      `Timeframe "${timeframe}" is owned by ${owner}, not ${provider}. Mixing providers within `
+      `The ${symbol} ${timeframe} series is owned by ${owner}, not ${provider}. Mixing providers within `
       + `one series creates train/serve skew. Pass --allow-foreign-provider only if you are `
       + `deliberately reassigning ownership and have planned the purge of the existing rows.`,
     );
@@ -95,6 +106,7 @@ async function main(): Promise<void> {
       assertProviderOwnsTimeframe(
         requireOption(argumentsList, "provider").toLowerCase(),
         timeframe,
+        symbol,
       );
     }
     const from = parseDateOption(requireOption(argumentsList, "from"), false);

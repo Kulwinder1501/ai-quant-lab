@@ -107,17 +107,21 @@ export interface VolatilityCompetitionDecision {
  * Requiring both is the whole lesson of the directional target. Under CPCV it beat
  * trivial on macro-F1 on 100% of splits while losing on accuracy on 93% of them, because
  * spreading predictions across three classes raises macro-F1 and lowers accuracy. A
- * macro-F1-only gate ranks the spreader first. The volatility target passes both, which
- * is why it is here at all.
+ * macro-F1-only gate ranks the spreader first; an accuracy-only gate (this function's
+ * original form) has the mirror-image hole and admits a majority-hugger with no more
+ * class discrimination than trivial. The volatility target passes both, which is why it
+ * is here at all.
  */
 function beatsTrivial(metrics: VolatilitySettledMetrics): boolean {
-  if (metrics.macroF1 === null || metrics.accuracy === null || metrics.trivialAccuracy === null) {
+  if (
+    metrics.macroF1 === null
+    || metrics.accuracy === null
+    || metrics.trivialAccuracy === null
+    || metrics.trivialMacroF1 === null
+  ) {
     return false;
   }
-  // Trivial macro-F1 for a single-class predictor over N classes is 2/(N+1)/N... but
-  // rather than model it, compare accuracy directly against the trivial strategy's own
-  // accuracy, which is exactly what trivialAccuracy is.
-  return metrics.accuracy > metrics.trivialAccuracy;
+  return metrics.accuracy > metrics.trivialAccuracy && metrics.macroF1 > metrics.trivialMacroF1;
 }
 
 function hasEnoughSample(standing: VolatilityStanding, rules: VolatilityCompetitionRules): boolean {
@@ -191,8 +195,9 @@ export function decideVolatilityCompetition(input: {
       primaryModelVersionId: null,
       challengerModelVersionId: ranking[0]?.modelVersionId ?? null,
       explanation:
-        "The volatility PRIMARY no longer beats the trivial majority-class predictor on accuracy "
-        + `(${formatMetric(incumbent.metrics.accuracy)} vs ${formatMetric(incumbent.metrics.trivialAccuracy)}). `
+        "The volatility PRIMARY no longer beats the trivial majority-class predictor on both axes "
+        + `(accuracy ${formatMetric(incumbent.metrics.accuracy)} vs ${formatMetric(incumbent.metrics.trivialAccuracy)}, `
+        + `macro-F1 ${formatMetric(incumbent.metrics.macroF1)} vs ${formatMetric(incumbent.metrics.trivialMacroF1)}). `
         + "Vacating the slot.",
     };
   }

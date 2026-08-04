@@ -85,7 +85,12 @@ describe("ImportHistoricalMarketData", () => {
     expect(ingestion.completed).toEqual([1]);
   });
 
-  it("keeps a provider bar provisional when its close is still in the future", async () => {
+  it("defers an in-progress bar instead of persisting it", async () => {
+    // Yahoo appends the forming session bar, often keyed at the last trade time
+    // rather than the timeframe grid. Persisting it — even as provisional —
+    // littered every intraday series with orphaned rows no later fetch could
+    // match. The bar is deferred: the next fetch after its close delivers it
+    // settled, on-grid.
     const stored: UpsertCandleInput[] = [];
     const candles: CandleRepository = {
       upsert: async (input): Promise<PersistedCandle> => {
@@ -116,9 +121,10 @@ describe("ImportHistoricalMarketData", () => {
       timeframe: "1d",
       from: new Date(openTime.getTime() - 60_000),
       to: new Date(futureClose.getTime() + 60_000),
-    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 1 });
+    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 0, candlesDeferred: 1 });
 
-    expect(stored[0]?.isComplete).toBe(false);
+    expect(stored).toHaveLength(0);
+    expect(ingestion.completed).toEqual([0]);
   });
 
   it("skips dates already stored as completed candles when skipExisting is set", async () => {

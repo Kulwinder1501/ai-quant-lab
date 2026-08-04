@@ -58,7 +58,7 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
     const bbId = indMap.get("BOLLINGER_BANDS");
     const rsiId = indMap.get("RSI");
 
-    // 4. Seed candles for NIFTY50 & BANKNIFTY across 1d, 1h, 15m, 5m, 1m timeframes
+    // 4. Seed candles for NIFTY50 & BANKNIFTY on the Yahoo-owned timeframes only
     const instRes = await client.query<{ id: string; symbol: string }>("SELECT id, symbol FROM instruments WHERE symbol IN ('NIFTY50', 'BANKNIFTY')");
     for (const inst of instRes.rows) {
         const yfSymbol = resolveYahooSymbol(inst.symbol);
@@ -70,8 +70,10 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
           // semantics of real 60m bars under a second name.
           { tf: "60m", count: 100, intervalMs: 3600 * 1000 },
           { tf: "15m", count: 100, intervalMs: 15 * 60 * 1000 },
-          { tf: "5m", count: 100, intervalMs: 5 * 60 * 1000 },
-          { tf: "1m", count: 100, intervalMs: 60 * 1000 },
+          // No 5m or 1m: those timeframes are Fyers-owned under the provider partition
+          // in collect-historical-data.ts, so a boot-time Yahoo write here would
+          // re-pollute the series after every db:purge:yahoo-scalp. Scalp timeframes
+          // are backfilled by `data:collect:historical -- --provider fyers` instead.
         ];
 
         const now = new Date();

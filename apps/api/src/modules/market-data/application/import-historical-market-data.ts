@@ -43,6 +43,8 @@ export interface ImportHistoricalMarketDataResult {
   candlesRejected: number;
   /** Up to five rejected candles, so a bad upstream print is diagnosable. */
   rejectedSamples: Array<{ openTime: string; reason: string }>;
+  /** In-progress bars left for a later fetch to deliver settled. Never persisted. */
+  candlesDeferred: number;
 }
 
 function isPositiveDecimal(value: string): boolean {
@@ -72,12 +74,7 @@ function validateCandle(candle: HistoricalMarketCandle): void {
 function toPersistenceInput(
   candle: HistoricalMarketCandle,
   input: ImportHistoricalMarketDataInput,
-  now: Date,
 ): UpsertCandleInput {
-  // Providers (Yahoo especially) return the in-progress session bar with a
-  // projected close_time still ahead of wall clock. Marking that bar complete
-  // made GenerateTradeIdeas treat a mid-session print as a settled close.
-  const isComplete = candle.closeTime.getTime() <= now.getTime();
   return {
     instrumentId: input.instrument.id,
     timeframe: input.timeframe,
@@ -88,7 +85,7 @@ function toPersistenceInput(
     low: candle.low,
     close: candle.close,
     volume: candle.volume,
-    isComplete,
+    isComplete: true,
     source: input.provider.id,
     sourceMetadata: { providerInstrumentId: input.providerInstrumentId },
   };
@@ -97,7 +94,8 @@ function toPersistenceInput(
 /**
  * Coordinates ingestion and keeps the provider adapter outside the application rule.
  * Settled provider bars are stored complete; a bar whose close is still ahead of
- * wall clock stays provisional so live updates and strategy evaluation can own it.
+ * wall clock is deferred to a later fetch, never persisted. Live in-progress bars
+ * are owned exclusively by the live collector.
  */
 export class ImportHistoricalMarketData {
   constructor(
@@ -167,8 +165,21 @@ export class ImportHistoricalMarketData {
         candles.push(candle);
       }
       let candlesSkipped = 0;
+      let candlesDeferred = 0;
       const now = new Date();
       for (const candle of candles) {
+        // Historical import persists settled evidence only. Providers (Yahoo
+        // especially) append the in-progress session bar, often keyed at the
+        // last trade time rather than the timeframe grid — persisting it, even
+        // as provisional, littered every intraday series with orphaned rows no
+        // later fetch could match and no sweep could honestly finalise. The
+        // bar is not lost: the next fetch after its window closes delivers it
+        // settled, on-grid. The forming bar belongs to the live collector,
+        // which constructs its own session-anchored windows.
+        if (candle.closeTime.getTime() > now.getTime()) {
+          candlesDeferred += 1;
+          continue;
+        }
         if (input.skipExisting) {
           const existing = await this.candleRepository.findByKey(
             input.instrument.id,
@@ -183,12 +194,12 @@ export class ImportHistoricalMarketData {
           }
         }
         await this.candleRepository.upsert({
-          ...toPersistenceInput(candle, input, now),
+          ...toPersistenceInput(candle, input),
           ingestionId: ingestion.id,
         });
       }
 
-      const candlesPersisted = candles.length - candlesSkipped;
+      const candlesPersisted = candles.length - candlesSkipped - candlesDeferred;
       await this.ingestionRepository.complete(ingestion.id, candlesPersisted);
       return {
         ingestionId: ingestion.id,
@@ -198,6 +209,7 @@ export class ImportHistoricalMarketData {
         candlesSkipped,
         candlesRejected,
         rejectedSamples,
+        candlesDeferred,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown historical import failure.";

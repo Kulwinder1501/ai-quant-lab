@@ -26,6 +26,16 @@ import { createDatabasePool } from "../../infrastructure/database/database.js";
  */
 const SCALP_TIMEFRAMES = ["1m", "3m", "5m", "10m"];
 
+/**
+ * Instruments whose intraday series stay Yahoo-owned and must survive this purge.
+ * Mirrors `yahooOwnedInstruments` in collect-historical-data.ts (not importable:
+ * that module is a CLI and runs its main on import). INDIAVIX 1m/5m is collected
+ * from Yahoo every five minutes by INDIA_VIX_INTRADAY; deleting it here would
+ * destroy the VIX intraday history and cascade away its SMA20 snapshots — the
+ * exact series the scalp feature contract needs.
+ */
+const YAHOO_OWNED_SYMBOLS = ["INDIAVIX"];
+
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
   const apply = argumentsList.includes("--apply");
@@ -34,36 +44,43 @@ async function main(): Promise<void> {
 
   try {
     const survey = await database.query(
-      `SELECT c.timeframe,
+      `SELECT i.symbol,
+              c.timeframe,
               count(*) AS yahoo_bars,
               count(*) FILTER (WHERE f.open_time IS NOT NULL) AS fyers_replacement
        FROM candles c
+       JOIN instruments i ON i.id = c.instrument_id
        LEFT JOIN candles f
          ON f.instrument_id = c.instrument_id
         AND f.timeframe = c.timeframe
         AND f.open_time = c.open_time
         AND f.source = 'fyers-api-v3'
        WHERE c.source = 'yahoo' AND c.timeframe = ANY($1)
-       GROUP BY c.timeframe
-       ORDER BY c.timeframe`,
-      [SCALP_TIMEFRAMES],
+         AND i.symbol <> ALL($2)
+       GROUP BY i.symbol, c.timeframe
+       ORDER BY i.symbol, c.timeframe`,
+      [SCALP_TIMEFRAMES, YAHOO_OWNED_SYMBOLS],
     );
 
     const snapshots = await database.query(
       `SELECT count(*) AS n
        FROM indicator_snapshots s
        JOIN candles c ON c.id = s.candle_id
-       WHERE c.source = 'yahoo' AND c.timeframe = ANY($1)`,
-      [SCALP_TIMEFRAMES],
+       JOIN instruments i ON i.id = c.instrument_id
+       WHERE c.source = 'yahoo' AND c.timeframe = ANY($1)
+         AND i.symbol <> ALL($2)`,
+      [SCALP_TIMEFRAMES, YAHOO_OWNED_SYMBOLS],
     );
 
     console.info(JSON.stringify({
       level: "info",
       message: apply ? "Purging Yahoo scalp candles" : "Dry run — nothing deleted",
-      timeframes: survey.rows.map((row) => ({
+      preservedYahooOwnedInstruments: YAHOO_OWNED_SYMBOLS,
+      series: survey.rows.map((row) => ({
+        symbol: String(row.symbol),
         timeframe: String(row.timeframe),
         yahooBars: Number(row.yahoo_bars),
-        // A timeframe with no Fyers replacement would be left empty by this purge.
+        // A series with no Fyers replacement would be left empty by this purge.
         fyersAlreadyCovering: Number(row.fyers_replacement),
       })),
       indicatorSnapshotsCascading: Number(snapshots.rows[0]?.n ?? 0),
@@ -75,8 +92,10 @@ async function main(): Promise<void> {
     }
 
     const deleted = await database.query(
-      "DELETE FROM candles WHERE source = 'yahoo' AND timeframe = ANY($1)",
-      [SCALP_TIMEFRAMES],
+      `DELETE FROM candles
+       WHERE source = 'yahoo' AND timeframe = ANY($1)
+         AND instrument_id NOT IN (SELECT id FROM instruments WHERE symbol = ANY($2))`,
+      [SCALP_TIMEFRAMES, YAHOO_OWNED_SYMBOLS],
     );
     console.info(JSON.stringify({
       level: "info",

@@ -49,6 +49,16 @@ export interface GenericSettledMetrics {
    * long as it did.
    */
   trivialAccuracy: number | null;
+  /**
+   * Macro-F1 of the same always-majority strategy, closed-form rather than simulated:
+   * with majority prevalence p the majority class scores precision p and recall 1, so
+   * F1 = 2p/(1+p), every other class scores 0, and the macro average divides by the
+   * full alphabet size. Carried so a "beats trivial" gate can require a win on both
+   * axes: each alone is gameable — macro-F1-only admits the spreader, accuracy-only
+   * admits a majority-hugger that edges past trivial accuracy by luck while showing
+   * no more class discrimination than the trivial predictor itself.
+   */
+  trivialMacroF1: number | null;
 }
 
 export function computeAlphabetSettledMetrics<TLabel extends string>(
@@ -95,6 +105,7 @@ export function computeAlphabetSettledMetrics<TLabel extends string>(
       macroF1: null,
       committedHitRate: null,
       trivialAccuracy: null,
+      trivialMacroF1: null,
     };
   }
 
@@ -110,6 +121,7 @@ export function computeAlphabetSettledMetrics<TLabel extends string>(
   // The majority class is read from realized outcomes, not predictions: the baseline is
   // "what would always guessing the commonest actual outcome have scored".
   const largestRealized = Math.max(...alphabet.labels.map((label) => realizedTotal.get(label) ?? 0));
+  const majorityPrevalence = largestRealized / sampleCount;
 
   return {
     sampleCount,
@@ -117,6 +129,9 @@ export function computeAlphabetSettledMetrics<TLabel extends string>(
     accuracy: correctCount / sampleCount,
     macroF1: f1Sum / alphabet.labels.length,
     committedHitRate: committedCount === 0 ? null : committedCorrect / committedCount,
-    trivialAccuracy: largestRealized / sampleCount,
+    trivialAccuracy: majorityPrevalence,
+    // On a tie the trivial predictor picks either majority class; prevalence, and
+    // therefore this figure, is the same whichever it picks.
+    trivialMacroF1: (2 * majorityPrevalence) / (1 + majorityPrevalence) / alphabet.labels.length,
   };
 }

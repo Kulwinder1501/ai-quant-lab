@@ -10,6 +10,7 @@ import { PostgresModelPerformanceQueryRepository } from "../../infrastructure/da
 import { PostgresModelPredictionQueryRepository } from "../../infrastructure/database/repositories/postgres-model-prediction-query-repository.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresOffshoreDerivativeRepository } from "../../infrastructure/database/repositories/postgres-offshore-derivative-repository.js";
+import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeHistoryQueryRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-history-query-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
@@ -101,6 +102,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       candleRepository,
       new PostgresMarketContextReader(pool),
     ),
+    optionChainRepository: new PostgresOptionChainRepository(pool),
     aiAutonomousAgent,
   };
 }

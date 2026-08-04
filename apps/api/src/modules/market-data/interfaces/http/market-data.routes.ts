@@ -2,10 +2,19 @@ import type { Express, NextFunction, Response } from "express";
 import yahooFinance from "yahoo-finance2";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { InvalidHttpQueryError, parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
+import {
+  atmStrikeOf,
+  expiriesOf,
+  largestOpenInterestStrikes,
+  moneynessOf,
+  putCallRatios,
+  quoteSpread,
+  summariseLiquidity,
+} from "../../domain/option-chain.js";
 
 export function registerMarketDataRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "dashboardRepository" | "aiAutonomousAgent" | "getInstitutionalContext">,
+  dependencies: Pick<HttpDependencies, "dashboardRepository" | "aiAutonomousAgent" | "getInstitutionalContext" | "optionChainRepository">,
 ): void {
   app.get("/api/v1/candles", async (request, response, next) => {
     try {
@@ -208,4 +217,111 @@ export function registerMarketDataRoutes(
       next(error);
     }
   });
+
+  /**
+   * The latest stored option chain, with the metrics a pre-trade check needs.
+   *
+   * Serves what was observed plus derivations computed on read — spread, moneyness,
+   * put/call ratios, heaviest-OI strikes. Nothing derived is stored, so changing a
+   * definition re-scores history instead of invalidating it.
+   */
+  app.get("/api/v1/option-chain", async (request, response, next) => {
+    try {
+      const underlyingSymbol = (queryString(request, "underlying") || "NIFTY50").toUpperCase();
+      const expiryDate = queryString(request, "expiry") || undefined;
+      if (expiryDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(expiryDate)) {
+        response.status(400).json({ error: "`expiry` must be an ISO date (YYYY-MM-DD)." });
+        return;
+      }
+      const costBudgetText = queryString(request, "costBudgetPercent");
+      const costBudgetPercent = costBudgetText ? Number(costBudgetText) : 1.0;
+      if (!Number.isFinite(costBudgetPercent) || costBudgetPercent <= 0) {
+        response.status(400).json({ error: "`costBudgetPercent` must be a positive number." });
+        return;
+      }
+
+      const snapshot = await dependencies.optionChainRepository.latestSnapshot({
+        underlyingSymbol,
+        expiryDate,
+      });
+      if (snapshot === null) {
+        // Explicitly "nothing collected yet" rather than an empty chain, because the
+        // series is forward-accumulating and absence is the normal early state.
+        response.status(200).json({
+          data: {
+            underlyingSymbol,
+            available: false,
+            reason: "No option-chain snapshot has been collected for this underlying yet.",
+            underlyings: await dependencies.optionChainRepository.listUnderlyings(),
+          },
+        });
+        return;
+      }
+
+      const atmStrike = snapshot.underlyingValue === null
+        ? null
+        : atmStrikeOf(snapshot.quotes, snapshot.underlyingValue);
+      const ratios = putCallRatios(snapshot.quotes);
+      const liquidity = summariseLiquidity(snapshot.quotes, costBudgetPercent);
+      const heaviest = largestOpenInterestStrikes(snapshot.quotes);
+
+      // One row per strike with both sides alongside, which is how a chain is read.
+      const byStrike = new Map<number, Record<string, unknown>>();
+      for (const quote of snapshot.quotes) {
+        let row = byStrike.get(quote.strikePrice);
+        if (!row) {
+          row = {
+            strikePrice: quote.strikePrice,
+            isAtm: atmStrike !== null && quote.strikePrice === atmStrike,
+            call: null,
+            put: null,
+          };
+          byStrike.set(quote.strikePrice, row);
+        }
+        const spread = quoteSpread(quote);
+        const leg = {
+          lastPrice: quote.lastPrice,
+          bid: quote.bid,
+          ask: quote.ask,
+          volume: quote.volume,
+          openInterest: quote.openInterest,
+          openInterestChange: quote.openInterestChange,
+          spreadAbsolute: spread?.absolute ?? null,
+          spreadPercentOfMid: spread?.percentOfMid ?? null,
+          withinCostBudget: spread === null ? null : spread.percentOfMid <= costBudgetPercent,
+          moneyness: snapshot.underlyingValue === null || atmStrike === null
+            ? null
+            : moneynessOf(quote, snapshot.underlyingValue, atmStrike),
+          providerSymbol: quote.providerSymbol,
+        };
+        row[quote.optionType === "CE" ? "call" : "put"] = leg;
+      }
+
+      response.status(200).json({
+        data: {
+          underlyingSymbol: snapshot.underlyingSymbol,
+          available: true,
+          provider: snapshot.provider,
+          observedAt: snapshot.observedAt.toISOString(),
+          underlyingValue: snapshot.underlyingValue,
+          atmStrike,
+          expiries: expiriesOf(snapshot).map((entry) => ({
+            expiryDate: entry.expiryDate.toISOString().slice(0, 10),
+            expiryKind: entry.expiryKind,
+          })),
+          putCall: ratios,
+          liquidity,
+          // Named for what it is. A heavy-OI strike is where positions sit, not a level
+          // price must respect, so it is never labelled support or resistance.
+          largestOpenInterest: heaviest,
+          strikes: [...byStrike.values()].sort(
+            (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
+          ),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
 }

@@ -53,6 +53,10 @@ describe("computeVolatilitySettledMetrics", () => {
     // Realized totals are CONTRACTION 40+5, STABLE 30+5, EXPANSION 20, so always
     // guessing CONTRACTION -- the commonest actual outcome -- would score 0.45.
     expect(metrics.trivialAccuracy).toBeCloseTo(0.45, 10);
+    // Closed form for the same always-CONTRACTION strategy: the majority class gets
+    // precision 0.45 and recall 1, F1 = 2(0.45)/1.45, the other two classes get 0,
+    // and the macro average divides by the three-label alphabet.
+    expect(metrics.trivialMacroF1).toBeCloseTo((2 * 0.45) / 1.45 / 3, 10);
   });
 
   it("treats STABLE as the abstain class when computing the committed hit rate", () => {
@@ -79,6 +83,7 @@ describe("computeVolatilitySettledMetrics", () => {
       accuracy: null,
       macroF1: null,
       trivialAccuracy: null,
+      trivialMacroF1: null,
     });
   });
 });
@@ -120,6 +125,30 @@ describe("decideVolatilityCompetition", () => {
     expect(spreader.metrics.accuracy!).toBeLessThan(spreader.metrics.trivialAccuracy!);
 
     const decision = decideVolatilityCompetition({ standings: [spreader], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("NO_QUALIFYING_MODEL");
+    expect(decision.excludedBelowTrivial).toBe(1);
+  });
+
+  // The mirror-image hole of the spreader test: the original gate compared accuracy
+  // only, so a model winning on accuracy while showing no more class discrimination
+  // than trivial slipped through. Metrics are hand-authored because reaching this
+  // corner from a real confusion matrix takes a pathological window; the gate must
+  // still hold when settlement arithmetic changes or a different alphabet arrives.
+  it("excludes a model that beats trivial on accuracy but not macro-F1", () => {
+    const hugger = standing({
+      metrics: {
+        sampleCount: 1000,
+        correctCount: 710,
+        accuracy: 0.71,
+        macroF1: 0.25,
+        committedHitRate: 0.71,
+        trivialAccuracy: 0.7,
+        trivialMacroF1: 0.2745,
+      },
+    });
+
+    const decision = decideVolatilityCompetition({ standings: [hugger], asOfDate: TODAY });
 
     expect(decision.reason).toBe("NO_QUALIFYING_MODEL");
     expect(decision.excludedBelowTrivial).toBe(1);

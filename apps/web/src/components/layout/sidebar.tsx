@@ -16,6 +16,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  Layers,
 } from "lucide-react";
 import { classNames } from "../ui/class-names";
 import { type ReactNode } from "react";
@@ -47,6 +48,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         { name: "Market News", href: "/news", icon: <Newspaper className="size-5" /> },
         { name: "Market Scanner", href: "/", icon: <ScanSearch className="size-5" /> },
         { name: "Interactive Charts", href: "/charts", icon: <CandlestickChart className="size-5" /> },
+        { name: "Option Chain", href: "/option-chain", icon: <Layers className="size-5" /> },
       ],
     },
     {

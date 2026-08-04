@@ -151,6 +151,25 @@ async function main(): Promise<void> {
     void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
   }, { timezone: IST });
 
+  // Option chain, every 15 minutes through the session.
+  //
+  // This series is forward-accumulating and cannot be backfilled: a chain endpoint
+  // returns the current book, there is no historical source, and Workstream D3 forbids
+  // presenting today's page as though it were the past. Every interval not collected is
+  // permanently unavailable, which is why this is scheduled rather than run on demand.
+  //
+  // Fifteen minutes is a deliberate compromise. Change in open interest is the useful
+  // figure rather than its level, so intra-session granularity matters; but each run is
+  // one request per underlying against a provider that answers 429 after roughly a dozen
+  // rapid calls.
+  cron.schedule("*/15 9-15 * * 1-5", () => {
+    void schedule("OPTION_CHAIN", () => runCommand("npm", [
+      "run", "data:collect:option-chain", "--",
+      "--underlyings", "NIFTY50,BANKNIFTY",
+      "--strike-count", "15",
+    ]));
+  }, { timezone: IST });
+
   // Every three minutes, matching the interval this replaced. It claims its due minute
   // like everything else, so replicas share the work rather than each ingesting the same
   // feeds and racing on the same article rows.
@@ -167,6 +186,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
+      "OPTION_CHAIN",
       "RSS_NEWS_INGESTION",
     ],
     timezone: IST,
