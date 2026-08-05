@@ -14,9 +14,15 @@ Briefs in this repo have gone stale and cost real time. Check these first, and t
 mismatch as "this file is older than the tree", not "the tree is broken".
 
 ```bash
-cd apps/api && npx tsc --noEmit && npx vitest run
+cd apps/api && npm run build && npx vitest run
 ```
-Expect a clean typecheck and **563 passed / 71 files**.
+
+`npm run build` rather than `npx tsc --noEmit`, because the shared packages emit `dist` and
+the API typechecks against it. On a fresh clone, or after deleting `dist`, a bare
+`npx tsc --noEmit` reports dozens of "Cannot find module '@ai-quant-lab/pricing'" errors that
+are an artefact of the unbuilt package, not of the tree. `npm run build` builds both packages
+first.
+Expect a clean typecheck and **597 passed / 74 files**.
 
 ```bash
 py -3.12 -m unittest discover -s apps/ml -p "test_*.py"
@@ -32,7 +38,7 @@ already shipped once.
 
 | | state on 2026-08-05 |
 |---|---|
-| HEAD | `f880806`+ on `feature/champion-challenger` |
+| HEAD | `2f58e8e`+ on `feature/champion-challenger` |
 | migrations | through **041**; next is **042** |
 | system of record | **v2, port 5433**. v1 (5432) is a read-only audit trail |
 | paper trades | **7 rows, 6 excluded from evidence** — 2 phantom-expiry, 4 synthetic verification |
@@ -97,33 +103,22 @@ A real filter needs a calendar of **scheduled** events — earnings dates, polic
 expiry-week flags — which this project does not have. That is the work; more keyword tuning
 is not.
 
-### 1.4 Chain collection has unbackfillable gaps, and failures are not diagnosable
+### 1.4 Nothing pages anyone when a scheduled job fails
 
-On 2026-08-05 the first successful snapshot was 06:30 UTC (12:00 IST); three runs failed at
-05:45, 06:00 and 06:15, and nothing was attempted during 09:15–11:15 IST. Chain data cannot
-be backfilled, so that morning is permanently missing.
+`assessFyersAuthHealth` counts FAILED runs and logs at error level from the scheduler, and a
+failure now records the child's output (4.8), so a failure is *diagnosable*. Nobody is
+*notified*: an error line in a container log is found only by someone already looking.
 
-`scheduled_job_runs.error_details` recorded only:
+Whatever reads it should treat option-chain failures as more urgent than the rest. That series
+is forward-accumulating with no backfill, so a lost interval is lost permanently — the
+2026-08-05 morning session (09:15–11:15 IST, plus failures at 05:45, 06:00 and 06:15 UTC) is
+gone and cannot be reconstructed.
 
-```
-npm run data:collect:option-chain -- --underlyings ... exited with code 1
-```
+Deliberately **not** added: an immediate in-run retry. The provider answers 429 after roughly
+a dozen rapid calls, so retrying hard against a rate limit makes the outage worse, and the
+15-minute cron is already a retry that costs one interval.
 
-The actual reason is not captured, so a failure cannot be diagnosed after the fact. The
-child process's stderr should be recorded.
-
-`assessFyersAuthHealth` does now count these failures and logs at error level from the
-scheduler (see 4.5), but nothing pages anyone — an error line in a container log is only
-found by someone already looking.
-
-### 1.5 `fyers-live-streamer` is untyped and untested
-
-128 lines backing an SSE tick endpoint, with `private socket: any` and no test. It works
-insofar as the endpoint responds; nothing pins its reconnect or resubscribe behaviour. The
-`fyers-api-v3` dependency and `apps/api/src/types/fyers-api-v3.d.ts` (a hand-written ambient
-declaration, `export const fyersModel: any`) exist solely for it.
-
-### 1.6 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
+### 1.5 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
 
 Measured 2026-08-05, after backfilling NIFTYBEES 5m and BANKBEES 1m/5m from Fyers back to
 2019-01-01 (previously NIFTYBEES 5m stopped at 2023-01-02 and BANKBEES had zero rows).
@@ -150,7 +145,7 @@ No BANKBEES training pipeline exists yet — `train_tcn.py` and `train_stack.py`
 `AUTHORIZED_SYMBOL = "NIFTYBEES"`. A note for whoever builds that track, not a change made to
 either file.
 
-### 1.7 Leftover verification rows
+### 1.6 Leftover verification rows
 
 Four `trade_ideas` rows carry `evidence->>'synthetic' = 'true'`, created to exercise the
 option open/close path while the market was closed (the real generator persists nothing
@@ -290,7 +285,50 @@ running container serves the chain endpoint with delta 0.529211 — identical to
 extraction. The engine's tests stay under `apps/api`, so the API suite now guards the web
 client's pricing too.
 
-### 4.7 Both databases bind to localhost
+### 4.7 Scheduled-job failures record why
+
+`runCommand` used `stdio: "inherit"`, so a child wrote straight to the scheduler's streams and
+nothing was kept. A FAILED row therefore held only
+`npm run data:collect:option-chain -- ... exited with code 1`, which is why three real
+OPTION_CHAIN failures are permanently undiagnosable.
+
+Output is now piped, forwarded unchanged to the container log, and the last 4,000 characters
+are kept for the failure message. stderr is preferred with stdout as a genuine fallback,
+because this project's CLIs report failures as JSON on stdout via `console.info` — a
+stderr-only capture would have recorded nothing for exactly the jobs most likely to fail. A
+signal is reported as a signal rather than `exit code null`, and no output at all says so
+outright instead of leaving an empty tail.
+
+`close` rather than `exit`, so the streams have flushed and the captured tail is complete when
+the message is built.
+
+Four tests spawn real failing processes to prove the capture. The cron window (9–15 IST) had
+passed when this shipped, so it has not yet been exercised by the live scheduler.
+
+### 4.8 The live streamer is typed, validated and tested
+
+Was 128 lines with `private socket: any`, no test, and three defects behind that:
+
+- **A tick could carry `undefined` as a `number`.** `ltp: message.ltp ?? message.last_price`
+  is typed `number`, so a payload with neither produced a Tick whose price was undefined. It
+  reached the browser, made the chain's spot undefined, and stopped repricing in silence.
+  `parseTick` now returns null for anything without a symbol and a positive price, and a zero
+  bid or ask reads as absent rather than as a price of zero.
+- **Every tick was logged at info level.** `console.log("[RAW TICK]", …)` per message floods a
+  session's container log and buries everything else. Unparseable messages are now counted and
+  the total is reported on close, via `droppedMessageCount()`.
+- **Reconnect was a fixed 5 seconds, uncapped.** Fyers auth lapses every 15 days with no
+  non-interactive path, and each attempt calls `getAccessToken()`, which takes a row lock and
+  can spend a refresh against the provider. An overnight failure was thousands of those.
+  Backoff now doubles from 5s to a 5-minute ceiling, and resets on a successful `connect`
+  event rather than on an attempt.
+
+The vendor socket has a narrow `FyersDataSocket` interface and is injectable, so 17 tests
+cover parsing, backoff, resubscribe-on-reconnect, and that nothing is sent before the
+handshake completes. `isConnected` is optional on the vendor object, and its absence is no
+longer read as connected.
+
+### 4.9 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 

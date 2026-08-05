@@ -1,6 +1,6 @@
 import "dotenv/config";
 import cron from "node-cron";
-import { spawn } from "node:child_process";
+import { runCommand as runChildCommand } from "./run-command.js";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
@@ -41,18 +41,12 @@ function istDateKey(instant: Date): string {
 // container (/app) — relying on it silently broke every ML job in Docker.
 const REPO_ROOT = fileURLToPath(new URL("../../../../..", import.meta.url));
 
+/**
+ * Child output is captured as well as forwarded, so a FAILED row in `scheduled_job_runs`
+ * carries the reason rather than only an exit code. See `run-command.ts`.
+ */
 function runCommand(command: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", shell: true, cwd: REPO_ROOT });
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      // A non-zero exit is a failed run, not a completed one. The previous version
-      // listened only for "error", so a job that started and then exited 1 was
-      // indistinguishable from success.
-      if (code === 0) resolve();
-      else reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
-    });
-  });
+  return runChildCommand(command, args, { cwd: REPO_ROOT });
 }
 
 function log(message: string, extra: Record<string, unknown> = {}): void {
