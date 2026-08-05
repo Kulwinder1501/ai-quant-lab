@@ -36,6 +36,37 @@ SEQUENCE_WINDOW_GATES: dict[str, dict[str, Any]] = {
 }
 
 
+
+def earliest_reliable_volume_year(
+    per_year_zero_volume: Mapping[int, float],
+    *,
+    maximum_zero_volume_fraction: float,
+) -> int | None:
+    """The earliest year from which every later year clears the zero-volume gate.
+
+    A window that fails on zero volume is usually not a collection defect and cannot be
+    fixed by fetching more history -- it is a series that was thinly traded when it
+    launched. Measured 2026-08-05, BANKBEES 5m is 20.0% zero-volume across 2019 and at most
+    0.43% in every year from 2020 onward, because the ETF was barely traded in its first
+    year. The remedy is to start the window later, so the refusal should say when.
+
+    Returns None when no starting year clears, which means the problem is not the window
+    and the operator should stop moving it.
+    """
+
+    if not per_year_zero_volume:
+        return None
+    years = sorted(per_year_zero_volume)
+    # Walk backwards: a year qualifies only if it and every year after it are clean, so a
+    # single bad later year cannot be hidden by good early ones.
+    earliest: int | None = None
+    for year in reversed(years):
+        if per_year_zero_volume[year] > maximum_zero_volume_fraction:
+            break
+        earliest = year
+    return earliest
+
+
 class SequenceReadinessError(RuntimeError):
     """TCN research refused because the sequence-readiness gate did not clear."""
 
@@ -72,13 +103,30 @@ def assess_training_window(
             ),
         })
     if zero_volume_fraction > thresholds["maximumZeroVolumeFraction"]:
-        findings.append({
-            "code": "WINDOW_ZERO_VOLUME",
-            "detail": (
-                f"Zero-volume fraction {zero_volume_fraction:.6f} exceeds "
-                f"{thresholds['maximumZeroVolumeFraction']:.6f}."
-            ),
-        })
+        detail = (
+            f"Zero-volume fraction {zero_volume_fraction:.6f} exceeds "
+            f"{thresholds['maximumZeroVolumeFraction']:.6f}."
+        )
+        # Name the fix rather than leaving the operator to rediscover it. A thinly traded
+        # launch year is not a collection defect and more backfilling will not help.
+        per_year = {
+            int(year): float(fraction)
+            for year, fraction in (measurements.get("zeroVolumeFractionByYear") or {}).items()
+        }
+        suggested = earliest_reliable_volume_year(
+            per_year, maximum_zero_volume_fraction=thresholds["maximumZeroVolumeFraction"]
+        )
+        if suggested is not None:
+            detail += (
+                f" Every year from {suggested} onward clears it, so start the window at "
+                f"{suggested}-01-01 rather than fetching more history."
+            )
+        elif per_year:
+            detail += (
+                " No starting year inside this window clears it, so the problem is not the"
+                " window start."
+            )
+        findings.append({"code": "WINDOW_ZERO_VOLUME", "detail": detail})
     if providers != [thresholds["requiredProvider"]]:
         findings.append({
             "code": "WINDOW_PROVIDER_MISMATCH",
@@ -148,6 +196,34 @@ def measure_training_window(
         )
         row = cursor.fetchone()
 
+        # Per-year zero-volume across the same window. Bounded by the identical predicates so
+        # the yearly figures always sum to the window measured above.
+        cursor.execute(
+            """
+            SELECT
+              extract(year FROM (c.open_time AT TIME ZONE 'Asia/Kolkata'))::int AS bar_year,
+              count(*)::bigint AS bar_count,
+              count(*) FILTER (WHERE c.volume = 0)::bigint AS zero_volume_bars
+            FROM instruments i
+            JOIN candles c ON c.instrument_id = i.id
+            WHERE i.exchange = 'NSE'
+              AND upper(i.symbol) = upper(%s)
+              AND c.timeframe = %s
+              AND c.is_complete = TRUE
+              AND c.received_at <= %s
+              AND c.close_time <= %s
+              AND c.open_time >= %s
+              AND c.close_time <= %s
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            (symbol, timeframe, data_cutoff_at, data_cutoff_at, window_start, window_end),
+        )
+        zero_volume_by_year = {
+            int(bar_year): (0.0 if int(bars) == 0 else int(zero_bars) / int(bars))
+            for bar_year, bars, zero_bars in cursor.fetchall()
+        }
+
     if row is None:
         measurements: dict[str, Any] = {
             "symbol": symbol.upper(),
@@ -159,6 +235,7 @@ def measure_training_window(
             "barCount": 0,
             "sessionCount": 0,
             "zeroVolumeFraction": 0.0,
+            "zeroVolumeFractionByYear": {},
             "providers": [],
             "firstOpenTime": None,
             "lastOpenTime": None,
@@ -182,6 +259,7 @@ def measure_training_window(
             "barCount": bar_count,
             "sessionCount": int(sessions),
             "zeroVolumeFraction": 0.0 if bar_count == 0 else int(zero_bars) / bar_count,
+            "zeroVolumeFractionByYear": zero_volume_by_year,
             "providers": list(providers or []),
             "firstOpenTime": None if first_at is None else first_at.isoformat(),
             "lastOpenTime": None if last_at is None else last_at.isoformat(),

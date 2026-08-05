@@ -1,5 +1,5 @@
 import type { DatabasePool } from "../database.js";
-import { fromDateColumn } from "../date-column.js";
+import { fromDateColumn, toDateKey } from "../date-column.js";
 import { yearsToExpiry } from "@ai-quant-lab/pricing";
 import { impliedForwardFromParity } from "@ai-quant-lab/pricing";
 import type { OptionExpiryCalendar } from "../../../modules/market-data/domain/option-expiry-calendar.js";
@@ -222,6 +222,61 @@ export class PostgresOptionChainRepository {
         expiryKind: String(row.expiry_kind) as ExpiryKind,
       })),
     };
+  }
+
+  /**
+   * One ATM-ish implied-volatility input per stored day, for the IV percentile.
+   *
+   * Returns the *last* snapshot of each day, and only the strikes adjacent to that snapshot's
+   * own spot, so the caller solves a handful of contracts per day rather than every strike of
+   * every 15-minute observation. A percentile needs one value per day: intraday snapshots are
+   * autocorrelated, so ranking against all of them would let two sessions look like fifty
+   * independent samples.
+   */
+  async dailyAtmQuotes(input: { underlyingSymbol: string; days: number }): Promise<Array<{
+    date: string;
+    observedAt: Date;
+    underlyingValue: number | null;
+    expiryDate: Date;
+    strikePrice: number;
+    optionType: OptionType;
+    bid: number | null;
+    ask: number | null;
+  }>> {
+    const result = await this.pool.query(`
+      WITH last_per_day AS (
+        SELECT DISTINCT ON ((observed_at AT TIME ZONE 'Asia/Kolkata')::date)
+               (observed_at AT TIME ZONE 'Asia/Kolkata')::date AS session_date,
+               observed_at
+        FROM option_chain_snapshots
+        WHERE underlying_symbol = $1
+        ORDER BY (observed_at AT TIME ZONE 'Asia/Kolkata')::date DESC, observed_at DESC
+      ),
+      recent AS (SELECT * FROM last_per_day ORDER BY session_date DESC LIMIT $2)
+      SELECT r.session_date, s.observed_at, s.underlying_value, s.expiry_date,
+             s.strike_price, s.option_type, s.bid, s.ask
+      FROM recent r
+      JOIN option_chain_snapshots s
+        ON s.underlying_symbol = $1 AND s.observed_at = r.observed_at
+      -- Nearest expiry only: mixing tenors would rank today's front-month IV against a
+      -- previous day's far-month, which is a different quantity.
+      WHERE s.expiry_date = (
+        SELECT min(expiry_date) FROM option_chain_snapshots inner_s
+        WHERE inner_s.underlying_symbol = $1 AND inner_s.observed_at = r.observed_at
+      )
+      ORDER BY r.session_date DESC, s.strike_price, s.option_type
+    `, [input.underlyingSymbol, Math.max(1, Math.floor(input.days))]);
+
+    return result.rows.map((row) => ({
+      date: toDateKey(fromDateColumn(row.session_date)),
+      observedAt: row.observed_at as Date,
+      underlyingValue: toNumberOrNull(row.underlying_value),
+      expiryDate: toExpiryInstant(row.expiry_date),
+      strikePrice: Number(row.strike_price),
+      optionType: String(row.option_type) as OptionType,
+      bid: toNumberOrNull(row.bid),
+      ask: toNumberOrNull(row.ask),
+    }));
   }
 
   /** Distinct underlyings with a stored chain, and how fresh each is. */

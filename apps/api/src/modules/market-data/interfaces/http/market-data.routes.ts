@@ -21,6 +21,7 @@ import {
 
 /** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
+import { summariseIvPercentile, type DailyImpliedVolatility } from "../../domain/iv-percentile.js";
 
 export function registerMarketDataRoutes(
   app: Express,
@@ -400,6 +401,61 @@ export function registerMarketDataRoutes(
         row[quote.optionType === "CE" ? "call" : "put"] = leg;
       }
 
+      // Averaged across the ATM call and put when both solve, because either alone carries the
+      // skew of its own side.
+      const meanIv = (values: readonly number[]): number | null =>
+        values.length === 0 ? null : values.reduce((total, iv) => total + iv, 0) / values.length;
+
+      const atmIv = atmStrike === null ? null : meanIv([...byStrike.values()]
+        .filter((row) => row.strikePrice === atmStrike)
+        .flatMap((row) => [row.call, row.put])
+        .map((leg) => (leg as { impliedVolatility: number | null } | null)?.impliedVolatility ?? null)
+        .filter((iv): iv is number => iv !== null));
+
+      // One solve per stored day, from that day's last snapshot and its own spot, so a year of
+      // history costs a few hundred inversions rather than every strike of every observation.
+      const history: DailyImpliedVolatility[] = [];
+      try {
+        const dailyQuotes = await dependencies.optionChainRepository.dailyAtmQuotes({
+          underlyingSymbol, days: 400,
+        });
+        const byDate = new Map<string, typeof dailyQuotes>();
+        for (const quote of dailyQuotes) {
+          byDate.set(quote.date, [...(byDate.get(quote.date) ?? []), quote]);
+        }
+        for (const [date, quotes] of byDate) {
+          const daySpot = quotes.find((quote) => quote.underlyingValue !== null)?.underlyingValue ?? null;
+          if (daySpot === null) continue;
+          // That day's own ATM strike, not today's: spot moves, and ranking a fixed strike
+          // across months would measure moneyness drift rather than volatility.
+          const strikes = [...new Set(quotes.map((quote) => quote.strikePrice))];
+          const dayAtm = strikes.reduce<number | null>((closest, strike) => (
+            closest === null || Math.abs(strike - daySpot) < Math.abs(closest - daySpot)
+              ? strike
+              : closest
+          ), null);
+          if (dayAtm === null) continue;
+          const solved = quotes
+            .filter((quote) => quote.strikePrice === dayAtm)
+            .map((quote) => {
+              const mid = midPriceForIv(quote.bid, quote.ask);
+              const time = yearsToExpiry(quote.observedAt, quote.expiryDate);
+              if (mid === null || time <= 0) return null;
+              const result = impliedVolatilityFromPremium({
+                spot: daySpot, strike: quote.strikePrice, timeToExpiryYears: time,
+                riskFreeRate: RISK_FREE_RATE, optionType: quote.optionType, premium: mid,
+              });
+              return result.measurable ? result.impliedVolatility : null;
+            })
+            .filter((iv): iv is number => iv !== null);
+          const dayIv = meanIv(solved);
+          if (dayIv !== null) history.push({ date, impliedVolatility: dayIv });
+        }
+      } catch {
+        // History is an enrichment. Losing it must not cost the caller the live chain.
+      }
+      const ivPercentile = summariseIvPercentile({ history, currentImpliedVolatility: atmIv });
+
       response.status(200).json({
         data: {
           underlyingSymbol: snapshot.underlyingSymbol,
@@ -422,16 +478,16 @@ export function registerMarketDataRoutes(
           // The single IV a "is IV unusually high?" check reads. Averaged across the ATM
           // call and put when both solve, because either alone carries the skew of its
           // own side.
-          atmImpliedVolatility: (() => {
-            if (atmStrike === null) return null;
-            const solved = [...byStrike.values()]
-              .filter((row) => row.strikePrice === atmStrike)
-              .flatMap((row) => [row.call, row.put])
-              .map((leg) => (leg as { impliedVolatility: number | null } | null)?.impliedVolatility ?? null)
-              .filter((iv): iv is number => iv !== null);
-            if (solved.length === 0) return null;
-            return solved.reduce((total, iv) => total + iv, 0) / solved.length;
-          })(),
+          atmImpliedVolatility: atmIv,
+          /*
+           * Where that IV sits against its own history -- factor 5 of the pre-trade checklist,
+           * which had no answer at all before.
+           *
+           * Not measurable yet: chain history begins 2026-08-04 and cannot be backfilled, so
+           * it refuses with a day count until enough distinct days exist. The refusal is the
+           * point; a percentile over three days is arithmetically fine and worthless.
+           */
+          atmImpliedVolatilityPercentile: ivPercentile,
           strikes: [...byStrike.values()].sort(
             (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
           ),

@@ -161,9 +161,10 @@ describe("validateOptionsEntry", () => {
   });
 
   it("carries the caller's reason for absent volume, so 'not reported' is distinguishable", () => {
-    // Measured: all 1,069 stored 15m index bars have zero volume because the provider
-    // supplies no intraday index volume. "Not reported by this series" and "nobody looked it
-    // up" must not collapse into one line, because only one of them is worth acting on.
+    // Measured: all 1,069 stored 15m index bars have zero volume, because 15m is Yahoo's
+    // under the provenance split and Yahoo carries no index volume. "Not reported by this
+    // series" and "nobody looked it up" must not collapse into one line, because only one of
+    // them is worth acting on.
     const result = validateOptionsEntry({
       proposedIdea: IDEA,
       optionChain: chain(),

@@ -22,7 +22,7 @@ the API typechecks against it. On a fresh clone, or after deleting `dist`, a bar
 `npx tsc --noEmit` reports dozens of "Cannot find module '@ai-quant-lab/pricing'" errors that
 are an artefact of the unbuilt package, not of the tree. `npm run build` builds both packages
 first.
-Expect a clean typecheck and **597 passed / 74 files**.
+Expect a clean typecheck and **605 passed / 75 files**.
 
 ```bash
 py -3.12 -m unittest discover -s apps/ml -p "test_*.py"
@@ -38,10 +38,10 @@ already shipped once.
 
 | | state on 2026-08-05 |
 |---|---|
-| HEAD | `2f58e8e`+ on `feature/champion-challenger` |
-| migrations | through **041**; next is **042** |
+| HEAD | `5859121`+ on `feature/champion-challenger` |
+| migrations | through **042**; next is **043** |
 | system of record | **v2, port 5433**. v1 (5432) is a read-only audit trail |
-| paper trades | **7 rows, 6 excluded from evidence** — 2 phantom-expiry, 4 synthetic verification |
+| paper trades | **3 rows, 2 excluded** — both phantom-expiry, kept as the defect record |
 | option chain history | begins **2026-08-04**. Forward-accumulating, no backfill exists |
 | both databases | bound to `127.0.0.1` |
 
@@ -64,15 +64,24 @@ passed over in silence:
 ]
 ```
 
-Events are 1.3 below. The volume line is a **data** limit, not a wiring gap: measured
-2026-08-05, all 1,069 stored 15m bars for BANKNIFTY and NIFTY50 have zero or null volume,
-because the provider supplies no intraday index volume. Daily index bars do carry it, and a
-1d-sourced idea is checked — verified live, `sourceCandleVolume: 158800`.
+Events are 1.3 below. The volume line is a **provenance** limit, not a wiring gap, and the
+earlier version of this file mis-attributed it. Measured 2026-08-05 on stored BANKNIFTY bars:
 
-It clears itself two ways, neither of which is more code here: train and raise ideas on
-**futures** rather than spot indices (see the settled note in 3 on index volume), or the
-provider starts supplying intraday index volume. The probe is per instrument and timeframe,
-so the check begins working on its own when either happens.
+| timeframe | source | bars | with volume |
+|---|---|---|---|
+| 15m | yahoo | 1,069 | **0** |
+| 5m | fyers-api-v3 | 10,725 | **10,717** |
+| 1d | yahoo | 884 | 875 |
+
+Intraday index volume is *not* unavailable. **Fyers supplies it at 5m (99.9%)**; 15m belongs
+to Yahoo under the provenance split, and Yahoo carries none. So this is not "wait for the
+provider" — an idea raised on a **5m** bar is volume-checked today, with no change to any
+code, because the probe is per instrument and timeframe. A 1d-sourced idea is checked too:
+verified live, `sourceCandleVolume: 158800`.
+
+What would close it: raise option ideas from a 5m Fyers series rather than 15m Yahoo. That is
+an idea-generation decision, not a gate change, and it interacts with the settled note in 3 —
+train on futures rather than spot, or a volume feature becomes a date proxy.
 
 Do not "fix" this by removing the `unchecked` entries, and do not make the route substitute
 the latest bar for the idea's own `source_candle_id` — that would judge an older idea on
@@ -80,13 +89,7 @@ information it never had. A gate that reports `isValid: true` while silently ski
 is the exact failure this project has already paid for twice: once with `greeks.price`, once
 with guards written `x !== null && x !== undefined` against fields that did not exist.
 
-### 1.2 No IV history, so "unusually high IV" has no answer
-
-Chain snapshots begin 2026-08-04, so there is no percentile to compute and no way to
-backfill one: a chain endpoint returns the current book and no historical source exists.
-This resolves with time and only with time. **Do not try to reconstruct it.**
-
-### 1.3 No event calendar, and headlines cannot substitute for one
+### 1.2 No event calendar, and headlines cannot substitute for one
 
 Measured 2026-08-05 against the stored newswire: the keyword detector in
 `check-macro-events` fires on **7 of 9 days**. Tightened to unambiguous phrases
@@ -103,16 +106,37 @@ A real filter needs a calendar of **scheduled** events — earnings dates, polic
 expiry-week flags — which this project does not have. That is the work; more keyword tuning
 is not.
 
-### 1.4 Nothing pages anyone when a scheduled job fails
+### 1.3 The dashboard shows fabricated macro events
 
-`assessFyersAuthHealth` counts FAILED runs and logs at error level from the scheduler, and a
-failure now records the child's output (4.8), so a failure is *diagnosable*. Nobody is
-*notified*: an error line in a container log is found only by someone already looking.
+Found 2026-08-05 while checking whether 1.2 was already in progress.
+`apps/web/src/features/dashboard/components/upcoming-events.tsx` renders a hardcoded
+`MOCK_EVENTS` array — "CPI Data (US), estimate 3.1%, previous 3.2%, T-02:14:00", "FOMC
+Meeting", "RBI MPC (IN) 6.5%" — with impact badges and live-looking countdowns, and it is wired
+into `live-price-dashboard.tsx`. There is no backing endpoint; the numbers are invented.
 
-Whatever reads it should treat option-chain failures as more urgent than the rest. That series
-is forward-accumulating with no backfill, so a lost interval is lost permanently — the
-2026-08-05 morning session (09:15–11:15 IST, plus failures at 05:45, 06:00 and 06:15 UTC) is
-gone and cannot be reconstructed.
+This is not a styling placeholder. It presents specific estimates for specific releases at
+specific times, on a dashboard next to real prices, and a reader could act on it. It is the
+same failure mode as the pseudo-embeddings and the fabricated SHAP rows: plausible output with
+nothing behind it.
+
+Not changed here because it is another work stream's uncommitted work — flagged rather than
+edited or committed. Either give it the scheduled-event feed 1.2 needs, or label it
+unmistakably as sample data until that exists.
+
+### 1.4 Nothing *sends* a job-failure alert
+
+Failures are now diagnosable (4.8) and **readable** (4.10): `GET /api/v1/health/jobs`
+answers 503 with a `criticalFailures` list. What is missing is a sender — that needs a channel
+and credentials, which belong to the operator, not to an agent. Point an uptime check at that
+endpoint and the loop closes.
+
+Polling it immediately surfaced failures nobody had noticed: **EOD_PIPELINE ×1** and
+**INSTITUTIONAL_FLOWS ×3**, on top of the three OPTION_CHAIN failures already known. Their
+`lastError` is still the old bare exit code, because they predate the capture in 4.8.
+
+Option-chain failures are treated as critical because that series is forward-accumulating with
+no backfill, so a lost interval is lost permanently — the 2026-08-05 morning session
+(09:15–11:15 IST, plus 05:45, 06:00 and 06:15 UTC) is gone and cannot be reconstructed.
 
 Deliberately **not** added: an immediate in-run retry. The provider answers 429 after roughly
 a dozen rapid calls, so retrying hard against a rate limit makes the outage worse, and the
@@ -134,6 +158,12 @@ it.
 2020-01-01. That leaves ~122,237 bars across ~1,600 sessions for BANKBEES 5m — past the
 100k-bar/250-session floor — at ~0.07% zero-volume.
 
+The gate already refuses a 2019-reaching window with `WINDOW_ZERO_VOLUME`, and now **names the
+year to start from** rather than leaving it to be rediscovered: it measures zero-volume per
+year inside the window and reports the earliest year after which every later year is clean, or
+says outright that no start would help. So the remaining work is only to pick the window when
+that track is built.
+
 | series | bars | sessions | range |
 |---|---|---|---|
 | NIFTYBEES 1m | 331,516 | 888 | 2023-01-02 → 2026-08-03 |
@@ -145,13 +175,7 @@ No BANKBEES training pipeline exists yet — `train_tcn.py` and `train_stack.py`
 `AUTHORIZED_SYMBOL = "NIFTYBEES"`. A note for whoever builds that track, not a change made to
 either file.
 
-### 1.6 Leftover verification rows
 
-Four `trade_ideas` rows carry `evidence->>'synthetic' = 'true'`, created to exercise the
-option open/close path while the market was closed (the real generator persists nothing
-without a new candle). They cannot be deleted without orphaning the paper trades keyed to
-them. The two trades they produced are flagged `excluded_from_evidence`, so no aggregate sees
-them.
 
 ---
 
@@ -328,7 +352,50 @@ cover parsing, backoff, resubscribe-on-reconnect, and that nothing is sent befor
 handshake completes. `isConnected` is optional on the vendor object, and its absence is no
 longer read as connected.
 
-### 4.9 Both databases bind to localhost
+### 4.9 An IV percentile exists, and refuses honestly until it can answer
+
+Factor 5 of the checklist — is IV high *relative to its own history* — had no answer at all.
+`atmImpliedVolatilityPercentile` on the chain endpoint now answers it, or says exactly why it
+cannot:
+
+```json
+{ "measurable": false, "reason": "INSUFFICIENT_HISTORY",
+  "observedDays": 2, "requiredDays": 20,
+  "explanation": "... history is forward-accumulating and cannot be backfilled, so this
+                  resolves with time." }
+```
+
+The percentile is over **one value per day**, and that is the whole design. Fifteen-minute
+snapshots are heavily autocorrelated — 25 observations from one session are one day's
+information, not 25 independent samples — so ranking against raw observations would report a
+confident percentile built from two days, and would call an ordinary IV extreme. It needs 20
+distinct days, so with history from 2026-08-04 it starts answering around **2026-09-01**.
+
+Each historical day is solved from that day's last snapshot, its own spot, its own ATM strike
+and the nearest expiry only. A fixed strike across months would measure moneyness drift, and
+mixing tenors would rank front-month IV against far-month, which is a different quantity.
+Losing the history read cannot cost the caller the live chain.
+
+### 4.10 Job failures are readable from outside the process
+
+`GET /api/v1/health/jobs?lookbackHours=48` returns per-job failed/completed/running counts,
+the last failure time and the captured `lastError`, and answers **503** when a job flagged
+critical (OPTION_CHAIN, EOD_PIPELINE) has failed. It deliberately sends nothing itself: that
+needs a channel and credentials, which are the operator's to install. Extended the existing
+`health.routes.ts` rather than adding a second endpoint.
+
+### 4.11 The verification rows are gone
+
+Migration 042 removes the four synthetic ideas and their four paper trades, in foreign-key
+order, scoped to the synthetic marker *and* `excluded_from_evidence` so a real trade cannot be
+caught by a mis-set flag. Exclusion kept the metrics honest but left four of seven rows as
+scaffolding a reader had to filter by hand.
+
+The two trades booked on the phantom BANKNIFTY 2026-08-04 expiry are deliberately kept. They
+record a real defect, and deleting them would erase the evidence rather than the noise.
+`paper_trades` is now three rows: those two, still excluded, and one real trade.
+
+### 4.12 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 

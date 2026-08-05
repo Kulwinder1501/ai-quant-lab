@@ -14,10 +14,12 @@ export interface OptionsValidationContext {
    * Volume of the bar the idea was raised on. Omit when unknown; it is then unchecked.
    *
    * Must be null rather than 0 when the series does not report volume at all. Measured
-   * 2026-08-05: every one of 1,069 stored 15m bars for BANKNIFTY and NIFTY50 has zero or
-   * null volume, because the provider supplies no intraday index volume. Passing that 0
-   * through would read as "nobody traded" and refuse essentially every index option entry,
-   * when the honest reading is "this series carries no volume".
+   * 2026-08-05: every one of 1,069 stored 15m BANKNIFTY and NIFTY50 bars has zero or null
+   * volume -- not because intraday index volume is unavailable, but because 15m belongs to
+   * Yahoo under the provenance split and Yahoo carries none. The Fyers 5m series for the
+   * same index is 99.9% populated. Passing that 0 through would read as "nobody traded" and
+   * refuse essentially every 15m-sourced index entry, when the honest reading is "this
+   * series carries no volume".
    */
   candleVolume?: number | null;
   /**

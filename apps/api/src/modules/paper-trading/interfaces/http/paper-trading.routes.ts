@@ -435,10 +435,11 @@ export function registerPaperTradingRoutes(
         // later bar would judge it on information it never had.
         //
         // A zero is only treated as "nobody traded" when the series demonstrably reports
-        // volume. Every stored 15m index bar has zero volume because the provider supplies
-        // no intraday index volume, and reading that as no participation would refuse every
-        // index option entry. The probe is per instrument and timeframe, so the check starts
-        // working on its own if the provider ever begins supplying it.
+        // volume. Every stored 15m index bar has zero volume because 15m is Yahoo's under the
+        // provenance split and Yahoo carries no index volume -- the Fyers 5m series for the
+        // same index is 99.9% populated. Reading that zero as absent participation would
+        // refuse every 15m-sourced index entry. The probe is per instrument and timeframe, so
+        // an idea raised on a 5m bar is checked today, with no change here.
         let candleVolume: number | null = null;
         let volumeAbsenceReason = "the idea records no source candle, so its bar volume cannot be read";
         if (idea.source_candle_id) {
