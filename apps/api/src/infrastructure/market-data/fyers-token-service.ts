@@ -142,21 +142,37 @@ export class FyersTokenService {
   }
 
   /** Read-only snapshot of the stored credential, for a health check that never mutates it. */
+  /**
+   * Both clocks, because they mean different things now.
+   *
+   * `accessTokenExpiresAt` decides whether Fyers calls work. `refreshTokenExpiresAt` used to
+   * imply the access token could be renewed programmatically; since Fyers disabled the
+   * refresh API it implies nothing, and reporting it alone made the credential look healthy
+   * for a fortnight while every job failed.
+   */
   async checkCredentialHealth(): Promise<{
     hasCredential: boolean;
+    accessTokenExpiresAt: Date | null;
     refreshTokenExpiresAt: Date | null;
     lastError: string | null;
   }> {
     const result = await this.options.pool.query(
-      "SELECT refresh_token, refresh_token_expires_at, last_error FROM provider_credentials WHERE provider = $1",
+      "SELECT refresh_token, access_token_expires_at, refresh_token_expires_at, last_error "
+      + "FROM provider_credentials WHERE provider = $1",
       [FYERS_PROVIDER_ID],
     );
     const row = result.rows[0];
     if (!row?.refresh_token) {
-      return { hasCredential: false, refreshTokenExpiresAt: null, lastError: (row?.last_error as string | null) ?? null };
+      return {
+        hasCredential: false,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        lastError: (row?.last_error as string | null) ?? null,
+      };
     }
     return {
       hasCredential: true,
+      accessTokenExpiresAt: row.access_token_expires_at as Date | null,
       refreshTokenExpiresAt: row.refresh_token_expires_at as Date | null,
       lastError: row.last_error as string | null,
     };

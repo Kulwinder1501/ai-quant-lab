@@ -49,7 +49,7 @@ already shipped once.
 
 ## 1. Open items
 
-### 1.1 Fyers has disabled its refresh-token API, so the token must be renewed by hand
+### 1.1 Fyers refresh can refuse with code -16, and everything Fyers-dependent stops
 
 Hit 2026-08-05 mid-backfill:
 
@@ -58,23 +58,27 @@ Fyers token refresh failed (HTTP 400, code -16).
 Refresh token API is currently disabled to comply with SEBI regulations.
 ```
 
-`provider_credentials.refresh_token_expires_at` still says 2026-08-20, so the stored token
-looks healthy for another fortnight. It is not: **there is no programmatic refresh at all**
-any more. When the access token expires — it did at **14:27 UTC**, roughly eight hours after
-issue — every Fyers path fails until a human completes an interactive login.
+**It was transient.** `last_refreshed_at` shows a refresh succeeding 19 minutes later, which
+cleared `last_error` and rolled the window forward. So refresh does work; it can simply refuse,
+and while it refuses every Fyers path fails — collection, the option-chain expiry gate, the
+tick stream.
 
-This is a sharper constraint than the "15-day refresh" this file assumed, and it very likely
-explains the OPTION_CHAIN and EOD_PIPELINE failures in 1.4: they are the jobs that run after
-the token lapses.
+I first recorded this as "the refresh API is disabled, renewal is manual only" and advised
+against consolidating onto Fyers on that basis. That was an overstatement from a single
+19-minute window, corrected here and in the memory. Access tokens were observed lasting ~8
+hours (06:27 → 14:27, then 14:46 → 22:46 UTC).
 
-What it changes:
+What still holds:
 
-- **`assessFyersAuthHealth` warns on the wrong clock.** Its window is 2 days before
-  `refresh_token_expires_at`, which is now meaningless. It should warn on
-  `access_token_expires_at`, in hours.
-- **Do not consolidate onto Fyers** until this is understood. A daily manual login as the
-  single point of failure for all market data is worse than the split.
-- Renew with `npm run data:auth:fyers`.
+- **A refusal is silent unless something watches the right clock.** While it lasted,
+  `refresh_token_expires_at` read 2026-08-20 and the credential looked healthy. Fixed in 4.13.
+- **It is the most likely cause of the OPTION_CHAIN and EOD_PIPELINE failures** in 1.5.
+- **Recovery is `npm run data:auth:fyers`** when refresh keeps refusing.
+
+Still open: nothing retries a refusal, and a refusal spanning the session loses option-chain
+intervals permanently. Whether that is worth a retry is a judgement — the provider 429s after
+about a dozen rapid calls, so a tight retry loop against a refusing auth endpoint is its own
+risk.
 
 ### 1.2 The entry gate cannot check events, and cannot check volume on intraday index ideas
 
@@ -471,7 +475,29 @@ npm run data:collect:historical --workspace @ai-quant-lab/api --   --instrument=
 
 Delete the Yahoo rows and update the declaration first, or the key refuses the insert.
 
-### 4.13 Both databases bind to localhost
+### 4.13 The auth-health check watches the access token, not the refresh window
+
+`assessFyersAuthHealth` took its verdict from `refresh_token_expires_at` with a two-day window.
+That reports OK whenever the *refresh* credential is comfortable, which is exactly the state
+during a code -16 refusal: refresh window a fortnight out, access token dead, every job
+failing.
+
+It now reads `access_token_expires_at`, and the question is cadence-aware rather than a generic
+window. The check runs once at **08:00 IST**, before the 09:15 open, so what matters is whether
+the token survives to the **15:30 IST close** — a token dying at noon strands the afternoon,
+and option-chain intervals cannot be backfilled. `mustRemainValidUntil` is passed in by the
+scheduler so session-calendar knowledge stays out of the domain function, and is omitted after
+the close, when a token expiring today has stranded nothing.
+
+`checkCredentialHealth` now returns both clocks. The refresh window is still reported, but only
+as context and only when something is already wrong, with the explicit note that it says
+nothing about whether the access token is usable right now.
+
+Verified against the live credential: it reports **ERROR** naming the 3 failed Fyers-dependent
+jobs, where the old logic would have said OK until 2026-08-20. 10 tests, including that a dead
+access token with a fortnight of refresh window still reads EXPIRED.
+
+### 4.14 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 

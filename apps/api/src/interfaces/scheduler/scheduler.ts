@@ -77,12 +77,23 @@ async function checkFyersAuthHealth(tokenService: FyersTokenService, database: D
   );
   const recentJobFailures = Number(failures.rows[0]?.count ?? 0);
 
+  // The token must last until the close, because the intervals it would miss cannot be
+  // backfilled. 15:30 IST is 10:00 UTC.
+  const now = new Date();
+  const sessionClose = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 10, 0, 0, 0,
+  ));
+
   const assessment = assessFyersAuthHealth({
-    now: new Date(),
+    now,
     hasCredential: health.hasCredential,
+    accessTokenExpiresAt: health.accessTokenExpiresAt,
     refreshTokenExpiresAt: health.refreshTokenExpiresAt,
     lastError: refreshError ?? health.lastError,
     recentJobFailures,
+    // Only meaningful while the close is still ahead; after it, a token dying today has
+    // stranded nothing.
+    mustRemainValidUntil: sessionClose.getTime() > now.getTime() ? sessionClose : undefined,
   });
 
   const payload = {
