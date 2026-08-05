@@ -39,7 +39,7 @@ already shipped once.
 | | state on 2026-08-05 |
 |---|---|
 | HEAD | `5859121`+ on `feature/champion-challenger` |
-| migrations | through **042**; next is **043** |
+| migrations | through **043**; next is **044** |
 | system of record | **v2, port 5433**. v1 (5432) is a read-only audit trail |
 | paper trades | **3 rows, 2 excluded** — both phantom-expiry, kept as the defect record |
 | option chain history | begins **2026-08-04**. Forward-accumulating, no backfill exists |
@@ -49,7 +49,34 @@ already shipped once.
 
 ## 1. Open items
 
-### 1.1 The entry gate cannot check events, and cannot check volume on intraday index ideas
+### 1.1 Fyers has disabled its refresh-token API, so the token must be renewed by hand
+
+Hit 2026-08-05 mid-backfill:
+
+```
+Fyers token refresh failed (HTTP 400, code -16).
+Refresh token API is currently disabled to comply with SEBI regulations.
+```
+
+`provider_credentials.refresh_token_expires_at` still says 2026-08-20, so the stored token
+looks healthy for another fortnight. It is not: **there is no programmatic refresh at all**
+any more. When the access token expires — it did at **14:27 UTC**, roughly eight hours after
+issue — every Fyers path fails until a human completes an interactive login.
+
+This is a sharper constraint than the "15-day refresh" this file assumed, and it very likely
+explains the OPTION_CHAIN and EOD_PIPELINE failures in 1.4: they are the jobs that run after
+the token lapses.
+
+What it changes:
+
+- **`assessFyersAuthHealth` warns on the wrong clock.** Its window is 2 days before
+  `refresh_token_expires_at`, which is now meaningless. It should warn on
+  `access_token_expires_at`, in hours.
+- **Do not consolidate onto Fyers** until this is understood. A daily manual login as the
+  single point of failure for all market data is worse than the split.
+- Renew with `npm run data:auth:fyers`.
+
+### 1.2 The entry gate cannot check events, and cannot check volume on intraday index ideas
 
 `validateOptionsEntry` runs on every option entry and refuses on confidence, falling open
 interest, spread over 3%, sub-1-DTE at low confidence, delta under 0.40, and now a
@@ -89,7 +116,7 @@ information it never had. A gate that reports `isValid: true` while silently ski
 is the exact failure this project has already paid for twice: once with `greeks.price`, once
 with guards written `x !== null && x !== undefined` against fields that did not exist.
 
-### 1.2 No event calendar, and headlines cannot substitute for one
+### 1.3 No event calendar, and headlines cannot substitute for one
 
 Measured 2026-08-05 against the stored newswire: the keyword detector in
 `check-macro-events` fires on **7 of 9 days**. Tightened to unambiguous phrases
@@ -106,7 +133,7 @@ A real filter needs a calendar of **scheduled** events — earnings dates, polic
 expiry-week flags — which this project does not have. That is the work; more keyword tuning
 is not.
 
-### 1.3 The dashboard shows fabricated macro events
+### 1.4 The dashboard shows fabricated macro events
 
 Found 2026-08-05 while checking whether 1.2 was already in progress.
 `apps/web/src/features/dashboard/components/upcoming-events.tsx` renders a hardcoded
@@ -123,7 +150,7 @@ Not changed here because it is another work stream's uncommitted work — flagge
 edited or committed. Either give it the scheduled-event feed 1.2 needs, or label it
 unmistakably as sample data until that exists.
 
-### 1.4 Nothing *sends* a job-failure alert
+### 1.5 Nothing *sends* a job-failure alert
 
 Failures are now diagnosable (4.8) and **readable** (4.10): `GET /api/v1/health/jobs`
 answers 503 with a `criticalFailures` list. What is missing is a sender — that needs a channel
@@ -142,7 +169,7 @@ Deliberately **not** added: an immediate in-run retry. The provider answers 429 
 a dozen rapid calls, so retrying hard against a rate limit makes the outage worse, and the
 15-minute cron is already a retry that costs one interval.
 
-### 1.5 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
+### 1.6 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
 
 Measured 2026-08-05, after backfilling NIFTYBEES 5m and BANKBEES 1m/5m from Fyers back to
 2019-01-01 (previously NIFTYBEES 5m stopped at 2023-01-02 and BANKBEES had zero rows).
@@ -395,7 +422,56 @@ The two trades booked on the phantom BANKNIFTY 2026-08-04 expiry are deliberatel
 record a real defect, and deleting them would erase the evidence rather than the noise.
 `paper_trades` is now three rows: those two, still excluded, and one real trade.
 
-### 4.12 Both databases bind to localhost
+### 4.12 One provider per candle series, enforced by the database
+
+The rule was prose in `fyers-historical-data-provider.ts` — the split is by timeframe "so that
+no single series is ever half Fyers and half Yahoo" — and enforced only in
+`collect-historical-data.ts`. Seeds, the scheduler and every other writer went straight to
+`candles`, and the rule was broken exactly as warned:
+
+```
+NIFTY50 15m  fyers-api-v3  21,102 bars  2023-01-02 → 2026-06-05   27% with volume
+NIFTY50 15m  yahoo          1,069 bars  2026-06-08 → 2026-08-05    0% with volume
+```
+
+Migration 043 adds `candle_series_provenance`, one row per (instrument, timeframe) naming the
+permitted source, with a foreign key from `candles`. A per-row repository check would mean a
+lookup per candle on a 300k-bar backfill; a key costs nothing and covers every write path.
+Verified by attempting a Yahoo 15m insert on a Fyers-declared series:
+
+```
+ERROR: insert or update on table "candles" violates foreign key constraint
+       "candles_series_provenance_fkey"
+```
+
+Mixed series: **0**. Reassignment means deleting that series' candles and updating the
+declaration — the key blocks the shortcut, so the discipline is no longer something to
+remember.
+
+The CLI guard now **reads that table** rather than a static map. Keeping a map was briefly a
+second source of truth and immediately misfired: setting it to "15m is Fyers" made the CLI
+refuse Yahoo 15m for equities whose declaration had legitimately stayed Yahoo. Ownership is
+per series, so only the table can answer it. The static policy still applies to a series with
+no declaration, so a new one lands on the intended provider.
+
+**15m ownership ended up split, deliberately:**
+
+| declared owner | instruments | why |
+|---|---|---|
+| `fyers-api-v3` | 6 — NIFTY50, BANKNIFTY, NIFTYBEES, ASIANPAINT, AXISBANK, BAJFINANCE | deep history and real index volume; 9,830 bars each from 2025-01-01 |
+| `yahoo` | 19 — the remaining equities, and INDIAVIX at every timeframe | full equity volume, no auth dependency |
+
+The intent was all of 15m on Fyers. The token died partway through (1.1), and Yahoo 15m is
+capped at **60 days** — measured, `--from=2026-06-01` is refused as outside the window. So the
+19 were restored from Yahoo at ~1,050 bars each. Finishing the move needs a live token:
+
+```bash
+npm run data:collect:historical --workspace @ai-quant-lab/api --   --instrument=SBIN --provider=fyers --timeframe=15m --from=2025-01-01 --to=<today>
+```
+
+Delete the Yahoo rows and update the declaration first, or the key refuses the insert.
+
+### 4.13 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 

@@ -40,6 +40,7 @@ import { optionExpiryCalendarMigration } from "./039-option-expiry-calendar.js";
 import { addExcludedFromEvidenceMigration } from "./040-add-excluded-from-evidence.js";
 import { volatilityShadowEnrollmentsMigration } from "./041-volatility-shadow-enrollments.js";
 import { purgeSyntheticVerificationRowsMigration } from "./042-purge-synthetic-verification-rows.js";
+import { candleSeriesProvenanceMigration } from "./043-candle-series-provenance.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -84,4 +85,5 @@ export const migrations = [
   addExcludedFromEvidenceMigration,
   volatilityShadowEnrollmentsMigration,
   purgeSyntheticVerificationRowsMigration,
+  candleSeriesProvenanceMigration,
 ];

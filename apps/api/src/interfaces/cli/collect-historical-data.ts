@@ -58,9 +58,18 @@ function providerFromArguments(
  * inferring on another's — train/serve skew introduced at the data layer, where it is
  * nearly invisible.
  */
+/*
+ * Mirrors `candle_series_provenance`, which is now the enforcing copy: a foreign key from
+ * `candles` rejects a mismatched source on every write path, not just this CLI. Kept here so
+ * the refusal arrives before a long backfill runs rather than on its first insert.
+ *
+ * 15m moved to Fyers on 2026-08-05. Yahoo serves 15m equities with full volume but only ~2
+ * months of history and no index volume at all, and NIFTY50 15m had ended up half Fyers and
+ * half Yahoo with volume dropping to zero across the seam.
+ */
 const timeframeOwner: Record<string, "fyers" | "yahoo"> = {
-  "1m": "fyers", "3m": "fyers", "5m": "fyers", "10m": "fyers",
-  "15m": "yahoo", "30m": "yahoo", "60m": "yahoo", "1d": "yahoo",
+  "1m": "fyers", "3m": "fyers", "5m": "fyers", "10m": "fyers", "15m": "fyers",
+  "30m": "yahoo", "60m": "yahoo", "1d": "yahoo",
 };
 
 /**
@@ -74,17 +83,52 @@ const timeframeOwner: Record<string, "fyers" | "yahoo"> = {
  */
 const yahooOwnedInstruments = new Set(["INDIAVIX"]);
 
-function assertProviderOwnsTimeframe(provider: string, timeframe: string, symbol: string): void {
-  const owner = yahooOwnedInstruments.has(symbol.toUpperCase()) ? "yahoo" : timeframeOwner[timeframe];
+const providerIds: Record<string, string> = { fyers: "fyers-api-v3", yahoo: "yahoo" };
+
+/**
+ * Refuses a provider that does not own this series.
+ *
+ * Reads `candle_series_provenance` first, because that table is what the foreign key on
+ * `candles` enforces -- a static map here would be a second source of truth, and briefly was:
+ * flipping it to "15m is Fyers" made the CLI refuse a Yahoo 15m collection for equities whose
+ * declaration had legitimately stayed Yahoo. Ownership is per (instrument, timeframe), not per
+ * timeframe, so only the table can answer it.
+ *
+ * The static policy below still applies to a series with no declaration yet, so a brand-new
+ * series lands on the intended provider rather than whichever one ran first.
+ */
+async function assertProviderOwnsTimeframe(
+  database: DatabasePool,
+  provider: string,
+  timeframe: string,
+  symbol: string,
+  instrumentId: string,
+): Promise<void> {
   // csv and kite are manual escape hatches and are not part of the partition.
-  if (!owner || (provider !== "fyers" && provider !== "yahoo")) return;
-  if (provider !== owner) {
+  if (provider !== "fyers" && provider !== "yahoo") return;
+
+  const declared = await database.query<{ source: string }>(
+    "SELECT source FROM candle_series_provenance WHERE instrument_id = $1 AND timeframe = $2",
+    [instrumentId, timeframe],
+  );
+  const declaredSource = declared.rows[0]?.source;
+  if (declaredSource) {
+    if (providerIds[provider] === declaredSource) return;
     throw new Error(
-      `The ${symbol} ${timeframe} series is owned by ${owner}, not ${provider}. Mixing providers within `
-      + `one series creates train/serve skew. Pass --allow-foreign-provider only if you are `
-      + `deliberately reassigning ownership and have planned the purge of the existing rows.`,
+      `The ${symbol} ${timeframe} series is declared as ${declaredSource}, not ${provider}. `
+      + `Mixing providers within one series creates train/serve skew, and the foreign key on `
+      + `candles will reject the rows anyway. To reassign: delete that series' candles, update `
+      + `candle_series_provenance, then collect.`,
     );
   }
+
+  const owner = yahooOwnedInstruments.has(symbol.toUpperCase()) ? "yahoo" : timeframeOwner[timeframe];
+  if (!owner || provider === owner) return;
+  throw new Error(
+    `The ${symbol} ${timeframe} series has no declaration yet, and policy assigns a new `
+    + `${timeframe} series to ${owner}, not ${provider}. Pass --allow-foreign-provider to `
+    + `override deliberately.`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -103,10 +147,12 @@ async function main(): Promise<void> {
     const provider = providerFromArguments(argumentsList, database);
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
     if (!argumentsList.includes("--allow-foreign-provider")) {
-      assertProviderOwnsTimeframe(
+      await assertProviderOwnsTimeframe(
+        database,
         requireOption(argumentsList, "provider").toLowerCase(),
         timeframe,
         symbol,
+        instrument.id,
       );
     }
     const from = parseDateOption(requireOption(argumentsList, "from"), false);
