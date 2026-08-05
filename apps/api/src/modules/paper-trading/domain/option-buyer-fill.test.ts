@@ -165,3 +165,88 @@ describe("resolveOptionExpiryInstant", () => {
     expect(Number.isNaN(resolveOptionExpiryInstant("").getTime())).toBe(true);
   });
 });
+
+describe("mapIdeaToOptionBuyerFill with an observed chain fill", () => {
+  const base: OptionBuyerFillInput = {
+    ideaSide: "LONG",
+    underlyingEntry: 57_739.95,
+    underlyingStop: 57_400,
+    underlyingTarget: 58_300,
+    impliedVolatility: 0.1193,
+    expiryDate: new Date("2026-08-25T10:00:00.000Z"),
+    now: new Date("2026-08-05T11:47:00.000Z"),
+    strikeStep: 100,
+  };
+
+  it("fills at the observed price instead of the model premium", () => {
+    // The measured gap this exists to close: the model said 770.22 where the book was
+    // offering 752.75, so a position opened 2.9% underwater on model error alone.
+    const modelled = mapIdeaToOptionBuyerFill(base);
+    const observed = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 752.75, impliedVolatility: 0.12983 },
+    });
+
+    expect(observed.fillPremium).toBe(752.75);
+    expect(observed.fillSource).toBe("OPTION_CHAIN_QUOTE");
+    expect(modelled.fillSource).toBe("OPTION_MODEL");
+    expect(modelled.fillPremium).not.toBe(observed.fillPremium);
+  });
+
+  it("reprices stop and target on the observed IV, not the caller's estimate", () => {
+    // Entry from the market and exits from a different volatility would put the two ends of
+    // the same trade on different surfaces. A wider stop keeps the geometry valid across
+    // both volatilities so the comparison is about IV alone.
+    const wide = { ...base, underlyingStop: 56_500 };
+    const lower = mapIdeaToOptionBuyerFill({
+      ...wide, observedFill: { premium: 752.75, impliedVolatility: 0.12 },
+    });
+    const higher = mapIdeaToOptionBuyerFill({
+      ...wide, observedFill: { premium: 752.75, impliedVolatility: 0.15 },
+    });
+
+    // Same entry price, different surface: only the repriced exits may move.
+    expect(lower.fillPremium).toBe(higher.fillPremium);
+    expect(higher.stopPremium).toBeGreaterThan(lower.stopPremium);
+    expect(higher.targetPremium).toBeGreaterThan(lower.targetPremium);
+  });
+
+  it("refuses a fill and an IV that cannot describe the same market", () => {
+    // Found by a test that passed the market's ask with a volatility 3 points away from the
+    // one implied by it. At IV 0.16 the option is worth 809.76 at the stop level while the
+    // entry paid 752.75 -- a stop-loss above the entry premium, which is not a long trade.
+    // The route cannot produce this pairing, because it takes both from the same solve; the
+    // guard exists so a future caller cannot either.
+    expect(() => mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 752.75, impliedVolatility: 0.16 },
+    })).toThrow(/no tradable premium geometry/);
+  });
+
+  it("keeps entry greeks on the observed IV so they match the position mark", () => {
+    const observed = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 752.75, impliedVolatility: 0.12983 },
+    });
+
+    expect(observed.entryGreeks.delta).toBeGreaterThan(0);
+    expect(observed.entryGreeks.delta).toBeLessThan(1);
+    expect(observed.entryGreeks.theta).toBeLessThan(0);
+  });
+
+  it("still refuses when the observed fill leaves no tradable geometry", () => {
+    // An ask above the target premium is not a setup, and inventing a band around it is the
+    // behaviour this function already refuses for the model path.
+    expect(() => mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 99_999, impliedVolatility: 0.12983 },
+    })).toThrow(/no tradable premium geometry/);
+  });
+
+  it("falls back to the model when no snapshot covers the contract", () => {
+    const modelled = mapIdeaToOptionBuyerFill({ ...base, observedFill: undefined });
+
+    expect(modelled.fillSource).toBe("OPTION_MODEL");
+    expect(modelled.fillPremium).toBeGreaterThan(0);
+  });
+});

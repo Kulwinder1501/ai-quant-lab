@@ -33,6 +33,23 @@ export interface OptionBuyerFillInput {
   strikeStep: number;
   /** Optional options entry validation result (11-factor checklist). */
   validationResult?: { isValid: boolean; reasons: string[] };
+  /**
+   * The observed book for the contract being bought, when a fresh chain snapshot covers it.
+   *
+   * Without this the entry fill is the Black-Scholes premium, and the model was measurably
+   * wrong: on a live BANKNIFTY 57700 CE it produced 770.22 against a quoted mid of 748.25,
+   * so a position opened 2.9% underwater the instant it was marked -- Rs 329 on one lot,
+   * entirely model error rather than market cost.
+   *
+   * `premium` is what the buyer actually pays. `impliedVolatility` is solved from the mid and
+   * replaces the caller's IV for the stop and target repricing, so all three premiums sit on
+   * one volatility surface: taking the entry from the market and the exits from a different
+   * IV would reintroduce the same inconsistency at the other end of the trade.
+   */
+  observedFill?: {
+    premium: number;
+    impliedVolatility: number;
+  };
 }
 
 export interface OptionBuyerFill {
@@ -41,6 +58,8 @@ export interface OptionBuyerFill {
   side: "LONG";
   strike: number;
   fillPremium: number;
+  /** Where the entry premium came from, so a trade record is never ambiguous about it. */
+  fillSource: "OPTION_CHAIN_QUOTE" | "OPTION_MODEL";
   stopPremium: number;
   targetPremium: number;
   entryGreeks: OptionGreeks;
@@ -67,12 +86,16 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
   const strike = nearestStrike(input.underlyingEntry, step);
   const T = yearsToExpiry(now, input.expiryDate);
 
+  // One volatility for entry, stop and target. When the chain has been solved, that is the
+  // market's own IV rather than the caller's estimate of it.
+  const volatility = input.observedFill?.impliedVolatility ?? input.impliedVolatility;
+
   const entryGreeks = priceEuropeanOption({
     spot: input.underlyingEntry,
     strike,
     timeToExpiryYears: T,
     riskFreeRate: rate,
-    volatility: input.impliedVolatility,
+    volatility,
     optionType,
   });
   const stopGreeks = priceEuropeanOption({
@@ -80,7 +103,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     strike,
     timeToExpiryYears: T,
     riskFreeRate: rate,
-    volatility: input.impliedVolatility,
+    volatility,
     optionType,
   });
   const targetGreeks = priceEuropeanOption({
@@ -88,7 +111,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     strike,
     timeToExpiryYears: T,
     riskFreeRate: rate,
-    volatility: input.impliedVolatility,
+    volatility,
     optionType,
   });
 
@@ -105,7 +128,12 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     );
   }
 
-  const fillPremium = Math.max(OPTION_TICK_SIZE, entryGreeks.premium);
+  // The observed price a buyer pays, when there is one. The model premium is a fallback for
+  // contracts no snapshot covers, not an equal alternative.
+  const fillPremium = Math.max(
+    OPTION_TICK_SIZE,
+    input.observedFill?.premium ?? entryGreeks.premium,
+  );
   const stopPremium = Math.max(OPTION_TICK_SIZE, stopGreeks.premium);
   const targetPremium = Math.max(OPTION_TICK_SIZE, targetGreeks.premium);
 
@@ -132,6 +160,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     side: "LONG",
     strike,
     fillPremium: roundMoney(fillPremium),
+    fillSource: input.observedFill === undefined ? "OPTION_MODEL" : "OPTION_CHAIN_QUOTE",
     stopPremium: roundMoney(stopPremium),
     targetPremium: roundMoney(targetPremium),
     entryGreeks,

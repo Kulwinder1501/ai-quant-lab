@@ -17,6 +17,7 @@ import {
   resolveOptionExpiryInstant,
 } from "../../domain/option-buyer-fill.js";
 import { resolveListedExpiry } from "../../../market-data/domain/option-expiry-calendar.js";
+import { nearestStrike } from "../../../pricing/domain/black-scholes-engine.js";
 import { solveContractGreeksFromChain } from "../../../market-data/domain/chain-greeks.js";
 import { validateOptionsEntry } from "../../../strategy-engine/domain/options-entry-validator.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
@@ -375,6 +376,33 @@ export function registerPaperTradingRoutes(
         // with a settlement time that disagrees with the contract.
         const settlementExpiry = listed.expiryDate;
 
+        // The chain is read before the fill is mapped, because the entry premium should be
+        // the market's rather than the model's. The strike does not depend on the mapping --
+        // it is `nearestStrike(entry, step)` -- so it can be derived here and looked up.
+        const intendedStrike = nearestStrike(Number(idea.entry_price), strikeStep);
+        const intendedOptionType = idea.side === "LONG" ? "CE" : "PE";
+        const entryChain = await dependencies.optionChainRepository
+          .latestSnapshot({
+            underlyingSymbol: String(idea.symbol).toUpperCase(),
+            expiryDate: settlementExpiry.toISOString().slice(0, 10),
+          })
+          .catch(() => null);
+        const solvedGreeks = entryChain === null ? null : solveContractGreeksFromChain({
+          snapshot: entryChain,
+          strikePrice: intendedStrike,
+          optionType: intendedOptionType,
+        });
+        // A buyer pays the ask, not the mid. Filling at the mid would understate the entry by
+        // half the spread on every trade, and spread is the cost that decides whether an
+        // options edge survives at all -- the measured straddle edge dies at roughly 1.09% per
+        // leg. The ask is what the book was actually offering.
+        const intendedQuote = entryChain?.quotes.find(
+          (quote) => quote.strikePrice === intendedStrike && quote.optionType === intendedOptionType,
+        );
+        const observedFill = solvedGreeks !== null && intendedQuote?.ask != null && intendedQuote.ask > 0
+          ? { premium: intendedQuote.ask, impliedVolatility: solvedGreeks.impliedVolatility }
+          : undefined;
+
         let mapped: ReturnType<typeof mapIdeaToOptionBuyerFill>;
         try {
           mapped = mapIdeaToOptionBuyerFill({
@@ -385,6 +413,7 @@ export function registerPaperTradingRoutes(
             impliedVolatility: iv,
             expiryDate: settlementExpiry,
             strikeStep,
+            observedFill,
           });
         } catch (error) {
           response.status(422).json({
@@ -392,24 +421,13 @@ export function registerPaperTradingRoutes(
           });
           return;
         }
-        // Pre-trade gate on the contract that was actually chosen.
+        // Pre-trade gate on the contract that was actually chosen, reusing the snapshot and
+        // solved greeks the fill was priced from -- a second read could land on a newer
+        // observation and gate a position against a book it was not filled at.
         //
-        // Runs here rather than at idea generation because the strike is only known once the
-        // fill is mapped, and liquidity, open-interest drift and delta are all per-contract.
         // A refusal returns `unchecked` alongside `reasons`, because "passed" and "never
         // evaluated" must not look the same to the caller -- that conflation is exactly how
         // this project shipped guards that never fired.
-        const entryChain = await dependencies.optionChainRepository
-          .latestSnapshot({
-            underlyingSymbol: String(idea.symbol).toUpperCase(),
-            expiryDate: settlementExpiry.toISOString().slice(0, 10),
-          })
-          .catch(() => null);
-        const solvedGreeks = entryChain === null ? null : solveContractGreeksFromChain({
-          snapshot: entryChain,
-          strikePrice: mapped.strike,
-          optionType: mapped.optionType,
-        });
         const reasoningList = Array.isArray(idea.reasoning)
           ? (idea.reasoning as unknown[]).map(String)
           : [];
@@ -420,7 +438,7 @@ export function registerPaperTradingRoutes(
             reasoning: reasoningList,
           },
           optionChain: entryChain ?? undefined,
-          intendedStrike: mapped.strike,
+          intendedStrike: intendedStrike,
           intendedContractDelta: solvedGreeks?.delta ?? null,
         });
         if (!entryCheck.isValid) {
@@ -433,6 +451,8 @@ export function registerPaperTradingRoutes(
           return;
         }
         feeMetaEntryChecks = {
+          fillSource: mapped.fillSource,
+          observedAsk: intendedQuote?.ask ?? null,
           reasons: entryCheck.reasons,
           unchecked: entryCheck.unchecked,
           solvedDelta: solvedGreeks?.delta ?? null,
