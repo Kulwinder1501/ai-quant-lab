@@ -75,10 +75,16 @@ What still holds:
 - **It is the most likely cause of the OPTION_CHAIN and EOD_PIPELINE failures** in 1.5.
 - **Recovery is `npm run data:auth:fyers`** when refresh keeps refusing.
 
-Still open: nothing retries a refusal, and a refusal spanning the session loses option-chain
-intervals permanently. Whether that is worth a retry is a judgement — the provider 429s after
-about a dozen rapid calls, so a tight retry loop against a refusing auth endpoint is its own
-risk.
+A **bounded retry** now covers the short version of this (4.14): three attempts, 2s then 6s,
+and only for failures that could plausibly clear — code -16, 429, 5xx, or a request that never
+reached the provider. An unrecognised code is treated as terminal, because retrying it spends
+the budget a real blip needs and walks into the 429 the provider returns after about a dozen
+rapid calls.
+
+Still open: **the retry does not cover a long outage.** The observed refusal lasted 19 minutes;
+the budget is about 8 seconds, because it runs while the credential row is locked and every
+other Fyers caller waits behind it. A refusal spanning the session still loses option-chain
+intervals permanently, and still needs 4.13 to raise it and a human to run `data:auth:fyers`.
 
 ### 1.2 The entry gate cannot check events, and cannot check volume on intraday index ideas
 
@@ -497,7 +503,31 @@ Verified against the live credential: it reports **ERROR** naming the 3 failed F
 jobs, where the old logic would have said OK until 2026-08-20. 10 tests, including that a dead
 access token with a fortnight of refresh window still reads EXPIRED.
 
-### 4.14 Both databases bind to localhost
+### 4.14 A refused refresh is retried, briefly and selectively
+
+`FyersRefreshError` now carries whether trying again could help, and `refreshWithRetry` spends
+a small budget on the ones that could: **3 attempts, 2s then 6s**.
+
+Two decisions worth keeping:
+
+- **Retryable is an allowlist, not a default.** Code -16, 429, 5xx and a fetch that threw
+  before reaching the provider are retried; everything else — including `-371`, the wrong
+  appIdHash — fails on the first attempt. Retrying a terminal failure spends the budget a real
+  blip needs, and the provider answers 429 after about a dozen rapid calls, so a retry loop
+  against a refusing auth endpoint is its own outage.
+- **The retry runs inside the `FOR UPDATE` on the credential row, and that is why it is
+  small.** Holding the lock is correct — it is what stops two callers each burning a refresh,
+  and a caller that waits then gets the fresh token rather than an error — but it also means
+  the budget is how long every other Fyers caller is blocked. Retrying for 19 minutes inside a
+  row lock would be worse than the failure.
+
+So this narrows the window; it does not remove the failure mode. The final error names the
+attempt count, so a `last_error` row distinguishes one refusal from a sustained outage.
+
+13 tests, including that a terminal failure is attempted exactly once and that a valid access
+token triggers no refresh at all.
+
+### 4.15 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 
