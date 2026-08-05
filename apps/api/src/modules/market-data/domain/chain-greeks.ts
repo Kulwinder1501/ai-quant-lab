@@ -1,12 +1,12 @@
 import type { OptionChainSnapshot, OptionType } from "./option-chain.js";
-import { priceEuropeanOption, yearsToExpiry } from "../../pricing/domain/black-scholes-engine.js";
+import { priceEuropeanOption, yearsToExpiry } from "@ai-quant-lab/pricing";
 import {
   effectiveSpotForForward,
   impliedForwardFromParity,
   impliedVolatilityFromPremium,
   midPriceForIv,
-} from "../../pricing/domain/implied-volatility.js";
-import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
+} from "@ai-quant-lab/pricing";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 /**
  * Greeks for one contract, solved from the observed chain.

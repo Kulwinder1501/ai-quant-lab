@@ -6,12 +6,14 @@ WORKDIR /app
 FROM base AS builder
 COPY package*.json ./
 COPY packages/contracts/package*.json ./packages/contracts/
+COPY packages/pricing/package*.json ./packages/pricing/
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
 RUN npm ci || npm install
 
 COPY tsconfig*.json ./
 COPY packages/contracts ./packages/contracts
+COPY packages/pricing ./packages/pricing
 COPY apps/api ./apps/api
 RUN npm run build --workspace @ai-quant-lab/api
 
@@ -41,6 +43,8 @@ ENV PYTHON=/opt/venv/bin/python
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/contracts ./packages/contracts
+# Built JavaScript, not source: the API resolves @ai-quant-lab/pricing at runtime.
+COPY --from=builder /app/packages/pricing ./packages/pricing
 COPY --from=builder /app/apps/api ./apps/api
 COPY apps/ml ./apps/ml
 COPY scripts ./scripts

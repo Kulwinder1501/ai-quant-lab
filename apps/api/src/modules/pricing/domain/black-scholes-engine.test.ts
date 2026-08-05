@@ -3,8 +3,8 @@ import {
   nearestStrike,
   priceEuropeanOption,
   yearsToExpiry,
-} from "./black-scholes-engine.js";
-import { RISK_FREE_RATE } from "./constants.js";
+} from "@ai-quant-lab/pricing";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 describe("black-scholes-engine", () => {
   const base = {

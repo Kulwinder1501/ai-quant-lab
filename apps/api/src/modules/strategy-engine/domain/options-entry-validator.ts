@@ -1,7 +1,7 @@
 import type { ProposedTradeIdea } from "./strategy.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import { largestOpenInterestStrikes } from "../../market-data/domain/option-chain.js";
-import { yearsToExpiry } from "../../pricing/domain/black-scholes-engine.js";
+import { yearsToExpiry } from "@ai-quant-lab/pricing";
 
 export interface OptionsValidationContext {
   /**

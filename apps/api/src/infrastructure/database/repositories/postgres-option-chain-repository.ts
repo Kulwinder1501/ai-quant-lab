@@ -1,7 +1,7 @@
 import type { DatabasePool } from "../database.js";
 import { fromDateColumn } from "../date-column.js";
-import { yearsToExpiry } from "../../../modules/pricing/domain/black-scholes-engine.js";
-import { impliedForwardFromParity } from "../../../modules/pricing/domain/implied-volatility.js";
+import { yearsToExpiry } from "@ai-quant-lab/pricing";
+import { impliedForwardFromParity } from "@ai-quant-lab/pricing";
 import type { OptionExpiryCalendar } from "../../../modules/market-data/domain/option-expiry-calendar.js";
 import type {
   ExpiryKind,
@@ -9,7 +9,7 @@ import type {
   OptionChainSnapshot,
   OptionType,
 } from "../../../modules/market-data/domain/option-chain.js";
-import { RISK_FREE_RATE } from "../../../modules/pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 /**
  * The settlement instant for a DATE column holding an expiry: that day at 15:30 IST.

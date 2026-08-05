@@ -3,9 +3,9 @@ import {
   yearsToExpiry,
   type OptionGreeks,
   type OptionType,
-} from "../domain/black-scholes-engine.js";
+} from "@ai-quant-lab/pricing";
 
-import { RISK_FREE_RATE } from "../domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 export interface PriceOptionRequest {
   underlyingPrice: number;

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { priceEuropeanOption } from "./black-scholes-engine.js";
+import { priceEuropeanOption } from "@ai-quant-lab/pricing";
 import {
   effectiveSpotForForward,
   impliedForwardFromParity,
   impliedVolatilityFromPremium,
   midPriceForIv,
-} from "./implied-volatility.js";
+} from "@ai-quant-lab/pricing";
 
-import { RISK_FREE_RATE } from "./constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 const BASE = {
   spot: 24_000,

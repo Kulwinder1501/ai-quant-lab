@@ -11,16 +11,16 @@ import {
   quoteSpread,
   summariseLiquidity,
 } from "../../domain/option-chain.js";
-import { priceEuropeanOption, yearsToExpiry } from "../../../pricing/domain/black-scholes-engine.js";
+import { priceEuropeanOption, yearsToExpiry } from "@ai-quant-lab/pricing";
 import {
   effectiveSpotForForward,
   impliedForwardFromParity,
   impliedVolatilityFromPremium,
   midPriceForIv,
-} from "../../../pricing/domain/implied-volatility.js";
+} from "@ai-quant-lab/pricing";
 
 /** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
-import { RISK_FREE_RATE } from "../../../pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 export function registerMarketDataRoutes(
   app: Express,

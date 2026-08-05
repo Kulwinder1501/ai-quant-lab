@@ -1,10 +1,10 @@
 import type { PaperTrade } from "./paper-trading.js";
 import { isOptionBuyerTrade, priceOptionMark } from "./option-mark-to-market.js";
-import { priceEuropeanOption, yearsToExpiry } from "../../pricing/domain/black-scholes-engine.js";
+import { priceEuropeanOption, yearsToExpiry } from "@ai-quant-lab/pricing";
 import {
   effectiveSpotForForward,
   impliedVolatilityFromPremium,
-} from "../../pricing/domain/implied-volatility.js";
+} from "@ai-quant-lab/pricing";
 
 /**
  * How the mark was obtained, in descending order of authority.
@@ -98,7 +98,7 @@ export interface ValuePaperTradeInput {
 }
 
 const DEFAULT_MAX_QUOTE_AGE_MS = 40 * 60 * 1000;
-import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 function validPositive(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;

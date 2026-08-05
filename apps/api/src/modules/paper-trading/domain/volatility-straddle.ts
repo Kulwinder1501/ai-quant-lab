@@ -4,10 +4,10 @@ import {
   yearsToExpiry,
   type OptionGreeks,
   type OptionType,
-} from "../../pricing/domain/black-scholes-engine.js";
+} from "@ai-quant-lab/pricing";
 import type { VolatilityLabel } from "../../model-predictions/domain/volatility-expansion-label.js";
 import type { WeeklyExpirySource } from "../../market-data/domain/weekly-expiry.js";
-import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 /**
  * Turns a volatility-regime prediction into a costed long-straddle proposal.

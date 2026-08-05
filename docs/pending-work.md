@@ -97,17 +97,7 @@ A real filter needs a calendar of **scheduled** events — earnings dates, polic
 expiry-week flags — which this project does not have. That is the work; more keyword tuning
 is not.
 
-### 1.4 The pricing engine is duplicated on the web client
-
-`apps/web/src/lib/black-scholes-engine.ts` and `implied-volatility.ts` are line-for-line the
-same length as their API counterparts (168 and 281). Two implementations of the same maths
-will drift, and every pricing bug fixed this week was fixed in the API copy only — none of
-those fixes reached the browser.
-
-Decide whether the client should price at all or only render what the API computed. If it
-must price, the shared code belongs in `packages/`.
-
-### 1.5 Chain collection has unbackfillable gaps, and failures are not diagnosable
+### 1.4 Chain collection has unbackfillable gaps, and failures are not diagnosable
 
 On 2026-08-05 the first successful snapshot was 06:30 UTC (12:00 IST); three runs failed at
 05:45, 06:00 and 06:15, and nothing was attempted during 09:15–11:15 IST. Chain data cannot
@@ -123,17 +113,17 @@ The actual reason is not captured, so a failure cannot be diagnosed after the fa
 child process's stderr should be recorded.
 
 `assessFyersAuthHealth` does now count these failures and logs at error level from the
-scheduler (see 4.4), but nothing pages anyone — an error line in a container log is only
+scheduler (see 4.5), but nothing pages anyone — an error line in a container log is only
 found by someone already looking.
 
-### 1.6 `fyers-live-streamer` is untyped and untested
+### 1.5 `fyers-live-streamer` is untyped and untested
 
 128 lines backing an SSE tick endpoint, with `private socket: any` and no test. It works
 insofar as the endpoint responds; nothing pins its reconnect or resubscribe behaviour. The
 `fyers-api-v3` dependency and `apps/api/src/types/fyers-api-v3.d.ts` (a hand-written ambient
 declaration, `export const fyersModel: any`) exist solely for it.
 
-### 1.7 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
+### 1.6 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
 
 Measured 2026-08-05, after backfilling NIFTYBEES 5m and BANKBEES 1m/5m from Fyers back to
 2019-01-01 (previously NIFTYBEES 5m stopped at 2023-01-02 and BANKBEES had zero rows).
@@ -160,7 +150,7 @@ No BANKBEES training pipeline exists yet — `train_tcn.py` and `train_stack.py`
 `AUTHORIZED_SYMBOL = "NIFTYBEES"`. A note for whoever builds that track, not a change made to
 either file.
 
-### 1.8 Leftover verification rows
+### 1.7 Leftover verification rows
 
 Four `trade_ideas` rows carry `evidence->>'synthetic' = 'true'`, created to exercise the
 option open/close path while the market was closed (the real generator persists nothing
@@ -271,7 +261,36 @@ the fail-closed expiry gate does not refuse equity underlyings. `assessFyersAuth
 from the scheduler, reads `scheduled_job_runs` failures, and logs at error level before the
 15-day refresh token lapses. Remaining gap in 1.5.
 
-### 4.6 Both databases bind to localhost
+### 4.6 One pricing engine, in `packages/pricing`
+
+`apps/web/src/lib` held its own copy of the engine and the IV solver. Textually they had
+barely drifted — one import extension — but **behaviourally they had**: the client re-solved
+IV and greeks against **raw spot** while the server had moved to the put-call-parity forward.
+On a live BANKNIFTY 57700 CE that is delta 0.61 against 0.53, and it showed as the number
+changing the instant a tick arrived, because the client re-prices on the SSE tick stream
+between 15-minute snapshots.
+
+Deleting the client copy was not an option: that live repricing is real work the snapshot
+endpoint cannot do. So the engine, the IV solver and `RISK_FREE_RATE` now live in
+`@ai-quant-lab/pricing`, imported by both apps, and the client prices against
+`impliedForwardByExpiry` from the API response.
+
+Two things this had to get right, both of which bite silently:
+
+- **The package ships built JavaScript, not source.** `main` pointing at a `.ts` file
+  resolves fine under `tsc` and then fails at runtime under `node dist/server.js`.
+  `packages/contracts` has exactly that shape and has never been caught, because nothing
+  imports it.
+- **Both Dockerfiles copy `packages/pricing`** in the builder and runner stages, and the
+  API's `build` script builds the package first. Missing either produces an image that
+  builds and then cannot start.
+
+Verified: api tsc 0, 563 tests pass, `next build` succeeds, both images build, and the
+running container serves the chain endpoint with delta 0.529211 — identical to before the
+extraction. The engine's tests stay under `apps/api`, so the API suite now guards the web
+client's pricing too.
+
+### 4.7 Both databases bind to localhost
 
 `127.0.0.1:5432:5432` and `127.0.0.1:5433:5432`.
 

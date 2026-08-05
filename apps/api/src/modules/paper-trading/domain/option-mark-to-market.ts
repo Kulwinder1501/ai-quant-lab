@@ -2,12 +2,12 @@ import {
   priceEuropeanOption,
   yearsToExpiry,
   type OptionGreeks,
-} from "../../pricing/domain/black-scholes-engine.js";
+} from "@ai-quant-lab/pricing";
 import { floorLivePremiumToTick } from "../../pricing/domain/option-tick.js";
 import type { CompletedPriceCandle, PaperTradeExitDecision } from "./paper-trade-exit-policy.js";
 import type { PaperTrade } from "./paper-trading.js";
 
-import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 export interface OptionMarkInput {
   trade: PaperTrade;

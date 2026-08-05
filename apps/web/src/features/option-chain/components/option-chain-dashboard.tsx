@@ -6,8 +6,13 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
-import { impliedVolatilityFromPremium, midPriceForIv } from "../../../lib/implied-volatility";
-import { priceEuropeanOption } from "../../../lib/black-scholes-engine";
+import {
+  RISK_FREE_RATE,
+  effectiveSpotForForward,
+  impliedVolatilityFromPremium,
+  midPriceForIv,
+  priceEuropeanOption,
+} from "@ai-quant-lab/pricing";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4001/api/v1";
 
@@ -214,7 +219,10 @@ export function OptionChainDashboard() {
               changed = true;
             }
 
-            const RISK_FREE_RATE = 0.065; // Fixed assumption matching backend
+            // The forward the option market prices, as the server uses. Re-solving against
+            // raw spot is what made a live BANKNIFTY delta read 0.61 where the server said
+            // 0.53, and it showed up as the number jumping the instant a tick arrived.
+            const forwardByExpiry = prevChain.impliedForwardByExpiry ?? {};
 
             const recalculateLeg = (leg: Leg, strikePrice: number, optionType: "CE" | "PE", isLegTick: boolean): Leg => {
               const newLastPrice = isLegTick ? (tick.ltp ?? leg.lastPrice) : leg.lastPrice;
@@ -244,11 +252,21 @@ export function OptionChainDashboard() {
               let newTheta = leg.theta;
               let newVega = leg.vega;
 
-              if (premium !== null && leg.daysToExpiry !== null && currentSpot > 0) {
+              const timeToExpiryYears = leg.daysToExpiry === null
+                ? null
+                : Math.max(0, leg.daysToExpiry / 365);
+              // Only the expiry's own forward may price it; spot is the fallback, and then
+              // the bias is the known one rather than a silent one.
+              const legForward = Object.values(forwardByExpiry)[0];
+              const pricingSpot = legForward !== undefined && timeToExpiryYears !== null && timeToExpiryYears > 0
+                ? effectiveSpotForForward(legForward, RISK_FREE_RATE, timeToExpiryYears)
+                : currentSpot;
+
+              if (premium !== null && timeToExpiryYears !== null && pricingSpot > 0) {
                 const ivResult = impliedVolatilityFromPremium({
-                  spot: currentSpot,
+                  spot: pricingSpot,
                   strike: strikePrice,
-                  timeToExpiryYears: Math.max(0, leg.daysToExpiry / 365),
+                  timeToExpiryYears,
                   riskFreeRate: RISK_FREE_RATE,
                   optionType,
                   premium,
@@ -258,9 +276,9 @@ export function OptionChainDashboard() {
                   iv = ivResult.impliedVolatility;
                   ivRefusal = null;
                   const greeks = priceEuropeanOption({
-                    spot: currentSpot,
+                    spot: pricingSpot,
                     strike: strikePrice,
-                    timeToExpiryYears: Math.max(0, leg.daysToExpiry / 365),
+                    timeToExpiryYears,
                     riskFreeRate: RISK_FREE_RATE,
                     volatility: iv,
                     optionType,

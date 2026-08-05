@@ -4,11 +4,11 @@ import {
   yearsToExpiry,
   type OptionGreeks,
   type OptionType,
-} from "../../pricing/domain/black-scholes-engine.js";
+} from "@ai-quant-lab/pricing";
 import { OPTION_TICK_SIZE } from "../../pricing/domain/option-tick.js";
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
 
-import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
+import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 
 export interface OptionBuyerFillInput {

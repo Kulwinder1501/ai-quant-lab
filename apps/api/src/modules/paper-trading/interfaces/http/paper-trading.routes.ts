@@ -17,7 +17,7 @@ import {
   resolveOptionExpiryInstant,
 } from "../../domain/option-buyer-fill.js";
 import { resolveListedExpiry } from "../../../market-data/domain/option-expiry-calendar.js";
-import { nearestStrike } from "../../../pricing/domain/black-scholes-engine.js";
+import { nearestStrike } from "@ai-quant-lab/pricing";
 import { solveContractGreeksFromChain } from "../../../market-data/domain/chain-greeks.js";
 import { validateOptionsEntry } from "../../../strategy-engine/domain/options-entry-validator.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
