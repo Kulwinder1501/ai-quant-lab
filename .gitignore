@@ -15,3 +15,6 @@ postgres-data/
 
 # TypeScript incremental build artifacts — regenerated, never reviewed.
 *.tsbuildinfo
+
+# Throwaway probe scripts. Never shipped -- this repo is public.
+scratch/

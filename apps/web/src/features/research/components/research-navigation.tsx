@@ -30,9 +30,6 @@ export function ResearchNavigation({ activeView }: { activeView: ResearchView })
       <Link aria-current={activeView === "dashboard" ? "page" : undefined} className={linkClass("dashboard")} href="/dashboard">
         ⚡ Live Dashboard
       </Link>
-      <Link aria-current={activeView === "news" ? "page" : undefined} className={linkClass("news")} href="/news">
-        📰 Market News
-      </Link>
       <Link aria-current={activeView === "positions-orders" ? "page" : undefined} className={linkClass("positions-orders")} href="/positions-orders">
         Positions &amp; Orders
       </Link>

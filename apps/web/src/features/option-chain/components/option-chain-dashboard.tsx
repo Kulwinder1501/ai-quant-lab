@@ -5,6 +5,9 @@ import { PageHeader } from "../../../components/layout/page-header";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { formatNumber } from "../../research/presentation";
+import { OptionTradeModal } from "./option-trade-modal";
+import { impliedVolatilityFromPremium, midPriceForIv } from "../../../lib/implied-volatility";
+import { priceEuropeanOption } from "../../../lib/black-scholes-engine";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4001/api/v1";
 
@@ -131,6 +134,11 @@ export function OptionChainDashboard() {
   const [chain, setChain] = useState<ChainResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tradeModalConfig, setTradeModalConfig] = useState<{
+    leg: Leg;
+    strike: number;
+    optionType: "CE" | "PE";
+  } | null>(null);
 
   /**
    * Fetches without touching state, so the effect below can set it in a callback.
@@ -178,6 +186,175 @@ export function OptionChainDashboard() {
     return () => controller.abort();
   }, [fetchChain]);
 
+  // Live streaming via SSE
+  useEffect(() => {
+    if (!chain?.available) return;
+
+    let eventSource: EventSource | null = null;
+    const url = `${API}/option-chain/stream?underlying=${underlying}`;
+    
+    try {
+      eventSource = new EventSource(url);
+      
+      eventSource.onmessage = (event) => {
+        try {
+          const tick = JSON.parse(event.data);
+          
+          setChain((prevChain) => {
+            if (!prevChain || !prevChain.strikes) return prevChain;
+
+            const newStrikes = [...prevChain.strikes];
+            let changed = false;
+            let currentSpot = prevChain.underlyingValue ?? 0;
+            
+            // If the tick is for the underlying index
+            const isIndex = tick.symbol.endsWith("-INDEX");
+            if (isIndex && tick.ltp) {
+              currentSpot = tick.ltp;
+              changed = true;
+            }
+
+            const RISK_FREE_RATE = 0.065; // Fixed assumption matching backend
+
+            const recalculateLeg = (leg: Leg, strikePrice: number, optionType: "CE" | "PE", isLegTick: boolean): Leg => {
+              const newLastPrice = isLegTick ? (tick.ltp ?? leg.lastPrice) : leg.lastPrice;
+              const newBid = isLegTick ? (tick.bid ?? leg.bid) : leg.bid;
+              const newAsk = isLegTick ? (tick.ask ?? leg.ask) : leg.ask;
+              const newVolume = isLegTick ? (tick.volume ?? leg.volume) : leg.volume;
+
+              let spreadAbs: number | null = null;
+              let midPrice: number | null = null;
+              let spreadPct: number | null = null;
+              let withinBudget: boolean | null = leg.withinCostBudget;
+
+              if (newBid !== null && newAsk !== null && newBid > 0 && newAsk > 0 && newAsk >= newBid) {
+                spreadAbs = newAsk - newBid;
+                midPrice = (newAsk + newBid) / 2;
+                spreadPct = (spreadAbs / midPrice) * 100;
+                withinBudget = spreadPct <= DEFAULT_COST_BUDGET_PERCENT;
+              } else {
+                midPrice = midPriceForIv(newBid, newAsk);
+              }
+
+              const premium = midPrice ?? newLastPrice;
+              let iv: number | null = null;
+              let ivRefusal: string | null = "NO_PREMIUM";
+              let newDelta = leg.delta;
+              let newGamma = leg.gamma;
+              let newTheta = leg.theta;
+              let newVega = leg.vega;
+
+              if (premium !== null && leg.daysToExpiry !== null && currentSpot > 0) {
+                const ivResult = impliedVolatilityFromPremium({
+                  spot: currentSpot,
+                  strike: strikePrice,
+                  timeToExpiryYears: Math.max(0, leg.daysToExpiry / 365),
+                  riskFreeRate: RISK_FREE_RATE,
+                  optionType,
+                  premium,
+                });
+
+                if (ivResult.measurable) {
+                  iv = ivResult.impliedVolatility;
+                  ivRefusal = null;
+                  const greeks = priceEuropeanOption({
+                    spot: currentSpot,
+                    strike: strikePrice,
+                    timeToExpiryYears: Math.max(0, leg.daysToExpiry / 365),
+                    riskFreeRate: RISK_FREE_RATE,
+                    volatility: iv,
+                    optionType,
+                  });
+                  newDelta = greeks.delta;
+                  newGamma = greeks.gamma;
+                  newTheta = greeks.theta;
+                  newVega = greeks.vega;
+                } else {
+                  ivRefusal = ivResult.reason;
+                  newDelta = null;
+                  newGamma = null;
+                  newTheta = null;
+                  newVega = null;
+                }
+              }
+
+              return {
+                ...leg,
+                lastPrice: newLastPrice,
+                bid: newBid,
+                ask: newAsk,
+                volume: newVolume,
+                spreadAbsolute: spreadAbs,
+                spreadPercentOfMid: spreadPct,
+                withinCostBudget: withinBudget,
+                impliedVolatility: iv,
+                impliedVolatilityRefusal: ivRefusal,
+                delta: newDelta,
+                gamma: newGamma,
+                theta: newTheta,
+                vega: newVega,
+              };
+            };
+
+            for (let i = 0; i < newStrikes.length; i++) {
+              const row = newStrikes[i];
+              const call = row.call;
+              const put = row.put;
+
+              const isCallTick = call?.providerSymbol === tick.symbol;
+              const isPutTick = put?.providerSymbol === tick.symbol;
+
+              // Recalculate if this specific leg ticked, OR if the index ticked (affecting all legs)
+              if (isCallTick || isIndex) {
+                if (call) {
+                  newStrikes[i] = {
+                    ...newStrikes[i],
+                    call: recalculateLeg(call, row.strikePrice, "CE", isCallTick)
+                  };
+                  changed = true;
+                }
+              }
+              
+              if (isPutTick || isIndex) {
+                if (put) {
+                  newStrikes[i] = {
+                    ...newStrikes[i],
+                    put: recalculateLeg(put, row.strikePrice, "PE", isPutTick)
+                  };
+                  changed = true;
+                }
+              }
+            }
+
+            if (changed) {
+              return { 
+                ...prevChain, 
+                underlyingValue: currentSpot,
+                strikes: newStrikes 
+              };
+            }
+            return prevChain;
+          });
+        } catch (err) {
+          console.error("Failed to parse tick:", err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error("SSE Error:", err);
+        eventSource?.close();
+      };
+    } catch (err) {
+      console.error("Failed to setup SSE:", err);
+    }
+
+    return () => {
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, [chain?.available, underlying]);
+
   const spreadTone = useCallback((leg: Leg | null) => {
     // A one-sided quote is unknown, not cheap. Rendering it as good would make the most
     // illiquid strikes look the most tradeable, which is the inversion that matters.
@@ -188,7 +365,15 @@ export function OptionChainDashboard() {
       : "text-rose-300";
   }, []);
 
-  const rows = useMemo(() => chain?.strikes ?? [], [chain]);
+  const rows = useMemo(() => {
+    const allRows = chain?.strikes ?? [];
+    if (allRows.length === 0) return [];
+    const atmIndex = allRows.findIndex((r) => r.isAtm);
+    if (atmIndex === -1) return allRows;
+    const startIndex = Math.max(0, atmIndex - 5);
+    const endIndex = Math.min(allRows.length, atmIndex + 6);
+    return allRows.slice(startIndex, endIndex);
+  }, [chain]);
 
   return (
     <div className="space-y-5 p-4 md:p-6">
@@ -199,7 +384,7 @@ export function OptionChainDashboard() {
         unavailable={chain !== null && !chain.available}
       />
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         {UNDERLYINGS.map((symbol) => (
           <button
             key={symbol}
@@ -354,6 +539,7 @@ export function OptionChainDashboard() {
                         <th className="px-3 py-2 text-right">Spread</th>
                         <th className="px-3 py-2 text-right">Bid</th>
                         <th className="px-3 py-2 text-right">Ask</th>
+                        <th className="px-3 py-2 text-center">Action</th>
                       </>
                     ) : (
                       <>
@@ -364,11 +550,13 @@ export function OptionChainDashboard() {
                         <th className="px-3 py-2 text-right">IV</th>
                         <th className="px-3 py-2 text-right">Bid</th>
                         <th className="px-3 py-2 text-right">Ask</th>
+                        <th className="px-3 py-2 text-center">Action</th>
                       </>
                     )}
-                    <th className="px-3 py-2 text-center text-cyan-300">Strike</th>
+                    <th className="px-3 py-2 text-center text-cyan-300 sticky left-0 right-0 z-20 bg-slate-900 border-x border-white/10 shadow-[0_0_15px_rgba(0,0,0,0.5)]">Strike</th>
                     {view === "quotes" ? (
                       <>
+                        <th className="px-3 py-2 text-center">Action</th>
                         <th className="px-3 py-2 text-left">Bid</th>
                         <th className="px-3 py-2 text-left">Ask</th>
                         <th className="px-3 py-2 text-left">Spread</th>
@@ -390,9 +578,9 @@ export function OptionChainDashboard() {
                     )}
                   </tr>
                   <tr className="border-b border-white/10 text-[10px]">
-                    <th colSpan={7} className="px-3 py-1 text-center font-bold text-emerald-300/80">CALLS</th>
+                    <th colSpan={8} className="px-3 py-1 text-center font-bold text-emerald-300/80">CALLS</th>
                     <th />
-                    <th colSpan={7} className="px-3 py-1 text-center font-bold text-rose-300/80">PUTS</th>
+                    <th colSpan={8} className="px-3 py-1 text-center font-bold text-rose-300/80">PUTS</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -427,6 +615,17 @@ export function OptionChainDashboard() {
                             </td>
                             <td className="px-3 py-1.5 text-slate-300">{row.call?.bid ?? "—"}</td>
                             <td className="px-3 py-1.5 text-slate-300">{row.call?.ask ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-center">
+                              {row.call && row.call.ask && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTradeModalConfig({ leg: row.call!, strike: row.strikePrice, optionType: "CE" })}
+                                  className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/40 transition"
+                                >
+                                  BUY
+                                </button>
+                              )}
+                            </td>
                           </>
                         ) : (
                           <>
@@ -437,13 +636,35 @@ export function OptionChainDashboard() {
                             {ivCell(row.call, "text-right")}
                             <td className="px-3 py-1.5 text-slate-300">{row.call?.bid ?? "—"}</td>
                             <td className="px-3 py-1.5 text-slate-300">{row.call?.ask ?? "—"}</td>
+                            <td className="px-3 py-1.5 text-center">
+                              {row.call && row.call.ask && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTradeModalConfig({ leg: row.call!, strike: row.strikePrice, optionType: "CE" })}
+                                  className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/40 transition"
+                                >
+                                  BUY
+                                </button>
+                              )}
+                            </td>
                           </>
                         )}
-                        <td className={`px-3 py-1.5 text-center font-black ${row.isAtm ? "text-cyan-200" : "text-white"}`}>
+                        <td className={`px-3 py-1.5 text-center font-black sticky left-0 right-0 z-10 border-x border-white/10 shadow-[0_0_15px_rgba(0,0,0,0.5)] ${row.isAtm ? "text-cyan-200 bg-slate-800" : "text-white bg-slate-900"}`}>
                           {row.strikePrice}
                         </td>
                         {view === "quotes" ? (
                           <>
+                            <td className="px-3 py-1.5 text-center">
+                              {row.put && row.put.ask && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTradeModalConfig({ leg: row.put!, strike: row.strikePrice, optionType: "PE" })}
+                                  className="rounded bg-rose-500/20 px-2 py-0.5 text-[10px] font-bold text-rose-300 hover:bg-rose-500/40 transition"
+                                >
+                                  BUY
+                                </button>
+                              )}
+                            </td>
                             <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.bid ?? "—"}</td>
                             <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.ask ?? "—"}</td>
                             <td className={`px-3 py-1.5 text-left font-bold ${spreadTone(row.put)}`}>
@@ -458,6 +679,17 @@ export function OptionChainDashboard() {
                           </>
                         ) : (
                           <>
+                            <td className="px-3 py-1.5 text-center">
+                              {row.put && row.put.ask && (
+                                <button
+                                  type="button"
+                                  onClick={() => setTradeModalConfig({ leg: row.put!, strike: row.strikePrice, optionType: "PE" })}
+                                  className="rounded bg-rose-500/20 px-2 py-0.5 text-[10px] font-bold text-rose-300 hover:bg-rose-500/40 transition"
+                                >
+                                  BUY
+                                </button>
+                              )}
+                            </td>
                             <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.bid ?? "—"}</td>
                             <td className="px-3 py-1.5 text-left text-slate-300">{row.put?.ask ?? "—"}</td>
                             {ivCell(row.put, "text-left")}
@@ -492,6 +724,25 @@ export function OptionChainDashboard() {
             </p>
           </GlassPanel>
         </>
+      )}
+
+      {tradeModalConfig && (
+        <OptionTradeModal
+          show={true}
+          onClose={() => setTradeModalConfig(null)}
+          underlyingSymbol={chain!.underlyingSymbol}
+          strike={tradeModalConfig.strike}
+          optionType={tradeModalConfig.optionType}
+          expiryDate={expiry || chain!.expiries![0].expiryDate}
+          premium={tradeModalConfig.leg.ask!}
+          impliedVolatility={tradeModalConfig.leg.impliedVolatility}
+          greeks={{
+            delta: tradeModalConfig.leg.delta,
+            gamma: tradeModalConfig.leg.gamma,
+            theta: tradeModalConfig.leg.theta,
+            vega: tradeModalConfig.leg.vega,
+          }}
+        />
       )}
     </div>
   );

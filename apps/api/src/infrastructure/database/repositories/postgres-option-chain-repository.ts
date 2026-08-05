@@ -8,6 +8,7 @@ import type {
   OptionChainSnapshot,
   OptionType,
 } from "../../../modules/market-data/domain/option-chain.js";
+import { RISK_FREE_RATE } from "../../../modules/pricing/domain/constants.js";
 
 /**
  * `pg` hands back a DATE column as either a Date (local midnight) or a string, depending on
@@ -30,8 +31,6 @@ function toNumberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** Matches the chain route, so a chain-marked IV is comparable to a chain IV. */
-const CHAIN_RISK_FREE_RATE = 0.065;
 
 export class PostgresOptionChainRepository {
   constructor(private readonly pool: DatabasePool) {}
@@ -163,7 +162,7 @@ export class PostgresOptionChainRepository {
       [...pairs.entries()]
         .filter(([, slot]) => slot.callMid !== undefined && slot.putMid !== undefined)
         .map(([strike, slot]) => ({ strike, callMid: slot.callMid!, putMid: slot.putMid! })),
-      CHAIN_RISK_FREE_RATE,
+      RISK_FREE_RATE,
       timeToExpiry,
     );
 

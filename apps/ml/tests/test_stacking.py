@@ -12,6 +12,7 @@ from ai_quant_lab_ml.stack_explain import explain_stack_prediction
 from ai_quant_lab_ml.stacking import (
     STACK_ALGORITHM,
     STACK_CONTRIBUTION_METHOD,
+    block_bootstrap_macro_f1_gap,
     build_meta_features,
     measure_error_diversity,
     meta_feature_names,
@@ -28,7 +29,8 @@ START = datetime(2026, 3, 2, 3, 45, tzinfo=UTC)
 def make_examples(rows: int = 180) -> list[LabeledExample]:
     examples: list[LabeledExample] = []
     for index in range(rows):
-        observed = START + timedelta(minutes=index)
+        session, minute = divmod(index, 30)
+        observed = START + timedelta(days=session, minutes=minute)
         score = (index % 19) - 9
         label = "EXPANSION" if score > 4 else ("CONTRACTION" if score < -4 else "STABLE")
         examples.append(
@@ -136,6 +138,37 @@ class MetaLearnerTests(unittest.TestCase):
         model, metrics, _, _ = train_meta_learner(train_rows, holdout_rows)
         self.assertGreater(metrics.macro_f1, 0.3)
         self.assertEqual(len(model.classes_), 3)
+
+
+class BlockBootstrapTests(unittest.TestCase):
+    def test_a_clearly_superior_predictor_is_significant(self) -> None:
+        labels = ["EXPANSION", "STABLE", "CONTRACTION"] * 20
+        perfect = list(labels)
+        # A predictor wrong on every third row, in a fixed, non-cancelling way.
+        worse = [
+            "STABLE" if label == "EXPANSION" else ("CONTRACTION" if label == "STABLE" else "EXPANSION")
+            for label in labels
+        ]
+        report = block_bootstrap_macro_f1_gap(
+            labels, perfect, worse, alphabet=VOLATILITY_ALPHABET, resamples=200, random_state=0,
+        )
+        self.assertEqual(report["method"], "MOVING_BLOCK_BOOTSTRAP_V1")
+        self.assertTrue(report["significant"])
+        self.assertGreater(report["lowerBound"], 0.0)
+
+    def test_identical_predictors_are_not_significant(self) -> None:
+        labels = ["EXPANSION", "STABLE", "CONTRACTION"] * 20
+        report = block_bootstrap_macro_f1_gap(
+            labels, labels, labels, alphabet=VOLATILITY_ALPHABET, resamples=100, random_state=0,
+        )
+        self.assertEqual(report["pointEstimate"], 0.0)
+        self.assertFalse(report["significant"])
+
+    def test_rejects_mismatched_lengths(self) -> None:
+        with self.assertRaises(Exception):
+            block_bootstrap_macro_f1_gap(
+                ["EXPANSION"], ["EXPANSION", "STABLE"], ["EXPANSION"], alphabet=VOLATILITY_ALPHABET,
+            )
 
 
 @unittest.skipUnless(TORCH_AVAILABLE, "torch is not installed")

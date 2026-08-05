@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_quant_lab_ml.artifacts import resolve_artifact_path, ArtifactIntegrityError, load_model_artifact, write_model_artifact
+from ai_quant_lab_ml.artifacts import (
+    ArtifactIntegrityError,
+    compute_artifact_checksum,
+    load_model_artifact,
+    resolve_artifact_path,
+    write_model_artifact,
+)
 
 
 class ModelArtifactTests(unittest.TestCase):
@@ -19,6 +25,27 @@ class ModelArtifactTests(unittest.TestCase):
             self.assertEqual(loaded.checksum, written.checksum)
             self.assertEqual(loaded.model, {"weights": [1, 2]})
             self.assertEqual(dict(loaded.metadata), {"featureSchema": ["x"], "run": 7})
+
+    def test_predicted_checksum_matches_the_written_artifact(self) -> None:
+        # A content-addressed destination filename (e.g. register_sequence_shadow.py's
+        # shadow path) must be derivable before writing, and must agree with what
+        # write_model_artifact actually records -- otherwise two different artifacts
+        # could still collide on the same predicted name.
+        model = {"weights": [3, 4]}
+        metadata = {"featureSchema": ["x", "y"], "run": 9}
+        predicted = compute_artifact_checksum(model=model, metadata=metadata)
+
+        with tempfile.TemporaryDirectory() as directory:
+            written = write_model_artifact(Path(directory) / "artifact.pkl", model=model, metadata=metadata)
+
+        self.assertEqual(predicted, written.checksum)
+
+    def test_predicted_checksum_differs_for_different_metadata(self) -> None:
+        model = {"weights": [1]}
+        first = compute_artifact_checksum(model=model, metadata={"run": 1})
+        second = compute_artifact_checksum(model=model, metadata={"run": 2})
+
+        self.assertNotEqual(first, second)
 
     def test_detects_payload_tampering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

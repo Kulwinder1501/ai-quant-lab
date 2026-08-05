@@ -45,7 +45,6 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       title: "MARKETS",
       items: [
         { name: "Live Dashboard", href: "/dashboard", icon: <Zap className="size-5" /> },
-        { name: "Market News", href: "/news", icon: <Newspaper className="size-5" /> },
         { name: "Market Scanner", href: "/", icon: <ScanSearch className="size-5" /> },
         { name: "Interactive Charts", href: "/charts", icon: <CandlestickChart className="size-5" /> },
         { name: "Option Chain", href: "/option-chain", icon: <Layers className="size-5" /> },

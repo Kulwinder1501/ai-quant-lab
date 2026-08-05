@@ -17,7 +17,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from ai_quant_lab_ml.artifacts import load_model_artifact, write_model_artifact
+from ai_quant_lab_ml.artifacts import compute_artifact_checksum, load_model_artifact, write_model_artifact
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION_SCALP,
     LABEL_SCHEME_VOLATILITY_EXPANSION,
@@ -163,7 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.rewrite_in_place:
         dest = source
     else:
-        dest = source.with_name(source.stem + "-shadow.pkl")
+        # Content-addressed, not a fixed "-shadow.pkl" suffix: two different
+        # underlying artifacts registered from the same source stem must never
+        # collide on one filename and silently overwrite each other's bytes
+        # (observed previously: a later registration overwrote an earlier
+        # version's shadow artifact while both model_versions rows kept
+        # pointing at the same now-wrong path). Re-registering identical
+        # content is still idempotent, since the same bytes hash to the same
+        # name.
+        predicted_checksum = compute_artifact_checksum(model=loaded.model, metadata=enriched)
+        dest = source.with_name(f"{source.stem}-shadow-{predicted_checksum[:16]}.pkl")
 
     written = write_model_artifact(dest, model=loaded.model, metadata=enriched)
     schema_version = enriched["featureSchemaVersion"]
@@ -205,6 +214,18 @@ def main(argv: list[str] | None = None) -> int:
             trained_at=trained_at,
         )
 
+        # Sticky, one-shot enrollment: only a research run that actually cleared
+        # Stage 5/6 acceptance (beat trivial/lag-baseline or best-base, per fold)
+        # is eligible, and a model key that already holds an enrollment keeps the
+        # version it was first enrolled with -- a later qualifying re-registration
+        # of the same key must not reset its evidence clock.
+        research_advances = bool(protocol.get("researchAdvances"))
+        volatility_shadow_enrolled = research_advances and repository.enroll_volatility_shadow(
+            label_scheme=str(protocol["labelScheme"]),
+            model_key=str(enriched["modelKey"]),
+            model_version_id=candidate.id,
+        )
+
     json_output({
         "level": "info",
         "message": "Sequence shadow candidate registered",
@@ -213,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         "modelVersionId": candidate.id,
         "version": candidate.version,
         "stage": candidate.stage,
+        "researchAdvances": research_advances,
+        "volatilityShadowEnrolled": volatility_shadow_enrolled,
         "artifactPath": str(written.path),
         "artifactChecksum": written.checksum,
         "eodTrainLoop": False,

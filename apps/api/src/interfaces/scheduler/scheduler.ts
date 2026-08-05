@@ -4,11 +4,16 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
-import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { createDatabasePool, type DatabasePool } from "../../infrastructure/database/database.js";
+import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
+import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
+
+/** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
+const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN"];
 
 /**
  * The scheduler process.
@@ -54,11 +59,68 @@ function log(message: string, extra: Record<string, unknown> = {}): void {
   console.info(JSON.stringify({ level: "info", message, process: processIdentity, ...extra }));
 }
 
+/**
+ * Fyers has no non-interactive re-authorization path, so this never tries to log in on
+ * a human's behalf. What it closes: nothing today checks the credential before it lapses,
+ * and nothing reads the failures `scheduled_job_runs` already records -- a lapsed token
+ * was previously discovered only when the option-chain expiry gate started refusing live
+ * trades. Proactively calling `getAccessToken()` also refreshes the access token ahead of
+ * the trading session, instead of the first OPTION_CHAIN run at market open finding out.
+ */
+async function checkFyersAuthHealth(tokenService: FyersTokenService, database: DatabasePool): Promise<void> {
+  let refreshError: string | null = null;
+  try {
+    await tokenService.getAccessToken();
+  } catch (error) {
+    refreshError = error instanceof Error ? error.message : String(error);
+  }
+
+  const health = await tokenService.checkCredentialHealth();
+  const failures = await database.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM scheduled_job_runs
+     WHERE job_type = ANY($1) AND status = 'FAILED' AND claimed_at >= NOW() - INTERVAL '1 day'`,
+    [FYERS_DEPENDENT_JOB_TYPES],
+  );
+  const recentJobFailures = Number(failures.rows[0]?.count ?? 0);
+
+  const assessment = assessFyersAuthHealth({
+    now: new Date(),
+    hasCredential: health.hasCredential,
+    refreshTokenExpiresAt: health.refreshTokenExpiresAt,
+    lastError: refreshError ?? health.lastError,
+    recentJobFailures,
+  });
+
+  const payload = {
+    level: assessment.status === "OK" ? "info" : "error",
+    message: "Fyers auth health check",
+    process: processIdentity,
+    status: assessment.status,
+    reasons: assessment.reasons,
+  };
+  if (assessment.status === "OK") {
+    console.info(JSON.stringify(payload));
+  } else {
+    console.error(JSON.stringify(payload));
+  }
+}
+
 async function main(): Promise<void> {
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
   const claims = new PostgresScheduledJobClaimRepository(database);
   const ingestNews = new IngestRssNewsService(new PostgresNewsRepository(database));
+
+  const fyersAppId = process.env.FYERS_APP_ID;
+  const fyersAppSecret = process.env.FYERS_APP_SECRET;
+  const fyersTokenService = fyersAppId && fyersAppSecret
+    ? new FyersTokenService({
+      pool: database,
+      appId: fyersAppId,
+      appSecret: fyersAppSecret,
+      pin: process.env.FYERS_PIN ?? "",
+    })
+    : null;
 
   async function schedule(jobType: string, task: () => Promise<void>): Promise<void> {
     const scheduledFor = toDueMinute(new Date());
@@ -151,6 +213,16 @@ async function main(): Promise<void> {
     void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
   }, { timezone: IST });
 
+  // Once daily, well before the 9:15 open: proactively refresh the Fyers access token and
+  // report credential health, so a lapsed or soon-to-lapse refresh token is a visible log
+  // line at 8:00 rather than a silent trade refusal discovered mid-session. Skipped
+  // entirely (not merely a no-op alert) when Fyers isn't configured in this environment.
+  if (fyersTokenService) {
+    cron.schedule("0 8 * * 1-5", () => {
+      void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
+    }, { timezone: IST });
+  }
+
   // Option chain, every 15 minutes through the session.
   //
   // This series is forward-accumulating and cannot be backfilled: a chain endpoint
@@ -165,7 +237,7 @@ async function main(): Promise<void> {
   cron.schedule("*/15 9-15 * * 1-5", () => {
     void schedule("OPTION_CHAIN", () => runCommand("npm", [
       "run", "data:collect:option-chain", "--",
-      "--underlyings", "NIFTY50,BANKNIFTY",
+      "--underlyings", "NIFTY50,BANKNIFTY,SBIN,RELIANCE",
       "--strike-count", "15",
     ]));
   }, { timezone: IST });
@@ -186,6 +258,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
+      ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK"] : []),
       "OPTION_CHAIN",
       "RSS_NEWS_INGESTION",
     ],

@@ -45,6 +45,7 @@
     "csv-parse": "^5.5.6",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "fyers-api-v3": "^2.1.0",
     "node-cron": "^4.6.0",
     "pg": "^8.12.0",
     "yahoo-finance2": "^4.0.0",

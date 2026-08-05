@@ -7,11 +7,13 @@ import {
   midPriceForIv,
 } from "./implied-volatility.js";
 
+import { RISK_FREE_RATE } from "./constants.js";
+
 const BASE = {
   spot: 24_000,
   strike: 24_000,
   timeToExpiryYears: 21 / 365,
-  riskFreeRate: 0.065,
+  riskFreeRate: RISK_FREE_RATE,
   optionType: "CE" as const,
 };
 
@@ -169,7 +171,7 @@ describe("midPriceForIv", () => {
 
 describe("impliedForwardFromParity", () => {
   const T = 21 / 365;
-  const r = 0.065;
+  const r = RISK_FREE_RATE;
 
   /** Call and put mids consistent with a chosen forward, so it can be recovered. */
   function pairsFor(forward: number, strikes: number[]) {
@@ -219,7 +221,7 @@ describe("effectiveSpotForForward", () => {
   // F*e^(-rT) makes the model reproduce F exactly.
   it("round-trips to the forward through the model's own carry", () => {
     const forward = 57_712;
-    const r = 0.065;
+    const r = RISK_FREE_RATE;
     const T = 21 / 365;
 
     const spot = effectiveSpotForForward(forward, r, T);

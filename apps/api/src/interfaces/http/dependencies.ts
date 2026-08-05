@@ -1,5 +1,7 @@
 import type { DatabasePool, DatabaseQueryable } from "../../infrastructure/database/database.js";
 import { PostgresAiJournalRepository } from "../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
+import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
+import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresDashboardQueryRepository } from "../../infrastructure/database/repositories/postgres-dashboard-query-repository.js";
 import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
@@ -28,6 +30,7 @@ import { GetModelPrediction } from "../../modules/model-predictions/application/
 import { ListModelPredictions } from "../../modules/model-predictions/application/list-model-predictions.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { ListMarketNewsService } from "../../modules/news-sentiment/application/list-market-news.js";
+import { CheckMacroEventsService } from "../../modules/news-sentiment/application/check-macro-events.js";
 import { ClosePaperTrade } from "../../modules/paper-trading/application/close-paper-trade.js";
 import { CreatePaperAccount } from "../../modules/paper-trading/application/create-paper-account.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
@@ -62,6 +65,8 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     new PostgresIndiaVixImpliedVolatilitySource(pool),
   );
 
+  const checkMacroEvents = new CheckMacroEventsService(newsRepository);
+
   const aiAutonomousAgent = new AiAutonomousAgent(
     pool,
     strategyContextRepository,
@@ -71,7 +76,24 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     candleRepository,
     newsRepository,
     new PostgresAiJournalRepository(pool),
+    checkMacroEvents,
   );
+
+  const appId = process.env.FYERS_APP_ID;
+  const appSecret = process.env.FYERS_APP_SECRET;
+  let fyersLiveStreamer: FyersLiveStreamer | null = null;
+  if (appId && appSecret) {
+    const fyersTokenService = new FyersTokenService({
+      pool,
+      appId,
+      appSecret,
+      pin: process.env.FYERS_PIN ?? "",
+    });
+    fyersLiveStreamer = new FyersLiveStreamer({
+      tokenService: fyersTokenService,
+      appId,
+    });
+  }
 
   return {
     database,
@@ -96,6 +118,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     ),
     ingestNews: new IngestRssNewsService(newsRepository),
     listNews: new ListMarketNewsService(newsRepository),
+    checkMacroEvents,
     getInstitutionalContext: new GetInstitutionalContextService(
       new PostgresInstitutionalFlowRepository(pool),
       new PostgresOffshoreDerivativeRepository(pool),
@@ -103,6 +126,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       new PostgresMarketContextReader(pool),
     ),
     optionChainRepository: new PostgresOptionChainRepository(pool),
+    fyersLiveStreamer,
     aiAutonomousAgent,
   };
 }

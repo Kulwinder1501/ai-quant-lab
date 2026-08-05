@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ai_quant_lab}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres-data-v2:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
@@ -30,6 +30,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
       GIFT_NIFTY_YAHOO_SYMBOL: ${GIFT_NIFTY_YAHOO_SYMBOL:-}
       FII_DII_HISTORY_URL: ${FII_DII_HISTORY_URL:-}
+      FYERS_APP_ID: ${FYERS_APP_ID:-}
+      FYERS_APP_SECRET: ${FYERS_APP_SECRET:-}
+      FYERS_PIN: ${FYERS_PIN:-}
     ports:
       - "4001:4000"
     depends_on:
@@ -51,6 +54,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
       GIFT_NIFTY_YAHOO_SYMBOL: ${GIFT_NIFTY_YAHOO_SYMBOL:-}
       FII_DII_HISTORY_URL: ${FII_DII_HISTORY_URL:-}
+      FYERS_APP_ID: ${FYERS_APP_ID:-}
+      FYERS_APP_SECRET: ${FYERS_APP_SECRET:-}
+      FYERS_PIN: ${FYERS_PIN:-}
     volumes:
       # Trained pickle artifacts must outlive the container: model_versions rows
       # reference them by absolute path, and the competition pool reloads them

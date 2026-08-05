@@ -5,7 +5,7 @@ import {
   type OptionType,
 } from "../domain/black-scholes-engine.js";
 
-export const DEFAULT_RISK_FREE_RATE = 0.07;
+import { RISK_FREE_RATE } from "../domain/constants.js";
 
 export interface PriceOptionRequest {
   underlyingPrice: number;
@@ -39,7 +39,7 @@ function normalizeIv(raw: number): number {
 export function priceOption(input: PriceOptionRequest): PriceOptionResult {
   const asOf = input.asOf ?? new Date();
   const iv = normalizeIv(input.impliedVolatility);
-  const rate = input.riskFreeRate ?? DEFAULT_RISK_FREE_RATE;
+  const rate = input.riskFreeRate ?? RISK_FREE_RATE;
   const T = yearsToExpiry(asOf, input.expiryDate);
   const greeks = priceEuropeanOption({
     spot: input.underlyingPrice,

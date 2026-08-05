@@ -37,6 +37,8 @@ import { sequenceReadinessReportsMigration } from "./036-sequence-readiness-repo
 import { optionChainSnapshotsMigration } from "./037-option-chain-snapshots.js";
 import { confirmedExpiryCalendarMigration } from "./038-confirmed-expiry-calendar.js";
 import { optionExpiryCalendarMigration } from "./039-option-expiry-calendar.js";
+import { addExcludedFromEvidenceMigration } from "./040-add-excluded-from-evidence.js";
+import { volatilityShadowEnrollmentsMigration } from "./041-volatility-shadow-enrollments.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -78,4 +80,6 @@ export const migrations = [
   optionChainSnapshotsMigration,
   confirmedExpiryCalendarMigration,
   optionExpiryCalendarMigration,
+  addExcludedFromEvidenceMigration,
+  volatilityShadowEnrollmentsMigration,
 ];

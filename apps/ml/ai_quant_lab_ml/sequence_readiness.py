@@ -14,10 +14,188 @@ from typing import Any, Mapping
 
 MAXIMUM_REPORT_AGE = timedelta(days=7)
 PASS_VERDICT = "PASS"
+SEQUENCE_WINDOW_GATES: dict[str, dict[str, Any]] = {
+    "tcn-1m": {
+        "minimumBars": 200_000,
+        "minimumSessions": 250,
+        "maximumZeroVolumeFraction": 0.01,
+        "requiredProvider": "fyers-api-v3",
+    },
+    "tcn-5m": {
+        "minimumBars": 100_000,
+        "minimumSessions": 250,
+        "maximumZeroVolumeFraction": 0.01,
+        "requiredProvider": "fyers-api-v3",
+    },
+    "tcn-15m": {
+        "minimumBars": 50_000,
+        "minimumSessions": 250,
+        "maximumZeroVolumeFraction": 0.01,
+        "requiredProvider": "fyers-api-v3",
+    },
+}
 
 
 class SequenceReadinessError(RuntimeError):
     """TCN research refused because the sequence-readiness gate did not clear."""
+
+
+def assess_training_window(
+    measurements: Mapping[str, Any],
+    *,
+    candidate: str,
+) -> dict[str, Any]:
+    """Assess the exact source window a sequence run will actually consume."""
+
+    thresholds = SEQUENCE_WINDOW_GATES.get(candidate)
+    if thresholds is None:
+        raise SequenceReadinessError(f"No exact-window gate is defined for {candidate!r}.")
+
+    findings: list[dict[str, str]] = []
+    bar_count = int(measurements.get("barCount") or 0)
+    session_count = int(measurements.get("sessionCount") or 0)
+    zero_volume_fraction = float(measurements.get("zeroVolumeFraction") or 0.0)
+    providers = sorted(str(item) for item in (measurements.get("providers") or []))
+    instrument_semantics = str(measurements.get("instrumentSemantics") or "OTHER")
+
+    if bar_count < thresholds["minimumBars"]:
+        findings.append({
+            "code": "INSUFFICIENT_WINDOW_BARS",
+            "detail": f"{bar_count} bars is below the {thresholds['minimumBars']} exact-window floor.",
+        })
+    if session_count < thresholds["minimumSessions"]:
+        findings.append({
+            "code": "INSUFFICIENT_WINDOW_SESSIONS",
+            "detail": (
+                f"{session_count} sessions is below the "
+                f"{thresholds['minimumSessions']} exact-window floor."
+            ),
+        })
+    if zero_volume_fraction > thresholds["maximumZeroVolumeFraction"]:
+        findings.append({
+            "code": "WINDOW_ZERO_VOLUME",
+            "detail": (
+                f"Zero-volume fraction {zero_volume_fraction:.6f} exceeds "
+                f"{thresholds['maximumZeroVolumeFraction']:.6f}."
+            ),
+        })
+    if providers != [thresholds["requiredProvider"]]:
+        findings.append({
+            "code": "WINDOW_PROVIDER_MISMATCH",
+            "detail": (
+                f"Exact window providers are {providers or ['<none>']}; "
+                f"required sole provider is {thresholds['requiredProvider']}."
+            ),
+        })
+    if instrument_semantics == "SPOT_INDEX":
+        findings.append({
+            "code": "SPOT_INDEX_SEMANTICS",
+            "detail": "Volume-dependent sequence research requires an ETF proxy or futures lineage.",
+        })
+
+    return {
+        "verdict": "PASS" if not findings else "FAIL",
+        "findings": findings,
+        "thresholds": dict(thresholds),
+        "measurements": dict(measurements),
+    }
+
+
+def measure_training_window(
+    connection,
+    *,
+    symbol: str,
+    timeframe: str,
+    candidate: str,
+    window_start: datetime,
+    window_end: datetime,
+    data_cutoff_at: datetime,
+) -> dict[str, Any]:
+    """Measure and require the precise cutoff-bounded candle window."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+              i.instrument_type,
+              i.metadata ->> 'purpose' AS metadata_purpose,
+              count(*)::bigint AS bar_count,
+              count(DISTINCT (c.open_time AT TIME ZONE 'Asia/Kolkata')::date)::bigint AS session_count,
+              count(*) FILTER (WHERE c.volume = 0)::bigint AS zero_volume_bars,
+              array_agg(DISTINCT c.source ORDER BY c.source) AS providers,
+              min(c.open_time) AS first_open_time,
+              max(c.open_time) AS last_open_time
+            FROM instruments i
+            JOIN candles c ON c.instrument_id = i.id
+            WHERE i.exchange = 'NSE'
+              AND upper(i.symbol) = upper(%s)
+              AND c.timeframe = %s
+              AND c.is_complete = TRUE
+              AND c.received_at <= %s
+              AND c.close_time <= %s
+              AND c.open_time >= %s
+              AND c.close_time <= %s
+            GROUP BY i.id, i.instrument_type, i.metadata ->> 'purpose'
+            """,
+            (
+                symbol,
+                timeframe,
+                data_cutoff_at,
+                data_cutoff_at,
+                window_start,
+                window_end,
+            ),
+        )
+        row = cursor.fetchone()
+
+    if row is None:
+        measurements: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "windowStart": window_start.isoformat(),
+            "windowEnd": window_end.isoformat(),
+            "dataCutoffAt": data_cutoff_at.isoformat(),
+            "instrumentSemantics": "OTHER",
+            "barCount": 0,
+            "sessionCount": 0,
+            "zeroVolumeFraction": 0.0,
+            "providers": [],
+            "firstOpenTime": None,
+            "lastOpenTime": None,
+        }
+    else:
+        instrument_type, purpose, bars, sessions, zero_bars, providers, first_at, last_at = row
+        purpose_text = str(purpose or "").lower()
+        semantics = (
+            "ETF_PROXY"
+            if instrument_type == "ETF" or "proxy" in purpose_text
+            else "SPOT_INDEX" if instrument_type == "INDEX" else str(instrument_type or "OTHER")
+        )
+        bar_count = int(bars)
+        measurements = {
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "windowStart": window_start.isoformat(),
+            "windowEnd": window_end.isoformat(),
+            "dataCutoffAt": data_cutoff_at.isoformat(),
+            "instrumentSemantics": semantics,
+            "barCount": bar_count,
+            "sessionCount": int(sessions),
+            "zeroVolumeFraction": 0.0 if bar_count == 0 else int(zero_bars) / bar_count,
+            "providers": list(providers or []),
+            "firstOpenTime": None if first_at is None else first_at.isoformat(),
+            "lastOpenTime": None if last_at is None else last_at.isoformat(),
+        }
+
+    assessment = assess_training_window(measurements, candidate=candidate)
+    if assessment["verdict"] != PASS_VERDICT:
+        detail = "; ".join(
+            f"{finding['code']}: {finding['detail']}" for finding in assessment["findings"]
+        )
+        raise SequenceReadinessError(
+            f"Exact training window for {symbol.upper()} {timeframe} ({candidate}) failed: {detail}"
+        )
+    return assessment
 
 
 def load_latest_sequence_report(connection) -> Mapping[str, Any] | None:

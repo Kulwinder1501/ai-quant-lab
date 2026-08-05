@@ -38,6 +38,7 @@ function build(options: {
   trailing?: RangeBar[];
   forward?: RangeBar[];
   forwardCloseTime?: Date | null;
+  forwardWindowClosed?: boolean;
 }) {
   const recordSettlement = vi.fn(async (_outcome: AuxiliarySettlementOutcome) => undefined);
   const recordUnsettleable = vi.fn(async (_predictionId: string, _reason: string) => undefined);
@@ -47,6 +48,7 @@ function build(options: {
       trailing: options.trailing ?? window(10),
       forward: options.forward ?? window(12.5),
       forwardCloseTime: options.forwardCloseTime === undefined ? FORWARD_CLOSE : options.forwardCloseTime,
+      forwardWindowClosed: options.forwardWindowClosed ?? false,
     }),
     recordSettlement,
     recordUnsettleable,
@@ -98,6 +100,23 @@ describe("SettleAuxiliaryPredictions", () => {
     expect(result).toMatchObject({ settled: 0, notYetMatured: 1, unsettleable: 0 });
     expect(recordSettlement).not.toHaveBeenCalled();
     expect(recordUnsettleable).not.toHaveBeenCalled();
+  });
+
+  it("censors an intraday prediction when its session ended before the horizon", async () => {
+    const { service, recordSettlement, recordUnsettleable } = build({
+      items: [pending({ timeframe: "1m" })],
+      forward: window(10).slice(0, 2),
+      forwardWindowClosed: true,
+    });
+
+    const result = await service.execute();
+
+    expect(result).toMatchObject({ settled: 0, notYetMatured: 0, unsettleable: 1 });
+    expect(recordSettlement).not.toHaveBeenCalled();
+    expect(recordUnsettleable).toHaveBeenCalledWith(
+      "prediction-1",
+      "INTRADAY_SESSION_ENDED_BEFORE_HORIZON",
+    );
   });
 
   // A flat trailing window is a permanent property of the data, so it is recorded to

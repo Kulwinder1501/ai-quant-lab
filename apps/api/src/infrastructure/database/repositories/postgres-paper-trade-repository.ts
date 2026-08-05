@@ -281,9 +281,9 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       const capitalResult = await client.query<CapitalRow>(`
         SELECT
           paper_accounts.opening_balance
-          + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED'), 0)
-          - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN'), 0)
-          - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN'), 0)
+          + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED' AND paper_trades.excluded_from_evidence = false), 0)
+          - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+          - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
           AS available_capital
         FROM paper_accounts
         LEFT JOIN paper_trades ON paper_trades.account_id = paper_accounts.id
@@ -622,14 +622,15 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
         WHERE paper_trades.account_id = $1
           AND paper_trades.status IN ('OPEN', 'CLOSED')
+          AND paper_trades.excluded_from_evidence = false
         ORDER BY paper_trades.closed_at ASC NULLS LAST, paper_trades.opened_at ASC, paper_trades.id ASC
       `, [accountId]),
       this.database.query<CapitalRow>(`
         SELECT
           paper_accounts.opening_balance
-          + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED'), 0)
-          - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN'), 0)
-          - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN'), 0)
+          + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED' AND paper_trades.excluded_from_evidence = false), 0)
+          - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+          - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
           AS available_capital
         FROM paper_accounts
         LEFT JOIN paper_trades ON paper_trades.account_id = paper_accounts.id

@@ -77,7 +77,11 @@ class SequenceBuilderTests(unittest.TestCase):
 
 class SequenceCvTests(unittest.TestCase):
     def test_purge_drops_overlapping_information_intervals(self) -> None:
-        examples = [bar(i, label="EXPANSION" if i % 2 else "CONTRACTION") for i in range(40)]
+        examples = [
+            bar(i, session_offset_days=day, label="EXPANSION" if i % 2 else "CONTRACTION")
+            for day in range(6)
+            for i in range(12)
+        ]
         sequences = build_intrasession_sequences(
             examples, lookback=4, feature_names=("a", "b"), timeframe="1m",
         )
@@ -92,6 +96,10 @@ class SequenceCvTests(unittest.TestCase):
                 self.assertFalse(
                     intervals_overlap(item.sequence_start_at, item.label_available_at, val_start, val_end)
                 )
+            validation_sessions = {item.observed_at.astimezone().date() for item in split.validation}
+            for session in validation_sessions:
+                all_in_session = [item for item in sequences if item.observed_at.astimezone().date() == session]
+                self.assertTrue(all(item in split.validation for item in all_in_session))
 
     def test_rejects_empty_input(self) -> None:
         with self.assertRaises(SequenceError):

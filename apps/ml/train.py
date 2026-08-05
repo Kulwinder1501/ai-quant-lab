@@ -216,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Inclusive forward-return neutral band in bps. Defaults to a band calibrated "
             "for the timeframe (1m: 2, 5m: 5, 15m: 9, 1d: 50), because a single constant "
-            "leaves a 1m target 99% NEUTRAL."
+            "leaves a 1m target 99%% NEUTRAL."
         ),
     )
     parser.add_argument(
@@ -1317,6 +1317,19 @@ def main() -> int:
             trained_at=trained_at,
         )
 
+        # Sticky, one-shot enrollment: a model key that already holds a shadow
+        # enrollment keeps the version it was first enrolled with, so a later
+        # qualifying retrain of the same key does not reset its evidence clock.
+        volatility_shadow_enrolled = (
+            is_volatility
+            and qualifies_for_promotion
+            and repository.enroll_volatility_shadow(
+                label_scheme=request.label_scheme,
+                model_key=model_key,
+                model_version_id=candidate.id,
+            )
+        )
+
         promoted: PersistedModelVersion | None = None
         if args.promote and qualifies_for_promotion:
             validate_candidate_artifact(
@@ -1358,6 +1371,7 @@ def main() -> int:
             "promotionAssessment": assessment,
             "promotedModelVersionId": None if promoted is None else promoted.id,
             "promotedVersion": None if promoted is None else promoted.version,
+            "volatilityShadowEnrolled": volatility_shadow_enrolled,
         }
     )
     return 0

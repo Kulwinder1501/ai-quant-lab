@@ -50,14 +50,20 @@ export interface AuxiliaryPredictionSettlementRepository {
   /**
    * The `horizonBars` completed bars ending at `closeTime`, then the
    * `horizonBars` completed bars strictly after it. Fewer forward bars than
-   * requested means the prediction has not matured.
+   * requested means the prediction has not matured unless `forwardWindowClosed`
+   * proves an intraday session ended before the horizon could complete.
    */
   loadRangeWindows(input: {
     instrumentId: string;
     timeframe: string;
     closeTime: Date;
     horizonBars: number;
-  }): Promise<{ trailing: RangeBar[]; forward: RangeBar[]; forwardCloseTime: Date | null }>;
+  }): Promise<{
+    trailing: RangeBar[];
+    forward: RangeBar[];
+    forwardCloseTime: Date | null;
+    forwardWindowClosed: boolean;
+  }>;
   recordSettlement(outcome: AuxiliarySettlementOutcome): Promise<void>;
   /**
    * Records why a matured prediction could not be graded. Never written as a
@@ -135,6 +141,14 @@ export class SettleAuxiliaryPredictions {
         // An incomplete forward window is simply not ready; anything else is a
         // permanent property of the data and is recorded so it stops being retried.
         if (windows.forward.length < item.horizonBars) {
+          if (windows.forwardWindowClosed) {
+            await this.repository.recordUnsettleable(
+              item.predictionId,
+              "INTRADAY_SESSION_ENDED_BEFORE_HORIZON",
+            );
+            result.unsettleable += 1;
+            continue;
+          }
           result.notYetMatured += 1;
           continue;
         }

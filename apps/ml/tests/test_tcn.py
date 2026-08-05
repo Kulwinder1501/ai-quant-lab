@@ -20,7 +20,8 @@ START = datetime(2026, 3, 2, 3, 45, tzinfo=UTC)
 def make_examples(rows: int = 120) -> list[LabeledExample]:
     examples: list[LabeledExample] = []
     for index in range(rows):
-        observed = START + timedelta(minutes=index)
+        session, minute = divmod(index, 20)
+        observed = START + timedelta(days=session, minutes=minute)
         score = (index % 17) - 8
         label = "EXPANSION" if score > 3 else ("CONTRACTION" if score < -3 else "STABLE")
         examples.append(
@@ -154,6 +155,25 @@ class SequenceReadinessGateTests(unittest.TestCase):
         )
         self.assertEqual(provenance["verdict"], "PASS")
         self.assertEqual(provenance["reportId"], "r1")
+
+    def test_exact_window_cannot_borrow_whole_series_history(self) -> None:
+        from ai_quant_lab_ml.sequence_readiness import assess_training_window
+
+        assessment = assess_training_window(
+            {
+                "barCount": 53_625,
+                "sessionCount": 143,
+                "zeroVolumeFraction": 0.0,
+                "providers": ["fyers-api-v3"],
+                "instrumentSemantics": "ETF_PROXY",
+            },
+            candidate="tcn-1m",
+        )
+        self.assertEqual(assessment["verdict"], "FAIL")
+        self.assertEqual(
+            {finding["code"] for finding in assessment["findings"]},
+            {"INSUFFICIENT_WINDOW_BARS", "INSUFFICIENT_WINDOW_SESSIONS"},
+        )
 
 
 if __name__ == "__main__":

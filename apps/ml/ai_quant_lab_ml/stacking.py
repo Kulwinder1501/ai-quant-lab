@@ -9,6 +9,7 @@ features — never the raw market feature vector.
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -103,6 +104,7 @@ class StackTrainingResult:
     best_base_name: str
     holdout_fold: int
     calibration: Mapping[str, Any]
+    bootstrap: Mapping[str, Any]
     diversity: DiversityReport
     hyperparameters: Mapping[str, Any]
     beats_best_base: bool
@@ -425,6 +427,82 @@ def evaluate_base_on_rows(
     return evaluate_predictions(actual, predicted, alphabet=alphabet)
 
 
+def block_bootstrap_macro_f1_gap(
+    labels: Sequence[AnyLabel],
+    pred_a: Sequence[AnyLabel],
+    pred_b: Sequence[AnyLabel],
+    *,
+    alphabet: LabelAlphabet,
+    block_size: int = 20,
+    resamples: int = 500,
+    random_state: int = 42,
+) -> dict[str, Any]:
+    """Moving-block-bootstrap CI on macro-F1(a) - macro-F1(b) over one ordered holdout.
+
+    A point-estimate "stack beats best base" comparison cannot tell a real
+    improvement from noise on a holdout this small. Row-wise iid resampling
+    would also understate the true uncertainty here: adjacent rows share
+    overlapping lookback windows and label horizons, so they are not
+    independent draws. Resampling contiguous blocks instead preserves that
+    local correlation. ``labels``, ``pred_a`` and ``pred_b`` must already be in
+    the holdout's chronological order.
+    """
+
+    n = len(labels)
+    if n == 0:
+        raise TrainingError("Block bootstrap requires at least one holdout row.")
+    if len(pred_a) != n or len(pred_b) != n:
+        raise TrainingError("labels, pred_a and pred_b must have matching lengths.")
+
+    point_estimate = (
+        evaluate_predictions(labels, pred_a, alphabet=alphabet).macro_f1
+        - evaluate_predictions(labels, pred_b, alphabet=alphabet).macro_f1
+    )
+    effective_block = max(1, min(block_size, n))
+    max_start = n - effective_block
+    n_blocks = math.ceil(n / effective_block)
+    generator = random.Random(random_state)
+
+    deltas: list[float] = []
+    for _ in range(resamples):
+        indices: list[int] = []
+        for _ in range(n_blocks):
+            start = generator.randint(0, max_start) if max_start > 0 else 0
+            indices.extend(range(start, start + effective_block))
+        indices = indices[:n]
+        sample_labels = [labels[i] for i in indices]
+        sample_a = [pred_a[i] for i in indices]
+        sample_b = [pred_b[i] for i in indices]
+        deltas.append(
+            evaluate_predictions(sample_labels, sample_a, alphabet=alphabet).macro_f1
+            - evaluate_predictions(sample_labels, sample_b, alphabet=alphabet).macro_f1
+        )
+
+    ordered = sorted(deltas)
+    lower = ordered[max(0, int(0.025 * (len(ordered) - 1)))]
+    upper = ordered[max(0, int(0.975 * (len(ordered) - 1)))]
+    significant = lower > 0.0
+    return {
+        "method": "MOVING_BLOCK_BOOTSTRAP_V1",
+        "pointEstimate": point_estimate,
+        "blockSize": effective_block,
+        "resamples": resamples,
+        "confidenceLevel": 0.95,
+        "lowerBound": lower,
+        "upperBound": upper,
+        "significant": significant,
+        "reason": (
+            f"95% block-bootstrap CI on the macro-F1 gap is [{lower:.4f}, {upper:.4f}]; "
+            + (
+                "the lower bound clears zero."
+                if significant
+                else "the lower bound does not clear zero, so the point estimate is not "
+                "distinguishable from noise."
+            )
+        ),
+    }
+
+
 def train_oof_stack(
     splits: Sequence[SequenceSplit],
     *,
@@ -467,7 +545,7 @@ def train_oof_stack(
     if not train_rows or not holdout_rows:
         raise TrainingError("Failed to partition OOF rows into train/holdout folds.")
 
-    model, holdout_metrics, _, stack_proba = train_meta_learner(
+    model, holdout_metrics, stack_pred, stack_proba = train_meta_learner(
         train_rows,
         holdout_rows,
         alphabet=alphabet,
@@ -497,7 +575,26 @@ def train_oof_stack(
     )
 
     calib = calibration_report(holdout_rows, stack_proba, alphabet=alphabet)
-    beats_best = holdout_metrics.macro_f1 > best_metrics.macro_f1
+    # holdout_rows is a single fold's validation partition, appended in the
+    # split's own (chronological) order, so it can be block-bootstrapped
+    # directly without re-sorting.
+    best_pred = (
+        [row.tcn_pred for row in holdout_rows]
+        if best_name == BASE_TCN
+        else [row.lag_lgbm_pred for row in holdout_rows]
+    )
+    bootstrap = block_bootstrap_macro_f1_gap(
+        [row.label for row in holdout_rows],
+        stack_pred,
+        best_pred,
+        alphabet=alphabet,
+        random_state=random_state,
+    )
+    # A strict point-estimate comparison cannot tell a real improvement from
+    # noise on a holdout this small; "beats best" now requires the block-
+    # bootstrap CI on the macro-F1 gap to clear zero, not just the point
+    # estimate to be positive.
+    beats_best = bootstrap["significant"]
     beats_trivial = holdout_metrics.macro_f1 > trivial.macro_f1
     # Stage 6: must beat best base; calibration should not worsen vs best base log-loss.
     best_logloss = calib["holdoutLogLoss"][best_name if best_name != BASE_LAG_LGBM else "lagLightgbm"]
@@ -526,6 +623,7 @@ def train_oof_stack(
         best_base_name=best_name,
         holdout_fold=holdout_fold,
         calibration=calib,
+        bootstrap=bootstrap,
         diversity=diversity,
         hyperparameters={
             "metaC": meta_c,
@@ -583,6 +681,7 @@ __all__ = [
     "STACK_ALGORITHM",
     "STACK_CONTRIBUTION_METHOD",
     "StackTrainingResult",
+    "block_bootstrap_macro_f1_gap",
     "build_meta_features",
     "calibration_report",
     "collect_oof_rows",

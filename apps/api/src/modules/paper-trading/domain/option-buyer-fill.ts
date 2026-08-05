@@ -8,7 +8,7 @@ import {
 import { OPTION_TICK_SIZE } from "../../pricing/domain/option-tick.js";
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
 
-const DEFAULT_RISK_FREE_RATE = 0.07;
+import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
 
 
 export interface OptionBuyerFillInput {
@@ -31,6 +31,8 @@ export interface OptionBuyerFillInput {
    * a price threshold, so the caller supplies the contract specification.
    */
   strikeStep: number;
+  /** Optional options entry validation result (11-factor checklist). */
+  validationResult?: { isValid: boolean; reasons: string[] };
 }
 
 export interface OptionBuyerFill {
@@ -51,8 +53,12 @@ export interface OptionBuyerFill {
  * underlying stop and target levels so SL/TP evaluation stays in ₹ premium.
  */
 export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuyerFill {
+  if (input.validationResult && !input.validationResult.isValid) {
+    throw new Error(`Options entry checklist failed: ${input.validationResult.reasons.join(" | ")}`);
+  }
+
   const now = input.now ?? new Date();
-  const rate = input.riskFreeRate ?? DEFAULT_RISK_FREE_RATE;
+  const rate = input.riskFreeRate ?? RISK_FREE_RATE;
   const step = input.strikeStep;
   if (!Number.isFinite(step) || step <= 0) {
     throw new Error("Strike step must be a positive number; read it from instruments.strike_step.");

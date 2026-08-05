@@ -5,6 +5,7 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tooltip } from "../../../components/ui/tooltip";
 import { getResearchJson } from "../../research/api";
 import { MarketContextHistoryChart } from "./market-context-history-chart";
+import { NewsDashboard } from "../../news/components/news-dashboard";
 
 export type InstitutionalFlowStance =
   | "BOTH_ACCUMULATING"
@@ -35,20 +36,6 @@ interface FlowSummary {
   sessionsCovered: number;
 }
 
-interface GiftNiftyStatus {
-  available: boolean;
-  reason: "PROVIDER_NOT_CONFIGURED" | "NO_PRINT_COLLECTED" | null;
-  instrumentId: string;
-  date: string | null;
-  closePrice: number | null;
-  publishedAt: string | null;
-  domesticClose: number | null;
-  impliedGapBps: number | null;
-  configuredSymbol: string | null;
-  history: Array<{ date: string; closePrice: number; domesticClose: number | null; impliedGapBps: number | null; publishedAt: string }>;
-  ageInDays: number | null;
-  isStale: boolean;
-}
 
 interface IndiaVixStatus {
   available: boolean;
@@ -60,7 +47,6 @@ interface IndiaVixStatus {
 
 interface InstitutionalContext {
   flows: FlowSummary;
-  giftNifty: GiftNiftyStatus;
   indiaVix: IndiaVixStatus;
 }
 
@@ -152,7 +138,7 @@ export function InstitutionalContextCards() {
   if (loading) {
     return (
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {["FII / DII Institutional Flows", "GIFT Nifty Offshore"].map((title) => (
+        {["FII / DII Institutional Flows", "Market News"].map((title) => (
           <GlassPanel key={title} className="p-6 border-white/10 bg-slate-900/60">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</span>
             <div className="mt-4 h-24 animate-pulse rounded-xl bg-white/5" />
@@ -171,7 +157,7 @@ export function InstitutionalContextCards() {
     );
   }
 
-  const { flows, giftNifty, indiaVix } = context;
+  const { flows, indiaVix } = context;
   const stance = STANCE_COPY[flows.stance];
 
   return (
@@ -274,104 +260,12 @@ export function InstitutionalContextCards() {
         )}
       </GlassPanel>
 
-      {/* GIFT Nifty Offshore */}
-      <GlassPanel className="flex flex-col p-6 border-white/10 bg-gradient-to-br from-slate-900 via-slate-900 to-indigo-950/20">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">Offshore Derivative</span>
-            <h3 className="mt-1 text-lg font-bold text-white">GIFT Nifty</h3>
-          </div>
-          <span className="rounded bg-white/5 px-2 py-0.5 text-[10px] font-mono text-slate-400">
-            <Tooltip content="Nifty 50 futures traded on NSE International Exchange, GIFT City">NSE IX</Tooltip>
-          </span>
-        </div>
-
-        {giftNifty.available ? (
-          <>
-            <div className="mt-5 flex items-baseline gap-3">
-              <span className="font-mono text-4xl font-extrabold text-indigo-200">
-                {giftNifty.closePrice?.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-              </span>
-              {giftNifty.impliedGapBps !== null && (
-                <span
-                  className={`rounded-full border px-2.5 py-0.5 text-xs font-bold ${
-                    giftNifty.impliedGapBps >= 0
-                      ? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
-                      : "border-rose-500/40 bg-rose-500/20 text-rose-300"
-                  }`}
-                >
-                  {giftNifty.impliedGapBps >= 0 ? "PREMIUM" : "DISCOUNT"} {Math.abs(giftNifty.impliedGapBps).toFixed(1)} bps
-                </span>
-              )}
-            </div>
-            <dl className="mt-4 space-y-2 font-mono text-xs">
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <dt className="text-slate-400">Session:</dt>
-                <dd className="font-bold text-slate-200">{giftNifty.date ? formatSession(giftNifty.date) : "—"}</dd>
-              </div>
-              <div className="flex justify-between border-b border-white/5 pb-1">
-                <dt className="text-slate-400">NIFTY 50 close:</dt>
-                <dd className="font-bold text-cyan-300">
-                  {giftNifty.domesticClose?.toLocaleString("en-IN", { minimumFractionDigits: 2 }) ?? "not settled"}
-                </dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-slate-400">Feed symbol:</dt>
-                <dd className="font-bold text-slate-300">{giftNifty.configuredSymbol ?? "—"}</dd>
-              </div>
-            </dl>
-            <p className="mt-4 border-t border-white/5 pt-3 text-xs leading-relaxed text-slate-400">
-              The offshore premium or discount to the domestic close is the market&apos;s overnight read on where NIFTY
-              opens next.
-            </p>
-          </>
-        ) : (
-          <>
-            <div className="mt-5 rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-4">
-              <div className="flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-slate-500" />
-                <p className="text-sm font-bold text-slate-200">
-                  {giftNifty.reason === "PROVIDER_NOT_CONFIGURED" ? "No feed configured" : "No print collected"}
-                </p>
-              </div>
-              <p className="mt-2 text-xs leading-relaxed text-slate-400">
-                {giftNifty.reason === "PROVIDER_NOT_CONFIGURED" ? (
-                  <>
-                    GIFT Nifty trades on NSE IX, which publishes no free machine-readable feed. Set{" "}
-                    <code className="rounded bg-black/40 px-1 font-mono text-indigo-300">GIFT_NIFTY_YAHOO_SYMBOL</code>{" "}
-                    to a series your data provider actually carries and this card fills in.
-                  </>
-                ) : (
-                  <>
-                    <code className="rounded bg-black/40 px-1 font-mono text-indigo-300">
-                      {giftNifty.configuredSymbol}
-                    </code>{" "}
-                    is configured but resolved no settled quote. Confirm your provider carries that series.
-                  </>
-                )}
-              </p>
-            </div>
-
-            <div className="mt-4 rounded-xl border border-white/5 bg-slate-950/40 p-3">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Why not show NIFTY 50 instead?
-              </span>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-                Public &ldquo;GIFT Nifty live&rdquo; pages display the NIFTY 50 spot index as a proxy. That value is
-                already this database&apos;s NIFTY50 candle series, so filing it as an offshore print would make the
-                implied overnight gap a comparison of the Indian close with itself — a fabricated signal rather than a
-                missing one.
-              </p>
-            </div>
-
-            <p className="mt-auto pt-3 text-[10px] text-slate-500">
-              Absent data is shown as absent. No placeholder price is ever persisted.
-            </p>
-          </>
-        )}
-      </GlassPanel>
+      {/* Market News */}
+      <div className="flex flex-col h-full max-h-[800px] overflow-y-auto rounded-2xl border border-white/10 bg-slate-900/60 shadow-2xl relative px-4 py-2">
+         <NewsDashboard />
       </div>
-      <MarketContextHistoryChart flows={flows.history} indiaVix={indiaVix} giftNifty={giftNifty} />
+      </div>
+      <MarketContextHistoryChart flows={flows.history} indiaVix={indiaVix}  />
     </div>
   );
 }

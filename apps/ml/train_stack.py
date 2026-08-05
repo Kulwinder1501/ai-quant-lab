@@ -30,6 +30,7 @@ from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
 from ai_quant_lab_ml.sequence_readiness import (
     SequenceReadinessError,
     load_latest_sequence_report,
+    measure_training_window,
     require_sequence_candidate_pass,
 )
 from ai_quant_lab_ml.sequences import SequenceError, build_intrasession_sequences, sequence_purged_walk_forward
@@ -152,6 +153,15 @@ def main(argv: list[str] | None = None) -> int:
                             timeframe=AUTHORIZED_TIMEFRAME,
                             candidate=AUTHORIZED_CANDIDATE,
                             as_of=trained_at,
+                        ),
+                        "exactTrainingWindow": measure_training_window(
+                            connection,
+                            symbol=AUTHORIZED_SYMBOL,
+                            timeframe=AUTHORIZED_TIMEFRAME,
+                            candidate=AUTHORIZED_CANDIDATE,
+                            window_start=request.data_window_start,
+                            window_end=request.data_window_end,
+                            data_cutoff_at=request.data_cutoff_at,
                         ),
                     }
                 except (DataReadinessError, SequenceReadinessError) as error:
@@ -341,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                         "reason": result.diversity.reason,
                     },
                     "calibration": dict(result.calibration),
+                    "bootstrap": dict(result.bootstrap),
                     "dataReadiness": data_readiness,
                     "sequenceReadiness": sequence_readiness,
                     "researchAdvances": result.advances,
@@ -359,9 +370,11 @@ def main(argv: list[str] | None = None) -> int:
                 "enrollment": {
                     "eod": False,
                     "reason": (
-                        "Stack beat best base and calibration gate on holdout fold"
+                        "Stack's improvement over best base cleared the block-bootstrap significance "
+                        "test, and cleared trivial/calibration/diversity"
                         if result.advances
-                        else "Stack did not clear Stage 6 acceptance vs best base/calibration/diversity"
+                        else "Stack did not clear Stage 6 acceptance vs best base (block-bootstrap "
+                        "significance)/trivial/calibration/diversity"
                     ),
                 },
             }
@@ -392,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                         **metrics_mapping(result.best_base_holdout_metrics),
                     },
                     "calibration": dict(result.calibration),
+                    "bootstrap": dict(result.bootstrap),
                 },
                 "outerFolds": fold_summaries,
                 "beatsBestBase": result.beats_best_base,

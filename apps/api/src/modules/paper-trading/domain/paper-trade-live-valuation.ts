@@ -98,8 +98,7 @@ export interface ValuePaperTradeInput {
 }
 
 const DEFAULT_MAX_QUOTE_AGE_MS = 40 * 60 * 1000;
-/** Same rate the chain route uses, so a chain-marked IV is comparable to a chain IV. */
-const CHAIN_RISK_FREE_RATE = 0.065;
+import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
 
 function validPositive(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -197,13 +196,13 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
       // The forward the option market itself prices, when the snapshot could supply
       // it; spot only as a last resort, and the bias is then the known one.
       const pricingSpot = observed.impliedForward !== null && timeToExpiry > 0
-        ? effectiveSpotForForward(observed.impliedForward, CHAIN_RISK_FREE_RATE, timeToExpiry)
+        ? effectiveSpotForForward(observed.impliedForward, RISK_FREE_RATE, timeToExpiry)
         : spot;
       const solved = impliedVolatilityFromPremium({
         spot: pricingSpot,
         strike: trade.optionStrike as number,
         timeToExpiryYears: timeToExpiry,
-        riskFreeRate: CHAIN_RISK_FREE_RATE,
+        riskFreeRate: RISK_FREE_RATE,
         optionType: trade.optionType as "CE" | "PE",
         premium: observed.mid,
       });
@@ -214,7 +213,7 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
           spot: pricingSpot,
           strike: trade.optionStrike as number,
           timeToExpiryYears: timeToExpiry,
-          riskFreeRate: CHAIN_RISK_FREE_RATE,
+          riskFreeRate: RISK_FREE_RATE,
           volatility: solved.impliedVolatility,
           optionType: trade.optionType as "CE" | "PE",
         })

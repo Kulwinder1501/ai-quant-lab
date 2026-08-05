@@ -141,6 +141,27 @@ export class FyersTokenService {
     }
   }
 
+  /** Read-only snapshot of the stored credential, for a health check that never mutates it. */
+  async checkCredentialHealth(): Promise<{
+    hasCredential: boolean;
+    refreshTokenExpiresAt: Date | null;
+    lastError: string | null;
+  }> {
+    const result = await this.options.pool.query(
+      "SELECT refresh_token, refresh_token_expires_at, last_error FROM provider_credentials WHERE provider = $1",
+      [FYERS_PROVIDER_ID],
+    );
+    const row = result.rows[0];
+    if (!row?.refresh_token) {
+      return { hasCredential: false, refreshTokenExpiresAt: null, lastError: (row?.last_error as string | null) ?? null };
+    }
+    return {
+      hasCredential: true,
+      refreshTokenExpiresAt: row.refresh_token_expires_at as Date | null,
+      lastError: row.last_error as string | null,
+    };
+  }
+
   private async refresh(refreshToken: string): Promise<{ accessToken: string; expiresAt: Date }> {
     const response = await this.fetch(`${this.baseUrl}/api/v3/validate-refresh-token`, {
       method: "POST",

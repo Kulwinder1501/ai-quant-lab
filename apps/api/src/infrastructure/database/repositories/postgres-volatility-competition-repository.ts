@@ -40,14 +40,16 @@ export class PostgresVolatilityCompetitionRepository implements VolatilityCompet
                                      AS scored_days,
         max((amp.label_available_at AT TIME ZONE 'Asia/Kolkata')::date)::text
                                      AS last_scored_date
-      FROM model_versions mv
+      FROM volatility_shadow_enrollments vse
+      JOIN model_versions mv ON mv.id = vse.model_version_id
       LEFT JOIN volatility_competition_state vcs ON vcs.model_version_id = mv.id
       LEFT JOIN auxiliary_model_predictions amp
         ON amp.model_version_id = mv.id
        AND amp.settled_at IS NOT NULL
        AND amp.realized_label IS NOT NULL
        AND amp.label_available_at >= NOW() - ($1 || ' days')::interval
-      WHERE (mv.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = $2
+      WHERE vse.label_scheme = $2
+        AND mv.stage IN ('CANDIDATE', 'PRODUCTION')
       GROUP BY mv.id, mv.model_key, vcs.role, amp.prediction, amp.realized_label
       ORDER BY mv.model_key
     `, [bounded, VOLATILITY_SCHEME]);

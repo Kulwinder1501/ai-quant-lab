@@ -7,7 +7,7 @@ import { floorLivePremiumToTick } from "../../pricing/domain/option-tick.js";
 import type { CompletedPriceCandle, PaperTradeExitDecision } from "./paper-trade-exit-policy.js";
 import type { PaperTrade } from "./paper-trading.js";
 
-const DEFAULT_RISK_FREE_RATE = 0.07;
+import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
 
 export interface OptionMarkInput {
   trade: PaperTrade;
@@ -64,7 +64,7 @@ export function priceOptionMark(input: OptionMarkInput): OptionMark {
     spot: input.spot,
     strike: input.trade.optionStrike!,
     timeToExpiryYears,
-    riskFreeRate: input.riskFreeRate ?? DEFAULT_RISK_FREE_RATE,
+    riskFreeRate: input.riskFreeRate ?? RISK_FREE_RATE,
     volatility: input.volatility,
     optionType: input.trade.optionType!,
   });

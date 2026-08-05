@@ -7,6 +7,7 @@ import {
 } from "../../pricing/domain/black-scholes-engine.js";
 import type { VolatilityLabel } from "../../model-predictions/domain/volatility-expansion-label.js";
 import type { WeeklyExpirySource } from "../../market-data/domain/weekly-expiry.js";
+import { RISK_FREE_RATE } from "../../pricing/domain/constants.js";
 
 /**
  * Turns a volatility-regime prediction into a costed long-straddle proposal.
@@ -197,7 +198,7 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
       spot: input.underlyingSpot,
       strike,
       timeToExpiryYears,
-      riskFreeRate: input.riskFreeRate ?? 0.065,
+      riskFreeRate: input.riskFreeRate ?? RISK_FREE_RATE,
       volatility: input.impliedVolatility as number,
       optionType,
     });

@@ -4,7 +4,7 @@ import { queryString } from "../../../../interfaces/http/common/query.js";
 
 export function registerNewsRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "listNews" | "ingestNews">,
+  dependencies: Pick<HttpDependencies, "listNews" | "ingestNews" | "checkMacroEvents">,
 ): void {
   app.get("/api/v1/market-news", async (request, response, next) => {
     try {
@@ -20,6 +20,15 @@ export function registerNewsRoutes(
         search,
         limit: limitText ? Number(limitText) : 50,
       });
+      response.status(200).json({ data: result });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/v1/macro-events", async (_request, response, next) => {
+    try {
+      const result = await dependencies.checkMacroEvents.execute();
       response.status(200).json({ data: result });
     } catch (error) {
       next(error);

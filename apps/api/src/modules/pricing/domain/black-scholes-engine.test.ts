@@ -4,13 +4,14 @@ import {
   priceEuropeanOption,
   yearsToExpiry,
 } from "./black-scholes-engine.js";
+import { RISK_FREE_RATE } from "./constants.js";
 
 describe("black-scholes-engine", () => {
   const base = {
     spot: 24000,
     strike: 24000,
     timeToExpiryYears: 7 / 365,
-    riskFreeRate: 0.07,
+    riskFreeRate: RISK_FREE_RATE,
     volatility: 0.12,
   };
 
@@ -53,7 +54,7 @@ describe("black-scholes-engine", () => {
       spot: 105,
       strike: 100,
       timeToExpiryYears: 0,
-      riskFreeRate: 0.07,
+      riskFreeRate: RISK_FREE_RATE,
       volatility: 0.2,
       optionType: "CE",
     });

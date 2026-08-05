@@ -147,7 +147,7 @@ export class PostgresDashboardQueryRepository {
       LEFT JOIN instruments i ON i.id = pt.instrument_id
       LEFT JOIN trade_ideas ti ON ti.id = pt.trade_idea_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
-      WHERE pt.account_id = $1
+      WHERE pt.account_id = $1 AND pt.excluded_from_evidence = false
       ORDER BY pt.opened_at DESC
     `, [accountId]);
 

@@ -28,9 +28,18 @@ from ai_quant_lab_ml.contracts import (
 from ai_quant_lab_ml.data_readiness import DataReadinessError, load_latest_report, require_series_ready
 from ai_quant_lab_ml.features import build_volatility_expansion_examples, feature_schema
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
+from ai_quant_lab_ml.sequence_acceptance import (
+    benchmark_tcn_inference,
+    cost_relevant_precision_report,
+    explanation_sanity_check,
+    fold_improvement_significance,
+    tcn_calibration_report,
+)
+from ai_quant_lab_ml.sequence_leakage import run_sequence_leakage_audit
 from ai_quant_lab_ml.sequence_readiness import (
     SequenceReadinessError,
     load_latest_sequence_report,
+    measure_training_window,
     require_sequence_candidate_pass,
 )
 from ai_quant_lab_ml.sequences import (
@@ -40,7 +49,7 @@ from ai_quant_lab_ml.sequences import (
 )
 from ai_quant_lab_ml.tcn_explain import temporal_occlusion_contributions
 from ai_quant_lab_ml.tcn_model import TCN_ALGORITHM, TcnDependencyError
-from ai_quant_lab_ml.tcn_training import train_lag_lightgbm_baseline, train_tcn_classifier
+from ai_quant_lab_ml.tcn_training import predict_tcn_proba, train_lag_lightgbm_baseline, train_tcn_classifier
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 from train import DEFAULT_ARTIFACT_DIRECTORY, json_output, parse_timestamp, positive_int, strict_unit_interval
 
@@ -73,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unaudited-data",
         action="store_true",
         help="Skip data-readiness and sequence-readiness gates (research only; recorded in the artifact).",
+    )
+    parser.add_argument(
+        "--skip-expensive-checks",
+        action="store_true",
+        help=(
+            "Skip the sequence leakage audit (label shuffle + era holdout, ~3 extra TCN fits) and the "
+            "explanation sanity check, for fast iteration. A run built this way can never set "
+            "researchAdvances=True, since those checks are what that flag certifies."
+        ),
     )
     return parser
 
@@ -173,6 +191,15 @@ def main(argv: list[str] | None = None) -> int:
                             timeframe=AUTHORIZED_TIMEFRAME,
                             candidate=AUTHORIZED_CANDIDATE,
                             as_of=trained_at,
+                        ),
+                        "exactTrainingWindow": measure_training_window(
+                            connection,
+                            symbol=AUTHORIZED_SYMBOL,
+                            timeframe=AUTHORIZED_TIMEFRAME,
+                            candidate=AUTHORIZED_CANDIDATE,
+                            window_start=request.data_window_start,
+                            window_end=request.data_window_end,
+                            data_cutoff_at=request.data_cutoff_at,
                         ),
                     }
                 except (DataReadinessError, SequenceReadinessError) as error:
@@ -284,9 +311,60 @@ def main(argv: list[str] | None = None) -> int:
             mean_tcn = sum(row["tcn"]["macroF1"] for row in fold_rows) / len(fold_rows)
             mean_lgbm = sum(row["lagLightgbm"]["macroF1"] for row in fold_rows) / len(fold_rows)
             mean_trivial = sum(row["trivialMacroF1"] for row in fold_rows) / len(fold_rows)
-            advances = (
+            cheap_advances = (
                 all(row["beatsTrivial"] for row in fold_rows)
                 and mean_tcn > mean_lgbm
+            )
+            fold_variability = fold_improvement_significance(fold_rows)
+
+            final_proba = predict_tcn_proba(
+                final.model, final_split.validation,
+                medians=final.hyperparameters["featureMedians"], alphabet=VOLATILITY_ALPHABET,
+            )
+            calibration = tcn_calibration_report(
+                [str(example.label) for example in final_split.validation],
+                final_proba,
+                alphabet=VOLATILITY_ALPHABET,
+            )
+            cost_report = cost_relevant_precision_report(final.validation_metrics)
+            benchmark = benchmark_tcn_inference(
+                final.model, final_split.validation,
+                medians=final.hyperparameters["featureMedians"], alphabet=VOLATILITY_ALPHABET,
+            )
+
+            # Expensive (retrains the TCN ~3 more times): only worth running once the
+            # cheap per-fold signal already looks promising, mirroring train.py's
+            # leakage audit, which only runs when promotion is actually requested.
+            leakage_audit: dict[str, Any] | None = None
+            explanation_sanity: dict[str, Any] | None = None
+            if cheap_advances and not args.skip_expensive_checks:
+                leakage_audit = run_sequence_leakage_audit(
+                    sequences,
+                    lookback=args.lookback,
+                    channels=args.channels,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    alphabet=VOLATILITY_ALPHABET,
+                    validation_fraction=args.validation_fraction,
+                    random_state=args.random_state,
+                )
+                explanation_sanity = explanation_sanity_check(
+                    final.model,
+                    final_split.validation[0],
+                    medians=final.hyperparameters["featureMedians"],
+                    alphabet=VOLATILITY_ALPHABET,
+                    n_features=len(schema),
+                    channels=args.channels,
+                    random_state=args.random_state,
+                )
+
+            advances = (
+                cheap_advances
+                and fold_variability["significant"]
+                and leakage_audit is not None
+                and leakage_audit["verdict"] == "PASS"
+                and explanation_sanity is not None
+                and explanation_sanity["passes"]
             )
 
             model_key = (
@@ -330,6 +408,13 @@ def main(argv: list[str] | None = None) -> int:
                     "meanTcnMacroF1": mean_tcn,
                     "meanLagLightgbmMacroF1": mean_lgbm,
                     "meanTrivialMacroF1": mean_trivial,
+                    "cheapAdvances": cheap_advances,
+                    "foldVariability": fold_variability,
+                    "calibration": calibration,
+                    "costRelevantPrecision": cost_report,
+                    "inferenceBenchmark": benchmark,
+                    "leakageAudit": leakage_audit,
+                    "explanationSanity": explanation_sanity,
                     "researchAdvances": advances,
                 },
                 "trainingMetrics": metrics_mapping(final.training_metrics),
@@ -337,9 +422,20 @@ def main(argv: list[str] | None = None) -> int:
                 "enrollment": {
                     "eod": False,
                     "reason": (
-                        "TCN beat lag LightGBM and trivial on every fold"
+                        "TCN beat lag LightGBM and trivial on every fold, its improvement exceeded "
+                        "fold-to-fold noise, and it cleared the leakage and explanation sanity checks"
                         if advances
-                        else "TCN did not clear Stage 5 acceptance vs lag baseline/trivial"
+                        else (
+                            "TCN did not clear Stage 5 acceptance vs lag baseline/trivial"
+                            if not cheap_advances
+                            else (
+                                "The leakage audit and explanation sanity check were skipped "
+                                "(--skip-expensive-checks); researchAdvances cannot be set without them"
+                                if args.skip_expensive_checks
+                                else "TCN beat the cheap gates but failed fold-variability, leakage, "
+                                "or the explanation sanity check"
+                            )
+                        )
                     ),
                 },
             }
@@ -358,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
                 "meanTcnMacroF1": mean_tcn,
                 "meanLagLightgbmMacroF1": mean_lgbm,
                 "meanTrivialMacroF1": mean_trivial,
+                "foldVariability": fold_variability,
+                "calibration": calibration,
+                "costRelevantPrecision": cost_report,
+                "inferenceBenchmark": benchmark,
+                "leakageAudit": leakage_audit,
+                "explanationSanity": explanation_sanity,
                 "researchAdvances": advances,
                 "enrollment": metadata["enrollment"],
             })

@@ -76,20 +76,39 @@ implements AuxiliaryPredictionSettlementRepository {
     timeframe: string;
     closeTime: Date;
     horizonBars: number;
-  }): Promise<{ trailing: RangeBar[]; forward: RangeBar[]; forwardCloseTime: Date | null }> {
-    const [trailing, forward] = await Promise.all([
+  }): Promise<{
+    trailing: RangeBar[];
+    forward: RangeBar[];
+    forwardCloseTime: Date | null;
+    forwardWindowClosed: boolean;
+  }> {
+    const intraday = /^\d+(?:m|h)$/i.test(input.timeframe);
+    const [trailing, forward, laterSession] = await Promise.all([
       this.database.query(`
         SELECT high, low FROM candles
         WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE AND close_time <= $3
+          AND ($5 = FALSE OR (close_time AT TIME ZONE 'Asia/Kolkata')::date
+            = ($3 AT TIME ZONE 'Asia/Kolkata')::date)
         ORDER BY close_time DESC
         LIMIT $4
-      `, [input.instrumentId, input.timeframe, input.closeTime, input.horizonBars]),
+      `, [input.instrumentId, input.timeframe, input.closeTime, input.horizonBars, intraday]),
       this.database.query(`
         SELECT high, low, close_time FROM candles
         WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE AND close_time > $3
+          AND ($5 = FALSE OR (close_time AT TIME ZONE 'Asia/Kolkata')::date
+            = ($3 AT TIME ZONE 'Asia/Kolkata')::date)
         ORDER BY close_time ASC
         LIMIT $4
-      `, [input.instrumentId, input.timeframe, input.closeTime, input.horizonBars]),
+      `, [input.instrumentId, input.timeframe, input.closeTime, input.horizonBars, intraday]),
+      this.database.query(`
+        SELECT EXISTS (
+          SELECT 1 FROM candles
+          WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
+            AND close_time > $3
+            AND (close_time AT TIME ZONE 'Asia/Kolkata')::date
+              > ($3 AT TIME ZONE 'Asia/Kolkata')::date
+        ) AS exists
+      `, [input.instrumentId, input.timeframe, input.closeTime]),
     ]);
 
     const toBar = (row: Record<string, unknown>): RangeBar => ({
@@ -107,6 +126,9 @@ implements AuxiliaryPredictionSettlementRepository {
       forwardCloseTime: forwardRows.length === input.horizonBars
         ? (forwardRows[forwardRows.length - 1].close_time as Date)
         : null,
+      forwardWindowClosed: intraday
+        && forwardRows.length < input.horizonBars
+        && Boolean(laterSession.rows[0]?.exists),
     };
   }
 

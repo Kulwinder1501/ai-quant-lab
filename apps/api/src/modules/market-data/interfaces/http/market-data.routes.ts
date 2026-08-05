@@ -20,11 +20,11 @@ import {
 } from "../../../pricing/domain/implied-volatility.js";
 
 /** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
-const RISK_FREE_RATE = 0.065;
+import { RISK_FREE_RATE } from "../../../pricing/domain/constants.js";
 
 export function registerMarketDataRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "dashboardRepository" | "aiAutonomousAgent" | "getInstitutionalContext" | "optionChainRepository">,
+  dependencies: Pick<HttpDependencies, "dashboardRepository" | "aiAutonomousAgent" | "getInstitutionalContext" | "optionChainRepository" | "fyersLiveStreamer">,
 ): void {
   app.get("/api/v1/candles", async (request, response, next) => {
     try {
@@ -436,6 +436,68 @@ export function registerMarketDataRoutes(
             (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
           ),
         },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/v1/option-chain/stream", async (request, response, next) => {
+    try {
+      if (!dependencies.fyersLiveStreamer) {
+        response.status(503).json({ error: "Live streaming is not configured." });
+        return;
+      }
+      const underlyingSymbol = (queryString(request, "underlying") || "NIFTY50").toUpperCase();
+      
+      const snapshot = await dependencies.optionChainRepository.latestSnapshot({
+        underlyingSymbol,
+      });
+
+      if (!snapshot || snapshot.quotes.length === 0) {
+        response.status(404).json({ error: "No snapshot available to stream." });
+        return;
+      }
+
+      // Collect symbols to subscribe to (strike calls and puts) + underlying spot if it has a symbol
+      const symbolsToSubscribe = new Set<string>();
+      for (const quote of snapshot.quotes) {
+        if (quote.providerSymbol) {
+          symbolsToSubscribe.add(quote.providerSymbol);
+        }
+      }
+      
+      // Underlying is usually available via Fyers symbol like NSE:NIFTY50-INDEX
+      const fyersUnderlyingSymbol = snapshot.provider === "fyers-api-v3" && snapshot.quotes[0]?.providerSymbol 
+          ? snapshot.quotes[0].providerSymbol.split(":")[0] + ":" + underlyingSymbol + "-INDEX"
+          : null;
+      if (fyersUnderlyingSymbol) symbolsToSubscribe.add(fyersUnderlyingSymbol);
+
+      const symbolsArray = Array.from(symbolsToSubscribe);
+
+      response.setHeader("Content-Type", "text/event-stream");
+      response.setHeader("Cache-Control", "no-cache");
+      response.setHeader("Connection", "keep-alive");
+      response.flushHeaders();
+
+      // Ensure we are connected and subscribed
+      dependencies.fyersLiveStreamer.subscribe(symbolsArray);
+
+      const tickListener = (tick: any) => {
+        // Only send ticks for the symbols we care about
+        if (symbolsToSubscribe.has(tick.symbol)) {
+          response.write(`data: ${JSON.stringify(tick)}\n\n`);
+        }
+      };
+
+      dependencies.fyersLiveStreamer.on("tick", tickListener);
+
+      request.on("close", () => {
+        if (dependencies.fyersLiveStreamer) {
+          dependencies.fyersLiveStreamer.off("tick", tickListener);
+          // If we want to be clean, we can unsubscribe, but other clients might still need them.
+          // For simplicity, we can just leave it subscribed or implement a reference counter in FyersLiveStreamer.
+        }
       });
     } catch (error) {
       next(error);

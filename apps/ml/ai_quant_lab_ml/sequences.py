@@ -159,6 +159,20 @@ def intervals_overlap(start_a: datetime, end_a: datetime, start_b: datetime, end
     return start_a <= end_b and start_b <= end_a
 
 
+def _group_into_ist_sessions(sequences: Sequence[SequenceExample]) -> list[list[SequenceExample]]:
+    """Order sequences chronologically and group them by IST session (trading day)."""
+
+    ordered = sorted(sequences, key=lambda s: (s.observed_at, s.label_available_at, s.candle_id))
+    sessions: list[list[SequenceExample]] = []
+    for item in ordered:
+        key = _ist_session_key(item.observed_at)
+        if not sessions or _ist_session_key(sessions[-1][0].observed_at) != key:
+            sessions.append([item])
+        else:
+            sessions[-1].append(item)
+    return sessions
+
+
 def sequence_purged_walk_forward(
     sequences: Sequence[SequenceExample],
     *,
@@ -180,23 +194,27 @@ def sequence_purged_walk_forward(
     if not sequences:
         raise SequenceError("At least one sequence example is required.")
 
-    ordered = sorted(sequences, key=lambda s: (s.observed_at, s.label_available_at, s.candle_id))
-    total_validation = max(1, math.ceil(len(ordered) * validation_fraction))
-    if total_validation < folds:
-        raise SequenceError("Not enough validation sequences to populate the requested folds.")
+    sessions = _group_into_ist_sessions(sequences)
+    if len(sessions) <= folds:
+        raise SequenceError(
+            f"Need at least {folds + 1} complete IST sessions for {folds} session-grouped folds."
+        )
 
-    validation_start = len(ordered) - total_validation
-    fold_size = total_validation // folds
-    remainder = total_validation % folds
+    total_validation_sessions = max(folds, math.ceil(len(sessions) * validation_fraction))
+    total_validation_sessions = min(total_validation_sessions, len(sessions) - 1)
+    validation_start_session = len(sessions) - total_validation_sessions
+    fold_size = total_validation_sessions // folds
+    remainder = total_validation_sessions % folds
     splits: list[SequenceSplit] = []
-    cursor = validation_start
+    session_cursor = validation_start_session
 
     for fold_idx in range(folds):
-        size = fold_size + (1 if fold_idx < remainder else 0)
-        validation = tuple(ordered[cursor : cursor + size])
+        session_count = fold_size + (1 if fold_idx < remainder else 0)
+        validation_sessions = sessions[session_cursor : session_cursor + session_count]
+        validation = tuple(item for session in validation_sessions for item in session)
         val_start = min(item.sequence_start_at for item in validation)
         val_end = max(item.label_available_at for item in validation)
-        train_pool = ordered[:cursor]
+        train_pool = [item for session in sessions[:session_cursor] for item in session]
         train = tuple(
             item
             for item in train_pool
@@ -208,9 +226,57 @@ def sequence_purged_walk_forward(
         if not validation:
             raise SequenceError(f"Fold {fold_idx + 1} has an empty validation set.")
         splits.append(SequenceSplit(train=train, validation=validation, purge_count=purge_count))
-        cursor += size
+        session_cursor += session_count
 
     return splits
+
+
+def sequence_era_holdout_split(
+    sequences: Sequence[SequenceExample],
+    *,
+    train_fraction: float = 0.5,
+    holdout_fraction: float = 0.2,
+) -> SequenceSplit:
+    """Train on the earliest era, score a disjoint, much later one.
+
+    Unlike ``sequence_purged_walk_forward``, the middle era is dropped entirely
+    rather than trained on -- the point is to measure whether a score survives a
+    large temporal gap, not merely the adjacent-fold purge a walk-forward split
+    already exercises.
+    """
+
+    if not math.isfinite(train_fraction) or not 0 < train_fraction < 1:
+        raise SequenceError("train_fraction must be strictly between zero and one.")
+    if not math.isfinite(holdout_fraction) or not 0 < holdout_fraction < 1:
+        raise SequenceError("holdout_fraction must be strictly between zero and one.")
+    if train_fraction + holdout_fraction >= 1:
+        raise SequenceError("train_fraction and holdout_fraction must leave a gap between them.")
+    if not sequences:
+        raise SequenceError("At least one sequence example is required.")
+
+    sessions = _group_into_ist_sessions(sequences)
+    train_end_session = int(len(sessions) * train_fraction)
+    holdout_start_session = len(sessions) - max(1, int(len(sessions) * holdout_fraction))
+    if train_end_session <= 0 or holdout_start_session <= train_end_session:
+        raise SequenceError(
+            f"Need enough IST sessions ({len(sessions)} available) to leave a gap between "
+            "the training era and a disjoint, later holdout era."
+        )
+
+    train_pool = [item for session in sessions[:train_end_session] for item in session]
+    validation = tuple(item for session in sessions[holdout_start_session:] for item in session)
+    if not validation:
+        raise SequenceError("Era holdout produced an empty validation set.")
+    val_start = min(item.sequence_start_at for item in validation)
+    val_end = max(item.label_available_at for item in validation)
+    train = tuple(
+        item
+        for item in train_pool
+        if not intervals_overlap(item.sequence_start_at, item.label_available_at, val_start, val_end)
+    )
+    if not train:
+        raise SequenceError("Era holdout produced an empty training set after purge.")
+    return SequenceSplit(train=train, validation=validation, purge_count=len(train_pool) - len(train))
 
 
 def flatten_lag_features(sequence: SequenceExample) -> dict[str, float]:

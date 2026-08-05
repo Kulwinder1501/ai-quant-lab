@@ -163,13 +163,21 @@ export function NewsDashboard() {
 
   return (
     <>
-      <PageHeader connectionLabel={connectionLabel}
-      description="Live financial RSS feed ingestion with quantitative lexicon scoring and autonomous agent emergency circuit breakers."
-      eyebrow="REAL-TIME MACRO INTELLIGENCE"
-      title="Market News & Sentiment Engine"
-      unavailable={state === "unavailable"} />
-      <div className="mt-10">
-      <section className="mt-6">
+      <div className="flex flex-col mb-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <span className="text-xs font-bold uppercase tracking-wider text-amber-500">
+              Real-Time Macro Intelligence
+            </span>
+            <h3 className="mt-1 text-lg font-bold text-white">Market News & Sentiment Engine</h3>
+          </div>
+          <span className="rounded bg-white/5 px-2 py-0.5 text-[10px] font-mono text-slate-400 whitespace-nowrap">
+            {connectionLabel}
+          </span>
+        </div>
+      </div>
+      <div>
+      <section>
         {state === "ready" || state === "empty" ? (
           <div className="space-y-8">
             {/* Macro Sentiment Gauge & Circuit Breaker Banner */}
@@ -270,7 +278,7 @@ export function NewsDashboard() {
             {/* Article Grid or Empty State Panel */}
             {articles.length > 0 ? (
               <Reveal delayMs={100}>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                <div className="grid grid-cols-1 gap-5">
                   {articles.map((art) => (
                     <NewsCard key={art.id} art={art} />
                   ))}

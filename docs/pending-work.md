@@ -137,6 +137,36 @@ This resolves itself with time and only with time. Do not try to reconstruct it.
 Factor 11 (earnings, policy dates, expiry-week effects) has no data behind it at all. A
 position can be opened straight into an earnings print with nothing objecting.
 
+### 2.5 A BANKBEES/NIFTYBEES 5m TCN window must start no earlier than 2020-01-01
+
+Measured **2026-08-05**, after backfilling NIFTYBEES 5m and BANKBEES 1m/5m from Fyers back
+to 2019-01-01 (previously NIFTYBEES 5m stopped at 2023-01-02 and BANKBEES had zero rows).
+
+The `tcn-5m` exact-window gate (`SEQUENCE_WINDOW_GATES` in `sequence_readiness.py`) requires
+a zero-volume fraction ≤ 1%. BANKBEES 5m fails that check if the window reaches back to
+2019 — that year alone is **20.0%** zero-volume (3,656 of 18,280 bars), while every year
+from 2020 onward is ≤ 0.43% and usually ~0.00%. BANKBEES was thinly traded in its first year
+as an ETF and has been reliably liquid every year since; this is not a collection defect and
+not something more backfilling fixes.
+
+**The fix is the training window, not the data or the gate**: start no earlier than
+2020-01-01. That still leaves ~122,237 bars across ~1,600 sessions for BANKBEES 5m —
+comfortably past the 100k-bar/250-session floor — at a zero-volume fraction of ~0.07%.
+
+Depth after the backfill (all four now clear the `tcn-1m`/`tcn-5m` bar and session floors;
+only the pre-2020 slice of BANKBEES 5m fails zero-volume):
+
+| series | bars | sessions | range |
+|---|---|---|---|
+| NIFTYBEES 1m | 331,516 | 888 | 2023-01-02 → 2026-08-03 |
+| NIFTYBEES 5m | 140,524 | 1,882 | 2019-01-01 → 2026-08-04 |
+| BANKBEES 1m | 331,888 | 889 | 2023-01-02 → 2026-08-04 |
+| BANKBEES 5m | 140,517 | 1,882 | 2019-01-01 → 2026-08-04 (use `--from 2020-01-01`) |
+
+No BANKBEES training pipeline exists yet — `train_tcn.py`/`train_stack.py` still hardcode
+`AUTHORIZED_SYMBOL = "NIFTYBEES"`. This is a note for whoever builds that track, not a
+change made to either file.
+
 ---
 
 ## 3. Security — the user's actions, not the agent's

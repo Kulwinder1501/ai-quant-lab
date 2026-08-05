@@ -96,23 +96,7 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def write_model_artifact(
-    path: str | Path,
-    *,
-    model: Any,
-    metadata: Mapping[str, Any],
-) -> WrittenModelArtifact:
-    """Atomically write a local model artifact and return its file checksum.
-
-    Metadata lives inside the checksummed payload so the feature schema,
-    training configuration, and metrics cannot silently drift from the model.
-    The checksum detects accidental damage; as with all pickle files, callers
-    must load only artifacts from a trusted local source.
-    """
-
-    destination = Path(path)
-    if not destination.name:
-        raise ArtifactError("An artifact file path is required.")
+def _serialize_artifact_envelope(*, model: Any, metadata: Mapping[str, Any]) -> bytes:
     try:
         payload = pickle.dumps(
             {
@@ -131,9 +115,43 @@ def write_model_artifact(
         "payloadSha256": payload_checksum,
     }
     try:
-        serialized_envelope = pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
     except (pickle.PickleError, TypeError, AttributeError) as error:  # pragma: no cover - payload is already pickled
         raise ArtifactError("The artifact envelope could not be serialized.") from error
+
+
+def compute_artifact_checksum(*, model: Any, metadata: Mapping[str, Any]) -> str:
+    """Return the SHA-256 checksum ``write_model_artifact`` would record, without writing.
+
+    Pickling the same model/metadata twice (once here, once inside
+    ``write_model_artifact``) is deterministic, so callers can use this to name a
+    destination path *before* writing -- e.g. a content-addressed filename that
+    cannot collide across two different underlying artifacts the way a fixed
+    filename can.
+    """
+
+    return sha256_bytes(_serialize_artifact_envelope(model=model, metadata=metadata))
+
+
+def write_model_artifact(
+    path: str | Path,
+    *,
+    model: Any,
+    metadata: Mapping[str, Any],
+) -> WrittenModelArtifact:
+    """Atomically write a local model artifact and return its file checksum.
+
+    Metadata lives inside the checksummed payload so the feature schema,
+    training configuration, and metrics cannot silently drift from the model.
+    The checksum detects accidental damage; as with all pickle files, callers
+    must load only artifacts from a trusted local source.
+    """
+
+    destination = Path(path)
+    if not destination.name:
+        raise ArtifactError("An artifact file path is required.")
+
+    serialized_envelope = _serialize_artifact_envelope(model=model, metadata=metadata)
 
     # Persist the hash of the bytes on disk.  That is the checksum recorded on
     # model_versions and therefore catches any file-level modification.
@@ -210,6 +228,7 @@ __all__ = [
     "ArtifactIntegrityError",
     "LoadedModelArtifact",
     "WrittenModelArtifact",
+    "compute_artifact_checksum",
     "load_model_artifact",
     "sha256_bytes",
     "write_model_artifact",

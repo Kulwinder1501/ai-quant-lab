@@ -104,6 +104,8 @@ export interface OpenPaperTradeInput {
   sideOverride?: TradeSide;
   /** When set, persists first-class option contract columns for live repricing. */
   optionContract?: OptionContractSpec;
+  /** Result of the strict 11-factor options entry validation checklist. */
+  optionsValidationResult?: Record<string, unknown>;
 }
 
 export interface ClosePaperTradeInput {

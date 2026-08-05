@@ -9,6 +9,7 @@ import type { PostgresAiJournalRepository } from "../../../infrastructure/databa
 import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
+import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
 
 export interface AiBrainThought {
   id: string;
@@ -155,6 +156,7 @@ export class AiAutonomousAgent {
     candleRepo: CandleRepository,
     private readonly newsRepo: NewsRepository,
     private readonly aiJournalRepo: PostgresAiJournalRepository,
+    private readonly checkMacroEvents?: CheckMacroEventsService,
   ) {
     this.evaluateTrades = new EvaluateOpenPaperTrades(
       paperTradeRepo,
@@ -301,6 +303,14 @@ export class AiAutonomousAgent {
           ? `POSITIVE (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`
           : `NEUTRAL (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`;
 
+    let hasMacroEvent = false;
+    let macroEventNames: string[] = [];
+    if (this.checkMacroEvents) {
+      const macroRes = await this.checkMacroEvents.execute();
+      hasMacroEvent = macroRes.hasMacroEvent;
+      macroEventNames = macroRes.events;
+    }
+
     // Institutional Data
     //
     // Reads the most recent *published* print rather than today's row. Flows for
@@ -426,7 +436,10 @@ export class AiAutonomousAgent {
     }
 
     // EMERGENCY CIRCUIT BREAKER RULE 1 & News sentiment logic
-    if (newsSentiment <= -0.5) {
+    if (hasMacroEvent) {
+      confidence -= 50;
+      reasoning.push(`🚨 CIRCUIT BREAKER: Major macro event detected today (${macroEventNames.join(", ")}). Trading frozen to avoid volatility crush.`);
+    } else if (newsSentiment <= -0.5) {
       confidence -= 40;
       reasoning.push(`🚨 CIRCUIT BREAKER RULE 1: Heavy negative news sentiment (${newsSentiment.toFixed(2)}). Freezing new long trade proposals.`);
     } else if (newsSentiment > 0.2) {

@@ -1369,6 +1369,40 @@ class PostgresMlRepository:
                     raise RuntimeError("Creating the candidate model did not return a row.")
                 return _to_model_version(inserted)
 
+    def enroll_volatility_shadow(
+        self,
+        *,
+        label_scheme: str,
+        model_key: str,
+        model_version_id: str,
+    ) -> bool:
+        """Seed stable shadow-competition membership for a model key, once.
+
+        Enrollment is sticky by design: a model key already enrolled for this label
+        scheme keeps evaluating the version it was first enrolled with, even once a
+        later retrain of the same key produces a newer, qualifying candidate.
+        Swapping the enrolled version automatically would reset the live evidence
+        clock the shadow competition depends on -- exactly the bug this table
+        exists to prevent. A model key with no row yet is free to enroll its first
+        qualifying version. Returns whether this call inserted a new row.
+        """
+
+        normalized_label_scheme = _require_non_blank(label_scheme, "Label scheme")
+        normalized_model_key = _require_non_blank(model_key, "Model key")
+        normalized_model_version_id = _require_non_blank(model_version_id, "Model version id")
+
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO volatility_shadow_enrollments (label_scheme, model_key, model_version_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (label_scheme, model_key) DO NOTHING
+                RETURNING model_version_id
+                """,
+                (normalized_label_scheme, normalized_model_key, normalized_model_version_id),
+            )
+            return cursor.fetchone() is not None
+
     def get_production_model(self, model_key: str) -> PersistedModelVersion | None:
         """Resolve the sole production version for a model key, if one is promoted."""
 

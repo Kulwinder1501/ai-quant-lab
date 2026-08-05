@@ -411,6 +411,127 @@ export function registerPaperTradingRoutes(
     }
   });
 
+  app.post("/api/v1/paper-trades/open-manual-option", async (request, response) => {
+    try {
+      const {
+        accountId,
+        underlyingSymbol,
+        optionType,
+        strike,
+        expiryDate,
+        fillPrice,
+        quantity,
+        lots,
+        impliedVolatility,
+        notes,
+      } = request.body || {};
+
+      if (!accountId || !underlyingSymbol || !optionType || !strike || !expiryDate || fillPrice === undefined) {
+        response.status(400).json({ error: "accountId, underlyingSymbol, optionType, strike, expiryDate, and fillPrice are required." });
+        return;
+      }
+
+      const instrumentResult = await dependencies.database.query(`
+        SELECT id, symbol, lot_size FROM instruments WHERE symbol = $1 AND is_active = TRUE LIMIT 1
+      `, [underlyingSymbol]);
+      const instrument = instrumentResult.rows[0] as { id: string; symbol: string; lot_size: number } | undefined;
+      
+      if (!instrument) {
+        response.status(404).json({ error: `Instrument ${underlyingSymbol} not found.` });
+        return;
+      }
+
+      const lotSize = Number(instrument.lot_size);
+      const resolvedQuantity = typeof lots === "number" && lots > 0
+        ? lotsToQuantity(Math.floor(lots), lotSize)
+        : quantity;
+      
+      if (typeof resolvedQuantity !== "number") {
+        response.status(400).json({ error: "quantity or lots is required." });
+        return;
+      }
+
+      // Synthesize a trade idea for this manual entry
+      const ideaResult = await dependencies.database.query(`
+        INSERT INTO trade_ideas (
+          instrument_id,
+          strategy_version_id,
+          source_candle_id,
+          side,
+          status,
+          entry_price,
+          stop_loss,
+          target_price,
+          risk_reward,
+          confidence,
+          reasoning,
+          evidence,
+          expires_at
+        ) VALUES (
+          $1, NULL, NULL, $2, 'PROPOSED', $3, $4, $5, 0, 1.0, '{"summary":"Manual options chain trade"}', '[]', NOW() + INTERVAL '1 day'
+        ) RETURNING id
+      `, [
+        instrument.id,
+        optionType === "CE" ? "LONG" : "SHORT", // Direction mapping for options
+        fillPrice,
+        fillPrice * 0.5, // Dummy stop loss in underlying terms (not used since we override)
+        fillPrice * 2.0, // Dummy target in underlying terms
+      ]);
+      const tradeIdeaId = ideaResult.rows[0]?.id;
+
+      // Now prepare the options contract info
+      const expiry = resolveOptionExpiryInstant(expiryDate);
+      if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
+        response.status(422).json({ error: "Valid future expiryDate is required." });
+        return;
+      }
+
+      let iv = typeof impliedVolatility === "number" ? impliedVolatility : 0.15;
+      if (iv > 1) iv /= 100;
+
+      const optionContract = {
+        optionStrike: Number(strike),
+        optionExpiry: expiry,
+        optionType: optionType as "CE" | "PE",
+        underlyingSymbol: instrument.symbol,
+        entryIv: iv,
+      };
+
+      const feeMeta = {
+        entry: calculateEntryFees(Number(fillPrice), resolvedQuantity),
+        option: {
+          optionType,
+          strike: Number(strike),
+          impliedVolatility: iv,
+          expiryDate: expiry.toISOString(),
+          underlyingEntry: Number(strike), // Assuming ATM for margin
+        },
+      };
+
+      const trade = await dependencies.openPaperTrade.execute({
+        accountId,
+        tradeIdeaId,
+        fillPrice: Number(fillPrice),
+        quantity: resolvedQuantity,
+        openedAt: new Date(),
+        entryFees: feeMeta && typeof (feeMeta.entry as { total?: number })?.total === "number"
+          ? (feeMeta.entry as { total: number }).total
+          : undefined,
+        entrySlippage: 0,
+        notes: notes || "Manual option trade from chain",
+        orderType: "MARKET",
+        sideOverride: "LONG", // Buying options is always LONG
+        feeBreakdown: feeMeta,
+        applyBrokerageFees: !feeMeta,
+        optionContract,
+      });
+
+      response.status(201).json({ data: trade });
+    } catch (error: any) {
+      response.status(400).json({ error: error.message || "Failed to open manual paper trade" });
+    }
+  });
+
   app.post("/api/v1/paper-trades/evaluate", async (request, response) => {
     try {
       const { accountId } = request.body || {};
