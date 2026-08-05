@@ -435,11 +435,27 @@ export class AiAutonomousAgent {
       reasoning.push(`Detected ${latestPattern.code} (${latestPattern.direction}) with ${(latestPattern.confidence * 100).toFixed(0)}% algorithmic certainty.`);
     }
 
-    // EMERGENCY CIRCUIT BREAKER RULE 1 & News sentiment logic
+    // Macro-event caution.
+    //
+    // This was a -50 circuit breaker described as freezing trading. Measured against the
+    // stored newswire on 2026-08-05, its keyword match fires on 7 of 9 days (78%); even
+    // tightened to unambiguous phrases like "monetary policy" and "federal reserve" and
+    // requiring five corroborating articles it still fires on 4 of 9. That is not an event
+    // filter -- financial media discusses monetary policy continuously, so the detector
+    // mostly reports that a newswire exists. A -50 gate on four days in five does not avoid
+    // volatility crush, it suppresses idea generation.
+    //
+    // So it is a caution, sized like the other sentiment terms, and no longer short-circuits
+    // them: the `else if` chain meant a macro day discarded the sentiment reading entirely.
+    // A real freeze needs a calendar of *scheduled* events (earnings, policy dates), which
+    // this project does not have -- see docs/pending-work.md 2.4. Nine days is a small
+    // sample; the direction is not in doubt but the exact rate will move.
     if (hasMacroEvent) {
-      confidence -= 50;
-      reasoning.push(`🚨 CIRCUIT BREAKER: Major macro event detected today (${macroEventNames.join(", ")}). Trading frozen to avoid volatility crush.`);
-    } else if (newsSentiment <= -0.5) {
+      confidence -= 10;
+      reasoning.push(`Macro-event caution: recent coverage mentions ${macroEventNames.slice(0, 3).join(", ")}. Headline-derived, not a scheduled-event calendar, so treated as context rather than a block.`);
+    }
+
+    if (newsSentiment <= -0.5) {
       confidence -= 40;
       reasoning.push(`🚨 CIRCUIT BREAKER RULE 1: Heavy negative news sentiment (${newsSentiment.toFixed(2)}). Freezing new long trade proposals.`);
     } else if (newsSentiment > 0.2) {

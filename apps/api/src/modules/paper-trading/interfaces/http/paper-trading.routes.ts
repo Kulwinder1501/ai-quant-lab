@@ -17,6 +17,8 @@ import {
   resolveOptionExpiryInstant,
 } from "../../domain/option-buyer-fill.js";
 import { resolveListedExpiry } from "../../../market-data/domain/option-expiry-calendar.js";
+import { solveContractGreeksFromChain } from "../../../market-data/domain/chain-greeks.js";
+import { validateOptionsEntry } from "../../../strategy-engine/domain/options-entry-validator.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
   hasAnyOptionContractField,
@@ -71,6 +73,43 @@ async function loadLivePrices(symbols: readonly string[]): Promise<Record<string
     }
   }
   return livePrices;
+}
+
+
+/**
+ * The freshest observed chain quote for a trade's exact contract, or null.
+ *
+ * Shared by the summary and close routes deliberately. They used to differ: the summary
+ * marked at the observed mid while the close fell back to the model, so the screen showed
+ * one price and the account booked another. On a live BANKNIFTY 57700 CE the model mark
+ * and the chain mid differed by 179 points -- reporting +Rs 2,032 on a position that was
+ * down Rs 651 -- so an exit taken from the wrong one is a wrong realized P&L, not a
+ * display nit.
+ *
+ * Returns null rather than throwing: a chain lookup failure must never cost a position
+ * its model mark, which is the difference between a stale number and an unclosable trade.
+ */
+async function observedChainQuoteFor(
+  optionChainRepository: HttpDependencies["optionChainRepository"],
+  trade: { underlyingSymbol?: string | null; optionExpiry?: Date | null; optionStrike?: number | null; optionType?: string | null },
+): Promise<Awaited<ReturnType<HttpDependencies["optionChainRepository"]["latestContractQuote"]>>> {
+  if (
+    !trade.underlyingSymbol || !(trade.optionExpiry instanceof Date)
+    || typeof trade.optionStrike !== "number"
+    || (trade.optionType !== "CE" && trade.optionType !== "PE")
+  ) {
+    return null;
+  }
+  try {
+    return await optionChainRepository.latestContractQuote({
+      underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
+      expiryDate: trade.optionExpiry,
+      strikePrice: trade.optionStrike,
+      optionType: trade.optionType,
+    });
+  } catch {
+    return null;
+  }
 }
 
 export function registerPaperTradingRoutes(
@@ -173,24 +212,10 @@ export function registerPaperTradingRoutes(
       // contract before valuing. Absent for most positions -- collection covers a
       // bounded strike window on a few underlyings -- and the model then applies.
       const valuations = new Map(await Promise.all(currentOpenTrades.map(async (trade) => {
-        let observedQuote = null;
-        if (
-          trade.underlyingSymbol && trade.optionExpiry instanceof Date
-          && typeof trade.optionStrike === "number"
-          && (trade.optionType === "CE" || trade.optionType === "PE")
-        ) {
-          try {
-            observedQuote = await dependencies.optionChainRepository.latestContractQuote({
-              underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
-              expiryDate: trade.optionExpiry,
-              strikePrice: trade.optionStrike,
-              optionType: trade.optionType,
-            });
-          } catch {
-            // A chain lookup failure must not cost the position its model mark.
-            observedQuote = null;
-          }
-        }
+        const observedQuote = await observedChainQuoteFor(
+          dependencies.optionChainRepository,
+          trade,
+        );
         return [
           trade.id,
           valuePaperTrade({ trade, livePrices, asOf, currentVolatility, observedQuote }),
@@ -242,7 +267,7 @@ export function registerPaperTradingRoutes(
 
       const ideaResult = await dependencies.database.query(`
         SELECT ti.id, ti.side, ti.entry_price, ti.stop_loss, ti.target_price,
-               ti.instrument_id, i.lot_size, i.symbol, i.strike_step
+               ti.instrument_id, ti.confidence, ti.reasoning, i.lot_size, i.symbol, i.strike_step
         FROM trade_ideas ti
         INNER JOIN instruments i ON i.id = ti.instrument_id
         WHERE ti.id = $1
@@ -257,6 +282,8 @@ export function registerPaperTradingRoutes(
         lot_size: number;
         symbol: string;
         strike_step: string | null;
+        confidence: string | number | null;
+        reasoning: unknown;
       } | undefined;
       if (!idea) {
         response.status(404).json({ error: "Trade idea not found." });
@@ -277,6 +304,9 @@ export function registerPaperTradingRoutes(
       let targetOverride: number | undefined;
       let sideOverride: TradeSide | undefined;
       let feeMeta: Record<string, unknown> | undefined;
+      // What the pre-trade gate saw, persisted with the trade: a position that passed a
+      // partially-unchecked gate should say so on its own record.
+      let feeMetaEntryChecks: Record<string, unknown> | undefined;
       let optionContract: {
         optionStrike: number;
         optionExpiry: Date;
@@ -362,6 +392,54 @@ export function registerPaperTradingRoutes(
           });
           return;
         }
+        // Pre-trade gate on the contract that was actually chosen.
+        //
+        // Runs here rather than at idea generation because the strike is only known once the
+        // fill is mapped, and liquidity, open-interest drift and delta are all per-contract.
+        // A refusal returns `unchecked` alongside `reasons`, because "passed" and "never
+        // evaluated" must not look the same to the caller -- that conflation is exactly how
+        // this project shipped guards that never fired.
+        const entryChain = await dependencies.optionChainRepository
+          .latestSnapshot({
+            underlyingSymbol: String(idea.symbol).toUpperCase(),
+            expiryDate: settlementExpiry.toISOString().slice(0, 10),
+          })
+          .catch(() => null);
+        const solvedGreeks = entryChain === null ? null : solveContractGreeksFromChain({
+          snapshot: entryChain,
+          strikePrice: mapped.strike,
+          optionType: mapped.optionType,
+        });
+        const reasoningList = Array.isArray(idea.reasoning)
+          ? (idea.reasoning as unknown[]).map(String)
+          : [];
+        const entryCheck = validateOptionsEntry({
+          proposedIdea: {
+            side: idea.side,
+            confidence: Number(idea.confidence ?? 0),
+            reasoning: reasoningList,
+          },
+          optionChain: entryChain ?? undefined,
+          intendedStrike: mapped.strike,
+          intendedContractDelta: solvedGreeks?.delta ?? null,
+        });
+        if (!entryCheck.isValid) {
+          response.status(422).json({
+            error: `Options pre-trade checks refused this entry: ${entryCheck.reasons.join(" ")}`,
+            reason: "OPTIONS_ENTRY_REJECTED",
+            reasons: entryCheck.reasons,
+            unchecked: entryCheck.unchecked,
+          });
+          return;
+        }
+        feeMetaEntryChecks = {
+          reasons: entryCheck.reasons,
+          unchecked: entryCheck.unchecked,
+          solvedDelta: solvedGreeks?.delta ?? null,
+          solvedImpliedVolatility: solvedGreeks?.impliedVolatility ?? null,
+          chainObservedAt: entryChain?.observedAt.toISOString() ?? null,
+        };
+
         openFill = mapped.fillPremium;
         stopOverride = mapped.stopPremium;
         targetOverride = mapped.targetPremium;
@@ -379,10 +457,14 @@ export function registerPaperTradingRoutes(
             optionType: mapped.optionType,
             strike: mapped.strike,
             impliedVolatility: iv,
-            expiryDate: expiry.toISOString(),
+            // The contract's settlement instant, matching what the trade is booked against.
+            // Recording the caller's raw input here would disagree with `optionExpiry`
+            // whenever a bare date was supplied.
+            expiryDate: settlementExpiry.toISOString(),
             greeks: mapped.entryGreeks,
             underlyingEntry: Number(idea.entry_price),
           },
+          entryChecks: feeMetaEntryChecks,
         };
       }
 
@@ -590,11 +672,18 @@ export function registerPaperTradingRoutes(
         } catch {
           // valuePaperTrade will use the persisted entry IV or fail closed.
         }
+        // The exit price becomes realized P&L, so it is marked from the same observed
+        // quote the summary displays. Without this the screen and the books disagree.
+        const observedQuote = await observedChainQuoteFor(
+          dependencies.optionChainRepository,
+          openTrade,
+        );
         const valuation = valuePaperTrade({
           trade: openTrade,
           livePrices,
           asOf: closedAt,
           currentVolatility,
+          observedQuote,
         });
         if (valuation.status !== "AVAILABLE" || valuation.markPrice === null) {
           response.status(409).json({
@@ -610,6 +699,10 @@ export function registerPaperTradingRoutes(
           underlyingPrice: valuation.underlyingPrice,
           volatility: valuation.volatility,
           volatilitySource: valuation.volatilitySource,
+          // Persisted because a realized P&L is only as trustworthy as the mark behind it,
+          // and "which mark was this?" is unanswerable after the fact otherwise.
+          markSource: valuation.source,
+          observedQuoteAt: observedQuote?.observedAt.toISOString() ?? null,
           asOf: valuation.asOf,
           optionStrike: openTrade.optionStrike,
           optionExpiry: openTrade.optionExpiry?.toISOString(),

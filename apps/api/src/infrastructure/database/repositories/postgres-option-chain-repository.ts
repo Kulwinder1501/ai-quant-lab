@@ -1,4 +1,5 @@
 import type { DatabasePool } from "../database.js";
+import { fromDateColumn } from "../date-column.js";
 import { yearsToExpiry } from "../../../modules/pricing/domain/black-scholes-engine.js";
 import { impliedForwardFromParity } from "../../../modules/pricing/domain/implied-volatility.js";
 import type { OptionExpiryCalendar } from "../../../modules/market-data/domain/option-expiry-calendar.js";
@@ -11,18 +12,20 @@ import type {
 import { RISK_FREE_RATE } from "../../../modules/pricing/domain/constants.js";
 
 /**
- * `pg` hands back a DATE column as either a Date (local midnight) or a string, depending on
- * parser configuration. Taking `.toISOString()` of a local-midnight Date shifts the day
- * backwards east of UTC, which would silently move every expiry by one.
+ * The settlement instant for a DATE column holding an expiry: that day at 15:30 IST.
+ *
+ * `fromDateColumn` fixes the calendar day -- node-pg returns a DATE as *local* midnight, so
+ * `row.expiry_date.toISOString().slice(0, 10)` gave 2026-08-24 for a stored 2026-08-25 on an
+ * IST host. That surfaced as every chain expiry a day early and every IV and greek solved
+ * against a tenor 15.5 hours short, and it read as correct inside the API container only
+ * because that container runs UTC -- so the bug depended on where the code ran.
+ *
+ * The 10:00 UTC stamp then makes it the instant the contract actually settles, matching
+ * `resolveOptionExpiryInstant` and the calendar rows.
  */
-function toDateKey(value: unknown): string {
-  if (value instanceof Date) {
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    const day = String(value.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
-  return String(value).slice(0, 10);
+function toExpiryInstant(value: unknown): Date {
+  const day = fromDateColumn(value);
+  return new Date(day.getTime() + 10 * 60 * 60 * 1000);
 }
 
 function toNumberOrNull(value: unknown): number | null {
@@ -215,7 +218,7 @@ export class PostgresOptionChainRepository {
       observedAt: result.rows[0].observed_at as Date,
       expiries: result.rows.map((row) => ({
         // DATE comes back at midnight; the contract settles at 15:30 IST.
-        expiryDate: new Date(`${toDateKey(row.expiry_date)}T10:00:00.000Z`),
+        expiryDate: toExpiryInstant(row.expiry_date),
         expiryKind: String(row.expiry_kind) as ExpiryKind,
       })),
     };
@@ -277,7 +280,7 @@ export class PostgresOptionChainRepository {
     if (result.rows.length === 0) return null;
 
     const quotes: OptionChainQuote[] = result.rows.map((row) => ({
-      expiryDate: row.expiry_date as Date,
+      expiryDate: toExpiryInstant(row.expiry_date),
       expiryKind: String(row.expiry_kind) as ExpiryKind,
       strikePrice: Number(row.strike_price),
       optionType: String(row.option_type) as OptionType,
@@ -310,7 +313,7 @@ export class PostgresOptionChainRepository {
       underlyingValue: toNumberOrNull(result.rows[0].underlying_value),
       quotes,
       listedExpiries: calendarRows.rows.map((row) => ({
-        expiryDate: new Date(`${toDateKey(row.expiry_date)}T10:00:00.000Z`),
+        expiryDate: toExpiryInstant(row.expiry_date),
         expiryKind: String(row.expiry_kind) as ExpiryKind,
       })),
     };

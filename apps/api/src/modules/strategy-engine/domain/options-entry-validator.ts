@@ -1,11 +1,17 @@
-import type { StrategyMarketContext, ProposedTradeIdea } from "./strategy.js";
+import type { ProposedTradeIdea } from "./strategy.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import { largestOpenInterestStrikes } from "../../market-data/domain/option-chain.js";
 import { yearsToExpiry } from "../../pricing/domain/black-scholes-engine.js";
 
 export interface OptionsValidationContext {
-  marketContext: StrategyMarketContext;
-  proposedIdea: ProposedTradeIdea;
+  /**
+   * Only the three fields actually read. It used to demand a whole `StrategyMarketContext`
+   * and `ProposedTradeIdea` to reach one volume and three idea fields, which is why no
+   * caller could reasonably construct the input -- and why this went unwired.
+   */
+  proposedIdea: Pick<ProposedTradeIdea, "side" | "confidence" | "reasoning">;
+  /** Volume of the bar the idea was raised on. Omit when unknown; it is then unchecked. */
+  candleVolume?: number | null;
   optionChain?: OptionChainSnapshot;
   intendedStrike?: number;
   hasMacroEvent?: boolean;
@@ -39,7 +45,7 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
   const unchecked: string[] = [];
   let isValid = true;
   const {
-    marketContext, proposedIdea, optionChain, intendedStrike, hasMacroEvent,
+    proposedIdea, candleVolume, optionChain, intendedStrike, hasMacroEvent,
     intendedContractDelta,
   } = context;
 
@@ -49,10 +55,16 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
     unchecked.push("Open interest, liquidity, expiry and greeks: no option chain was supplied.");
   }
 
-  // Macro Events Check
-  if (hasMacroEvent) {
+  // Macro Events Check.
+  //
+  // Blocks only when a caller asserts a macro event. It is deliberately not fed from the
+  // headline keyword detector: measured on 2026-08-05 that fires on 7 of 9 days, so wiring
+  // it here would refuse almost every entry. See ai-autonomous-agent for the measurement.
+  if (hasMacroEvent === true) {
     isValid = false;
-    reasons.push("Macro Event Filter: A major macro event is detected today (e.g. RBI, Fed). Trading options is blocked to avoid extreme volatility crush.");
+    reasons.push("Macro Event Filter: a scheduled macro event was asserted for today. Options entry is blocked to avoid volatility crush.");
+  } else if (hasMacroEvent === undefined) {
+    unchecked.push("Macro events: no scheduled-event calendar exists, so event risk was not screened.");
   }
 
   // 1-6: Price action, Trend, Market Structure, Trade Direction
@@ -62,9 +74,10 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
   }
 
   // 7: Volume - Breakout should ideally have strong volume
-  const currentVolume = marketContext.candle.volume;
   const hasStrongVolume = proposedIdea.reasoning.some(r => r.toLowerCase().includes("volume") && !r.toLowerCase().includes("low volume"));
-  if (!hasStrongVolume && currentVolume <= 0) {
+  if (candleVolume == null) {
+    unchecked.push("Volume confirmation: no bar volume was supplied.");
+  } else if (!hasStrongVolume && candleVolume <= 0) {
     isValid = false;
     reasons.push("Low-volume moves are weak or false. Avoid options entry without volume confirmation.");
   }
