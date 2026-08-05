@@ -29,7 +29,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             wrapper used to sit here; when collapsed to ~68px that double padding
             left ~12px for 20px icons and overflow-x-hidden clipped them away. */}
         <aside
-          className={`relative z-20 hidden lg:flex shrink-0 border-r border-white/10 bg-slate-950/45 backdrop-blur-xl h-screen sticky top-0 flex-col overflow-hidden transition-[width] duration-300 ease-out ${collapsed ? "w-16" : "w-72"}`}
+          className={`relative z-20 hidden lg:flex shrink-0 border-r border-white/10 bg-slate-950/45 backdrop-blur-xl h-screen sticky top-0 flex-col overflow-hidden transition-[width] duration-300 ease-out ${collapsed ? "w-16" : "w-60"}`}
         >
           <Sidebar collapsed={collapsed} onToggleCollapse={() => setCollapsed((p) => !p)} />
         </aside>

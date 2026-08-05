@@ -34,7 +34,7 @@ import { TradeLedgerTable } from "./trade-ledger-table";
  * data behind it the tile shows an em dash rather than a zero, because a zero win
  * rate and an absent win rate are different facts.
  */
-export function TradeHistoryDashboard({ initialMode = "swing" }: { initialMode?: TradeHistoryMode } = {}) {
+export function TradeHistoryDashboard({ initialMode = "swing", navigation }: { initialMode?: TradeHistoryMode, navigation?: React.ReactNode } = {}) {
   const [mode, setMode] = useState<TradeHistoryMode>(initialMode);
   const [filters, setFilters] = useState<TradeHistoryFilters>(defaultTradeHistoryFilters);
   const [symbolDraft, setSymbolDraft] = useState<string>("");
@@ -121,6 +121,7 @@ export function TradeHistoryDashboard({ initialMode = "swing" }: { initialMode?:
       />
       <div className="mt-10">
       <div className="space-y-6">
+        {navigation && <Reveal>{navigation}</Reveal>}
         <Reveal>
           <Tabs
             tabs={[

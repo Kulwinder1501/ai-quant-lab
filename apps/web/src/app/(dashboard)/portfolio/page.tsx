@@ -6,5 +6,6 @@ export default async function PositionsOrdersPage({
   searchParams: Promise<{ tab?: string }>;
 }) {
   const { tab } = await searchParams;
-  return <PositionsOrdersDashboard initialMode={tab === "orders" ? "orders" : "positions"} />;
+  const initialMode = tab === "orders" ? "orders" : tab === "history" ? "history" : "positions";
+  return <PositionsOrdersDashboard initialMode={initialMode} />;
 }

@@ -27,7 +27,7 @@ interface LotInfoResponse {
 interface PaperAccountSummary {
   id: string;
   name: string;
-  availableCapital: number;
+  openingBalance: number;
 }
 
 export interface OptionTradeModalProps {
@@ -174,7 +174,7 @@ export function OptionTradeModal({
               <option value="" disabled>Select an account...</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} (Available: ₹{formatNumber(acc.availableCapital, 2)})
+                  {acc.name} (Available: ₹{formatNumber(acc.openingBalance, 2)})
                 </option>
               ))}
             </select>

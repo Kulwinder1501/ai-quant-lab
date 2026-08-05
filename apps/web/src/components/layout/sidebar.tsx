@@ -53,8 +53,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
     {
       title: "TRADING",
       items: [
-        { name: "Positions & Orders", href: "/positions-orders", icon: <ScrollText className="size-5" /> },
-        { name: "Trade History", href: "/trade-history", icon: <Receipt className="size-5" /> },
+        { name: "Portfolio", href: "/portfolio", icon: <ScrollText className="size-5" /> },
       ],
     },
     {

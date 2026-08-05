@@ -333,8 +333,8 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
   }
 
   return (
-    <div className="w-full rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950/90 p-4 shadow-2xl backdrop-blur-xl">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3 text-xs font-mono">
+    <div className="w-full h-full flex flex-col rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950/90 p-4 shadow-2xl backdrop-blur-xl">
+      <div className="mb-3 shrink-0 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3 text-xs font-mono">
         <div className="flex items-center gap-3">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 px-2.5 py-1 text-cyan-300 border border-cyan-500/30 font-extrabold">
             <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse"></span>
@@ -353,7 +353,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
       <div 
         ref={chartContainerRef} 
-        className="w-full overflow-hidden rounded-xl h-[600px] cursor-crosshair active:cursor-grabbing"
+        className="w-full overflow-hidden rounded-xl h-full min-h-[300px] cursor-crosshair active:cursor-grabbing"
       />
       <div className="mt-2 text-center text-[11px] text-slate-500 font-medium">
         💡 Tip: Drag chart to pan horizontally. Scroll mouse wheel to zoom in/out. Hover on flags to view pattern details.

@@ -5,8 +5,9 @@ import { Pin, ScrollText } from "lucide-react";
 import { Tabs } from "../../../components/ui/tabs";
 import { OrdersDashboard } from "../../orders/components/orders-dashboard";
 import { PositionsDashboard } from "../../positions/components/positions-dashboard";
+import { TradeHistoryDashboard } from "../../trade-history/components/trade-history-dashboard";
 
-export type PositionsOrdersMode = "positions" | "orders";
+export type PositionsOrdersMode = "positions" | "orders" | "history";
 
 export function PositionsOrdersDashboard({
   initialMode = "positions",
@@ -17,11 +18,11 @@ export function PositionsOrdersDashboard({
 
   const applyMode = useCallback((next: PositionsOrdersMode) => {
     setMode(next);
-    window.history.replaceState(
-      null,
-      "",
-      next === "orders" ? "/positions-orders?tab=orders" : "/positions-orders",
-    );
+    let url = "/portfolio";
+    if (next === "orders") url = "/portfolio?tab=orders";
+    else if (next === "history") url = "/portfolio?tab=history";
+    
+    window.history.replaceState(null, "", url);
   }, []);
 
   const navigation = (
@@ -31,10 +32,14 @@ export function PositionsOrdersDashboard({
       tabs={[
         { id: "positions", label: "Positions", icon: <Pin className="size-4" /> },
         { id: "orders", label: "Orders", icon: <ScrollText className="size-4" /> },
+        { id: "history", label: "History", icon: <ScrollText className="size-4" /> },
       ]}
     />
   );
 
+  if (mode === "history") {
+    return <TradeHistoryDashboard navigation={navigation} />;
+  }
   return mode === "positions"
     ? <PositionsDashboard navigation={navigation} />
     : <OrdersDashboard navigation={navigation} />;
