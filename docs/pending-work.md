@@ -16,7 +16,7 @@ mismatch as "this file is older than the tree", not "the tree is broken".
 ```bash
 cd apps/api && npx tsc --noEmit && npx vitest run
 ```
-Expect a clean typecheck and **560 passed / 71 files**.
+Expect a clean typecheck and **563 passed / 71 files**.
 
 ```bash
 py -3.12 -m unittest discover -s apps/ml -p "test_*.py"
@@ -32,10 +32,10 @@ already shipped once.
 
 | | state on 2026-08-05 |
 |---|---|
-| HEAD | `487c17d` on `feature/champion-challenger` |
+| HEAD | `f880806`+ on `feature/champion-challenger` |
 | migrations | through **041**; next is **042** |
 | system of record | **v2, port 5433**. v1 (5432) is a read-only audit trail |
-| paper trades | **5 rows, 4 excluded from evidence** — 2 phantom-expiry, 2 synthetic verification |
+| paper trades | **7 rows, 6 excluded from evidence** — 2 phantom-expiry, 4 synthetic verification |
 | option chain history | begins **2026-08-04**. Forward-accumulating, no backfill exists |
 | both databases | bound to `127.0.0.1` |
 
@@ -43,26 +43,36 @@ already shipped once.
 
 ## 1. Open items
 
-### 1.1 The entry gate never checks volume or events
+### 1.1 The entry gate cannot check events, and cannot check volume on intraday index ideas
 
 `validateOptionsEntry` runs on every option entry and refuses on confidence, falling open
-interest, spread over 3%, sub-1-DTE at low confidence, and delta under 0.40. Two of its
-factors are permanently unevaluated, and it says so on every trade rather than staying quiet:
+interest, spread over 3%, sub-1-DTE at low confidence, delta under 0.40, and now a
+zero-volume source bar. What remains unevaluated is reported on every trade rather than
+passed over in silence:
 
 ```
 "unchecked": [
   "Macro events: no scheduled-event calendar exists, so event risk was not screened.",
-  "Volume confirmation: no bar volume was supplied."
+  "Volume confirmation: BANKNIFTY 15m carries no volume in this dataset, so a zero
+   cannot be read as absent participation."
 ]
 ```
 
-Volume is the cheap one: the open-trade route has an `instrument_id` and a timeframe, so it
-could read the latest completed bar and pass `candleVolume`. Events are 1.3 below.
+Events are 1.3 below. The volume line is a **data** limit, not a wiring gap: measured
+2026-08-05, all 1,069 stored 15m bars for BANKNIFTY and NIFTY50 have zero or null volume,
+because the provider supplies no intraday index volume. Daily index bars do carry it, and a
+1d-sourced idea is checked — verified live, `sourceCandleVolume: 158800`.
 
-Do not "fix" this by removing the `unchecked` entries. A gate that reports `isValid: true`
-while silently skipping factors is the exact failure this project has already paid for twice
-— once with `greeks.price`, once with guards written `x !== null && x !== undefined` against
-fields that did not exist.
+It clears itself two ways, neither of which is more code here: train and raise ideas on
+**futures** rather than spot indices (see the settled note in 3 on index volume), or the
+provider starts supplying intraday index volume. The probe is per instrument and timeframe,
+so the check begins working on its own when either happens.
+
+Do not "fix" this by removing the `unchecked` entries, and do not make the route substitute
+the latest bar for the idea's own `source_candle_id` — that would judge an older idea on
+information it never had. A gate that reports `isValid: true` while silently skipping factors
+is the exact failure this project has already paid for twice: once with `greeks.price`, once
+with guards written `x !== null && x !== undefined` against fields that did not exist.
 
 ### 1.2 No IV history, so "unusually high IV" has no answer
 
@@ -152,7 +162,7 @@ either file.
 
 ### 1.8 Leftover verification rows
 
-Two `trade_ideas` rows carry `evidence->>'synthetic' = 'true'`, created to exercise the
+Four `trade_ideas` rows carry `evidence->>'synthetic' = 'true'`, created to exercise the
 option open/close path while the market was closed (the real generator persists nothing
 without a new candle). They cannot be deleted without orphaning the paper trades keyed to
 them. The two trades they produced are flagged `excluded_from_evidence`, so no aggregate sees

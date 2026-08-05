@@ -10,8 +10,21 @@ export interface OptionsValidationContext {
    * caller could reasonably construct the input -- and why this went unwired.
    */
   proposedIdea: Pick<ProposedTradeIdea, "side" | "confidence" | "reasoning">;
-  /** Volume of the bar the idea was raised on. Omit when unknown; it is then unchecked. */
+  /**
+   * Volume of the bar the idea was raised on. Omit when unknown; it is then unchecked.
+   *
+   * Must be null rather than 0 when the series does not report volume at all. Measured
+   * 2026-08-05: every one of 1,069 stored 15m bars for BANKNIFTY and NIFTY50 has zero or
+   * null volume, because the provider supplies no intraday index volume. Passing that 0
+   * through would read as "nobody traded" and refuse essentially every index option entry,
+   * when the honest reading is "this series carries no volume".
+   */
   candleVolume?: number | null;
+  /**
+   * Why volume is absent, when it is. Without it "not reported by this series" and "nobody
+   * looked it up" produce the same unchecked line, and only one of those is worth acting on.
+   */
+  volumeAbsenceReason?: string;
   optionChain?: OptionChainSnapshot;
   intendedStrike?: number;
   hasMacroEvent?: boolean;
@@ -45,8 +58,8 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
   const unchecked: string[] = [];
   let isValid = true;
   const {
-    proposedIdea, candleVolume, optionChain, intendedStrike, hasMacroEvent,
-    intendedContractDelta,
+    proposedIdea, candleVolume, volumeAbsenceReason, optionChain, intendedStrike,
+    hasMacroEvent, intendedContractDelta,
   } = context;
 
   // Every chain-derived factor below needs a chain. Without one they are unchecked, not
@@ -76,7 +89,9 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
   // 7: Volume - Breakout should ideally have strong volume
   const hasStrongVolume = proposedIdea.reasoning.some(r => r.toLowerCase().includes("volume") && !r.toLowerCase().includes("low volume"));
   if (candleVolume == null) {
-    unchecked.push("Volume confirmation: no bar volume was supplied.");
+    unchecked.push(
+      `Volume confirmation: ${volumeAbsenceReason ?? "no bar volume was supplied"}.`,
+    );
   } else if (!hasStrongVolume && candleVolume <= 0) {
     isValid = false;
     reasons.push("Low-volume moves are weak or false. Avoid options entry without volume confirmation.");

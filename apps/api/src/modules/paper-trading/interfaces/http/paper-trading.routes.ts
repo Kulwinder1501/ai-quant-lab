@@ -268,7 +268,8 @@ export function registerPaperTradingRoutes(
 
       const ideaResult = await dependencies.database.query(`
         SELECT ti.id, ti.side, ti.entry_price, ti.stop_loss, ti.target_price,
-               ti.instrument_id, ti.confidence, ti.reasoning, i.lot_size, i.symbol, i.strike_step
+               ti.instrument_id, ti.confidence, ti.reasoning, ti.source_candle_id,
+               i.lot_size, i.symbol, i.strike_step
         FROM trade_ideas ti
         INNER JOIN instruments i ON i.id = ti.instrument_id
         WHERE ti.id = $1
@@ -285,6 +286,7 @@ export function registerPaperTradingRoutes(
         strike_step: string | null;
         confidence: string | number | null;
         reasoning: unknown;
+        source_candle_id: string | null;
       } | undefined;
       if (!idea) {
         response.status(404).json({ error: "Trade idea not found." });
@@ -428,6 +430,46 @@ export function registerPaperTradingRoutes(
         // A refusal returns `unchecked` alongside `reasons`, because "passed" and "never
         // evaluated" must not look the same to the caller -- that conflation is exactly how
         // this project shipped guards that never fired.
+        // Volume of the bar the idea was actually raised on, via `source_candle_id`. The
+        // latest bar is deliberately not substituted: validating an older idea against a
+        // later bar would judge it on information it never had.
+        //
+        // A zero is only treated as "nobody traded" when the series demonstrably reports
+        // volume. Every stored 15m index bar has zero volume because the provider supplies
+        // no intraday index volume, and reading that as no participation would refuse every
+        // index option entry. The probe is per instrument and timeframe, so the check starts
+        // working on its own if the provider ever begins supplying it.
+        let candleVolume: number | null = null;
+        let volumeAbsenceReason = "the idea records no source candle, so its bar volume cannot be read";
+        if (idea.source_candle_id) {
+          try {
+            const sourceBar = await dependencies.database.query(`
+              SELECT c.volume, c.timeframe, c.instrument_id,
+                     (SELECT count(*) FROM candles peer
+                       WHERE peer.instrument_id = c.instrument_id
+                         AND peer.timeframe = c.timeframe
+                         AND peer.volume > 0) AS series_volume_bars
+              FROM candles c WHERE c.id = $1
+            `, [idea.source_candle_id]);
+            const bar = sourceBar.rows[0] as
+              { volume: string | null; timeframe: string; series_volume_bars: string } | undefined;
+            if (!bar) {
+              volumeAbsenceReason = "the idea's source candle is no longer stored";
+            } else if (Number(bar.series_volume_bars) === 0) {
+              volumeAbsenceReason =
+                `${idea.symbol} ${bar.timeframe} carries no volume in this dataset, so a zero `
+                + "cannot be read as absent participation";
+            } else {
+              const parsed = bar.volume === null ? Number.NaN : Number(bar.volume);
+              if (Number.isFinite(parsed)) candleVolume = parsed;
+              else volumeAbsenceReason = "the source candle stores no volume";
+            }
+          } catch {
+            // A volume lookup failure must not block an entry; it is reported as unchecked.
+            volumeAbsenceReason = "the source candle's volume could not be read";
+          }
+        }
+
         const reasoningList = Array.isArray(idea.reasoning)
           ? (idea.reasoning as unknown[]).map(String)
           : [];
@@ -437,6 +479,8 @@ export function registerPaperTradingRoutes(
             confidence: Number(idea.confidence ?? 0),
             reasoning: reasoningList,
           },
+          candleVolume,
+          volumeAbsenceReason,
           optionChain: entryChain ?? undefined,
           intendedStrike: intendedStrike,
           intendedContractDelta: solvedGreeks?.delta ?? null,
@@ -452,6 +496,7 @@ export function registerPaperTradingRoutes(
         }
         feeMetaEntryChecks = {
           fillSource: mapped.fillSource,
+          sourceCandleVolume: candleVolume,
           observedAsk: intendedQuote?.ask ?? null,
           reasons: entryCheck.reasons,
           unchecked: entryCheck.unchecked,

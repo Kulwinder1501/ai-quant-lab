@@ -160,6 +160,52 @@ describe("validateOptionsEntry", () => {
     expect(result.unchecked.join(" ")).toMatch(/no bar volume was supplied/);
   });
 
+  it("carries the caller's reason for absent volume, so 'not reported' is distinguishable", () => {
+    // Measured: all 1,069 stored 15m index bars have zero volume because the provider
+    // supplies no intraday index volume. "Not reported by this series" and "nobody looked it
+    // up" must not collapse into one line, because only one of them is worth acting on.
+    const result = validateOptionsEntry({
+      proposedIdea: IDEA,
+      optionChain: chain(),
+      candleVolume: null,
+      volumeAbsenceReason: "BANKNIFTY 15m carries no volume in this dataset",
+    });
+
+    expect(result.isValid).toBe(true);
+    expect(result.unchecked.join(" ")).toMatch(/BANKNIFTY 15m carries no volume/);
+  });
+
+  it("refuses a genuinely zero-volume bar when the series does report volume", () => {
+    // Reasoning that does not claim volume support, and a bar with none: nothing corroborates
+    // the move.
+    const result = validateOptionsEntry({
+      proposedIdea: { ...IDEA, reasoning: ["momentum breakout"] },
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      candleVolume: 0,
+    });
+
+    expect(result.isValid).toBe(false);
+    expect(result.reasons.join(" ")).toMatch(/Low-volume moves are weak/);
+  });
+
+  it("passes a real volume figure through to the check", () => {
+    const result = validateOptionsEntry({
+      proposedIdea: { ...IDEA, reasoning: ["momentum breakout"] },
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      candleVolume: 148_000,
+    });
+
+    expect(result.isValid).toBe(true);
+    // Checked, so it must not appear as unevaluated.
+    expect(result.unchecked.join(" ")).not.toMatch(/Volume confirmation/);
+  });
+
   it("refuses low-confidence ideas outright", () => {
     const result = validateOptionsEntry({
       proposedIdea: { ...IDEA, confidence: 0.4 }, candleVolume: 12_000, optionChain: chain(),
