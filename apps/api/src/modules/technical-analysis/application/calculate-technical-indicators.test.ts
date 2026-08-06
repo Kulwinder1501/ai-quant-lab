@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CalculateTechnicalIndicators } from "./calculate-technical-indicators.js";
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import type { IndicatorDefinitionRepository, IndicatorSnapshotRepository } from "../domain/technical-indicator.js";
+import { defaultIndicatorDefinitions } from "../domain/technical-indicator.js";
 
 function persistedCandles(count: number): PersistedCandle[] {
   return Array.from({ length: count }, (_, index) => {
@@ -48,11 +49,20 @@ describe("CalculateTechnicalIndicators", () => {
     const result = await new CalculateTechnicalIndicators(candleRepository, definitionRepository, snapshotRepository)
       .execute({ instrumentId: "instrument-1", timeframe: "1m" });
 
-    // 9 default definitions: the registry gained a second EMA (period 9, the
-    // momentum-scalp fast leg) alongside the period-20 EMA.
-    expect(definitions).toHaveLength(9);
+    // Asserted against the registry rather than a literal, because the count is not the
+    // property under test and hardcoding it made this fail the moment the six SMC
+    // indicators were added -- a real change, flagged as a regression by an unrelated test.
+    expect(definitions).toHaveLength(defaultIndicatorDefinitions.length);
+    // The two that a count alone would not protect: a second EMA (period 9, the
+    // momentum-scalp fast leg) alongside the period-20 one, and every registered code
+    // reaching the processor.
     expect(definitions.filter((code) => code === "EMA")).toHaveLength(2);
-    expect(result).toMatchObject({ candlesRead: 40, definitionsProcessed: 9, snapshotsWritten: snapshots.length });
+    expect(new Set(definitions)).toEqual(new Set(defaultIndicatorDefinitions.map((d) => d.code)));
+    expect(result).toMatchObject({
+      candlesRead: 40,
+      definitionsProcessed: defaultIndicatorDefinitions.length,
+      snapshotsWritten: snapshots.length,
+    });
     expect(snapshots.some((snapshot) => snapshot.indicatorDefinitionId === "definition-SMA" && snapshot.candleId === "candle-20")).toBe(true);
     expect(snapshots.some((snapshot) => snapshot.indicatorDefinitionId === "definition-RSI" && snapshot.candleId === "candle-15")).toBe(true);
   });

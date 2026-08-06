@@ -231,6 +231,269 @@ function supertrend(candles: readonly IndicatorCandle[], atrPeriod: number, mult
   return valuesToPoints(candles, result);
 }
 
+/**
+ * Fair value gaps, published on the bar that completes the pattern.
+ *
+ * A gap is a three-bar shape: bar 1's high below bar 3's low, or the mirror. It used to be
+ * stamped on the **middle** bar, which meant the value at bar i was computed from bar i+1 --
+ * a reader at time i could not have known it. That is look-ahead, and it was measurable:
+ * editing a later bar changed an earlier bar's FVG.
+ *
+ * The gap's price levels still describe the middle bar's zone. What moves is *when the
+ * observation exists*, which is the third bar, because that is when the shape is complete.
+ * `gapBarOffset` records the distance back to the zone so a chart can still draw it in place.
+ */
+function fvg(candles: readonly IndicatorCandle[]): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  for (let index = 2; index < candles.length; index += 1) {
+    const candle1 = candles[index - 2];
+    const candle3 = candles[index];
+
+    // Bullish FVG: low of candle 3 is higher than high of candle 1
+    if (candle3.low > candle1.high) {
+      result[index] = {
+        type: "BULLISH",
+        top: rounded(candle3.low),
+        bottom: rounded(candle1.high),
+        gapBarOffset: 1,
+        active: true,
+      };
+    }
+    // Bearish FVG: high of candle 3 is lower than low of candle 1
+    else if (candle3.high < candle1.low) {
+      result[index] = {
+        type: "BEARISH",
+        top: rounded(candle1.low),
+        bottom: rounded(candle3.high),
+        gapBarOffset: 1,
+        active: true,
+      };
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
+function bos(candles: readonly IndicatorCandle[], pivotLength: number): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  let lastSwingHigh: number | null = null;
+  let lastSwingLow: number | null = null;
+
+  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
+    const currentHigh = candles[index].high;
+    const currentLow = candles[index].low;
+    let isSwingHigh = true;
+    let isSwingLow = true;
+
+    for (let j = 1; j <= pivotLength; j++) {
+      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) {
+        isSwingHigh = false;
+      }
+      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) {
+        isSwingLow = false;
+      }
+    }
+
+    if (isSwingHigh) {
+      lastSwingHigh = currentHigh;
+    }
+    if (isSwingLow) {
+      lastSwingLow = currentLow;
+    }
+
+    // Now check for Break of Structure
+    // Note: We check if the current close breaks the LAST known swing high/low that was formed BEFORE this candle.
+    const close = candles[index].close;
+    if (lastSwingHigh !== null && close > lastSwingHigh) {
+      result[index] = { type: "BULLISH_BOS", level: rounded(lastSwingHigh) };
+      lastSwingHigh = null; // Consume it so we don't trigger again on the same level
+    } else if (lastSwingLow !== null && close < lastSwingLow) {
+      result[index] = { type: "BEARISH_BOS", level: rounded(lastSwingLow) };
+      lastSwingLow = null;
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
+function choch(candles: readonly IndicatorCandle[], pivotLength: number): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  let lastSwingHigh: number | null = null;
+  let lastSwingLow: number | null = null;
+  let currentTrend: "BULLISH" | "BEARISH" | null = null;
+
+  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
+    const currentHigh = candles[index].high;
+    const currentLow = candles[index].low;
+    let isSwingHigh = true;
+    let isSwingLow = true;
+
+    for (let j = 1; j <= pivotLength; j++) {
+      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
+      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
+    }
+
+    if (isSwingHigh) lastSwingHigh = currentHigh;
+    if (isSwingLow) lastSwingLow = currentLow;
+
+    const close = candles[index].close;
+    
+    // Check for structure breaks to determine trend
+    if (lastSwingHigh !== null && close > lastSwingHigh) {
+      if (currentTrend === "BEARISH") {
+        result[index] = { type: "BULLISH_CHOCH", level: rounded(lastSwingHigh) };
+      }
+      currentTrend = "BULLISH";
+      lastSwingHigh = null; 
+    } else if (lastSwingLow !== null && close < lastSwingLow) {
+      if (currentTrend === "BULLISH") {
+        result[index] = { type: "BEARISH_CHOCH", level: rounded(lastSwingLow) };
+      }
+      currentTrend = "BEARISH";
+      lastSwingLow = null;
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
+function liquiditySweep(candles: readonly IndicatorCandle[], pivotLength: number): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  let lastSwingHigh: number | null = null;
+  let lastSwingLow: number | null = null;
+
+  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
+    const currentHigh = candles[index].high;
+    const currentLow = candles[index].low;
+    let isSwingHigh = true;
+    let isSwingLow = true;
+
+    for (let j = 1; j <= pivotLength; j++) {
+      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
+      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
+    }
+
+    if (isSwingHigh) lastSwingHigh = currentHigh;
+    if (isSwingLow) lastSwingLow = currentLow;
+
+    const high = candles[index].high;
+    const low = candles[index].low;
+    const close = candles[index].close;
+
+    // Sweep: Pierces level but closes back inside
+    if (lastSwingHigh !== null && high > lastSwingHigh && close <= lastSwingHigh) {
+      result[index] = { type: "BEARISH_SWEEP", level: rounded(lastSwingHigh) };
+      lastSwingHigh = null; // consume
+    }
+    if (lastSwingLow !== null && low < lastSwingLow && close >= lastSwingLow) {
+      result[index] = { type: "BULLISH_SWEEP", level: rounded(lastSwingLow) };
+      lastSwingLow = null; // consume
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
+function orderBlock(candles: readonly IndicatorCandle[], displacementThreshold: number): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  
+  /*
+   * The displacement reference is built only from bars at or before the one being scored.
+   *
+   * It used to be seeded with the mean body of the series' first 50 candles and then rolled
+   * forward. For any bar inside that seed window -- the first fifty, which on a short series
+   * is all of them -- the reference therefore included bars that had not happened yet, and
+   * the seed's influence decays but never leaves. It did not always change the output, since
+   * the value is a threshold comparison and a small shift in the mean often flips nothing,
+   * which is exactly why it survived: a leak that only sometimes shows is still a leak.
+   */
+  const bodies: number[] = [];
+
+  for (let index = 1; index < candles.length; index += 1) {
+    bodies.push(Math.abs(candles[index - 1].close - candles[index - 1].open));
+    if (bodies.length > 20) bodies.shift();
+    // `|| 1` keeps a flat opening stretch from making every later bar a displacement.
+    const avgBody = (bodies.reduce((total, body) => total + body, 0) / bodies.length) || 1;
+
+    const candle = candles[index];
+    const prevCandle = candles[index - 1];
+    const bodySize = Math.abs(candle.close - candle.open);
+
+    if (bodySize > avgBody * displacementThreshold) {
+      const isBullishDisplacement = candle.close > candle.open;
+      const wasBearish = prevCandle.close < prevCandle.open;
+      const wasBullish = prevCandle.close > prevCandle.open;
+
+      if (isBullishDisplacement && wasBearish) {
+        result[index - 1] = {
+          type: "BULLISH_OB",
+          top: rounded(prevCandle.high),
+          bottom: rounded(prevCandle.low),
+        };
+      } else if (!isBullishDisplacement && wasBullish) {
+        result[index - 1] = {
+          type: "BEARISH_OB",
+          top: rounded(prevCandle.high),
+          bottom: rounded(prevCandle.low),
+        };
+      }
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
+/**
+ * The zone between the most recent confirmed swing high and low, and its midpoint.
+ *
+ * A swing at bar i is only *known* at bar i + pivotLength, because confirming it reads the
+ * pivotLength bars after it. The other swing-based indicators here get away with using one
+ * immediately: their trigger is a break of the level, and a swing high requires the following
+ * bars to be lower, so the break cannot fire inside the confirmation window.
+ *
+ * This one has no such trigger -- it publishes the zone on every bar -- so it was emitting a
+ * value at bar i built from bars up to i + pivotLength. Measured: editing a later bar changed
+ * two earlier values. Swings are therefore held pending and promoted only once their window
+ * has elapsed, so a published zone never depends on a bar after the one carrying it.
+ */
+function equilibriumZone(candles: readonly IndicatorCandle[], pivotLength: number): IndicatorPoint[] {
+  const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
+  let lastSwingHigh: number | null = null;
+  let lastSwingLow: number | null = null;
+  let pendingHigh: { value: number; knownAt: number } | null = null;
+  let pendingLow: { value: number; knownAt: number } | null = null;
+
+  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
+    // Promote first: a swing detected earlier becomes usable once this bar is at or past
+    // the end of its confirmation window.
+    if (pendingHigh !== null && index >= pendingHigh.knownAt) {
+      lastSwingHigh = pendingHigh.value;
+      pendingHigh = null;
+    }
+    if (pendingLow !== null && index >= pendingLow.knownAt) {
+      lastSwingLow = pendingLow.value;
+      pendingLow = null;
+    }
+
+    const currentHigh = candles[index].high;
+    const currentLow = candles[index].low;
+    let isSwingHigh = true;
+    let isSwingLow = true;
+
+    for (let j = 1; j <= pivotLength; j++) {
+      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
+      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
+    }
+
+    if (isSwingHigh) pendingHigh = { value: currentHigh, knownAt: index + pivotLength };
+    if (isSwingLow) pendingLow = { value: currentLow, knownAt: index + pivotLength };
+
+    if (lastSwingHigh !== null && lastSwingLow !== null) {
+      result[index] = {
+        top: rounded(lastSwingHigh),
+        bottom: rounded(lastSwingLow),
+        equilibrium: rounded((lastSwingHigh + lastSwingLow) / 2),
+      };
+    }
+  }
+  return valuesToPoints(candles, result);
+}
+
 export class TechnicalIndicatorEngine {
   calculate(candles: readonly IndicatorCandle[], definition: IndicatorDefinitionSpec): IndicatorPoint[] {
     for (let index = 1; index < candles.length; index += 1) {
@@ -260,8 +523,29 @@ export class TechnicalIndicatorEngine {
         positiveIntegerParameter(definition.parameters, "atrPeriod"),
         numberParameter(definition.parameters, "multiplier", 0),
       );
+      case "FVG": return fvg(candles);
+      case "BOS": return bos(
+        candles,
+        positiveIntegerParameter(definition.parameters, "pivotLength"),
+      );
+      case "CHOCH": return choch(
+        candles,
+        positiveIntegerParameter(definition.parameters, "pivotLength"),
+      );
+      case "LIQUIDITY_SWEEP": return liquiditySweep(
+        candles,
+        positiveIntegerParameter(definition.parameters, "pivotLength"),
+      );
+      case "ORDER_BLOCK": return orderBlock(
+        candles,
+        numberParameter(definition.parameters, "displacementThreshold", 1.5),
+      );
+      case "EQUILIBRIUM_ZONE": return equilibriumZone(
+        candles,
+        positiveIntegerParameter(definition.parameters, "pivotLength"),
+      );
       default: {
-        const unsupported: never = definition.code;
+        const unsupported: never = definition.code as never;
         throw new Error(`Unsupported indicator ${unsupported}.`);
       }
     }
