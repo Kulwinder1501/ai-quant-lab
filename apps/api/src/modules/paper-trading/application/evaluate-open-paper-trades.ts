@@ -336,7 +336,7 @@ export class EvaluateOpenPaperTrades {
 
     const closeOption = async (args: {
       exitPrice: number;
-      exitReason: "STOP_LOSS" | "TARGET" | "EXPIRED";
+      exitReason: "STOP_LOSS" | "TARGET" | "EXPIRED" | "TRAP_DETECTED";
       closedAt: Date;
       details: Record<string, unknown>;
       exercisedIntrinsic?: number;
@@ -400,7 +400,7 @@ export class EvaluateOpenPaperTrades {
     const liveSpot = resolveLiveSpot(trade, livePrices);
     if (liveSpot !== undefined) {
       const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
-      const decision = decideOptionBuyerLiveExit(trade, mark.premium);
+      const decision = decideOptionBuyerLiveExit(trade, mark.premium, liveSpot);
       if (decision) {
         return closeOption({
           exitPrice: decision.exitPrice,
@@ -413,7 +413,7 @@ export class EvaluateOpenPaperTrades {
             markPremium: mark.premium,
             timeToExpiryYears: mark.timeToExpiryYears,
             greeks: mark.greeks,
-            fillRule: decision.reason === "TARGET" ? "INTRABAR_TARGET" : "INTRABAR_STOP",
+            fillRule: decision.reason === "TARGET" ? "INTRABAR_TARGET" : (decision.reason === "TRAP_DETECTED" ? "TRAP_DETECTED" : "INTRABAR_STOP"),
             eventType: decision.eventType,
           },
         });

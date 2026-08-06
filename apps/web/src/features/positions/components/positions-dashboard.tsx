@@ -27,7 +27,7 @@ interface LivePriceResponse {
   };
 }
 
-export function PositionsDashboard({ navigation }: { navigation?: ReactNode } = {}) {
+export function PositionsDashboard() {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
@@ -282,14 +282,7 @@ export function PositionsDashboard({ navigation }: { navigation?: ReactNode } = 
     }
   };
 return (
-    <>
-      <PageHeader eyebrow="Autonomous AI Trading Lab"
-      title="Live Positions & Real-Time P&L Monitor"
-      description="Track open quantitative positions executed by the autonomous AI strategy engine. Real-time second-by-second Server-Sent Events (SSE) live valuation stream."
-      connectionLabel={isStreaming ? `⚡ Live SSE Stream Active @ ${lastUpdated}` : lastUpdated ? `Live Ticks Updated @ ${lastUpdated}` : "Connecting Live SSE Feed..."} />
-      <div className="mt-10">
       <div className="space-y-6">
-        {navigation && <Reveal>{navigation}</Reveal>}
 
         {/* Account Selector & Control Bar */}
         <Reveal>
@@ -384,7 +377,5 @@ return (
           onSubmit={handleConfirmCloseTrade}
         />
       </div>
-    </div>
-    </>
   );
 }

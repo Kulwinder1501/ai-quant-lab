@@ -10,11 +10,11 @@ export interface CompletedPriceCandle {
   close: number;
 }
 
-export type ExitFillRule = "OPEN_GAP_STOP" | "OPEN_GAP_TARGET" | "INTRABAR_STOP" | "INTRABAR_TARGET" | "CONSERVATIVE_STOP_FIRST";
+export type ExitFillRule = "OPEN_GAP_STOP" | "OPEN_GAP_TARGET" | "INTRABAR_STOP" | "INTRABAR_TARGET" | "CONSERVATIVE_STOP_FIRST" | "TRAP_DETECTED";
 
 export interface PaperTradeExitDecision {
-  reason: Extract<PaperTradeExitReason, "STOP_LOSS" | "TARGET">;
-  eventType: Extract<PaperTradeEventType, "STOP_LOSS_HIT" | "TARGET_HIT">;
+  reason: Extract<PaperTradeExitReason, "STOP_LOSS" | "TARGET" | "TRAP_DETECTED">;
+  eventType: Extract<PaperTradeEventType, "STOP_LOSS_HIT" | "TARGET_HIT" | "TRAP_DETECTED">;
   exitPrice: number;
   fillRule: ExitFillRule;
   candleId: string;

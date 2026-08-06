@@ -1,52 +1,205 @@
-import { GlassPanel } from "../../../components/ui/glass-panel";
+"use client";
 
-interface MacroEvent {
+import { useEffect, useState } from "react";
+import { GlassPanel } from "../../../components/ui/glass-panel";
+import { getResearchJson } from "../../research/api";
+
+interface ExpiryRow {
   id: string;
   title: string;
-  estimate: string;
-  previous: string;
-  impact: "HIGH" | "MED" | "LOW";
-  timeAway: string;
+  kind: string;
+  dateLabel: string;
+  daysAway: number;
 }
 
-const MOCK_EVENTS: MacroEvent[] = [
-  { id: "1", title: "CPI Data (US)", estimate: "3.1%", previous: "3.2%", impact: "HIGH", timeAway: "T-02:14:00" },
-  { id: "2", title: "FOMC Meeting", estimate: "Rate Decision", previous: "5.50%", impact: "HIGH", timeAway: "T-24:00:00" },
-  { id: "3", title: "Initial Jobless", estimate: "215K", previous: "211K", impact: "MED", timeAway: "T-48:00:00" },
-  { id: "4", title: "RBI MPC (IN)", estimate: "6.5%", previous: "6.5%", impact: "HIGH", timeAway: "T-72:00:00" },
-];
+interface HeadlineRow {
+  id: string;
+  title: string;
+}
 
+interface OptionChainResponse {
+  data?: {
+    available?: boolean;
+    underlyingSymbol?: string;
+    expiries?: Array<{ expiryDate: string; expiryKind: string }>;
+  };
+}
+
+interface MacroEventsResponse {
+  data?: {
+    hasMacroEvent?: boolean;
+    events?: string[];
+  };
+}
+
+const UNDERLYINGS = ["NIFTY50", "BANKNIFTY"] as const;
+
+function daysUntilIstDate(isoDate: string, now = new Date()): number | null {
+  // Expiry dates are calendar days in IST settlement terms (YYYY-MM-DD).
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const expiryUtc = Date.UTC(year, month - 1, day, 10, 0, 0); // ~15:30 IST
+  const nowUtc = now.getTime();
+  return Math.ceil((expiryUtc - nowUtc) / (24 * 60 * 60 * 1000));
+}
+
+function formatDayAway(days: number): string {
+  if (days < 0) return "expired";
+  if (days === 0) return "today";
+  if (days === 1) return "1d";
+  return `${days}d`;
+}
+
+/**
+ * Upcoming items backed by stored option expiries and recent macro headline
+ * keywords. Not a scheduled economic calendar — estimates/countdowns are never invented.
+ */
 export function UpcomingEvents() {
+  const [expiries, setExpiries] = useState<ExpiryRow[]>([]);
+  const [headlines, setHeadlines] = useState<HeadlineRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      setError(null);
+      try {
+        const [macro, ...chains] = await Promise.all([
+          getResearchJson("/macro-events") as Promise<MacroEventsResponse>,
+          ...UNDERLYINGS.map(
+            (underlying) =>
+              getResearchJson(`/option-chain?underlying=${underlying}`) as Promise<OptionChainResponse>,
+          ),
+        ]);
+
+        if (cancelled) return;
+
+        const nextExpiries: ExpiryRow[] = [];
+        for (const response of chains) {
+          const payload = response?.data;
+          if (!payload?.available || !Array.isArray(payload.expiries)) continue;
+          const symbol = payload.underlyingSymbol ?? "INDEX";
+          for (const entry of payload.expiries) {
+            if (!entry?.expiryDate) continue;
+            const daysAway = daysUntilIstDate(entry.expiryDate);
+            if (daysAway === null || daysAway < 0) continue;
+            nextExpiries.push({
+              id: `${symbol}-${entry.expiryDate}`,
+              title: `${symbol} ${entry.expiryKind === "WEEKLY" ? "weekly" : "monthly"} expiry`,
+              kind: entry.expiryKind || "LISTED",
+              dateLabel: entry.expiryDate,
+              daysAway,
+            });
+          }
+        }
+        nextExpiries.sort((a, b) => a.daysAway - b.daysAway || a.dateLabel.localeCompare(b.dateLabel));
+        setExpiries(nextExpiries.slice(0, 6));
+
+        const titles = Array.isArray(macro?.data?.events) ? macro.data.events : [];
+        setHeadlines(
+          titles.slice(0, 4).map((title, index) => ({
+            id: `macro-${index}`,
+            title,
+          })),
+        );
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load events.");
+          setExpiries([]);
+          setHeadlines([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void load();
+    const interval = setInterval(() => {
+      void load();
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   return (
-    <GlassPanel className="p-3 border-white/5 bg-slate-900/40 flex flex-col h-full rounded-md">
-      <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-2">
-        <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-          <span className="h-3 w-3 flex items-center justify-center text-xs">📅</span>
-          Upcoming Events
+    <GlassPanel className="flex h-full flex-col rounded-md border-white/5 bg-slate-900/40 p-3">
+      <div className="mb-2 flex items-center justify-between border-b border-white/5 pb-2">
+        <h3 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+          <span className="flex h-3 w-3 items-center justify-center text-[10px]">📅</span>
+          Upcoming
         </h3>
+        <span className="text-[8px] font-bold uppercase tracking-wider text-slate-600">
+          listed + headlines
+        </span>
       </div>
-      
-      <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-3">
-        {MOCK_EVENTS.map((evt) => (
-          <div key={evt.id} className="border-b border-white/[0.02] pb-2 last:border-0 last:pb-0">
-            <div className="flex items-center justify-between">
-              <h4 className="text-xs font-bold text-slate-200">{evt.title}</h4>
-              <span className={`text-[8px] font-black tracking-wider rounded px-1.5 py-0.5 border ${
-                evt.impact === "HIGH" ? "bg-rose-500/10 text-rose-400 border-rose-500/20" :
-                evt.impact === "MED" ? "bg-amber-500/10 text-amber-400 border-amber-500/20" :
-                "bg-slate-500/10 text-slate-400 border-slate-500/20"
-              }`}>
-                {evt.impact}
-              </span>
-            </div>
-            <div className="flex items-center justify-between mt-1 text-[10px] text-slate-400 font-mono">
-              <div>
-                <span className="text-slate-500">Est:</span> {evt.estimate} <span className="text-slate-600 px-1">|</span> <span className="text-slate-500">Prev:</span> {evt.previous}
-              </div>
-              <div className="text-cyan-400 font-bold">{evt.timeAway}</div>
-            </div>
+
+      <div className="custom-scrollbar flex-1 space-y-3 overflow-y-auto pr-1">
+        {loading && (
+          <p className="py-4 text-center text-[10px] italic text-slate-500">Loading…</p>
+        )}
+
+        {!loading && error && (
+          <p className="py-4 text-center text-[10px] text-rose-400/80">{error}</p>
+        )}
+
+        {!loading && !error && expiries.length === 0 && headlines.length === 0 && (
+          <div className="space-y-2 py-4 text-center">
+            <p className="text-[10px] font-bold text-slate-400">No upcoming items yet</p>
+            <p className="text-[9px] leading-relaxed text-slate-600">
+              No listed option expiries in store, and no recent macro headline matches.
+              A full economic calendar is not wired.
+            </p>
           </div>
-        ))}
+        )}
+
+        {!loading && expiries.length > 0 && (
+          <section className="space-y-2">
+            <h4 className="text-[8px] font-black uppercase tracking-widest text-slate-500">
+              Option expiries
+            </h4>
+            {expiries.map((evt) => (
+              <div
+                key={evt.id}
+                className="border-b border-white/[0.02] pb-2 last:border-0 last:pb-0"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h5 className="truncate text-xs font-bold text-slate-200">{evt.title}</h5>
+                  <span className="shrink-0 rounded border border-cyan-500/20 bg-cyan-500/10 px-1.5 py-0.5 text-[8px] font-black tracking-wider text-cyan-300">
+                    {evt.kind}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-slate-400">
+                  <span>{evt.dateLabel}</span>
+                  <span className="font-bold text-cyan-400">{formatDayAway(evt.daysAway)}</span>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
+
+        {!loading && headlines.length > 0 && (
+          <section className="space-y-2">
+            <h4 className="text-[8px] font-black uppercase tracking-widest text-slate-500">
+              Macro headlines (not scheduled)
+            </h4>
+            {headlines.map((row) => (
+              <div
+                key={row.id}
+                className="border-b border-white/[0.02] pb-2 last:border-0 last:pb-0"
+              >
+                <p className="text-[11px] leading-snug text-slate-300">{row.title}</p>
+              </div>
+            ))}
+          </section>
+        )}
       </div>
     </GlassPanel>
   );

@@ -47,7 +47,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <div className="absolute top-4 right-4 sm:top-6 sm:right-6 lg:top-8 lg:right-12 z-50">
             <NotificationBell />
           </div>
-          <div className="mx-auto max-w-6xl pt-10 lg:pt-0">
+          <div className="w-full pt-10 lg:pt-0">
             <ErrorBoundary>
               <Reveal delayMs={90}>
                 {children}

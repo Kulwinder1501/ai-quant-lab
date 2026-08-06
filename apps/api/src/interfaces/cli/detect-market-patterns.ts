@@ -9,7 +9,7 @@ import { PostgresPriceActionEventRepository } from "../../infrastructure/databas
 import { DetectMarketPatterns } from "../../modules/pattern-recognition/application/detect-market-patterns.js";
 import { atrPriceActionConfiguration, PriceActionEngine } from "../../modules/pattern-recognition/domain/price-action-engine.js";
 import { CandlestickPatternEngine } from "../../modules/pattern-recognition/domain/candlestick-pattern-engine.js";
-import { getOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
+import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 /**
  * ATR-measured distances are a different interpretation of the same rules, so their
@@ -37,6 +37,8 @@ async function main(): Promise<void> {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
     const thresholdMode = parseThresholdMode(getOption(argumentsList, "threshold-mode"));
+    const fromArg = getOption(argumentsList, "from");
+    const since = fromArg ? parseDateOption(fromArg, false) : undefined;
     const variant = priceActionVariants[thresholdMode];
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
@@ -53,12 +55,14 @@ async function main(): Promise<void> {
       instrumentId: instrument.id,
       timeframe,
       priceActionAlgorithmVersion: variant.algorithmVersion,
+      since,
     });
     console.info(JSON.stringify({
       level: "info",
       message: "Market pattern detection complete",
       instrument: symbol,
       timeframe,
+      since: since?.toISOString(),
       thresholdMode,
       priceActionAlgorithmVersion: variant.algorithmVersion,
       ...result,

@@ -14,6 +14,7 @@ export interface DetectMarketPatternsInput {
   timeframe: string;
   candlestickAlgorithmVersion?: string;
   priceActionAlgorithmVersion?: string;
+  since?: Date;
 }
 
 export interface DetectMarketPatternsResult {
@@ -80,6 +81,13 @@ export class DetectMarketPatterns {
     const priceActionAlgorithmVersion = input.priceActionAlgorithmVersion ?? "price-action-v2";
     const patterns = this.candlestickEngine.detect(candles);
     const events = this.priceActionEngine.detect(candles);
+    
+    const openTimeByCandleId = new Map<string, number>();
+    for (const c of candles) {
+      openTimeByCandleId.set(c.id, c.openTime.getTime());
+    }
+    const fromTime = input.since?.getTime() ?? 0;
+    
     const definitionsByCode = new Map<string, { id: string }>();
 
     for (const pattern of patterns) {
@@ -92,6 +100,10 @@ export class DetectMarketPatterns {
         });
         definitionsByCode.set(pattern.patternCode, definition);
       }
+      
+      const time = openTimeByCandleId.get(pattern.candleId) ?? 0;
+      if (time < fromTime) continue;
+
       await this.patternDetectionRepository.upsert({
         candleId: pattern.candleId,
         patternDefinitionId: definition.id,
@@ -103,6 +115,9 @@ export class DetectMarketPatterns {
     }
 
     for (const event of events) {
+      const time = openTimeByCandleId.get(event.candleId) ?? 0;
+      if (time < fromTime) continue;
+
       await this.priceActionEventRepository.upsert({
         candleId: event.candleId,
         eventCode: event.eventCode,

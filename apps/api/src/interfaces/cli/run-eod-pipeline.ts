@@ -108,7 +108,7 @@ async function main(): Promise<void> {
     // 1. Fetch EOD Historical Data for NIFTY50 via Yahoo Finance (last 7 days to ensure safety)
     await runCommand("npm", [
       "run", "data:collect:historical", "--",
-      "--provider", "yahoo",
+      "--provider", "fyers",
       "--instrument", "NIFTY50",
       "--timeframe", "15m",
       "--from", sevenDaysAgo,

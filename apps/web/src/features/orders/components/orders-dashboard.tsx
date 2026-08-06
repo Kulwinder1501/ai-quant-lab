@@ -13,7 +13,7 @@ import { OrdersStats } from "./orders-stats";
 import { OrdersTable } from "./orders-table";
 import type { OrderRow } from "./orders-table";
 
-export function OrdersDashboard({ navigation }: { navigation?: ReactNode } = {}) {
+export function OrdersDashboard() {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
@@ -134,16 +134,7 @@ export function OrdersDashboard({ navigation }: { navigation?: ReactNode } = {})
   }, [filteredOrders]);
 
   return (
-    <>
-      <PageHeader
-        eyebrow="Autonomous AI Trading Lab"
-        title="Completed AI Orders & Execution Log"
-        description="Review closed quantitative trade executions, algorithmic exit reasons (Take-Profit vs Stop-Loss), and realized P&L auditing."
-        connectionLabel={`Auditing Account: ${accounts.find((a) => a.id === selectedAccountId)?.name || "Default"}`}
-      />
-      <div className="mt-10">
-        <div className="space-y-6">
-        {navigation && <Reveal>{navigation}</Reveal>}
+      <div className="space-y-6">
 
         {/* Account & Filter Control Bar */}
         <Reveal>
@@ -188,7 +179,5 @@ export function OrdersDashboard({ navigation }: { navigation?: ReactNode } = {})
           <OrdersTable filteredOrders={filteredOrders} summary={summary} loading={loading} />
         </Reveal>
       </div>
-    </div>
-    </>
   );
 }

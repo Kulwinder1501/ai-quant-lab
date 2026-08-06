@@ -81,7 +81,11 @@ export function TradeHistoryTable({ closedTrades }: TradeHistoryTableProps) {
                       {ret >= 0 ? "+" : ""}{formatNumber(ret, 2)}%
                     </td>
                     <td className="py-3.5 px-4">
-                      <span className="inline-flex px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-300 border border-white/10 font-mono">
+                      <span className={`inline-flex px-2 py-0.5 rounded text-xs border font-mono ${
+                        trade.exitReason === "TRAP_DETECTED" 
+                          ? "bg-orange-500/20 text-orange-300 border-orange-500/30"
+                          : "bg-slate-800 text-slate-300 border-white/10"
+                      }`}>
                         {trade.exitReason || "MANUAL"}
                       </span>
                     </td>

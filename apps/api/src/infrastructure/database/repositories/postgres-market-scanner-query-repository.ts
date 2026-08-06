@@ -81,6 +81,12 @@ const knownIndicatorCodes = [
   "VWAP",
   "BOLLINGER_BANDS",
   "SUPERTREND",
+  "FVG",
+  "BOS",
+  "CHOCH",
+  "LIQUIDITY_SWEEP",
+  "ORDER_BLOCK",
+  "EQUILIBRIUM_ZONE",
 ] as const;
 const knownPatternCodes = [
   "DOJI",

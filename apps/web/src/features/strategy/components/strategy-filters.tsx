@@ -10,6 +10,8 @@ interface StrategyFiltersProps {
   setMinConfidence: (v: number) => void;
   dateFilter: string;
   setDateFilter: (v: string) => void;
+  includeExpired: boolean;
+  setIncludeExpired: (v: boolean) => void;
   loading: boolean;
   onRefresh: () => void;
   onGenerate: () => void;
@@ -24,6 +26,8 @@ export function StrategyFilters({
   setMinConfidence,
   dateFilter,
   setDateFilter,
+  includeExpired,
+  setIncludeExpired,
   loading,
   onRefresh,
   onGenerate,
@@ -92,6 +96,16 @@ export function StrategyFilters({
             className="bg-transparent text-sm font-semibold text-white focus:outline-none w-auto cursor-pointer placeholder:text-slate-600"
           />
         </div>
+
+        <label className="flex items-center gap-2 cursor-pointer ml-2">
+          <input
+            type="checkbox"
+            checked={includeExpired}
+            onChange={(e) => setIncludeExpired(e.target.checked)}
+            className="rounded border-white/10 bg-slate-900 text-cyan-500 focus:ring-cyan-500/50"
+          />
+          <span className="text-xs font-semibold text-slate-400">Include Expired</span>
+        </label>
       </div>
 
       <div className="flex items-center gap-3">

@@ -45,7 +45,8 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       title: "MARKETS",
       items: [
         { name: "Live Dashboard", href: "/dashboard", icon: <Zap className="size-5" /> },
-        { name: "Market Scanner", href: "/", icon: <ScanSearch className="size-5" /> },
+        { name: "Market News", href: "/news", icon: <Newspaper className="size-5" /> },
+        { name: "Scanner & Backtesting", href: "/", icon: <ScanSearch className="size-5" /> },
         { name: "Interactive Charts", href: "/charts", icon: <CandlestickChart className="size-5" /> },
         { name: "Option Chain", href: "/option-chain", icon: <Layers className="size-5" /> },
       ],
@@ -60,14 +61,12 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       title: "STRATEGY",
       items: [
         { name: "Strategy & Ideas", href: "/strategy", icon: <Lightbulb className="size-5" /> },
-        { name: "Backtesting", href: "/backtesting", icon: <FlaskConical className="size-5" /> },
       ],
     },
     {
       title: "AI & ML",
       items: [
-        { name: "AI Predictions", href: "/predictions", icon: <BrainCircuit className="size-5" /> },
-        { name: "Model Performance", href: "/model-performance", icon: <Cpu className="size-5" /> },
+        { name: "AI Models", href: "/ai-models", icon: <BrainCircuit className="size-5" /> },
       ],
     },
   ];

@@ -20,6 +20,10 @@ function themedScale(name: string, palette: Record<string, string>) {
 
 export default {
   content: ["./src/**/*.{ts,tsx}"],
+  // The app owns its theme: applyTheme() toggles both data-theme and the `dark`
+  // class on <html>. Tailwind's default "media" strategy would key `dark:` off
+  // the OS preference instead, which silently disagrees with the in-app toggle.
+  darkMode: "class",
   theme: {
     extend: {
       colors: {

@@ -5,7 +5,6 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tooltip } from "../../../components/ui/tooltip";
 import { getResearchJson } from "../../research/api";
 import { MarketContextHistoryChart } from "./market-context-history-chart";
-import { NewsDashboard } from "../../news/components/news-dashboard";
 
 export type InstitutionalFlowStance =
   | "BOTH_ACCUMULATING"
@@ -137,13 +136,11 @@ export function InstitutionalContextCards() {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {["FII / DII Institutional Flows", "Market News"].map((title) => (
-          <GlassPanel key={title} className="p-6 border-white/10 bg-slate-900/60">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</span>
-            <div className="mt-4 h-24 animate-pulse rounded-xl bg-white/5" />
-          </GlassPanel>
-        ))}
+      <div className="space-y-6">
+        <GlassPanel className="p-6 border-white/10 bg-slate-900/60">
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-400">FII / DII Institutional Flows</span>
+          <div className="mt-4 h-24 animate-pulse rounded-xl bg-white/5" />
+        </GlassPanel>
       </div>
     );
   }
@@ -162,7 +159,6 @@ export function InstitutionalContextCards() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       {/* FII / DII Institutional Flows */}
       <GlassPanel className="flex flex-col p-6 border-white/10 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20">
         <div className="flex items-start justify-between gap-3">
@@ -259,12 +255,6 @@ export function InstitutionalContextCards() {
           </>
         )}
       </GlassPanel>
-
-      {/* Market News */}
-      <div className="flex flex-col h-full max-h-[800px] overflow-y-auto rounded-2xl border border-white/10 bg-slate-900/60 shadow-2xl relative px-4 py-2">
-         <NewsDashboard />
-      </div>
-      </div>
       <MarketContextHistoryChart flows={flows.history} indiaVix={indiaVix}  />
     </div>
   );

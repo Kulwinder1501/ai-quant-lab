@@ -57,6 +57,7 @@ interface PaperTradeRow extends QueryResultRow {
   option_expiry: Date | null;
   option_type: "CE" | "PE" | null;
   underlying_symbol: string | null;
+  underlying_entry_price: string | null;
   entry_iv: string | null;
 }
 
@@ -97,6 +98,7 @@ const tradeColumns = `
   paper_trades.option_expiry,
   paper_trades.option_type,
   paper_trades.underlying_symbol,
+  paper_trades.underlying_entry_price,
   paper_trades.entry_iv
 `;
 
@@ -147,6 +149,9 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     optionExpiry: row.option_expiry ?? null,
     optionType: row.option_type ?? null,
     underlyingSymbol: row.underlying_symbol ?? null,
+    underlyingEntryPrice: row.underlying_entry_price === null || row.underlying_entry_price === undefined
+      ? null
+      : toNumber(row.underlying_entry_price, "underlying entry price"),
     entryIv: row.entry_iv === null || row.entry_iv === undefined
       ? null
       : toNumber(row.entry_iv, "entry IV"),
@@ -179,7 +184,7 @@ function hasGeometryForFill(side: TradeSide, fillPrice: number, stopLoss: number
 
 function exitEventType(reason: PaperTradeExitReason): Extract<
   PaperTradeEventType,
-  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED" | "EXPIRED"
+  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED" | "EXPIRED" | "TRAP_DETECTED"
 > {
   switch (reason) {
     case "STOP_LOSS":
@@ -192,6 +197,8 @@ function exitEventType(reason: PaperTradeExitReason): Extract<
       return "CANCELLED";
     case "EXPIRED":
       return "EXPIRED";
+    case "TRAP_DETECTED":
+      return "TRAP_DETECTED";
   }
 }
 
@@ -308,10 +315,10 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         INSERT INTO paper_trades (
           account_id, trade_idea_id, instrument_id, side, status, quantity,
           entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes,
-          option_strike, option_expiry, option_type, underlying_symbol, entry_iv
+          option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv
         ) VALUES (
           $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12,
-          $15, $16, $17, $18, $19
+          $15, $16, $17, $18, $19, $20
         )
         RETURNING id
       `, [
@@ -333,6 +340,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         contract?.optionExpiry ?? null,
         contract?.optionType ?? null,
         contract?.underlyingSymbol ?? null,
+        contract?.underlyingEntryPrice ?? null,
         contract?.entryIv ?? null,
       ]);
       const paperTradeId = inserted.rows[0]?.id;

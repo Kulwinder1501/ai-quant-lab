@@ -1,23 +1,49 @@
 import { GlassPanel } from "../../../components/ui/glass-panel";
 
+import { useEffect, useState } from "react";
+import { apiV1Url } from "../../research/api";
+
 interface MarketWatchItem {
   symbol: string;
-  price: string;
+  price: string | number;
   changePercent: number;
   aiStance: "BULL" | "BEAR" | "NEUT";
 }
 
-const MOCK_WATCHLIST: MarketWatchItem[] = [
-  { symbol: "NIFTY50", price: "24,534.15", changePercent: 0.2, aiStance: "BULL" },
-  { symbol: "BANKNIFTY", price: "52,481.00", changePercent: 0.5, aiStance: "BULL" },
-  { symbol: "FINNIFTY", price: "23,150.25", changePercent: -0.1, aiStance: "NEUT" },
-  { symbol: "SENSEX", price: "80,720.50", changePercent: 0.1, aiStance: "NEUT" },
-  { symbol: "HANG SENG", price: "17,650.00", changePercent: -1.2, aiStance: "BEAR" },
-  { symbol: "NIKKEI 225", price: "39,120.00", changePercent: 0.8, aiStance: "BULL" },
-  { symbol: "S&P 500", price: "5,410.25", changePercent: 0.3, aiStance: "NEUT" },
-];
-
 export function MarketWatch({ selectedSymbol, onSelect }: { selectedSymbol?: string, onSelect?: (s: string) => void }) {
+  const [watchlist, setWatchlist] = useState<MarketWatchItem[]>([]);
+  const [flashing, setFlashing] = useState<Record<string, string>>({}); // symbol -> 'up' | 'down'
+  
+  useEffect(() => {
+    const es = new EventSource(`${apiV1Url}/stream/market-watch`);
+    
+    es.onmessage = (event) => {
+      try {
+        const data: MarketWatchItem[] = JSON.parse(event.data);
+        
+        setWatchlist(prev => {
+          const newFlashing: Record<string, string> = {};
+          
+          data.forEach(newItem => {
+            const oldItem = prev.find(p => p.symbol === newItem.symbol);
+            if (oldItem && Number(oldItem.price) !== Number(newItem.price)) {
+              newFlashing[newItem.symbol] = Number(newItem.price) > Number(oldItem.price) ? 'up' : 'down';
+            }
+          });
+          
+          if (Object.keys(newFlashing).length > 0) {
+            setFlashing(newFlashing);
+            setTimeout(() => setFlashing({}), 800);
+          }
+          
+          return data;
+        });
+      } catch (err) {}
+    };
+
+    return () => es.close();
+  }, []);
+
   return (
     <GlassPanel className="p-3 border-white/5 bg-slate-900/40 flex flex-col h-full rounded-md">
       <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-2">
@@ -37,23 +63,34 @@ export function MarketWatch({ selectedSymbol, onSelect }: { selectedSymbol?: str
             </tr>
           </thead>
           <tbody className="divide-y divide-white/[0.02]">
-            {MOCK_WATCHLIST.map((item) => {
+            {watchlist.length === 0 && (
+              <tr><td colSpan={3} className="text-center py-4 text-[10px] text-slate-500 italic">Connecting to live feed...</td></tr>
+            )}
+            {watchlist.map((item) => {
               const isPos = item.changePercent >= 0;
               const isSelected = item.symbol === selectedSymbol;
+              const flash = flashing[item.symbol];
+              
+              let rowClass = isSelected ? 'bg-cyan-500/10' : 'hover:bg-white/[0.02]';
+              if (flash === 'up') rowClass = 'bg-emerald-500/20 transition-none';
+              if (flash === 'down') rowClass = 'bg-rose-500/20 transition-none';
+              
               return (
                 <tr 
                   key={item.symbol} 
                   onClick={() => onSelect?.(item.symbol)}
-                  className={`group transition cursor-pointer ${isSelected ? 'bg-cyan-500/10' : 'hover:bg-white/[0.02]'}`}
+                  className={`group transition-all duration-300 cursor-pointer ${rowClass}`}
                 >
                   <td className={`py-2.5 font-bold truncate max-w-[80px] ${isSelected ? 'text-cyan-400' : 'text-slate-300 group-hover:text-white'}`}>
                     {isSelected && <span className="mr-1 text-[10px]">⚡</span>}
                     {item.symbol}
                   </td>
                   <td className="py-2.5 text-right">
-                    <div className="text-slate-200">{item.price}</div>
+                    <div className={`transition-colors duration-300 ${flash === 'up' ? 'text-emerald-400 font-bold' : flash === 'down' ? 'text-rose-400 font-bold' : 'text-slate-200'}`}>
+                      {typeof item.price === "number" ? item.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : item.price}
+                    </div>
                     <div className={`text-[10px] ${isPos ? "text-emerald-400" : "text-rose-400"}`}>
-                      {isPos ? "▲" : "▼"} {Math.abs(item.changePercent)}%
+                      {isPos ? "▲" : "▼"} {Math.abs(item.changePercent).toFixed(2)}%
                     </div>
                   </td>
                   <td className="py-2.5 text-right">

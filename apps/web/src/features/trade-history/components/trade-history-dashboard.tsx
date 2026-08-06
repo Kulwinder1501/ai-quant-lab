@@ -34,7 +34,7 @@ import { TradeLedgerTable } from "./trade-ledger-table";
  * data behind it the tile shows an em dash rather than a zero, because a zero win
  * rate and an absent win rate are different facts.
  */
-export function TradeHistoryDashboard({ initialMode = "swing", navigation }: { initialMode?: TradeHistoryMode, navigation?: React.ReactNode } = {}) {
+export function TradeHistoryDashboard({ initialMode = "swing" }: { initialMode?: TradeHistoryMode } = {}) {
   const [mode, setMode] = useState<TradeHistoryMode>(initialMode);
   const [filters, setFilters] = useState<TradeHistoryFilters>(defaultTradeHistoryFilters);
   const [symbolDraft, setSymbolDraft] = useState<string>("");
@@ -107,21 +107,7 @@ export function TradeHistoryDashboard({ initialMode = "swing", navigation }: { i
   }, []);
 
   return (
-    <>
-      <PageHeader
-        eyebrow="Simulated Execution Ledger"
-        title="Trade History"
-        description="The complete chronological record of local paper trades across every research account, with realised profit factor, expectancy, reward multiples, and holding periods. Reading this ledger cannot open, close, or cancel a position."
-        connectionLabel={state === "unavailable"
-          ? "Ledger unavailable"
-          : state === "loading"
-            ? "Loading trade history"
-            : `${records.length}${pageTruncated ? "+" : ""} ${mode} simulated trades loaded`}
-        unavailable={state === "unavailable"}
-      />
-      <div className="mt-10">
       <div className="space-y-6">
-        {navigation && <Reveal>{navigation}</Reveal>}
         <Reveal>
           <Tabs
             tabs={[
@@ -299,7 +285,5 @@ export function TradeHistoryDashboard({ initialMode = "swing", navigation }: { i
             />
           )}
       </div>
-      </div>
-    </>
   );
 }

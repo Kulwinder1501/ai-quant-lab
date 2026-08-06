@@ -154,7 +154,7 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
         pt.instrument_id,
         i.symbol AS instrument_symbol,
         i.display_name AS instrument_name,
-        c.timeframe AS timeframe,
+        COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe,
         pt.trade_idea_id,
         pt.side,
         pt.status,

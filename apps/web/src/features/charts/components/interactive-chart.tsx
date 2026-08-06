@@ -10,29 +10,54 @@ interface InteractiveChartProps {
   payload: ChartPayload;
   activeIndicators: string[];
   showPatterns: boolean;
+  /** Sizing for the chart container. Defaults to a self-supporting height for
+   *  callers that don't constrain it; pass "h-full w-full" inside a flex row. */
+  className?: string;
 }
 
-export function InteractiveChart({ payload, activeIndicators, showPatterns }: InteractiveChartProps) {
+export function InteractiveChart({ payload, activeIndicators, showPatterns, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const theme = useAppStore((state) => state.theme);
 
-  const chartColors = useMemo(() => theme === "light" ? {
-    text: "#475569",
-    grid: "rgba(203, 213, 225, 0.65)",
-    crosshair: "#f97316",
-    border: "#cbd5e1",
-    sma: "#ea580c",
-    bollingerMiddle: "rgba(37, 99, 235, 0.85)",
-    rsi: "#d97706",
-  } : {
-    text: "#94a3b8",
-    grid: "rgba(30, 41, 59, 0.5)",
-    crosshair: "#38bdf8",
-    border: "#334155",
-    sma: "#06b6d4",
-    bollingerMiddle: "rgba(59, 130, 246, 0.8)",
-    rsi: "#f59e0b",
+  // The canvas is painted by JS, so it can't use Tailwind classes. Read the same
+  // theme variables globals.css defines (they flip with data-theme) and build the
+  // colour strings from them, so the chart tracks the app's light/dark toggle.
+  const chartColors = useMemo(() => {
+    const rgb = (name: string, fallback: string) => {
+      if (typeof window === "undefined") return fallback;
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+    };
+
+    // Fallbacks mirror globals.css for the first paint, before the variables
+    // resolve; the accent scales are only overridden in light, so their dark
+    // values double as the fallback.
+    const base = theme === "light"
+      ? { text: "51 65 85", grid: "203 213 225", muted: "71 85 105" }
+      : { text: "203 213 225", grid: "30 41 59", muted: "148 163 184" };
+
+    const text = rgb("--chart-text", base.text);
+    const grid = rgb("--chart-grid", base.grid);
+    const muted = rgb("--chart-muted", base.muted);
+    const cyan = rgb("--color-cyan-400", "34 211 238");
+    const blue = rgb("--color-blue-400", "96 165 250");
+    const amber = rgb("--color-amber-400", "251 191 36");
+    const emerald = rgb("--color-emerald-500", "16 185 129");
+    const rose = rgb("--color-rose-500", "244 63 94");
+
+    return {
+      text: `rgb(${text})`,
+      grid: `rgb(${grid} / 0.45)`,
+      crosshair: `rgb(${muted})`,
+      border: `rgb(${grid})`,
+      sma: `rgb(${cyan})`,
+      bollingerMiddle: `rgb(${blue} / 0.75)`,
+      bollingerUpper: `rgb(${emerald} / 0.5)`,
+      bollingerLower: `rgb(${rose} / 0.5)`,
+      rsi: `rgb(${amber})`,
+      up: `rgb(${emerald})`,
+      down: `rgb(${rose})`,
+    };
   }, [theme]);
 
   const candles = useMemo(() => payload.candles || [], [payload.candles]);
@@ -109,18 +134,90 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
   }, [hasRsi, indicators.RSI]);
 
   const markers = useMemo<SeriesMarker<Time>[]>(() => {
-    if (!showPatterns || patterns.length === 0) return [];
-    return patterns.map((pat): SeriesMarker<Time> => {
-      const isBullish = pat.direction === "BULLISH";
-      return {
-        time: (new Date(pat.timestamp).getTime() / 1000) as Time,
-        position: isBullish ? "belowBar" : "aboveBar",
-        color: isBullish ? "#10b981" : "#f43f5e",
-        shape: isBullish ? "arrowUp" : "arrowDown",
-        text: pat.name || pat.type,
-      };
-    }).sort((a, b) => (a.time as number) - (b.time as number));
-  }, [showPatterns, patterns]);
+    if (!showPatterns) return [];
+    
+    const allMarkers: SeriesMarker<Time>[] = [];
+
+    if (patterns && patterns.length > 0) {
+      patterns.forEach((pat) => {
+        const isBullish = pat.direction === "BULLISH";
+        allMarkers.push({
+          time: (new Date(pat.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#10b981" : "#f43f5e",
+          shape: isBullish ? "arrowUp" : "arrowDown",
+          text: pat.name || pat.type,
+        });
+      });
+    }
+
+    if (indicators.FVG) {
+      indicators.FVG.forEach((fvg) => {
+        const isBullish = fvg.type === "BULLISH";
+        allMarkers.push({
+          time: (new Date(fvg.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#10b981" : "#f43f5e",
+          shape: "circle",
+          text: "FVG",
+        });
+      });
+    }
+
+    if (indicators.BOS) {
+      indicators.BOS.forEach((bos) => {
+        const isBullish = bos.type === "BULLISH_BOS";
+        allMarkers.push({
+          time: (new Date(bos.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#3b82f6" : "#eab308",
+          shape: "square",
+          text: "BOS",
+        });
+      });
+    }
+
+    if (indicators.CHOCH) {
+      indicators.CHOCH.forEach((choch) => {
+        const isBullish = choch.type === "BULLISH_CHOCH";
+        allMarkers.push({
+          time: (new Date(choch.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#8b5cf6" : "#d946ef",
+          shape: "arrowUp",
+          text: "CHoCH",
+        });
+      });
+    }
+
+    if (indicators.LIQUIDITY_SWEEP) {
+      indicators.LIQUIDITY_SWEEP.forEach((sweep) => {
+        const isBullish = sweep.type === "BULLISH_SWEEP";
+        allMarkers.push({
+          time: (new Date(sweep.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#14b8a6" : "#f97316",
+          shape: "arrowDown",
+          text: "Sweep",
+        });
+      });
+    }
+
+    if (indicators.ORDER_BLOCK) {
+      indicators.ORDER_BLOCK.forEach((ob) => {
+        const isBullish = ob.type === "BULLISH_OB";
+        allMarkers.push({
+          time: (new Date(ob.timestamp).getTime() / 1000) as Time,
+          position: isBullish ? "belowBar" : "aboveBar",
+          color: isBullish ? "#0ea5e9" : "#fb923c",
+          shape: "circle",
+          text: "OB",
+        });
+      });
+    }
+
+    return allMarkers.sort((a, b) => (a.time as number) - (b.time as number));
+  }, [showPatterns, patterns, indicators.FVG, indicators.BOS, indicators.CHOCH, indicators.LIQUIDITY_SWEEP, indicators.ORDER_BLOCK]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -130,7 +227,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: chartColors.text,
-        fontFamily: "'Inter', 'Roboto', sans-serif",
+        fontFamily: "var(--font-inter), 'Inter', system-ui, sans-serif",
       },
       grid: {
         vertLines: { color: chartColors.grid },
@@ -182,11 +279,11 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
     // Series
     const mainSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#10b981",
-      downColor: "#f43f5e",
+      upColor: chartColors.up,
+      downColor: chartColors.down,
       borderVisible: false,
-      wickUpColor: "#10b981",
-      wickDownColor: "#f43f5e",
+      wickUpColor: chartColors.up,
+      wickDownColor: chartColors.down,
     });
     mainSeries.setData(ohlcData);
     
@@ -218,7 +315,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     if (hasBb) {
       if (bbUpper.length > 0) {
         chart.addSeries(LineSeries, {
-          color: "rgba(16, 185, 129, 0.5)",
+          color: chartColors.bollingerUpper,
           lineWidth: 1,
           lineStyle: 2, // Dashed
         }).setData(bbUpper);
@@ -231,7 +328,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
       }
       if (bbLower.length > 0) {
         chart.addSeries(LineSeries, {
-          color: "rgba(244, 63, 94, 0.5)",
+          color: chartColors.bollingerLower,
           lineWidth: 1,
           lineStyle: 2, // Dashed
         }).setData(bbLower);
@@ -240,18 +337,19 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
     // Add RSI Pane if present
     if (hasRsi && rsiData.length > 0) {
-      const rsiScale = chart.priceScale("rsi");
-      rsiScale.applyOptions({
-        scaleMargins: { top: 0.85, bottom: 0 },
-        borderColor: chartColors.border,
-      });
-
+      // An overlay price scale only exists once a series is attached to it —
+      // reaching for chart.priceScale("rsi") first throws "incorrect ID: rsi".
       const rsiLine = chart.addSeries(LineSeries, {
         color: chartColors.rsi,
         lineWidth: 2,
         priceScaleId: "rsi",
       });
       rsiLine.setData(rsiData);
+
+      chart.priceScale("rsi").applyOptions({
+        scaleMargins: { top: 0.85, bottom: 0 },
+        borderColor: chartColors.border,
+      });
 
       const rsiBaseOptions = {
         priceScaleId: "rsi",
@@ -290,34 +388,6 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
     hasRsi, rsiData, markers, payload.timeframe, chartColors
   ]);
 
-  const handleZoom = (direction: 'in' | 'out') => {
-    if (!chartRef.current) return;
-    const timeScale = chartRef.current.timeScale();
-    const currentLogicalRange = timeScale.getVisibleLogicalRange();
-    if (currentLogicalRange) {
-      const bars = currentLogicalRange.to - currentLogicalRange.from;
-      const amount = direction === 'in' ? bars * 0.2 : -bars * 0.2;
-      timeScale.setVisibleLogicalRange({
-        from: currentLogicalRange.from + amount,
-        to: currentLogicalRange.to - amount,
-      });
-    }
-  };
-
-  const handlePan = (direction: 'left' | 'right') => {
-    if (!chartRef.current) return;
-    const timeScale = chartRef.current.timeScale();
-    const currentLogicalRange = timeScale.getVisibleLogicalRange();
-    if (currentLogicalRange) {
-      const bars = currentLogicalRange.to - currentLogicalRange.from;
-      const amount = direction === 'left' ? -bars * 0.1 : bars * 0.1;
-      timeScale.setVisibleLogicalRange({
-        from: currentLogicalRange.from + amount,
-        to: currentLogicalRange.to + amount,
-      });
-    }
-  };
-
   const handleReset = () => {
     if (!chartRef.current) return;
     chartRef.current.timeScale().fitContent();
@@ -325,39 +395,16 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns }: In
 
   if (candles.length === 0) {
     return (
-      <div className="flex h-96 flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 bg-slate-950/40 p-8 text-center">
-        <p className="text-base font-semibold text-slate-300">No chart candle data available</p>
-        <p className="mt-1 text-xs text-slate-500">Select an instrument symbol and click &quot;Plot Chart&quot; to load historical OHLCV data.</p>
+      <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
+        <p className="text-base font-semibold text-slate-400">No chart candle data available</p>
       </div>
     );
   }
 
   return (
-    <div className="w-full h-full flex flex-col rounded-2xl border border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950/90 p-4 shadow-2xl backdrop-blur-xl">
-      <div className="mb-3 shrink-0 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3 text-xs font-mono">
-        <div className="flex items-center gap-3">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 px-2.5 py-1 text-cyan-300 border border-cyan-500/30 font-extrabold">
-            <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse"></span>
-            TRADINGVIEW LIGHTWEIGHT CHARTS
-          </span>
-          <span className="text-slate-400 hidden sm:inline">Professional Hardware Accelerated Visualization</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => handlePan('left')} className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Pan Left">⬅️</button>
-          <button onClick={() => handlePan('right')} className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Pan Right">➡️</button>
-          <button onClick={() => handleZoom('in')} className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Zoom In">➕</button>
-          <button onClick={() => handleZoom('out')} className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Zoom Out">➖</button>
-          <button onClick={handleReset} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold" title="Reset View">Reset</button>
-        </div>
-      </div>
-
-      <div 
-        ref={chartContainerRef} 
-        className="w-full overflow-hidden rounded-xl h-full min-h-[300px] cursor-crosshair active:cursor-grabbing"
-      />
-      <div className="mt-2 text-center text-[11px] text-slate-500 font-medium">
-        💡 Tip: Drag chart to pan horizontally. Scroll mouse wheel to zoom in/out. Hover on flags to view pattern details.
-      </div>
-    </div>
+    <div
+      ref={chartContainerRef}
+      className={`${className} cursor-crosshair active:cursor-grabbing`}
+    />
   );
 }

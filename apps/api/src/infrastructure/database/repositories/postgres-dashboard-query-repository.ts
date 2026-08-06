@@ -137,7 +137,7 @@ export class PostgresDashboardQueryRepository {
 
     const tradesResult = await this.database.query<QueryResultRow>(`
       SELECT
-        pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, '1d') AS timeframe, pt.side, pt.status,
+        pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe, pt.side, pt.status,
         pt.quantity, pt.entry_price, pt.stop_loss, pt.target_price, pt.opened_at, pt.closed_at,
         pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.fee_breakdown, pt.slippage, pt.notes,
         pt.option_strike, pt.option_expiry, pt.option_type, pt.underlying_symbol, pt.entry_iv,

@@ -64,6 +64,7 @@ export interface OptionBuyerFill {
   targetPremium: number;
   entryGreeks: OptionGreeks;
   timeToExpiryYears: number;
+  underlyingEntryPrice: number;
 }
 
 /**
@@ -165,6 +166,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     targetPremium: roundMoney(targetPremium),
     entryGreeks,
     timeToExpiryYears: T,
+    underlyingEntryPrice: input.underlyingEntry,
   };
 }
 

@@ -69,7 +69,7 @@ export function ModelLeaderboard({
           )}
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto max-h-[600px] overflow-y-auto pr-2">
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-white/10 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -96,10 +96,9 @@ export function ModelLeaderboard({
                     onClick={() => setSelectedId(record.id)}
                   >
                     <td className="px-4 py-4 font-extrabold text-white">
-                      v{record.version}
-                      <span className="mt-0.5 block max-w-[16rem] truncate font-mono text-[11px] font-normal text-slate-500">
-                        {record.modelKey}
-                      </span>
+                      <Tooltip content={record.modelKey}>
+                        <span className="cursor-help">v{record.version}</span>
+                      </Tooltip>
                     </td>
                     <td className="px-4 py-4 text-xs">
                       <span className="font-bold text-slate-100">{algorithmLabel(record.algorithm)}</span>

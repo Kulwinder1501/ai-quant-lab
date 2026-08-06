@@ -8,8 +8,8 @@ interface AiBrainStreamProps {
 
 export function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
   return (
-    <GlassPanel className="p-6 md:p-8 border-cyan-500/40 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/30 shadow-2xl">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center border-b border-white/10 pb-4">
+    <GlassPanel className="flex h-full min-h-0 flex-col p-6 md:p-8 border-cyan-500/40 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/30 shadow-2xl">
+      <div className="flex shrink-0 flex-col justify-between gap-4 sm:flex-row sm:items-center border-b border-white/10 pb-4">
         <div className="flex items-center gap-3">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-500/20 border border-cyan-400/30 text-2xl shadow-inner">
             🧠
@@ -33,7 +33,7 @@ export function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
       </div>
 
       {/* Scrollable Live Thought Log */}
-      <div className="mt-6 max-h-[340px] space-y-3 overflow-y-auto pr-2 custom-scrollbar font-mono text-xs">
+      <div className="mt-6 min-h-0 flex-1 space-y-3 overflow-y-auto pr-2 custom-scrollbar font-mono text-xs">
         {thoughts.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/10 p-8 text-center text-slate-400">
             <span className="text-2xl animate-spin">⚙️</span>

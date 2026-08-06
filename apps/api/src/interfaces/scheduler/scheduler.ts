@@ -164,7 +164,7 @@ async function main(): Promise<void> {
       const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
       await runCommand("npm", [
         "run", "data:collect:historical", "--",
-        "--provider", "yahoo",
+        "--provider", "fyers",
         "--instrument", "NIFTY50",
         "--timeframe", "15m",
         "--from", todayIst,
@@ -172,6 +172,7 @@ async function main(): Promise<void> {
         "--skip-existing",
       ]);
       await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
+      await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
     });
   }, { timezone: IST });
 
@@ -218,6 +219,41 @@ async function main(): Promise<void> {
     void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
   }, { timezone: IST });
 
+  const collectIndicesIntraday = async (timeframes: readonly string[]): Promise<void> => {
+    const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
+    for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+      for (const timeframe of timeframes) {
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "fyers",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", todayIst,
+          "--to", todayIst,
+          "--skip-existing",
+        ]);
+        await runCommand("npm", [
+          "run", "analysis:calculate-indicators", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+        ]);
+      }
+    }
+  };
+
+  cron.schedule("*/1 9-15 * * 1-5", () => {
+    // Requires a healthy Fyers token, which FYERS_AUTH_HEALTH_CHECK ensures is available
+    if (fyersTokenService) {
+      void schedule("INDICES_INTRADAY", () => collectIndicesIntraday(["1m", "5m"]));
+    }
+  }, { timezone: IST });
+
+  cron.schedule("*/5 9-15 * * 1-5", () => {
+    if (fyersTokenService) {
+      void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
+    }
+  }, { timezone: IST });
+
   // Once daily, well before the 9:15 open: proactively refresh the Fyers access token and
   // report credential health, so a lapsed or soon-to-lapse refresh token is a visible log
   // line at 8:00 rather than a silent trade refusal discovered mid-session. Skipped
@@ -258,12 +294,13 @@ async function main(): Promise<void> {
     jobs: [
       "EOD_PIPELINE",
       "INTRADAY_MODEL_PREDICTIONS",
+      "INDICES_INTRADAY",
       "INSTITUTIONAL_FLOWS",
       "INSTITUTIONAL_FLOWS_RETRY",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
-      ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK"] : []),
+      ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT"] : []),
       "OPTION_CHAIN",
       "RSS_NEWS_INGESTION",
     ],

@@ -20,6 +20,7 @@
     "data:audit:sequence": "tsx src/interfaces/cli/audit-sequence-readiness.ts",
     "db:purge:yahoo-scalp": "tsx src/interfaces/cli/purge-yahoo-scalp-candles.ts",
     "pipeline:eod": "tsx src/interfaces/cli/run-eod-pipeline.ts",
+    "trading:paper:bot": "tsx src/interfaces/cli/run-paper-trading-bot.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
     "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",
     "analysis:generate-trade-ideas": "tsx src/interfaces/cli/generate-trade-ideas.ts",

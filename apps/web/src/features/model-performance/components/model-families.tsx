@@ -21,7 +21,7 @@ export function ModelFamilies({ families }: { families: ModelFamilySummary[] }) 
           Each family holds one production slot. Two algorithms only compete for the same slot when they were
           trained under one shared model key.
         </p>
-        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="mt-4 grid gap-3 lg:grid-cols-2 max-h-96 overflow-y-auto pr-2">
           {families.map((family) => (
             <div className="rounded-xl border border-white/10 bg-slate-950/60 p-4" key={family.modelKey}>
               <p className="break-all font-mono text-[11px] text-slate-400">{family.modelKey}</p>

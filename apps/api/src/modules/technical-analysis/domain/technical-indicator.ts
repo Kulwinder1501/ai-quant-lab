@@ -7,10 +7,16 @@ export const indicatorCodes = [
   "VWAP",
   "BOLLINGER_BANDS",
   "SUPERTREND",
+  "FVG",
+  "BOS",
+  "CHOCH",
+  "LIQUIDITY_SWEEP",
+  "ORDER_BLOCK",
+  "EQUILIBRIUM_ZONE",
 ] as const;
 
 export type IndicatorCode = (typeof indicatorCodes)[number];
-export type IndicatorValues = Record<string, number | string | null>;
+export type IndicatorValues = Record<string, number | string | boolean | null>;
 
 export interface IndicatorDefinitionSpec {
   code: IndicatorCode;
@@ -84,5 +90,41 @@ export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
     algorithmVersion: "ta-v1",
     parameters: { atrPeriod: 10, multiplier: 3 },
     outputSchema: { value: "number", upperBand: "number", lowerBand: "number", trend: "UP|DOWN" },
+  },
+  {
+    code: "FVG",
+    algorithmVersion: "ta-v1",
+    parameters: {},
+    outputSchema: { top: "number", bottom: "number", type: "BULLISH|BEARISH", active: "boolean" },
+  },
+  {
+    code: "BOS",
+    algorithmVersion: "ta-v1",
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_BOS|BEARISH_BOS", level: "number" },
+  },
+  {
+    code: "CHOCH",
+    algorithmVersion: "ta-v1",
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_CHOCH|BEARISH_CHOCH", level: "number" },
+  },
+  {
+    code: "LIQUIDITY_SWEEP",
+    algorithmVersion: "ta-v1",
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_SWEEP|BEARISH_SWEEP", level: "number" },
+  },
+  {
+    code: "ORDER_BLOCK",
+    algorithmVersion: "ta-v1",
+    parameters: { displacementThreshold: 1.5 },
+    outputSchema: { type: "BULLISH_OB|BEARISH_OB", top: "number", bottom: "number" },
+  },
+  {
+    code: "EQUILIBRIUM_ZONE",
+    algorithmVersion: "ta-v1",
+    parameters: { pivotLength: 5 },
+    outputSchema: { top: "number", bottom: "number", equilibrium: "number" },
   },
 ];

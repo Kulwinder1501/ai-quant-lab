@@ -13,6 +13,7 @@ export interface CalculateTechnicalIndicatorsInput {
   instrumentId: string;
   timeframe: string;
   definitions?: readonly IndicatorDefinitionSpec[];
+  since?: Date;
 }
 
 export interface CalculateTechnicalIndicatorsResult {
@@ -53,6 +54,12 @@ export class CalculateTechnicalIndicators {
     const candles = (await this.candleRepository.listCompleted(input.instrumentId, input.timeframe)).map(toIndicatorCandle);
     const definitions = input.definitions ?? defaultIndicatorDefinitions;
     let snapshotsWritten = 0;
+    
+    const openTimeByCandleId = new Map<string, number>();
+    for (const c of candles) {
+      openTimeByCandleId.set(c.id, c.openTime.getTime());
+    }
+    const fromTime = input.since?.getTime() ?? 0;
 
     for (const specification of definitions) {
       const definition = await this.definitionRepository.ensure({
@@ -61,6 +68,9 @@ export class CalculateTechnicalIndicators {
       });
       const points = this.engine.calculate(candles, specification);
       for (const point of points) {
+        const time = openTimeByCandleId.get(point.candleId) ?? 0;
+        if (time < fromTime) continue;
+        
         await this.snapshotRepository.upsert({
           candleId: point.candleId,
           indicatorDefinitionId: definition.id,

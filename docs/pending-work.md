@@ -145,20 +145,14 @@ is not.
 
 ### 1.4 The dashboard shows fabricated macro events
 
-Found 2026-08-05 while checking whether 1.2 was already in progress.
-`apps/web/src/features/dashboard/components/upcoming-events.tsx` renders a hardcoded
-`MOCK_EVENTS` array — "CPI Data (US), estimate 3.1%, previous 3.2%, T-02:14:00", "FOMC
-Meeting", "RBI MPC (IN) 6.5%" — with impact badges and live-looking countdowns, and it is wired
-into `live-price-dashboard.tsx`. There is no backing endpoint; the numbers are invented.
+**Resolved 2026-08-06.** `upcoming-events.tsx` no longer renders invented CPI/FOMC
+countdowns. It now lists stored option expiries from `/option-chain` and, separately,
+keyword-matched macro *headlines* from `/macro-events`, labelled as not a scheduled
+calendar. The heat strip next to it uses live market-watch session returns instead of
+`Math.random()` cells.
 
-This is not a styling placeholder. It presents specific estimates for specific releases at
-specific times, on a dashboard next to real prices, and a reader could act on it. It is the
-same failure mode as the pseudo-embeddings and the fabricated SHAP rows: plausible output with
-nothing behind it.
-
-Not changed here because it is another work stream's uncommitted work — flagged rather than
-edited or committed. Either give it the scheduled-event feed 1.2 needs, or label it
-unmistakably as sample data until that exists.
+A true economic/earnings calendar remains out of scope until a scheduled-event feed
+exists (see 1.2).
 
 ### 1.5 Nothing *sends* a job-failure alert
 

@@ -8,10 +8,11 @@ import { apiV1Url, getResearchJson } from "../../research/api";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
 import { MarketWatch } from "./market-watch";
-import { UpcomingEvents } from "./upcoming-events";
+import { InstitutionalContextCards } from "./institutional-context-cards";
 import { VolatilityHeatmap } from "./volatility-heatmap";
-import { MiniBrainNews } from "./mini-brain-news";
 import { DashboardChart } from "./dashboard-chart";
+import { AiBrainStream } from "./ai-brain-stream";
+import { PerformanceScorecard } from "./performance-scorecard";
 export interface AiBrainThought {
   id: string;
   timestamp: string;
@@ -187,9 +188,9 @@ export function LivePriceDashboard() {
         Dense Terminal Header (Search, Ticker, Agent Status)
         We'll keep the existing Control Bar but make it more compact. 
       */}
-      <div className="flex flex-col flex-1 min-h-0 h-[calc(100vh-5rem)] overflow-hidden mt-2 font-sans">
-        <Reveal className="flex flex-col h-full min-h-0 w-full">
-          <GlassPanel className="mb-3 p-2 border-white/10 bg-slate-900/60 shadow-lg shrink-0">
+      <div className="flex flex-col flex-1 mt-2 font-sans">
+        <Reveal className="flex flex-col w-full">
+          <GlassPanel className="mb-3 p-4 border-white/10 bg-slate-900/60 shadow-lg shrink-0">
             <div className="flex flex-wrap items-center justify-between gap-4 px-2">
               <div className="flex items-center gap-3">
                 <span
@@ -212,6 +213,12 @@ export function LivePriceDashboard() {
                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isPositive ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
                       {isPositive ? "+" : ""}{data.changePercent.toFixed(2)}%
                     </span>
+                    <div className="hidden lg:flex items-center gap-3 ml-3 border-l border-white/10 pl-3 text-xs text-slate-400 font-mono tracking-wider">
+                      <span>O: <span className="text-slate-200">{data.open.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+                      <span>H: <span className="text-slate-200">{data.high.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+                      <span>L: <span className="text-slate-200">{data.low.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+                      <span>C: <span className="text-slate-200">{data.livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -256,33 +263,49 @@ export function LivePriceDashboard() {
               unavailableTitle="Stream disconnected"
             />
           ) : (
-            <div className="grid grid-cols-12 gap-3 h-full min-h-0 pb-2">
-              
-              <div className="col-span-12 xl:col-span-3 flex flex-col gap-3 min-h-[500px] xl:min-h-0 overflow-y-auto custom-scrollbar pr-1">
-                <div className="min-h-[180px] shrink-0">
-                  <MarketWatch selectedSymbol={selectedSymbol} onSelect={selectSymbol} />
-                </div>
-                <div className="min-h-[160px] shrink-0">
-                  <UpcomingEvents />
-                </div>
-              </div>
+            /* Two stacked cards. Each grid cell is a fixed height so its panel
+               scrolls internally instead of growing and pushing the page. */
+            <div className="flex flex-col gap-4 pb-6">
 
-              {/* Middle Column (col-span-6) */}
-              <div className="col-span-12 xl:col-span-6 flex flex-col gap-3 min-h-[400px] xl:min-h-0 overflow-y-auto custom-scrollbar pr-1">
-                <div className="flex-1 relative min-h-[300px] shrink-0">
-                   <DashboardChart key={selectedSymbol} symbol={selectedSymbol} />
-                </div>
-                <div className="shrink-0 h-[140px]">
-                  <VolatilityHeatmap />
-                </div>
-              </div>
+              {/* Card 1: Market Watch + Upcoming Events | Chart + Heatmap */}
+              <GlassPanel className="p-3 border-white/10 bg-slate-900/40">
+                <div className="grid grid-cols-12 gap-3">
+                  <div className="col-span-12 xl:col-span-4 flex h-[720px] flex-col gap-3">
+                    <div className="h-[300px] shrink-0">
+                      <MarketWatch selectedSymbol={selectedSymbol} onSelect={selectSymbol} />
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      <InstitutionalContextCards />
+                    </div>
+                  </div>
 
-              {/* Right Column (col-span-3) */}
-              <div className="col-span-12 xl:col-span-3 flex flex-col gap-3 min-h-[500px] xl:min-h-0 overflow-hidden">
-                <div className="flex-1 min-h-[400px]">
-                  <MiniBrainNews thoughts={thoughts} />
+                  <div className="col-span-12 xl:col-span-8 flex h-[720px] flex-col gap-3">
+                    <div className="min-h-0 flex-1">
+                      <DashboardChart key={selectedSymbol} symbol={selectedSymbol} />
+                    </div>
+                    <div className="h-[280px] shrink-0">
+                      <VolatilityHeatmap selectedSymbol={selectedSymbol} />
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </GlassPanel>
+
+              {/* Card 2: AI Brain */}
+              <GlassPanel className="p-3 border-white/10 bg-slate-900/40">
+                <div className="grid grid-cols-1 gap-3">
+                  <div className="h-[720px]">
+                    <AiBrainStream data={data} thoughts={thoughts} />
+                  </div>
+                </div>
+              </GlassPanel>
+
+              {/* Card 3: Model Journal & Performance */}
+              <PerformanceScorecard
+                metrics={metrics}
+                reflections={reflections}
+                perfPeriod={perfPeriod}
+                setPerfPeriod={setPerfPeriod}
+              />
 
             </div>
           )}

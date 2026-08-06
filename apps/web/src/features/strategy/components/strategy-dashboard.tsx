@@ -59,6 +59,7 @@ export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: Str
   const [sideFilter, setSideFilter] = useState<string>("ALL");
   const [minConfidence, setMinConfidence] = useState<number>(0);
   const [dateFilter, setDateFilter] = useState<string>("");
+  const [includeExpired, setIncludeExpired] = useState<boolean>(isScalp);
 
   // Generate Modal state
   const [showGenerateModal, setShowGenerateModal] = useState<boolean>(false);
@@ -85,6 +86,7 @@ export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: Str
   // a bookmark, and the /scalp-strategy redirect all land on the right tab.
   const applyMode = useCallback((next: StrategyMode) => {
     setMode(next);
+    setIncludeExpired(next === "scalp");
     // Drop the outgoing mode's rows and show the skeleton straight away. The
     // refetch is driven by an effect, which cannot raise `loading` itself, so
     // without this the previous mode's proposals stay on screen under the new
@@ -101,16 +103,14 @@ export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: Str
   // Pure I/O: no state writes, so an effect can call it without cascading a render.
   const loadIdeas = useCallback(async (signal?: AbortSignal) => {
     const dateParam = dateFilter ? `&date=${encodeURIComponent(dateFilter)}` : "";
-    // The strategy filter has to go to the API. Filtering the response here instead
-    // applies limit=100 across every strategy first, so whichever strategy was
-    // regenerated last fills the page and this one shows stale rows or nothing.
     const strategyParam = strategyKey ? `&strategy=${encodeURIComponent(strategyKey)}` : "";
+    const expiredParam = includeExpired ? "&includeExpired=true" : "";
     const res = await getResearchJson(
-      `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}`,
+      `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}${expiredParam}`,
       signal,
     ) as { data: TradeIdeaRow[] };
     return res.data || [];
-  }, [dateFilter, strategyKey]);
+  }, [dateFilter, strategyKey, includeExpired]);
 
   const applyIdeas = useCallback((rows: TradeIdeaRow[]) => {
     setIdeas(rows);
@@ -263,6 +263,8 @@ export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: Str
             setMinConfidence={setMinConfidence}
             dateFilter={dateFilter}
             setDateFilter={setDateFilter}
+            includeExpired={includeExpired}
+            setIncludeExpired={setIncludeExpired}
             loading={loading}
             onRefresh={refreshIdeas}
             onGenerate={() => { setShowGenerateModal(true); setGenMessage(null); setGenError(null); }}

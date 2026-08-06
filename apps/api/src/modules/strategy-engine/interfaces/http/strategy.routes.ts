@@ -2,6 +2,12 @@ import type { Express } from "express";
 import yahooFinance from "yahoo-finance2";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
+import {
+  estimateContributionPts,
+  resolveIndexDriverUniverse,
+  SUPPORTED_DRIVER_INDEX_KEYS,
+  yahooEquitySymbol,
+} from "../../../market-data/domain/nifty50-driver-weights.js";
 
 export function registerStrategyRoutes(
   app: Express,
@@ -175,6 +181,163 @@ export function registerStrategyRoutes(
     }, 1000);
 
     request.on("close", () => clearInterval(intervalId));
+  });
+
+  app.get("/api/v1/stream/market-watch", async (request, response) => {
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+
+    // Map UI symbols to Yahoo Finance symbols
+    const symbolMap: Record<string, string> = {
+      "NIFTY50": "^NSEI",
+      "BANKNIFTY": "^NSEBANK",
+      "FINNIFTY": "FINNIFTY.NS",
+      "SENSEX": "^BSESN",
+      "HANG SENG": "^HSI",
+      "NIKKEI 225": "^N225",
+      "S&P 500": "^GSPC",
+    };
+
+    const intervalId = setInterval(async () => {
+      try {
+        const yf = new (yahooFinance as any)();
+        const quotes = await Promise.all(
+          Object.values(symbolMap).map(sym => 
+            yf.quote(sym).catch(() => null)
+          )
+        );
+
+        const data = Object.keys(symbolMap).map((uiSymbol, index) => {
+          const quote = quotes[index];
+          if (!quote) return null;
+          
+          return {
+            symbol: uiSymbol,
+            price: quote.regularMarketPrice,
+            changePercent: quote.regularMarketChangePercent,
+            aiStance: "NEUT" // Kept for UI compatibility, could be dynamic later
+          };
+        }).filter(Boolean);
+
+        response.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch (e) {
+        // Ignore transient errors
+      }
+    }, 2500);
+
+    request.on("close", () => clearInterval(intervalId));
+  });
+
+  /**
+   * Index contribution heatmap tiles (NIFTY50 / BANKNIFTY / FINNIFTY / SENSEX).
+   * Approximate weights × live Yahoo day% × index level → est. index points.
+   * UI-only — not used by ML feature construction.
+   */
+  app.get("/api/v1/index-drivers", async (request, response, next) => {
+    try {
+      const indexKey = String(
+        (request.query as { index?: string }).index ?? "NIFTY50",
+      );
+      const universe = resolveIndexDriverUniverse(indexKey);
+      if (!universe) {
+        response.status(400).json({
+          error: `Drivers heatmap supports: ${SUPPORTED_DRIVER_INDEX_KEYS.join(", ")}.`,
+          supported: SUPPORTED_DRIVER_INDEX_KEYS,
+        });
+        return;
+      }
+
+      const yf = new (yahooFinance as any)();
+      const yahooSymbols = universe.drivers.map((row) =>
+        yahooEquitySymbol(row.symbol),
+      );
+
+      // Batch quote index + equities (chunked to avoid oversized Yahoo payloads).
+      const chunkSize = 25;
+      const quoteBySymbol = new Map<string, any>();
+      const allSymbols = [universe.yahooIndexSymbol, ...yahooSymbols];
+      for (let i = 0; i < allSymbols.length; i += chunkSize) {
+        const chunk = allSymbols.slice(i, i + chunkSize);
+        try {
+          const batch = await yf.quote(chunk);
+          const rows = Array.isArray(batch) ? batch : [batch];
+          for (const quote of rows) {
+            if (quote?.symbol) quoteBySymbol.set(String(quote.symbol), quote);
+          }
+        } catch {
+          // Fall back to per-symbol so one bad ticker does not blank the panel.
+          await Promise.all(
+            chunk.map(async (sym) => {
+              try {
+                const quote = await yf.quote(sym);
+                if (quote?.symbol) quoteBySymbol.set(String(quote.symbol), quote);
+              } catch {
+                // skip
+              }
+            }),
+          );
+        }
+      }
+
+      const indexQuote =
+        quoteBySymbol.get(universe.yahooIndexSymbol) ?? null;
+      const indexLevel =
+        typeof indexQuote?.regularMarketPrice === "number"
+          ? indexQuote.regularMarketPrice
+          : null;
+
+      const asOf = new Date().toISOString();
+      const drivers = universe.drivers
+        .map((row) => {
+          const quote =
+            quoteBySymbol.get(yahooEquitySymbol(row.symbol)) ??
+            quoteBySymbol.get(row.symbol) ??
+            null;
+          const dayPct =
+            typeof quote?.regularMarketChangePercent === "number"
+              ? quote.regularMarketChangePercent
+              : null;
+          const last =
+            typeof quote?.regularMarketPrice === "number"
+              ? quote.regularMarketPrice
+              : null;
+          const estPts =
+            dayPct != null && indexLevel != null
+              ? estimateContributionPts(row.weightPct, dayPct, indexLevel)
+              : null;
+          return {
+            symbol: row.symbol,
+            name: row.name,
+            weightPct: row.weightPct,
+            dayPct,
+            last,
+            estPts,
+          };
+        })
+        .filter((d) => d.dayPct != null && d.estPts != null);
+
+      drivers.sort(
+        (a, b) => Math.abs(b.estPts ?? 0) - Math.abs(a.estPts ?? 0),
+      );
+
+      const estNetPts = drivers.reduce((sum, d) => sum + (d.estPts ?? 0), 0);
+
+      response.status(200).json({
+        index: universe.key,
+        label: universe.label,
+        indexLevel,
+        estNetPts,
+        asOf,
+        supported: SUPPORTED_DRIVER_INDEX_KEYS,
+        disclaimer:
+          "Est. points = weight% × day% × index / 10000. Weights are approximate (not live exchange free-float) — close to contribution, not exchange-official.",
+        drivers,
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/v1/agent/performance", async (request, response, next) => {

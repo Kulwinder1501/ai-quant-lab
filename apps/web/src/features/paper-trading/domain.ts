@@ -29,7 +29,7 @@ export interface PaperTradeRow {
   closedAt?: string | null;
   exitFees?: number | null;
   exitSlippage?: number | null;
-  exitReason?: string | null;
+  exitReason?: string | "TRAP_DETECTED" | null;
   realizedPnl?: number | null;
   returnPercent?: number | null;
   notes?: string;
