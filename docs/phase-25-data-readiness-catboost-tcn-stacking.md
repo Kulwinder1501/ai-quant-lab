@@ -1902,3 +1902,73 @@ live). Remaining operational work:
 - Tabular trees versus deep learning: https://proceedings.neurips.cc/paper_files/paper/2022/hash/0378c7692da36807bdec87ab043cdadc-Abstract-Datasets_and_Benchmarks.html
 - NSE India VIX: https://www.nseindia.com/static/products-services/indices-indiavix-index
 - NSE data products: https://www.nseindia.com/static/nse-data-and-analytics
+
+## Straddle costs measured against the real chain: fees, not spread (2026-08-06)
+
+The equity-panel study above left cost as a sensitivity table because there was no option
+chain then. There is now — `option_chain_snapshots` has been collecting since 2026-08-04 —
+so the hypothetical column can be replaced with a measurement.
+
+### Measured at-the-money spreads
+
+Nearest-to-spot strike per snapshot, both legs, split by whether the observation was inside
+the session:
+
+| Underlying | ATM spread, in session | after the close | ATM leg premium (% of spot) |
+|---|---|---|---|
+| NIFTY50 | **0.19%** | 12.89% | 0.58% |
+| BANKNIFTY | **0.25%** | 1.32% | 1.21% |
+| RELIANCE | **0.51%** | 0.77% | 1.89% |
+| SBIN | **0.55%** | 0.67% | 2.52% |
+
+Two corrections fall out of this, both of which had been repeated in earlier notes:
+
+- **The whole-chain median is not the number that matters.** The collector reports a median
+  across every strike it fetched, which includes wings nobody trades: 0.25% for NIFTY but
+  2.51% for BANKNIFTY. A straddle is bought at the money, where BANKNIFTY is **0.25%**. The
+  earlier "SBIN 2.24%" figure was a whole-chain median and its ATM spread is **0.55%**.
+- **Out-of-session books are not tradable and must never be measured.** NIFTY's ATM spread
+  goes from 0.19% in session to **12.89%** after the close. Any cost study that samples a
+  post-close snapshot will conclude the strategy is impossible.
+
+### All-in round-trip cost
+
+Spread crossed once per leg (half on entry, half on exit) plus this project's own Zerodha
+fee model, on one lot, expressed against total premium paid — the study's denominator:
+
+| Underlying | spread | fees | **all-in** | share of the 1.09% budget |
+|---|---|---|---|---|
+| NIFTY50 | 0.190% | 0.626% | **0.816%** | 75% |
+| BANKNIFTY | 0.250% | 0.636% | **0.886%** | 81% |
+| RELIANCE | 0.510% | 0.543% | **1.053%** | 97% |
+| SBIN | 0.550% | 0.494% | **1.044%** | 96% |
+
+### What this changes
+
+**Fees dominate, not spread.** On NIFTY, fees are **3.3x** the spread. Every earlier note
+here treated the bid-ask as the binding cost; it is not. That has a practical consequence
+the spread framing hides: spread improves with liquidity and with trading in session, while
+fees are largely per-order and fixed, so **size helps and frequency hurts**.
+
+**The costs do not kill the edge, on indices.** All four underlyings come in under the
+1.09%-per-leg level that erases the +0.117% gross edge — the indices with about a quarter of
+the budget to spare, the single stocks with 3-4%. So the earlier conclusion that the signal
+"works where it cannot be traded cheaply" was wrong in its cost half: ATM equity options are
+cheaper to cross than the whole-chain medians suggested.
+
+### What it does not establish
+
+- The spread sample is **54 in-session ATM legs per underlying across two days**, and the
+  entire conclusion rests on it. Two days of one volatility regime is not a cost model.
+- Gross edge still comes from **n=286** training-period precision, not from settled live
+  predictions. The first of those mature around 2026-08-11.
+- **Slippage beyond the touch is unmeasured.** These are quoted spreads at one lot; there is
+  no market-impact data here at all.
+- On RELIANCE and SBIN the margin is 3-4% of budget, which is inside the error of every
+  input above it. Indices are the only place the margin exceeds the uncertainty.
+
+**Verdict unchanged in direction, changed in reason.** Still not a case for going live — but
+the blocker is no longer "costs eat it". It is that the edge is measured on training-period
+precision with a thin cost sample. The cheapest thing that would move it remains a real
+settled-prediction sample, now scored through these measured costs rather than a sensitivity
+table.
