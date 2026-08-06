@@ -1972,3 +1972,74 @@ the blocker is no longer "costs eat it". It is that the edge is measured on trai
 precision with a thin cost sample. The cheapest thing that would move it remains a real
 settled-prediction sample, now scored through these measured costs rather than a sensitivity
 table.
+
+## The equity straddle priced at a tenor that exists — and the edge does not survive it (2026-08-06)
+
+The 2026-08-04 equity study priced a **5-trading-day** straddle held to expiry at intrinsic
+and reported a 43.7% breakeven. NSE single-stock options are **monthly-only**, confirmed
+against the provider's own expiry list on 2026-08-05, so that contract never existed. The
+number described something nobody could buy.
+
+Re-run against a tradable contract. Two things change:
+
+- **The position is closed, not expired.** The signal forecasts a 5-day range, so a monthly
+  is bought and sold five days later. The buyer no longer surrenders all extrinsic value.
+- **Exit implied volatility becomes an assumption, and it decides the answer.** Held flat it
+  flatters the buyer, because volatility usually falls after the expansion being predicted.
+  Both are reported; flat is an upper bound, not a forecast.
+
+Tenor is **swept, not pinned**. NSE moved monthly expiry from the last Thursday to the last
+Tuesday and this repository cannot verify which applied on a given 2023 date. Pinning one
+would repeat the phantom-contract error that put two paper trades on a BANKNIFTY weekly that
+never traded.
+
+### Result — 20 equities, 17,062 entries, EXPANSION base rate 0.335
+
+| Days to expiry | Mean P&L | **Breakeven (flat IV)** | **Breakeven (IV reverts halfway)** |
+|---|---|---|---|
+| 7 | −0.462% | 0.562 | 0.562 |
+| 14 | −0.275% | 0.543 | 0.677 |
+| 21 | −0.201% | 0.523 | 0.794 |
+| 30 | −0.155% | **0.507** | 0.950 |
+| *(old 5d-to-expiry)* | *−0.37%* | *0.437* | — |
+
+The IV proxy reproduces the original: mean implied/realised ratio **1.252** against the
+earlier 1.254, over 860 sessions, so the change is the tenor and not the volatility model.
+
+### What it means
+
+**The pooled model's 0.486 EXPANSION precision no longer clears the bar.** It beat 0.437 by
++4.9pp; against a tradable tenor it falls short at every point of the sweep — by 2.1pp at 30
+days and 7.6pp at 7 — and that is before costs, which the previous section measured at
+0.8–1.05% of premium.
+
+The mechanism is not subtle: buying a monthly to express a five-day view means paying for
+thirty days of volatility and holding through five. The old result was not a small
+mis-estimate. A five-day-to-expiry contract is nearly all intrinsic-or-nothing, so a correct
+call paid the full move; a monthly closed early pays theta and, usually, a lower exit IV.
+
+The flat-IV column is the *generous* reading. Reverting IV halfway toward realised — the
+direction it actually moves after an expansion — pushes the breakeven to 0.68 at 14 days and
+0.95 at 30, which no classifier here is close to.
+
+### Caveats
+
+- EXPANSION base rate here is **0.335**; the earlier study reported 0.281 on the same panel
+  and band. The label construction used here matches the shipped
+  `build_volatility_expansion_examples` exactly — `horizon_bars` for both the trailing and
+  forward window — so the discrepancy is in the earlier run and is unexplained. If the older
+  base rate is the right one, the breakevens here move, though not by enough to reverse the
+  conclusion.
+- Reversion weight 0.5 is a judgement, not a measurement. There is no post-expansion IV path
+  in this project to fit it to; the chain history is two days old.
+- Strikes are exactly at the money. Real strikes snap to a step, which costs a little more.
+
+**Verdict: the equity straddle path is closed, not marginal.** The index half of the earlier
+study stands — NIFTY has weeklies, so its 5-day tenor is purchasable — and it is the only
+place this signal has a contract that matches its horizon. Unlike the previous correction,
+this one is not a cost problem that better execution could fix. The contract is wrong for the
+forecast.
+
+Persisted as `apps/ml/ai_quant_lab_ml/straddle_economics.py` with 14 tests, and re-runnable
+via `apps/ml/straddle_study.py`, so the settled predictions maturing from 2026-08-11 can be
+scored through the same code rather than a throwaway script.
