@@ -315,6 +315,7 @@ export function registerPaperTradingRoutes(
         optionExpiry: Date;
         optionType: "CE" | "PE";
         underlyingSymbol: string;
+        underlyingEntryPrice: number;
         entryIv: number;
       } | undefined;
 
@@ -515,6 +516,7 @@ export function registerPaperTradingRoutes(
           optionExpiry: settlementExpiry,
           optionType: mapped.optionType,
           underlyingSymbol: idea.symbol,
+          underlyingEntryPrice: mapped.underlyingEntryPrice,
           entryIv: iv,
         };
         feeMeta = {
@@ -637,11 +639,44 @@ export function registerPaperTradingRoutes(
       let iv = typeof impliedVolatility === "number" ? impliedVolatility : 0.15;
       if (iv > 1) iv /= 100;
 
+      /*
+       * Where the underlying actually was when this contract was bought.
+       *
+       * This used to be `Number(strike)`, which is not a spot at all. Trap detection measures
+       * `liveSpot - underlyingEntryPrice`, so anchoring on the strike made an ITM contract
+       * look as though the underlying had already moved hundreds of points in its favour --
+       * a 57,300 CE with spot at 57,740 reads as +440 against a 28.65-point threshold, so the
+       * trap fired on the first evaluation with nothing having happened. The same error made
+       * it unfireable for OTM contracts, where the difference is negative.
+       *
+       * Resolved server-side rather than taken from the request: the client already displays
+       * a spot, but an entry anchor that decides exits should not be caller-supplied. The
+       * stored chain snapshot is preferred because it is the same observation the strike was
+       * chosen from; a live quote is the fallback.
+       */
+      let underlyingEntryPrice: number | null = null;
+      try {
+        const snapshot = await dependencies.optionChainRepository.latestSnapshot({
+          underlyingSymbol: String(underlyingSymbol).toUpperCase(),
+        });
+        underlyingEntryPrice = snapshot?.underlyingValue ?? null;
+      } catch {
+        underlyingEntryPrice = null;
+      }
+      if (underlyingEntryPrice === null) {
+        const livePrices = await loadLivePrices([String(underlyingSymbol).toUpperCase()]);
+        underlyingEntryPrice = livePrices[String(underlyingSymbol).toUpperCase()] ?? null;
+      }
+
       const optionContract = {
         optionStrike: Number(strike),
         optionExpiry: expiry,
         optionType: optionType as "CE" | "PE",
         underlyingSymbol: instrument.symbol,
+        // Omitted rather than guessed when no spot is available. `decideOptionBuyerLiveExit`
+        // skips trap detection without an anchor, so the position simply keeps its ordinary
+        // stop and target -- a wrong anchor would instead produce confident wrong exits.
+        ...(underlyingEntryPrice === null ? {} : { underlyingEntryPrice }),
         entryIv: iv,
       };
 
@@ -652,7 +687,9 @@ export function registerPaperTradingRoutes(
           strike: Number(strike),
           impliedVolatility: iv,
           expiryDate: expiry.toISOString(),
-          underlyingEntry: Number(strike), // Assuming ATM for margin
+          // The observed spot when available; the strike only as a last resort, and this
+          // field is display metadata rather than an input to any exit decision.
+          underlyingEntry: underlyingEntryPrice ?? Number(strike),
         },
       };
 

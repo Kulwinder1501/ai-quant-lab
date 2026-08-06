@@ -134,6 +134,7 @@ export function decideOptionBuyerExit(
   trade: PaperTrade,
   candle: CompletedPriceCandle,
   marks: OptionCandleMarks,
+  options?: { premiumToleranceFraction?: number },
 ): PaperTradeExitDecision | null {
   if (trade.status !== "OPEN") {
     throw new Error("Only open paper trades can be evaluated for exits.");
@@ -193,14 +194,65 @@ export function decideOptionBuyerExit(
       candleId: candle.id,
     };
   }
+
+  // Trap Detection at candle close
+  if (trade.underlyingEntryPrice) {
+    const favorableMove = trade.optionType === "CE"
+      ? candle.close - trade.underlyingEntryPrice
+      : trade.underlyingEntryPrice - candle.close;
+    
+    const minFavorableMove = trade.underlyingEntryPrice * 0.0005;
+    
+    if (favorableMove >= minFavorableMove
+      && marks.close < trapPremiumFloor(trade.entryPrice, options?.premiumToleranceFraction)) {
+      return {
+        reason: "TRAP_DETECTED",
+        eventType: "TRAP_DETECTED",
+        exitPrice: marks.close,
+        fillRule: "TRAP_DETECTED",
+        candleId: candle.id,
+      };
+    }
+  }
+
   return null;
 }
 
-/** Live single-print check against premium SL/TP. */
+/**
+ * How far below the entry premium a mark must sit before it counts as "failed to rise".
+ *
+ * An option buyer fills at the **ask** and the position is marked at the **mid**, so a fresh
+ * position is already below its entry by half the spread with nothing having happened --
+ * measured on a live BANKNIFTY 57700 CE, entry 752.75 against a mark of 748.25, or 0.6%.
+ * Comparing `mark <= entry` therefore reported "premium failed to rise" on the very first
+ * evaluation of every trade, leaving the trap resting entirely on the favourable-move test.
+ *
+ * 1% of the entry premium is a deliberate approximation of that asymmetry, sized from the
+ * measurement: that book was bid 743.75 / ask 752.75, a 1.20% spread and so a 0.60% half. A
+ * first attempt at 0.5% did not even cover its own example. Observed half-spreads range from
+ * about 0.12% (NIFTY ATM intraday) to well over 1% (BANKNIFTY after the close), so no single
+ * number fits: 1% errs toward firing *late*, which is the safer direction for a check whose
+ * failure mode was closing positions that had merely been opened.
+ *
+ * The exact fix is to persist the mark taken at entry and compare against that. Until a trade
+ * carries one, this keeps the trigger off the spread alone; callers holding a real spread can
+ * override it.
+ */
+export const TRAP_PREMIUM_TOLERANCE_FRACTION = 0.01;
+
+/** The premium a mark must fall strictly below before the trap treats it as not rising. */
+export function trapPremiumFloor(entryPrice: number, toleranceFraction?: number): number {
+  const fraction = toleranceFraction ?? TRAP_PREMIUM_TOLERANCE_FRACTION;
+  return entryPrice * (1 - Math.max(0, fraction));
+}
+
+/** Live single-print check against premium SL/TP, and Trap Detection. */
 export function decideOptionBuyerLiveExit(
   trade: PaperTrade,
   markPremium: number,
-): { reason: "STOP_LOSS" | "TARGET"; eventType: "STOP_LOSS_HIT" | "TARGET_HIT"; exitPrice: number } | null {
+  liveSpot?: number,
+  options?: { premiumToleranceFraction?: number },
+): { reason: "STOP_LOSS" | "TARGET" | "TRAP_DETECTED"; eventType: "STOP_LOSS_HIT" | "TARGET_HIT" | "TRAP_DETECTED"; exitPrice: number } | null {
   if (trade.side !== "LONG") {
     throw new Error("Option-buyer dynamic evaluation only supports LONG premium positions.");
   }
@@ -210,5 +262,23 @@ export function decideOptionBuyerLiveExit(
   if (markPremium >= trade.targetPrice) {
     return { reason: "TARGET", eventType: "TARGET_HIT", exitPrice: markPremium };
   }
+
+  // Trap Detection: Divergence between underlying movement and option premium
+  if (liveSpot !== undefined && trade.underlyingEntryPrice) {
+    const favorableMove = trade.optionType === "CE"
+      ? liveSpot - trade.underlyingEntryPrice
+      : trade.underlyingEntryPrice - liveSpot;
+    
+    // Require at least a 0.05% favorable move in the underlying
+    const minFavorableMove = trade.underlyingEntryPrice * 0.0005;
+    
+    // Strictly below the floor, so a mark sitting exactly at the entry mid -- which is where
+    // every position starts -- is not read as a premium that failed to rise.
+    if (favorableMove >= minFavorableMove
+      && markPremium < trapPremiumFloor(trade.entryPrice, options?.premiumToleranceFraction)) {
+      return { reason: "TRAP_DETECTED", eventType: "TRAP_DETECTED", exitPrice: markPremium };
+    }
+  }
+
   return null;
 }

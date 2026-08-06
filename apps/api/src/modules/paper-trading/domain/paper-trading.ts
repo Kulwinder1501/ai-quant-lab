@@ -1,7 +1,7 @@
 import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
-export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED" | "EXPIRED";
+export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED" | "EXPIRED" | "TRAP_DETECTED";
 export type PaperTradeEventType =
   | "PENDING_PLACED"
   | "OPENED"
@@ -9,7 +9,8 @@ export type PaperTradeEventType =
   | "TARGET_HIT"
   | "MANUALLY_CLOSED"
   | "CANCELLED"
-  | "EXPIRED";
+  | "EXPIRED"
+  | "TRAP_DETECTED";
 export type OptionContractType = "CE" | "PE";
 
 export interface PaperAccount {
@@ -61,6 +62,7 @@ export interface PaperTrade {
   optionExpiry?: Date | null;
   optionType?: OptionContractType | null;
   underlyingSymbol?: string | null;
+  underlyingEntryPrice?: number | null;
   entryIv?: number | null;
 }
 
@@ -79,6 +81,15 @@ export interface OptionContractSpec {
   optionExpiry: Date;
   optionType: OptionContractType;
   underlyingSymbol: string;
+  /**
+   * Spot when the contract was bought, the anchor trap detection measures divergence from.
+   *
+   * Optional because "not known" is a real state and the honest encoding of it. The column is
+   * already nullable and `decideOptionBuyerLiveExit` skips trap detection without an anchor,
+   * so a position simply keeps its ordinary stop and target. Substituting something
+   * spot-shaped instead — the strike, say — produces confident wrong exits.
+   */
+  underlyingEntryPrice?: number;
   entryIv: number;
 }
 
