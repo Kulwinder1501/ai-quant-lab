@@ -112,6 +112,22 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
           for (let i = 0; i < quotes.length; i++) {
             const q = quotes[i];
             const date = new Date(q.date);
+
+            /*
+             * Yahoo's chart response ends with the bar currently forming, and it is not a
+             * bar: its date is the moment of the request rather than the grid slot, and its
+             * open, high, low and close are all the last price. Writing it as a completed
+             * candle produced 46 flat 60m rows stamped at container-start times -- one per
+             * restart, `is_complete = true`, sitting in NIFTY50 and BANKNIFTY where any 60m
+             * feature would read them as real hours.
+             *
+             * A bar is only complete once its whole interval is in the past. Checked against
+             * the interval rather than the grid because it holds for every timeframe without
+             * needing to know each session's anchor.
+             */
+            if (!Number.isFinite(date.getTime()) || date.getTime() + intervalMs > now.getTime()) {
+              continue;
+            }
             const open = Number((q.open ?? q.close ?? 0).toFixed(2));
             const close = Number((q.close ?? 0).toFixed(2));
             // Rounding each leg on its own can push the extremes inside the body —

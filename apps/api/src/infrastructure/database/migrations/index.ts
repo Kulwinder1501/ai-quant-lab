@@ -41,6 +41,10 @@ import { addExcludedFromEvidenceMigration } from "./040-add-excluded-from-eviden
 import { volatilityShadowEnrollmentsMigration } from "./041-volatility-shadow-enrollments.js";
 import { purgeSyntheticVerificationRowsMigration } from "./042-purge-synthetic-verification-rows.js";
 import { candleSeriesProvenanceMigration } from "./043-candle-series-provenance.js";
+import { paperTradeUnderlyingEntryMigration } from "./044-paper-trade-underlying-entry.js";
+import { addSmcIndicatorsMigration } from "./045-add-smc-indicators.js";
+import { addRemainingSmcMigration } from "./046-add-remaining-smc.js";
+import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-bars.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -86,4 +90,8 @@ export const migrations = [
   volatilityShadowEnrollmentsMigration,
   purgeSyntheticVerificationRowsMigration,
   candleSeriesProvenanceMigration,
+  paperTradeUnderlyingEntryMigration,
+  addSmcIndicatorsMigration,
+  addRemainingSmcMigration,
+  purgeInProgressSeedBarsMigration,
 ];
