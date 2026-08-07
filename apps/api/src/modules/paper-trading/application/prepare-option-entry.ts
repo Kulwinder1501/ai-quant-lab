@@ -375,9 +375,19 @@ export class PrepareOptionEntry {
    * is deliberately not substituted: validating an older idea against a later bar would judge
    * it on information it never had.
    *
-   * A zero counts as "nobody traded" only where the series demonstrably reports volume.
-   * Yahoo-sourced 15m index bars carry none at all, so reading their zero as absent
-   * participation would refuse every 15m-sourced index entry.
+   * A zero counts as "nobody traded" only where the series reports volume **around that bar**.
+   * The window is the correction: the check used to ask whether the series had *ever* carried
+   * volume, which sorts a series into "always reports" or "never reports" and has no answer
+   * for one that reported and stopped. Both live cases are that third kind:
+   *
+   * - Yahoo stopped supplying index 1d volume on 2026-08-01. June and July were ~100%
+   *   populated; all 8 August bars are zero. Every idea raised on one was refused with "low
+   *   volume moves are weak or false" -- a data outage reported as a market observation.
+   * - The Fyers quotes endpoint returns `volume: 0` for an index, so every live-collected
+   *   intraday bar carries a zero into a series whose history bars carry real volume.
+   *
+   * Neither is nobody trading. A window of peers around the bar answers the question that was
+   * actually being asked, and still refuses a genuinely quiet bar sitting among active ones.
    */
   private async readSourceBarVolume(
     sourceCandleId: string | null,
@@ -391,24 +401,26 @@ export class PrepareOptionEntry {
     }
     try {
       const result = await this.database.query<{
-        volume: string | null; timeframe: string; series_volume_bars: string;
+        volume: string | null; timeframe: string; nearby_volume_bars: string;
       }>(`
         SELECT c.volume, c.timeframe,
                (SELECT count(*) FROM candles peer
                  WHERE peer.instrument_id = c.instrument_id
                    AND peer.timeframe = c.timeframe
-                   AND peer.volume > 0) AS series_volume_bars
+                   AND peer.volume > 0
+                   AND peer.open_time BETWEEN c.open_time - INTERVAL '7 days'
+                                          AND c.open_time + INTERVAL '7 days') AS nearby_volume_bars
         FROM candles c WHERE c.id = $1
       `, [sourceCandleId]);
       const bar = result.rows[0];
       if (!bar) {
         return { candleVolume: null, absenceReason: "the idea's source candle is no longer stored" };
       }
-      if (Number(bar.series_volume_bars) === 0) {
+      if (Number(bar.nearby_volume_bars) === 0) {
         return {
           candleVolume: null,
-          absenceReason: `${symbol} ${bar.timeframe} carries no volume in this dataset, so a zero `
-            + "cannot be read as absent participation",
+          absenceReason: `${symbol} ${bar.timeframe} reported no volume on any bar within a week `
+            + "of this one, so a zero here is an absent feed rather than absent participation",
         };
       }
       const parsed = bar.volume === null ? Number.NaN : Number(bar.volume);

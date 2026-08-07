@@ -76,7 +76,7 @@ interface Overrides {
   idea?: Record<string, unknown> | null;
   calendar?: OptionExpiryCalendar | null;
   snapshot?: OptionChainSnapshot | null;
-  barVolume?: { volume: string | null; timeframe: string; series_volume_bars: string } | null;
+  barVolume?: { volume: string | null; timeframe: string; nearby_volume_bars: string } | null;
 }
 
 function service(overrides: Overrides = {}) {
@@ -86,9 +86,9 @@ function service(overrides: Overrides = {}) {
         const idea = overrides.idea === undefined ? IDEA : overrides.idea;
         return { rows: (idea ? [idea] : []) as T[] };
       }
-      if (text.includes("series_volume_bars")) {
+      if (text.includes("nearby_volume_bars")) {
         const bar = overrides.barVolume === undefined
-          ? { volume: "150000", timeframe: "5m", series_volume_bars: "10000" }
+          ? { volume: "150000", timeframe: "5m", nearby_volume_bars: "10000" }
           : overrides.barVolume;
         return { rows: (bar ? [bar] : []) as T[] };
       }
@@ -237,24 +237,27 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     expect(result.entry.unchecked.join(" ")).toContain("Macro events");
   });
 
-  it("does not read a zero from a volume-less series as absent participation", async () => {
-    // Every stored 15m index bar has zero volume because 15m is Yahoo's under the provenance
-    // split and Yahoo carries none. Reading that as "nobody traded" would refuse every
-    // 15m-sourced index entry.
+  it("does not read a zero as absent participation when the feed itself stopped reporting", async () => {
+    // The case the old "has this series ever carried volume" test got wrong. Yahoo stopped
+    // supplying index 1d volume on 2026-08-01: June and July ~100% populated, all 8 August
+    // bars zero. Every idea raised on one was refused for low volume -- a data outage
+    // reported as a market observation. The window asks about bars near this one instead.
     const result = await service({
       idea: { ...IDEA, reasoning: ["VOLATILITY_EXPANSION regime"] },
-      barVolume: { volume: "0", timeframe: "15m", series_volume_bars: "0" },
+      barVolume: { volume: "0", timeframe: "1d", nearby_volume_bars: "0" },
     }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
-    expect(result.entry.unchecked.join(" ")).toContain("carries no volume in this dataset");
+    expect(result.entry.unchecked.join(" ")).toContain("absent feed rather than absent participation");
   });
 
-  it("refuses a genuinely zero-volume bar where the series does report volume", async () => {
+  it("still refuses a quiet bar sitting among active ones", async () => {
+    // The window must not turn the check off. A zero among neighbours that traded is the
+    // observation the gate exists to act on.
     const result = await service({
       idea: { ...IDEA, reasoning: ["VOLATILITY_EXPANSION regime"] },
-      barVolume: { volume: "0", timeframe: "5m", series_volume_bars: "10000" },
+      barVolume: { volume: "0", timeframe: "5m", nearby_volume_bars: "10000" },
     }).execute({ tradeIdeaId: "idea-1", now: NOW });
 
     expect(result).toMatchObject({ approved: false, reason: "OPTIONS_ENTRY_REJECTED" });

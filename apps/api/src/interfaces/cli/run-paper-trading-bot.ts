@@ -15,6 +15,10 @@ import { PostgresOptionChainRepository } from "../../infrastructure/database/rep
 import { OpenPaperTrade } from "../../modules/paper-trading/application/open-paper-trade.js";
 import { PrepareOptionEntry } from "../../modules/paper-trading/application/prepare-option-entry.js";
 import { assessDataFreshness, DEFAULT_MAX_BAR_AGE_MINUTES } from "../../modules/paper-trading/domain/bot-data-freshness.js";
+import {
+  registeredStrategies,
+  strategySupportsTimeframe,
+} from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
 
 /** Minutes in one bar of a timeframe, so a series is not called stale for lagging by design. */
@@ -23,6 +27,28 @@ function barLengthMinutes(timeframe: string): number {
   if (!match) return 0;
   const size = Number(match[1]);
   return match[2] === "m" ? size : match[2] === "h" ? size * 60 : size * 60 * 24;
+}
+
+/**
+ * Refuses to start on a timeframe nothing can trade.
+ *
+ * The generator skips a strategy whose `supportedTimeframes` do not include the requested
+ * one, and reports nothing -- so a misconfigured timeframe looks exactly like a quiet market.
+ * That is how this bot spent its time scanning 5m, which no strategy has ever supported.
+ */
+function assertScannableTimeframes(timeframes: readonly string[]): void {
+  for (const timeframe of timeframes) {
+    const supported = registeredStrategies.some((strategy) => strategySupportsTimeframe(strategy, timeframe));
+    if (!supported) {
+      throw new Error(
+        `No registered strategy supports the ${timeframe} timeframe, so scanning it can only ever `
+        + "produce nothing. Supported: "
+        + registeredStrategies
+          .map((strategy) => `${strategy.registration.strategyKey} (${strategy.supportedTimeframes.join(", ")})`)
+          .join("; ") + ".",
+      );
+    }
+  }
 }
 
 /** One key per contract, so a persisting signal cannot open the same position twice. */
@@ -55,7 +81,19 @@ function contractKey(underlying: string, expiry: Date, strike: number, optionTyp
 
 const BOT_ACCOUNT_NAME = "AutoBot";
 const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
-const SCAN_TIMEFRAMES = ["5m"] as const;
+/**
+ * `5m` used to be here, and **no registered strategy supports it** -- trend-breakout takes
+ * 15m/30m/60m/1d and momentum-scalp takes 1m. Every scan was a silent no-op: the generator
+ * skipped both strategies and returned nothing, which is indistinguishable in the output from
+ * a market with no setups. `assertScannableTimeframes` below turns that into a startup error.
+ *
+ * 1m is deliberately not scanned. It is the only fresh intraday series -- the live poller
+ * writes it -- but its only strategy is momentum-scalp, which needs VWAP, and VWAP needs
+ * volume. The Fyers quotes endpoint returns `volume: 0` for an index, so those bars carry
+ * none: measured 2026-08-07, NIFTY50 1m has 375 VWAP snapshots on 05 Aug's history bars and
+ * **0** on today's live ones. Scanning it would produce nothing, slowly.
+ */
+const SCAN_TIMEFRAMES = ["15m"] as const;
 /**
  * Deliberately small. The account is Rs 1,000,000 and one NIFTY lot of a 200-point premium
  * is Rs 15,000, so this is not a capital limit -- it is a blast radius. The bot's edge is
@@ -76,6 +114,7 @@ function istMinutesSinceMidnight(now: Date): number {
 }
 
 async function main(): Promise<void> {
+  assertScannableTimeframes(SCAN_TIMEFRAMES);
   const now = new Date();
   const minutes = istMinutesSinceMidnight(now);
   if (minutes < MARKET_OPEN_MINUTES || minutes > MARKET_CLOSE_MINUTES) {
@@ -98,6 +137,8 @@ async function main(): Promise<void> {
     }
 
     const opened: Array<Record<string, unknown>> = [];
+    /** What each strategy actually did, so an empty run is never ambiguous. */
+    const strategyOutcomes: Array<Record<string, unknown>> = [];
     const refused: Array<Record<string, unknown>> = [];
     const skipped: Array<Record<string, unknown>> = [];
 
@@ -160,7 +201,23 @@ async function main(): Promise<void> {
 
           const results = await generator.execute({ instrumentId: instrument.id, timeframe });
           for (const result of results) {
-            if (result.skippedReason) continue;
+            if (result.skippedReason) {
+              // Reported rather than skipped in silence. "The strategy ran and found no
+              // setup" and "the strategy never ran" produce the same empty output
+              // otherwise, and only one of them is a market observation.
+              strategyOutcomes.push({
+                symbol, timeframe, strategy: result.strategyKey,
+                skippedReason: result.skippedReason,
+                ...(result.failureMessage ? { failureMessage: result.failureMessage } : {}),
+              });
+              continue;
+            }
+            strategyOutcomes.push({
+              symbol, timeframe, strategy: result.strategyKey,
+              skippedReason: null,
+              candidatesGenerated: result.candidatesGenerated,
+              ideasRaised: result.tradeIdeaIds.length,
+            });
             for (const tradeIdeaId of result.tradeIdeaIds) {
               if (openPositions >= MAX_CONCURRENT_POSITIONS) {
                 refused.push({
@@ -263,10 +320,12 @@ async function main(): Promise<void> {
       openPositionsAfterRun: openPositions,
       positionLimit: MAX_CONCURRENT_POSITIONS,
       skippedSymbols: skipped.length,
+      strategiesRun: strategyOutcomes.filter((outcome) => outcome.skippedReason === null).length,
       tradesEvaluated: evaluation.openTradesRead + evaluation.pendingTradesRead,
       tradesClosed: evaluation.tradesClosed,
       evaluationFailures: evaluation.evaluationFailures,
       opened,
+      strategyOutcomes,
       // Refusals are output, not noise. A run that opens nothing has to be distinguishable
       // from a run that found nothing.
       refused,
