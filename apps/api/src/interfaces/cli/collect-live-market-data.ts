@@ -2,11 +2,15 @@ import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { KiteLiveMarketDataProvider } from "../../infrastructure/market-data/kite-live-market-data-provider.js";
+import { FyersLiveMarketDataProvider } from "../../infrastructure/market-data/fyers-live-market-data-provider.js";
+import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
 import { CollectLiveMarketData, type LiveMarketSubscription } from "../../modules/market-data/application/collect-live-market-data.js";
 import type { Instrument } from "../../modules/market-data/domain/instrument.js";
+import type { LiveMarketDataProvider } from "../../modules/market-data/domain/live-market-data-provider.js";
+import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { getOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
@@ -22,20 +26,23 @@ function readHolidays(value: string | undefined): string[] {
   return (value ?? "").split(",").map((holiday) => holiday.trim()).filter((holiday) => /^\d{4}-\d{2}-\d{2}$/.test(holiday));
 }
 
-function kiteQuoteSymbol(instrument: Instrument): string {
+function providerQuoteSymbol(instrument: Instrument, provider: string): string {
+  if (provider === "fyers") {
+    return resolveFyersSymbol(instrument.symbol);
+  }
   const configured = instrument.metadata.kiteQuoteSymbol;
   return typeof configured === "string" && configured.trim()
     ? configured
     : `${instrument.exchange}:${instrument.symbol}`;
 }
 
-function selectSubscriptions(instruments: Instrument[], requestedSymbols: string | undefined): LiveMarketSubscription[] {
+function selectSubscriptions(instruments: Instrument[], requestedSymbols: string | undefined, provider: string): LiveMarketSubscription[] {
   const requested = requestedSymbols
     ? new Set(requestedSymbols.split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean))
     : null;
   const subscriptions = instruments
     .filter((instrument) => !requested || requested.has(instrument.symbol))
-    .map((instrument) => ({ instrument, providerInstrumentId: kiteQuoteSymbol(instrument) }));
+    .map((instrument) => ({ instrument, providerInstrumentId: providerQuoteSymbol(instrument, provider) }));
   if (requested && subscriptions.length !== requested.size) {
     const found = new Set(subscriptions.map((subscription) => subscription.instrument.symbol));
     throw new Error(`Unknown active instrument(s): ${[...requested].filter((symbol) => !found.has(symbol)).join(", ")}.`);
@@ -47,13 +54,9 @@ const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeou
 
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
-  if (requireOption(argumentsList, "provider").toLowerCase() !== "kite") {
-    throw new Error("Live collection currently supports the read-only Kite quote provider. Use --provider kite.");
-  }
-  const apiKey = process.env.KITE_API_KEY;
-  const accessToken = process.env.KITE_ACCESS_TOKEN;
-  if (!apiKey || !accessToken) {
-    throw new Error("Live Kite collection requires KITE_API_KEY and KITE_ACCESS_TOKEN in .env.");
+  const providerName = requireOption(argumentsList, "provider").toLowerCase();
+  if (providerName !== "kite" && providerName !== "fyers") {
+    throw new Error("Live collection currently supports kite or fyers. Use --provider kite or --provider fyers.");
   }
 
   const environment = loadEnvironment();
@@ -65,11 +68,32 @@ async function main(): Promise<void> {
     const subscriptions = selectSubscriptions(
       await new PostgresInstrumentRepository(database).listActive(),
       getOption(argumentsList, "instruments"),
+      providerName
     );
     if (subscriptions.length === 0) {
       throw new Error("No active instruments are configured for live collection.");
     }
-    const provider = new KiteLiveMarketDataProvider({ apiKey, accessToken });
+    
+    let provider: LiveMarketDataProvider;
+    if (providerName === "kite") {
+      const apiKey = process.env.KITE_API_KEY;
+      const accessToken = process.env.KITE_ACCESS_TOKEN;
+      if (!apiKey || !accessToken) {
+        throw new Error("Live Kite collection requires KITE_API_KEY and KITE_ACCESS_TOKEN in .env.");
+      }
+      provider = new KiteLiveMarketDataProvider({ apiKey, accessToken });
+    } else {
+      const appId = process.env.FYERS_APP_ID;
+      const appSecret = process.env.FYERS_APP_SECRET;
+      const pin = process.env.FYERS_PIN;
+      if (!appId || !appSecret || !pin) {
+        throw new Error("Live Fyers collection requires FYERS_APP_ID, FYERS_APP_SECRET and FYERS_PIN in .env.");
+      }
+      provider = new FyersLiveMarketDataProvider({
+        appId,
+        tokenService: new FyersTokenService({ pool: database, appId, appSecret, pin }),
+      });
+    }
     const pollingSeconds = parsePositiveSeconds(getOption(argumentsList, "poll-seconds"));
     const session = new NseMarketSession(readHolidays(getOption(argumentsList, "holidays") ?? process.env.NSE_HOLIDAYS));
     const ingestion = await ingestionRepository.start({
