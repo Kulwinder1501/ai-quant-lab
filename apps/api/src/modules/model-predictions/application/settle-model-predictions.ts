@@ -30,6 +30,7 @@ export interface DailyScoreUpsert {
   accuracy: number | null;
   macroF1: number | null;
   directionalHitRate: number | null;
+  baselineAccuracy: number | null;
 }
 
 export interface ModelPredictionSettlementRepository {
@@ -116,6 +117,7 @@ export class SettleModelPredictions {
           accuracy: metrics.accuracy,
           macroF1: metrics.macroF1,
           directionalHitRate: metrics.directionalHitRate,
+          baselineAccuracy: metrics.trivialAccuracy,
         });
         dailyScoresUpserted += 1;
       }

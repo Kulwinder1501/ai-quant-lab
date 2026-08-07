@@ -188,14 +188,15 @@ export class PostgresModelPredictionSettlementRepository implements ModelPredict
     await this.database.query(`
       INSERT INTO model_daily_scores (
         model_version_id, score_date, predictions_settled, predictions_correct,
-        accuracy, macro_f1, directional_hit_rate
-      ) VALUES ($1, $2::date, $3, $4, $5, $6, $7)
+        accuracy, macro_f1, directional_hit_rate, baseline_accuracy
+      ) VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (model_version_id, score_date) DO UPDATE SET
         predictions_settled = EXCLUDED.predictions_settled,
         predictions_correct = EXCLUDED.predictions_correct,
         accuracy = EXCLUDED.accuracy,
         macro_f1 = EXCLUDED.macro_f1,
-        directional_hit_rate = EXCLUDED.directional_hit_rate
+        directional_hit_rate = EXCLUDED.directional_hit_rate,
+        baseline_accuracy = EXCLUDED.baseline_accuracy
     `, [
       input.modelVersionId,
       input.scoreDate,
@@ -204,6 +205,7 @@ export class PostgresModelPredictionSettlementRepository implements ModelPredict
       input.accuracy,
       input.macroF1,
       input.directionalHitRate,
+      input.baselineAccuracy,
     ]);
   }
 }
