@@ -15,23 +15,45 @@ function claim(overrides: Partial<ScheduledJobClaim> = {}): ScheduledJobClaim {
   };
 }
 
-/** Enforces the real uniqueness rule: one winner per (jobType, scheduledFor). */
-function sharedClaimStore(): ScheduledJobClaimRepository & { completed: string[]; failed: string[] } {
+interface FakeRun { jobType: string; scheduledFor: Date; claimedAt: Date; status: "RUNNING" | "DONE" }
+
+/**
+ * Enforces the real uniqueness rule: one winner per (jobType, scheduledFor), and tracks
+ * run status so the overlap guard is exercised against the same state the table holds.
+ */
+function sharedClaimStore(): ScheduledJobClaimRepository & {
+  completed: string[]; failed: string[]; runs: FakeRun[];
+} {
   const held = new Set<string>();
+  const runs: FakeRun[] = [];
   const completed: string[] = [];
   const failed: string[] = [];
   const key = (input: { jobType: string; scheduledFor: Date }) =>
     `${input.jobType}@${input.scheduledFor.toISOString()}`;
+  const finish = (input: { jobType: string; scheduledFor: Date }) => {
+    const run = runs.find((candidate) => key(candidate) === key(input) && candidate.status === "RUNNING");
+    if (run) run.status = "DONE";
+  };
   return {
     completed,
     failed,
+    runs,
     claim: async (input) => {
       if (held.has(key(input))) return false;
       held.add(key(input));
+      runs.push({ jobType: input.jobType, scheduledFor: input.scheduledFor, claimedAt: input.scheduledFor, status: "RUNNING" });
       return true;
     },
-    complete: async (input) => { completed.push(key(input)); },
-    fail: async (input, errorDetails) => { failed.push(`${key(input)}:${errorDetails}`); },
+    complete: async (input) => { completed.push(key(input)); finish(input); },
+    fail: async (input, errorDetails) => { failed.push(`${key(input)}:${errorDetails}`); finish(input); },
+    abandonStaleRuns: async (jobType, abandonedBefore) => {
+      const stale = runs.filter((run) =>
+        run.jobType === jobType && run.status === "RUNNING" && run.claimedAt.getTime() < abandonedBefore.getTime());
+      for (const run of stale) run.status = "DONE";
+      return stale.length;
+    },
+    countRunning: async (jobType) =>
+      runs.filter((run) => run.jobType === jobType && run.status === "RUNNING").length,
   };
 }
 
@@ -92,7 +114,7 @@ describe("runExclusively", () => {
       throw new Error("must not run");
     });
 
-    expect(loser).toEqual({ ran: false, failed: false });
+    expect(loser).toMatchObject({ ran: false, failed: false, skippedReason: "CLAIMED_BY_PEER" });
   });
 
   it("records a failure and rethrows so the caller can log it", async () => {
@@ -119,6 +141,107 @@ describe("runExclusively", () => {
     // would mean two training runs.
     expect(result.ran).toBe(false);
     expect(peer).not.toHaveBeenCalled();
+  });
+
+  it("does not start a second copy while the previous run is still going", async () => {
+    // The pileup this exists to stop: INDICES_INTRADAY is a `*/1` cron over a job that
+    // takes longer than a minute. The claim key is per minute, so every tick won its own
+    // claim and started another copy -- 330 concurrent runs, one completion in 72 hours.
+    const repository = sharedClaimStore();
+    let release = (): void => {};
+    let markStarted = (): void => {};
+    const inFlight = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const task = vi.fn(() => { markStarted(); return inFlight; });
+
+    const first = runExclusively(
+      repository,
+      claim({ jobType: "INDICES_INTRADAY", scheduledFor: new Date("2026-08-07T06:31:00.000Z") }),
+      task,
+      { overlap: "SKIP", now: new Date("2026-08-07T06:31:00.000Z") },
+    );
+    // Wait for the first run to actually be in flight; otherwise the second call can win
+    // the race to `countRunning` and the test would assert on interleaving, not on the guard.
+    await started;
+    const second = await runExclusively(
+      repository,
+      claim({ jobType: "INDICES_INTRADAY", scheduledFor: new Date("2026-08-07T06:32:00.000Z") }),
+      task,
+      { overlap: "SKIP", now: new Date("2026-08-07T06:32:00.000Z") },
+    );
+
+    expect(second).toMatchObject({ ran: false, skippedReason: "PREVIOUS_RUN_UNFINISHED" });
+    expect(task).toHaveBeenCalledTimes(1);
+    // Skipping must not record a run: nothing happened, and a phantom row would make the
+    // job-health endpoint read as though it had.
+    expect(repository.runs).toHaveLength(1);
+
+    release();
+    await first;
+    expect((await runExclusively(
+      repository,
+      claim({ jobType: "INDICES_INTRADAY", scheduledFor: new Date("2026-08-07T06:33:00.000Z") }),
+      task,
+      { overlap: "SKIP", now: new Date("2026-08-07T06:33:00.000Z") },
+    )).ran).toBe(true);
+  });
+
+  it("recovers when the previous claimant was killed rather than merely slow", async () => {
+    // A row only leaves RUNNING via the process that claimed it, so a container restart
+    // strands it forever. Without the staleness sweep the overlap guard would then block
+    // the job permanently -- a worse failure than the one it prevents.
+    const repository = sharedClaimStore();
+    await repository.claim({
+      jobType: "INDICES_INTRADAY",
+      scheduledFor: new Date("2026-08-07T05:00:00.000Z"),
+      claimedBy: "dead-container",
+    });
+    const task = vi.fn(async () => {});
+
+    const result = await runExclusively(
+      repository,
+      claim({ jobType: "INDICES_INTRADAY", scheduledFor: new Date("2026-08-07T06:31:00.000Z") }),
+      task,
+      { overlap: "SKIP", abandonedAfterMs: 10 * 60 * 1000, now: new Date("2026-08-07T06:31:00.000Z") },
+    );
+
+    expect(result).toMatchObject({ ran: true, abandonedRuns: 1 });
+    expect(task).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not write off a run that is merely slower than usual", async () => {
+    // The horizon has to exceed the job's longest honest run. Declaring a working run
+    // abandoned frees the guard and starts a second copy -- the pileup, reintroduced.
+    const repository = sharedClaimStore();
+    await repository.claim({
+      jobType: "EOD_PIPELINE",
+      scheduledFor: new Date("2026-08-07T06:00:00.000Z"),
+      claimedBy: "still-training",
+    });
+
+    const result = await runExclusively(
+      repository,
+      claim({ jobType: "EOD_PIPELINE", scheduledFor: new Date("2026-08-07T06:31:00.000Z") }),
+      async () => { throw new Error("must not run"); },
+      { overlap: "SKIP", abandonedAfterMs: 6 * 60 * 60 * 1000, now: new Date("2026-08-07T06:31:00.000Z") },
+    );
+
+    expect(result).toMatchObject({ ran: false, skippedReason: "PREVIOUS_RUN_UNFINISHED", abandonedRuns: 0 });
+  });
+
+  it("leaves overlapping runs alone unless asked to skip", async () => {
+    const repository = sharedClaimStore();
+    await repository.claim({ jobType: "RSS_NEWS_INGESTION", scheduledFor: new Date("2026-08-07T06:00:00.000Z"), claimedBy: "peer" });
+    const task = vi.fn(async () => {});
+
+    const result = await runExclusively(
+      repository,
+      claim({ jobType: "RSS_NEWS_INGESTION", scheduledFor: new Date("2026-08-07T06:03:00.000Z") }),
+      task,
+    );
+
+    expect(result.ran).toBe(true);
+    expect(task).toHaveBeenCalledTimes(1);
   });
 
   it("keeps distinct job types independent at the same due minute", async () => {

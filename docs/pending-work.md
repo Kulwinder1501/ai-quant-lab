@@ -22,7 +22,7 @@ the API typechecks against it. On a fresh clone, or after deleting `dist`, a bar
 `npx tsc --noEmit` reports dozens of "Cannot find module '@ai-quant-lab/pricing'" errors that
 are an artefact of the unbuilt package, not of the tree. `npm run build` builds both packages
 first.
-Expect a clean typecheck and **605 passed / 75 files**.
+Expect a clean typecheck and **658 passed / 79 files**.
 
 ```bash
 py -3.12 -m unittest discover -s apps/ml -p "test_*.py"
@@ -36,10 +36,10 @@ Expect exit 0. This is what the Dockerfile runs, so a failure here means **no im
 built** — and `vitest` will not catch it, because it does not typecheck. That combination
 already shipped once.
 
-| | state on 2026-08-05 |
+| | state on 2026-08-07 |
 |---|---|
-| HEAD | `5859121`+ on `feature/champion-challenger` |
-| migrations | through **043**; next is **044** |
+| HEAD | `07afaea`+ on `feature/champion-challenger` |
+| migrations | through **049**; next is **050** |
 | system of record | **v2, port 5433**. v1 (5432) is a read-only audit trail |
 | paper trades | **3 rows, 2 excluded** — both phantom-expiry, kept as the defect record |
 | option chain history | begins **2026-08-04**. Forward-accumulating, no backfill exists |
@@ -248,6 +248,49 @@ Executable guards, so none of the above can silently regress: `resolveWeeklyExpi
 ---
 
 ## 4. Closed since 2026-08-04
+
+### 4.16 A per-minute job stopped starting a new copy of itself every minute
+
+Found 2026-08-07. `INDICES_INTRADAY` had **330 runs stuck in `RUNNING`**, oldest 06 Aug
+04:34 UTC, against **one** COMPLETED run in 72 hours. Inside the container, six copies of
+`calculate-technical-indicators --instrument NIFTY50 --timeframe 1m` were running at once,
+six minutes after a restart.
+
+Three separate defects, each of which alone was survivable:
+
+- **The claim key is per due minute, so it never prevented overlap.** `(job_type,
+  scheduled_for)` makes each *minute* run once; it says nothing about whether the previous
+  minute finished. On a one-minute cron over a job that takes longer than a minute, every
+  tick starts another copy and they accumulate until none finishes.
+- **The indicator writer was one round trip per row.** A NIFTY50 1m recompute is **564,962**
+  snapshots — 54,024 bars × 15 definitions — each an awaited `upsert`. Batched at 500 rows a
+  statement, that full recompute now takes **22 seconds**, measured.
+- **The whole history was rewritten every minute**, though only the newest bars can have
+  changed. The intraday job now passes `--from` with a 5-day window: **7 seconds, 4,157
+  snapshots**. Values are unchanged — indicators are still *computed* over the full series,
+  because EMA and the SMC pivots need the history; only the write is bounded. Five days
+  rather than one because nothing else recomputes index indicators (the EOD pipeline does
+  not), so a missed session has to heal on the next run.
+
+Consequences that had already landed, and are the reason this was worth chasing: NIFTY50 5m
+bars were stale since **05 Aug** and BANKNIFTY 5m since **31 Jul**, because the run never got
+past NIFTY50 1m; and the SMC recompute after migration 048 had reached **4 series of 36**.
+
+`runExclusively` now takes `overlap: "SKIP"`, and every job uses it — none of them is faster
+for running twice at once. Two things that had to be right:
+
+- **A skipped minute is not claimed.** Nothing ran, so recording a run would be a lie, and it
+  would make `/health/jobs` read as though the job were working.
+- **Staleness is swept first.** A row only leaves `RUNNING` via the process that claimed it,
+  so a container restart strands it forever — and without a sweep the overlap guard would
+  then block that job permanently, which is a worse failure than the one it prevents. The
+  horizon is per job (`ABANDONED_AFTER_MS`) and must exceed the job's slowest honest run:
+  6 hours for EOD_PIPELINE, 10 minutes for the intraday jobs. A test asserts a slow EOD run
+  is *not* written off.
+
+Migration 049 reconciles the rows that had already accumulated, so the health endpoint stops
+reporting hundreds of phantom running jobs immediately rather than on whichever tick sweeps
+first.
 
 ### 4.1 Options are priced from the observed book, not the model
 

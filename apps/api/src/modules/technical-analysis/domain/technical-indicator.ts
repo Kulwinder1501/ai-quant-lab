@@ -56,8 +56,19 @@ export interface IndicatorDefinitionRepository {
   ensure(input: EnsureIndicatorDefinitionInput): Promise<IndicatorDefinition>;
 }
 
+export interface IndicatorSnapshotInput {
+  candleId: string;
+  indicatorDefinitionId: string;
+  values: IndicatorValues;
+}
+
 export interface IndicatorSnapshotRepository {
-  upsert(input: { candleId: string; indicatorDefinitionId: string; values: IndicatorValues }): Promise<void>;
+  /**
+   * Writes a batch. Deliberately not a single-row `upsert`: the caller has one row per
+   * (candle, definition), so a per-row method meant ~810,000 awaited round trips for one
+   * NIFTY50 1m recompute, and that job runs every minute.
+   */
+  upsertMany(inputs: readonly IndicatorSnapshotInput[]): Promise<void>;
 }
 
 export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [

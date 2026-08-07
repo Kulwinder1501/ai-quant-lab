@@ -127,13 +127,77 @@ async function main(): Promise<void> {
     })
     : null;
 
+  /**
+   * How long each job may legitimately be RUNNING before it is presumed dead.
+   *
+   * This has to exceed the job's slowest honest run, not its typical one: declaring a
+   * working run abandoned lets the next tick start a second copy, which is the pileup
+   * this is here to stop. Absent entries take the 15-minute default.
+   *
+   * The cost of that direction is paid after a restart: the previous container's rows are
+   * still RUNNING and not yet old enough to sweep, so the job stays skipped for up to one
+   * horizon. Ten minutes of a per-minute job is the right trade against restarting a
+   * pileup, and the alternative -- a heartbeat column -- is more machinery than the
+   * failure justifies.
+   */
+  const ABANDONED_AFTER_MS: Record<string, number> = {
+    // Trains and promotes models; measured in hours, not minutes.
+    EOD_PIPELINE: 6 * 60 * 60 * 1000,
+    INSTITUTIONAL_FLOWS: 30 * 60 * 1000,
+    INSTITUTIONAL_FLOWS_RETRY: 30 * 60 * 1000,
+    // Every intraday job below is on a cron faster than this, so a run that outlives its
+    // horizon has stopped being useful anyway -- the next tick's data supersedes it.
+    INDICES_INTRADAY: 10 * 60 * 1000,
+    INDIA_VIX_INTRADAY: 10 * 60 * 1000,
+    OPTION_CHAIN: 10 * 60 * 1000,
+    PAPER_TRADING_BOT: 10 * 60 * 1000,
+    RSS_NEWS_INGESTION: 10 * 60 * 1000,
+  };
+
+  /**
+   * Runs this process has claimed and not yet finished.
+   *
+   * Only so shutdown can write them off. Age is the general answer to a dead claimant, but
+   * it costs a full horizon after every deploy -- the stopped container's rows are still
+   * RUNNING and not yet old enough to sweep, so the overlap guard skips until they are. A
+   * process that is being asked to stop knows exactly which rows are its own.
+   */
+  const inFlightRuns = new Map<string, { jobType: string; scheduledFor: Date }>();
+
   async function schedule(jobType: string, task: () => Promise<void>): Promise<void> {
     const scheduledFor = toDueMinute(new Date());
+    const runKey = `${jobType}@${scheduledFor.toISOString()}`;
     try {
-      const result = await runExclusively(claims, { jobType, scheduledFor, claimedBy: processIdentity }, task);
-      log(result.ran ? "Scheduled job completed" : "Scheduled job already claimed by another process", {
+      // Every job here skips rather than overlaps itself. None of them is faster for
+      // running twice at once, and INDICES_INTRADAY -- a `*/1` cron over a job that takes
+      // longer than a minute -- accumulated 330 concurrent runs and completed once in 72
+      // hours, each copy slowing the others until none finished.
+      const result = await runExclusively(
+        claims,
+        { jobType, scheduledFor, claimedBy: processIdentity },
+        async () => {
+          inFlightRuns.set(runKey, { jobType, scheduledFor });
+          try {
+            await task();
+          } finally {
+            inFlightRuns.delete(runKey);
+          }
+        },
+        { overlap: "SKIP", abandonedAfterMs: ABANDONED_AFTER_MS[jobType] },
+      );
+      if (result.abandonedRuns) {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Reconciled scheduled runs whose claimant is gone",
+          process: processIdentity,
+          jobType,
+          abandonedRuns: result.abandonedRuns,
+        }));
+      }
+      log(result.ran ? "Scheduled job completed" : "Scheduled job skipped", {
         jobType,
         scheduledFor: scheduledFor.toISOString(),
+        ...(result.ran ? {} : { skippedReason: result.skippedReason }),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -219,8 +283,27 @@ async function main(): Promise<void> {
     void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
   }, { timezone: IST });
 
+  /**
+   * How far back an intraday indicator recompute writes.
+   *
+   * Indicators are still *computed* over the full series -- EMA and the SMC pivots need
+   * the history -- but writing all of it every minute was the job's real cost: 54,006
+   * NIFTY50 1m bars times fifteen definitions is ~810,000 upserts per run, on an
+   * every-minute cron. Bounding the write leaves the values identical and the work
+   * proportional to what actually changed.
+   *
+   * Five days rather than one because nothing else recomputes index indicators -- the EOD
+   * pipeline does not -- so a missed session has to heal on the next run, including over
+   * a long weekend.
+   */
+  const INDICATOR_WRITE_LOOKBACK_DAYS = 5;
+
   const collectIndicesIntraday = async (timeframes: readonly string[]): Promise<void> => {
-    const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
+    const now = new Date();
+    const todayIst = istDateKey(now);
+    const indicatorsFrom = istDateKey(
+      new Date(now.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
+    );
     for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
       for (const timeframe of timeframes) {
         await runCommand("npm", [
@@ -236,6 +319,7 @@ async function main(): Promise<void> {
           "run", "analysis:calculate-indicators", "--",
           "--instrument", instrument,
           "--timeframe", timeframe,
+          "--from", indicatorsFrom,
         ]);
       }
     }
@@ -308,7 +392,24 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async (signal: string): Promise<void> => {
-    log("Scheduler shutting down", { signal });
+    log("Scheduler shutting down", { signal, inFlightRuns: inFlightRuns.size });
+    // Child processes die with this one, so these runs are ending whether or not they
+    // finished. Recording that here is what lets the next container start work
+    // immediately, instead of waiting out an abandonment horizon on rows only this
+    // process could explain. A run killed mid-flight is a failure, not a completion.
+    for (const run of inFlightRuns.values()) {
+      try {
+        await claims.fail(run, `Interrupted by scheduler shutdown (${signal}); the run did not finish.`);
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Could not record an interrupted run on shutdown",
+          process: processIdentity,
+          jobType: run.jobType,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    }
     await database.end();
     process.exit(0);
   };

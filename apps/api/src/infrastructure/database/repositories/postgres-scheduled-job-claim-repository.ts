@@ -39,4 +39,32 @@ export class PostgresScheduledJobClaimRepository implements ScheduledJobClaimRep
       WHERE job_type = $1 AND scheduled_for = $2 AND status = 'RUNNING'
     `, [claim.jobType, claim.scheduledFor, errorDetails]);
   }
+
+  /**
+   * A row is only ever moved out of RUNNING by the process that claimed it, so a claimant
+   * that is killed leaves it RUNNING permanently. Age is the only signal available: the
+   * claimant is in another container and there is no liveness channel to ask.
+   *
+   * `completed_at` is set because the table's check constraint requires a non-RUNNING row
+   * to have one. It records when the run was written off, not when it stopped -- which is
+   * unknowable, and is why the reason says so.
+   */
+  async abandonStaleRuns(jobType: string, abandonedBefore: Date, reason: string): Promise<number> {
+    const result = await this.database.query<{ id: string }>(`
+      UPDATE scheduled_job_runs
+      SET status = 'FAILED', completed_at = CURRENT_TIMESTAMP,
+          error_details = COALESCE(error_details, '') || $3
+      WHERE job_type = $1 AND status = 'RUNNING' AND claimed_at < $2
+      RETURNING id
+    `, [jobType, abandonedBefore, reason]);
+    return result.rows.length;
+  }
+
+  async countRunning(jobType: string): Promise<number> {
+    const result = await this.database.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM scheduled_job_runs WHERE job_type = $1 AND status = 'RUNNING'",
+      [jobType],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
 }

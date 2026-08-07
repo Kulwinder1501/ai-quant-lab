@@ -44,8 +44,9 @@ import { candleSeriesProvenanceMigration } from "./043-candle-series-provenance.
 import { paperTradeUnderlyingEntryMigration } from "./044-paper-trade-underlying-entry.js";
 import { addSmcIndicatorsMigration } from "./045-add-smc-indicators.js";
 import { addRemainingSmcMigration } from "./046-add-remaining-smc.js";
-import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-bars.js";
+import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-bars.js";
 import { purgeLookAheadSmcSnapshotsMigration } from "./048-purge-look-ahead-smc-snapshots.js";
+import { reconcileAbandonedJobRunsMigration } from "./049-reconcile-abandoned-job-runs.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -94,6 +95,7 @@ export const migrations = [
   paperTradeUnderlyingEntryMigration,
   addSmcIndicatorsMigration,
   addRemainingSmcMigration,
-  purgeInProgressSeedBarsMigration,
+  purgeInProgressSeedBarsMigration,
   purgeLookAheadSmcSnapshotsMigration,
+  reconcileAbandonedJobRunsMigration,
 ];
