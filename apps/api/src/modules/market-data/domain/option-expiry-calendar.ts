@@ -105,6 +105,68 @@ export function resolveListedExpiry(
   };
 }
 
+export type ExpirySelection =
+  | { usable: true; expiryDate: Date; expiryKind: ExpiryKind; daysToExpiry: number }
+  | { usable: false; reason: "NO_CALENDAR" | "NO_EXPIRY_FAR_ENOUGH_OUT"; explanation: string };
+
+/**
+ * Picks the nearest listed expiry at least `minimumDaysToExpiry` away.
+ *
+ * An automated caller has to choose a contract rather than be handed one, and choosing is
+ * where a phantom gets in: a weekday rule invents 11 Aug for BANKNIFTY, which lists nothing
+ * before 25 Aug. So the choice is made *from* the provider's list -- every candidate is
+ * therefore a contract that trades, and the underlying's series structure needs no special
+ * casing. A monthly-only underlying simply has a more distant nearest expiry.
+ *
+ * The floor exists because the entry gate refuses sub-1-DTE contracts at anything short of
+ * top confidence, and because an expiry-day option is nearly all gamma: a stop placed in
+ * premium space stops describing the underlying move it was derived from. Selecting a
+ * contract the gate would then refuse is a slower way of getting the same answer.
+ */
+export function selectNearestListedExpiry(
+  calendar: OptionExpiryCalendar | null,
+  now: Date,
+  minimumDaysToExpiry: number,
+): ExpirySelection {
+  if (calendar === null || calendar.expiries.length === 0) {
+    return {
+      usable: false,
+      reason: "NO_CALENDAR",
+      explanation:
+        `No option-expiry calendar has been collected for ${calendar?.underlyingSymbol ?? "this underlying"}, `
+        + "so no contract can be chosen. Collect the option chain first.",
+    };
+  }
+
+  const earliestAcceptable = now.getTime() + minimumDaysToExpiry * 24 * 60 * 60 * 1000;
+  const candidates = [...calendar.expiries]
+    .filter((entry) => !Number.isNaN(entry.expiryDate.getTime()) && entry.expiryDate.getTime() >= earliestAcceptable)
+    .sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime());
+
+  const chosen = candidates[0];
+  if (!chosen) {
+    const listed = [...calendar.expiries]
+      .sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime())
+      .slice(0, 4)
+      .map((entry) => `${dateKey(entry.expiryDate)} (${entry.expiryKind})`)
+      .join(", ");
+    return {
+      usable: false,
+      reason: "NO_EXPIRY_FAR_ENOUGH_OUT",
+      explanation:
+        `${calendar.underlyingSymbol} lists no expiry at least ${minimumDaysToExpiry} day(s) out. `
+        + `Nearest listed: ${listed}. (Calendar observed ${calendar.observedAt.toISOString()}.)`,
+    };
+  }
+
+  return {
+    usable: true,
+    expiryDate: chosen.expiryDate,
+    expiryKind: chosen.expiryKind,
+    daysToExpiry: (chosen.expiryDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
+  };
+}
+
 /** Rejects a calendar that cannot be a real observation, before it reaches the table. */
 export function assertCalendarStorable(calendar: OptionExpiryCalendar): void {
   if (!calendar.underlyingSymbol.trim()) {

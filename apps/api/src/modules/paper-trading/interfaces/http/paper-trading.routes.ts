@@ -12,21 +12,14 @@ import { calculateEntryFees } from "../../domain/brokerage-calculator.js";
 import type { TradeOutcomeFilter } from "../../domain/paper-trade-history.js";
 import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-trading.js";
 import { lotsToQuantity } from "../../domain/lot-size-validator.js";
-import {
-  mapIdeaToOptionBuyerFill,
-  resolveOptionExpiryInstant,
-} from "../../domain/option-buyer-fill.js";
-import { resolveListedExpiry } from "../../../market-data/domain/option-expiry-calendar.js";
-import { nearestStrike } from "@ai-quant-lab/pricing";
-import { solveContractGreeksFromChain } from "../../../market-data/domain/chain-greeks.js";
-import { validateOptionsEntry } from "../../../strategy-engine/domain/options-entry-validator.js";
+import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
+import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
   hasAnyOptionContractField,
   valuePaperTrade,
 } from "../../domain/paper-trade-live-valuation.js";
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../infrastructure/india-vix-implied-volatility-source.js";
-import { regimeSourceInstrumentSymbol } from "../../../strategy-engine/domain/regime.js";
 import type { TradeSide } from "../../../strategy-engine/domain/strategy.js";
 
 function parseTradeHistoryQuery(request: Request): {
@@ -307,9 +300,6 @@ export function registerPaperTradingRoutes(
       let targetOverride: number | undefined;
       let sideOverride: TradeSide | undefined;
       let feeMeta: Record<string, unknown> | undefined;
-      // What the pre-trade gate saw, persisted with the trade: a position that passed a
-      // partially-unchecked gate should say so on its own record.
-      let feeMetaEntryChecks: Record<string, unknown> | undefined;
       let optionContract: {
         optionStrike: number;
         optionExpiry: Date;
@@ -320,220 +310,35 @@ export function registerPaperTradingRoutes(
       } | undefined;
 
       if (asOptionBuyer) {
-        let iv = typeof impliedVolatility === "number" ? impliedVolatility : undefined;
-        if (iv === undefined) {
-          const vixClose = await dependencies.database.query(`
-            SELECT c.close
-            FROM candles c
-            INNER JOIN instruments i ON i.id = c.instrument_id
-            WHERE i.symbol = $1
-              AND c.timeframe = '1d'
-              AND c.is_complete = TRUE
-              AND c.close_time <= CURRENT_TIMESTAMP
-            ORDER BY c.close_time DESC
-            LIMIT 1
-          `, [regimeSourceInstrumentSymbol]);
-          if (vixClose.rows[0]) iv = Number((vixClose.rows[0] as { close: string }).close) / 100;
-        }
-        if (iv === undefined || !Number.isFinite(iv) || iv <= 0) iv = 0.12;
-        if (iv > 1) iv /= 100;
-
-        const strikeStep = idea.strike_step === null ? null : Number(idea.strike_step);
-        if (strikeStep === null || !Number.isFinite(strikeStep) || strikeStep <= 0) {
-          response.status(422).json({
-            error: `Instrument ${idea.symbol} has no strike_step configured, so an option strike cannot be chosen.`,
-          });
-          return;
-        }
-        if (typeof expiryDate !== "string" || expiryDate.trim() === "") {
-          response.status(422).json({
-            error: "expiryDate is required when opening an option-buyer position; "
-              + "it names the contract being priced and cannot be inferred.",
-          });
-          return;
-        }
-        // A date-only expiry means that day's 15:30 IST settlement, not midnight UTC.
-        const expiry = resolveOptionExpiryInstant(expiryDate);
-        if (Number.isNaN(expiry.getTime())) {
-          response.status(422).json({ error: `expiryDate "${expiryDate}" is not a valid date.` });
-          return;
-        }
-        if (expiry.getTime() <= Date.now()) {
-          response.status(422).json({
-            error: `expiryDate ${expiry.toISOString()} has already passed; an expired contract cannot be priced.`,
-          });
-          return;
-        }
-        // A well-formed future date is not yet a contract. Two trades were booked against a
-        // BANKNIFTY 2026-08-04 expiry that underlying does not list, and priced cleanly the
-        // whole way through, so the requested expiry is checked against the provider's own
-        // calendar before anything is derived from it.
-        const calendar = await dependencies.optionChainRepository
-          .latestExpiryCalendar(String(idea.symbol).toUpperCase());
-        const listed = resolveListedExpiry(calendar, expiry, String(idea.symbol).toUpperCase());
-        if (!listed.usable) {
-          response.status(422).json({ error: listed.explanation, reason: listed.reason });
-          return;
-        }
-        // The calendar's own instant, so a caller who passed a bare date does not end up
-        // with a settlement time that disagrees with the contract.
-        const settlementExpiry = listed.expiryDate;
-
-        // The chain is read before the fill is mapped, because the entry premium should be
-        // the market's rather than the model's. The strike does not depend on the mapping --
-        // it is `nearestStrike(entry, step)` -- so it can be derived here and looked up.
-        const intendedStrike = nearestStrike(Number(idea.entry_price), strikeStep);
-        const intendedOptionType = idea.side === "LONG" ? "CE" : "PE";
-        const entryChain = await dependencies.optionChainRepository
-          .latestSnapshot({
-            underlyingSymbol: String(idea.symbol).toUpperCase(),
-            expiryDate: settlementExpiry.toISOString().slice(0, 10),
-          })
-          .catch(() => null);
-        const solvedGreeks = entryChain === null ? null : solveContractGreeksFromChain({
-          snapshot: entryChain,
-          strikePrice: intendedStrike,
-          optionType: intendedOptionType,
+        // The whole option entry sequence lives in `PrepareOptionEntry`, because the
+        // paper-trading bot opens positions through the same steps and a second copy of them
+        // is where a gate goes missing. Expiry-calendar check, observed-book fill and the
+        // pre-trade checklist are all inside it; a refusal names which one refused.
+        const prepared = await new PrepareOptionEntry(
+          dependencies.database,
+          dependencies.optionChainRepository,
+        ).execute({
+          tradeIdeaId,
+          expiryDate,
+          impliedVolatility,
+          quantity: resolvedQuantity,
         });
-        // A buyer pays the ask, not the mid. Filling at the mid would understate the entry by
-        // half the spread on every trade, and spread is the cost that decides whether an
-        // options edge survives at all -- the measured straddle edge dies at roughly 1.09% per
-        // leg. The ask is what the book was actually offering.
-        const intendedQuote = entryChain?.quotes.find(
-          (quote) => quote.strikePrice === intendedStrike && quote.optionType === intendedOptionType,
-        );
-        const observedFill = solvedGreeks !== null && intendedQuote?.ask != null && intendedQuote.ask > 0
-          ? { premium: intendedQuote.ask, impliedVolatility: solvedGreeks.impliedVolatility }
-          : undefined;
-
-        let mapped: ReturnType<typeof mapIdeaToOptionBuyerFill>;
-        try {
-          mapped = mapIdeaToOptionBuyerFill({
-            ideaSide: idea.side,
-            underlyingEntry: Number(idea.entry_price),
-            underlyingStop: Number(idea.stop_loss),
-            underlyingTarget: Number(idea.target_price),
-            impliedVolatility: iv,
-            expiryDate: settlementExpiry,
-            strikeStep,
-            observedFill,
-          });
-        } catch (error) {
-          response.status(422).json({
-            error: error instanceof Error ? error.message : "Option fill could not be derived.",
+        if (!prepared.approved) {
+          const status = prepared.reason === "IDEA_NOT_FOUND" ? 404 : 422;
+          response.status(status).json({
+            error: prepared.explanation,
+            reason: prepared.reason,
+            ...(prepared.reasons ? { reasons: prepared.reasons } : {}),
+            ...(prepared.unchecked ? { unchecked: prepared.unchecked } : {}),
           });
           return;
         }
-        // Pre-trade gate on the contract that was actually chosen, reusing the snapshot and
-        // solved greeks the fill was priced from -- a second read could land on a newer
-        // observation and gate a position against a book it was not filled at.
-        //
-        // A refusal returns `unchecked` alongside `reasons`, because "passed" and "never
-        // evaluated" must not look the same to the caller -- that conflation is exactly how
-        // this project shipped guards that never fired.
-        // Volume of the bar the idea was actually raised on, via `source_candle_id`. The
-        // latest bar is deliberately not substituted: validating an older idea against a
-        // later bar would judge it on information it never had.
-        //
-        // A zero is only treated as "nobody traded" when the series demonstrably reports
-        // volume. Every stored 15m index bar has zero volume because 15m is Yahoo's under the
-        // provenance split and Yahoo carries no index volume -- the Fyers 5m series for the
-        // same index is 99.9% populated. Reading that zero as absent participation would
-        // refuse every 15m-sourced index entry. The probe is per instrument and timeframe, so
-        // an idea raised on a 5m bar is checked today, with no change here.
-        let candleVolume: number | null = null;
-        let volumeAbsenceReason = "the idea records no source candle, so its bar volume cannot be read";
-        if (idea.source_candle_id) {
-          try {
-            const sourceBar = await dependencies.database.query(`
-              SELECT c.volume, c.timeframe, c.instrument_id,
-                     (SELECT count(*) FROM candles peer
-                       WHERE peer.instrument_id = c.instrument_id
-                         AND peer.timeframe = c.timeframe
-                         AND peer.volume > 0) AS series_volume_bars
-              FROM candles c WHERE c.id = $1
-            `, [idea.source_candle_id]);
-            const bar = sourceBar.rows[0] as
-              { volume: string | null; timeframe: string; series_volume_bars: string } | undefined;
-            if (!bar) {
-              volumeAbsenceReason = "the idea's source candle is no longer stored";
-            } else if (Number(bar.series_volume_bars) === 0) {
-              volumeAbsenceReason =
-                `${idea.symbol} ${bar.timeframe} carries no volume in this dataset, so a zero `
-                + "cannot be read as absent participation";
-            } else {
-              const parsed = bar.volume === null ? Number.NaN : Number(bar.volume);
-              if (Number.isFinite(parsed)) candleVolume = parsed;
-              else volumeAbsenceReason = "the source candle stores no volume";
-            }
-          } catch {
-            // A volume lookup failure must not block an entry; it is reported as unchecked.
-            volumeAbsenceReason = "the source candle's volume could not be read";
-          }
-        }
-
-        const reasoningList = Array.isArray(idea.reasoning)
-          ? (idea.reasoning as unknown[]).map(String)
-          : [];
-        const entryCheck = validateOptionsEntry({
-          proposedIdea: {
-            side: idea.side,
-            confidence: Number(idea.confidence ?? 0),
-            reasoning: reasoningList,
-          },
-          candleVolume,
-          volumeAbsenceReason,
-          optionChain: entryChain ?? undefined,
-          intendedStrike: intendedStrike,
-          intendedContractDelta: solvedGreeks?.delta ?? null,
-        });
-        if (!entryCheck.isValid) {
-          response.status(422).json({
-            error: `Options pre-trade checks refused this entry: ${entryCheck.reasons.join(" ")}`,
-            reason: "OPTIONS_ENTRY_REJECTED",
-            reasons: entryCheck.reasons,
-            unchecked: entryCheck.unchecked,
-          });
-          return;
-        }
-        feeMetaEntryChecks = {
-          fillSource: mapped.fillSource,
-          sourceCandleVolume: candleVolume,
-          observedAsk: intendedQuote?.ask ?? null,
-          reasons: entryCheck.reasons,
-          unchecked: entryCheck.unchecked,
-          solvedDelta: solvedGreeks?.delta ?? null,
-          solvedImpliedVolatility: solvedGreeks?.impliedVolatility ?? null,
-          chainObservedAt: entryChain?.observedAt.toISOString() ?? null,
-        };
-
-        openFill = mapped.fillPremium;
-        stopOverride = mapped.stopPremium;
-        targetOverride = mapped.targetPremium;
-        sideOverride = mapped.side;
-        optionContract = {
-          optionStrike: mapped.strike,
-          optionExpiry: settlementExpiry,
-          optionType: mapped.optionType,
-          underlyingSymbol: idea.symbol,
-          underlyingEntryPrice: mapped.underlyingEntryPrice,
-          entryIv: iv,
-        };
-        feeMeta = {
-          entry: calculateEntryFees(openFill, resolvedQuantity),
-          option: {
-            optionType: mapped.optionType,
-            strike: mapped.strike,
-            impliedVolatility: iv,
-            // The contract's settlement instant, matching what the trade is booked against.
-            // Recording the caller's raw input here would disagree with `optionExpiry`
-            // whenever a bare date was supplied.
-            expiryDate: settlementExpiry.toISOString(),
-            greeks: mapped.entryGreeks,
-            underlyingEntry: Number(idea.entry_price),
-          },
-          entryChecks: feeMetaEntryChecks,
-        };
+        openFill = prepared.entry.fillPrice;
+        stopOverride = prepared.entry.stopLossOverride;
+        targetOverride = prepared.entry.targetPriceOverride;
+        sideOverride = prepared.entry.side;
+        optionContract = prepared.entry.optionContract;
+        feeMeta = prepared.entry.feeBreakdown;
       }
 
       const trade = await dependencies.openPaperTrade.execute({
