@@ -77,12 +77,31 @@ function toUpsertInput(candle: PersistedCandle): UpsertCandleInput {
 export class CollectLiveMarketData {
   private readonly activeCandles = new Map<string, ActiveCandle>();
   private readonly lastCumulativeVolumes = new Map<string, string>();
+  /**
+   * When this collector began observing. A window that opened before it is one this process
+   * cannot have seen in full.
+   *
+   * Measured on 2026-08-07: a collector started at 08:12 sealed the 08:00-08:15 NIFTY50 bar
+   * with a range of **0.9 points** and BANKNIFTY's with **0.5**, from three minutes of
+   * quotes. Both were marked complete, so `listCompleted` fed them to the strategies and the
+   * indicator engine, and a later historical fetch would have skipped them as
+   * already-present. A partial bar wearing a completed bar's clothes is worse than a missing
+   * one: the gap is visible and self-heals, the fake does neither.
+   *
+   * A partially-observed window is therefore never started and never sealed. It is left
+   * absent, or left incomplete if an earlier run created it, and the historical fetch fills
+   * it properly once the session has settled.
+   */
+  private readonly observationStartedAt: Date;
 
   constructor(
     private readonly provider: LiveMarketDataProvider,
     private readonly candleRepository: CandleRepository,
     private readonly marketSession: NseMarketSession,
-  ) {}
+    observationStartedAt?: Date,
+  ) {
+    this.observationStartedAt = observationStartedAt ?? new Date();
+  }
 
   async execute(input: CollectLiveMarketDataInput): Promise<CollectLiveMarketDataResult> {
     const now = input.now ?? new Date();
@@ -129,6 +148,12 @@ export class CollectLiveMarketData {
     }
     const window = this.marketSession.candleWindow(quoteTime, timeframe);
     if (!window) {
+      return { applied: false, finalized: 0 };
+    }
+    // A window that opened before this collector did cannot be observed in full, so it is
+    // not started at all. Nothing is lost: the historical fetch delivers that bar settled and
+    // on-grid once the session closes.
+    if (window.openTime.getTime() < this.observationStartedAt.getTime()) {
       return { applied: false, finalized: 0 };
     }
 
@@ -235,10 +260,20 @@ export class CollectLiveMarketData {
       timeframe,
       now,
     );
+    let finalized = 0;
     for (const candle of pending) {
+      // Only a window this process watched from the start may be sealed. An incomplete bar
+      // left by an earlier run is partial by definition -- its collector died mid-window --
+      // and sealing it would make a guess permanent. Left incomplete it is excluded from
+      // `listCompleted`, and the historical fetch overwrites it, because `skipExisting`
+      // skips only completed candles.
+      if (candle.openTime.getTime() < this.observationStartedAt.getTime()) {
+        continue;
+      }
       await this.candleRepository.upsert(toUpsertInput({ ...candle, isComplete: true }));
       this.activeCandles.delete(candle.instrumentId);
+      finalized += 1;
     }
-    return pending.length;
+    return finalized;
   }
 }

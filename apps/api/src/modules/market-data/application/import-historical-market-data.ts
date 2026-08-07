@@ -47,6 +47,16 @@ export interface ImportHistoricalMarketDataResult {
   candlesDeferred: number;
 }
 
+/**
+ * Whether a stored candle was built by the live collector rather than fetched settled.
+ *
+ * `quoteObservedAt` is written by `CollectLiveMarketData` on every quote it applies, so it
+ * is present on exactly the bars this distinction is about.
+ */
+function isLiveAggregated(candle: { sourceMetadata: Record<string, unknown> }): boolean {
+  return candle.sourceMetadata?.quoteObservedAt !== undefined;
+}
+
 function isPositiveDecimal(value: string): boolean {
   return /^\d+(?:\.\d+)?$/.test(value) && Number(value) > 0;
 }
@@ -188,7 +198,14 @@ export class ImportHistoricalMarketData {
           );
           // Only an already-*completed* candle is skipped. An incomplete one is
           // still allowed to be finalised by this write.
-          if (existing?.isComplete) {
+          //
+          // A live-aggregated bar is never skipped, complete or not. It is a sample of the
+          // window taken every few seconds from quote snapshots; this is the exchange's own
+          // settled bar for it. They are not the same object, and the differences are not
+          // subtle -- the live path carries no index volume at all, because the quotes
+          // endpoint reports zero for an index. Skipping it would make the approximation
+          // permanent, since the settled bar is fetched exactly once.
+          if (existing?.isComplete && !isLiveAggregated(existing)) {
             candlesSkipped += 1;
             continue;
           }

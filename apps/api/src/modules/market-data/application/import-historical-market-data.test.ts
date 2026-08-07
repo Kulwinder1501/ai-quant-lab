@@ -292,4 +292,88 @@ describe("ImportHistoricalMarketData invalid-candle handling", () => {
 
     expect(result).toMatchObject({ candlesRejected: 0, rejectedSamples: [] });
   });
+
+  it("overwrites a live-aggregated bar even with skipExisting, because it is an approximation", async () => {
+    // The live path samples a window from quote snapshots every few seconds; this is the
+    // exchange's settled bar for it. Skipping would make the approximation permanent, since
+    // the settled bar is fetched exactly once. Measured 2026-08-07: a live 15m NIFTY50 bar
+    // spanned 0.9 points and carried no volume at all, against a real session range.
+    const openTime = new Date("2026-07-24T03:45:00Z");
+    const closeTime = new Date("2026-07-24T04:00:00Z");
+    const liveAggregated: PersistedCandle = {
+      id: "live-1", instrumentId: "instrument-1", timeframe: "15m",
+      openTime, closeTime,
+      open: "100", high: "100.9", low: "100", close: "100.5", volume: "0",
+      isComplete: true, source: "fyers-api-v3", ingestionId: "live-run",
+      // Written by CollectLiveMarketData on every quote it applies.
+      sourceMetadata: { quoteObservedAt: "2026-07-24T03:59:00Z" },
+    };
+    const stored: UpsertCandleInput[] = [];
+    const candles: CandleRepository = {
+      upsert: async (input): Promise<PersistedCandle> => {
+        stored.push(input);
+        return { id: "candle-new", ...input, ingestionId: input.ingestionId ?? null, sourceMetadata: input.sourceMetadata ?? {} };
+      },
+      findByKey: async () => liveAggregated,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const provider: HistoricalMarketDataProvider = {
+      id: "test-provider",
+      fetchCandles: async () => [
+        { openTime, closeTime, open: "100", high: "142.5", low: "98.2", close: "141.0", volume: "875000" },
+      ],
+    };
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, candles);
+
+    await expect(service.execute({
+      instrument, provider, providerInstrumentId: "256265", timeframe: "15m",
+      from: new Date("2026-07-24T00:00:00Z"), to: new Date("2026-07-24T23:59:59Z"),
+      skipExisting: true,
+    })).resolves.toMatchObject({ candlesFetched: 1, candlesPersisted: 1, candlesSkipped: 0 });
+
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ high: "142.5", volume: "875000" });
+  });
+
+  it("still skips a settled bar the live path never touched", async () => {
+    // The guard must stay narrow: a bar fetched settled is immutable, and rewriting it on
+    // every overlapping backfill is what skipExisting exists to prevent.
+    const openTime = new Date("2026-07-24T03:45:00Z");
+    const closeTime = new Date("2026-07-24T04:00:00Z");
+    const settled: PersistedCandle = {
+      id: "history-1", instrumentId: "instrument-1", timeframe: "15m",
+      openTime, closeTime,
+      open: "100", high: "142.5", low: "98.2", close: "141.0", volume: "875000",
+      isComplete: true, source: "fyers-api-v3", ingestionId: "history-run",
+      sourceMetadata: {},
+    };
+    const stored: UpsertCandleInput[] = [];
+    const candles: CandleRepository = {
+      upsert: async (input): Promise<PersistedCandle> => {
+        stored.push(input);
+        return { id: "candle-new", ...input, ingestionId: input.ingestionId ?? null, sourceMetadata: input.sourceMetadata ?? {} };
+      },
+      findByKey: async () => settled,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const provider: HistoricalMarketDataProvider = {
+      id: "test-provider",
+      fetchCandles: async () => [
+        { openTime, closeTime, open: "100", high: "142.5", low: "98.2", close: "141.0", volume: "875000" },
+      ],
+    };
+    const ingestion = ingestionRepository();
+    const service = new ImportHistoricalMarketData(ingestion.repository, candles);
+
+    await expect(service.execute({
+      instrument, provider, providerInstrumentId: "256265", timeframe: "15m",
+      from: new Date("2026-07-24T00:00:00Z"), to: new Date("2026-07-24T23:59:59Z"),
+      skipExisting: true,
+    })).resolves.toMatchObject({ candlesSkipped: 1, candlesPersisted: 0 });
+
+    expect(stored).toHaveLength(0);
+  });
 });

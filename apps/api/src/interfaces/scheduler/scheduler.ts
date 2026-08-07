@@ -328,7 +328,13 @@ async function main(): Promise<void> {
   cron.schedule("*/1 9-15 * * 1-5", () => {
     // Requires a healthy Fyers token, which FYERS_AUTH_HEALTH_CHECK ensures is available
     if (fyersTokenService) {
-      void schedule("INDICES_INTRADAY", () => collectIndicesIntraday(["1m", "5m"]));
+      // 15m is here for its **indicators**, not its bars. The history endpoint publishes no
+      // same-day intraday data -- a 15m fetch for today returns zero candles, measured -- so
+      // those bars come from the live collector. But trend-breakout is the only strategy the
+      // paper-trading bot can use, it reads 15m, and it resolves EMA/RSI/ATR snapshots that
+      // nothing else recomputes intraday. Without this the bot sees fresh bars and stale
+      // indicators.
+      void schedule("INDICES_INTRADAY", () => collectIndicesIntraday(["1m", "5m", "15m"]));
     }
   }, { timezone: IST });
 

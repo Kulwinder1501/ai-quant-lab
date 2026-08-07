@@ -62,7 +62,11 @@ describe("CollectLiveMarketData", () => {
       },
     };
     const candles = candleRepository();
-    const collector = new CollectLiveMarketData(provider, candles.repository, new NseMarketSession());
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      // Observing from the session open, so both windows below are fully watched.
+      new Date("2026-07-24T03:45:00Z"),
+    );
     const input = { subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }], timeframe: "1m" as const, ingestionId: "live-ingestion" };
 
     await collector.execute({ ...input, now: new Date("2026-07-24T03:45:15Z") });
@@ -85,5 +89,87 @@ describe("CollectLiveMarketData", () => {
       ingestionId: "live-ingestion",
       now: new Date("2026-07-25T04:00:00Z"), // Saturday
     })).resolves.toMatchObject({ quotesReceived: 0, quotesApplied: 0 });
+  });
+
+  it("never starts a window that opened before it did", async () => {
+    // A collector that starts mid-window cannot have seen the whole of it. Measured
+    // 2026-08-07: one started at 08:12 sealed the 08:00-08:15 NIFTY50 bar from three minutes
+    // of quotes, range 0.9 points, marked complete. The strategies and the indicator engine
+    // read it, and a later historical fetch would have skipped it as already present.
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => [{
+        providerInstrumentId: "NSE:RELIANCE", lastPrice: "100", cumulativeVolume: "1000",
+        observedAt: new Date("2026-07-24T04:12:00Z"), exchangeTimestamp: null,
+      }],
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:12:05Z"),
+    });
+
+    // The 04:00-04:15 window opened twelve minutes before observation began.
+    expect(result).toMatchObject({ quotesReceived: 1, quotesApplied: 0 });
+    expect([...candles.saved.values()]).toHaveLength(0);
+  });
+
+  it("starts the next window once it begins cleanly", async () => {
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => [{
+        providerInstrumentId: "NSE:RELIANCE", lastPrice: "100", cumulativeVolume: "1000",
+        observedAt: new Date("2026-07-24T04:16:00Z"), exchangeTimestamp: null,
+      }],
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:16:05Z"),
+    });
+
+    expect(result).toMatchObject({ quotesApplied: 1 });
+    expect([...candles.saved.values()][0]).toMatchObject({ isComplete: false });
+  });
+
+  it("leaves an earlier run's unfinished bar incomplete rather than sealing a guess", async () => {
+    // Sealing it would make a partial permanent, and `skipExisting` skips only completed
+    // candles -- so left incomplete, the historical fetch corrects it.
+    const candles = candleRepository();
+    await candles.repository.upsert({
+      instrumentId: instrument.id, ingestionId: "older-run", timeframe: "15m",
+      openTime: new Date("2026-07-24T03:45:00Z"), closeTime: new Date("2026-07-24T04:00:00Z"),
+      open: "100", high: "100", low: "100", close: "100", volume: "0",
+      isComplete: false, source: "test-live", sourceMetadata: { quoteObservedAt: "2026-07-24T03:59:00Z" },
+    });
+    const provider: LiveMarketDataProvider = { id: "test-live", fetchQuotes: async () => [] };
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:16:05Z"),
+    });
+
+    expect(result.candlesFinalized).toBe(0);
+    expect([...candles.saved.values()][0]).toMatchObject({ isComplete: false });
   });
 });
