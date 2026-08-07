@@ -126,6 +126,28 @@ information it never had. A gate that reports `isValid: true` while silently ski
 is the exact failure this project has already paid for twice: once with `greeks.price`, once
 with guards written `x !== null && x !== undefined` against fields that did not exist.
 
+### 1.7 Option-premium scalping is blocked on collection cadence, not on strategy
+
+Planned 2026-08-07 in `phase-27-option-premium-scalping.md`; nothing built yet.
+
+The request was to scalp NIFTY option premiums on a 1m signal. Two proposals -- trade the
+futures chart, or replace VWAP with a 50 EMA -- were both rejected, because neither touches
+the constraint that decides it: **the option chain is observed 17 times a day**, so a
+one-minute scalp would be entered, marked and exited against a fifteen-minute-old book.
+
+The thing both proposals missed is that **options carry real traded volume** (NIFTY50 24550
+CE: 80,680,470). VWAP fails on the index because an index reports zero, not because VWAP
+needs futures. Scalping the contract itself dissolves the problem.
+
+Measured cost bar, live ATM NIFTY 24550 CE: **0.79% of premium per round trip at one lot**,
+a breakeven of **2.1 index points** against an average 1m bar body of **3.90**. 83% of that
+cost is fixed brokerage, so five lots halves the breakeven -- position size matters more than
+the strategy choice, and a one-lot study will reject strategies that work at five.
+
+Sequenced measure-first in the phase doc: collect premiums at 15-30s, then test against cost,
+then build. Step one is worth doing whatever the outcome, because the 15-minute chain also
+limits stop enforcement on positions the bot already holds.
+
 ### 1.3 No event calendar, and headlines cannot substitute for one
 
 Measured 2026-08-05 against the stored newswire: the keyword detector in
