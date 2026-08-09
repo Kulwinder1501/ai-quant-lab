@@ -10,7 +10,13 @@ import { registerNewsRoutes } from "../../modules/news-sentiment/interfaces/http
 import { registerPaperTradingRoutes } from "../../modules/paper-trading/interfaces/http/paper-trading.routes.js";
 import { registerPricingRoutes } from "../../modules/pricing/interfaces/http/pricing.routes.js";
 import { registerStrategyRoutes } from "../../modules/strategy-engine/interfaces/http/strategy.routes.js";
-import { errorHandler, notFoundHandler, requestLogger } from "./common/middleware.js";
+import {
+  createMutationRateLimiter,
+  errorHandler,
+  notFoundHandler,
+  requestLogger,
+  securityHeaders,
+} from "./common/middleware.js";
 import { buildHttpDependencies } from "./dependencies.js";
 import { registerHealthRoutes } from "./routes/health.routes.js";
 
@@ -28,10 +34,27 @@ export interface ApplicationDependencies {
 export function createApp({ database }: ApplicationDependencies): Express {
   const app = express();
   const dependencies = buildHttpDependencies(database);
+  const allowedOrigins = new Set(
+    (process.env.CORS_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  );
+  const configuredMutationLimit = Number(process.env.API_MUTATION_RATE_LIMIT ?? "120");
+  const mutationLimit = Number.isInteger(configuredMutationLimit) && configuredMutationLimit > 0
+    ? configuredMutationLimit
+    : 120;
 
   app.use(requestLogger);
-  app.use(cors());
-  app.use(express.json());
+  app.use(securityHeaders);
+  app.use(cors({
+    origin(origin, callback) {
+      if (origin === undefined || allowedOrigins.has(origin)) callback(null, true);
+      else callback(new Error("Origin is not allowed by CORS policy."));
+    },
+  }));
+  app.use(express.json({ limit: "256kb" }));
+  app.use(createMutationRateLimiter({ maxRequests: mutationLimit, windowMs: 60_000 }));
 
   registerHealthRoutes(app, dependencies);
   registerMarketScannerRoutes(app, dependencies);

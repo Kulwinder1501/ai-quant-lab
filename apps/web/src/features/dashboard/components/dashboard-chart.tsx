@@ -37,7 +37,9 @@ export function DashboardChart({ symbol }: { symbol: string }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadChartData(controller.signal);
+    const initialLoad = setTimeout(() => {
+      void loadChartData(controller.signal);
+    }, 0);
     
     // Refresh chart data every 60s
     const interval = setInterval(() => {
@@ -46,6 +48,7 @@ export function DashboardChart({ symbol }: { symbol: string }) {
     
     return () => {
       controller.abort();
+      clearTimeout(initialLoad);
       clearInterval(interval);
     };
   }, [loadChartData]);
@@ -108,7 +111,7 @@ export function DashboardChart({ symbol }: { symbol: string }) {
       </div>
 
       <div className="shrink-0 border-t border-slate-700/40 px-3 py-1.5 text-[9px] text-slate-500">
-        Yahoo public OHLC — forming bar synced to live spot when within 0.5% — {timeframe} — Mode: {mode}
+        Stored completed OHLC bars — {timeframe} — Mode: {mode}
       </div>
     </GlassPanel>
   );

@@ -72,6 +72,12 @@ interface ClosedTradeUpdateRow extends QueryResultRow {
   slippage: string;
 }
 
+export interface OpenManualOptionTradeInput extends Omit<OpenPaperTradeInput, "tradeIdeaId"> {
+  instrumentId: string;
+}
+
+class TradeIdeaExpiredError extends Error {}
+
 const accountColumns = "id, name, opening_balance, currency, is_active";
 const tradeColumns = `
   paper_trades.id,
@@ -221,164 +227,51 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
   constructor(private readonly database: DatabasePool) {}
 
   async openFromTradeIdea(input: OpenPaperTradeInput): Promise<PaperTrade> {
-    assertPositiveFinite(input.quantity, "Quantity");
-    assertPositiveFinite(input.fillPrice, "Fill price");
-    assertNonNegativeFinite(input.entryFees, "Entry fees");
-    assertNonNegativeFinite(input.entrySlippage, "Entry slippage");
-    assertDate(input.openedAt, "Opened at");
-
     const client = await this.database.connect();
     let transactionStarted = false;
     try {
       await client.query("BEGIN");
       transactionStarted = true;
+      const trade = await this.openFromTradeIdeaWithinTransaction(client, input);
+      await client.query("COMMIT");
+      transactionStarted = false;
+      return trade;
+    } catch (error) {
+      if (transactionStarted) {
+        if (error instanceof TradeIdeaExpiredError) {
+          await client.query("COMMIT");
+        } else {
+          await client.query("ROLLBACK");
+        }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 
-      const accountResult = await client.query<PaperAccountRow>(`
-        SELECT ${accountColumns}
-        FROM paper_accounts
-        WHERE id = $1 AND is_active = TRUE
-        FOR UPDATE
-      `, [input.accountId]);
-      const account = accountResult.rows[0];
-      if (!account) {
-        throw new Error("Paper account was not found or is inactive.");
-      }
-
-      const ideaResult = await client.query<LockedTradeIdeaRow & { lot_size: number }>(`
-        SELECT
-          trade_ideas.id,
-          trade_ideas.instrument_id,
-          trade_ideas.side,
-          trade_ideas.entry_price,
-          trade_ideas.stop_loss,
-          trade_ideas.target_price,
-          trade_ideas.expires_at,
-          instruments.lot_size
-        FROM trade_ideas
-        INNER JOIN instruments ON instruments.id = trade_ideas.instrument_id
-        WHERE trade_ideas.id = $1
-          AND trade_ideas.status = 'PROPOSED'
-        FOR UPDATE OF trade_ideas
-      `, [input.tradeIdeaId]);
-      const idea = ideaResult.rows[0];
-      if (!idea) {
-        throw new Error("Trade idea was not found or is no longer proposed.");
-      }
-      validateQuantity(input.quantity, Number(idea.lot_size));
-      if (idea.expires_at && idea.expires_at.getTime() <= input.openedAt.getTime()) {
-        await client.query(`
-          UPDATE trade_ideas
-          SET status = 'EXPIRED'
-          WHERE id = $1 AND status = 'PROPOSED'
-        `, [idea.id]);
-        await client.query("COMMIT");
-        transactionStarted = false;
-        throw new Error("Trade idea expired before the simulated opening time.");
-      }
-
-      const stopLoss = input.stopLossOverride
-        ?? toNumber(idea.stop_loss, "trade idea stop loss");
-      const targetPrice = input.targetPriceOverride
-        ?? toNumber(idea.target_price, "trade idea target price");
-      const side = input.sideOverride ?? idea.side;
-      if (!hasGeometryForFill(side, input.fillPrice, stopLoss, targetPrice)) {
-        throw new Error("The explicit fill price invalidates the referenced trade idea's stop/target geometry.");
-      }
-
-      const capitalResult = await client.query<CapitalRow>(`
-        SELECT
-          paper_accounts.opening_balance
-          + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED' AND paper_trades.excluded_from_evidence = false), 0)
-          - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
-          - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
-          AS available_capital
-        FROM paper_accounts
-        LEFT JOIN paper_trades ON paper_trades.account_id = paper_accounts.id
-        WHERE paper_accounts.id = $1
-        GROUP BY paper_accounts.id, paper_accounts.opening_balance
-      `, [input.accountId]);
-      const availableCapital = capitalResult.rows[0]
-        ? toNumber(capitalResult.rows[0].available_capital, "available capital")
-        : null;
-      if (availableCapital === null) {
-        throw new Error("Unable to calculate available paper-account capital.");
-      }
-      const requiredCapital = input.quantity * input.fillPrice + input.entryFees + input.entrySlippage;
-      if (requiredCapital > availableCapital + 1e-9) {
-        throw new Error("Insufficient available capital for this simulated fill.");
-      }
-
-      const status = input.status ?? 'OPEN';
-      const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
-      const contract = input.optionContract;
-      const inserted = await client.query<{ id: string }>(`
-        INSERT INTO paper_trades (
-          account_id, trade_idea_id, instrument_id, side, status, quantity,
-          entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes,
-          option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv
+  /** Creates the synthetic idea and opens its trade in one database transaction. */
+  async openManualOption(input: OpenManualOptionTradeInput): Promise<PaperTrade> {
+    const client = await this.database.connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      const ideaResult = await client.query<{ id: string }>(`
+        INSERT INTO trade_ideas (
+          instrument_id, strategy_version_id, source_candle_id, side, status,
+          entry_price, stop_loss, target_price, risk_reward, confidence,
+          reasoning, evidence, expires_at
         ) VALUES (
-          $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12,
-          $15, $16, $17, $18, $19, $20
-        )
-        RETURNING id
-      `, [
-        input.accountId,
-        idea.id,
-        idea.instrument_id,
-        side,
-        input.quantity,
-        input.fillPrice,
-        stopLoss,
-        targetPrice,
-        input.openedAt,
-        input.entryFees,
-        input.entrySlippage,
-        input.notes,
-        JSON.stringify(feeBreakdown),
-        status,
-        contract?.optionStrike ?? null,
-        contract?.optionExpiry ?? null,
-        contract?.optionType ?? null,
-        contract?.underlyingSymbol ?? null,
-        contract?.underlyingEntryPrice ?? null,
-        contract?.entryIv ?? null,
-      ]);
-      const paperTradeId = inserted.rows[0]?.id;
-      if (!paperTradeId) {
-        throw new Error("Opening a paper trade did not return a row.");
+          $1, NULL, NULL, 'LONG', 'PROPOSED', $2, $3, $4, 0, 1.0,
+          '{"summary":"Manual options chain trade"}', '[]', NOW() + INTERVAL '1 day'
+        ) RETURNING id
+      `, [input.instrumentId, input.fillPrice, input.fillPrice * 0.5, input.fillPrice * 2]);
+      const tradeIdeaId = ideaResult.rows[0]?.id;
+      if (!tradeIdeaId) {
+        throw new Error("Manual trade idea creation returned no id.");
       }
-
-      const eventType = status === 'PENDING' ? 'PENDING_PLACED' : 'OPENED';
-      await client.query(`
-        INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
-        VALUES ($1, $6, $2, $3, $4::jsonb, $5)
-      `, [paperTradeId, input.fillPrice, input.quantity, JSON.stringify({
-        fillPolicy: status === 'PENDING' ? "LIMIT_STOP_PENDING" : "MANUAL_EXPLICIT",
-        tradeIdeaId: idea.id,
-        referenceEntryPrice: toNumber(idea.entry_price, "trade idea entry price"),
-        stopLoss,
-        targetPrice,
-        openedAt: input.openedAt.toISOString(),
-        entryFees: input.entryFees,
-        entrySlippage: input.entrySlippage,
-        notes: input.notes,
-      }), input.openedAt, eventType]);
-
-      const accepted = await client.query<{ id: string }>(`
-        UPDATE trade_ideas
-        SET status = 'ACCEPTED'
-        WHERE id = $1 AND status = 'PROPOSED'
-        RETURNING id
-      `, [idea.id]);
-      if (!accepted.rows[0]) {
-        throw new Error("Trade idea could not be marked as accepted.");
-      }
-
-      const trade = await findPaperTradeById(client, paperTradeId);
-      if (!trade) {
-        throw new Error("Unable to resolve the newly opened paper trade.");
-      }
-
+      const trade = await this.openFromTradeIdeaWithinTransaction(client, { ...input, tradeIdeaId });
       await client.query("COMMIT");
       transactionStarted = false;
       return trade;
@@ -390,6 +283,133 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     } finally {
       client.release();
     }
+  }
+
+  private async openFromTradeIdeaWithinTransaction(
+    client: DatabaseClient,
+    input: OpenPaperTradeInput,
+  ): Promise<PaperTrade> {
+    assertPositiveFinite(input.quantity, "Quantity");
+    assertPositiveFinite(input.fillPrice, "Fill price");
+    assertNonNegativeFinite(input.entryFees, "Entry fees");
+    assertNonNegativeFinite(input.entrySlippage, "Entry slippage");
+    assertDate(input.openedAt, "Opened at");
+
+    const accountResult = await client.query<PaperAccountRow>(`
+      SELECT ${accountColumns}
+      FROM paper_accounts
+      WHERE id = $1 AND is_active = TRUE
+      FOR UPDATE
+    `, [input.accountId]);
+    if (!accountResult.rows[0]) {
+      throw new Error("Paper account was not found or is inactive.");
+    }
+
+    const ideaResult = await client.query<LockedTradeIdeaRow & { lot_size: number }>(`
+      SELECT
+        trade_ideas.id, trade_ideas.instrument_id, trade_ideas.side,
+        trade_ideas.entry_price, trade_ideas.stop_loss, trade_ideas.target_price,
+        trade_ideas.expires_at, instruments.lot_size
+      FROM trade_ideas
+      INNER JOIN instruments ON instruments.id = trade_ideas.instrument_id
+      WHERE trade_ideas.id = $1 AND trade_ideas.status = 'PROPOSED'
+      FOR UPDATE OF trade_ideas
+    `, [input.tradeIdeaId]);
+    const idea = ideaResult.rows[0];
+    if (!idea) {
+      throw new Error("Trade idea was not found or is no longer proposed.");
+    }
+    validateQuantity(input.quantity, Number(idea.lot_size));
+    if (idea.expires_at && idea.expires_at.getTime() <= input.openedAt.getTime()) {
+      await client.query(`UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`, [idea.id]);
+      throw new TradeIdeaExpiredError("Trade idea expired before the simulated opening time.");
+    }
+
+    const stopLoss = input.stopLossOverride ?? toNumber(idea.stop_loss, "trade idea stop loss");
+    const targetPrice = input.targetPriceOverride ?? toNumber(idea.target_price, "trade idea target price");
+    const side = input.sideOverride ?? idea.side;
+    if (!hasGeometryForFill(side, input.fillPrice, stopLoss, targetPrice)) {
+      throw new Error("The explicit fill price invalidates the referenced trade idea's stop/target geometry.");
+    }
+
+    const capitalResult = await client.query<CapitalRow>(`
+      SELECT
+        paper_accounts.opening_balance
+        + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED' AND paper_trades.excluded_from_evidence = false), 0)
+        - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+        - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+        AS available_capital
+      FROM paper_accounts
+      LEFT JOIN paper_trades ON paper_trades.account_id = paper_accounts.id
+      WHERE paper_accounts.id = $1
+      GROUP BY paper_accounts.id, paper_accounts.opening_balance
+    `, [input.accountId]);
+    const availableCapital = capitalResult.rows[0]
+      ? toNumber(capitalResult.rows[0].available_capital, "available capital")
+      : null;
+    if (availableCapital === null) {
+      throw new Error("Unable to calculate available paper-account capital.");
+    }
+    const requiredCapital = input.quantity * input.fillPrice + input.entryFees + input.entrySlippage;
+    if (requiredCapital > availableCapital + 1e-9) {
+      throw new Error("Insufficient available capital for this simulated fill.");
+    }
+
+    const status = input.status ?? "OPEN";
+    const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
+    const contract = input.optionContract;
+    const inserted = await client.query<{ id: string }>(`
+      INSERT INTO paper_trades (
+        account_id, trade_idea_id, instrument_id, side, status, quantity,
+        entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes,
+        option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv
+      ) VALUES (
+        $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12,
+        $15, $16, $17, $18, $19, $20
+      ) RETURNING id
+    `, [
+      input.accountId, idea.id, idea.instrument_id, side, input.quantity,
+      input.fillPrice, stopLoss, targetPrice, input.openedAt, input.entryFees,
+      input.entrySlippage, input.notes, JSON.stringify(feeBreakdown), status,
+      contract?.optionStrike ?? null, contract?.optionExpiry ?? null,
+      contract?.optionType ?? null, contract?.underlyingSymbol ?? null,
+      contract?.underlyingEntryPrice ?? null, contract?.entryIv ?? null,
+    ]);
+    const paperTradeId = inserted.rows[0]?.id;
+    if (!paperTradeId) {
+      throw new Error("Opening a paper trade did not return a row.");
+    }
+
+    const eventType = status === "PENDING" ? "PENDING_PLACED" : "OPENED";
+    await client.query(`
+      INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+      VALUES ($1, $6, $2, $3, $4::jsonb, $5)
+    `, [paperTradeId, input.fillPrice, input.quantity, JSON.stringify({
+      fillPolicy: status === "PENDING" ? "LIMIT_STOP_PENDING" : "MANUAL_EXPLICIT",
+      tradeIdeaId: idea.id,
+      referenceEntryPrice: toNumber(idea.entry_price, "trade idea entry price"),
+      stopLoss,
+      targetPrice,
+      openedAt: input.openedAt.toISOString(),
+      entryFees: input.entryFees,
+      entrySlippage: input.entrySlippage,
+      notes: input.notes,
+    }), input.openedAt, eventType]);
+
+    const accepted = await client.query<{ id: string }>(`
+      UPDATE trade_ideas SET status = 'ACCEPTED'
+      WHERE id = $1 AND status = 'PROPOSED'
+      RETURNING id
+    `, [idea.id]);
+    if (!accepted.rows[0]) {
+      throw new Error("Trade idea could not be marked as accepted.");
+    }
+
+    const trade = await findPaperTradeById(client, paperTradeId);
+    if (!trade) {
+      throw new Error("Unable to resolve the newly opened paper trade.");
+    }
+    return trade;
   }
 
   async findOpenById(id: string): Promise<PaperTrade | null> {

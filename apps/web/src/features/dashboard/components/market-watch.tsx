@@ -1,7 +1,7 @@
 import { GlassPanel } from "../../../components/ui/glass-panel";
 
 import { useEffect, useState } from "react";
-import { apiV1Url } from "../../research/api";
+import { getApiV1Url } from "../../research/api";
 
 interface MarketWatchItem {
   symbol: string;
@@ -15,7 +15,7 @@ export function MarketWatch({ selectedSymbol, onSelect }: { selectedSymbol?: str
   const [flashing, setFlashing] = useState<Record<string, string>>({}); // symbol -> 'up' | 'down'
   
   useEffect(() => {
-    const es = new EventSource(`${apiV1Url}/stream/market-watch`);
+    const es = new EventSource(`${getApiV1Url()}/stream/market-watch`);
     
     es.onmessage = (event) => {
       try {
@@ -38,7 +38,7 @@ export function MarketWatch({ selectedSymbol, onSelect }: { selectedSymbol?: str
           
           return data;
         });
-      } catch (err) {}
+      } catch {}
     };
 
     return () => es.close();

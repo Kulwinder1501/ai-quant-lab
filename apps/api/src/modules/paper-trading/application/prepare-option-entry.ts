@@ -151,10 +151,13 @@ export class PrepareOptionEntry {
     const underlyingSymbol = String(idea.symbol).toUpperCase();
     const lotSize = Number(idea.lot_size);
     // Lot-correct by construction. `quantity: 1` against a lot of 75 is not a small
-    // position, it is one that cannot be placed.
+    // position, it is one that cannot be placed. Rounded rather than floored: a
+    // risk-adjusted lot count like 1.25 (1 base lot x a 1.25 EXPANSION multiplier)
+    // must round to its nearest integer, not always down — flooring silently
+    // discarded every sizing-up multiplier below 2x.
     const quantity = typeof input.quantity === "number" && input.quantity > 0
       ? input.quantity
-      : lotsToQuantity(Math.max(1, Math.floor(input.lots ?? 1)), lotSize);
+      : lotsToQuantity(Math.max(1, Math.round(input.lots ?? 1)), lotSize);
 
     const strikeStep = idea.strike_step === null ? null : Number(idea.strike_step);
     if (strikeStep === null || !Number.isFinite(strikeStep) || strikeStep <= 0) {

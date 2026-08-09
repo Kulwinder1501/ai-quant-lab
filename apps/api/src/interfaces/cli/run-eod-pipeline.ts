@@ -50,7 +50,19 @@ const RESEARCH_EQUITY_POOL = [
   "ASIANPAINT", "AXISBANK", "BAJFINANCE", "BHARTIARTL", "HDFCBANK",
   "HINDUNILVR", "ICICIBANK", "INFY", "ITC", "KOTAKBANK",
   "LT", "MARUTI", "NESTLEIND", "RELIANCE", "SBIN",
-  "SUNPHARMA", "TCS", "TITAN", "ULTRACEMCO", "WIPRO",
+  "SUNPHARMA", "TCS", "TITAN", "ULTRACEMCO", "WIPRO"
+];
+
+// Yahoo does not expose these canonical index keys as ordinary NSE equities.
+// They are collected through the same Fyers index mapping used intraday instead
+// of falling through to invalid `FINNIFTY.NS`-style tickers.
+const RESEARCH_INDEX_POOL = [
+  "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50",
+];
+
+const RESEARCH_TRAINING_POOL = [
+  ...RESEARCH_EQUITY_POOL,
+  ...RESEARCH_INDEX_POOL,
 ].join(",");
 
 /** Viable only on the pooled dataset; 5 folds on a single instrument breaks the floor. */
@@ -115,6 +127,25 @@ async function main(): Promise<void> {
       "--to", today,
       "--skip-existing"
     ]);
+
+    // 1a. Fetch 1d Historical Data for NIFTY50 and the Research Equity Pool
+    // This is required before shadow-predict so that 1d models have fresh daily candles to score against.
+    const allDailySeries = [
+      { symbol: "NIFTY50", provider: "yahoo" },
+      ...RESEARCH_EQUITY_POOL.map((symbol) => ({ symbol, provider: "yahoo" })),
+      ...RESEARCH_INDEX_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
+    ];
+    for (const { symbol, provider } of allDailySeries) {
+      await runCommand("npm", [
+        "run", "data:collect:historical", "--",
+        "--provider", provider,
+        "--instrument", symbol,
+        "--timeframe", "1d",
+        "--from", sevenDaysAgo,
+        "--to", today,
+        "--skip-existing"
+      ]);
+    }
 
     // 1b. Data-readiness audit (Phase 25, Workstream A). Measures every stored
     // series, assigns READY/DEGRADED/STALE/INVALID, and persists the report the
@@ -244,7 +275,7 @@ async function main(): Promise<void> {
     for (const algo of ML_ALGORITHMS) {
       await runTrainingStep(`${algo} pooled 1d volatility`, [
         "run", `ml:train:${algo}`, "--",
-        "--instruments", RESEARCH_EQUITY_POOL,
+        "--instruments", RESEARCH_TRAINING_POOL,
         "--timeframe", "1d",
         "--from", "2023-01-01",
         "--to", nowIso,

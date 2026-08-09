@@ -7,7 +7,6 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { errorMessage, isAbortError } from "../../../lib/errors";
-import { PageHeader } from "../../../components/layout/page-header";
 import { Tabs } from "../../../components/ui/tabs";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
 import { parseTradeHistoryEnvelope } from "../api";

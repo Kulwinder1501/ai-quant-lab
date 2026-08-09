@@ -235,6 +235,15 @@ async function main(): Promise<void> {
         "--to", todayIst,
         "--skip-existing",
       ]);
+      // Same-day Fyers history returns no intraday rows. NIFTYBEES 1m bars are
+      // written continuously by live-collector-scalp-v2; refresh their overlays
+      // before scoring instead of reporting a successful zero-row backfill.
+      await runCommand("npm", [
+        "run", "analysis:calculate-indicators", "--",
+        "--instrument", "NIFTYBEES",
+        "--timeframe", "1m",
+        "--from", todayIst,
+      ]);
       await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
     });

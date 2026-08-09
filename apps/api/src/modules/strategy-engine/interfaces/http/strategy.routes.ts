@@ -89,24 +89,30 @@ export function registerStrategyRoutes(
 
     const symbol = queryString(request, "symbol") || "NIFTY50";
     const timeframe = queryString(request, "timeframe") || "1d";
-    let tickCount = 0;
+    let pollInFlight = false;
 
     const intervalId = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
         const candles = await dependencies.dashboardRepository.listCandlesWithOverlays(symbol, timeframe, 5);
         if (candles.length < 2) return;
-        const latest = candles[0]!;
-        const previous = candles[1]!;
+        // The repository returns chart-ready chronological rows. The last row is
+        // therefore the newest one; reading index zero served the oldest of the
+        // requested bars as "live" data.
+        const latest = candles.at(-1)!;
+        const previous = candles.at(-2)!;
 
         let livePrice = Number(latest.close);
         let previousClose = Number(previous.close);
-        let change = 0;
-        let changePercent = 0;
+        let change = livePrice - previousClose;
+        let changePercent = previousClose === 0 ? 0 : (change / previousClose) * 100;
         let liveVolume = Number(latest.volume);
         let liveOpen = Number(latest.open);
         let liveHigh = Number(latest.high);
         let liveLow = Number(latest.low);
-        let lastUpdated = new Date().toISOString();
+        let lastUpdated = latest.closeTime.toISOString();
+        let priceSource = "STORED_CANDLE";
 
         try {
           const symbolUpper = symbol.toUpperCase();
@@ -127,29 +133,28 @@ export function registerStrategyRoutes(
             liveHigh = quote.regularMarketDayHigh || liveHigh;
             liveLow = quote.regularMarketDayLow || liveLow;
             lastUpdated = quote.regularMarketTime ? quote.regularMarketTime.toISOString() : lastUpdated;
+            priceSource = "YAHOO_QUOTE";
           }
         } catch {
-          const baseClose = Number(latest.close);
-          const noise = (Math.sin(Date.now() / 800) * (symbol === "NIFTY50" ? 18 : 45))
-            + ((Math.random() - 0.5) * (symbol === "NIFTY50" ? 15 : 40));
-          livePrice = Number((baseClose + noise).toFixed(2));
-          change = Number((livePrice - previousClose).toFixed(2));
-          changePercent = Number(((change / previousClose) * 100).toFixed(2));
-          liveVolume = Number(latest.volume) + (tickCount * (symbol === "NIFTY50" ? 125 : 310));
-          liveHigh = Math.max(Number(latest.high), livePrice);
-          liveLow = Math.min(Number(latest.low), livePrice);
+          // A provider failure must not be disguised as a synthetic market tick.
+          // The response remains useful by explicitly serving the latest stored bar.
         }
 
-        await dependencies.aiAutonomousAgent.tick(symbol, timeframe, livePrice);
-        const rsiValue = latest.indicators?.["rsi"] !== undefined ? Number(latest.indicators["rsi"]) : 55;
-        const smaValue = latest.indicators?.["sma_20"] !== undefined
-          ? Number(latest.indicators["sma_20"])
-          : Number((livePrice * 0.995).toFixed(2));
-        const bollinger = (latest.indicators?.["bb_20_2"] as Record<string, unknown>) || {
-          upper: livePrice * 1.015,
-          middle: livePrice,
-          lower: livePrice * 0.985,
-        };
+        const rsi = latest.indicators?.["RSI"] as Record<string, unknown> | undefined;
+        const sma = latest.indicators?.["SMA"] as Record<string, unknown> | undefined;
+        const bollinger = latest.indicators?.["BOLLINGER_BANDS"] as Record<string, unknown> | undefined;
+        const rsiValue = Number.isFinite(Number(rsi?.value)) ? Number(rsi?.value) : null;
+        const smaValue = Number.isFinite(Number(sma?.value)) ? Number(sma?.value) : null;
+        const bollingerValues = bollinger
+          && Number.isFinite(Number(bollinger.upper))
+          && Number.isFinite(Number(bollinger.middle))
+          && Number.isFinite(Number(bollinger.lower))
+          ? {
+              upper: Number(bollinger.upper),
+              middle: Number(bollinger.middle),
+              lower: Number(bollinger.lower),
+            }
+          : null;
 
         response.write(`data: ${JSON.stringify({
           symbol,
@@ -161,22 +166,20 @@ export function registerStrategyRoutes(
           low: liveLow,
           volume: liveVolume,
           lastUpdated,
+          priceSource,
           indicators: {
             rsi: rsiValue,
             sma20: smaValue,
-            bollinger: {
-              upper: Number(bollinger.upper),
-              middle: Number(bollinger.middle),
-              lower: Number(bollinger.lower),
-            },
+            bollinger: bollingerValues,
           },
           latestPattern: latest.patterns?.[0] || null,
           thoughts: dependencies.aiAutonomousAgent.getThoughts(8),
           reflections: await dependencies.aiAutonomousAgent.getReflections(6),
         })}\n\n`);
-        tickCount += 1;
       } catch {
         // Transient stream failures are retried on the next interval.
+      } finally {
+        pollInFlight = false;
       }
     }, 1000);
 

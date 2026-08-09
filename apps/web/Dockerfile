@@ -7,7 +7,7 @@ COPY packages/contracts/package*.json ./packages/contracts/
 COPY packages/pricing/package*.json ./packages/pricing/
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
-RUN npm ci || npm install
+RUN npm ci
 
 COPY tsconfig*.json ./
 COPY packages/contracts ./packages/contracts

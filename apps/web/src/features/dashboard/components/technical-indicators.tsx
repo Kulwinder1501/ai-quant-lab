@@ -7,6 +7,8 @@ interface TechnicalIndicatorsProps {
 }
 
 export function TechnicalIndicators({ data }: TechnicalIndicatorsProps) {
+  const rsi = data.indicators.rsi;
+  const bands = data.indicators.bollinger;
   return (
     <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
       {/* RSI Card */}
@@ -20,17 +22,17 @@ export function TechnicalIndicators({ data }: TechnicalIndicatorsProps) {
           </div>
           <h3 className="mt-2 text-lg font-bold text-white">Relative Strength Index</h3>
           <div className="mt-4 flex items-baseline gap-3">
-            <span className="text-4xl font-extrabold font-mono text-cyan-200">{data.indicators.rsi.toFixed(1)}</span>
+            <span className="text-4xl font-extrabold font-mono text-cyan-200">{rsi === null ? "—" : rsi.toFixed(1)}</span>
             <span
               className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${
-                data.indicators.rsi >= 70
+                rsi !== null && rsi >= 70
                   ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                  : data.indicators.rsi <= 30
+                  : rsi !== null && rsi <= 30
                   ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                   : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
               }`}
             >
-              {data.indicators.rsi >= 70 ? "OVERBOUGHT" : data.indicators.rsi <= 30 ? "OVERSOLD" : "NEUTRAL ZONE"}
+              {rsi === null ? "UNAVAILABLE" : rsi >= 70 ? "OVERBOUGHT" : rsi <= 30 ? "OVERSOLD" : "NEUTRAL ZONE"}
             </span>
           </div>
         </div>
@@ -50,15 +52,15 @@ export function TechnicalIndicators({ data }: TechnicalIndicatorsProps) {
           <div className="mt-4 space-y-2 font-mono text-xs">
             <div className="flex justify-between border-b border-white/5 pb-1">
               <span className="text-slate-400">Upper (+2σ):</span>
-              <span className="font-bold text-emerald-400">₹{data.indicators.bollinger.upper.toFixed(2)}</span>
+              <span className="font-bold text-emerald-400">{bands === null ? "—" : `₹${bands.upper.toFixed(2)}`}</span>
             </div>
             <div className="flex justify-between border-b border-white/5 pb-1">
               <span className="text-slate-400">Middle (SMA):</span>
-              <span className="font-bold text-cyan-300">₹{data.indicators.bollinger.middle.toFixed(2)}</span>
+              <span className="font-bold text-cyan-300">{bands === null ? "—" : `₹${bands.middle.toFixed(2)}`}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Lower (-2σ):</span>
-              <span className="font-bold text-rose-400">₹{data.indicators.bollinger.lower.toFixed(2)}</span>
+              <span className="font-bold text-rose-400">{bands === null ? "—" : `₹${bands.lower.toFixed(2)}`}</span>
             </div>
           </div>
         </div>

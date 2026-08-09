@@ -27,6 +27,8 @@ export type OptionType = "CE" | "PE";
 export type ExpiryKind = "WEEKLY" | "MONTHLY";
 export type Moneyness = "ITM" | "ATM" | "OTM";
 
+import { impliedVolatilityFromPremium, midPriceForIv, yearsToExpiry, RISK_FREE_RATE } from "@ai-quant-lab/pricing";
+
 /** One contract as the provider quoted it. Prices are nullable: an illiquid strike
  * genuinely has no bid, and a zero would claim someone bid nothing. */
 export interface OptionChainQuote {
@@ -276,4 +278,89 @@ export function expiriesOf(snapshot: OptionChainSnapshot): Array<{ expiryDate: D
     if (!byDate.has(key)) byDate.set(key, { expiryDate: quote.expiryDate, expiryKind: quote.expiryKind });
   }
   return [...byDate.values()].sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime());
+}
+
+export interface ImpliedVolatilitySkew {
+  skew: number | null;
+  putIv: number | null;
+  callIv: number | null;
+  putStrike: number | null;
+  callStrike: number | null;
+}
+
+/**
+ * Calculates the Implied Volatility (IV) skew from a set of quotes.
+ * Skew is defined as the IV of an OTM Put minus the IV of an OTM Call.
+ *
+ * @param quotes A chain's quotes, possibly spanning multiple expiries -- only the
+ *   nearest expiry present is used (see below).
+ * @param underlyingValue The spot price of the underlying.
+ * @param observedAt When the chain was observed, for time-to-expiry.
+ * @param skewOffsetPercent How far out of the money to look (default 2%, i.e. 0.02).
+ */
+export function impliedVolatilitySkew(
+  quotes: readonly OptionChainQuote[],
+  underlyingValue: number,
+  observedAt: Date,
+  skewOffsetPercent = 0.02
+): ImpliedVolatilitySkew {
+  if (!Number.isFinite(underlyingValue) || quotes.length === 0) {
+    return { skew: null, putIv: null, callIv: null, putStrike: null, callStrike: null };
+  }
+
+  // A chain fetched without an expiry filter spans every listed expiry. Averaging IV
+  // across expiries would blend distinct term-structure points -- a weekly and a
+  // monthly at the same strike price different amounts of time -- into one number
+  // that describes neither, the same mistake `forwardByExpiry` exists to avoid
+  // elsewhere in this file. Scoping to the nearest listed expiry keeps both legs, and
+  // the skew itself, describing a single contract month.
+  const nearestExpiryMs = Math.min(...quotes.map((q) => q.expiryDate.getTime()));
+  const nearExpiryQuotes = quotes.filter((q) => q.expiryDate.getTime() === nearestExpiryMs);
+
+  const targetPutStrike = underlyingValue * (1 - skewOffsetPercent);
+  const targetCallStrike = underlyingValue * (1 + skewOffsetPercent);
+
+  const strikes = [...new Set(nearExpiryQuotes.map((q) => q.strikePrice))].filter(s => s > 0);
+  if (strikes.length === 0) {
+    return { skew: null, putIv: null, callIv: null, putStrike: null, callStrike: null };
+  }
+
+  const putStrike = strikes.reduce((best, strike) =>
+    Math.abs(strike - targetPutStrike) < Math.abs(best - targetPutStrike) ? strike : best
+  );
+
+  const callStrike = strikes.reduce((best, strike) =>
+    Math.abs(strike - targetCallStrike) < Math.abs(best - targetCallStrike) ? strike : best
+  );
+
+  const solveIv = (strike: number, type: OptionType): number | null => {
+    const candidates = nearExpiryQuotes.filter(q => q.strikePrice === strike && q.optionType === type);
+    if (candidates.length === 0) return null;
+
+    const ivs: number[] = [];
+    for (const quote of candidates) {
+      const mid = midPriceForIv(quote.bid, quote.ask);
+      const time = yearsToExpiry(observedAt, quote.expiryDate);
+      if (mid !== null && time > 0) {
+        const result = impliedVolatilityFromPremium({
+          spot: underlyingValue,
+          strike: quote.strikePrice,
+          timeToExpiryYears: time,
+          riskFreeRate: RISK_FREE_RATE,
+          optionType: quote.optionType,
+          premium: mid,
+        });
+        if (result.measurable) {
+          ivs.push(result.impliedVolatility);
+        }
+      }
+    }
+    return ivs.length > 0 ? ivs.reduce((total, iv) => total + iv, 0) / ivs.length : null;
+  };
+
+  const putIv = solveIv(putStrike, "PE");
+  const callIv = solveIv(callStrike, "CE");
+  const skew = (putIv !== null && callIv !== null) ? putIv - callIv : null;
+
+  return { skew, putIv, callIv, putStrike, callStrike };
 }

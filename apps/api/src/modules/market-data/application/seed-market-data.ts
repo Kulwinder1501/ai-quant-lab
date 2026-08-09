@@ -65,13 +65,9 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
 
         const timeframes = [
           { tf: "1d", count: 100, intervalMs: 24 * 3600 * 1000 },
-          // "60m", not "1h": `1h` is absent from supportedHistoricalTimeframes, so seeding it
-          // created a timeframe no collector could ever extend and that duplicated the
-          // semantics of real 60m bars under a second name.
-          { tf: "60m", count: 100, intervalMs: 3600 * 1000 },
-          // No 15m, 5m or 1m: those timeframes are Fyers-owned under the provider partition
+          // No 60m, 15m, 5m or 1m: those timeframes are Fyers-owned under the provider partition
           // in collect-historical-data.ts, so a boot-time Yahoo write here would
-          // re-pollute the series after every db:purge:yahoo-scalp. Scalp timeframes
+          // fail constraint validation. Scalp timeframes
           // are backfilled by `data:collect:historical -- --provider fyers` instead.
         ];
 

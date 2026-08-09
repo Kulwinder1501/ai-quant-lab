@@ -16,6 +16,7 @@ from typing import Any
 from .artifacts import load_model_artifact
 from .contracts import (
     FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2,
     LABEL_SCHEME_FIXED_HORIZON,
     LABEL_SCHEME_VOLATILITY_EXPANSION,
     CandleEvidence,
@@ -77,9 +78,10 @@ def validate_sequence_shadow_artifact(
         raise InferenceError("The artifact model key does not match its persisted model version.")
 
     schema_version = metadata.get("featureSchemaVersion")
-    if schema_version != FEATURE_SCHEMA_VERSION_SCALP:
+    if schema_version not in (FEATURE_SCHEMA_VERSION_SCALP, FEATURE_SCHEMA_VERSION_SCALP_V2):
         raise InferenceError(
-            f"Sequence shadow artifacts must use {FEATURE_SCHEMA_VERSION_SCALP!r}, got {schema_version!r}."
+            "Sequence shadow artifacts must use a supported scalp schema "
+            f"({FEATURE_SCHEMA_VERSION_SCALP_V2!r}, {FEATURE_SCHEMA_VERSION_SCALP!r}), got {schema_version!r}."
         )
     expected_schema = feature_schema(schema_version)
     if _schema_names(model_version.feature_schema) != expected_schema:

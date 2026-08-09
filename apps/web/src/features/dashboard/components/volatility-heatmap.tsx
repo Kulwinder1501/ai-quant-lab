@@ -123,20 +123,25 @@ export function VolatilityHeatmap({
   );
 
   useEffect(() => {
-    if (!indexKey) {
-      setPayload(null);
-      setStatus("unsupported");
-      return;
-    }
-    setStatus("loading");
-    setPayload(null);
     const controller = new AbortController();
-    void load(controller.signal);
+    if (!indexKey) {
+      const unsupportedUpdate = setTimeout(() => {
+        setPayload(null);
+        setStatus("unsupported");
+      }, 0);
+      return () => clearTimeout(unsupportedUpdate);
+    }
+    const initialLoad = setTimeout(() => {
+      setStatus("loading");
+      setPayload(null);
+      void load(controller.signal);
+    }, 0);
     const interval = setInterval(() => {
       void load();
     }, 60_000);
     return () => {
       controller.abort();
+      clearTimeout(initialLoad);
       clearInterval(interval);
     };
   }, [indexKey, load]);

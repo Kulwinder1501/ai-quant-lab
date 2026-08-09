@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 
 interface OrderBookRow {
@@ -9,11 +9,7 @@ interface OrderBookRow {
   total: number;
 }
 
-export function OrderBook() {
-  const [asks, setAsks] = useState<OrderBookRow[]>([]);
-  const [bids, setBids] = useState<OrderBookRow[]>([]);
-
-  useEffect(() => {
+function createMockOrderBook(): { asks: OrderBookRow[]; bids: OrderBookRow[] } {
     // Generate mock order book
     const mockAsks: OrderBookRow[] = [];
     const mockBids: OrderBookRow[] = [];
@@ -39,9 +35,11 @@ export function OrderBook() {
       });
     }
 
-    setAsks(mockAsks.reverse()); // Asks are usually highest price at top
-    setBids(mockBids);
-  }, []);
+  return { asks: mockAsks.reverse(), bids: mockBids };
+}
+
+export function OrderBook() {
+  const [{ asks, bids }] = useState(createMockOrderBook);
 
   const maxTotal = Math.max(
     ...asks.map(a => a.total),

@@ -18,9 +18,9 @@ export function PositionsOrdersDashboard({
 
   const applyMode = useCallback((next: PositionsOrdersMode) => {
     setMode(next);
-    let url = "/portfolio";
-    if (next === "orders") url = "/portfolio?tab=orders";
-    else if (next === "history") url = "/portfolio?tab=history";
+    let url = "/positions-orders";
+    if (next === "orders") url = "/positions-orders?tab=orders";
+    else if (next === "history") url = "/positions-orders?tab=history";
     
     window.history.replaceState(null, "", url);
   }, []);

@@ -12,25 +12,23 @@ interface TradePrint {
 }
 
 export function RecentTradesFeed() {
-  const [trades, setTrades] = useState<TradePrint[]>([]);
-
-  useEffect(() => {
-    // Generate initial mock trades
-    const initial: TradePrint[] = Array.from({ length: 15 }).map((_, i) => ({
+  const [trades, setTrades] = useState<TradePrint[]>(() =>
+    Array.from({ length: 15 }).map((_, i) => ({
       id: i,
-      time: new Date(Date.now() - i * 2000).toISOString().substr(11, 8),
+      time: new Date(Date.now() - i * 2000).toISOString().slice(11, 19),
       price: (24534.15 + (Math.random() * 10 - 5)).toFixed(2),
       amount: (Math.random() * 3 + 0.1).toFixed(3),
-      side: Math.random() > 0.5 ? "BUY" : "SELL"
-    }));
-    setTrades(initial);
+      side: Math.random() > 0.5 ? "BUY" : "SELL",
+    })),
+  );
 
+  useEffect(() => {
     // Simulate ticking
     const interval = setInterval(() => {
       setTrades(prev => {
         const newTrade: TradePrint = {
           id: Date.now(),
-          time: new Date().toISOString().substr(11, 8),
+          time: new Date().toISOString().slice(11, 19),
           price: (24534.15 + (Math.random() * 10 - 5)).toFixed(2),
           amount: (Math.random() * 3 + 0.1).toFixed(3),
           side: Math.random() > 0.5 ? "BUY" : "SELL"

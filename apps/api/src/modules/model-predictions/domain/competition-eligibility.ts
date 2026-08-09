@@ -45,7 +45,7 @@ export const DIRECTIONAL_LABEL_SCHEMES = ["fixed-horizon-v1", "triple-barrier-v1
  * the v6 lineages in the volatility competition, which ranks live settled outcomes and is
  * therefore comparable across schemas.
  */
-export const CURRENT_FEATURE_SCHEMA_VERSION = "ml-feature-v6";
+export const CURRENT_FEATURE_SCHEMA_VERSION = "ml-feature-v7";
 
 export interface CompetitionEligibilityFilter {
   directionalLabelSchemes: readonly string[];

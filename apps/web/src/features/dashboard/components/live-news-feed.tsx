@@ -4,15 +4,21 @@ import { useEffect, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { getResearchJson } from "../../research/api";
 import { NewsCard } from "../../news/components/news-card";
+import type { NewsArticle } from "../../news/components/news-dashboard";
+
+interface NewsResponse {
+  data?: { articles?: NewsArticle[] };
+}
 
 export function LiveNewsFeed() {
-  const [news, setNews] = useState<any[]>([]);
+  const [news, setNews] = useState<NewsArticle[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     // Fetch latest news on mount
     getResearchJson("/market-news?limit=10")
-      .then((res: any) => {
+      .then((value) => {
+        const res = value as NewsResponse;
         if (res?.data?.articles) {
           setNews(res.data.articles.slice(0, 4));
         }

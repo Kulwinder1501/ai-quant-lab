@@ -9,7 +9,10 @@ from typing import Any
 
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_V6,
     BreadthContext,
     CandleEvidence,
     DatasetRequest,
@@ -20,6 +23,9 @@ from ai_quant_lab_ml.contracts import (
 from ai_quant_lab_ml.features import (
     FEATURE_SCHEMA,
     FEATURE_SCHEMA_V5,
+    FEATURE_SCHEMA_V6,
+    FEATURE_SCHEMA_SCALP,
+    FEATURE_SCHEMA_SCALP_V2,
     VOLUME_MEDIAN_WINDOW,
     FeatureConstructionError,
     build_feature_vector,
@@ -59,6 +65,8 @@ def evidence(
     events: tuple[PriceActionEvidence, ...] | None = None,
     fii_net_flow_ratio: float | None = None,
     dii_net_flow_ratio: float | None = None,
+    fii_futures_net_flow_ratio: float | None = None,
+    fii_options_net_flow_ratio: float | None = None,
 ) -> CandleEvidence:
     open_time = START + timedelta(days=index)
     return CandleEvidence(
@@ -100,6 +108,8 @@ def evidence(
         future_close_time=open_time + timedelta(days=2, hours=6) if future_close is not None else None,
         fii_net_flow_ratio=fii_net_flow_ratio,
         dii_net_flow_ratio=dii_net_flow_ratio,
+        fii_futures_net_flow_ratio=fii_futures_net_flow_ratio,
+        fii_options_net_flow_ratio=fii_options_net_flow_ratio,
     )
 
 
@@ -183,7 +193,12 @@ class FeatureConstructionTests(unittest.TestCase):
         been removed until a real offshore feed exists.
         """
 
-        populated = features_of(evidence(fii_net_flow_ratio=-2.0, dii_net_flow_ratio=1.5))
+        populated = features_of(evidence(
+            fii_net_flow_ratio=-2.0,
+            dii_net_flow_ratio=1.5,
+            fii_futures_net_flow_ratio=-1.0,
+            fii_options_net_flow_ratio=0.5,
+        ))
         unsourced = [
             name
             for name in FEATURE_SCHEMA
@@ -234,6 +249,27 @@ class FeatureConstructionTests(unittest.TestCase):
         # The v6 aggregates and breadth columns must not bleed into a v5 vector.
         self.assertNotIn("pattern.bullish_confidence", first)
         self.assertNotIn("breadth.advance_decline_ratio", first)
+
+    def test_published_schema_versions_keep_their_original_widths(self) -> None:
+        """A new feature must get a new version rather than orphan deployed artifacts."""
+
+        self.assertEqual(len(FEATURE_SCHEMA_V5), 113)
+        self.assertEqual(len(FEATURE_SCHEMA_V6), 36)
+        self.assertEqual(len(FEATURE_SCHEMA_SCALP_V2), 27)
+        self.assertEqual(len(FEATURE_SCHEMA), 38)
+        self.assertEqual(len(FEATURE_SCHEMA_SCALP), 29)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V5), FEATURE_SCHEMA_V5)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V6), FEATURE_SCHEMA_V6)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_SCALP_V2), FEATURE_SCHEMA_SCALP_V2)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION), FEATURE_SCHEMA)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_SCALP), FEATURE_SCHEMA_SCALP)
+        for legacy_version in (
+            FEATURE_SCHEMA_VERSION_V5,
+            FEATURE_SCHEMA_VERSION_V6,
+            FEATURE_SCHEMA_VERSION_SCALP_V2,
+        ):
+            self.assertNotIn("market.fii_futures_net_flow_ratio", feature_schema(legacy_version))
+            self.assertNotIn("market.fii_options_net_flow_ratio", feature_schema(legacy_version))
 
     def test_unknown_schema_version_is_rejected(self) -> None:
         with self.assertRaises(FeatureConstructionError):

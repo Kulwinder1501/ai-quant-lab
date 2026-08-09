@@ -8,11 +8,13 @@ import {
   putCallRatios,
   quoteSpread,
   summariseLiquidity,
+  impliedVolatilitySkew,
   type OptionChainQuote,
   type OptionChainSnapshot,
 } from "./option-chain.js";
 
 const EXPIRY = new Date("2026-08-04T10:00:00Z");
+const OBSERVED_AT = new Date("2026-08-04T09:30:00Z");
 
 function quote(overrides: Partial<OptionChainQuote> = {}): OptionChainQuote {
   return {
@@ -223,5 +225,62 @@ describe("expiriesOf", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ expiryKind: "WEEKLY" });
     expect(result[1]).toMatchObject({ expiryKind: "MONTHLY" });
+  });
+});
+
+describe("impliedVolatilitySkew", () => {
+  it("calculates skew as put IV minus call IV at target offset", () => {
+    // 24000 spot. 2% OTM is 23520 (PE) and 24480 (CE).
+    // Closest listed strikes in quotes: 23500 PE and 24500 CE.
+    const quotes = [
+      // Call side
+      quote({ strikePrice: 24_000, optionType: "CE", bid: 200, ask: 202 }),
+      quote({ strikePrice: 24_500, optionType: "CE", bid: 30, ask: 32 }), // 2% OTM Call
+      quote({ strikePrice: 24_600, optionType: "CE", bid: 20, ask: 22 }),
+      // Put side
+      quote({ strikePrice: 24_000, optionType: "PE", bid: 200, ask: 202 }),
+      quote({ strikePrice: 23_500, optionType: "PE", bid: 45, ask: 47 }), // 2% OTM Put
+      quote({ strikePrice: 23_400, optionType: "PE", bid: 35, ask: 37 }),
+    ];
+
+    const result = impliedVolatilitySkew(quotes, 24_000, OBSERVED_AT, 0.02);
+
+    expect(result.putStrike).toBe(23_500);
+    expect(result.callStrike).toBe(24_500);
+    expect(result.putIv).toBeGreaterThan(0);
+    expect(result.callIv).toBeGreaterThan(0);
+    expect(typeof result.skew).toBe("number");
+
+    // In typical equity index markets, OTM puts trade at a premium to OTM calls (volatility smirk)
+    // Because we set the PE bid/ask higher than CE bid/ask in the mock, put IV > call IV
+    expect(result.skew).toBeGreaterThan(0);
+  });
+
+  it("returns null if no quotes or invalid underlying", () => {
+    expect(impliedVolatilitySkew([], 24_000, OBSERVED_AT).skew).toBeNull();
+    expect(impliedVolatilitySkew([quote()], NaN, OBSERVED_AT).skew).toBeNull();
+  });
+
+  it("scopes to the nearest listed expiry, ignoring a later expiry's quotes", () => {
+    // A chain fetched with no expiry filter spans every listed expiry. A far-dated
+    // monthly at the same 2% OTM strikes, priced for a much wider move, must not blend
+    // into the near-week skew -- that would average two different term-structure
+    // points into a number that describes neither.
+    const monthly = new Date("2026-08-25T10:00:00Z");
+    const nearWeek = [
+      quote({ expiryDate: EXPIRY, strikePrice: 24_500, optionType: "CE", bid: 30, ask: 32 }),
+      quote({ expiryDate: EXPIRY, strikePrice: 23_500, optionType: "PE", bid: 45, ask: 47 }),
+    ];
+    const laterMonth = [
+      quote({ expiryDate: monthly, strikePrice: 24_500, optionType: "CE", bid: 300, ask: 320 }),
+      quote({ expiryDate: monthly, strikePrice: 23_500, optionType: "PE", bid: 450, ask: 470 }),
+    ];
+
+    const scoped = impliedVolatilitySkew(nearWeek, 24_000, OBSERVED_AT, 0.02);
+    const mixed = impliedVolatilitySkew([...nearWeek, ...laterMonth], 24_000, OBSERVED_AT, 0.02);
+
+    expect(mixed.putIv).toBeCloseTo(scoped.putIv as number, 10);
+    expect(mixed.callIv).toBeCloseTo(scoped.callIv as number, 10);
+    expect(mixed.skew).toBeCloseTo(scoped.skew as number, 10);
   });
 });

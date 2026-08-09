@@ -14,13 +14,20 @@ Local-first Indian-market research and paper-trading platform. It **never places
 ## Start locally
 
 1. Copy `.env.example` to `.env` and set secure local values.
-2. Start the database: `docker compose up -d database`.
+2. Start the v2 system-of-record database: `docker compose -f docker-compose.v2.yml up -d database-v2`.
 3. Install JavaScript dependencies: `npm install`.
 4. Apply the local schema: `npm run db:migrate`.
 5. Start the API: `npm run dev:api`.
 6. Start the dashboard: `npm run dev:web`.
 
 Market-data integrations are added only after a provider is selected and its terms are reviewed.
+
+The v2 Compose stack publishes the dashboard, API, and database on `127.0.0.1` only. The API
+also restricts browser origins, caps JSON bodies at 256 KB, and rate-limits state-changing
+requests per source address (`API_MUTATION_RATE_LIMIT`, 120/minute by default). Do not change
+the port bindings to `0.0.0.0` without putting authenticated TLS termination in front of both
+the dashboard and API. Environment files and their backups are excluded from every Docker
+build context.
 
 For Phase 3, use `npm run data:seed:core-instruments`, then import a licensed CSV or configure the optional read-only Kite historical-data adapter. See `docs/phase-03-historical-data.md` for commands and data-source guidance.
 
@@ -46,7 +53,7 @@ Phase 13 adds a GET-only Market Scanner and active local instrument Watchlist. I
 
 Phase 14 transforms the platform into an interactive, full-stack Next.js web application operable from the FE. It introduces rich UI modules for Paper Trading (`/paper-trading`), Strategy & Trade Ideas (`/strategy`), Chronological Backtesting (`/backtesting`), and Interactive Technical Charts (`/charts`) with indicator/pattern overlays, eliminating CLI dependence while strictly maintaining the no-live-trading safety boundary. See [the Phase 14 interactive full-stack guide](docs/phase-14-interactive-fullstack-fe.md) for transport helpers, UI aesthetics, and feature operability.
 
-Phase 15 containerizes the entire stack (API, Web, and PostgreSQL/pgvector database) using Docker and Docker Compose. It establishes automated container startup workflows, including database schema migration, core instrument registration, and comprehensive market data seeding (600+ candlesticks, indicator snapshots, pattern detections, and 12 active trade proposals), enabling turnkey out-of-the-box UI operability with `docker compose up -d --build`. See [the Phase 15 Docker orchestration and seeding guide](docs/phase-15-docker-orchestration-seeding.md) for container networking, multi-stage Dockerfiles, and automated bootstrapper mechanics.
+Phase 15 containerizes the entire stack (API, Web, and PostgreSQL/pgvector database) using Docker and Docker Compose. The current system of record is the v2 stack: start it with `docker compose -f docker-compose.v2.yml up -d --build`. The unqualified `docker-compose.yml` stack is retained only as the v1 audit environment and must not be used for current ingestion or training. See [the Phase 15 Docker orchestration and seeding guide](docs/phase-15-docker-orchestration-seeding.md) for container networking, multi-stage Dockerfiles, and automated bootstrapper mechanics.
 
 Phase 19 makes XGBoost and LightGBM real trainable model families alongside the logistic baseline with `npm run ml:train -- --instrument NIFTY50 --timeframe 1d --from 2022-01-01 --to 2025-01-01 --algorithm xgboost`. Each family keeps its own promotion lineage by default, a shared `--model-key` makes two algorithms compete for one production slot on identical unseen data, and a boosted prediction is explained with exact TreeSHAP contributions rather than borrowed linear-coefficient language. See [the Phase 19 gradient-boosting guide](docs/phase-19-gradient-boosting-models.md) for defaults, determinism, and the explainer contract.
 

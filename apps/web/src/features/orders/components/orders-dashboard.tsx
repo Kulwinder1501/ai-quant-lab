@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { Download } from "lucide-react";
 import { exportToCsv } from "../../../lib/export";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { errorMessage, isAbortError } from "../../../lib/errors";
-import { PageHeader } from "../../../components/layout/page-header";
 import type { PaperAccountSummary, PaperAccountFullSummary } from "../../paper-trading/domain";
 import { OrdersFilterBar } from "./orders-filter-bar";
 import { OrdersStats } from "./orders-stats";

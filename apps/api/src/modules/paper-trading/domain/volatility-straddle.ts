@@ -6,7 +6,6 @@ import {
   type OptionType,
 } from "@ai-quant-lab/pricing";
 import type { VolatilityLabel } from "../../model-predictions/domain/volatility-expansion-label.js";
-import type { WeeklyExpirySource } from "../../market-data/domain/weekly-expiry.js";
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 /**
@@ -49,7 +48,8 @@ import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 export type StraddleRefusalReason =
   | "NOT_AN_EXPANSION_SIGNAL"
   | "CONTRACTION_NEEDS_SHORT_PREMIUM"
-  | "EXPIRY_WEEKDAY_UNCONFIRMED"
+  | "UNSUPPORTED_UNDERLYING"
+  | "EXPIRY_UNLISTED"
   | "NO_IMPLIED_VOLATILITY"
   | "EXPIRY_NOT_IN_FUTURE"
   | "TRAILING_RANGE_UNMEASURABLE"
@@ -104,8 +104,8 @@ export interface ProposeStraddleInput {
   /** From the point-in-time IV source, as a decimal (0.14 for 14%). */
   impliedVolatility: number | null;
   expiryDate: Date;
-  /** An ASSUMED weekly expiry is refused; a contract that never traded prices nothing. */
-  expirySource: WeeklyExpirySource | null;
+  /** True if the expiry was confirmed against the provider's listed calendar. */
+  isListedExpiry: boolean;
   strikeStep: number;
   lotSize: number;
   lots: number;
@@ -133,6 +133,11 @@ function refuse(reason: StraddleRefusalReason, explanation: string): StraddlePro
   return { actionable: false, reason, explanation };
 }
 
+function roundToTick(value: number): number {
+  const snapped = Math.round(value / 0.05) * 0.05;
+  return Math.round((snapped + Number.EPSILON) * 100) / 100;
+}
+
 /**
  * Proposes a long straddle for an EXPANSION prediction, or explains the refusal.
  *
@@ -157,16 +162,22 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     );
   }
 
-  // An ASSUMED expiry weekday is refused for the same reason resolveWeeklyExpiryWeekday
-  // refuses it: a plausible expiry is indistinguishable from a correct one, and pricing
-  // against a contract that never traded yields correct-looking premium and greeks all
-  // the way through.
-  if (input.expirySource !== "CONFIRMED") {
+  if (input.underlyingSymbol !== "NIFTY50") {
     return refuse(
-      "EXPIRY_WEEKDAY_UNCONFIRMED",
-      `${input.underlyingSymbol}'s weekly expiry is recorded as ${input.expirySource ?? "absent"} `
-      + "rather than CONFIRMED. Pricing a contract that may never have traded produces "
-      + "plausible premiums for a position that cannot be taken.",
+      "UNSUPPORTED_UNDERLYING",
+      "Straddles are currently only enabled for NIFTY50 until real settled evidence exists."
+    );
+  }
+
+  // An unlisted expiry is refused: a plausible expiry is indistinguishable from a correct one,
+  // and pricing against a contract that never traded yields correct-looking premium and greeks all
+  // the way through.
+  if (!input.isListedExpiry) {
+    return refuse(
+      "EXPIRY_UNLISTED",
+      `The supplied expiry ${input.expiryDate.toISOString()} was not confirmed against `
+      + `${input.underlyingSymbol}'s listed calendar. Pricing a contract that may never `
+      + "have traded produces plausible premiums for a position that cannot be taken.",
     );
   }
   if (input.impliedVolatility === null || !Number.isFinite(input.impliedVolatility) || input.impliedVolatility <= 0) {
@@ -209,7 +220,7 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
   // on the size of the move rather than its direction.
   const legs: [StraddleLeg, StraddleLeg] = [priceLeg("CE"), priceLeg("PE")];
 
-  const totalPremium = legs[0].premium + legs[1].premium;
+  const totalPremium = roundToTick(legs[0].premium + legs[1].premium);
   const quantity = input.lotSize * input.lots;
   const predictedForwardRange = input.trailingRange * (1 + input.expansionBand);
   const impliedMove = input.underlyingSpot * input.impliedVolatility * Math.sqrt(timeToExpiryYears);
@@ -231,25 +242,30 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     conservativeCoverage: predictedForwardRange / 2 / totalPremium,
   };
 
-  // Even the best case must clear the breakeven. If the full predicted range cannot pay
-  // for both legs, the structure loses on the signal being *right*.
-  if (economics.optimisticExcursion <= totalPremium) {
-    return refuse(
-      "PREMIUM_EXCEEDS_PREDICTED_MOVE",
-      `The two legs cost ${totalPremium.toFixed(2)} but the predicted forward range is only `
-      + `${predictedForwardRange.toFixed(2)}. Even the underlying travelling the whole range in one `
-      + "direction would not reach breakeven, so this loses money when the signal is correct.",
-    );
-  }
-
   // The ATM straddle premium is the market's own forecast of the move. Predicting a
-  // range the market has already priced is not an edge, however accurate it is.
+  // range the market has already priced is not an edge, however accurate it is. Checked
+  // first: an ATM straddle's premium is itself roughly 0.8x the implied move, so the
+  // half-range gate below refuses everything this gate would and more — running this one
+  // second would leave it permanently unreachable and its distinct message would never
+  // surface even when it is the more fundamental reason the trade is off.
   if (predictedForwardRange <= impliedMove) {
     return refuse(
       "MARKET_ALREADY_PRICES_THE_MOVE",
       `The predicted forward range ${predictedForwardRange.toFixed(2)} does not exceed the implied `
       + `move ${impliedMove.toFixed(2)} the option chain is already pricing. Buying premium here bets `
       + "that realised volatility beats implied volatility, and this signal does not claim that.",
+    );
+  }
+
+  // A range R around an at-the-money strike gives roughly R/2 of displacement in either
+  // direction. The conservative (half-range) excursion must clear the total premium, or
+  // the structure loses on a realistic outcome even when the signal is right.
+  if (economics.conservativeExcursion <= totalPremium) {
+    return refuse(
+      "PREMIUM_EXCEEDS_PREDICTED_MOVE",
+      `The two legs cost ${totalPremium.toFixed(2)} but the conservative half-range excursion is only `
+      + `${economics.conservativeExcursion.toFixed(2)} (from a ${predictedForwardRange.toFixed(2)} predicted range). `
+      + "The expected directional move does not reach breakeven, so this loses money when the signal is correct.",
     );
   }
 

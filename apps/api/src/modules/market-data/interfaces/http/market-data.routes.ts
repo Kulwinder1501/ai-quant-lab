@@ -10,6 +10,7 @@ import {
   putCallRatios,
   quoteSpread,
   summariseLiquidity,
+  impliedVolatilitySkew,
 } from "../../domain/option-chain.js";
 import { priceEuropeanOption, yearsToExpiry } from "@ai-quant-lab/pricing";
 import {
@@ -25,7 +26,7 @@ import { summariseIvPercentile, type DailyImpliedVolatility } from "../../domain
 
 export function registerMarketDataRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "dashboardRepository" | "aiAutonomousAgent" | "getInstitutionalContext" | "optionChainRepository" | "fyersLiveStreamer">,
+  dependencies: Pick<HttpDependencies, "dashboardRepository" | "getInstitutionalContext" | "optionChainRepository" | "fyersLiveStreamer">,
 ): void {
   app.get("/api/v1/candles", async (request, response, next) => {
     try {
@@ -55,48 +56,27 @@ export function registerMarketDataRoutes(
         volume: row.volume,
       }));
 
-      try {
-        const symbolUpper = symbol.toUpperCase();
-        let yfSymbol = symbolUpper;
-        if (symbolUpper === "NIFTY50") yfSymbol = "^NSEI";
-        else if (symbolUpper === "BANKNIFTY") yfSymbol = "^NSEBANK";
-        else if (!symbolUpper.includes(".")) yfSymbol = `${symbolUpper}.NS`;
-
-        const yf = new (yahooFinance as any)();
-        const quote = (await yf.quote(yfSymbol)) as any;
-        const liveClose = quote.regularMarketPrice;
-        if (liveClose) {
-          candles.push({
-            timestamp: quote.regularMarketTime ? quote.regularMarketTime.toISOString() : new Date().toISOString(),
-            open: quote.regularMarketOpen || liveClose,
-            high: quote.regularMarketDayHigh || liveClose,
-            low: quote.regularMarketDayLow || liveClose,
-            close: liveClose,
-            volume: quote.regularMarketVolume || 0,
-          });
-        }
-      } catch {
-        // Historical chart data remains available if the live quote provider fails.
-      }
-
       const indicators: Record<string, any[]> = { SMA: [], BB: [], RSI: [] };
       const patterns: any[] = [];
       rows.forEach((row) => {
         const timestamp = row.openTime instanceof Date ? row.openTime.toISOString() : String(row.openTime);
         const rowIndicators = row.indicators || {};
         if (rowIndicators["SMA"]) {
-          indicators["SMA"]?.push({ timestamp, value: Number((rowIndicators["SMA"] as any)?.value || row.close) });
+          const value = Number((rowIndicators["SMA"] as Record<string, unknown>).value);
+          if (Number.isFinite(value)) indicators["SMA"]?.push({ timestamp, value });
         }
-        if (rowIndicators["BB"]) {
-          indicators["BB"]?.push({
-            timestamp,
-            upper: Number((rowIndicators["BB"] as any)?.upper || row.high),
-            middle: Number((rowIndicators["BB"] as any)?.middle || row.close),
-            lower: Number((rowIndicators["BB"] as any)?.lower || row.low),
-          });
+        if (rowIndicators["BOLLINGER_BANDS"]) {
+          const values = rowIndicators["BOLLINGER_BANDS"] as Record<string, unknown>;
+          const upper = Number(values.upper);
+          const middle = Number(values.middle);
+          const lower = Number(values.lower);
+          if ([upper, middle, lower].every(Number.isFinite)) {
+            indicators["BB"]?.push({ timestamp, upper, middle, lower });
+          }
         }
         if (rowIndicators["RSI"]) {
-          indicators["RSI"]?.push({ timestamp, value: Number((rowIndicators["RSI"] as any)?.value || 50) });
+          const value = Number((rowIndicators["RSI"] as Record<string, unknown>).value);
+          if (Number.isFinite(value)) indicators["RSI"]?.push({ timestamp, value });
         }
         if (row.patterns && Array.isArray(row.patterns)) {
           row.patterns.forEach((pattern: any, patternIndex: number) => {
@@ -145,34 +125,41 @@ export function registerMarketDataRoutes(
 
       const yf = new (yahooFinance as any)();
       const quote = (await yf.quote(yfSymbol)) as any;
-      const close = quote.regularMarketPrice || 0;
-      const change = quote.regularMarketChange || 0;
-      const changePercent = quote.regularMarketChangePercent || 0;
-
-      try {
-        await dependencies.aiAutonomousAgent.tick(symbol, timeframe, close);
-      } catch {
-        // Quote responses do not fail when the autonomous research tick fails.
+      const close = Number(quote.regularMarketPrice);
+      if (!Number.isFinite(close) || close <= 0) {
+        throw new Error(`Live quote provider returned no valid price for ${symbol}.`);
       }
+      const change = Number.isFinite(Number(quote.regularMarketChange)) ? Number(quote.regularMarketChange) : null;
+      const changePercent = Number.isFinite(Number(quote.regularMarketChangePercent))
+        ? Number(quote.regularMarketChangePercent)
+        : null;
 
-      let rsiValue = 51;
-      let smaValue = close;
-      let bollinger = { upper: close * 1.01, middle: close, lower: close * 0.99 };
-      let latestPattern = { name: "BULLISH_ENGULFING", direction: "BULLISH", confidence: 0.85 };
+      let rsiValue: number | null = null;
+      let smaValue: number | null = null;
+      let bollinger: { upper: number; middle: number; lower: number } | null = null;
+      let latestPattern: { name: string; direction: string; confidence: number } | null = null;
       try {
         const rows = await dependencies.dashboardRepository.listCandlesWithOverlays(symbol, timeframe, 1);
         if (rows.length > 0) {
-          const latest = rows[0]!;
+          const latest = rows.at(-1)!;
           const indicators = latest.indicators || {};
-          rsiValue = Number((indicators["RSI"] as any)?.value || rsiValue);
-          smaValue = Number((indicators["SMA"] as any)?.value || smaValue);
-          bollinger = (indicators["BB"] as any) || bollinger;
+          const rsi = indicators["RSI"] as Record<string, unknown> | undefined;
+          const sma = indicators["SMA"] as Record<string, unknown> | undefined;
+          const bands = indicators["BOLLINGER_BANDS"] as Record<string, unknown> | undefined;
+          if (rsi && Number.isFinite(Number(rsi.value))) rsiValue = Number(rsi.value);
+          if (sma && Number.isFinite(Number(sma.value))) smaValue = Number(sma.value);
+          if (bands) {
+            const upper = Number(bands.upper);
+            const middle = Number(bands.middle);
+            const lower = Number(bands.lower);
+            if ([upper, middle, lower].every(Number.isFinite)) bollinger = { upper, middle, lower };
+          }
           const patterns = Array.isArray(latest.patterns) ? latest.patterns : [];
           if (patterns.length > 0) {
             latestPattern = {
-              name: patterns[0].name || patterns[0].code || "BULLISH_ENGULFING",
-              direction: patterns[0].direction || "BULLISH",
-              confidence: Number(patterns[0].confidence || 0.85),
+              name: patterns[0].name || patterns[0].code,
+              direction: patterns[0].direction,
+              confidence: Number(patterns[0].confidence),
             };
           }
         }
@@ -188,23 +175,20 @@ export function registerMarketDataRoutes(
           livePrice: close,
           change,
           changePercent,
-          open: quote.regularMarketOpen || close,
-          high: quote.regularMarketDayHigh || close,
-          low: quote.regularMarketDayLow || close,
-          volume: quote.regularMarketVolume || 0,
+          open: Number.isFinite(Number(quote.regularMarketOpen)) ? Number(quote.regularMarketOpen) : null,
+          high: Number.isFinite(Number(quote.regularMarketDayHigh)) ? Number(quote.regularMarketDayHigh) : null,
+          low: Number.isFinite(Number(quote.regularMarketDayLow)) ? Number(quote.regularMarketDayLow) : null,
+          volume: Number.isFinite(Number(quote.regularMarketVolume)) ? Number(quote.regularMarketVolume) : null,
           lastUpdated: quote.regularMarketTime ? quote.regularMarketTime.toISOString() : new Date().toISOString(),
           indicators: {
             rsi: rsiValue,
             sma20: smaValue,
-            bollinger: {
-              upper: Number(bollinger.upper),
-              middle: Number(bollinger.middle),
-              lower: Number(bollinger.lower),
-            },
+            bollinger,
           },
           latestPattern,
           status: "MARKET_LIVE",
-          researchOnly: false,
+          researchOnly: true,
+          priceSource: "YAHOO_QUOTE",
         },
       });
     } catch (error) {
@@ -475,6 +459,9 @@ export function registerMarketDataRoutes(
           // Named for what it is. A heavy-OI strike is where positions sit, not a level
           // price must respect, so it is never labelled support or resistance.
           largestOpenInterest: heaviest,
+          impliedVolatilitySkew: snapshot.underlyingValue !== null
+            ? impliedVolatilitySkew(snapshot.quotes, snapshot.underlyingValue, snapshot.observedAt, 0.02)
+            : null,
           // The single IV a "is IV unusually high?" check reads. Averaged across the ATM
           // call and put when both solve, because either alone carries the skew of its
           // own side.

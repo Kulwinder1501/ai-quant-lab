@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { formatNumber } from "../../research/presentation";
 import { getResearchJson, postResearchJson } from "../../research/api";
+import { errorMessage } from "../../../lib/errors";
 
 interface LotInfoResponse {
   data: {
@@ -28,6 +29,10 @@ interface PaperAccountSummary {
   id: string;
   name: string;
   openingBalance: number;
+}
+
+interface PaperAccountsResponse {
+  data?: PaperAccountSummary[];
 }
 
 export interface OptionTradeModalProps {
@@ -67,18 +72,16 @@ export function OptionTradeModal({
 
   const [lotSize, setLotSize] = useState(75);
   const [feeTotal, setFeeTotal] = useState<number | null>(null);
-  const [feeLines, setFeeLines] = useState<LotInfoResponse["data"]["feeEstimate"]["entry"] | null>(null);
 
   useEffect(() => {
     if (!show) return;
     const controller = new AbortController();
     void getResearchJson("/paper-accounts", controller.signal)
-      .then((res: any) => {
-        const accs = res.data || [];
+      .then((value) => {
+        const res = value as PaperAccountsResponse;
+        const accs = res.data ?? [];
         setAccounts(accs);
-        if (accs.length > 0 && !selectedAccountId) {
-          setSelectedAccountId(accs[0].id);
-        }
+        setSelectedAccountId((current) => current || accs[0]?.id || "");
       })
       .catch(() => {});
     return () => controller.abort();
@@ -92,11 +95,10 @@ export function OptionTradeModal({
       `/instruments/by-symbol/${encodeURIComponent(underlyingSymbol)}/lot-info?lots=${lots}&premium=${p}`,
       controller.signal,
     )
-      .then((res: any) => {
-        const body = res as LotInfoResponse;
+      .then((value) => {
+        const body = value as LotInfoResponse;
         setLotSize(body.data.lotSize);
         setFeeTotal(body.data.feeEstimate.entry.total);
-        setFeeLines(body.data.feeEstimate.entry);
       })
       .catch(() => {});
     return () => controller.abort();
@@ -127,6 +129,10 @@ export function OptionTradeModal({
       setError("Please select a paper trading account.");
       return;
     }
+    if (impliedVolatility === null) {
+      setError("This contract has no measured implied volatility and cannot be opened safely.");
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
 
@@ -139,13 +145,13 @@ export function OptionTradeModal({
         expiryDate,
         fillPrice: premium,
         lots,
-        impliedVolatility: impliedVolatility ?? 0.15,
+        impliedVolatility,
         notes: notes || `Manual ${optionType} buy at ${strike}`,
       });
       setIsSubmitting(false);
       onClose();
-    } catch (err: any) {
-      setError(err.message || "Failed to open trade.");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to open trade."));
       setIsSubmitting(false);
     }
   };

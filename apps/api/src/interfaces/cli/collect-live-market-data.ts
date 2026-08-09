@@ -65,9 +65,19 @@ async function main(): Promise<void> {
   let ingestionId: string | undefined;
   try {
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
+    const requestedSymbols = getOption(argumentsList, "instruments");
+    const instrumentRepository = new PostgresInstrumentRepository(database);
+    const instruments = requestedSymbols
+      ? (await Promise.all(
+          requestedSymbols.split(",")
+            .map((symbol) => symbol.trim().toUpperCase())
+            .filter(Boolean)
+            .map((symbol) => instrumentRepository.findByExchangeAndSymbol("NSE", symbol)),
+        )).filter((instrument): instrument is Instrument => instrument !== null)
+      : await instrumentRepository.listActive();
     const subscriptions = selectSubscriptions(
-      await new PostgresInstrumentRepository(database).listActive(),
-      getOption(argumentsList, "instruments"),
+      instruments,
+      requestedSymbols,
       providerName
     );
     if (subscriptions.length === 0) {

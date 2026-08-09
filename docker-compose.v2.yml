@@ -19,6 +19,7 @@ services:
       retries: 5
 
   api-v2:
+    image: aiquantlab-api-v2:latest
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -34,15 +35,13 @@ services:
       FYERS_APP_SECRET: ${FYERS_APP_SECRET:-}
       FYERS_PIN: ${FYERS_PIN:-}
     ports:
-      - "4001:4000"
+      - "127.0.0.1:4001:4000"
     depends_on:
       database-v2:
         condition: service_healthy
 
   scheduler-v2:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-scheduler-v2
     restart: unless-stopped
     # Reuses the api image and only overrides the command. Deliberately skips the
@@ -76,9 +75,7 @@ services:
         condition: service_healthy
 
   live-collector-v2:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-live-collector-v2
     restart: unless-stopped
     # A daemon, not a scheduled job. It polls quotes and aggregates them into bars for the
@@ -113,6 +110,28 @@ services:
       database-v2:
         condition: service_healthy
 
+  live-collector-scalp-v2:
+    image: aiquantlab-api-v2:latest
+    container_name: ai-quant-lab-live-collector-scalp-v2
+    restart: unless-stopped
+    command:
+      - "node"
+      - "apps/api/dist/interfaces/cli/collect-live-market-data.js"
+      - "--provider=fyers"
+      - "--timeframe=1m"
+      - "--instruments=NIFTYBEES"
+      - "--poll-seconds=15"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+      FYERS_APP_ID: ${FYERS_APP_ID:-}
+      FYERS_APP_SECRET: ${FYERS_APP_SECRET:-}
+      FYERS_PIN: ${FYERS_PIN:-}
+      NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+    depends_on:
+      database-v2:
+        condition: service_healthy
+
   web-v2:
     build:
       context: .
@@ -128,7 +147,7 @@ services:
       PORT: 3000
       NEXT_PUBLIC_API_URL: http://localhost:4001/api/v1
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     depends_on:
       - api-v2
 

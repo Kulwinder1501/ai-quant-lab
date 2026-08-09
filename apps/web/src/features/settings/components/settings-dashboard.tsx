@@ -4,7 +4,6 @@ import React from 'react';
 import { PageHeader } from '../../../components/layout/page-header';
 import { GlassPanel } from '../../../components/ui/glass-panel';
 import { Select } from '../../../components/ui/select';
-import { Button } from '../../../components/ui/button';
 import { ThemeToggle } from '../../../components/theme/theme-toggle';
 import { useAppStore } from '../../../stores/app-store';
 
@@ -35,11 +34,6 @@ export function SettingsDashboard() {
     apiBaseUrl,
     setApiBaseUrl,
   } = useAppStore();
-
-  const handleSave = () => {
-    // Usually you might want to show a toast or something, but saving is mostly instantaneous
-    console.log('Settings saved');
-  };
 
   return (
     <div className="flex flex-col h-full space-y-6 p-6">
@@ -97,7 +91,7 @@ export function SettingsDashboard() {
                   value={apiBaseUrl}
                   onChange={(e) => setApiBaseUrl(e.target.value)}
                   className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-cyan-500/50"
-                  placeholder="http://localhost:8000"
+                  placeholder="http://localhost:4000/api/v1"
                 />
               </div>
 
@@ -110,9 +104,7 @@ export function SettingsDashboard() {
       </div>
 
       <div className="flex justify-end max-w-4xl">
-        <Button onClick={handleSave} className="w-full sm:w-auto">
-          Save Changes
-        </Button>
+        <p className="text-xs text-slate-500">Changes are saved automatically in this browser.</p>
       </div>
     </div>
   );

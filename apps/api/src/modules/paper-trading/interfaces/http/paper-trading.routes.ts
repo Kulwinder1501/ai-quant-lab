@@ -11,7 +11,7 @@ import { InvalidTradeHistoryQueryError } from "../../application/list-paper-trad
 import { calculateEntryFees } from "../../domain/brokerage-calculator.js";
 import type { TradeOutcomeFilter } from "../../domain/paper-trade-history.js";
 import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-trading.js";
-import { lotsToQuantity } from "../../domain/lot-size-validator.js";
+import { lotsToQuantity, validateQuantity } from "../../domain/lot-size-validator.js";
 import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
@@ -118,7 +118,6 @@ export function registerPaperTradingRoutes(
     | "openPaperTrade"
     | "evaluateOpenPaperTrades"
     | "closePaperTrade"
-    | "aiAutonomousAgent"
     | "optionChainRepository"
   >,
 ): void {
@@ -165,35 +164,21 @@ export function registerPaperTradingRoutes(
     try {
       const accountId = request.params.id || "";
       const asOf = new Date();
-      let livePrices: Record<string, number> = {};
-      try {
-        const openTrades = await dependencies.paperTradeRepository.listOpenByAccount(accountId);
-        const pendingTrades = await dependencies.paperTradeRepository.listPendingByAccount(accountId);
-        const activeSymbols = [...new Set(
-          [...openTrades, ...pendingTrades].flatMap((trade) => [
-            trade.underlyingSymbol?.toUpperCase(),
-            trade.instrumentSymbol?.toUpperCase(),
-          ]).filter(
-            (symbol): symbol is string => typeof symbol === "string" && symbol.length > 0,
-          ),
-        )];
-        livePrices = await loadLivePrices(activeSymbols);
-        const result = await dependencies.evaluateOpenPaperTrades.execute({
-          accountId,
-          asOf,
-          livePrices,
-        });
-        if (result.tradesClosed > 0) {
-          for (const closedId of result.closedTradeIds) {
-            await dependencies.aiAutonomousAgent.generateSelfReflection(closedId, "NIFTY50");
-          }
-        }
-      } catch {
-        // Live evaluation is best effort during summary polling.
-      }
+      // Summary polling is read-only. Stop/target execution and reflection writes belong
+      // to the scheduler or the explicit POST /paper-trades/evaluate command; otherwise
+      // opening a dashboard tab changes the account and multiple tabs race each other.
+      const currentOpenTrades = await dependencies.paperTradeRepository.listOpenByAccount(accountId);
+      const activeSymbols = [...new Set(
+        currentOpenTrades.flatMap((trade) => [
+          trade.underlyingSymbol?.toUpperCase(),
+          trade.instrumentSymbol?.toUpperCase(),
+        ]).filter(
+          (symbol): symbol is string => typeof symbol === "string" && symbol.length > 0,
+        ),
+      )];
+      const livePrices = await loadLivePrices(activeSymbols);
       const summary = await dependencies.getPaperAccountSummary.execute(accountId);
       const fullSummary = await dependencies.dashboardRepository.getPaperAccountFullSummary(accountId, summary);
-      const currentOpenTrades = await dependencies.paperTradeRepository.listOpenByAccount(accountId);
       let currentVolatility: number | null = null;
       try {
         currentVolatility = await new PostgresIndiaVixImpliedVolatilitySource(
@@ -385,10 +370,36 @@ export function registerPaperTradingRoutes(
         response.status(400).json({ error: "accountId, underlyingSymbol, optionType, strike, expiryDate, and fillPrice are required." });
         return;
       }
+      const normalizedOptionType = String(optionType).toUpperCase();
+      const normalizedSymbol = String(underlyingSymbol).toUpperCase();
+      const numericStrike = Number(strike);
+      const requestedFill = Number(fillPrice);
+      if ((normalizedOptionType !== "CE" && normalizedOptionType !== "PE")
+        || !Number.isFinite(numericStrike) || numericStrike <= 0
+        || !Number.isFinite(requestedFill) || requestedFill <= 0) {
+        response.status(400).json({ error: "optionType must be CE/PE and strike/fillPrice must be positive numbers." });
+        return;
+      }
+
+      const expiry = resolveOptionExpiryInstant(String(expiryDate));
+      if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
+        response.status(422).json({ error: "Valid future expiryDate is required." });
+        return;
+      }
+      let iv = Number(impliedVolatility);
+      if (!Number.isFinite(iv) || iv <= 0) {
+        response.status(422).json({ error: "A measured positive impliedVolatility is required; it cannot be guessed." });
+        return;
+      }
+      if (iv > 1) iv /= 100;
+      if (iv <= 0 || iv > 5) {
+        response.status(422).json({ error: "impliedVolatility is outside the supported range." });
+        return;
+      }
 
       const instrumentResult = await dependencies.database.query(`
         SELECT id, symbol, lot_size FROM instruments WHERE symbol = $1 AND is_active = TRUE LIMIT 1
-      `, [underlyingSymbol]);
+      `, [normalizedSymbol]);
       const instrument = instrumentResult.rows[0] as { id: string; symbol: string; lot_size: number } | undefined;
       
       if (!instrument) {
@@ -405,44 +416,26 @@ export function registerPaperTradingRoutes(
         response.status(400).json({ error: "quantity or lots is required." });
         return;
       }
+      validateQuantity(resolvedQuantity, lotSize);
 
-      // Synthesize a trade idea for this manual entry
-      const ideaResult = await dependencies.database.query(`
-        INSERT INTO trade_ideas (
-          instrument_id,
-          strategy_version_id,
-          source_candle_id,
-          side,
-          status,
-          entry_price,
-          stop_loss,
-          target_price,
-          risk_reward,
-          confidence,
-          reasoning,
-          evidence,
-          expires_at
-        ) VALUES (
-          $1, NULL, NULL, $2, 'PROPOSED', $3, $4, $5, 0, 1.0, '{"summary":"Manual options chain trade"}', '[]', NOW() + INTERVAL '1 day'
-        ) RETURNING id
-      `, [
-        instrument.id,
-        optionType === "CE" ? "LONG" : "SHORT", // Direction mapping for options
-        fillPrice,
-        fillPrice * 0.5, // Dummy stop loss in underlying terms (not used since we override)
-        fillPrice * 2.0, // Dummy target in underlying terms
-      ]);
-      const tradeIdeaId = ideaResult.rows[0]?.id;
-
-      // Now prepare the options contract info
-      const expiry = resolveOptionExpiryInstant(expiryDate);
-      if (Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now()) {
-        response.status(422).json({ error: "Valid future expiryDate is required." });
+      const observedQuote = await dependencies.optionChainRepository.latestContractQuote({
+        underlyingSymbol: normalizedSymbol,
+        expiryDate: expiry,
+        strikePrice: numericStrike,
+        optionType: normalizedOptionType as "CE" | "PE",
+      });
+      const quoteAgeMinutes = observedQuote === null
+        ? Number.POSITIVE_INFINITY
+        : (Date.now() - observedQuote.observedAt.getTime()) / 60_000;
+      if (observedQuote?.ask == null || observedQuote.ask <= 0 || quoteAgeMinutes < 0 || quoteAgeMinutes > 40) {
+        response.status(422).json({
+          error: "A fresh two-sided quote for the exact contract is required before a manual option can be opened.",
+        });
         return;
       }
-
-      let iv = typeof impliedVolatility === "number" ? impliedVolatility : 0.15;
-      if (iv > 1) iv /= 100;
+      // A buyer pays the observed ask. The request value is display context only and
+      // cannot override the server-side book used to book P&L.
+      const serverFillPrice = observedQuote.ask;
 
       /*
        * Where the underlying actually was when this contract was bought.
@@ -474,9 +467,9 @@ export function registerPaperTradingRoutes(
       }
 
       const optionContract = {
-        optionStrike: Number(strike),
+        optionStrike: numericStrike,
         optionExpiry: expiry,
-        optionType: optionType as "CE" | "PE",
+        optionType: normalizedOptionType as "CE" | "PE",
         underlyingSymbol: instrument.symbol,
         // Omitted rather than guessed when no spot is available. `decideOptionBuyerLiveExit`
         // skips trap detection without an anchor, so the position simply keeps its ordinary
@@ -486,33 +479,32 @@ export function registerPaperTradingRoutes(
       };
 
       const feeMeta = {
-        entry: calculateEntryFees(Number(fillPrice), resolvedQuantity),
+        entry: calculateEntryFees(serverFillPrice, resolvedQuantity),
         option: {
-          optionType,
-          strike: Number(strike),
+          optionType: normalizedOptionType,
+          strike: numericStrike,
           impliedVolatility: iv,
           expiryDate: expiry.toISOString(),
           // The observed spot when available; the strike only as a last resort, and this
           // field is display metadata rather than an input to any exit decision.
-          underlyingEntry: underlyingEntryPrice ?? Number(strike),
+          underlyingEntry: underlyingEntryPrice,
+          quoteObservedAt: observedQuote.observedAt.toISOString(),
+          requestedFill,
+          fillSource: "OBSERVED_ASK",
         },
       };
 
-      const trade = await dependencies.openPaperTrade.execute({
+      const trade = await dependencies.paperTradeRepository.openManualOption({
         accountId,
-        tradeIdeaId,
-        fillPrice: Number(fillPrice),
+        instrumentId: instrument.id,
+        fillPrice: serverFillPrice,
         quantity: resolvedQuantity,
         openedAt: new Date(),
-        entryFees: feeMeta && typeof (feeMeta.entry as { total?: number })?.total === "number"
-          ? (feeMeta.entry as { total: number }).total
-          : undefined,
+        entryFees: feeMeta.entry.total,
         entrySlippage: 0,
         notes: notes || "Manual option trade from chain",
-        orderType: "MARKET",
         sideOverride: "LONG", // Buying options is always LONG
         feeBreakdown: feeMeta,
-        applyBrokerageFees: !feeMeta,
         optionContract,
       });
 

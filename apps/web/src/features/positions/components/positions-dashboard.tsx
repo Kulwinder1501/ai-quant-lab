@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
-import { apiV1Url, getResearchJson, postResearchJson } from "../../research/api";
+import { getApiV1Url, getResearchJson, postResearchJson } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { errorMessage, isAbortError } from "../../../lib/errors";
-import { PageHeader } from "../../../components/layout/page-header";
 
 import {
   isOptionPaperTrade,
@@ -36,7 +35,6 @@ export function PositionsDashboard() {
 
   // Live Price State for real-time PnL
   const [liveQuotes, setLiveQuotes] = useState<LiveQuoteMap>({});
-  const [lastUpdated, setLastUpdated] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
   // Close trade modal state
@@ -95,7 +93,7 @@ export function PositionsDashboard() {
   useEffect(() => {
     const symbols = ["NIFTY50", "BANKNIFTY"];
     const sources = symbols.map((sym) => {
-      const streamUrl = `${apiV1Url}/stream/live-agent?symbol=${sym}&timeframe=1d`;
+      const streamUrl = `${getApiV1Url()}/stream/live-agent?symbol=${sym}&timeframe=1d`;
       const es = new EventSource(streamUrl);
       es.onopen = () => setIsStreaming(true);
       es.onmessage = (event) => {
@@ -118,7 +116,6 @@ export function PositionsDashboard() {
                 },
               };
             });
-            setLastUpdated(new Date().toLocaleTimeString());
           }
         } catch {
           // Ignore stream parse errors
@@ -172,7 +169,6 @@ export function PositionsDashboard() {
         BANKNIFTY: updateWithDir("BANKNIFTY", newQuotes.BANKNIFTY),
       };
     });
-    setLastUpdated(new Date().toLocaleTimeString());
   }, []);
 
   /** The SSE stream is the primary feed, so a failed fallback poll waits for the next tick. */

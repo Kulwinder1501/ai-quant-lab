@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "npm run build --workspace @ai-quant-lab/contracts && npm run build --workspace @ai-quant-lab/pricing && next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run"
   },
   "dependencies": {
     "@ai-quant-lab/pricing": "*",
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "eslint": "^9.39.5",
-    "eslint-config-next": "^16.2.12"
+    "eslint-config-next": "^16.2.12",
+    "vitest": "^2.0.5"
   }
 }

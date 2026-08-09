@@ -48,6 +48,7 @@ import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-b
 import { purgeLookAheadSmcSnapshotsMigration } from "./048-purge-look-ahead-smc-snapshots.js";
 import { reconcileAbandonedJobRunsMigration } from "./049-reconcile-abandoned-job-runs.js";
 import { addBaselineAccuracyMigration } from "./050-add-baseline-accuracy.js";
+import { addVolatilityIndicesMigration } from "./051-add-volatility-indices.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -100,4 +101,5 @@ export const migrations = [
   purgeLookAheadSmcSnapshotsMigration,
   reconcileAbandonedJobRunsMigration,
   addBaselineAccuracyMigration,
+  addVolatilityIndicesMigration,
 ];

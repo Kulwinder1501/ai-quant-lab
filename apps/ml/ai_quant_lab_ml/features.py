@@ -28,7 +28,9 @@ from typing import Any
 from .contracts import (
     FEATURE_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_V6,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -99,9 +101,14 @@ _CANDLE_FEATURES: tuple[str, ...] = (
 # inference. Re-add it together with a loader once a real offshore feed exists --
 # a declared column with no source is worse than an absent one, because it enters
 # the versioned contract and forces a retrain while contributing nothing.
-_MARKET_FEATURES: tuple[str, ...] = (
+_LEGACY_MARKET_FEATURES: tuple[str, ...] = (
     "market.fii_net_flow_ratio",
     "market.dii_net_flow_ratio",
+)
+
+_MARKET_FEATURES: tuple[str, ...] = _LEGACY_MARKET_FEATURES + (
+    "market.fii_futures_net_flow_ratio",
+    "market.fii_options_net_flow_ratio",
 )
 
 # The three gap columns describe a session boundary, so inside a session they are
@@ -209,16 +216,16 @@ def _build_feature_schema_v5() -> tuple[str, ...]:
         f"price_action.{event_type}.level_distance_bps" for event_type in _PRICE_ACTION_EVENT_TYPES
     )
     regime_features = ("regime.vix_sma20.value_ratio",)
-    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features + _MARKET_FEATURES
+    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features + _LEGACY_MARKET_FEATURES
 
-def _build_feature_schema_scalp() -> tuple[str, ...]:
+def _build_feature_schema_scalp(market_features: tuple[str, ...]) -> tuple[str, ...]:
     indicator_features = tuple(
         f"indicator.{code}.{field}"
         for code, fields in _INDICATOR_VALUE_FIELDS.items()
         for field in fields
     )
     supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
-    return _SCALP_CANDLE_FEATURES + indicator_features + supertrend_features + _MARKET_FEATURES
+    return _SCALP_CANDLE_FEATURES + indicator_features + supertrend_features + market_features
 
 
 # The v6 swing schema: 36 columns against v5's 113. Explicit rather than
@@ -290,22 +297,33 @@ FEATURE_SCHEMA_V6: tuple[str, ...] = (
     "cross.nifty_banknifty_return_gap_bps",
 )
 
+# Futures/options institutional flows change the ordered contract. They belong to
+# v7 rather than silently changing every existing v6 artifact from 36 to 38 columns.
+FEATURE_SCHEMA_V7: tuple[str, ...] = (
+    FEATURE_SCHEMA_V6[:29]
+    + ("market.fii_futures_net_flow_ratio", "market.fii_options_net_flow_ratio")
+    + FEATURE_SCHEMA_V6[29:]
+)
+
 # A tuple, rather than a data-dependent list, is the versioned model contract.
 # FEATURE_SCHEMA is always the *current* swing schema; the v5 tuple stays
 # importable because v5 artifacts remain loadable and their feature vectors
 # must be reconstructible bit-for-bit at inference.
 FEATURE_SCHEMA_V5: tuple[str, ...] = _build_feature_schema_v5()
-FEATURE_SCHEMA: tuple[str, ...] = FEATURE_SCHEMA_V6
-FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp()
+FEATURE_SCHEMA: tuple[str, ...] = FEATURE_SCHEMA_V7
+FEATURE_SCHEMA_SCALP_V2: tuple[str, ...] = _build_feature_schema_scalp(_LEGACY_MARKET_FEATURES)
+FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp(_MARKET_FEATURES)
 
 # The ordered contract for every schema version this codebase can construct.
 # An unknown version is a hard error rather than a silent fallback: falling
 # back to "the current swing schema" is exactly how a v5 artifact would end up
 # scored against v6 columns.
 _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
-    FEATURE_SCHEMA_VERSION: FEATURE_SCHEMA_V6,
+    FEATURE_SCHEMA_VERSION: FEATURE_SCHEMA_V7,
+    FEATURE_SCHEMA_VERSION_V6: FEATURE_SCHEMA_V6,
     FEATURE_SCHEMA_VERSION_V5: FEATURE_SCHEMA_V5,
     FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
@@ -496,6 +514,8 @@ def build_feature_vector(
             "candle.is_gap_defended": is_gap_defended,
             "market.fii_net_flow_ratio": _numeric_or_nan(candle.fii_net_flow_ratio),
             "market.dii_net_flow_ratio": _numeric_or_nan(candle.dii_net_flow_ratio),
+            "market.fii_futures_net_flow_ratio": _numeric_or_nan(candle.fii_futures_net_flow_ratio),
+            "market.fii_options_net_flow_ratio": _numeric_or_nan(candle.fii_options_net_flow_ratio),
             "regime.vix_sma20.value_ratio": _numeric_or_nan(candle.vix_value_ratio),
         }
     )
@@ -980,12 +1000,16 @@ __all__ = [
     "FEATURE_SCHEMA",
     "FEATURE_SCHEMA_V5",
     "FEATURE_SCHEMA_V6",
+    "FEATURE_SCHEMA_V7",
     "FEATURE_SCHEMA_SCALP",
+    "FEATURE_SCHEMA_SCALP_V2",
     "FEATURE_DEFINITION",
     "FEATURE_DEFINITION_SCALP",
     "FEATURE_SCHEMA_VERSION",
     "FEATURE_SCHEMA_VERSION_V5",
+    "FEATURE_SCHEMA_VERSION_V6",
     "FEATURE_SCHEMA_VERSION_SCALP",
+    "FEATURE_SCHEMA_VERSION_SCALP_V2",
     "FeatureConstructionError",
     "LabelResult",
     "build_feature_vector",

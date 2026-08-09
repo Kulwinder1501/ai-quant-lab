@@ -2,18 +2,24 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import type { AiBrainThought } from "./live-price-dashboard";
 import { useEffect, useState } from "react";
 import { getResearchJson } from "../../research/api";
+import type { NewsArticle } from "../../news/components/news-dashboard";
+
+interface NewsResponse {
+  data?: { articles?: NewsArticle[] };
+}
 
 interface MiniBrainNewsProps {
   thoughts: AiBrainThought[];
 }
 
 export function MiniBrainNews({ thoughts }: MiniBrainNewsProps) {
-  const [news, setNews] = useState<any[]>([]);
+  const [news, setNews] = useState<NewsArticle[]>([]);
 
   useEffect(() => {
     // Fetch latest news on mount
     getResearchJson("/market-news?limit=10")
-      .then((res: any) => {
+      .then((value) => {
+        const res = value as NewsResponse;
         if (res?.data?.articles) {
           setNews(res.data.articles.slice(0, 5));
         }

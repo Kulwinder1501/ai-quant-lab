@@ -20,6 +20,8 @@ import {
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
+import { PostgresRiskStateRepository } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
+import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 
 /** Minutes in one bar of a timeframe, so a series is not called stale for lagging by design. */
 function barLengthMinutes(timeframe: string): number {
@@ -99,7 +101,7 @@ const SCAN_TIMEFRAMES = ["15m"] as const;
  * is Rs 15,000, so this is not a capital limit -- it is a blast radius. The bot's edge is
  * unproven, and its own trade history is the evidence that will decide whether it has one.
  */
-const MAX_CONCURRENT_POSITIONS = 4;
+const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
 /** An intraday signal raised after this has no session left to resolve in. */
@@ -144,6 +146,7 @@ async function main(): Promise<void> {
 
     const prepareEntry = new PrepareOptionEntry(database, new PostgresOptionChainRepository(database));
     const openTrade = new OpenPaperTrade(tradeRepository);
+    const riskRepository = new PostgresRiskStateRepository(database);
     // Read once per run rather than per idea: within a single run nothing else opens
     // positions on this account, and the count is re-derived on the next run anyway.
     const existingOpen = await tradeRepository.listOpenByAccount(account.id);
@@ -227,7 +230,7 @@ async function main(): Promise<void> {
                 continue;
               }
 
-              // One lot. The service picks the contract from the provider's calendar and
+              // The service picks the contract from the provider's calendar and
               // fills at the observed ask; everything it refuses on is reported rather than
               // counted as a pass.
               const prepared = await prepareEntry.execute({ tradeIdeaId, lots: 1, now });
@@ -243,6 +246,34 @@ async function main(): Promise<void> {
               }
 
               const entry = prepared.entry;
+              const riskState = await riskRepository.findRiskState({
+                accountId: account.id,
+                instrumentId: instrument.id,
+                asOf: now,
+                maxRegimeAgeMinutes: 60,
+              });
+              const riskDecision = evaluateRisk({
+                instrumentId: instrument.id,
+                decisionTimestamp: now,
+                side: entry.side,
+                entryPrice: entry.fillPrice,
+                stopLoss: entry.stopLossOverride,
+                targetPrice: entry.targetPriceOverride,
+                lotSize: entry.lotSize,
+              }, riskState);
+              if (!riskDecision.approved) {
+                refused.push({
+                  tradeIdeaId,
+                  symbol,
+                  timeframe,
+                  reason: "RISK_CONTROL_VETO",
+                  explanation: `Risk engine refused the entry: ${riskDecision.reasonCodes.join(", ")}.`,
+                });
+                continue;
+              }
+              // The bot deliberately starts at one lot. The portfolio engine may reduce
+              // that allowance, but it cannot silently size an unattended strategy up.
+              const approvedQuantity = Math.min(entry.quantity, riskDecision.approvedQuantity);
               const key = contractKey(
                 entry.optionContract.underlyingSymbol,
                 entry.optionContract.optionExpiry,
@@ -258,15 +289,17 @@ async function main(): Promise<void> {
                 continue;
               }
 
+              const riskNote = ` Risk checks: ${riskDecision.reasonCodes.join(", ")}.`;
+
               const trade = await openTrade.execute({
                 accountId: account.id,
                 tradeIdeaId,
                 fillPrice: entry.fillPrice,
-                quantity: entry.quantity,
+                quantity: approvedQuantity,
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${BOT_ACCOUNT_NAME} from a ${timeframe} ${symbol} signal.`,
+                notes: `Opened by ${BOT_ACCOUNT_NAME} from a ${timeframe} ${symbol} signal.${riskNote}`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,
@@ -287,10 +320,10 @@ async function main(): Promise<void> {
                 fillPremium: entry.fillPrice,
                 stopPremium: entry.stopLossOverride,
                 targetPremium: entry.targetPriceOverride,
-                quantity: entry.quantity,
+                quantity: approvedQuantity,
                 lotSize: entry.lotSize,
                 entryFees: entry.entryFees,
-                estimatedExitFees: Number(calculateExitFees(entry.fillPrice, entry.quantity).total.toFixed(2)),
+                estimatedExitFees: Number(calculateExitFees(entry.fillPrice, approvedQuantity).total.toFixed(2)),
                 fillSource: (entry.feeBreakdown.entryChecks as { fillSource?: string } | undefined)?.fillSource,
                 barAgeMinutes: Math.round(freshness.ageMinutes),
                 // Reported on every position, not only when empty: a trade that passed a

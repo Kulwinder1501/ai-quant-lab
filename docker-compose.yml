@@ -29,7 +29,7 @@ services:
       API_PORT: 4000
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database:5432/${POSTGRES_DB:-ai_quant_lab}
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     depends_on:
       database:
         condition: service_healthy
@@ -62,7 +62,7 @@ services:
       PORT: 3000
       NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - api
 

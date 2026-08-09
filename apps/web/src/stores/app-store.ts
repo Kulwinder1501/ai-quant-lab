@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 
 export type AppTheme = 'light' | 'dark';
 
@@ -21,7 +22,9 @@ interface AppState {
   setApiBaseUrl: (url: string) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+const defaultApiBaseUrl = process.env.NEXT_PUBLIC_API_URL?.trim() || 'http://localhost:4000/api/v1';
+
+export const useAppStore = create<AppState>()(persist((set) => ({
   selectedInstrument: 'NIFTY50',
   selectedTimeframe: '1m',
   activeAccountId: null,
@@ -29,7 +32,7 @@ export const useAppStore = create<AppState>((set) => ({
   sidebarCollapsed: false,
   theme: 'dark',
   autoRefreshInterval: 5,
-  apiBaseUrl: 'http://localhost:8000',
+  apiBaseUrl: defaultApiBaseUrl,
   setSelectedInstrument: (instrument) => set({ selectedInstrument: instrument }),
   setSelectedTimeframe: (timeframe) => set({ selectedTimeframe: timeframe }),
   setActiveAccountId: (id) => set({ activeAccountId: id }),
@@ -38,4 +41,16 @@ export const useAppStore = create<AppState>((set) => ({
   setTheme: (theme) => set({ theme }),
   setAutoRefreshInterval: (interval) => set({ autoRefreshInterval: interval }),
   setApiBaseUrl: (url) => set({ apiBaseUrl: url }),
+}), {
+  name: 'ai-quant-lab-preferences',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (state) => ({
+    selectedInstrument: state.selectedInstrument,
+    selectedTimeframe: state.selectedTimeframe,
+    activeAccountId: state.activeAccountId,
+    sidebarCollapsed: state.sidebarCollapsed,
+    theme: state.theme,
+    autoRefreshInterval: state.autoRefreshInterval,
+    apiBaseUrl: state.apiBaseUrl,
+  }),
 }));

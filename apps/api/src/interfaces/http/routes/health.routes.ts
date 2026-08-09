@@ -4,6 +4,7 @@ import type { HttpDependencies } from "../dependencies.js";
 
 /** Jobs that stop data arriving, rather than merely delaying a report. */
 const CRITICAL_JOB_TYPES = ["OPTION_CHAIN", "EOD_PIPELINE"];
+const MAX_CRITICAL_SUCCESS_AGE_HOURS = 72;
 
 export function registerHealthRoutes(app: Express, { database }: Pick<HttpDependencies, "database">): void {
   app.get("/api/v1/health", (_request, response) => {
@@ -32,7 +33,10 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
    * report is recoverable, a missing observation is not.
    */
   app.get("/api/v1/health/jobs", async (request, response) => {
-    const lookbackHours = Number(request.query.lookbackHours ?? 24);
+    // A seven-day default spans the previous trading day even on weekends and
+    // exchange holidays; the old 24-hour window reported a clean bill of health
+    // on Sunday after Friday's critical jobs had failed.
+    const lookbackHours = Number(request.query.lookbackHours ?? 168);
     if (!Number.isFinite(lookbackHours) || lookbackHours <= 0 || lookbackHours > 720) {
       response.status(400).json({ error: "lookbackHours must be a positive number of hours up to 720." });
       return;
@@ -45,6 +49,7 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
                count(*) FILTER (WHERE status = 'COMPLETED')::int AS completed,
                count(*) FILTER (WHERE status = 'RUNNING')::int   AS running,
                max(claimed_at) FILTER (WHERE status = 'FAILED')  AS last_failure_at,
+               max(completed_at) FILTER (WHERE status = 'COMPLETED') AS last_completed_at,
                (array_agg(error_details ORDER BY claimed_at DESC)
                   FILTER (WHERE status = 'FAILED' AND error_details IS NOT NULL))[1] AS last_error
         FROM scheduled_job_runs
@@ -59,19 +64,32 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
         completed: Number(row.completed),
         running: Number(row.running),
         lastFailureAt: row.last_failure_at === null ? null : new Date(row.last_failure_at as string | Date).toISOString(),
+        lastCompletedAt: row.last_completed_at === null ? null : new Date(row.last_completed_at as string | Date).toISOString(),
         // The captured child output. Truncated here only for transport; the row keeps it all.
         lastError: row.last_error === null ? null : String(row.last_error).slice(0, 2_000),
         critical: CRITICAL_JOB_TYPES.includes(String(row.job_type)),
       }));
 
       const failing = jobs.filter((job) => job.failed > 0);
-      const criticalFailing = failing.filter((job) => job.critical);
-      response.status(criticalFailing.length > 0 ? 503 : 200).json({
-        status: criticalFailing.length > 0 ? "degraded" : failing.length > 0 ? "warning" : "ok",
+      const now = Date.now();
+      const criticalFailing = jobs.filter((job) => {
+        if (!job.critical || job.lastFailureAt === null) return false;
+        return job.lastCompletedAt === null
+          || new Date(job.lastFailureAt).getTime() > new Date(job.lastCompletedAt).getTime();
+      });
+      const staleCritical = CRITICAL_JOB_TYPES.filter((jobType) => {
+        const job = jobs.find((candidate) => candidate.jobType === jobType);
+        return job?.lastCompletedAt === null || job?.lastCompletedAt === undefined
+          || now - new Date(job.lastCompletedAt).getTime() > MAX_CRITICAL_SUCCESS_AGE_HOURS * 3_600_000;
+      });
+      const degraded = criticalFailing.length > 0 || staleCritical.length > 0;
+      response.status(degraded ? 503 : 200).json({
+        status: degraded ? "degraded" : failing.length > 0 ? "warning" : "ok",
         lookbackHours: Math.floor(lookbackHours),
         // Named explicitly rather than left for the caller to work out from the list, so an
         // alert rule can key on one field.
         criticalFailures: criticalFailing.map((job) => job.jobType),
+        staleCriticalJobs: staleCritical,
         jobs,
       });
     } catch (error) {

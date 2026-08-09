@@ -1,4 +1,4 @@
-import type { DatabaseClient } from "../database.js";
+import type { DatabaseQueryable } from "../database.js";
 import type { RiskState, VolatilityRegime, VolatilityRegimeEvidence } from "../../../modules/risk-management/domain/risk.js";
 
 /** The label scheme whose predictions this reads. Non-directional by construction. */
@@ -7,7 +7,7 @@ export const VOLATILITY_LABEL_SCHEME = "volatility-expansion-v1";
 const VOLATILITY_REGIMES: readonly string[] = ["CONTRACTION", "STABLE", "EXPANSION"];
 
 export class PostgresRiskStateRepository {
-  constructor(private readonly client: DatabaseClient) {}
+  constructor(private readonly client: DatabaseQueryable) {}
 
   /**
    * The latest volatility prediction that was already available at `asOf`.
@@ -20,16 +20,28 @@ export class PostgresRiskStateRepository {
    * re-checks it too, so a caller that forgets this predicate is rejected rather than
    * silently sized on a prediction from the future.
    */
-  async findVolatilityRegime(input: { instrumentId: string; asOf: Date }): Promise<VolatilityRegimeEvidence | null> {
+  async findVolatilityRegime(input: {
+    instrumentId: string;
+    asOf: Date;
+    maxAgeMinutes?: number;
+  }): Promise<VolatilityRegimeEvidence | null> {
     const result = await this.client.query<{ prediction: string; confidence: string; evidence_cutoff_at: Date }>(`
-      SELECT prediction, confidence, evidence_cutoff_at
-      FROM auxiliary_model_predictions
-      WHERE instrument_id = $1
-        AND label_scheme = $2
-        AND evidence_cutoff_at <= $3
-      ORDER BY evidence_cutoff_at DESC, created_at DESC
+      SELECT p.prediction, p.confidence, p.evidence_cutoff_at
+      FROM auxiliary_model_predictions p
+      INNER JOIN model_versions m ON m.id = p.model_version_id
+      WHERE p.instrument_id = $1
+        AND p.label_scheme = $2
+        AND p.evidence_cutoff_at <= $3
+        AND m.stage = 'PRODUCTION'
+        AND ($4::integer IS NULL OR p.evidence_cutoff_at >= $3 - make_interval(mins => $4::integer))
+      ORDER BY p.evidence_cutoff_at DESC, p.created_at DESC
       LIMIT 1
-    `, [input.instrumentId, VOLATILITY_LABEL_SCHEME, input.asOf]);
+    `, [
+      input.instrumentId,
+      VOLATILITY_LABEL_SCHEME,
+      input.asOf,
+      input.maxAgeMinutes === undefined ? null : Math.max(1, Math.floor(input.maxAgeMinutes)),
+    ]);
 
     const row = result.rows[0];
     if (!row) return null;
@@ -52,7 +64,12 @@ export class PostgresRiskStateRepository {
    * exit order, because no running peak is stored; that makes the drawdown check honest
    * about history it can actually see.
    */
-  async findRiskState(input: { accountId: string; instrumentId: string; asOf: Date }): Promise<RiskState> {
+  async findRiskState(input: {
+    accountId: string;
+    instrumentId: string;
+    asOf: Date;
+    maxRegimeAgeMinutes?: number;
+  }): Promise<RiskState> {
     const account = await this.client.query<{ opening_balance: string }>(
       "SELECT opening_balance FROM paper_accounts WHERE id = $1",
       [input.accountId],
@@ -91,7 +108,11 @@ export class PostgresRiskStateRepository {
       peakEquity,
       openPositionCount: Number(open.rows[0]?.open_position_count ?? 0),
       realizedPnlToday,
-      volatilityRegime: await this.findVolatilityRegime({ instrumentId: input.instrumentId, asOf: input.asOf }),
+      volatilityRegime: await this.findVolatilityRegime({
+        instrumentId: input.instrumentId,
+        asOf: input.asOf,
+        maxAgeMinutes: input.maxRegimeAgeMinutes,
+      }),
     };
   }
 }

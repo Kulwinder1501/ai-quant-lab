@@ -91,16 +91,20 @@ DIRECTIONAL_ALPHABET = LabelAlphabet(name="direction", labels=LABELS, abstain_la
 # an artifact against the schema version *recorded in its own metadata*, so the
 # volatility shadow families trained under v5 keep building settled history
 # while v6 lineages start fresh.
-FEATURE_SCHEMA_VERSION = "ml-feature-v6"
+FEATURE_SCHEMA_VERSION = "ml-feature-v7"
+FEATURE_SCHEMA_VERSION_V6 = "ml-feature-v6"
 FEATURE_SCHEMA_VERSION_V5 = "ml-feature-v5"
-FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v2"
+FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v3"
+FEATURE_SCHEMA_VERSION_SCALP_V2 = "ml-feature-scalp-v2"
 
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V6,
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
@@ -435,7 +439,9 @@ class CandleEvidence:
     # not the same evidence.
     fii_net_flow_ratio: float | None = None
     dii_net_flow_ratio: float | None = None
-    # The trading session whose published flows the two ratios above came from.
+    fii_futures_net_flow_ratio: float | None = None
+    fii_options_net_flow_ratio: float | None = None
+    # The trading session whose published flows the ratios above came from.
     # Carried so a leakage audit can assert it precedes this bar's own session.
     institutional_flow_date: date | None = None
     # The latest settled panel session's breadth at or before this bar's close

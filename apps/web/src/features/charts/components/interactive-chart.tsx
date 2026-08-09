@@ -388,11 +388,6 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
     hasRsi, rsiData, markers, payload.timeframe, chartColors
   ]);
 
-  const handleReset = () => {
-    if (!chartRef.current) return;
-    chartRef.current.timeScale().fitContent();
-  };
-
   if (candles.length === 0) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">

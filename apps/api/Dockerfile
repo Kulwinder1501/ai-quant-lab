@@ -9,7 +9,7 @@ COPY packages/contracts/package*.json ./packages/contracts/
 COPY packages/pricing/package*.json ./packages/pricing/
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
-RUN npm ci || npm install
+RUN npm ci
 
 COPY tsconfig*.json ./
 COPY packages/contracts ./packages/contracts
@@ -35,7 +35,9 @@ COPY apps/ml/requirements-dl.txt ./apps/ml/requirements-dl.txt
 # candidates (TCN / OOF stack). Kept as a separate requirements file so the
 # default tree path remains documentable without DL deps.
 RUN /opt/venv/bin/pip install --no-cache-dir -r apps/ml/requirements.txt \
-  && /opt/venv/bin/pip install --no-cache-dir -r apps/ml/requirements-dl.txt
+  && /opt/venv/bin/pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    -r apps/ml/requirements-dl.txt
 
 # scripts/run-python.mjs honors this instead of probing for an interpreter.
 ENV PYTHON=/opt/venv/bin/python

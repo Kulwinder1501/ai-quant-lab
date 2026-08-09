@@ -191,6 +191,10 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                     "dii_cash_net_cr": "1800",
                     "fii_scale": "1200",
                     "dii_scale": "900",
+                    "fii_index_futures_net_cr": None,
+                    "fii_index_options_net_cr": None,
+                    "fii_futures_scale": None,
+                    "fii_options_scale": None,
                 },
             ],
             # Breadth panel: empty here — a panel below the participation floor
@@ -518,6 +522,10 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                 "dii_cash_net_cr": None,
                 "fii_scale": "1500",
                 "dii_scale": None,
+                "fii_index_futures_net_cr": None,
+                "fii_index_options_net_cr": None,
+                "fii_futures_scale": None,
+                "fii_options_scale": None,
             }],
             # Breadth panel (empty: below the participation floor, no context).
             [],

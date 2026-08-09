@@ -458,12 +458,14 @@ export class PostgresDashboardQueryRepository {
         FROM indicator_snapshots isnp
         JOIN indicator_definitions idf ON idf.id = isnp.indicator_definition_id
         WHERE isnp.candle_id = ANY($1::uuid[])
+          AND idf.algorithm_version = 'ta-v1'
       `, [candleIds]),
       this.database.query<QueryResultRow>(`
         SELECT pd.candle_id, pdf.pattern_code AS pattern_code, pdf.pattern_code AS display_name, pd.direction, pd.confidence
         FROM pattern_detections pd
         JOIN pattern_definitions pdf ON pdf.id = pd.pattern_definition_id
         WHERE pd.candle_id = ANY($1::uuid[])
+          AND pdf.algorithm_version = 'candlestick-v1'
       `, [candleIds]),
     ]);
 

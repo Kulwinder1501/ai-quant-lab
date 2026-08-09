@@ -1,16 +1,15 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import Link from "next/link";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
-import { apiV1Url, getResearchJson } from "../../research/api";
-import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
+import { getApiV1Url, getResearchJson } from "../../research/api";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
 import { MarketWatch } from "./market-watch";
 import { InstitutionalContextCards } from "./institutional-context-cards";
 import { VolatilityHeatmap } from "./volatility-heatmap";
 import { DashboardChart } from "./dashboard-chart";
+import { OptionChainMetrics } from "./option-chain-metrics";
 import { AiBrainStream } from "./ai-brain-stream";
 import { PerformanceScorecard } from "./performance-scorecard";
 export interface AiBrainThought {
@@ -51,21 +50,21 @@ export interface LivePriceData {
   displayName?: string;
   exchange?: string;
   livePrice: number;
-  change: number;
-  changePercent: number;
-  open: number;
-  high: number;
-  low: number;
-  volume: number;
+  change: number | null;
+  changePercent: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  volume: number | null;
   lastUpdated: string;
   indicators: {
-    rsi: number;
-    sma20: number;
+    rsi: number | null;
+    sma20: number | null;
     bollinger: {
       upper: number;
       middle: number;
       lower: number;
-    };
+    } | null;
   };
   latestPattern?: {
     name?: string;
@@ -85,6 +84,15 @@ interface AgentPerformanceResponse {
 
 interface LivePriceResponse {
   data?: LivePriceData;
+}
+
+function displayNumber(value: number | null, fractionDigits = 2): string {
+  return value === null
+    ? "—"
+    : value.toLocaleString("en-IN", {
+        minimumFractionDigits: fractionDigits,
+        maximumFractionDigits: fractionDigits,
+      });
 }
 
 export function LivePriceDashboard() {
@@ -138,7 +146,7 @@ export function LivePriceDashboard() {
 
   // Connect to Server-Sent Events (SSE) live ticking stream
   useEffect(() => {
-    const streamUrl = `${apiV1Url}/stream/live-agent?symbol=${selectedSymbol}&timeframe=${timeframe}`;
+    const streamUrl = `${getApiV1Url()}/stream/live-agent?symbol=${selectedSymbol}&timeframe=${timeframe}`;
     const es = new EventSource(streamUrl);
 
     es.onopen = () => {
@@ -211,12 +219,12 @@ export function LivePriceDashboard() {
                       {data.livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                     </span>
                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isPositive ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"}`}>
-                      {isPositive ? "+" : ""}{data.changePercent.toFixed(2)}%
+                      {data.changePercent === null ? "—" : `${isPositive ? "+" : ""}${data.changePercent.toFixed(2)}%`}
                     </span>
                     <div className="hidden lg:flex items-center gap-3 ml-3 border-l border-white/10 pl-3 text-xs text-slate-400 font-mono tracking-wider">
-                      <span>O: <span className="text-slate-200">{data.open.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
-                      <span>H: <span className="text-slate-200">{data.high.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
-                      <span>L: <span className="text-slate-200">{data.low.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+                      <span>O: <span className="text-slate-200">{displayNumber(data.open)}</span></span>
+                      <span>H: <span className="text-slate-200">{displayNumber(data.high)}</span></span>
+                      <span>L: <span className="text-slate-200">{displayNumber(data.low)}</span></span>
                       <span>C: <span className="text-slate-200">{data.livePrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
                     </div>
                   </div>
@@ -271,11 +279,11 @@ export function LivePriceDashboard() {
               <GlassPanel className="p-3 border-white/10 bg-slate-900/40">
                 <div className="grid grid-cols-12 gap-3">
                   <div className="col-span-12 xl:col-span-4 flex h-[720px] flex-col gap-3">
-                    <div className="h-[300px] shrink-0">
+                    <div className="flex-1 min-h-0">
                       <MarketWatch selectedSymbol={selectedSymbol} onSelect={selectSymbol} />
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto">
-                      <InstitutionalContextCards />
+                    <div className="shrink-0">
+                      <OptionChainMetrics symbol={selectedSymbol} />
                     </div>
                   </div>
 
@@ -289,6 +297,9 @@ export function LivePriceDashboard() {
                   </div>
                 </div>
               </GlassPanel>
+
+              {/* Institutional Context */}
+              <InstitutionalContextCards />
 
               {/* Card 2: AI Brain */}
               <GlassPanel className="p-3 border-white/10 bg-slate-900/40">

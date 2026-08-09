@@ -69,31 +69,31 @@ export function CommandPalette() {
               <PieChart className="h-4 w-4" /> Portfolio
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/market'); close(); }}
+              onSelect={() => { router.push('/dashboard'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Activity className="h-4 w-4" /> Market Data
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/strategies'); close(); }}
+              onSelect={() => { router.push('/strategy'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <FileCode className="h-4 w-4" /> Strategies
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/backtests'); close(); }}
+              onSelect={() => { router.push('/backtesting'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Terminal className="h-4 w-4" /> Backtests
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/analytics'); close(); }}
+              onSelect={() => { router.push('/ai-models'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Folder className="h-4 w-4" /> Analytics
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/logs'); close(); }}
+              onSelect={() => { router.push('/trade-history'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <BookOpen className="h-4 w-4" /> Trade Logs
@@ -105,13 +105,13 @@ export function CommandPalette() {
               <Settings className="h-4 w-4" /> Settings
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/account'); close(); }}
+              onSelect={() => { router.push('/paper-trading'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Users className="h-4 w-4" /> Account
             </Command.Item>
             <Command.Item 
-              onSelect={() => { router.push('/security'); close(); }}
+              onSelect={() => { router.push('/settings'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Shield className="h-4 w-4" /> Security

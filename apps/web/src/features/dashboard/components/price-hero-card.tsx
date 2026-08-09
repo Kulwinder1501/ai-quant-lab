@@ -6,7 +6,18 @@ interface PriceHeroCardProps {
   isPositive: boolean;
 }
 
-export function PriceHeroCard({ data, isPositive }: PriceHeroCardProps) {
+export function PriceHeroCard({ data: inputData, isPositive }: PriceHeroCardProps) {
+  // This legacy card is not mounted by the dashboard, but keep it null-safe so a
+  // future caller cannot render fabricated OHLC/volume fallbacks as real values.
+  const data = {
+    ...inputData,
+    change: inputData.change ?? 0,
+    changePercent: inputData.changePercent ?? 0,
+    open: inputData.open ?? inputData.livePrice,
+    high: inputData.high ?? inputData.livePrice,
+    low: inputData.low ?? inputData.livePrice,
+    volume: inputData.volume ?? 0,
+  };
   return (
     <GlassPanel className="relative overflow-hidden border-cyan-500/40 bg-gradient-to-br from-slate-900 via-slate-950 to-cyan-950/40 p-6 md:p-8 shadow-2xl">
       <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none"></div>

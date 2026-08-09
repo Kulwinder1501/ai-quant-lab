@@ -61,6 +61,8 @@ class InstitutionalFlowEvidence:
 
     fii_net_flow_ratio: float | None
     dii_net_flow_ratio: float | None
+    fii_futures_net_flow_ratio: float | None
+    fii_options_net_flow_ratio: float | None
     flow_date: date | None
 
 
@@ -399,8 +401,12 @@ _INSTITUTIONAL_FLOW_SQL = """
         published_at,
         fii_cash_net_cr,
         dii_cash_net_cr,
+        fii_index_futures_net_cr,
+        fii_index_options_net_cr,
         AVG(ABS(fii_cash_net_cr)) OVER scale_window AS fii_scale,
-        AVG(ABS(dii_cash_net_cr)) OVER scale_window AS dii_scale
+        AVG(ABS(dii_cash_net_cr)) OVER scale_window AS dii_scale,
+        AVG(ABS(fii_index_futures_net_cr)) OVER scale_window AS fii_futures_scale,
+        AVG(ABS(fii_index_options_net_cr)) OVER scale_window AS fii_options_scale
       FROM institutional_flows
       WHERE published_at <= %s
       WINDOW scale_window AS (
@@ -413,16 +419,24 @@ _INSTITUTIONAL_FLOW_SQL = """
       flow.date AS flow_date,
       flow.fii_cash_net_cr,
       flow.dii_cash_net_cr,
+      flow.fii_index_futures_net_cr,
+      flow.fii_index_options_net_cr,
       flow.fii_scale,
-      flow.dii_scale
+      flow.dii_scale,
+      flow.fii_futures_scale,
+      flow.fii_options_scale
     FROM candles AS target
     CROSS JOIN LATERAL (
       SELECT
         visible_flows.date,
         visible_flows.fii_cash_net_cr,
         visible_flows.dii_cash_net_cr,
+        visible_flows.fii_index_futures_net_cr,
+        visible_flows.fii_index_options_net_cr,
         visible_flows.fii_scale,
-        visible_flows.dii_scale
+        visible_flows.dii_scale,
+        visible_flows.fii_futures_scale,
+        visible_flows.fii_options_scale
       FROM visible_flows
       WHERE visible_flows.published_at <= target.close_time
         AND visible_flows.date < (target.close_time AT TIME ZONE 'Asia/Kolkata')::date
@@ -884,6 +898,8 @@ class PostgresMlRepository:
                     vix_observed_at=None if regime is None else regime[1],
                     fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
                     dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
+                    fii_futures_net_flow_ratio=None if flow is None else flow.fii_futures_net_flow_ratio,
+                    fii_options_net_flow_ratio=None if flow is None else flow.fii_options_net_flow_ratio,
                     institutional_flow_date=None if flow is None else flow.flow_date,
                     breadth=latest_breadth_at(breadth_contexts, close_time),
                     forward_path=forward_paths.get(candle_id, ()),
@@ -991,12 +1007,16 @@ class PostgresMlRepository:
 
             fii_ratio = ratio("fii_cash_net_cr", "fii_scale")
             dii_ratio = ratio("dii_cash_net_cr", "dii_scale")
-            if fii_ratio is None and dii_ratio is None:
+            fii_futures_ratio = ratio("fii_index_futures_net_cr", "fii_futures_scale")
+            fii_options_ratio = ratio("fii_index_options_net_cr", "fii_options_scale")
+            if fii_ratio is None and dii_ratio is None and fii_futures_ratio is None and fii_options_ratio is None:
                 continue
 
             flow_by_candle[candle_id] = InstitutionalFlowEvidence(
                 fii_net_flow_ratio=fii_ratio,
                 dii_net_flow_ratio=dii_ratio,
+                fii_futures_net_flow_ratio=fii_futures_ratio,
+                fii_options_net_flow_ratio=fii_options_ratio,
                 flow_date=row["flow_date"],
             )
         return flow_by_candle
@@ -1282,6 +1302,8 @@ class PostgresMlRepository:
             vix_observed_at=None if regime is None else regime[1],
             fii_net_flow_ratio=None if flow is None else flow.fii_net_flow_ratio,
             dii_net_flow_ratio=None if flow is None else flow.dii_net_flow_ratio,
+            fii_futures_net_flow_ratio=None if flow is None else flow.fii_futures_net_flow_ratio,
+            fii_options_net_flow_ratio=None if flow is None else flow.fii_options_net_flow_ratio,
             institutional_flow_date=None if flow is None else flow.flow_date,
             breadth=breadth,
         )

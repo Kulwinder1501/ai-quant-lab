@@ -11,7 +11,7 @@ function input(overrides: Partial<ProposeStraddleInput> = {}): ProposeStraddleIn
     underlyingSpot: 24_000,
     impliedVolatility: 0.14,
     expiryDate: EXPIRY,
-    expirySource: "CONFIRMED",
+    isListedExpiry: true,
     strikeStep: 50,
     lotSize: 75,
     lots: 1,
@@ -46,12 +46,14 @@ describe("proposeVolatilityStraddle", () => {
     if (!proposal.actionable) return;
     const { economics, legs } = proposal;
     const combined = legs[0].premium + legs[1].premium;
-    expect(economics.totalPremium).toBeCloseTo(combined, 8);
-    // At expiry the position pays only outside strike +/- combined premium.
-    expect(economics.breakevenUpper).toBeCloseTo(24_000 + combined, 8);
-    expect(economics.breakevenLower).toBeCloseTo(24_000 - combined, 8);
-    expect(economics.requiredMove).toBeCloseTo(combined, 8);
-    expect(economics.deployedCapital).toBeCloseTo(combined * 75, 8);
+    // totalPremium is snapped to the 0.05 exchange tick, so it is not the raw leg sum.
+    const rounded = Math.round((Math.round(combined / 0.05) * 0.05 + Number.EPSILON) * 100) / 100;
+    expect(economics.totalPremium).toBeCloseTo(rounded, 8);
+    // At expiry the position pays only outside strike +/- the rounded premium.
+    expect(economics.breakevenUpper).toBeCloseTo(24_000 + rounded, 8);
+    expect(economics.breakevenLower).toBeCloseTo(24_000 - rounded, 8);
+    expect(economics.requiredMove).toBeCloseTo(rounded, 8);
+    expect(economics.deployedCapital).toBeCloseTo(rounded * 75, 8);
   });
 
   it("scales deployed capital by lots without changing the breakeven", () => {
@@ -95,12 +97,12 @@ describe("proposeVolatilityStraddle", () => {
       expect(proposal).toMatchObject({ actionable: false, reason: "NOT_AN_EXPANSION_SIGNAL" });
     });
 
-    // Same rule resolveWeeklyExpiryWeekday enforces: a plausible expiry is
-    // indistinguishable from a correct one, and prices a contract that never traded.
-    it.each([["ASSUMED" as const], [null]])("refuses a %s expiry weekday", (expirySource) => {
-      const proposal = proposeVolatilityStraddle(input({ expirySource }));
+    // A plausible expiry is indistinguishable from a correct one, and prices a
+    // contract that never traded.
+    it("refuses an unlisted expiry", () => {
+      const proposal = proposeVolatilityStraddle(input({ isListedExpiry: false }));
 
-      expect(proposal).toMatchObject({ actionable: false, reason: "EXPIRY_WEEKDAY_UNCONFIRMED" });
+      expect(proposal).toMatchObject({ actionable: false, reason: "EXPIRY_UNLISTED" });
     });
 
     it.each([[null], [0], [-0.14]])("refuses implied volatility of %s", (impliedVolatility) => {
@@ -124,8 +126,8 @@ describe("proposeVolatilityStraddle", () => {
     // The case that matters most: the signal is *correct* and the trade still loses,
     // because a 25% wider range off a quiet base does not reach a breakeven priced off
     // an elevated IV.
-    it("refuses when the premium exceeds even the full predicted range", () => {
-      const proposal = proposeVolatilityStraddle(input({ trailingRange: 40, impliedVolatility: 0.30 }));
+    it("refuses when the premium exceeds the expected (half-range) directional move", () => {
+      const proposal = proposeVolatilityStraddle(input({ trailingRange: 1300, impliedVolatility: 0.30 }));
 
       expect(proposal).toMatchObject({ actionable: false, reason: "PREMIUM_EXCEEDS_PREDICTED_MOVE" });
       if (proposal.actionable) return;
@@ -156,19 +158,47 @@ describe("proposeVolatilityStraddle", () => {
   });
 
   it("uses the supplied strike step rather than inferring one from price", () => {
-    // NIFTY and BANKNIFTY both trade above 20,000, so a price threshold cannot separate
-    // them; a wrong step produces strikes the exchange does not list.
-    const banknifty = proposeVolatilityStraddle(input({
-      underlyingSymbol: "BANKNIFTY",
-      underlyingSpot: 57_240,
+    // A wrong step produces strikes the exchange does not list.
+    const nifty = proposeVolatilityStraddle(input({
+      underlyingSymbol: "NIFTY50",
+      underlyingSpot: 24_240,
       strikeStep: 100,
-      lotSize: 15,
-      trailingRange: 3_000,
+      lotSize: 75,
+      trailingRange: 1_000,
     }));
 
-    expect(banknifty.actionable).toBe(true);
-    if (!banknifty.actionable) return;
-    expect(banknifty.legs[0].strike % 100).toBe(0);
-    expect(banknifty.legs[0].strike).toBe(57_200);
+    expect(nifty.actionable).toBe(true);
+    if (!nifty.actionable) return;
+    expect(nifty.legs[0].strike % 100).toBe(0);
+    expect(nifty.legs[0].strike).toBe(24_200);
+  });
+
+  it("handles a monthly-tenor index with rounded total premium correctly", () => {
+    const monthlyExpiry = new Date("2026-08-25T10:00:00Z"); // Approx 2-4 weeks out
+    const nifty = proposeVolatilityStraddle(input({
+      underlyingSymbol: "NIFTY50",
+      underlyingSpot: 24_000,
+      impliedVolatility: 0.15,
+      strikeStep: 50,
+      lotSize: 75,
+      lots: 1,
+      // A monthly expiry prices in ~55 days of implied move; the predicted range has
+      // to clear that (not just a 5-day-equivalent range) or both economics gates
+      // correctly refuse it — this is the same tenor-mismatch this project's own
+      // straddle research already measured as dead for a short-horizon signal.
+      trailingRange: 2500,
+      expiryDate: monthlyExpiry,
+      isListedExpiry: true
+    }));
+
+    expect(nifty.actionable).toBe(true);
+    if (!nifty.actionable) return;
+    const { economics } = nifty;
+    // Ensure total premium is rounded to a 0.05 tick
+    expect(economics.totalPremium % 0.05).toBeCloseTo(0, 5);
+    // Breakeven must match strike +/- rounded premium exactly
+    const strike = nifty.legs[0].strike;
+    expect(economics.breakevenUpper).toBe(strike + economics.totalPremium);
+    expect(economics.breakevenLower).toBe(strike - economics.totalPremium);
   });
 });

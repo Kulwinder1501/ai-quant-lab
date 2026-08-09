@@ -7,7 +7,6 @@ import { getResearchJson, postResearchJson } from "../../research/api";
 import { isAbortError } from "../../../lib/errors";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { PageHeader } from "../../../components/layout/page-header";
 import { SentimentSummary } from "./sentiment-summary";
 import { NewsCard } from "./news-card";
 
