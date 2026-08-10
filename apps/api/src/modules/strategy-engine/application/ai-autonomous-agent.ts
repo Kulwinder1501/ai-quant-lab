@@ -9,6 +9,13 @@ import type { PostgresAiJournalRepository } from "../../../infrastructure/databa
 import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
 import { scoreDirectionalSetup } from "../domain/directional-setup-score.js";
 import { assessContractSize } from "../../paper-trading/domain/contract-specs.js";
+import { calculateExitFees } from "../../paper-trading/domain/brokerage-calculator.js";
+import { isOptionBuyerTrade } from "../../paper-trading/domain/option-mark-to-market.js";
+import { OpenOptionPositionFromIdea } from "../../paper-trading/application/open-option-position-from-idea.js";
+import { OpenPaperTrade } from "../../paper-trading/application/open-paper-trade.js";
+import { PrepareOptionEntry } from "../../paper-trading/application/prepare-option-entry.js";
+import { PostgresOptionChainRepository } from "../../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { PostgresRiskStateRepository } from "../../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
 import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
@@ -76,30 +83,18 @@ export const AGENT_ATR_STOP_MULTIPLE = 1.5;
 export const AGENT_REWARD_RISK_MULTIPLE = 2;
 
 /**
- * Transaction costs for an agent-executed position, using the same shape the backtest engine
- * charges (`feePerOrder` plus adverse slippage in basis points of turnover).
+ * Entry costs are **not** defined here.
  *
- * What this replaces: `entryFees: 40`, `entrySlippage: 15` and `exitFees: 20` written as three
- * unrelated literals at three call sites. None of them was derived from anything, and because
- * entry and exit disagreed, a round trip's modelled cost depended on which branch closed it --
- * the emergency circuit breaker charged 20 while the ordinary entry charged 40. A flat rupee
- * slippage is also the wrong shape: 15 rupees is a rounding error against a Rs 12 lakh
- * notional and material against a small one, so slippage scales with turnover here.
+ * There were briefly `AGENT_FEE_PER_ORDER_INR` and an `agentSlippageInr` helper in this file,
+ * modelled on the backtest engine's cash-order shape. They existed only because the agent was
+ * booking a position at the index's own level, which `brokerage-calculator.ts` cannot price --
+ * it charges option premium turnover at option STT rates. Now that entries go through
+ * `PrepareOptionEntry`, the position is a real option contract and the brokerage model applies
+ * directly, so the estimate is gone rather than kept alongside the measured figure.
  *
- * `brokerage-calculator.ts` is deliberately **not** used: it models option premium turnover
- * with option STT rates, and these positions are taken on the underlying's level. Applying a
- * premium fee schedule to an index notional would be a second wrong answer rather than a fix.
- *
- * Both numbers are order-of-magnitude estimates for a discount-broker cash order, and they are
- * exported so a backtest and the agent can be pointed at one figure instead of two.
+ * The sentiment circuit breaker's exit uses `calculateExitFees` on the observed premium for the
+ * same reason -- see `resolvePanicExitPremium`.
  */
-export const AGENT_FEE_PER_ORDER_INR = 20;
-export const AGENT_SLIPPAGE_BPS = 5;
-
-/** Adverse slippage in rupees for one side of a position, from turnover. */
-export function agentSlippageInr(fillPrice: number, quantity: number): number {
-  return Math.round((fillPrice * quantity * (AGENT_SLIPPAGE_BPS / 10_000)) * 100) / 100;
-}
 
 /**
  * How many thoughts the in-memory ring keeps.
@@ -179,9 +174,23 @@ export function institutionalFlowBias(
   };
 }
 
+/** The one chain method the breaker-exit path needs, so a test does not implement a repository. */
+export interface ContractQuoteReader {
+  latestContractQuote(input: {
+    underlyingSymbol: string;
+    expiryDate: Date;
+    strikePrice: number;
+    optionType: "CE" | "PE";
+  }): Promise<{ mid: number; bid: number | null; ask: number | null } | null>;
+}
+
 export class AiAutonomousAgent {
   private readonly thoughts: AiBrainThought[] = [];
   private readonly evaluateTrades: EvaluateOpenPaperTrades;
+  /** Every entry goes through here, so the option gates and the risk engine cannot be skipped. */
+  private readonly openOptionPosition: OpenOptionPositionFromIdea;
+  /** Read-only, for pricing a breaker exit against the observed book. */
+  private readonly optionChainRepository: ContractQuoteReader;
   private lastTradeAttempt: Map<string, number> = new Map();
 
   constructor(
@@ -194,16 +203,77 @@ export class AiAutonomousAgent {
     private readonly newsRepo: NewsRepository,
     private readonly aiJournalRepo: PostgresAiJournalRepository,
     private readonly checkMacroEvents?: CheckMacroEventsService,
+    /**
+     * Seams for tests, both defaulted to the real thing.
+     *
+     * Grouped into one optional object rather than trailing positional parameters: this
+     * constructor already takes eight, and the two collaborators below are the ones that place and
+     * price real positions. Passing nothing gets the gated implementations, so a caller cannot
+     * weaken the entry path by getting an argument position wrong.
+     */
+    overrides?: {
+      openOptionPosition?: OpenOptionPositionFromIdea;
+      optionChainRepository?: ContractQuoteReader;
+    },
   ) {
     this.evaluateTrades = new EvaluateOpenPaperTrades(
       paperTradeRepo,
       candleRepo,
       new PostgresIndiaVixImpliedVolatilitySource(database),
     );
+    this.optionChainRepository = overrides?.optionChainRepository
+      ?? new PostgresOptionChainRepository(database);
+    this.openOptionPosition = overrides?.openOptionPosition ?? new OpenOptionPositionFromIdea(
+      new PrepareOptionEntry(database, new PostgresOptionChainRepository(database)),
+      new OpenPaperTrade(paperTradeRepo),
+      new PostgresRiskStateRepository(database),
+    );
   }
 
   public getThoughts(limit = 15): AiBrainThought[] {
     return this.thoughts.slice(-limit).reverse();
+  }
+
+  /**
+   * The premium a panic liquidation would actually receive, or null if it cannot be observed.
+   *
+   * The bid is preferred over the mid: this position is being **sold**, in a hurry, and the bid
+   * is what a seller crossing the spread gets. Marking a forced exit at the mid reports a better
+   * fill than a panic would ever achieve, which flatters exactly the trades the breaker exists to
+   * cut. Falls back to the mid when the book publishes no bid, and records which was used.
+   *
+   * Returns null rather than substituting a model price. A Black-Scholes mark and the book's bid
+   * differed by 179 points on a live BANKNIFTY 57700 CE in this project's own measurements, so a
+   * model exit is a wrong realized P&L, not an approximation of a right one.
+   */
+  private async resolvePanicExitPremium(
+    trade: PaperTrade,
+  ): Promise<{ premium: number; source: "OBSERVED_BID" | "OBSERVED_MID" } | null> {
+    if (!isOptionBuyerTrade(trade)) {
+      // A non-option position cannot arise from this agent any more, and closing one at the
+      // underlying's level is precisely the bug being removed, so it is refused rather than
+      // guessed at. The ordinary stop/target evaluation still manages such a position.
+      return null;
+    }
+    try {
+      const quote = await this.optionChainRepository.latestContractQuote({
+        underlyingSymbol: String(trade.underlyingSymbol).toUpperCase(),
+        expiryDate: trade.optionExpiry as Date,
+        strikePrice: Number(trade.optionStrike),
+        optionType: trade.optionType as "CE" | "PE",
+      });
+      if (quote === null) return null;
+      if (quote.bid !== null && Number.isFinite(quote.bid) && quote.bid > 0) {
+        return { premium: quote.bid, source: "OBSERVED_BID" };
+      }
+      if (Number.isFinite(quote.mid) && quote.mid > 0) {
+        return { premium: quote.mid, source: "OBSERVED_MID" };
+      }
+      return null;
+    } catch {
+      // A chain lookup failure must not become a fabricated exit.
+      return null;
+    }
   }
 
   /**
@@ -424,20 +494,52 @@ export class AiAutonomousAgent {
     const existingTrades = openTrades.filter((t) => t.instrumentId === instId);
 
     // EMERGENCY CIRCUIT BREAKER RULE 3: Panic Emergency Exit on <= -0.7
+    //
+    // Every position here is an option, so the exit has to be priced in **premium** space. This
+    // used to close at `exitPrice: livePrice` -- the underlying's index level, around 24,590
+    // against a premium of maybe 200 -- which books a fabricated ~24,000-point gain per unit on
+    // what is supposed to be an emergency liquidation. It is the same defect as the model mark
+    // that once reported +Rs 2,032 on a position down Rs 651, and it was reachable for any option
+    // position on the ticked instrument, including ones the bot opened.
+    //
+    // A contract with no observed quote is **not** closed. Refusing is the conservative action:
+    // an unpriceable position stays open and says so, where a guessed exit writes a wrong
+    // realized P&L into the ledger permanently.
     if (newsSentiment <= -0.7 && existingTrades.length > 0) {
       for (const t of existingTrades) {
+        const exit = await this.resolvePanicExitPremium(t);
+        if (exit === null) {
+          this.recordThought({
+            id: `th-${Date.now()}-panic-unpriced`,
+            timestamp: ts,
+            symbol,
+            action: "MONITORING",
+            confidence: 99,
+            message: `🚨 CIRCUIT BREAKER RULE 3 wanted to liquidate trade #${t.id.substring(0, 8)} on `
+              + `extreme negative sentiment (${newsSentiment.toFixed(2)}), but no observed quote `
+              + "exists for its contract. Left open rather than closed at a guessed price.",
+            details: { tradeId: t.id, reason: "NO_OBSERVED_CONTRACT_QUOTE", newsSentiment },
+          });
+          continue;
+        }
         await this.paperTradeRepo.close({
           paperTradeId: t.id,
-          exitPrice: livePrice,
+          exitPrice: exit.premium,
           exitReason: "MANUAL",
           closedAt: new Date(),
-          exitFees: AGENT_FEE_PER_ORDER_INR,
-          // A panic liquidation crosses the spread, so it is charged double the ordinary
-          // adverse slippage rather than the unrelated 0.1% flat rate that was here -- 0.1%
-          // was 20x the entry assumption on the same position, which made a breaker exit look
-          // like a market-impact event instead of an urgent one.
-          exitSlippage: agentSlippageInr(livePrice, t.quantity) * 2,
-          details: { reason: "EMERGENCY_PANIC_CIRCUIT_BREAKER", newsSentiment },
+          // The brokerage model, on the premium that is actually being sold. Charging a flat
+          // constant here is what made a breaker exit cost a different amount from every other
+          // exit on the same contract.
+          exitFees: Number(calculateExitFees(exit.premium, t.quantity).total.toFixed(2)),
+          // Zero: `exit.premium` is already the bid where one was observed, so the spread has
+          // been crossed. A slippage estimate on top charges for crossing it twice.
+          exitSlippage: 0,
+          details: {
+            reason: "EMERGENCY_PANIC_CIRCUIT_BREAKER",
+            newsSentiment,
+            exitPriceSource: exit.source,
+            underlyingAtExit: livePrice,
+          },
         });
         this.recordThought({
           id: `th-${Date.now()}-panic`,
@@ -445,8 +547,16 @@ export class AiAutonomousAgent {
           symbol,
           action: "EXECUTING",
           confidence: 99,
-          message: `🚨 EMERGENCY CIRCUIT BREAKER RULE 3 TRIGGERED: Extreme negative news sentiment (${newsSentiment.toFixed(2)}). Liquidating open position at market price ₹${livePrice.toFixed(2)}!`,
-          details: { tradeId: t.id, exitReason: "EMERGENCY_PANIC", newsSentiment },
+          message: `🚨 EMERGENCY CIRCUIT BREAKER RULE 3 TRIGGERED: Extreme negative news sentiment `
+            + `(${newsSentiment.toFixed(2)}). Liquidating trade #${t.id.substring(0, 8)} at premium `
+            + `₹${exit.premium.toFixed(2)} (${exit.source}).`,
+          details: {
+            tradeId: t.id,
+            exitReason: "EMERGENCY_PANIC",
+            newsSentiment,
+            exitPremium: exit.premium,
+            exitPriceSource: exit.source,
+          },
         });
         await this.generateSelfReflection(t.id, symbol);
       }
@@ -626,29 +736,14 @@ export class AiAutonomousAgent {
       const stopLoss = side === "LONG" ? Number((livePrice - slDist).toFixed(2)) : Number((livePrice + slDist).toFixed(2));
       const targetPrice = side === "LONG" ? Number((livePrice + tpDist).toFixed(2)) : Number((livePrice - tpDist).toFixed(2));
 
-      // One lot at the instrument's configured size. A missing or non-positive lot size is a
-      // refusal rather than a fallback: guessing it is what the hardcoded literal did, and the
-      // plausibility band in `contract-specs.ts` cannot help a number that never came from the
-      // row it is meant to check.
-      const qty = Number.isInteger(lotSize) && lotSize > 0 ? lotSize : 0;
-      if (qty === 0) {
-        this.recordThought({
-          id: `th-${Date.now()}-nolot`,
-          timestamp: new Date().toISOString(),
-          symbol,
-          action: "MONITORING",
-          confidence,
-          message: `Setup qualified at ${confidence}% confidence, but ${symbol} has no usable lot_size configured. `
-            + "Skipping execution rather than guessing a position size.",
-          details: { symbol, configuredLotSize: lotSize },
-        });
-        return;
-      }
-      const assessment = assessContractSize(qty, livePrice);
-      if (assessment.verdict !== "PLAUSIBLE") {
-        // Surfaced, not blocked: the notional band is a staleness heuristic, not a rule, and
-        // the position is still one exchange lot. Recorded so a stale row is visible in the
-        // journal instead of only in the returns.
+      // Sizing, strike selection and fees all belong to the entry gate now, so nothing is
+      // derived here. `lotSize` is read only to surface a stale configuration in the journal --
+      // `PrepareOptionEntry` uses the same column through the tested `lotsToQuantity` path.
+      const assessment = Number.isInteger(lotSize) && lotSize > 0
+        ? assessContractSize(lotSize, livePrice)
+        : null;
+      if (assessment !== null && assessment.verdict !== "PLAUSIBLE") {
+        // Surfaced, not blocked: the notional band is a staleness heuristic, not a rule.
         reasoning.push(`Contract-size check: ${assessment.explanation}`);
       }
 
@@ -671,8 +766,8 @@ export class AiAutonomousAgent {
             atrValue,
             atrStopMultiple: AGENT_ATR_STOP_MULTIPLE,
             rewardRiskMultiple: AGENT_REWARD_RISK_MULTIPLE,
-            lotSize: qty,
-            contractSizeVerdict: assessment.verdict,
+            configuredLotSize: lotSize,
+            contractSizeVerdict: assessment?.verdict ?? "UNKNOWN",
             // Recorded so a review can ask whether the losing thesis was nearly as strong.
             longConfidence: setupScore.longConfidence,
             shortConfidence: setupScore.shortConfidence,
@@ -681,25 +776,75 @@ export class AiAutonomousAgent {
           evidenceItems: [],
         });
 
-        const trade = await this.paperTradeRepo.openFromTradeIdea({
+        /**
+         * The idea becomes an **option** position, through the shared gated path.
+         *
+         * This used to be `openFromTradeIdea({ quantity: lotSize, fillPrice: livePrice })`, which
+         * booked a cash-style position at the index's own level -- 75 units of NIFTY50 at ~24,590.
+         * That instrument cannot be bought, so every P&L it produced was measured against a
+         * contract that does not exist. `side` here is the *thesis*; the entry gate turns LONG
+         * into a call and SHORT into a put, and the position is long the option either way.
+         *
+         * `OpenOptionPositionFromIdea` also applies `evaluateRisk`, which the agent previously
+         * had no contact with at all -- so the one component trading unattended was the one with
+         * no concurrent-position, daily-loss or drawdown brake.
+         */
+        const placement = await this.openOptionPosition.execute({
           accountId: account.id,
+          instrumentId: instId,
           tradeIdeaId: proposal.id,
-          quantity: qty,
-          fillPrice: livePrice,
-          openedAt: new Date(),
-          entryFees: AGENT_FEE_PER_ORDER_INR,
-          entrySlippage: agentSlippageInr(livePrice, qty),
-          notes: `AI Autonomous Execution (${confidence}% confidence). Confluence: ${reasoning[0]}`,
+          lots: 1,
+          now: new Date(),
+          notes: `AI Autonomous Execution (${confidence}% ${side} confidence). Confluence: ${reasoning[0]}`,
         });
 
+        if (!placement.opened) {
+          // A refusal is reported, never silently dropped: "the gate refused" and "no setup
+          // qualified" are different observations and must not read the same in the journal.
+          this.recordThought({
+            id: `th-${Date.now()}-refused`,
+            timestamp: new Date().toISOString(),
+            symbol,
+            action: "MONITORING",
+            confidence,
+            message: `Setup qualified at ${confidence}% (${side}) but the entry gate refused: `
+              + `${placement.reason}. ${placement.explanation}`,
+            details: {
+              tradeIdeaId: proposal.id,
+              reason: placement.reason,
+              ...(placement.reasons ? { reasons: placement.reasons } : {}),
+              ...(placement.unchecked ? { unchecked: placement.unchecked } : {}),
+            },
+          });
+          return;
+        }
+
+        const contract = `${placement.contract.underlyingSymbol} `
+          + `${placement.contract.optionExpiry.toISOString().slice(0, 10)} `
+          + `${placement.contract.optionStrike} ${placement.contract.optionType}`;
         this.recordThought({
           id: `th-${Date.now()}-exec`,
           timestamp: new Date().toISOString(),
           symbol,
           action: "EXECUTING",
           confidence,
-          message: `⚡ AUTO-EXECUTE ${side} ${qty} qty @ ₹${livePrice.toFixed(2)} (Trade #${trade.id.substring(0, 8)}). SL: ₹${stopLoss.toFixed(2)} | TP: ₹${targetPrice.toFixed(2)}.`,
-          details: { tradeId: trade.id, stopLoss, targetPrice, quantity: qty },
+          // Premiums, not index levels. The old message quoted the underlying's price as though
+          // it were the fill.
+          message: `⚡ AUTO-EXECUTE ${side} via ${contract}: ${placement.quantity} @ premium `
+            + `₹${placement.fillPremium.toFixed(2)} (Trade #${placement.trade.id.substring(0, 8)}). `
+            + `SL: ₹${placement.stopPremium.toFixed(2)} | TP: ₹${placement.targetPremium.toFixed(2)}.`,
+          details: {
+            tradeId: placement.trade.id,
+            thesis: side,
+            contract,
+            fillPremium: placement.fillPremium,
+            stopPremium: placement.stopPremium,
+            targetPremium: placement.targetPremium,
+            quantity: placement.quantity,
+            entryFees: placement.entryFees,
+            underlyingEntry: livePrice,
+            unchecked: placement.unchecked,
+          },
         });
       } catch (err) {
         this.recordThought({

@@ -30,6 +30,7 @@
     "pipeline:eod": "npm run pipeline:eod --workspace @ai-quant-lab/api",
     "trading:paper:bot": "npm run trading:paper:bot --workspace @ai-quant-lab/api --",
     "agent:tick": "npm run agent:tick --workspace @ai-quant-lab/api --",
+    "measure:directional-scorer": "npm run measure:directional-scorer --workspace @ai-quant-lab/api --",
     "paper:trades:evaluate": "npm run paper:trades:evaluate --workspace @ai-quant-lab/api --",
     "paper:trades:close": "npm run paper:trades:close --workspace @ai-quant-lab/api --",
     "paper:accounts:summary": "npm run paper:accounts:summary --workspace @ai-quant-lab/api --",

@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_ATR_STOP_MULTIPLE,
-  AGENT_FEE_PER_ORDER_INR,
-  AGENT_SLIPPAGE_BPS,
   AiAutonomousAgent,
-  agentSlippageInr,
   MAX_RETAINED_THOUGHTS,
   PRODUCTION_INDICATOR_VERSION,
 } from "./ai-autonomous-agent.js";
+import type { OpenOptionPositionFromIdea } from "../../paper-trading/application/open-option-position-from-idea.js";
 
 /**
  * Covers `tick`'s execution path, which had no tests at all despite being the only code in
@@ -72,19 +70,56 @@ const BULLISH_CONTEXT = {
   ],
 } as const;
 
+/** A CE contract standing in for whatever the entry gate would have picked. */
+const PLACED_CONTRACT = {
+  underlyingSymbol: "NIFTY50",
+  optionStrike: 24_600,
+  optionExpiry: new Date("2026-08-27T10:00:00.000Z"),
+  optionType: "CE" as const,
+};
+
 function buildAgent(overrides: {
   database: FakePool;
   context?: unknown;
   openTrades?: unknown[];
   newsScore?: number;
   articleCount?: number;
+  /** Set to refuse the placement, so the refusal-reporting path can be driven. */
+  placementRefusal?: { reason: string; explanation: string };
+  /** The observed contract quote the breaker exit prices against. `null` means none exists. */
+  chainQuote?: { mid: number; bid: number | null; ask: number | null } | null;
 }) {
   const openFromTradeIdea = vi.fn(async (input: Record<string, unknown>) => ({
     id: "trade-1", ...input,
   }));
   const saveProposal = vi.fn(async (input: Record<string, unknown>) => ({ id: "idea-1", ...input }));
-  const close = vi.fn(async () => ({ id: "trade-1" }));
+  const close = vi.fn(async (input: Record<string, unknown>) => ({ id: "trade-1", ...input }));
   const updateStopLoss = vi.fn(async (_id: string, _newStopLoss: number, _reason?: string) => undefined);
+  const latestContractQuote = vi.fn(async () => overrides.chainQuote ?? null);
+
+  /**
+   * Stands in for `OpenOptionPositionFromIdea`.
+   *
+   * Injected rather than stubbing `openFromTradeIdea`, because the point of the change under test
+   * is that the agent no longer calls the repository directly -- it hands the idea to the gated
+   * option path. A test that stubbed the repository would keep passing if that regressed.
+   */
+  const placeOption = vi.fn(async (input: Record<string, unknown>) => {
+    if (overrides.placementRefusal) {
+      return { opened: false as const, ...overrides.placementRefusal };
+    }
+    return {
+      opened: true as const,
+      trade: { id: "trade-1", ...input },
+      contract: PLACED_CONTRACT,
+      fillPremium: 212.5,
+      stopPremium: 150.25,
+      targetPremium: 337,
+      quantity: 75,
+      entryFees: 23.6,
+      unchecked: [],
+    };
+  });
 
   const agent = new AiAutonomousAgent(
     overrides.database,
@@ -103,63 +138,73 @@ function buildAgent(overrides: {
       })),
     } as never,
     { getRecentReflections: vi.fn(async () => []), saveReflection: vi.fn() } as never,
+    undefined,
+    {
+      openOptionPosition: { execute: placeOption } as unknown as OpenOptionPositionFromIdea,
+      optionChainRepository: { latestContractQuote },
+    },
   );
-  return { agent, openFromTradeIdea, saveProposal, close, updateStopLoss };
+  return { agent, openFromTradeIdea, saveProposal, close, updateStopLoss, placeOption, latestContractQuote };
 }
-
-describe("agentSlippageInr", () => {
-  it("scales with turnover rather than being a flat rupee figure", () => {
-    // The literal it replaces was 15 rupees regardless of position value.
-    expect(agentSlippageInr(24_000, 75)).toBeCloseTo(24_000 * 75 * (AGENT_SLIPPAGE_BPS / 10_000), 2);
-    expect(agentSlippageInr(100, 1)).toBeLessThan(agentSlippageInr(24_000, 75));
-  });
-});
 
 describe("AiAutonomousAgent.tick", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("sizes the position from instruments.lot_size, not a hardcoded 50/25", async () => {
-    // 75 is deliberately neither of the literals the agent used to choose between.
+  it("opens through the option entry gate, never at the index level", async () => {
+    // The defect this replaces: `openFromTradeIdea({ fillPrice: livePrice })` booked 75 units of
+    // NIFTY50 spot at ~24,050 -- an instrument that cannot be bought.
     const database = fakePool({
       instruments: [{ id: "inst-1", lot_size: 75 }],
       strategyVersions: [{ id: "sv-1" }],
     });
-    const { agent, openFromTradeIdea } = buildAgent({ database });
+    const { agent, openFromTradeIdea, placeOption } = buildAgent({ database });
 
     await agent.tick("NIFTY50", "15m", 24_050);
 
-    expect(openFromTradeIdea).toHaveBeenCalledTimes(1);
-    expect(openFromTradeIdea.mock.calls[0]![0]).toMatchObject({ quantity: 75 });
-  });
-
-  it("charges the declared fee and turnover-scaled slippage on entry", async () => {
-    const database = fakePool({
-      instruments: [{ id: "inst-1", lot_size: 75 }],
-      strategyVersions: [{ id: "sv-1" }],
+    expect(placeOption).toHaveBeenCalledTimes(1);
+    expect(placeOption.mock.calls[0]![0]).toMatchObject({
+      accountId: "acct-1",
+      instrumentId: "inst-1",
+      tradeIdeaId: "idea-1",
+      lots: 1,
     });
-    const { agent, openFromTradeIdea } = buildAgent({ database });
-
-    await agent.tick("NIFTY50", "15m", 24_050);
-
-    const booked = openFromTradeIdea.mock.calls[0]![0] as Record<string, number>;
-    expect(booked.entryFees).toBe(AGENT_FEE_PER_ORDER_INR);
-    expect(booked.entrySlippage).toBeCloseTo(agentSlippageInr(24_050, 75), 2);
-    // The literals that used to be here.
-    expect(booked.entryFees).not.toBe(40);
-    expect(booked.entrySlippage).not.toBe(15);
-  });
-
-  it("refuses to execute when lot_size is missing rather than guessing one", async () => {
-    const database = fakePool({
-      instruments: [{ id: "inst-1", lot_size: 0 }],
-      strategyVersions: [{ id: "sv-1" }],
-    });
-    const { agent, openFromTradeIdea } = buildAgent({ database });
-
-    await agent.tick("NIFTY50", "15m", 24_050);
-
+    // And it must not reach the repository directly, which is what skipped every gate.
     expect(openFromTradeIdea).not.toHaveBeenCalled();
-    expect(agent.getThoughts(5).some((t) => /no usable lot_size/i.test(t.message))).toBe(true);
+  });
+
+  it("records the premium it filled at, not the underlying's level", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent } = buildAgent({ database });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    const executed = agent.getThoughts(10).find((t) => t.action === "EXECUTING")!;
+    expect(executed.details.fillPremium).toBe(212.5);
+    expect(executed.details.underlyingEntry).toBe(24_050);
+    expect(executed.details.contract).toContain("24600 CE");
+    // The old message quoted the index level as though it were the fill.
+    expect(executed.message).not.toContain("24050");
+  });
+
+  it("reports a refused placement instead of dropping it silently", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent } = buildAgent({
+      database,
+      placementRefusal: { reason: "EXPIRY_NOT_LISTED", explanation: "No listed expiry far enough out." },
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    const refusal = agent.getThoughts(10).find((t) => t.details.reason === "EXPIRY_NOT_LISTED");
+    expect(refusal).toBeDefined();
+    // "the gate refused" and "no setup qualified" must not read the same.
+    expect(refusal!.message).toMatch(/entry gate refused/i);
   });
 
   it("brackets the stop from the production ATR snapshot", async () => {
@@ -198,17 +243,19 @@ describe("AiAutonomousAgent.tick", () => {
       instruments: [{ id: "inst-1", lot_size: 75 }],
       strategyVersions: [{ id: "sv-1" }],
     });
-    const { agent, saveProposal, openFromTradeIdea } = buildAgent({
+    const { agent, saveProposal, placeOption } = buildAgent({
       database, context: bearishContext, newsScore: -0.3,
     });
 
     await agent.tick("NIFTY50", "15m", 24_050);
 
-    expect(openFromTradeIdea).toHaveBeenCalledTimes(1);
+    expect(placeOption).toHaveBeenCalledTimes(1);
     const proposal = saveProposal.mock.calls[0]![0] as Record<string, number | string>;
+    // The idea carries the *thesis*. `PrepareOptionEntry` turns SHORT into a PE and the position
+    // is long that put, which is how an option buyer expresses a bearish view.
     expect(proposal.side).toBe("SHORT");
-    // A short's stop sits *above* the entry and its target below -- the geometry has to follow
-    // the side, or the bracket is inverted the moment the side is no longer hardcoded.
+    // A short's underlying-space stop sits *above* the entry and its target below -- the geometry
+    // has to follow the side, or the bracket inverts the moment the side is no longer hardcoded.
     expect(proposal.stopLoss).toBeGreaterThan(24_050);
     expect(proposal.targetPrice).toBeLessThan(24_050);
   });
@@ -250,6 +297,63 @@ describe("AiAutonomousAgent.tick", () => {
     // Tighter for a short means closer from above, and never through the price.
     expect(newStop).toBeLessThan(24_500);
     expect(newStop).toBeGreaterThan(24_050);
+  });
+
+  it("liquidates the panic breaker at the observed premium, not the underlying's level", async () => {
+    // The position is an option. Closing it at `livePrice` (~24,050) against a premium near 200
+    // books a fabricated ~24,000-point gain per unit on an emergency liquidation.
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const optionTrade = {
+      id: "trade-open", instrumentId: "inst-1", side: "LONG", quantity: 75, stopLoss: 150,
+      underlyingSymbol: "NIFTY50", optionStrike: 24_600, optionType: "CE",
+      optionExpiry: new Date("2026-08-27T10:00:00.000Z"),
+    };
+    const { agent, close } = buildAgent({
+      database,
+      newsScore: -0.85, // Past the -0.7 panic threshold.
+      openTrades: [optionTrade],
+      chainQuote: { mid: 205, bid: 203.5, ask: 206.5 },
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(close).toHaveBeenCalledTimes(1);
+    const closed = close.mock.calls[0]![0] as Record<string, unknown>;
+    // The bid, because a panic exit is a seller crossing the spread.
+    expect(closed.exitPrice).toBe(203.5);
+    expect(closed.exitPrice).not.toBe(24_050);
+    expect((closed.details as Record<string, unknown>).exitPriceSource).toBe("OBSERVED_BID");
+    // Fees from the brokerage model on the premium, not a flat constant.
+    expect(Number(closed.exitFees)).toBeGreaterThan(0);
+    expect(Number(closed.exitFees)).toBeLessThan(500);
+  });
+
+  it("leaves an unpriceable position open rather than closing it at a guess", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent, close } = buildAgent({
+      database,
+      newsScore: -0.85,
+      openTrades: [{
+        id: "trade-open", instrumentId: "inst-1", side: "LONG", quantity: 75, stopLoss: 150,
+        underlyingSymbol: "NIFTY50", optionStrike: 24_600, optionType: "CE",
+        optionExpiry: new Date("2026-08-27T10:00:00.000Z"),
+      }],
+      chainQuote: null, // No observed quote for the contract.
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(close).not.toHaveBeenCalled();
+    const blocked = agent.getThoughts(10).find(
+      (t) => t.details.reason === "NO_OBSERVED_CONTRACT_QUOTE",
+    );
+    expect(blocked).toBeDefined();
   });
 
   it("bounds the in-memory thought log instead of growing it forever", async () => {

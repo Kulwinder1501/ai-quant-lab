@@ -16,22 +16,48 @@ import type { TradeSide } from "./strategy.js";
  * same evidence. The side with the stronger score wins, and the number the winner carries is the
  * number that was computed for the direction actually traded.
  *
- * ## What is and is not being claimed
+ * ## Measured: this score does not select, on either side
  *
- * The mirrored terms are structural, not empirical. "Price above the upper band favours a short
- * exactly as far as price below the lower band favours a long" is a symmetry assumption about
- * these heuristics -- it is not a measured edge, and this project's own measurements are blunt
- * that directional prediction has not produced one. Two consequences are deliberate:
+ * `npm run measure:directional-scorer` replays it over stored history, applies the agent's own
+ * ATR bracket, and resolves each one with the paper-trading exit rules. Measured on NIFTY50 15m,
+ * 4,993 scored bars, news/flow/macro held out (2026-08-10):
+ *
+ * | side  | gated hit rate | unconditional | break-even | gated expectancy |
+ * |-------|----------------|---------------|------------|------------------|
+ * | LONG  | 0.3008 (n=256) | 0.3293        | 0.3333     | -0.10R           |
+ * | SHORT | 0.3829 (n=175) | 0.3895        | 0.3333     | +0.14R           |
+ *
+ * The comparison that matters is gated against **unconditional** -- taking that side on every bar
+ * regardless of score. Gating is *worse than not gating on both sides*. So the score is not
+ * selecting setups; it is selecting a subset that performs slightly below the population it was
+ * drawn from. The short side's positive expectancy is not the mirror working: the unconditional
+ * column captures all of it and more, which makes it a property of this bracket on this
+ * instrument over this window, not of the scoring.
+ *
+ * Two limits on that reading, both real:
+ *
+ * - With news and flow held out the ceiling is 75 (50 + 15 RSI + 10 envelope), so **clearing 80
+ *   requires a pattern**. The gated population is therefore "bars carrying a >=0.7 pattern", not
+ *   a general high-confidence population. Live, news and flow can add 28, so the gate is
+ *   reachable without one.
+ * - It could not be replicated on BANKNIFTY, which has **zero** 15m pattern detections stored, so
+ *   its gated sample was n=1. That is a data-coverage gap, not a second data point.
+ *
+ * ## What the code therefore claims
+ *
+ * That the two sides are *coherent*, not that either is profitable. The value of this module is
+ * that the number a position is opened on is the number computed for the direction traded --
+ * which was not true before, and was the actual defect. Whether to trade on it at all is a
+ * separate decision the measurement above should inform.
+ *
+ * Structural properties, deliberately preserved:
  *
  * - Bands and weights are unchanged from the long-only version, and no global reweighting is
  *   applied, so **a long scores exactly what it scored before**. Mirroring adds the short side;
- *   it does not retune the long side. The scorer's own tests pin this.
+ *   it does not retune the long side. A test pins the arithmetic.
  * - The one asymmetry, adverse institutional flow counting 1.5x, is not reimplemented here. It
  *   lives in `institutionalFlowBias`, which is already tested, and the caller supplies that
- *   function's verdict for each thesis -- see `DirectionalSetupInput.flowBias`.
- *
- * Nothing here should be read as evidence that shorting works. It restores the capability with a
- * coherent score behind it; whether the score has edge is a question for the trade journal.
+ *   function's verdict per thesis -- see `DirectionalSetupInput.flowBias`.
  */
 
 /** Never proposes below this, so a fully contradicted setup still reports a floor rather than 0. */

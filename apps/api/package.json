@@ -22,6 +22,7 @@
     "pipeline:eod": "tsx src/interfaces/cli/run-eod-pipeline.ts",
     "trading:paper:bot": "tsx src/interfaces/cli/run-paper-trading-bot.ts",
     "agent:tick": "tsx src/interfaces/cli/run-agent-tick.ts",
+    "measure:directional-scorer": "tsx src/interfaces/cli/measure-directional-scorer.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
     "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",
     "analysis:generate-trade-ideas": "tsx src/interfaces/cli/generate-trade-ideas.ts",

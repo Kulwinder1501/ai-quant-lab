@@ -89,12 +89,38 @@ agent's most confident shorts were its most confidently bullish reads. Each thes
 from the same evidence and the winner carries its own number; both are recorded on the proposal so
 a near-tie is distinguishable from conviction.
 
-The mirrored terms are a symmetry assumption, not a measured edge. The long side's bands and
-weights are unchanged (a test pins this), and the one asymmetry — adverse institutional flow
-counting 1.5× — is applied to both sides by evaluating the existing `institutionalFlowBias` on
-negated flows, so neither side gets the milder weighting systematically. Whether the short side
-has edge is a question for the trade journal, and this project's own measurements are blunt that
-directional prediction has not produced one.
+Positions are opened through `OpenOptionPositionFromIdea`, the same gated path the paper-trading
+bot uses: `PrepareOptionEntry` picks a listed contract and fills at the observed ask (LONG → call,
+SHORT → put), then `evaluateRisk` applies the concurrent-position, daily-loss and drawdown limits.
+The agent previously called the trade repository directly with `fillPrice: livePrice`, so it booked
+a cash-style position **at the index level** — an instrument that cannot be bought — with no risk
+check and no way to cost it honestly. The sentiment circuit breaker's exit is priced from the
+observed contract bid for the same reason, and refuses to close a position it cannot price rather
+than closing it at the underlying's level.
+
+### The scorer has been measured, and it does not select
+
+`npm run measure:directional-scorer -- --instrument=NIFTY50 --timeframe=15m` replays the scorer
+over stored history, applies the agent's ATR bracket, and resolves each one with the paper-trading
+exit rules (gap fills, conservative same-candle stop-first). On NIFTY50 15m over 4,993 scored bars
+with news/flow/macro held out:
+
+| side | gated (score ≥ 80) | unconditional | break-even | gated expectancy |
+|---|---|---|---|---|
+| LONG | 0.3008 (n=256) | 0.3293 | 0.3333 | −0.10R |
+| SHORT | 0.3829 (n=175) | 0.3895 | 0.3333 | +0.14R |
+
+**Gating is worse than not gating, on both sides.** The score selects a subset that performs
+slightly below the population it was drawn from. The short side's positive expectancy is not the
+mirror working — the unconditional column captures all of it and more, so it is a property of this
+bracket on this instrument over this window. Two limits: with news and flow held out the ceiling is
+75, so clearing 80 requires a pattern (the gated population is "bars carrying a ≥0.7 pattern"), and
+it could not be replicated on BANKNIFTY because **no 15m pattern detections exist for it** — a data
+gap, not a second data point.
+
+What the code claims is that the two sides are coherent: the number a position opens on is the
+number computed for the direction traded, which was not true before. Whether to trade on it at all
+is a separate decision, and the table above is the evidence for making it.
 
 ## Safety boundary
 
