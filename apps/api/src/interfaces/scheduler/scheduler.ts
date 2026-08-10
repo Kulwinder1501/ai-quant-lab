@@ -151,6 +151,7 @@ async function main(): Promise<void> {
     INDIA_VIX_INTRADAY: 10 * 60 * 1000,
     OPTION_CHAIN: 10 * 60 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
+    AI_AGENT_TICK: 10 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
   };
 
@@ -353,6 +354,26 @@ async function main(): Promise<void> {
     }
   }, { timezone: IST });
 
+  /**
+   * The autonomous agent's evaluation pass.
+   *
+   * This used to be driven from inside `GET /api/v1/stream/live-agent`, once per second per
+   * connected browser tab -- so open positions were only evaluated while someone was watching,
+   * and the one code path that mutates paper trades sat on the method the mutation rate limiter
+   * exempts. See `run-agent-tick.ts` for the full account.
+   *
+   * Every two minutes rather than every second. The agent's own proposal throttle is 15s and
+   * its evidence is a completed 15m bar, so a faster cadence re-reads the same context and
+   * cannot reach a different conclusion; what it does change is the number of Yahoo quotes and
+   * the size of the journal. Stop and target evaluation still runs on every pass, which is the
+   * part that wants to be prompt.
+   */
+  cron.schedule("*/2 9-15 * * 1-5", () => {
+    void schedule("AI_AGENT_TICK", () => runCommand("npm", [
+      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=15m",
+    ]));
+  }, { timezone: IST });
+
   // Once daily, well before the 9:15 open: proactively refresh the Fyers access token and
   // report credential health, so a lapsed or soon-to-lapse refresh token is a visible log
   // line at 8:00 rather than a silent trade refusal discovered mid-session. Skipped
@@ -399,6 +420,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
+      "AI_AGENT_TICK",
       ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT"] : []),
       "OPTION_CHAIN",
       "RSS_NEWS_INGESTION",

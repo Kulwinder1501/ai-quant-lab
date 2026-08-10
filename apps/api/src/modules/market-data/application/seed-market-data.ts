@@ -91,9 +91,10 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
             if (quotes.length > count) {
               quotes = quotes.slice(quotes.length - count);
             }
-          } catch (e: any) {
-            console.error(`Failed to fetch real data for ${yfSymbol} ${tf}: ${e.message}`);
-            continue; 
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`Failed to fetch real data for ${yfSymbol} ${tf}: ${message}`);
+            continue;
           }
 
           if (quotes.length === 0) {

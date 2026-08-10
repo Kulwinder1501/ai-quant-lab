@@ -1,12 +1,14 @@
 import type { Express } from "express";
-import yahooFinance from "yahoo-finance2";
+import {
+  quoteLabSymbol,
+  quoteLabSymbols,
+} from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
 import {
   estimateContributionPts,
   resolveIndexDriverUniverse,
   SUPPORTED_DRIVER_INDEX_KEYS,
-  yahooEquitySymbol,
 } from "../../../market-data/domain/nifty50-driver-weights.js";
 
 export function registerStrategyRoutes(
@@ -15,6 +17,7 @@ export function registerStrategyRoutes(
     "database" | "dashboardRepository" | "generateTradeIdeas" | "aiAutonomousAgent"
   >,
 ): void {
+
   app.get("/api/v1/trade-ideas", async (request, response, next) => {
     try {
       const limit = parseLimit(request) || 50;
@@ -34,7 +37,7 @@ export function registerStrategyRoutes(
     }
   });
 
-  app.post("/api/v1/trade-ideas/generate", async (request, response) => {
+  app.post("/api/v1/trade-ideas/generate", async (request, response, next) => {
     try {
       const { symbol, timeframe } = request.body || {};
       if (!symbol || !timeframe) {
@@ -54,32 +57,24 @@ export function registerStrategyRoutes(
         timeframe: String(timeframe),
       });
       response.status(200).json({ data: ideas });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to generate trade ideas" });
+    } catch (error) {
+      // Delegated rather than answered as 400. A generator that throws on a database outage
+      // is not a malformed request, and `error.message` on the wire leaks connection strings
+      // and driver internals to the browser.
+      next(error);
     }
   });
 
-  app.post("/api/v1/analysis/run", async (request, response) => {
-    try {
-      const { symbol, timeframe } = request.body || {};
-      if (!symbol || !timeframe) {
-        response.status(400).json({ error: "symbol and timeframe are required." });
-        return;
-      }
-      const candles = await dependencies.dashboardRepository.listCandlesWithOverlays(
-        String(symbol),
-        String(timeframe),
-        100,
-      );
-      response.status(200).json({
-        status: "success",
-        count: candles.length,
-        message: `Analysis complete for ${symbol} (${timeframe})`,
-      });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to run analysis" });
-    }
-  });
+  /**
+   * `POST /api/v1/analysis/run` is deliberately gone.
+   *
+   * It read 100 candles, ignored them, and answered `"Analysis complete for <symbol>"`. No
+   * indicator, pattern or idea was computed, and nothing in the dashboard called it -- so it
+   * was a success response for work that never happened. Recalculating overlays on demand is
+   * `analysis:calculate-indicators` / `analysis:detect-patterns`, both of which write their
+   * results and record their algorithm version; the honest HTTP surface for that is a job,
+   * not a synchronous route pretending to be one.
+   */
 
   app.get("/api/v1/stream/live-agent", async (request, response) => {
     response.setHeader("Content-Type", "text/event-stream");
@@ -114,31 +109,27 @@ export function registerStrategyRoutes(
         let lastUpdated = latest.closeTime.toISOString();
         let priceSource = "STORED_CANDLE";
 
-        try {
-          const symbolUpper = symbol.toUpperCase();
-          let yfSymbol = symbolUpper;
-          if (symbolUpper === "NIFTY50") yfSymbol = "^NSEI";
-          else if (symbolUpper === "BANKNIFTY") yfSymbol = "^NSEBANK";
-          else if (!symbolUpper.includes(".")) yfSymbol = `${symbolUpper}.NS`;
-
-          const yf = new (yahooFinance as any)();
-          const quote = (await yf.quote(yfSymbol)) as any;
-          if (quote.regularMarketPrice) {
-            livePrice = quote.regularMarketPrice;
-            previousClose = quote.regularMarketPreviousClose || previousClose;
-            change = quote.regularMarketChange || (livePrice - previousClose);
-            changePercent = quote.regularMarketChangePercent || ((change / previousClose) * 100);
-            liveVolume = quote.regularMarketVolume || liveVolume;
-            liveOpen = quote.regularMarketOpen || liveOpen;
-            liveHigh = quote.regularMarketDayHigh || liveHigh;
-            liveLow = quote.regularMarketDayLow || liveLow;
-            lastUpdated = quote.regularMarketTime ? quote.regularMarketTime.toISOString() : lastUpdated;
-            priceSource = "YAHOO_QUOTE";
-          }
-        } catch {
-          // A provider failure must not be disguised as a synthetic market tick.
-          // The response remains useful by explicitly serving the latest stored bar.
+        // A provider failure must not be disguised as a synthetic market tick, so a null
+        // quote leaves every field on the stored bar and says so through `priceSource`.
+        const quote = await quoteLabSymbol(symbol);
+        if (quote !== null) {
+          livePrice = quote.regularMarketPrice!;
+          previousClose = quote.regularMarketPreviousClose ?? previousClose;
+          change = quote.regularMarketChange ?? (livePrice - previousClose);
+          changePercent = quote.regularMarketChangePercent
+            ?? (previousClose === 0 ? 0 : (change / previousClose) * 100);
+          liveVolume = quote.regularMarketVolume ?? liveVolume;
+          liveOpen = quote.regularMarketOpen ?? liveOpen;
+          liveHigh = quote.regularMarketDayHigh ?? liveHigh;
+          liveLow = quote.regularMarketDayLow ?? liveLow;
+          lastUpdated = quote.regularMarketTime?.toISOString() ?? lastUpdated;
+          priceSource = "YAHOO_QUOTE";
         }
+
+        // This stream is read-only. The agent tick that used to run here now belongs to the
+        // scheduler (`AI_AGENT_TICK` -> `run-agent-tick.ts`): it mutates paper trades, and a
+        // GET is exempt from the mutation rate limiter, ran only while a tab was open, and
+        // blocked this payload behind itself. See that file's header for the full reasoning.
 
         const rsi = latest.indicators?.["RSI"] as Record<string, unknown> | undefined;
         const sma = latest.indicators?.["SMA"] as Record<string, unknown> | undefined;
@@ -192,41 +183,49 @@ export function registerStrategyRoutes(
     response.setHeader("Connection", "keep-alive");
     response.flushHeaders();
 
-    // Map UI symbols to Yahoo Finance symbols
-    const symbolMap: Record<string, string> = {
-      "NIFTY50": "^NSEI",
-      "BANKNIFTY": "^NSEBANK",
-      "FINNIFTY": "FINNIFTY.NS",
-      "SENSEX": "^BSESN",
-      "HANG SENG": "^HSI",
-      "NIKKEI 225": "^N225",
-      "S&P 500": "^GSPC",
-    };
+    /**
+     * Tiles, by the label the UI shows and the symbol the resolver understands.
+     *
+     * The Indian rows go through `resolveYahooSymbol`; the foreign indices are already
+     * Yahoo-qualified and pass through it untouched. This used to be an inline map that
+     * spelled Fin Nifty `FINNIFTY.NS` -- not a ticker -- so its quote rejected, the row was
+     * dropped by the `.filter(Boolean)` below, and the panel rendered one tile short with
+     * nothing logged. The resolver now owns every spelling in one place.
+     */
+    const tiles: ReadonlyArray<{ label: string; symbol: string }> = [
+      { label: "NIFTY50", symbol: "NIFTY50" },
+      { label: "BANKNIFTY", symbol: "BANKNIFTY" },
+      { label: "FINNIFTY", symbol: "FINNIFTY" },
+      { label: "SENSEX", symbol: "SENSEX" },
+      { label: "HANG SENG", symbol: "^HSI" },
+      { label: "NIKKEI 225", symbol: "^N225" },
+      { label: "S&P 500", symbol: "^GSPC" },
+    ];
 
+    let pollInFlight = false;
     const intervalId = setInterval(async () => {
+      // Without this a slow provider round-trip lets 2.5s ticks stack up on one connection.
+      if (pollInFlight) return;
+      pollInFlight = true;
       try {
-        const yf = new (yahooFinance as any)();
-        const quotes = await Promise.all(
-          Object.values(symbolMap).map(sym => 
-            yf.quote(sym).catch(() => null)
-          )
-        );
-
-        const data = Object.keys(symbolMap).map((uiSymbol, index) => {
-          const quote = quotes[index];
-          if (!quote) return null;
-          
-          return {
-            symbol: uiSymbol,
+        // One batched request per tick rather than seven concurrent ones per connected tab.
+        const quotes = await quoteLabSymbols(tiles.map((tile) => tile.symbol));
+        const data = tiles.flatMap((tile) => {
+          const quote = quotes.get(tile.symbol);
+          if (quote === undefined) return [];
+          return [{
+            symbol: tile.label,
             price: quote.regularMarketPrice,
             changePercent: quote.regularMarketChangePercent,
-            aiStance: "NEUT" // Kept for UI compatibility, could be dynamic later
-          };
-        }).filter(Boolean);
+            aiStance: "NEUT", // Kept for UI compatibility, could be dynamic later
+          }];
+        });
 
         response.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch (e) {
-        // Ignore transient errors
+      } catch {
+        // Transient stream failures are retried on the next interval.
+      } finally {
+        pollInFlight = false;
       }
     }, 2500);
 
@@ -252,60 +251,22 @@ export function registerStrategyRoutes(
         return;
       }
 
-      const yf = new (yahooFinance as any)();
-      const yahooSymbols = universe.drivers.map((row) =>
-        yahooEquitySymbol(row.symbol),
-      );
+      // Chunking and the per-symbol retry now live in the shared client, which keys results
+      // by the symbol asked for rather than by the one Yahoo echoes back.
+      const quoteBySymbol = await quoteLabSymbols([
+        universe.yahooIndexSymbol,
+        ...universe.drivers.map((row) => row.symbol),
+      ]);
 
-      // Batch quote index + equities (chunked to avoid oversized Yahoo payloads).
-      const chunkSize = 25;
-      const quoteBySymbol = new Map<string, any>();
-      const allSymbols = [universe.yahooIndexSymbol, ...yahooSymbols];
-      for (let i = 0; i < allSymbols.length; i += chunkSize) {
-        const chunk = allSymbols.slice(i, i + chunkSize);
-        try {
-          const batch = await yf.quote(chunk);
-          const rows = Array.isArray(batch) ? batch : [batch];
-          for (const quote of rows) {
-            if (quote?.symbol) quoteBySymbol.set(String(quote.symbol), quote);
-          }
-        } catch {
-          // Fall back to per-symbol so one bad ticker does not blank the panel.
-          await Promise.all(
-            chunk.map(async (sym) => {
-              try {
-                const quote = await yf.quote(sym);
-                if (quote?.symbol) quoteBySymbol.set(String(quote.symbol), quote);
-              } catch {
-                // skip
-              }
-            }),
-          );
-        }
-      }
-
-      const indexQuote =
-        quoteBySymbol.get(universe.yahooIndexSymbol) ?? null;
-      const indexLevel =
-        typeof indexQuote?.regularMarketPrice === "number"
-          ? indexQuote.regularMarketPrice
-          : null;
+      const indexQuote = quoteBySymbol.get(universe.yahooIndexSymbol) ?? null;
+      const indexLevel = indexQuote?.regularMarketPrice ?? null;
 
       const asOf = new Date().toISOString();
       const drivers = universe.drivers
         .map((row) => {
-          const quote =
-            quoteBySymbol.get(yahooEquitySymbol(row.symbol)) ??
-            quoteBySymbol.get(row.symbol) ??
-            null;
-          const dayPct =
-            typeof quote?.regularMarketChangePercent === "number"
-              ? quote.regularMarketChangePercent
-              : null;
-          const last =
-            typeof quote?.regularMarketPrice === "number"
-              ? quote.regularMarketPrice
-              : null;
+          const quote = quoteBySymbol.get(row.symbol) ?? null;
+          const dayPct = quote?.regularMarketChangePercent ?? null;
+          const last = quote?.regularMarketPrice ?? null;
           const estPts =
             dayPct != null && indexLevel != null
               ? estimateContributionPts(row.weightPct, dayPct, indexLevel)

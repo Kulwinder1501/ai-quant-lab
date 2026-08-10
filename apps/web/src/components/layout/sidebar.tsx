@@ -14,6 +14,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
+  Wallet,
+  History,
+  FlaskConical,
 } from "lucide-react";
 import { classNames } from "../ui/class-names";
 import { type ReactNode } from "react";
@@ -52,12 +55,17 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       title: "TRADING",
       items: [
         { name: "Portfolio", href: "/portfolio", icon: <ScrollText className="size-5" /> },
+        // These three had pages and command-palette entries but no sidebar link, so they were
+        // reachable only by someone who knew to press Ctrl+K.
+        { name: "Paper Trading", href: "/paper-trading", icon: <Wallet className="size-5" /> },
+        { name: "Trade History", href: "/trade-history", icon: <History className="size-5" /> },
       ],
     },
     {
       title: "STRATEGY",
       items: [
         { name: "Strategy & Ideas", href: "/strategy", icon: <Lightbulb className="size-5" /> },
+        { name: "Backtesting", href: "/backtesting", icon: <FlaskConical className="size-5" /> },
       ],
     },
     {

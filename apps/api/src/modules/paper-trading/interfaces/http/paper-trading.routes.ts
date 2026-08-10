@@ -1,5 +1,6 @@
 import type { Express, Request } from "express";
-import yahooFinance from "yahoo-finance2";
+import { quoteLabSymbols } from "../../../../infrastructure/market-data/yahoo-quote-client.js";
+import { respondToRouteError } from "../../../../interfaces/http/common/route-errors.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import {
   InvalidHttpQueryError,
@@ -52,20 +53,14 @@ async function loadLivePrices(symbols: readonly string[]): Promise<Record<string
   const livePrices: Record<string, number> = {};
   if (symbols.length === 0) return livePrices;
 
-  const yf = new (yahooFinance as any)();
-  for (const symbol of symbols) {
-    let yfSymbol = symbol;
-    if (symbol === "NIFTY50") yfSymbol = "^NSEI";
-    else if (symbol === "BANKNIFTY") yfSymbol = "^NSEBANK";
-    else if (!symbol.includes(".")) yfSymbol = `${symbol}.NS`;
-
-    try {
-      const quote = await yf.quote(yfSymbol);
-      if (quote?.regularMarketPrice) livePrices[symbol] = quote.regularMarketPrice;
-    } catch (error) {
-      console.error(`Failed to fetch live price for ${symbol}:`, error);
-    }
+  // Batched rather than one request per symbol: this runs on the account-summary and close
+  // paths, which are called with every open position's underlying at once.
+  const quotes = await quoteLabSymbols(symbols);
+  for (const [symbol, quote] of quotes) {
+    livePrices[symbol] = quote.regularMarketPrice!;
   }
+  // A symbol absent from the map has no usable quote. Left out rather than defaulted, so the
+  // valuation path falls back to a stored mark instead of pricing against a fabricated one.
   return livePrices;
 }
 
@@ -147,7 +142,7 @@ export function registerPaperTradingRoutes(
     }
   });
 
-  app.post("/api/v1/paper-accounts", async (request, response) => {
+  app.post("/api/v1/paper-accounts", async (request, response, next) => {
     try {
       const { name, openingBalance } = request.body || {};
       if (!name || typeof name !== "string" || !openingBalance || typeof openingBalance !== "number") {
@@ -155,12 +150,12 @@ export function registerPaperTradingRoutes(
         return;
       }
       response.status(201).json({ data: await dependencies.createPaperAccount.execute({ name, openingBalance }) });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to create paper account" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to create paper account");
     }
   });
 
-  app.get("/api/v1/paper-accounts/:id/summary", async (request, response) => {
+  app.get("/api/v1/paper-accounts/:id/summary", async (request, response, next) => {
     try {
       const accountId = request.params.id || "";
       const asOf = new Date();
@@ -220,12 +215,12 @@ export function registerPaperTradingRoutes(
         },
       }));
       response.status(200).json({ data: fullSummary });
-    } catch (error: any) {
-      response.status(404).json({ error: error.message || "Account not found" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 404, "Account not found");
     }
   });
 
-  app.post("/api/v1/paper-trades/open", async (request, response) => {
+  app.post("/api/v1/paper-trades/open", async (request, response, next) => {
     try {
       const {
         accountId,
@@ -346,12 +341,12 @@ export function registerPaperTradingRoutes(
         optionContract,
       });
       response.status(201).json({ data: trade });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to open paper trade" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to open paper trade");
     }
   });
 
-  app.post("/api/v1/paper-trades/open-manual-option", async (request, response) => {
+  app.post("/api/v1/paper-trades/open-manual-option", async (request, response, next) => {
     try {
       const {
         accountId,
@@ -509,12 +504,12 @@ export function registerPaperTradingRoutes(
       });
 
       response.status(201).json({ data: trade });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to open manual paper trade" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to open manual paper trade");
     }
   });
 
-  app.post("/api/v1/paper-trades/evaluate", async (request, response) => {
+  app.post("/api/v1/paper-trades/evaluate", async (request, response, next) => {
     try {
       const { accountId } = request.body || {};
       if (!accountId) {
@@ -534,12 +529,12 @@ export function registerPaperTradingRoutes(
         livePrices: await loadLivePrices(activeSymbols),
       });
       response.status(200).json({ data: result });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to evaluate trades" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to evaluate trades");
     }
   });
 
-  app.post("/api/v1/paper-trades/close", async (request, response) => {
+  app.post("/api/v1/paper-trades/close", async (request, response, next) => {
     try {
       const { paperTradeId, exitPrice, notes } = request.body || {};
       if (!paperTradeId || typeof exitPrice !== "number") {
@@ -623,8 +618,8 @@ export function registerPaperTradingRoutes(
         data: trade,
         execution: { requestedExitPrice: exitPrice, appliedExitPrice, exitPriceSource },
       });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to close trade" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to close trade");
     }
   });
 }

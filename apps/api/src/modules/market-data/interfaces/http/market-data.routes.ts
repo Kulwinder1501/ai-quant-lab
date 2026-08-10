@@ -1,5 +1,5 @@
 import type { Express, NextFunction, Response } from "express";
-import yahooFinance from "yahoo-finance2";
+import { quoteLabSymbol } from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { InvalidHttpQueryError, parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
 import {
@@ -118,21 +118,14 @@ export function registerMarketDataRoutes(
     try {
       const symbol = (queryString(request, "symbol") || "NIFTY50").toUpperCase();
       const timeframe = (queryString(request, "timeframe") || "1d").toLowerCase();
-      let yfSymbol = symbol;
-      if (symbol === "NIFTY50") yfSymbol = "^NSEI";
-      else if (symbol === "BANKNIFTY") yfSymbol = "^NSEBANK";
-      else if (!symbol.includes(".")) yfSymbol = `${symbol}.NS`;
 
-      const yf = new (yahooFinance as any)();
-      const quote = (await yf.quote(yfSymbol)) as any;
-      const close = Number(quote.regularMarketPrice);
-      if (!Number.isFinite(close) || close <= 0) {
+      const quote = await quoteLabSymbol(symbol);
+      if (quote === null) {
         throw new Error(`Live quote provider returned no valid price for ${symbol}.`);
       }
-      const change = Number.isFinite(Number(quote.regularMarketChange)) ? Number(quote.regularMarketChange) : null;
-      const changePercent = Number.isFinite(Number(quote.regularMarketChangePercent))
-        ? Number(quote.regularMarketChangePercent)
-        : null;
+      const close = quote.regularMarketPrice!;
+      const change = quote.regularMarketChange;
+      const changePercent = quote.regularMarketChangePercent;
 
       let rsiValue: number | null = null;
       let smaValue: number | null = null;
@@ -170,8 +163,11 @@ export function registerMarketDataRoutes(
       response.status(200).json({
         data: {
           symbol,
-          displayName: quote.shortName || (symbol === "BANKNIFTY" ? "NIFTY BANK" : "NIFTY 50"),
-          exchange: quote.exchange || "NSE",
+          // Falls back to the symbol itself. The previous ternary answered "NIFTY 50" for
+          // everything that was not BANKNIFTY, so `?symbol=RELIANCE` rendered a Reliance
+          // quote labelled NIFTY 50 -- a wrong label on a right price.
+          displayName: quote.shortName ?? symbol,
+          exchange: quote.exchange ?? "NSE",
           livePrice: close,
           change,
           changePercent,

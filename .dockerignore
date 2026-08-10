@@ -8,6 +8,9 @@
 **/brain
 **/*.log
 **/scratch
+# Probe scripts written beside the code they poke at rather than in scratch/. Only the
+# directory form was listed, so four of these were shipped into the image.
+**/scratch_*.ts
 **/tmp
 **/__pycache__
 **/.pytest_cache

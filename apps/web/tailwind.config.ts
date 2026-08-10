@@ -45,6 +45,27 @@ export default {
       fontFamily: {
         sans: ["var(--font-inter)", ...defaultTheme.fontFamily.sans],
       },
+      /**
+       * Price-tick flashes, as one-shot animations rather than timed state.
+       *
+       * The market-watch panel used to hold the flash in React state and clear it with a
+       * `setTimeout`, which fired after unmount and left a flash stuck on whenever two ticks
+       * overlapped. An animation that ends on its own needs neither a timer nor a render.
+       */
+      keyframes: {
+        "flash-up": {
+          "0%": { backgroundColor: "rgb(16 185 129 / 0.25)" },
+          "100%": { backgroundColor: "transparent" },
+        },
+        "flash-down": {
+          "0%": { backgroundColor: "rgb(244 63 94 / 0.25)" },
+          "100%": { backgroundColor: "transparent" },
+        },
+      },
+      animation: {
+        "flash-up": "flash-up 800ms ease-out 1",
+        "flash-down": "flash-down 800ms ease-out 1",
+      },
     },
   },
   plugins: [],

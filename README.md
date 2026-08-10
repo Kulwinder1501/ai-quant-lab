@@ -57,15 +57,44 @@ Phase 15 containerizes the entire stack (API, Web, and PostgreSQL/pgvector datab
 
 Phase 19 makes XGBoost and LightGBM real trainable model families alongside the logistic baseline with `npm run ml:train -- --instrument NIFTY50 --timeframe 1d --from 2022-01-01 --to 2025-01-01 --algorithm xgboost`. Each family keeps its own promotion lineage by default, a shared `--model-key` makes two algorithms compete for one production slot on identical unseen data, and a boosted prediction is explained with exact TreeSHAP contributions rather than borrowed linear-coefficient language. See [the Phase 19 gradient-boosting guide](docs/phase-19-gradient-boosting-models.md) for defaults, determinism, and the explainer contract.
 
-Phase 20 adds the two remaining specified dashboard modules: a **Trade History** ledger (`/trade-history`) with realised profit factor, expectancy, reward multiples, and ordered drawdown across every local paper account, and a **Model Performance** registry (`/model-performance`) exposing each version's holdout metrics, hyperparameters, purged validation protocol, promotion decision, and training-to-validation gap. Both are GET-only and cannot alter paper activity or the model registry. See [the Phase 20 trade-history and model-performance guide](docs/phase-20-trade-history-model-performance.md) for the API contract and metric semantics.
+Phase 20 adds the two remaining specified dashboard modules: a **Trade History** ledger (`/trade-history`) with realised profit factor, expectancy, reward multiples, and ordered drawdown across every local paper account, and a **Model Performance** registry (now served under `/ai-models`) exposing each version's holdout metrics, hyperparameters, purged validation protocol, promotion decision, and training-to-validation gap. Both are GET-only and cannot alter paper activity or the model registry. See [the Phase 20 trade-history and model-performance guide](docs/phase-20-trade-history-model-performance.md) for the API contract and metric semantics.
 
 Phase 21 hardens model integrity. The feature schema moves to `ml-feature-v2`, where every column is a basis-point distance, a ratio, a bounded oscillator, or a confidence — no absolute rupee level, because a price level acts as a proxy for time and lets a chronological holdout leak its label distribution. A new leakage audit (`npm run ml:audit -- --instrument NIFTY50 --timeframe 1d --from 2024-01-01 --to 2026-01-01`) runs label-shuffle, feature-lag, and era-holdout checks, and blocks promotion when one fails. The promotion gate now also refuses a suspiciously high score or a negative training-to-holdout gap, reports the directional hit rate and coverage next to macro-F1, and supports walk-forward validation via `--folds N` where both the mean and the most recent fold must clear the floor. Retraining the previously promoted model under v2 dropped it from 0.703 to 0.288 macro-F1, which is what the leak was worth. See [the Phase 21 model-integrity guide](docs/phase-21-model-integrity-and-leakage-audits.md) for the schema mapping, gate order, and check thresholds.
 
-Phase 22 integrates FII/DII Institutional Flows and GIFT Nifty data via a daily automated NSE scraper (`npm run data:collect:institutional`), feeding into the ML features and the `AiAutonomousAgent` logic. It also introduces `npm run ml:prune` to automatically garbage-collect old candidate models, and finalizes the dedicated React UI dashboard tabs (`/scalp-ideas` and `/scalp-trade-history`) to manage high-frequency 1-minute Momentum Scalping strategies independently from EOD strategies. See [the Phase 22 institutional & scalping guide](docs/phase-22-institutional-scalping.md) for data flow and UI isolation details.
+Phase 22 integrates FII/DII Institutional Flows and GIFT Nifty data via a daily automated NSE scraper (`npm run data:collect:institutional`), feeding into the ML features and the `AiAutonomousAgent` logic. It also introduces `npm run ml:prune` to automatically garbage-collect old candidate models, and finalizes the scalping views, which now live as a mode tab on the shared pages rather than as separate routes: `/strategy?mode=scalp` and `/trade-history?mode=scalp`. The former `/scalp-strategy` and `/scalp-trade-history` paths still resolve as redirects so older bookmarks and this document's earlier revisions keep working. See [the Phase 22 institutional & scalping guide](docs/phase-22-institutional-scalping.md) for data flow and UI isolation details.
 
 Phase 23 expands the Market News architecture by replacing the volatile mock memory-repository with real PostgreSQL persistence. It deprecates stale publishers (MoneyControl, ET) and integrates highly active external RSS feeds (LiveMint, Times of India, Business Standard, NDTV Profit). This ensures authentic publication timestamps and accurate, live sentiment scoring directly from the `market_news` table.
 
 Phase 24 introduces **Pending Paper Trades**. It adds the capability to submit simulated limit/stop-entry orders that wait for the market to trigger them instead of executing instantly at the current price. It relies on both live-tick checking and completed-candle checking to resolve `PENDING` states into `OPEN` positions, and implements End-of-Day cancellations to automatically void untriggered intraday limit orders at midnight.
+
+## The autonomous agent runs on a schedule, not on a page view
+
+`AiAutonomousAgent.tick` evaluates open paper trades against the live price, applies the news
+sentiment circuit breakers, and can open a position. It is driven by the scheduler's
+`AI_AGENT_TICK` job (`npm run agent:tick -- --symbols=NIFTY50,BANKNIFTY --timeframe=15m`), every
+two minutes during the session.
+
+It is deliberately **not** driven by the dashboard. `GET /api/v1/stream/live-agent` once called
+the tick on every one-second poll of every connected browser, which meant open positions were
+only evaluated while a tab happened to be open, the mutation rate limiter did not apply (it
+exempts GET by design), and a slow agent pass stalled the price feed the panel exists to show.
+That stream is now strictly read-only: it reports the agent's thoughts and reflections without
+advancing it. If nothing is scheduled, nothing trades.
+
+The agent scores **both directions** and trades whichever the evidence supports, in
+`strategy-engine/domain/directional-setup-score.ts`. This replaced a scorer whose every term was
+written for a long, after which the side was picked from the latest pattern's direction — so a
+bearish pattern inverted the position while keeping a score built for the opposite thesis, and the
+agent's most confident shorts were its most confidently bullish reads. Each thesis is now scored
+from the same evidence and the winner carries its own number; both are recorded on the proposal so
+a near-tie is distinguishable from conviction.
+
+The mirrored terms are a symmetry assumption, not a measured edge. The long side's bands and
+weights are unchanged (a test pins this), and the one asymmetry — adverse institutional flow
+counting 1.5× — is applied to both sides by evaluating the existing `institutionalFlowBias` on
+negated flows, so neither side gets the milder weighting systematically. Whether the short side
+has edge is a question for the trade journal, and this project's own measurements are blunt that
+directional prediction has not produced one.
 
 ## Safety boundary
 

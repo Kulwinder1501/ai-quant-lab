@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { parseLimit } from "../../../../interfaces/http/common/query.js";
+import { respondToRouteError } from "../../../../interfaces/http/common/route-errors.js";
 
 export function registerBacktestingRoutes(
   app: Express,
@@ -28,7 +29,7 @@ export function registerBacktestingRoutes(
     }
   });
 
-  app.post("/api/v1/backtest-runs", async (request, response) => {
+  app.post("/api/v1/backtest-runs", async (request, response, next) => {
     try {
       const { symbol, timeframe, startDate, endDate } = request.body || {};
       if (!symbol || !timeframe || !startDate || !endDate) {
@@ -67,8 +68,8 @@ export function registerBacktestingRoutes(
           status: "COMPLETED",
         },
       });
-    } catch (error: any) {
-      response.status(400).json({ error: error.message || "Failed to run backtest" });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to run backtest");
     }
   });
 }

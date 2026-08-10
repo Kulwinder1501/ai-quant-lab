@@ -7,6 +7,8 @@ import type { CandleRepository } from "../../market-data/domain/candle.js";
 import type { NewsRepository } from "../../news-sentiment/domain/news-article.js";
 import type { PostgresAiJournalRepository } from "../../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
 import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
+import { scoreDirectionalSetup } from "../domain/directional-setup-score.js";
+import { assessContractSize } from "../../paper-trading/domain/contract-specs.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
 import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
@@ -72,6 +74,41 @@ export const PRODUCTION_INDICATOR_VERSION = "ta-v1";
  */
 export const AGENT_ATR_STOP_MULTIPLE = 1.5;
 export const AGENT_REWARD_RISK_MULTIPLE = 2;
+
+/**
+ * Transaction costs for an agent-executed position, using the same shape the backtest engine
+ * charges (`feePerOrder` plus adverse slippage in basis points of turnover).
+ *
+ * What this replaces: `entryFees: 40`, `entrySlippage: 15` and `exitFees: 20` written as three
+ * unrelated literals at three call sites. None of them was derived from anything, and because
+ * entry and exit disagreed, a round trip's modelled cost depended on which branch closed it --
+ * the emergency circuit breaker charged 20 while the ordinary entry charged 40. A flat rupee
+ * slippage is also the wrong shape: 15 rupees is a rounding error against a Rs 12 lakh
+ * notional and material against a small one, so slippage scales with turnover here.
+ *
+ * `brokerage-calculator.ts` is deliberately **not** used: it models option premium turnover
+ * with option STT rates, and these positions are taken on the underlying's level. Applying a
+ * premium fee schedule to an index notional would be a second wrong answer rather than a fix.
+ *
+ * Both numbers are order-of-magnitude estimates for a discount-broker cash order, and they are
+ * exported so a backtest and the agent can be pointed at one figure instead of two.
+ */
+export const AGENT_FEE_PER_ORDER_INR = 20;
+export const AGENT_SLIPPAGE_BPS = 5;
+
+/** Adverse slippage in rupees for one side of a position, from turnover. */
+export function agentSlippageInr(fillPrice: number, quantity: number): number {
+  return Math.round((fillPrice * quantity * (AGENT_SLIPPAGE_BPS / 10_000)) * 100) / 100;
+}
+
+/**
+ * How many thoughts the in-memory ring keeps.
+ *
+ * The array was unbounded and only ever read through a tail slice, so a long-lived API or
+ * scheduler process grew it forever -- roughly 86k entries a day once the tick ran on a
+ * per-second cadence. The dashboard asks for at most a few dozen.
+ */
+export const MAX_RETAINED_THOUGHTS = 200;
 
 export interface InstitutionalFlowBias {
   /** Confidence points to add to a long-biased score. Negative discounts the trade. */
@@ -169,6 +206,20 @@ export class AiAutonomousAgent {
     return this.thoughts.slice(-limit).reverse();
   }
 
+  /**
+   * Appends a thought, discarding the oldest beyond `MAX_RETAINED_THOUGHTS`.
+   *
+   * Every site that used to call `this.thoughts.push` directly goes through here. The array is
+   * only ever read as a tail slice, so retaining more than the window is pure growth in a
+   * process that never exits.
+   */
+  private recordThought(thought: AiBrainThought): void {
+    this.thoughts.push(thought);
+    if (this.thoughts.length > MAX_RETAINED_THOUGHTS) {
+      this.thoughts.splice(0, this.thoughts.length - MAX_RETAINED_THOUGHTS);
+    }
+  }
+
   public async getReflections(limit = 20): Promise<AiReflectionLog[]> {
     return this.aiJournalRepo.getRecentReflections(limit);
   }
@@ -259,11 +310,25 @@ export class AiAutonomousAgent {
     }
 
     // 3. Resolve latest completed candle and indicator evidence
+    //
+    // `lot_size` is read here rather than hardcoded at the execution site. It used to be
+    // `symbol === "NIFTY50" ? 50 : 25`, which is both stale and unreachable by the revision
+    // that fixes it: lot sizes live in `instruments` precisely so a change is a data change
+    // (migrations 019/020 exist to correct them), and `assessContractSize` is there to catch a
+    // stale one. At NIFTY near 24,000 that literal implied a Rs 12 lakh contract, which the
+    // project's own `contractNotional` check grades BELOW_REGULATORY_MINIMUM against SEBI's
+    // Rs 15 lakh floor -- so the agent was sizing every position to a value the rest of the
+    // codebase is written to reject.
     const client = await this.database.connect();
     let instId = "";
+    let lotSize = 0;
     try {
-      const instRes = await client.query<{ id: string }>("SELECT id FROM instruments WHERE symbol = $1 LIMIT 1", [symbol]);
+      const instRes = await client.query<{ id: string; lot_size: string | number }>(
+        "SELECT id, lot_size FROM instruments WHERE symbol = $1 LIMIT 1",
+        [symbol],
+      );
       instId = instRes.rows[0]?.id ?? "";
+      lotSize = Number(instRes.rows[0]?.lot_size ?? 0);
     } finally {
       client.release();
     }
@@ -318,6 +383,17 @@ export class AiAutonomousAgent {
     // `WHERE date = today` lookup returned zero rows for the entire trading day
     // and this whole signal was dead every time the agent actually ran.
     let flowBias: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
+    /**
+     * The same verdict for a short thesis.
+     *
+     * `institutionalFlowBias` weights outflows 1.5x relative to inflows, because a thesis the
+     * tape contradicts should lose more than an agreeing tape wins. Negating the flows is what
+     * carries that asymmetry across to the other side: against a short, *inflows* become the
+     * adverse reading and take the 1.5x. Flipping the sign of `flowBias.adjustment` would not --
+     * it would hand the short side the milder weighting on every print, which is a systematic
+     * bias toward shorting dressed up as symmetry.
+     */
+    let shortFlowBias: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
     try {
       const res = await this.database.query<{ fii: string | null; dii: string | null; date: Date }>(
         `SELECT fii_cash_net_cr AS fii, dii_cash_net_cr AS dii, date
@@ -334,7 +410,11 @@ export class AiAutonomousAgent {
           const parsed = Number(value);
           return Number.isFinite(parsed) ? parsed : null;
         };
-        flowBias = institutionalFlowBias(toNumber(row.fii), toNumber(row.dii));
+        const fii = toNumber(row.fii);
+        const dii = toNumber(row.dii);
+        const negate = (value: number | null): number | null => (value === null ? null : -value);
+        flowBias = institutionalFlowBias(fii, dii);
+        shortFlowBias = institutionalFlowBias(negate(fii), negate(dii));
       }
     } catch (e) {
       console.warn("Error fetching institutional data:", e);
@@ -351,11 +431,15 @@ export class AiAutonomousAgent {
           exitPrice: livePrice,
           exitReason: "MANUAL",
           closedAt: new Date(),
-          exitFees: 20,
-          exitSlippage: livePrice * t.quantity * 0.001,
+          exitFees: AGENT_FEE_PER_ORDER_INR,
+          // A panic liquidation crosses the spread, so it is charged double the ordinary
+          // adverse slippage rather than the unrelated 0.1% flat rate that was here -- 0.1%
+          // was 20x the entry assumption on the same position, which made a breaker exit look
+          // like a market-impact event instead of an urgent one.
+          exitSlippage: agentSlippageInr(livePrice, t.quantity) * 2,
           details: { reason: "EMERGENCY_PANIC_CIRCUIT_BREAKER", newsSentiment },
         });
-        this.thoughts.push({
+        this.recordThought({
           id: `th-${Date.now()}-panic`,
           timestamp: ts,
           symbol,
@@ -370,101 +454,74 @@ export class AiAutonomousAgent {
     }
 
     // EMERGENCY CIRCUIT BREAKER RULE 2: Dynamic Stop-Loss Tightening on < -0.3
+    //
+    // Applies to both sides. It was `if (t.side === "LONG")`, so a short position in the
+    // account was silently exempt from the breaker -- and since the execution path below could
+    // book a SHORT, the agent was capable of opening exactly the position this rule could not
+    // protect. For a short, "tighter" means moving the stop *down* toward the price.
     if (newsSentiment < -0.3 && newsSentiment > -0.7 && existingTrades.length > 0 && this.paperTradeRepo.updateStopLoss) {
       for (const t of existingTrades) {
-        if (t.side === "LONG") {
-          const tightSl = Number((livePrice * 0.995).toFixed(2));
-          if (t.stopLoss < tightSl && tightSl < livePrice) {
-            await this.paperTradeRepo.updateStopLoss(t.id, tightSl, `Circuit Breaker Rule 2 (Sentiment ${newsSentiment.toFixed(2)})`);
-            this.thoughts.push({
-              id: `th-${Date.now()}-sl-tighten`,
-              timestamp: ts,
-              symbol,
-              action: "MONITORING",
-              confidence: 85,
-              message: `🛡️ CIRCUIT BREAKER RULE 2: Negative market sentiment (${newsSentiment.toFixed(2)}). Tightened Stop Loss from ₹${t.stopLoss} to ₹${tightSl} (0.5% trail).`,
-              details: { tradeId: t.id, oldSl: t.stopLoss, newSl: tightSl, newsSentiment },
-            });
-            t.stopLoss = tightSl;
-          }
-        }
+        const tightSl = Number((t.side === "LONG" ? livePrice * 0.995 : livePrice * 1.005).toFixed(2));
+        // Only ever moves the stop closer to the price, and never through it.
+        const isTighter = t.side === "LONG"
+          ? t.stopLoss < tightSl && tightSl < livePrice
+          : t.stopLoss > tightSl && tightSl > livePrice;
+        if (!isTighter) continue;
+        await this.paperTradeRepo.updateStopLoss(t.id, tightSl, `Circuit Breaker Rule 2 (Sentiment ${newsSentiment.toFixed(2)})`);
+        this.recordThought({
+          id: `th-${Date.now()}-sl-tighten`,
+          timestamp: ts,
+          symbol,
+          action: "MONITORING",
+          confidence: 85,
+          message: `🛡️ CIRCUIT BREAKER RULE 2: Negative market sentiment (${newsSentiment.toFixed(2)}). Tightened ${t.side} Stop Loss from ₹${t.stopLoss} to ₹${tightSl} (0.5% trail).`,
+          details: { tradeId: t.id, side: t.side, oldSl: t.stopLoss, newSl: tightSl, newsSentiment },
+        });
+        t.stopLoss = tightSl;
       }
     }
 
-    let confidence = 50;
-    const reasoning: string[] = [];
-
-    // Indicator logic
-    if (rsiVal >= 52 && rsiVal <= 68) {
-      confidence += 15;
-      reasoning.push(`RSI(14) at ${rsiVal.toFixed(1)} confirms healthy momentum without overbought exhaustion.`);
-    } else if (rsiVal > 70) {
-      confidence -= 20;
-      reasoning.push(`RSI(14) at ${rsiVal.toFixed(1)} warns of overbought divergence.`);
-    } else if (rsiVal < 35) {
-      confidence += 10;
-      reasoning.push(`RSI(14) at ${rsiVal.toFixed(1)} indicates oversold value zone.`);
-    }
-
-    // Include FII/DII sentiment
-    if (flowBias.reasoning) {
-      confidence += flowBias.adjustment;
-      reasoning.push(flowBias.reasoning);
-    }
-
-    if (livePrice > bbUpper) {
-      confidence -= 10;
-      reasoning.push(`Price pierced upper Bollinger Band (₹${bbUpper.toFixed(2)}), mean reversion risk elevated.`);
-    } else if (livePrice < bbLower) {
-      confidence += 15;
-      reasoning.push(`Price touched lower Bollinger Band (₹${bbLower.toFixed(2)}), potential value opportunity.`);
-    }
-
-    // Bollinger Bands logic
-    if (livePrice < bbUpper * 0.995 && livePrice > bbLower * 1.005) {
-      confidence += 10;
-      reasoning.push(`Price ₹${livePrice.toFixed(2)} is well-positioned within Bollinger Band envelope [₹${bbLower.toFixed(0)} - ₹${bbUpper.toFixed(0)}].`);
-    } else if (livePrice >= bbUpper * 0.995) {
-      confidence -= 25; // Applying our self-improvement penalty rule!
-      reasoning.push(`AI PENALTY APPLIED: Price is near upper Bollinger resistance ₹${bbUpper.toFixed(2)}. Avoiding false breakout.`);
-    }
-
-    // Pattern Recognition logic
-    if (latestPattern && latestPattern.confidence >= 0.7) {
-      confidence += 20;
-      reasoning.push(`Detected ${latestPattern.code} (${latestPattern.direction}) with ${(latestPattern.confidence * 100).toFixed(0)}% algorithmic certainty.`);
-    }
-
-    // Macro-event caution.
-    //
-    // This was a -50 circuit breaker described as freezing trading. Measured against the
-    // stored newswire on 2026-08-05, its keyword match fires on 7 of 9 days (78%); even
-    // tightened to unambiguous phrases like "monetary policy" and "federal reserve" and
-    // requiring five corroborating articles it still fires on 4 of 9. That is not an event
-    // filter -- financial media discusses monetary policy continuously, so the detector
-    // mostly reports that a newswire exists. A -50 gate on four days in five does not avoid
-    // volatility crush, it suppresses idea generation.
-    //
-    // So it is a caution, sized like the other sentiment terms, and no longer short-circuits
-    // them: the `else if` chain meant a macro day discarded the sentiment reading entirely.
-    // A real freeze needs a calendar of *scheduled* events (earnings, policy dates), which
-    // this project does not have -- see docs/pending-work.md 2.4. Nine days is a small
-    // sample; the direction is not in doubt but the exact rate will move.
-    if (hasMacroEvent) {
-      confidence -= 10;
-      reasoning.push(`Macro-event caution: recent coverage mentions ${macroEventNames.slice(0, 3).join(", ")}. Headline-derived, not a scheduled-event calendar, so treated as context rather than a block.`);
-    }
-
-    if (newsSentiment <= -0.5) {
-      confidence -= 40;
-      reasoning.push(`🚨 CIRCUIT BREAKER RULE 1: Heavy negative news sentiment (${newsSentiment.toFixed(2)}). Freezing new long trade proposals.`);
-    } else if (newsSentiment > 0.2) {
-      confidence += 10;
-      reasoning.push(`Indian market macro news sentiment is ${newsLabel}.`);
-    } else if (newsSentiment < 0) {
-      confidence -= 10;
-      reasoning.push(`Mild negative news sentiment (${newsSentiment.toFixed(2)}).`);
-    }
+    /**
+     * Both directions are scored from the same evidence, and the better-supported one wins.
+     *
+     * The terms themselves live in `directional-setup-score.ts`. What used to be here was a run
+     * of `confidence += n` statements written entirely for a long, after which `side` was picked
+     * from the latest pattern's direction -- so a bearish pattern flipped the position while
+     * keeping a score computed for the opposite thesis. Extracting the scorer is what made the
+     * two theses expressible at all; keeping it pure is what makes them testable.
+     *
+     * The macro-event caution deserves its original note, which is about sizing rather than
+     * direction: it was a -50 circuit breaker described as freezing trading, and measured against
+     * the stored newswire on 2026-08-05 its keyword match fires on 7 of 9 days (78%) -- even
+     * tightened to unambiguous phrases and five corroborating articles, still 4 of 9. Financial
+     * media discusses monetary policy continuously, so the detector mostly reports that a
+     * newswire exists, and a -50 gate on four days in five suppresses idea generation rather than
+     * avoiding volatility crush. A real freeze needs a calendar of *scheduled* events, which this
+     * project does not have -- see docs/pending-work.md 2.4.
+     */
+    const setupScore = scoreDirectionalSetup({
+      rsi: rsiVal,
+      livePrice,
+      bollingerUpper: bbUpper,
+      bollingerLower: bbLower,
+      pattern: latestPattern
+        ? {
+          code: latestPattern.code,
+          direction: latestPattern.direction,
+          confidence: latestPattern.confidence,
+        }
+        : null,
+      // The short verdict is the same tested function on negated flows, which is what makes
+      // *inflows* carry the 1.5x against a short. A sign flip would not: the asymmetry would
+      // then favour the short side on every reading.
+      flowBias: { long: flowBias, short: shortFlowBias },
+      newsSentiment,
+      newsLabel,
+      hasMacroEvent,
+      macroEventNames,
+    });
+    const confidence = setupScore.confidence;
+    const reasoning = setupScore.reasoning;
 
     // No memory recall term. This previously embedded the context with
     // `generatePseudoEmbedding` -- a string hash, not a semantic encoding -- took the
@@ -476,8 +533,8 @@ export class AiAutonomousAgent {
     // similarity floor, and a corpus worth retrieving from; see
     // docs/next-session-brief.md 3.6.
 
-    // Cap confidence
-    confidence = Math.min(96, Math.max(15, confidence));
+    // The floor and ceiling are applied per thesis inside the scorer, so there is nothing to
+    // clamp here.
 
     // Log AI Thought
     const thought: AiBrainThought = {
@@ -486,24 +543,34 @@ export class AiAutonomousAgent {
       symbol,
       action: confidence >= 80 ? "PROPOSING" : "ANALYZING",
       confidence,
+      // The winning side is named. The old message asserted the setup was "aligned across RSI,
+      // Bollinger Bands, and News Sentiment" without saying which way, which read as bullish
+      // regardless of what the score meant.
       message: confidence >= 80
-        ? `🔥 HIGH CONFIDENCE SETUP (${confidence}%): ${symbol} aligned across RSI, Bollinger Bands, and News Sentiment. Initiating trade proposal.`
-        : `Scanning ${symbol} @ ₹${livePrice.toFixed(2)}. Confidence ${confidence}% (Threshold: 80%). Waiting for stronger multi-modal confluence.`,
+        ? `🔥 HIGH CONFIDENCE ${setupScore.side} SETUP (${confidence}%): ${symbol} aligned across RSI, `
+          + "Bollinger Bands, and News Sentiment. Initiating trade proposal."
+        : `Scanning ${symbol} @ ₹${livePrice.toFixed(2)}. Best thesis ${setupScore.side} at ${confidence}% `
+          + `(long ${setupScore.longConfidence}% / short ${setupScore.shortConfidence}%, threshold 80%). `
+          + "Waiting for stronger multi-modal confluence.",
       details: {
         rsi: rsiVal.toFixed(1),
         pattern: latestPattern?.code ?? "NONE",
         newsSentiment: newsLabel,
+        // Both scores, so a 79/78 near-tie is distinguishable from a 79/20 conviction.
+        side: setupScore.side,
+        longConfidence: setupScore.longConfidence,
+        shortConfidence: setupScore.shortConfidence,
         reasoning,
       },
     };
-    this.thoughts.push(thought);
+    this.recordThought(thought);
 
     // 5. If confidence >= 80%, check margin and execute local paper trade!
     if (confidence >= 80) {
       this.lastTradeAttempt.set(symbol, Date.now());
 
       if (existingTrades.length > 0) {
-        this.thoughts.push({
+        this.recordThought({
           id: `th-${Date.now()}-skip`,
           timestamp: new Date().toISOString(),
           symbol,
@@ -526,7 +593,15 @@ export class AiAutonomousAgent {
       }
       if (!stratVerId) return;
 
-      const side: TradeSide = latestPattern?.direction === "BEARISH" ? "SHORT" : "LONG";
+      /**
+       * The side the score was computed for, not a direction chosen after the fact.
+       *
+       * `side` used to be `latestPattern?.direction === "BEARISH" ? "SHORT" : "LONG"`, read
+       * *after* a confidence number that was long-biased in every term -- so the agent's most
+       * confident shorts were its most confidently bullish reads. Both theses are now scored
+       * separately and this is whichever one won, carrying its own number.
+       */
+      const side: TradeSide = setupScore.side;
 
       // Volatility-scaled bracket. The production ATR snapshot is required: a
       // stop sized without a volatility measurement is a guess, and the rest of
@@ -534,7 +609,7 @@ export class AiAutonomousAgent {
       const atrObj = ctx.indicators.find((i) => i.code === "ATR" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
       const atrValue = atrObj ? Number(atrObj.values["value"] ?? Number.NaN) : Number.NaN;
       if (!Number.isFinite(atrValue) || atrValue <= 0) {
-        this.thoughts.push({
+        this.recordThought({
           id: `th-${Date.now()}-noatr`,
           timestamp: new Date().toISOString(),
           symbol,
@@ -550,7 +625,32 @@ export class AiAutonomousAgent {
       const tpDist = slDist * AGENT_REWARD_RISK_MULTIPLE;
       const stopLoss = side === "LONG" ? Number((livePrice - slDist).toFixed(2)) : Number((livePrice + slDist).toFixed(2));
       const targetPrice = side === "LONG" ? Number((livePrice + tpDist).toFixed(2)) : Number((livePrice - tpDist).toFixed(2));
-      const qty = symbol === "NIFTY50" ? 50 : 25; // 1 standard NSE lot
+
+      // One lot at the instrument's configured size. A missing or non-positive lot size is a
+      // refusal rather than a fallback: guessing it is what the hardcoded literal did, and the
+      // plausibility band in `contract-specs.ts` cannot help a number that never came from the
+      // row it is meant to check.
+      const qty = Number.isInteger(lotSize) && lotSize > 0 ? lotSize : 0;
+      if (qty === 0) {
+        this.recordThought({
+          id: `th-${Date.now()}-nolot`,
+          timestamp: new Date().toISOString(),
+          symbol,
+          action: "MONITORING",
+          confidence,
+          message: `Setup qualified at ${confidence}% confidence, but ${symbol} has no usable lot_size configured. `
+            + "Skipping execution rather than guessing a position size.",
+          details: { symbol, configuredLotSize: lotSize },
+        });
+        return;
+      }
+      const assessment = assessContractSize(qty, livePrice);
+      if (assessment.verdict !== "PLAUSIBLE") {
+        // Surfaced, not blocked: the notional band is a staleness heuristic, not a rule, and
+        // the position is still one exchange lot. Recorded so a stale row is visible in the
+        // journal instead of only in the returns.
+        reasoning.push(`Contract-size check: ${assessment.explanation}`);
+      }
 
       try {
         const proposal = await this.tradeIdeaRepo.saveProposal({
@@ -571,6 +671,11 @@ export class AiAutonomousAgent {
             atrValue,
             atrStopMultiple: AGENT_ATR_STOP_MULTIPLE,
             rewardRiskMultiple: AGENT_REWARD_RISK_MULTIPLE,
+            lotSize: qty,
+            contractSizeVerdict: assessment.verdict,
+            // Recorded so a review can ask whether the losing thesis was nearly as strong.
+            longConfidence: setupScore.longConfidence,
+            shortConfidence: setupScore.shortConfidence,
           },
           expiresAt: new Date(Date.now() + 3600000 * 4),
           evidenceItems: [],
@@ -582,12 +687,12 @@ export class AiAutonomousAgent {
           quantity: qty,
           fillPrice: livePrice,
           openedAt: new Date(),
-          entryFees: 40,
-          entrySlippage: 15,
+          entryFees: AGENT_FEE_PER_ORDER_INR,
+          entrySlippage: agentSlippageInr(livePrice, qty),
           notes: `AI Autonomous Execution (${confidence}% confidence). Confluence: ${reasoning[0]}`,
         });
 
-        this.thoughts.push({
+        this.recordThought({
           id: `th-${Date.now()}-exec`,
           timestamp: new Date().toISOString(),
           symbol,
@@ -597,7 +702,7 @@ export class AiAutonomousAgent {
           details: { tradeId: trade.id, stopLoss, targetPrice, quantity: qty },
         });
       } catch (err) {
-        this.thoughts.push({
+        this.recordThought({
           id: `th-${Date.now()}-err`,
           timestamp: new Date().toISOString(),
           symbol,
@@ -701,7 +806,7 @@ export class AiAutonomousAgent {
       await this.aiJournalRepo.deleteByTradeId(row.id);
       await this.aiJournalRepo.saveReflection(reflection);
 
-      this.thoughts.push({
+      this.recordThought({
         id: `th-${Date.now()}-learn`,
         timestamp: row.closed_at ? new Date(row.closed_at).toISOString() : new Date().toISOString(),
         symbol,

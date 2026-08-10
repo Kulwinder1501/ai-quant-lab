@@ -53,6 +53,36 @@ function assertScannableTimeframes(timeframes: readonly string[]): void {
   }
 }
 
+/**
+ * Refuses at startup to scan an instrument that is not active.
+ *
+ * `is_active` is how this project marks an instrument as research-only -- migration 027's
+ * twenty training equities and migration 030's two ETF proxies all carry `FALSE`, each with a
+ * comment saying activation is a separate decision. `POST /trade-ideas/generate` enforces that
+ * with `AND is_active = TRUE`, but `findByExchangeAndSymbol` deliberately does not filter (the
+ * collectors must reach inactive rows to backfill them), so an unattended bot reading the same
+ * repository could trade one without anything objecting. Checked at startup rather than per
+ * scan: a symbol list is a deployment decision, and this should fail before the first order.
+ */
+async function assertScannableSymbols(
+  repository: { findByExchangeAndSymbol(exchange: "NSE", symbol: string): Promise<{ isActive: boolean } | null> },
+  symbols: readonly string[],
+): Promise<void> {
+  for (const symbol of symbols) {
+    const instrument = await repository.findByExchangeAndSymbol("NSE", symbol);
+    if (!instrument) {
+      throw new Error(`${symbol} is not a registered instrument, so the bot cannot scan it.`);
+    }
+    if (!instrument.isActive) {
+      throw new Error(
+        `${symbol} is registered but is_active = FALSE, which marks it research-only. Scanning it `
+        + "would override that flag from the one path that does not check it. Activate the "
+        + "instrument deliberately before adding it to SCAN_SYMBOLS.",
+      );
+    }
+  }
+}
+
 /** One key per contract, so a persisting signal cannot open the same position twice. */
 function contractKey(underlying: string, expiry: Date, strike: number, optionType: string): string {
   return `${underlying} ${expiry.toISOString().slice(0, 10)} ${strike} ${optionType}`;
@@ -82,6 +112,26 @@ function contractKey(underlying: string, expiry: Date, strike: number, optionTyp
  */
 
 const BOT_ACCOUNT_NAME = "AutoBot";
+/**
+ * `NIFTYBEES` is deliberately **not** here, and it is worth recording why, because adding it
+ * looks obviously right: `live-collector-scalp-v2` writes its 1m bars, it is the one intraday
+ * series with real volume, and momentum-scalp needs volume for VWAP.
+ *
+ * Two things stop it, and neither is visible from this file alone.
+ *
+ * 1. Migration 030 registers it `is_active = FALSE` and says in as many words that activating
+ *    it for the scanner or strategy engine is a separate, explicit decision. `POST
+ *    /trade-ideas/generate` honours that with `AND is_active = TRUE`;
+ *    `findByExchangeAndSymbol` does not filter, so scanning it here would have quietly
+ *    overridden the flag from the one path that never checks it.
+ * 2. The bot's only entry path is `prepareEntry`, which buys an **option** on the idea's
+ *    underlying. NIFTYBEES is an ETF with no options chain, so every idea it raised would be
+ *    refused at NO_STRIKE_STEP/NO_CALENDAR -- a scan that cannot produce a position no matter
+ *    what the market does.
+ *
+ * Trading it needs an equity/ETF entry path plus a deliberate activation, so it stays out
+ * until both exist. `assertScannableSymbols` below enforces the `is_active` half.
+ */
 const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
 /**
  * `5m` used to be here, and **no registered strategy supports it** -- trend-breakout takes
@@ -131,6 +181,10 @@ async function main(): Promise<void> {
     const accountRepository = new PostgresPaperAccountRepository(database);
     const instrumentRepository = new PostgresInstrumentRepository(database);
     const tradeRepository = new PostgresPaperTradeRepository(database);
+
+    // Before the account is touched: a symbol list that should not be traded is a
+    // configuration error, and it must not get as far as raising an idea.
+    await assertScannableSymbols(instrumentRepository, SCAN_SYMBOLS);
 
     let account = await accountRepository.findByName(BOT_ACCOUNT_NAME);
     if (!account) {

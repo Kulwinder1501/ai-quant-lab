@@ -1,5 +1,6 @@
 import cors from "cors";
 import express, { type Express } from "express";
+import { loadHttpConfiguration, type HttpConfiguration } from "../../config/environment.js";
 import type { DatabaseQueryable } from "../../infrastructure/database/database.js";
 import { registerBacktestingRoutes } from "../../modules/backtesting/interfaces/http/backtesting.routes.js";
 import { registerMarketDataRoutes } from "../../modules/market-data/interfaces/http/market-data.routes.js";
@@ -22,6 +23,12 @@ import { registerHealthRoutes } from "./routes/health.routes.js";
 
 export interface ApplicationDependencies {
   database: DatabaseQueryable;
+  /**
+   * Validated configuration. Optional so existing callers -- notably the route tests, which
+   * construct an app around a stub database -- keep working without one; when absent the
+   * schema's own defaults are used, which is the same answer the inline parsing produced.
+   */
+  environment?: HttpConfiguration;
 }
 
 /**
@@ -31,19 +38,16 @@ export interface ApplicationDependencies {
  * creates shared dependencies, installs middleware in order, registers the
  * modules, and terminates the pipeline with the common 404/error handlers.
  */
-export function createApp({ database }: ApplicationDependencies): Express {
+export function createApp({ database, environment }: ApplicationDependencies): Express {
   const app = express();
   const dependencies = buildHttpDependencies(database);
-  const allowedOrigins = new Set(
-    (process.env.CORS_ORIGINS ?? "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001")
-      .split(",")
-      .map((origin) => origin.trim())
-      .filter(Boolean),
-  );
-  const configuredMutationLimit = Number(process.env.API_MUTATION_RATE_LIMIT ?? "120");
-  const mutationLimit = Number.isInteger(configuredMutationLimit) && configuredMutationLimit > 0
-    ? configuredMutationLimit
-    : 120;
+  // Origins and the mutation limit are parsed and defaulted by the schema in `config/`, not
+  // here. This function used to split the raw string and coerce the number itself, so the
+  // effective default and the documented one in `.env.example` could drift with nothing to
+  // compare -- and an unparseable limit fell back to 120 without saying so.
+  const configuration = environment ?? loadHttpConfiguration();
+  const allowedOrigins = new Set(configuration.CORS_ORIGINS);
+  const mutationLimit = configuration.API_MUTATION_RATE_LIMIT;
 
   app.use(requestLogger);
   app.use(securityHeaders);

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "../../../components/layout/page-header";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { errorMessage, isAbortError } from "../../../lib/errors";
+import { getApiV1Url } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
 import {
@@ -14,7 +15,15 @@ import {
   priceEuropeanOption,
 } from "@ai-quant-lab/pricing";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4001/api/v1";
+/**
+ * This page reads the API base URL from the same store as every other feature.
+ *
+ * It used to hold `process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4001/api/v1"`, which
+ * broke two ways: the Settings page writes its override into the store, so changing the API
+ * URL there had no effect here, and the fallback port disagreed with the 4000 that
+ * `app-store.ts` and `.env.example` both use -- so with no env var set, this one page pointed
+ * somewhere nothing was listening.
+ */
 
 /** The cost budget the measured volatility edge can afford: it dies near 1.09% per leg. */
 const DEFAULT_COST_BUDGET_PERCENT = 1.0;
@@ -164,7 +173,7 @@ export function OptionChainDashboard() {
         costBudgetPercent: String(DEFAULT_COST_BUDGET_PERCENT),
       });
       if (expiry) query.set("expiry", expiry);
-      const response = await fetch(`${API}/option-chain?${query.toString()}`, { signal });
+      const response = await fetch(`${getApiV1Url()}/option-chain?${query.toString()}`, { signal });
       if (!response.ok) throw new Error(`Option chain request failed (${response.status}).`);
       const payload = await response.json();
       return { status: "loaded", chain: payload.data as ChainResponse };
@@ -196,7 +205,7 @@ export function OptionChainDashboard() {
     if (!chain?.available) return;
 
     let eventSource: EventSource | null = null;
-    const url = `${API}/option-chain/stream?underlying=${underlying}`;
+    const url = `${getApiV1Url()}/option-chain/stream?underlying=${underlying}`;
     
     try {
       eventSource = new EventSource(url);
