@@ -120,18 +120,26 @@ export function SettingsDashboard() {
     const params = new URLSearchParams(window.location.search);
     const fyers = params.get('fyers');
     const message = params.get('fyersMessage');
-    if (fyers === 'connected') {
-      setFyersBanner('Fyers connected. Tokens are stored on the API — not in this browser.');
-      void loadFyersHealth();
-    } else if (fyers === 'error') {
-      setFyersBanner(message || 'Fyers connect failed. Try again.');
-    }
+
+    // Strip the callback params first, synchronously, so a refresh cannot replay the banner.
     if (fyers) {
       params.delete('fyers');
       params.delete('fyersMessage');
       const next = params.toString();
       const path = `${window.location.pathname}${next ? `?${next}` : ''}`;
       window.history.replaceState({}, '', path);
+    }
+
+    // The banner reflects a one-shot OAuth redirect param read once on mount, not reactive state
+    // derived from props/state, so `set-state-in-effect` is a false positive here: the URL is
+    // stripped above, so this cannot re-run and cascade. Disabled with that justification rather
+    // than deferred, because the rule tracks the set transitively through a microtask wrapper too.
+    if (fyers === 'connected') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot OAuth redirect banner
+      setFyersBanner('Fyers connected. Tokens are stored on the API — not in this browser.');
+      void loadFyersHealth();
+    } else if (fyers === 'error') {
+      setFyersBanner(message || 'Fyers connect failed. Try again.');
     }
   }, []);
 

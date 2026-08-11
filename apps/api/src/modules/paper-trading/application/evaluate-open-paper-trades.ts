@@ -427,25 +427,34 @@ export class EvaluateOpenPaperTrades {
 
     // A long option exits by selling into the bid. The dense series is the only sub-minute
     // executable mark in the system, so it outranks a theoretical premium whenever fresh.
-    if (denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0) {
-      const decision = decideOptionBuyerLiveExit(trade, denseQuote.bid, liveSpot);
+    const freshBid = denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0
+      ? denseQuote.bid
+      : null;
+    if (freshBid !== null) {
+      const decision = decideOptionBuyerLiveExit(trade, freshBid, liveSpot);
       if (decision) {
         return closeOption({
-          exitPrice: denseQuote.bid,
+          exitPrice: freshBid,
           exitReason: decision.reason,
           closedAt: asOf,
           details: {
             source: "OPTION_PREMIUM_TICK_BID",
-            quoteObservedAt: denseQuote.observedAt.toISOString(),
-            bid: denseQuote.bid,
-            ask: denseQuote.ask,
-            lastPrice: denseQuote.lastPrice,
+            quoteObservedAt: denseQuote!.observedAt.toISOString(),
+            bid: freshBid,
+            ask: denseQuote!.ask,
+            lastPrice: denseQuote!.lastPrice,
             spot: liveSpot,
             fillRule: decision.reason === "TARGET" ? "INTRABAR_TARGET" : (decision.reason === "TRAP_DETECTED" ? "TRAP_DETECTED" : "INTRABAR_STOP"),
             eventType: decision.eventType,
           },
         });
       }
+      // A fresh executable bid that does not trigger governs the HOLD too. It measures this exact
+      // instant, so the theoretical mark below -- which estimates the same instant and has been
+      // measured 179 points off a real quote on this project's own book -- must not be allowed to
+      // close a position the real market would keep open. The completed-candle path further down
+      // still runs: it answers a different question (a barrier crossed on a bar between sparse
+      // evaluations) that a point-in-time quote cannot see.
     }
 
     const volatility = await this.resolveVolatility(trade, asOf);
@@ -453,7 +462,9 @@ export class EvaluateOpenPaperTrades {
       return null;
     }
 
-    if (liveSpot !== undefined) {
+    // Only estimate the current premium with the model when no fresh executable bid was available.
+    // When one was, it already decided the current instant above.
+    if (freshBid === null && liveSpot !== undefined) {
       const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
       const decision = decideOptionBuyerLiveExit(trade, mark.premium, liveSpot);
       if (decision) {

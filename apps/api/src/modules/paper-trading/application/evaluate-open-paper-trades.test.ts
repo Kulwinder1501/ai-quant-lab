@@ -263,6 +263,47 @@ describe("EvaluateOpenPaperTrades", () => {
   });
 
 
+  it("lets a fresh bid govern HOLD, so the model cannot close what the real book keeps open", async () => {
+    // Same fixture as the "closes on live BS mark" case: at this spot/time the theoretical mark
+    // has crushed below the 150 stop, so the model path *would* close. But a fresh executable bid
+    // of 200 sits above the stop and below the target -- the real market says hold. The model must
+    // not override that. This is the `model-mark-flipped-pnl-sign` class of bug: a 179-point gap
+    // between the model and the real quote once booked +Rs 2,032 on a losing position.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const spot = 24000;
+    // Confirm the model really would have stopped out, so this test proves the override, not a
+    // scenario where the model happened to agree.
+    const mark = priceOptionMark({ trade, spot, asOf, volatility: 0.12 });
+    expect(mark.premium).toBeLessThan(trade.stopLoss);
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = {
+      latestForContract: async () => ({
+        observedAt: new Date(asOf.getTime() - 15_000),
+        bid: 200, ask: 202, lastPrice: 201,
+        underlyingValue: null,
+      }),
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, livePrices: { NIFTY50: spot }, exitFees: 0 });
+
+    // The fresh bid held, the model path was skipped, and nothing closed.
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
   it("isolates a trade it cannot evaluate instead of abandoning the rest of the batch", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const asOf = new Date("2026-08-06T10:00:00.000Z");
