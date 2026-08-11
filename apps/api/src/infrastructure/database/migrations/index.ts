@@ -48,6 +48,8 @@ import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-b
 import { purgeLookAheadSmcSnapshotsMigration } from "./048-purge-look-ahead-smc-snapshots.js";
 import { reconcileAbandonedJobRunsMigration } from "./049-reconcile-abandoned-job-runs.js";
 import { addBaselineAccuracyMigration } from "./050-add-baseline-accuracy.js";
+import { reapplyBankniftyLotSizeMigration } from "./053-reapply-banknifty-lot-size.js";
+import { aiBrainThoughtsMigration } from "./052-ai-brain-thoughts.js";
 import { addVolatilityIndicesMigration } from "./051-add-volatility-indices.js";
 
 export const migrations = [
@@ -102,4 +104,6 @@ export const migrations = [
   reconcileAbandonedJobRunsMigration,
   addBaselineAccuracyMigration,
   addVolatilityIndicesMigration,
+  aiBrainThoughtsMigration,
+  reapplyBankniftyLotSizeMigration,
 ];

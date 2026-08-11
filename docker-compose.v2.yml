@@ -111,15 +111,25 @@ services:
     # fetch and the fake does not -- so the cost of a late start is one lost bar per restart,
     # and the cost of not restarting is the rest of the session.
     #
-    # 15m rather than 1m: it is the shortest timeframe any registered strategy supports
-    # (trend-breakout), and the paper-trading bot scans it. The 1m collector, if run, adds
-    # only bars whose one strategy needs VWAP -- which needs volume, which the quotes
-    # endpoint does not report for an index.
+    # Every timeframe the paper-trading bot scans, in one process.
+    #
+    # This was 15m only, on the reasoning that 1m's only strategy was momentum-scalp, which needs
+    # VWAP, which needs volume the quotes endpoint does not report for an index. That reasoning
+    # expired when `momentum-scalp-index` landed: it gates on Supertrend direction instead of VWAP,
+    # so index 1m and 5m bars are now usable, and `trend-breakout` already supports 60m.
+    #
+    # Leaving it at 15m had made three quarters of the bot's scan surface dead. Measured 2026-08-11:
+    # NIFTY50/BANKNIFTY 1m was four days stale, 5m and 60m five days, so a bot run skipped six of
+    # eight symbol-timeframe pairs as STALE before any strategy was consulted.
+    #
+    # 30s polling is unchanged and is what bounds 1m accuracy: a 1m bar is aggregated from at most
+    # two observations, so its high and low are the extremes of those samples rather than of the
+    # minute. That is a known limit of quote-polled bars, not a defect introduced here.
     command:
       - "node"
       - "apps/api/dist/interfaces/cli/collect-live-market-data.js"
       - "--provider=fyers"
-      - "--timeframe=15m"
+      - "--timeframe=1m,5m,15m,60m"
       - "--instruments=NIFTY50,BANKNIFTY"
       - "--poll-seconds=30"
     environment:

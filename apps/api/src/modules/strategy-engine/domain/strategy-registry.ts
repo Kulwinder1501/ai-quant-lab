@@ -1,5 +1,6 @@
 import type { EnsureStrategyVersionInput, ProposedTradeIdea, StrategyMarketContext } from "./strategy.js";
 import { MomentumScalpStrategy, momentumScalpStrategyRegistration } from "./momentum-scalp-strategy.js";
+import { MomentumScalpIndexStrategy, momentumScalpIndexStrategyRegistration } from "./momentum-scalp-index-strategy.js";
 import { TrendBreakoutStrategy, trendBreakoutStrategyRegistration } from "./trend-breakout-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
@@ -42,6 +43,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: momentumScalpStrategyRegistration,
     StrategyClass: MomentumScalpStrategy,
     supportedTimeframes: ["1m"],
+  },
+  {
+    registration: momentumScalpIndexStrategyRegistration,
+    StrategyClass: MomentumScalpIndexStrategy,
+    supportedTimeframes: ["1m", "5m"],
   },
 ];
 

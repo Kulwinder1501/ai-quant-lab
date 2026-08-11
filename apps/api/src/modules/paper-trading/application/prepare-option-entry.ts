@@ -404,20 +404,51 @@ export class PrepareOptionEntry {
     }
     try {
       const result = await this.database.query<{
-        volume: string | null; timeframe: string; nearby_volume_bars: string;
+        volume: string | null; timeframe: string; instrument_type: string; nearby_volume_bars: string;
       }>(`
-        SELECT c.volume, c.timeframe,
+        SELECT c.volume, c.timeframe, i.instrument_type,
                (SELECT count(*) FROM candles peer
                  WHERE peer.instrument_id = c.instrument_id
                    AND peer.timeframe = c.timeframe
                    AND peer.volume > 0
                    AND peer.open_time BETWEEN c.open_time - INTERVAL '7 days'
                                           AND c.open_time + INTERVAL '7 days') AS nearby_volume_bars
-        FROM candles c WHERE c.id = $1
+        FROM candles c
+        JOIN instruments i ON i.id = c.instrument_id
+        WHERE c.id = $1
       `, [sourceCandleId]);
       const bar = result.rows[0];
       if (!bar) {
         return { candleVolume: null, absenceReason: "the idea's source candle is no longer stored" };
+      }
+      /*
+       * An index has no volume to confirm with, whatever a particular bar happens to store.
+       *
+       * The peer window below exists to tell "absent feed" from "absent participation", and it
+       * cannot separate them here: NSE publishes no traded volume for an index, and Fyers' history
+       * endpoint reports 0% non-zero through 2025 and then 100% from 2026 -- a structural break
+       * migration 030 records, and the reason the tradable ETF proxies were registered at all.
+       * Measured 2026-08-10, NIFTY50 15m carries volume on 6,827 of 22,221 bars (31%) while
+       * NIFTYBEES carries it on 9,829 of 9,830 (99.99%).
+       *
+       * So within 2026 the peers say "this series reports volume" while the live collector, which
+       * writes the bars nearest the present, cannot report it for an index -- the quotes endpoint
+       * returns 0. Every one of 2026-08-10's NIFTY50 15m bars stored 0. The gate then read a
+       * missing measurement as a failed one and refused every index entry near the live edge: the
+       * agent qualified setups at 80% confidence and was rejected on
+       * "Low-volume moves are weak or false" it could never satisfy.
+       *
+       * Reported as unchecked rather than passed. The distinction is the whole point -- a factor
+       * that could not be evaluated must never read like one that was.
+       */
+      if (bar.instrument_type === "INDEX") {
+        return {
+          candleVolume: null,
+          absenceReason: `${symbol} is an INDEX, and index volume is not a usable confirmation `
+            + "signal: NSE publishes none, and the provider's history has a 2026 break that makes "
+            + "any volume-derived check a proxy for the calendar. Use an ETF proxy to confirm on "
+            + "traded volume",
+        };
       }
       if (Number(bar.nearby_volume_bars) === 0) {
         return {

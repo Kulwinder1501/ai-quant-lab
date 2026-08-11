@@ -14,7 +14,11 @@ const coreInstruments = [
     symbol: "BANKNIFTY",
     displayName: "NIFTY BANK",
     instrumentType: "INDEX" as const,
-    lotSize: 15,
+    // 30, matching migration 020. 15 is the pre-revision lot and implies an 8.6 lakh contract at
+    // ~57,000 against SEBI's 15 lakh minimum -- `assessContractSize` grades it
+    // BELOW_REGULATORY_MINIMUM. Confirm against the current NSE contract note before trusting it
+    // for anything but paper trading; lot sizes are revised as the index drifts.
+    lotSize: 30,
     metadata: { market: "India", canonicalName: "NIFTY BANK", kiteQuoteSymbol: "NSE:NIFTY BANK" },
   },
   {

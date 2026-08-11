@@ -98,29 +98,34 @@ check and no way to cost it honestly. The sentiment circuit breaker's exit is pr
 observed contract bid for the same reason, and refuses to close a position it cannot price rather
 than closing it at the underlying's level.
 
-### The scorer has been measured, and it does not select
+### The scorer is measured, and the short side is switched off because of it
 
 `npm run measure:directional-scorer -- --instrument=NIFTY50 --timeframe=15m` replays the scorer
 over stored history, applies the agent's ATR bracket, and resolves each one with the paper-trading
-exit rules (gap fills, conservative same-candle stop-first). On NIFTY50 15m over 4,993 scored bars
-with news/flow/macro held out:
+exit rules (gap fills, conservative same-candle stop-first). On 15m with news/flow/macro held out,
+against a 0.3333 break-even hit rate:
 
-| side | gated (score ≥ 80) | unconditional | break-even | gated expectancy |
-|---|---|---|---|---|
-| LONG | 0.3008 (n=256) | 0.3293 | 0.3333 | −0.10R |
-| SHORT | 0.3829 (n=175) | 0.3895 | 0.3333 | +0.14R |
+| instrument | side | gated (score ≥ 80) | gated expectancy | unconditional | delta |
+|---|---|---|---|---|---|
+| NIFTY50 | LONG | 0.3351 (n=367) | +0.005R | 0.3370 | −0.0019 |
+| NIFTY50 | SHORT | 0.2950 (n=261) | **−0.262R** | 0.3595 | −0.0645 |
+| BANKNIFTY | LONG | 0.3850 (n=413) | +0.182R | 0.3568 | +0.0282 |
+| BANKNIFTY | SHORT | 0.2478 (n=347) | **−0.376R** | 0.3315 | −0.0837 |
 
-**Gating is worse than not gating, on both sides.** The score selects a subset that performs
-slightly below the population it was drawn from. The short side's positive expectancy is not the
-mirror working — the unconditional column captures all of it and more, so it is a property of this
-bracket on this instrument over this window. Two limits: with news and flow held out the ceiling is
-75, so clearing 80 requires a pattern (the gated population is "bars carrying a ≥0.7 pattern"), and
-it could not be replicated on BANKNIFTY because **no 15m pattern detections exist for it** — a data
-gap, not a second data point.
+The comparison that matters is gated against **unconditional** — taking that side on every bar
+regardless of score. The short gate is below break-even on both instruments, strongly negative in
+expectancy, and 6–8 points worse than its own baseline: it does not merely fail to select, it
+reliably selects *bad* shorts. So `AGENT_EXECUTABLE_SIDES` excludes SHORT. It is still scored and
+journalled — the population that would have traded stays visible — but it is not traded. The long
+gate is roughly neutral and stays enabled with no claim of edge.
 
-What the code claims is that the two sides are coherent: the number a position opens on is the
-number computed for the direction traded, which was not true before. Whether to trade on it at all
-is a separate decision, and the table above is the evidence for making it.
+Two caveats. With news and flow held out the ceiling is 75, so clearing 80 requires a pattern; the
+gated population is "bars carrying a ≥0.7 pattern", and live the gate is reachable without one.
+And an earlier run of this measurement reported the short side at 0.3829 with *positive* expectancy
+— that run used a stale pattern set, because `analysis:detect-patterns` had no scheduled caller at
+all (NIFTY50 15m detections stopped six days short of its candles; BANKNIFTY had none ever). Since
+the gate effectively requires a pattern, stale patterns move the gated population and can invert
+the result. `PATTERN_DETECTION_INTRADAY` now refreshes them every 15 minutes during the session.
 
 ## Safety boundary
 

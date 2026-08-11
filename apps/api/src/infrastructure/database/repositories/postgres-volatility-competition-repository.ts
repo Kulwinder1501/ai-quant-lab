@@ -28,29 +28,61 @@ export class PostgresVolatilityCompetitionRepository implements VolatilityCompet
    */
   async listCandidates(rollingWindowDays: number): Promise<VolatilityCandidate[]> {
     const bounded = Math.max(1, Math.min(Math.trunc(rollingWindowDays), 365));
+    /*
+     * `scored_days` is computed per model in its own CTE, not per confusion cell.
+     *
+     * The main GROUP BY is per (model, role, prediction, realized_label), so a `count(DISTINCT
+     * date)` in the select list counts the days inside *one cell*. The caller used to combine cells
+     * with `Math.max`, which yields the largest cell's day count rather than the union of days: a
+     * model settling EXPANSION on Mon-Tue and CONTRACTION on Wed-Fri reported 3 sessions instead of
+     * 5. That was harmless while `scoredDays` was populated but never read; it is systematically
+     * over-strict now that it gates qualification and promotion.
+     *
+     * A window function would be the obvious fix and is not available: PostgreSQL does not
+     * implement `DISTINCT` for window aggregates, so `count(DISTINCT ...) OVER (PARTITION BY ...)`
+     * is a runtime error rather than a slow query. Hence the pre-aggregate.
+     */
     const result = await this.pool.query(`
+      WITH settled AS (
+        SELECT
+          amp.model_version_id,
+          amp.prediction,
+          amp.realized_label,
+          (amp.label_available_at AT TIME ZONE 'Asia/Kolkata')::date AS scored_date
+        FROM auxiliary_model_predictions amp
+        WHERE amp.settled_at IS NOT NULL
+          AND amp.realized_label IS NOT NULL
+          AND amp.label_available_at >= NOW() - ($1 || ' days')::interval
+      ),
+      per_model AS (
+        SELECT
+          model_version_id,
+          count(DISTINCT scored_date)  AS scored_days,
+          max(scored_date)::text       AS last_scored_date
+        FROM settled
+        GROUP BY model_version_id
+      )
       SELECT
         mv.id                        AS model_version_id,
         mv.model_key,
         vcs.role,
-        amp.prediction,
-        amp.realized_label,
+        s.prediction,
+        s.realized_label,
         count(*)                     AS cell_count,
-        count(DISTINCT (amp.label_available_at AT TIME ZONE 'Asia/Kolkata')::date)
-                                     AS scored_days,
-        max((amp.label_available_at AT TIME ZONE 'Asia/Kolkata')::date)::text
-                                     AS last_scored_date
+        -- Identical on every cell row of a model, so the caller may simply take it.
+        COALESCE(pm.scored_days, 0)  AS scored_days,
+        pm.last_scored_date          AS last_scored_date
       FROM volatility_shadow_enrollments vse
       JOIN model_versions mv ON mv.id = vse.model_version_id
       LEFT JOIN volatility_competition_state vcs ON vcs.model_version_id = mv.id
-      LEFT JOIN auxiliary_model_predictions amp
-        ON amp.model_version_id = mv.id
-       AND amp.settled_at IS NOT NULL
-       AND amp.realized_label IS NOT NULL
-       AND amp.label_available_at >= NOW() - ($1 || ' days')::interval
+      -- Still a LEFT JOIN: a model with no settled rows must appear so the competition can
+      -- report it as excluded rather than pretend it does not exist.
+      LEFT JOIN settled s ON s.model_version_id = mv.id
+      LEFT JOIN per_model pm ON pm.model_version_id = mv.id
       WHERE vse.label_scheme = $2
         AND mv.stage IN ('CANDIDATE', 'PRODUCTION')
-      GROUP BY mv.id, mv.model_key, vcs.role, amp.prediction, amp.realized_label
+      GROUP BY mv.id, mv.model_key, vcs.role, s.prediction, s.realized_label,
+               pm.scored_days, pm.last_scored_date
       ORDER BY mv.model_key
     `, [bounded, VOLATILITY_SCHEME]);
 
@@ -86,7 +118,9 @@ export class PostgresVolatilityCompetitionRepository implements VolatilityCompet
         realizedLabel: realizedLabel as VolatilityLabel,
         count: Number(row.cell_count),
       });
-      candidate.scoredDays = Math.max(candidate.scoredDays, Number(row.scored_days));
+      // Assigned, not maxed: `scored_days` is now a per-model total, identical on every cell row.
+      // The old `Math.max` across cells was what under-counted the union of scored days.
+      candidate.scoredDays = Number(row.scored_days);
       const lastScored = row.last_scored_date === null ? null : String(row.last_scored_date);
       if (lastScored !== null && (candidate.lastScoredDate === null || lastScored > candidate.lastScoredDate)) {
         candidate.lastScoredDate = lastScored;

@@ -152,6 +152,8 @@ async function main(): Promise<void> {
     OPTION_CHAIN: 10 * 60 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
     AI_AGENT_TICK: 10 * 60 * 1000,
+    // Full-series recompute over both engines; slower than the other intraday jobs by nature.
+    PATTERN_DETECTION_INTRADAY: 20 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
   };
 
@@ -335,6 +337,46 @@ async function main(): Promise<void> {
     }
   };
 
+  /**
+   * Pattern detection, which had no scheduled caller at all.
+   *
+   * `analysis:detect-patterns` was invoked only by hand -- not here, not in the EOD pipeline -- so
+   * pattern evidence was as fresh as the last time someone remembered to run it. Measured
+   * 2026-08-10: BANKNIFTY 15m had *zero* detections ever recorded, and NIFTY50 15m stopped at
+   * 2026-08-04 while its candles ran to the 10th.
+   *
+   * That is not cosmetic. The strategies read pattern evidence, and the autonomous agent's 80 gate
+   * effectively requires a pattern -- so an entire evidence source decayed silently while the
+   * indicators computed beside it stayed current, and the agent had never once qualified a setup
+   * on BANKNIFTY.
+   *
+   * Deliberately **not** folded into INDICES_INTRADAY above, which runs every minute. `--from`
+   * bounds what this writes, but both engines still run over the whole completed series every
+   * invocation (multi-bar patterns and swing pivots need the history) -- 22k candles for NIFTY50
+   * 15m. Six full-series passes a minute is how INDICES_INTRADAY previously accumulated 330
+   * concurrent runs and completed once in 72 hours. Every 15 minutes is ample: the agent reads
+   * completed 15m bars, so a pattern set at most one bar stale changes nothing it could act on.
+   */
+  const detectPatternsIntraday = async (timeframes: readonly string[]): Promise<void> => {
+    const writeFrom = istDateKey(
+      new Date(Date.now() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
+    );
+    for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+      for (const timeframe of timeframes) {
+        await runCommand("npm", [
+          "run", "analysis:detect-patterns", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", writeFrom,
+        ]);
+      }
+    }
+  };
+
+  cron.schedule("*/15 9-15 * * 1-5", () => {
+    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["15m"]));
+  }, { timezone: IST });
+
   cron.schedule("*/1 9-15 * * 1-5", () => {
     // Requires a healthy Fyers token, which FYERS_AUTH_HEALTH_CHECK ensures is available
     if (fyersTokenService) {
@@ -421,6 +463,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
+      "PATTERN_DETECTION_INTRADAY",
       ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT"] : []),
       "OPTION_CHAIN",
       "RSS_NEWS_INGESTION",

@@ -12,8 +12,8 @@ function configuration(overrides: Record<string, unknown> = {}): Record<string, 
 }
 
 /**
- * ATR is 10, so one ATR of VWAP displacement is 10 points. Close sits 7.5 points
- * above VWAP, which is 0.75 ATR — the configured ideal displacement.
+ * ATR is 10, so one ATR of VWAP displacement is 10 points. Close sits 6 points
+ * above VWAP, which is 0.6 ATR — the configured ideal displacement.
  */
 function qualifyingLongContext(overrides: {
   close?: number;
@@ -23,7 +23,7 @@ function qualifyingLongContext(overrides: {
   emaSlow?: number;
   timeframe?: string;
 } = {}): StrategyMarketContext {
-  const close = overrides.close ?? 1007.5;
+  const close = overrides.close ?? 1006;
   return {
     candle: {
       id: "candle-scalp-long",
@@ -39,11 +39,11 @@ function qualifyingLongContext(overrides: {
       tickSize: 0.05,
     },
     indicators: [
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: overrides.emaFast ?? 1005 } },
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: overrides.emaSlow ?? 1000 } },
-      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: overrides.rsi ?? 70 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: overrides.emaFast ?? 1005 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: overrides.emaSlow ?? 1000 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: overrides.rsi ?? 65 } },
       { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: overrides.vwap ?? 1000 } },
-      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 10 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 10 } },
     ],
     patterns: [],
     priceActionEvents: [],
@@ -66,11 +66,11 @@ function qualifyingShortContext(): StrategyMarketContext {
       tickSize: 0.05,
     },
     indicators: [
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: 995 } },
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: 1000 } },
-      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 30 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: 995 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: 1000 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 35 } },
       { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 1000 } },
-      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 10 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 10 } },
     ],
     patterns: [],
     priceActionEvents: [],
@@ -102,6 +102,21 @@ describe("MomentumScalpStrategy configuration", () => {
       indicatorParameters: { ...defaultMomentumScalpStrategyConfiguration.indicatorParameters, VWAP: {} },
     }))).toThrow(/requires parameters for VWAP/);
   });
+
+  it("keeps the production v3 terms unchanged", () => {
+    expect(defaultMomentumScalpStrategyConfiguration).toMatchObject({
+      rsiLongMin: 55,
+      rsiLongMax: 75,
+      rsiShortMin: 25,
+      rsiShortMax: 45,
+      atrStopMultiple: 1.0,
+      rewardRiskMultiple: 1.5,
+      minimumVwapDisplacementAtr: 0.10,
+      idealVwapDisplacementAtr: 0.60,
+    });
+    expect(defaultMomentumScalpStrategyConfiguration.indicatorParameters.EMA_FAST).toEqual({ period: 3 });
+    expect(defaultMomentumScalpStrategyConfiguration.indicatorParameters.EMA_SLOW).toEqual({ period: 8 });
+  });
 });
 
 describe("MomentumScalpStrategy evaluation", () => {
@@ -122,14 +137,13 @@ describe("MomentumScalpStrategy evaluation", () => {
   });
 
   it("rejects a bar hovering at VWAP as chop", () => {
-    // 0.05 ATR of displacement is below minimumVwapDisplacementAtr. v1 scored
-    // this setup *highest*, because its confidence decreased with distance.
-    const context = qualifyingLongContext({ close: 1000.5 });
+    // 0.01 ATR of displacement is below minimumVwapDisplacementAtr (0.10).
+    const context = qualifyingLongContext({ close: 1000.1 });
     expect(new MomentumScalpStrategy().evaluate(context, configuration())).toHaveLength(0);
   });
 
   it("rejects an already-extended move rather than chasing it", () => {
-    // 3 ATR above VWAP, past maximumVwapDisplacementAtr.
+    // 3 ATR above VWAP, past maximumVwapDisplacementAtr (2.5).
     const context = qualifyingLongContext({ close: 1030 });
     expect(new MomentumScalpStrategy().evaluate(context, configuration())).toHaveLength(0);
   });

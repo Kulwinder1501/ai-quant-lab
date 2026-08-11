@@ -61,7 +61,7 @@ describe("CalculateTechnicalIndicators", () => {
     // The two that a count alone would not protect: a second EMA (period 9, the
     // momentum-scalp fast leg) alongside the period-20 one, and every registered code
     // reaching the processor.
-    expect(definitions.filter((code) => code === "EMA")).toHaveLength(2);
+    expect(definitions.filter((code) => code === "EMA")).toHaveLength(4);
     expect(new Set(definitions)).toEqual(new Set(defaultIndicatorDefinitions.map((d) => d.code)));
     expect(result).toMatchObject({
       candlesRead: 40,

@@ -65,7 +65,21 @@ export class PostgresInstrumentRepository implements InstrumentRepository {
         instrument_type = EXCLUDED.instrument_type,
         isin = EXCLUDED.isin,
         tick_size = EXCLUDED.tick_size,
-        lot_size = EXCLUDED.lot_size,
+        /*
+         * lot_size is preserved on conflict, not overwritten.
+         *
+         * Migration 020 corrected BANKNIFTY from 15 to 30, because 15 is the pre-revision lot and
+         * implies an 8.6 lakh contract against SEBI's 15 lakh minimum. The seed still carried 15,
+         * and this line wrote it back -- so every core-instrument seed run reverted the correction,
+         * and the API container reseeds on every start. Measured 2026-08-11 the live value was 15
+         * while strike_step from the same migration had survived at 100, which is the signature:
+         * only the column the seed also sets was reverted.
+         *
+         * A lot size is a contract specification the exchange revises, so a migration is the right
+         * place to correct one and a seed is not the right place to assert one. Establishing it on
+         * INSERT is fine; re-asserting it on every conflict is what made corrections temporary.
+         */
+        lot_size = instruments.lot_size,
         is_active = EXCLUDED.is_active,
         metadata = EXCLUDED.metadata,
         underlying_symbol = EXCLUDED.underlying_symbol,

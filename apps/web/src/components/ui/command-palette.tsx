@@ -13,9 +13,6 @@ import {
   Activity, 
   Folder, 
   FileCode, 
-  Users, 
-  Terminal, 
-  BookOpen, 
   Shield 
 } from "lucide-react";
 
@@ -80,36 +77,21 @@ export function CommandPalette() {
             >
               <FileCode className="h-4 w-4" /> Strategies
             </Command.Item>
-            <Command.Item 
-              onSelect={() => { router.push('/backtesting'); close(); }}
-              className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
-            >
-              <Terminal className="h-4 w-4" /> Backtests
-            </Command.Item>
+
             <Command.Item 
               onSelect={() => { router.push('/ai-models'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Folder className="h-4 w-4" /> Analytics
             </Command.Item>
-            <Command.Item 
-              onSelect={() => { router.push('/trade-history'); close(); }}
-              className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
-            >
-              <BookOpen className="h-4 w-4" /> Trade Logs
-            </Command.Item>
+
             <Command.Item 
               onSelect={() => { router.push('/settings'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >
               <Settings className="h-4 w-4" /> Settings
             </Command.Item>
-            <Command.Item 
-              onSelect={() => { router.push('/paper-trading'); close(); }}
-              className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
-            >
-              <Users className="h-4 w-4" /> Account
-            </Command.Item>
+
             <Command.Item 
               onSelect={() => { router.push('/settings'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"

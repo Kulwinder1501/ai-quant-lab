@@ -26,7 +26,6 @@ function roundNearestToTick(value: number, tickSize: number): number {
   return Math.round(value / tickSize) * tickSize;
 }
 
-/** Milliseconds in one bar, or null when the timeframe is not one this rule understands. */
 function timeframeMilliseconds(timeframe: string): number | null {
   const match = /^(\d+)(m|h|d)$/.exec(timeframe);
   if (!match) return null;
@@ -36,61 +35,9 @@ function timeframeMilliseconds(timeframe: string): number | null {
 
 type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
 
-/**
- * Version 2.
- *
- * v1 could never produce an idea: it registered `VWAP: {}` while its own parser
- * rejected an empty parameter set, so `evaluate` threw on every call. Fixing that
- * changes the immutable configuration, and a strategy-version configuration is
- * immutable by contract, so the rule set is registered under a new version rather
- * than mutating v1 in place.
- */
-/**
- * v3: Switches to EMA(3/8) — the market-standard 1m scalp pair — which creates
- * real crossovers multiple times per session (EMA 9/20 on a 1m bar are nearly
- * identical and rarely separate). Bands and exit geometry are also recalibrated:
- * RSI 55–75 / 25–45 (drops the exhaustion tail at 80/20), ATR stop 1.0× (was
- * 0.5× — stopped out on noise), and RRR 1.5 (provides edge over brokerage costs).
- */
-export const momentumScalpStrategyVersion = 3;
+export const momentumScalpIndexStrategyVersion = 1;
 
-export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
-  indicatorAlgorithmVersion: "ta-v1",
-  indicatorParameters: {
-    EMA_FAST: { period: 3 },
-    EMA_SLOW: { period: 8 },
-    RSI: { period: 14, smoothing: "WILDER" },
-    // VWAP takes no period, but it does take a reset rule, and that rule is part
-    // of what a stored VWAP value meant. Declaring it both satisfies the parser
-    // and matches the contract the feature pipeline already uses.
-    VWAP: { reset: "NSE_SESSION" },
-    ATR: { period: 14, smoothing: "WILDER" },
-  },
-  candlestickAlgorithmVersion: "candlestick-v1",
-  priceActionAlgorithmVersion: "price-action-v2",
-  rsiLongMin: 55,
-  rsiLongMax: 75,
-  rsiShortMin: 25,
-  rsiShortMax: 45,
-  atrStopMultiple: 1.0,
-  rewardRiskMultiple: 1.5,
-  minimumConfidence: 0.5,
-  expiryCandles: 5,
-  requireRegime: false,
-  minimumVwapDisplacementAtr: 0.10,
-  idealVwapDisplacementAtr: 0.60,
-  maximumVwapDisplacementAtr: 2.5,
-};
-
-export const momentumScalpStrategyRegistration = {
-  strategyKey: "momentum-scalp",
-  name: "Momentum Scalp",
-  description: "Fast EMA separation confirmed by VWAP displacement and a bounded RSI momentum band.",
-  version: momentumScalpStrategyVersion,
-  configuration: { ...defaultMomentumScalpStrategyConfiguration } as Record<string, unknown>,
-};
-
-export interface MomentumScalpStrategyConfiguration {
+export interface MomentumScalpIndexStrategyConfiguration {
   indicatorAlgorithmVersion: string;
   indicatorParameters: Record<string, Record<string, number | string | boolean>>;
   candlestickAlgorithmVersion: string;
@@ -103,25 +50,43 @@ export interface MomentumScalpStrategyConfiguration {
   rewardRiskMultiple: number;
   minimumConfidence: number;
   expiryCandles: number;
-  /**
-   * When true, a trade requires a *measured* volatility regime. It deliberately
-   * does not say which regime: v1 required LOW_VOL to go long and HIGH_VOL to go
-   * short, which is a directional bias wearing a volatility filter's costume. It
-   * also forbade longs in exactly the conditions where momentum scalping pays.
-   */
   requireRegime: boolean;
-  /** Displacement from VWAP, in ATR units, below which a bar is treated as chop. */
-  minimumVwapDisplacementAtr: number;
-  /** Displacement at which momentum is best confirmed. */
-  idealVwapDisplacementAtr: number;
-  /** Displacement beyond which entering is chasing an extended move. */
-  maximumVwapDisplacementAtr: number;
 }
+
+export const defaultMomentumScalpIndexStrategyConfiguration: MomentumScalpIndexStrategyConfiguration = {
+  indicatorAlgorithmVersion: "ta-v1",
+  indicatorParameters: {
+    EMA_FAST: { period: 3 },
+    EMA_SLOW: { period: 8 },
+    RSI: { period: 14, smoothing: "WILDER" },
+    SUPERTREND: { atrPeriod: 10, multiplier: 3 },
+    ATR: { period: 14, smoothing: "WILDER" },
+  },
+  candlestickAlgorithmVersion: "candlestick-v1",
+  priceActionAlgorithmVersion: "price-action-v2",
+  rsiLongMin: 55,
+  rsiLongMax: 75,
+  rsiShortMin: 25,
+  rsiShortMax: 45,
+  atrStopMultiple: 1.0,
+  rewardRiskMultiple: 1.5,
+  minimumConfidence: 0.5,
+  expiryCandles: 3,
+  requireRegime: false,
+};
+
+export const momentumScalpIndexStrategyRegistration = {
+  strategyKey: "momentum-scalp-index",
+  name: "Momentum Scalp (Index)",
+  description: "Fast EMA separation confirmed by Supertrend direction and a bounded RSI momentum band.",
+  version: momentumScalpIndexStrategyVersion,
+  configuration: { ...defaultMomentumScalpIndexStrategyConfiguration } as Record<string, unknown>,
+};
 
 function requiredNumber(raw: Record<string, unknown>, key: string, min = -Infinity, max = Infinity): number {
   const value = raw[key];
   if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`Momentum scalp configuration requires a valid numeric ${key} between ${min} and ${max}.`);
+    throw new Error(`Momentum scalp index configuration requires a valid numeric ${key} between ${min} and ${max}.`);
   }
   return value;
 }
@@ -129,14 +94,14 @@ function requiredNumber(raw: Record<string, unknown>, key: string, min = -Infini
 function requiredString(raw: Record<string, unknown>, key: string): string {
   const value = raw[key];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Momentum scalp configuration requires a valid string ${key}.`);
+    throw new Error(`Momentum scalp index configuration requires a valid string ${key}.`);
   }
   return value.trim();
 }
 
 function requiredBoolean(raw: Record<string, unknown>, key: string): boolean {
   if (typeof raw[key] !== "boolean") {
-    throw new Error(`Momentum scalp configuration requires a boolean ${key}.`);
+    throw new Error(`Momentum scalp index configuration requires a boolean ${key}.`);
   }
   return raw[key] as boolean;
 }
@@ -144,18 +109,18 @@ function requiredBoolean(raw: Record<string, unknown>, key: string): boolean {
 function requiredIndicatorParameters(raw: Record<string, unknown>): Record<string, Record<string, number | string | boolean>> {
   const candidate = raw.indicatorParameters;
   if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-    throw new Error("Momentum scalp configuration requires indicator parameter sets.");
+    throw new Error("Momentum scalp index configuration requires indicator parameter sets.");
   }
   const result: Record<string, Record<string, number | string | boolean>> = {};
-  for (const code of ["EMA_FAST", "EMA_SLOW", "RSI", "VWAP", "ATR"]) {
+  for (const code of ["EMA_FAST", "EMA_SLOW", "RSI", "SUPERTREND", "ATR"]) {
     const parameters = (candidate as Record<string, unknown>)[code];
     if (!parameters || typeof parameters !== "object" || Array.isArray(parameters) || Object.keys(parameters).length === 0) {
-      throw new Error(`Momentum scalp configuration requires parameters for ${code}.`);
+      throw new Error(`Momentum scalp index configuration requires parameters for ${code}.`);
     }
     const typed: Record<string, number | string | boolean> = {};
     for (const [key, value] of Object.entries(parameters as Record<string, unknown>)) {
       if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
-        throw new Error(`Momentum scalp configuration has an unsupported parameter for ${code}.`);
+        throw new Error(`Momentum scalp index configuration has an unsupported parameter for ${code}.`);
       }
       typed[key] = value;
     }
@@ -164,8 +129,8 @@ function requiredIndicatorParameters(raw: Record<string, unknown>): Record<strin
   return result;
 }
 
-export function parseMomentumScalpStrategyConfiguration(raw: Record<string, unknown>): MomentumScalpStrategyConfiguration {
-  const configuration: MomentumScalpStrategyConfiguration = {
+export function parseMomentumScalpIndexStrategyConfiguration(raw: Record<string, unknown>): MomentumScalpIndexStrategyConfiguration {
+  const configuration: MomentumScalpIndexStrategyConfiguration = {
     indicatorAlgorithmVersion: requiredString(raw, "indicatorAlgorithmVersion"),
     indicatorParameters: requiredIndicatorParameters(raw),
     candlestickAlgorithmVersion: requiredString(raw, "candlestickAlgorithmVersion"),
@@ -179,25 +144,12 @@ export function parseMomentumScalpStrategyConfiguration(raw: Record<string, unkn
     minimumConfidence: requiredNumber(raw, "minimumConfidence", 0, 1),
     expiryCandles: requiredNumber(raw, "expiryCandles", 1),
     requireRegime: requiredBoolean(raw, "requireRegime"),
-    minimumVwapDisplacementAtr: requiredNumber(raw, "minimumVwapDisplacementAtr", 0),
-    idealVwapDisplacementAtr: requiredNumber(raw, "idealVwapDisplacementAtr", Number.EPSILON),
-    maximumVwapDisplacementAtr: requiredNumber(raw, "maximumVwapDisplacementAtr", Number.EPSILON),
   };
   if (configuration.rsiLongMax <= configuration.rsiLongMin) {
-    throw new Error("Momentum scalp configuration requires rsiLongMax to be greater than rsiLongMin.");
+    throw new Error("Momentum scalp index configuration requires rsiLongMax to be greater than rsiLongMin.");
   }
   if (configuration.rsiShortMax <= configuration.rsiShortMin) {
-    throw new Error("Momentum scalp configuration requires rsiShortMax to be greater than rsiShortMin.");
-  }
-  // The displacement score interpolates between these three points, so a
-  // non-monotonic set would silently produce a negative or divide-by-zero score.
-  if (
-    !(configuration.minimumVwapDisplacementAtr < configuration.idealVwapDisplacementAtr)
-    || !(configuration.idealVwapDisplacementAtr < configuration.maximumVwapDisplacementAtr)
-  ) {
-    throw new Error(
-      "Momentum scalp configuration requires minimumVwapDisplacementAtr < idealVwapDisplacementAtr < maximumVwapDisplacementAtr.",
-    );
+    throw new Error("Momentum scalp index configuration requires rsiShortMax to be greater than rsiShortMin.");
   }
   return configuration;
 }
@@ -206,12 +158,13 @@ interface ResolvedIndicators {
   emaFast: IndicatorSnapshot;
   emaSlow: IndicatorSnapshot;
   rsi: IndicatorSnapshot;
-  vwap: IndicatorSnapshot;
+  supertrend: IndicatorSnapshot;
   atr: IndicatorSnapshot;
   emaFastValue: number;
   emaSlowValue: number;
   rsiValue: number;
-  vwapValue: number;
+  supertrendTrend: string;
+  supertrendValue: number;
   atrValue: number;
 }
 
@@ -234,56 +187,31 @@ function indicatorNumber(values: Record<string, unknown>, key: string): number |
   return typeof values[key] === "number" ? values[key] as number : null;
 }
 
-function resolveIndicators(context: StrategyMarketContext, configuration: MomentumScalpStrategyConfiguration): ResolvedIndicators | null {
+function indicatorString(values: Record<string, unknown>, key: string): string | null {
+  return typeof values[key] === "string" ? values[key] as string : null;
+}
+
+function resolveIndicators(context: StrategyMarketContext, configuration: MomentumScalpIndexStrategyConfiguration): ResolvedIndicators | null {
   const emaFast = findIndicator(context, "EMA", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.EMA_FAST);
   const emaSlow = findIndicator(context, "EMA", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.EMA_SLOW);
   const rsi = findIndicator(context, "RSI", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.RSI);
-  const vwap = findIndicator(context, "VWAP", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.VWAP);
+  const supertrend = findIndicator(context, "SUPERTREND", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.SUPERTREND);
   const atr = findIndicator(context, "ATR", configuration.indicatorAlgorithmVersion, configuration.indicatorParameters.ATR);
 
-  if (!emaFast || !emaSlow || !rsi || !vwap || !atr) return null;
+  if (!emaFast || !emaSlow || !rsi || !supertrend || !atr) return null;
 
   const emaFastValue = indicatorNumber(emaFast.values, "value");
   const emaSlowValue = indicatorNumber(emaSlow.values, "value");
   const rsiValue = indicatorNumber(rsi.values, "value");
-  const vwapValue = indicatorNumber(vwap.values, "value");
+  const supertrendTrend = indicatorString(supertrend.values, "trend");
+  const supertrendValue = indicatorNumber(supertrend.values, "value");
   const atrValue = indicatorNumber(atr.values, "value");
 
-  if (emaFastValue === null || emaSlowValue === null || rsiValue === null || vwapValue === null || atrValue === null || atrValue <= 0) return null;
-  return { emaFast, emaSlow, rsi, vwap, atr, emaFastValue, emaSlowValue, rsiValue, vwapValue, atrValue };
+  if (emaFastValue === null || emaSlowValue === null || rsiValue === null || supertrendTrend === null || supertrendValue === null || atrValue === null || atrValue <= 0) return null;
+  return { emaFast, emaSlow, rsi, supertrend, atr, emaFastValue, emaSlowValue, rsiValue, supertrendTrend, supertrendValue, atrValue };
 }
 
-/**
- * Signed displacement from VWAP in ATR units, positive when it favours the side.
- * ATR normalises it so the same number means the same thing across instruments
- * and across a volatility regime change.
- */
-function vwapDisplacementAtr(closePrice: number, vwapValue: number, atrValue: number, side: TradeSide): number {
-  const signed = side === "LONG" ? closePrice - vwapValue : vwapValue - closePrice;
-  return signed / atrValue;
-}
-
-/**
- * Scores displacement as a plateau, not a ramp.
- *
- * Below `minimum` the bar has not displaced and is chop. Between `minimum` and
- * `ideal` the move is confirming. Above `ideal` quality decays, reaching zero at
- * `maximum`, because entering an already-extended move is chasing.
- */
-function vwapDisplacementScore(displacementAtr: number, configuration: MomentumScalpStrategyConfiguration): number {
-  const { minimumVwapDisplacementAtr: near, idealVwapDisplacementAtr: ideal, maximumVwapDisplacementAtr: far } = configuration;
-  if (!Number.isFinite(displacementAtr) || displacementAtr <= near || displacementAtr >= far) return 0;
-  if (displacementAtr < ideal) return clamp((displacementAtr - near) / (ideal - near));
-  return clamp((far - displacementAtr) / (far - ideal));
-}
-
-/**
- * Scores where RSI sits inside its momentum band, peaking mid-band.
- *
- * Both edges are lower quality for opposite reasons: the near edge is momentum
- * that has not established itself, and the far edge is exhaustion.
- */
-function rsiMomentumScore(rsiValue: number, side: TradeSide, configuration: MomentumScalpStrategyConfiguration): number {
+function rsiMomentumScore(rsiValue: number, side: TradeSide, configuration: MomentumScalpIndexStrategyConfiguration): number {
   const low = side === "LONG" ? configuration.rsiLongMin : configuration.rsiShortMin;
   const high = side === "LONG" ? configuration.rsiLongMax : configuration.rsiShortMax;
   if (!(high > low)) return 0;
@@ -291,42 +219,64 @@ function rsiMomentumScore(rsiValue: number, side: TradeSide, configuration: Mome
   return clamp(1 - Math.abs(position - 0.5) * 2);
 }
 
+/**
+ * How much room the trend has before Supertrend would flip, in ATR units.
+ *
+ * Supertrend's `value` is the trailing band the trend rides: for an uptrend it sits below price and
+ * a close through it flips the trend down. Distance from price to that band is therefore the
+ * headroom the signal has, and it is the one thing the direction gate cannot express -- a close one
+ * tick above the band and a close two ATR above it both read as `trend === "UP"`.
+ *
+ * Normalised by ATR so it means the same thing on a 1m NIFTY bar and a 5m BANKNIFTY one, and
+ * clamped: beyond one ATR of headroom, more distance stops being reassuring and starts being
+ * extension. The sign is folded out here because `evaluate` has already established that price is
+ * on the correct side of the band for the side under test.
+ */
+function supertrendBandScore(
+  close: number,
+  supertrendValue: number,
+  atrValue: number,
+): number {
+  if (!Number.isFinite(atrValue) || atrValue <= 0) return 0;
+  return clamp(Math.abs(close - supertrendValue) / atrValue);
+}
+
 interface ConfidenceBreakdown {
   confidence: number;
   emaSpreadScore: number;
-  displacementScore: number;
   rsiScore: number;
-  displacementAtr: number;
+  supertrendScore: number;
 }
 
-/**
- * Confidence in [0.30, 1.00].
- *
- * v1 used `0.7 - vwapDistance * 0.2`, which had two defects. Its range was
- * [0.50, 0.70] against a 0.50 floor, so the quality gate could never reject
- * anything and section-11 trade filtering was a no-op. And it *decreased* with
- * distance from VWAP even though the entry rule already required price to be on
- * the correct side of VWAP -- so it ranked a bar hovering a tick above VWAP,
- * which is chop, above a bar that had actually displaced. Momentum wants
- * confirmed displacement, bounded by an anti-chase ceiling.
- */
 function confidenceFor(
   context: StrategyMarketContext,
-  configuration: MomentumScalpStrategyConfiguration,
+  configuration: MomentumScalpIndexStrategyConfiguration,
   indicators: ResolvedIndicators,
   side: TradeSide,
 ): ConfidenceBreakdown {
-  const displacementAtr = vwapDisplacementAtr(context.candle.close, indicators.vwapValue, indicators.atrValue, side);
-  const displacementScore = vwapDisplacementScore(displacementAtr, configuration);
   const emaSpreadScore = clamp(Math.abs(indicators.emaFastValue - indicators.emaSlowValue) / indicators.atrValue);
   const rsiScore = rsiMomentumScore(indicators.rsiValue, side, configuration);
-  const confidence = clamp(0.3 + emaSpreadScore * 0.25 + displacementScore * 0.25 + rsiScore * 0.2);
-  return { confidence, emaSpreadScore, displacementScore, rsiScore, displacementAtr };
+  const supertrendScore = supertrendBandScore(
+    context.candle.close,
+    indicators.supertrendValue,
+    indicators.atrValue,
+  );
+  /*
+   * 0.3 base + 0.3 EMA spread + 0.2 Supertrend headroom + 0.2 RSI position.
+   *
+   * The Supertrend term used to be folded into the base as a hardcoded 1.0 -- "implied as 1.0 since
+   * we filtered it" -- which made the base 0.5. With `minimumConfidence: 0.5` that left the floor
+   * **inert**: the smallest confidence the formula could return was exactly the threshold, so the
+   * gate rejected nothing and the strategy advertised a confidence filter it did not have. Scoring
+   * the headroom instead of assuming it restores a base of 0.3 and a floor that can actually bind.
+   */
+  const confidence = clamp(0.3 + emaSpreadScore * 0.3 + supertrendScore * 0.2 + rsiScore * 0.2);
+  return { confidence, emaSpreadScore, rsiScore, supertrendScore };
 }
 
 function buildProposal(
   context: StrategyMarketContext,
-  configuration: MomentumScalpStrategyConfiguration,
+  configuration: MomentumScalpIndexStrategyConfiguration,
   indicators: ResolvedIndicators,
   side: TradeSide,
 ): ProposedTradeIdea | null {
@@ -334,16 +284,9 @@ function buildProposal(
   if (!Number.isFinite(tickSize) || tickSize <= 0 || context.candle.close <= 0) return null;
 
   const barMilliseconds = timeframeMilliseconds(context.candle.timeframe);
-  // v1 fell back to 0 here, which set expiresAt equal to closeTime and produced
-  // an idea that was already expired the moment it was written.
   if (barMilliseconds === null) return null;
 
   const scores = confidenceFor(context, configuration, indicators, side);
-  // Displacement is a hard gate, not only a soft score. A bar that has not
-  // displaced past `minimum`, or has run past `maximum`, is rejected outright so
-  // that "never chase" is a rule rather than a preference the other terms can
-  // outvote.
-  if (scores.displacementScore <= 0) return null;
   if (scores.confidence < configuration.minimumConfidence) return null;
 
   const entryPrice = roundNearestToTick(context.candle.close, tickSize);
@@ -367,7 +310,7 @@ function buildProposal(
       sourceType: "INDICATOR",
       sourceReference: `EMA:${indicators.emaFast.algorithmVersion}`,
       label: `Fast EMA ${indicators.emaFastValue.toFixed(2)} is ${side === "LONG" ? "above" : "below"} slow EMA ${indicators.emaSlowValue.toFixed(2)} by ${rounded(scores.emaSpreadScore)} ATR`,
-      contribution: rounded(scores.emaSpreadScore * 0.25),
+      contribution: rounded(scores.emaSpreadScore * 0.3),
       details: {
         fast: indicators.emaFastValue,
         slow: indicators.emaSlowValue,
@@ -377,16 +320,16 @@ function buildProposal(
     },
     {
       sourceType: "INDICATOR",
-      sourceReference: `VWAP:${indicators.vwap.algorithmVersion}`,
-      label: `Price is displaced ${rounded(scores.displacementAtr)} ATR ${side === "LONG" ? "above" : "below"} VWAP ${indicators.vwapValue.toFixed(2)}`,
-      contribution: rounded(scores.displacementScore * 0.25),
+      sourceReference: `SUPERTREND:${indicators.supertrend.algorithmVersion}`,
+      label: `Supertrend direction is ${indicators.supertrendTrend} with value `
+        + `${indicators.supertrendValue.toFixed(2)}, leaving ${rounded(scores.supertrendScore)} ATR `
+        + "of headroom before a flip",
+      contribution: rounded(scores.supertrendScore * 0.2),
       details: {
-        value: indicators.vwapValue,
+        trend: indicators.supertrendTrend,
+        value: indicators.supertrendValue,
         close: context.candle.close,
-        displacementAtr: rounded(scores.displacementAtr),
-        minimumAtr: configuration.minimumVwapDisplacementAtr,
-        idealAtr: configuration.idealVwapDisplacementAtr,
-        maximumAtr: configuration.maximumVwapDisplacementAtr,
+        headroomAtr: rounded(scores.supertrendScore),
       },
     },
     {
@@ -405,8 +348,8 @@ function buildProposal(
     },
     {
       sourceType: "STRATEGY" as const,
-      sourceReference: `momentum-scalp:v${momentumScalpStrategyVersion}`,
-      label: `Momentum Scalp v${momentumScalpStrategyVersion} rule set passed`,
+      sourceReference: `momentum-scalp-index:v${momentumScalpIndexStrategyVersion}`,
+      label: `Momentum Scalp Index v${momentumScalpIndexStrategyVersion} rule set passed`,
       contribution: null,
       details: {
         configuration,
@@ -419,8 +362,8 @@ function buildProposal(
         confidence: scores.confidence,
         confidenceTerms: {
           base: 0.3,
-          emaSpread: rounded(scores.emaSpreadScore * 0.25),
-          vwapDisplacement: rounded(scores.displacementScore * 0.25),
+          emaSpread: rounded(scores.emaSpreadScore * 0.3),
+          supertrendHeadroom: rounded(scores.supertrendScore * 0.2),
           rsiMomentum: rounded(scores.rsiScore * 0.2),
         },
         expiresAt: expiresAt.toISOString(),
@@ -433,8 +376,6 @@ function buildProposal(
       sourceType: "REGIME" as const,
       sourceReference: "VIX_SMA20",
       label: `Volatility regime is ${context.regime.regime}`,
-      // The regime is a gate, not a term in the confidence formula. Claiming a
-      // numeric contribution here would over-attribute the computed confidence.
       contribution: null,
       details: {
         regime: context.regime.regime,
@@ -452,14 +393,14 @@ function buildProposal(
     riskReward,
     confidence: scores.confidence,
     reasoning: [
-      `${labelSide} Momentum Scalp entry on ${context.candle.timeframe}.`,
-      `Fast EMA is ${side === "LONG" ? "above" : "below"} slow EMA by ${rounded(scores.emaSpreadScore)} ATR, and price has displaced ${rounded(scores.displacementAtr)} ATR ${side === "LONG" ? "above" : "below"} VWAP.`,
+      `${labelSide} Momentum Scalp Index entry on ${context.candle.timeframe}.`,
+      `Fast EMA is ${side === "LONG" ? "above" : "below"} slow EMA by ${rounded(scores.emaSpreadScore)} ATR, and Supertrend is ${indicators.supertrendTrend}.`,
       `RSI ${indicators.rsiValue.toFixed(2)} is inside the momentum band and short of the exhaustion edge.`,
       `Reference entry ${entryPrice.toFixed(2)}, stop ${stopLoss.toFixed(2)}, target ${targetPrice.toFixed(2)} (${riskReward.toFixed(2)}R).`,
     ],
     evidence: {
-      strategy: "momentum-scalp",
-      strategyVersion: momentumScalpStrategyVersion,
+      strategy: "momentum-scalp-index",
+      strategyVersion: momentumScalpIndexStrategyVersion,
       sourceCandleId: context.candle.id,
       sourceCandleClose: context.candle.close,
       indicatorAlgorithmVersion: configuration.indicatorAlgorithmVersion,
@@ -472,17 +413,16 @@ function buildProposal(
   };
 }
 
-export class MomentumScalpStrategy {
+export class MomentumScalpIndexStrategy {
   evaluate(context: StrategyMarketContext, rawConfiguration: Record<string, unknown>): ProposedTradeIdea[] {
-    const configuration = parseMomentumScalpStrategyConfiguration(rawConfiguration);
+    const configuration = parseMomentumScalpIndexStrategyConfiguration(rawConfiguration);
     const indicators = resolveIndicators(context, configuration);
     if (!indicators) return [];
 
-    // A measured regime may be required, but it never selects the direction.
     const regime: VolatilityRegime | null = context.regime?.regime ?? null;
     if (configuration.requireRegime && regime === null) return [];
 
-    const longConditions = context.candle.close > indicators.vwapValue
+    const longConditions = indicators.supertrendTrend === "UP"
       && indicators.emaFastValue > indicators.emaSlowValue
       && indicators.rsiValue >= configuration.rsiLongMin
       && indicators.rsiValue <= configuration.rsiLongMax;
@@ -492,7 +432,7 @@ export class MomentumScalpStrategy {
       if (proposal) return [proposal];
     }
 
-    const shortConditions = context.candle.close < indicators.vwapValue
+    const shortConditions = indicators.supertrendTrend === "DOWN"
       && indicators.emaFastValue < indicators.emaSlowValue
       && indicators.rsiValue >= configuration.rsiShortMin
       && indicators.rsiValue <= configuration.rsiShortMax;

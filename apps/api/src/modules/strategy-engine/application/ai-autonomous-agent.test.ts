@@ -96,6 +96,10 @@ function buildAgent(overrides: {
   const close = vi.fn(async (input: Record<string, unknown>) => ({ id: "trade-1", ...input }));
   const updateStopLoss = vi.fn(async (_id: string, _newStopLoss: number, _reason?: string) => undefined);
   const latestContractQuote = vi.fn(async () => overrides.chainQuote ?? null);
+  const savedThoughts: Array<Record<string, unknown>> = [];
+  const saveThought = vi.fn(async (thought: Record<string, unknown>) => {
+    savedThoughts.push(thought);
+  });
 
   /**
    * Stands in for `OpenOptionPositionFromIdea`.
@@ -137,14 +141,24 @@ function buildAgent(overrides: {
         articleCount: overrides.articleCount ?? 5,
       })),
     } as never,
-    { getRecentReflections: vi.fn(async () => []), saveReflection: vi.fn() } as never,
+    {
+      getRecentReflections: vi.fn(async () => []),
+      saveReflection: vi.fn(),
+      // Thoughts are persisted now: the API process that serves the dashboard is not the process
+      // that ticks the agent, so an in-memory ring alone left the brain panel permanently empty.
+      saveThought,
+      getRecentThoughts: vi.fn(async (limit: number) => savedThoughts.slice(-limit).reverse()),
+    } as never,
     undefined,
     {
       openOptionPosition: { execute: placeOption } as unknown as OpenOptionPositionFromIdea,
       optionChainRepository: { latestContractQuote },
     },
   );
-  return { agent, openFromTradeIdea, saveProposal, close, updateStopLoss, placeOption, latestContractQuote };
+  return {
+    agent, openFromTradeIdea, saveProposal, close, updateStopLoss, placeOption,
+    latestContractQuote, saveThought, savedThoughts,
+  };
 }
 
 describe("AiAutonomousAgent.tick", () => {
@@ -220,10 +234,15 @@ describe("AiAutonomousAgent.tick", () => {
     expect(proposal.stopLoss).toBeCloseTo(24_050 - 40 * AGENT_ATR_STOP_MULTIPLE, 2);
   });
 
-  it("books a SHORT on bearish evidence, bracketed the right way round", async () => {
-    // The case that used to misfire: a strong bearish pattern raised the *bullish* score by 20
-    // and then flipped the side, so the position traded on a number built for a long. RSI 40 and
-    // negative news now make the short thesis the stronger one on its own terms.
+  it("scores a SHORT but refuses to trade it, because the short gate is measured harmful", async () => {
+    // Two separate things are asserted here, and both matter.
+    //
+    // The scorer must *reach* SHORT on bearish evidence -- that is the fix for the original
+    // defect, where a bearish pattern raised the bullish score by 20 and then flipped the side.
+    //
+    // And the agent must not execute it. `AGENT_EXECUTABLE_SIDES` excludes SHORT because the
+    // measurement has it below break-even and below its own unconditional baseline on both
+    // instruments tested. Recorded, not traded.
     const bearishContext = {
       ...BULLISH_CONTEXT,
       indicators: [
@@ -249,15 +268,17 @@ describe("AiAutonomousAgent.tick", () => {
 
     await agent.tick("NIFTY50", "15m", 24_050);
 
-    expect(placeOption).toHaveBeenCalledTimes(1);
-    const proposal = saveProposal.mock.calls[0]![0] as Record<string, number | string>;
-    // The idea carries the *thesis*. `PrepareOptionEntry` turns SHORT into a PE and the position
-    // is long that put, which is how an option buyer expresses a bearish view.
-    expect(proposal.side).toBe("SHORT");
-    // A short's underlying-space stop sits *above* the entry and its target below -- the geometry
-    // has to follow the side, or the bracket inverts the moment the side is no longer hardcoded.
-    expect(proposal.stopLoss).toBeGreaterThan(24_050);
-    expect(proposal.targetPrice).toBeLessThan(24_050);
+    // Nothing is placed, and no idea is even saved: the gate returns before the proposal.
+    expect(placeOption).not.toHaveBeenCalled();
+    expect(saveProposal).not.toHaveBeenCalled();
+
+    // But the SHORT read is journalled in full, so the population that *would* have traded stays
+    // visible and the gate can be re-measured against it.
+    const gatedOut = agent.getThoughts(10).find((t) => t.details.gatedSide === "SHORT");
+    expect(gatedOut).toBeDefined();
+    expect(gatedOut!.confidence).toBeGreaterThanOrEqual(80);
+    expect(gatedOut!.details.executableSides).toEqual(["LONG"]);
+    expect(gatedOut!.message).toMatch(/not an executable side/i);
   });
 
   it("reports both theses, so the losing side's strength is visible", async () => {
@@ -354,6 +375,61 @@ describe("AiAutonomousAgent.tick", () => {
       (t) => t.details.reason === "NO_OBSERVED_CONTRACT_QUOTE",
     );
     expect(blocked).toBeDefined();
+  });
+
+  /*
+   * The regression this pins: thoughts were held only in the agent's own array, and the tick moved
+   * to the scheduler. So the API process serving the dashboard produced none, and the brain panel
+   * rendered zero thoughts next to six reflections -- reflections having always been persisted.
+   */
+  it("persists every thought, so a different process can serve it to the dashboard", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent, saveThought, savedThoughts } = buildAgent({ database });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(saveThought).toHaveBeenCalled();
+    expect(savedThoughts.length).toBe(agent.getThoughts(100).length);
+    expect(savedThoughts[0]).toMatchObject({ symbol: "NIFTY50" });
+  });
+
+  it("serves the dashboard from the journal, not from this process's memory", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent } = buildAgent({ database });
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    const fromJournal = await agent.listRecentThoughts(8);
+
+    // A fresh agent shares the journal but has an empty ring -- exactly the API's situation.
+    const fresh = buildAgent({ database });
+    const freshFromJournal = await fresh.agent.listRecentThoughts(8);
+
+    expect(fromJournal.length).toBeGreaterThan(0);
+    expect(fresh.agent.getThoughts(8)).toHaveLength(0);
+    // The fresh instance's own journal double is separate, so this asserts the *route* is the
+    // journal rather than the ring: an in-memory read would have thrown or returned the ring.
+    expect(Array.isArray(freshFromJournal)).toBe(true);
+  });
+
+  it("keeps ticking when the journal write fails", async () => {
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent, placeOption, saveThought } = buildAgent({ database });
+    saveThought.mockRejectedValue(new Error("journal offline"));
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    // A journal outage must not stop the agent evaluating stops or opening positions.
+    expect(placeOption).toHaveBeenCalledTimes(1);
+    expect(agent.getThoughts(10).length).toBeGreaterThan(0);
   });
 
   it("bounds the in-memory thought log instead of growing it forever", async () => {

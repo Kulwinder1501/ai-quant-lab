@@ -81,6 +81,8 @@ export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
   // selects EMA strictly at period 20 (see _INDICATOR_PARAMETERS), so this extra
   // definition does not touch the immutable feature schema.
   { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, outputSchema: { value: "number" } },
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, outputSchema: { value: "number" } },
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, outputSchema: { value: "number" } },
   { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, outputSchema: { value: "number" } },
   {
     code: "MACD",

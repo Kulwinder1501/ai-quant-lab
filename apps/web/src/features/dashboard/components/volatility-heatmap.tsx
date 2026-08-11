@@ -13,6 +13,16 @@ interface IndexDriver {
   estPts: number;
 }
 
+interface DriverTapeMetrics {
+  advanceShare: number;
+  declineShare: number;
+  concentration: number;
+  coverage: number;
+  quotedCount: number;
+  rosterCount: number;
+  estNetPts: number;
+}
+
 interface IndexDriversResponse {
   index: string;
   label?: string;
@@ -21,6 +31,7 @@ interface IndexDriversResponse {
   asOf: string;
   disclaimer: string;
   supported?: string[];
+  tape?: DriverTapeMetrics | null;
   drivers: IndexDriver[];
 }
 
@@ -172,6 +183,15 @@ export function VolatilityHeatmap({
               }`}
             >
               Est. net {formatPts(estNet)} pts
+            </span>
+          )}
+          {status === "ready" && payload?.tape && (
+            <span className="font-mono text-[10px] tabular-nums text-slate-400">
+              Adv {(payload.tape.advanceShare * 100).toFixed(0)}%
+              {" · "}
+              Conc {(payload.tape.concentration * 100).toFixed(0)}%
+              {" · "}
+              Cov {(payload.tape.coverage * 100).toFixed(0)}%
             </span>
           )}
         </div>

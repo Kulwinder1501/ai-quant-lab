@@ -51,7 +51,7 @@ function qualifyingContext(): StrategyMarketContext {
   };
 }
 
-/** A completed 1m context that satisfies the momentum-scalp SHORT rule. */
+/** A completed 1m context that satisfies the momentum-scalp v3 SHORT rule. */
 function bearishScalpContext(id: string): StrategyMarketContext {
   return {
     candle: {
@@ -63,23 +63,23 @@ function bearishScalpContext(id: string): StrategyMarketContext {
       open: 101,
       high: 101.5,
       low: 99.5,
-      close: 100, // below VWAP
+      close: 100, // below VWAP by 1 point = 0.5 ATR (inside [0.10, 2.5] window)
       volume: 1_000,
       tickSize: 0.05,
     },
     indicators: [
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: 98 } },   // fast below slow
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: 101 } },
-      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 30 } },   // in 20-40 band
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: 98 } },   // fast below slow
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: 101 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 35 } },   // in v3 25-45 band
       { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 101 } },
-      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 2 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 2 } },
     ],
     patterns: [],
     priceActionEvents: [],
   };
 }
 
-/** A completed 1m context that satisfies the momentum-scalp LONG rule. */
+/** A completed 1m context that satisfies the momentum-scalp v3 LONG rule. */
 function bullishScalpContext(id: string): StrategyMarketContext {
   return {
     candle: {
@@ -91,16 +91,16 @@ function bullishScalpContext(id: string): StrategyMarketContext {
       open: 101,
       high: 102.5,
       low: 100.5,
-      close: 102, // above VWAP
+      close: 102, // above VWAP by 1 point = 0.5 ATR (inside [0.10, 2.5] window)
       volume: 1_000,
       tickSize: 0.05,
     },
     indicators: [
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, values: { value: 103 } },  // fast above slow
-      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, values: { value: 101 } },
-      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 70 } },   // in 60-80 band
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: 103 } },  // fast above slow
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: 101 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 65 } },   // in v3 55-75 band
       { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 101 } },
-      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14 }, values: { value: 2 } },
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 2 } },
     ],
     patterns: [],
     priceActionEvents: [],

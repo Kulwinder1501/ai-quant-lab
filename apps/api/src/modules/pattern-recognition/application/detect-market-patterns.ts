@@ -19,8 +19,22 @@ export interface DetectMarketPatternsInput {
 
 export interface DetectMarketPatternsResult {
   candlesRead: number;
+  /** Detected across the whole series. Both engines always run over all of it -- multi-bar
+   * patterns and swing pivots need the history -- so this is unaffected by `since`. */
   candlestickDetections: number;
   priceActionEvents: number;
+  /**
+   * Actually persisted, which `since` *does* bound.
+   *
+   * Reported separately because the detected counts alone are genuinely misleading: a run with
+   * `--from` yesterday reports the same `candlestickDetections` as a full rebuild, which reads as
+   * "it rewrote everything" when it wrote almost nothing. That ambiguity cost a wrong reading of
+   * a real run, so "how much was computed" and "how much was stored" are now separate numbers.
+   */
+  candlestickDetectionsWritten: number;
+  priceActionEventsWritten: number;
+  /** The write boundary applied, or null for the whole series. */
+  writesFrom: string | null;
 }
 
 function decimalToNumber(value: string, field: string): number {
@@ -87,6 +101,8 @@ export class DetectMarketPatterns {
       openTimeByCandleId.set(c.id, c.openTime.getTime());
     }
     const fromTime = input.since?.getTime() ?? 0;
+    let candlestickDetectionsWritten = 0;
+    let priceActionEventsWritten = 0;
     
     const definitionsByCode = new Map<string, { id: string }>();
 
@@ -112,6 +128,7 @@ export class DetectMarketPatterns {
         contextCandleIds: pattern.contextCandleIds,
         details: pattern.details,
       });
+      candlestickDetectionsWritten += 1;
     }
 
     for (const event of events) {
@@ -127,12 +144,16 @@ export class DetectMarketPatterns {
         algorithmVersion: priceActionAlgorithmVersion,
         details: event.details,
       });
+      priceActionEventsWritten += 1;
     }
 
     return {
       candlesRead: candles.length,
       candlestickDetections: patterns.length,
       priceActionEvents: events.length,
+      candlestickDetectionsWritten,
+      priceActionEventsWritten,
+      writesFrom: input.since?.toISOString() ?? null,
     };
   }
 }

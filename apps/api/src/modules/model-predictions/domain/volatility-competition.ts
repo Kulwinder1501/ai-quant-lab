@@ -42,13 +42,30 @@ export interface VolatilityStanding {
   modelKey: string;
   role: VolatilityRole | null;
   metrics: VolatilitySettledMetrics;
-  /** Scored days inside the rolling window, used for the silence check. */
+  /**
+   * Distinct sessions this model settled anything on, inside the rolling window.
+   *
+   * The time-in-market unit for both sample gates below, and also read by the silence
+   * check. It must be a true count of distinct days across *all* of the model's settled
+   * rows -- see the union note in `postgres-volatility-competition-repository.ts`.
+   */
   scoredDays: number;
   /** Most recent day this model settled anything, or null if never. */
   lastScoredDate: string | null;
 }
 
 export interface VolatilityCompetitionRules {
+  /** Distinct settled sessions before a model may enter the ranking at all. */
+  minimumScoredDays: number;
+  /** Distinct settled sessions both sides need before a dethroning is considered. */
+  minimumScoredDaysForPromotion: number;
+  /**
+   * Row floors, secondary to the session gates.
+   *
+   * A session count alone would let a single-instrument model qualify on fifteen rows, where
+   * SE(macro-F1) is far too wide to rank anything. These are the *statistical* minimum only;
+   * time in market is the session gates' job.
+   */
   minimumSettledPredictions: number;
   minimumSettledForPromotion: number;
   promotionMargin: number;
@@ -63,19 +80,65 @@ export interface VolatilityCompetitionRules {
  * for the same reason: at ~250 settled predictions per side the standard error of a
  * macro-F1 *difference* is about 0.044, so anything smaller promotes on noise.
  *
- * `minimumSettledPredictions` is higher than the directional 60 because a pooled model
- * writes one prediction per instrument per session. Sixty settled rows can be three
- * sessions of a twenty-instrument pool, which is not three independent observations —
- * twenty correlated names in one market share most of their systematic variance. 300
- * keeps the bar at roughly fifteen sessions.
+ * ## Time in market is counted in sessions, not rows
+ *
+ * These gates were `minimumSettledPredictions: 300` / `minimumSettledForPromotion: 750`, chosen
+ * as "roughly fifteen sessions" and "roughly 37.5 sessions" of a twenty-instrument pool. Rows and
+ * sessions are only interchangeable at a **fixed** roster size, and this project does not have
+ * one: a model's fan-out is whatever roster it was trained on, recorded in
+ * `validationProtocol.pooledInstruments` and read back by `_pooled_roster()` in `predict.py`. The
+ * live population is genuinely mixed -- measured 2026-08-10, enrolled volatility models included
+ * pool23, pool20, pool2 (`NIFTY50` + `BANKNIFTY`, which is what all three PRODUCTION models were)
+ * and single-instrument artifacts.
+ *
+ * Against a single row threshold those are not comparable. 300 rows is fifteen sessions for a
+ * pool-20 model, 150 for a pool-2 model, and 300 for a single-instrument one. Worse, the
+ * promotion gate below requires the **incumbent** to clear its threshold too, so a pool-2
+ * champion needed ~375 sessions before any challenger could dethrone it however good the
+ * challenger was -- and raising the row numbers to track a larger pool would have pushed that
+ * further out, delaying exactly the wider-pool work it was meant to protect.
+ *
+ * Counting sessions makes fifteen mean fifteen for every model regardless of roster, and needs no
+ * revision the next time the pool changes. Rows remain as a floor underneath, but at the value the
+ * statistics actually call for rather than the one that was doubling as a clock -- see below.
+ *
+ * 38 rather than 37.5 for the promotion gate: sessions are integers, and rounding up keeps the
+ * bar no weaker than the figure it replaces.
+ *
+ * ## Why the row floors drop to the directional numbers
+ *
+ * 300 and 750 were never statistical figures -- they were 15 and 37.5 sessions multiplied by a
+ * twenty-instrument roster. Now that sessions are counted directly, keeping them would leave the
+ * row count as the binding constraint for every roster smaller than twenty and the session gate
+ * inert: a pool-2 model would still need 150 sessions to reach 300 rows. So they revert to the
+ * statistical minimum, which is the directional pair (60 / 250) -- and 250 is specifically the *n*
+ * the 0.088 margin was derived from. Each number now carries one justification instead of two
+ * conflated ones.
+ *
+ * ## An honest limit on all of this
+ *
+ * The margin's derivation assumes ~250 *independent* observations. Rows are not independent: this
+ * comment's own earlier revision made the point that twenty correlated names in one market share
+ * most of their systematic variance. If a session is closer to the true independent unit than a
+ * row, then 38 sessions supports SE(macro-F1 difference) near 0.115, which is *wider* than the
+ * 0.088 margin it is being asked to defend -- and the same was true of the 37.5 sessions the old
+ * row figures encoded, so this change neither introduces nor fixes it.
+ *
+ * Resolving it properly means measuring the effective sample size -- how much a marginal
+ * instrument-day actually adds once cross-sectional correlation is accounted for -- and then
+ * setting the margin and the session gate together from that. Not guessed at here. What this
+ * change does fix is the unit: the gates now say what they mean, so that measurement has something
+ * coherent to adjust.
  *
  * There is no head-to-head daily-wins rule yet. That check needs a meaningful number of
- * common scored days, and no volatility model has a single settled prediction so far, so
- * calibrating one now would be inventing a threshold rather than measuring it.
+ * common scored days, and the settled history is still shallow (84 settled rows on 2026-08-10),
+ * so calibrating one now would be inventing a threshold rather than measuring it.
  */
 export const DEFAULT_VOLATILITY_COMPETITION_RULES: VolatilityCompetitionRules = {
-  minimumSettledPredictions: 300,
-  minimumSettledForPromotion: 750,
+  minimumScoredDays: 15,
+  minimumScoredDaysForPromotion: 38,
+  minimumSettledPredictions: 60,
+  minimumSettledForPromotion: 250,
   promotionMargin: 0.088,
   silenceToleranceDays: 5,
 };
@@ -124,8 +187,22 @@ function beatsTrivial(metrics: VolatilitySettledMetrics): boolean {
   return metrics.accuracy > metrics.trivialAccuracy && metrics.macroF1 > metrics.trivialMacroF1;
 }
 
+/**
+ * Both gates, and both must hold.
+ *
+ * Sessions carry the time-in-market requirement so it means the same thing for every roster size;
+ * rows are the statistical floor underneath it. Neither subsumes the other -- a single-instrument
+ * model reaches 15 sessions with 15 rows, and a pool-23 model reaches 60 rows in three sessions.
+ */
 function hasEnoughSample(standing: VolatilityStanding, rules: VolatilityCompetitionRules): boolean {
-  return standing.metrics.sampleCount >= rules.minimumSettledPredictions;
+  return standing.scoredDays >= rules.minimumScoredDays
+    && standing.metrics.sampleCount >= rules.minimumSettledPredictions;
+}
+
+/** The deeper evidence a dethroning needs, in the same two units. */
+function isDeeplyEvidenced(standing: VolatilityStanding, rules: VolatilityCompetitionRules): boolean {
+  return standing.scoredDays >= rules.minimumScoredDaysForPromotion
+    && standing.metrics.sampleCount >= rules.minimumSettledForPromotion;
 }
 
 function isSilent(
@@ -210,8 +287,9 @@ export function decideVolatilityCompetition(input: {
       primaryModelVersionId: incumbent?.modelVersionId ?? null,
       challengerModelVersionId: null,
       explanation:
-        `No volatility model both cleared ${rules.minimumSettledPredictions} settled predictions `
-        + "and beat the trivial predictor on macro-F1 and accuracy.",
+        `No volatility model both cleared ${rules.minimumScoredDays} scored sessions and `
+        + `${rules.minimumSettledPredictions} settled predictions, and beat the trivial predictor `
+        + "on macro-F1 and accuracy.",
     };
   }
 
@@ -242,10 +320,10 @@ export function decideVolatilityCompetition(input: {
   const incumbentF1 = incumbent.metrics.macroF1 ?? 0;
   const challengerF1 = leader.metrics.macroF1 ?? 0;
   const margin = challengerF1 - incumbentF1;
-  // Both sides need the deeper sample before a dethroning: a challenger that has
-  // qualified on 300 rows has not out-evidenced a champion measured over thousands.
-  const bothDeeplyEvidenced = leader.metrics.sampleCount >= rules.minimumSettledForPromotion
-    && incumbent.metrics.sampleCount >= rules.minimumSettledForPromotion;
+  // Both sides need the deeper sample before a dethroning: a challenger that has just
+  // qualified has not out-evidenced a champion measured over far longer.
+  const bothDeeplyEvidenced = isDeeplyEvidenced(leader, rules)
+    && isDeeplyEvidenced(incumbent, rules);
 
   if (margin >= rules.promotionMargin && bothDeeplyEvidenced) {
     return {
@@ -257,6 +335,7 @@ export function decideVolatilityCompetition(input: {
         `${leader.modelKey} replaces ${incumbent.modelKey}: macro-F1 `
         + `${formatMetric(challengerF1)} vs ${formatMetric(incumbentF1)}, a margin of `
         + `${margin.toFixed(4)} clearing ${rules.promotionMargin}, with both sides past `
+        + `${rules.minimumScoredDaysForPromotion} scored sessions and `
         + `${rules.minimumSettledForPromotion} settled predictions.`,
     };
   }
@@ -269,8 +348,13 @@ export function decideVolatilityCompetition(input: {
     explanation: bothDeeplyEvidenced
       ? `${leader.modelKey} leads by ${margin.toFixed(4)}, short of the ${rules.promotionMargin} `
         + "margin. Retaining the incumbent rather than promoting on noise."
-      : `${leader.modelKey} leads but both sides need ${rules.minimumSettledForPromotion} settled `
-        + "predictions before a dethroning is considered.",
+      // Names which side is short and in which unit: "needs more evidence" is unactionable when
+      // the answer could be either more sessions or a wider roster.
+      : `${leader.modelKey} leads but both sides need ${rules.minimumScoredDaysForPromotion} scored `
+        + `sessions and ${rules.minimumSettledForPromotion} settled predictions before a dethroning `
+        + `is considered. Challenger: ${leader.scoredDays} sessions / `
+        + `${leader.metrics.sampleCount} rows. Incumbent: ${incumbent.scoredDays} sessions / `
+        + `${incumbent.metrics.sampleCount} rows.`,
   };
 }
 

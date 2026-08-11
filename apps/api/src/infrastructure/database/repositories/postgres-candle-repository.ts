@@ -83,7 +83,7 @@ export class PostgresCandleRepository implements CandleRepository {
         source = EXCLUDED.source,
         source_metadata = EXCLUDED.source_metadata,
         received_at = CURRENT_TIMESTAMP
-      WHERE candles.is_complete = FALSE
+      WHERE candles.is_complete = FALSE OR (candles.source_metadata ? 'quoteObservedAt')
       RETURNING ${returningColumns}
     `, [
       input.instrumentId,

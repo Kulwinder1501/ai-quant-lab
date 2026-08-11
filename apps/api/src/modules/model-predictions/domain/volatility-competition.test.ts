@@ -170,16 +170,20 @@ describe("decideVolatilityCompetition", () => {
   });
 
   it("replaces the incumbent only on a margin past the noise filter with both deeply evidenced", () => {
+    // `scoredDays` is set explicitly on both sides: deep evidence is now two conditions, and a
+    // fixture that clears the row floor while sitting on 20 sessions is not deeply evidenced.
     const decision = decideVolatilityCompetition({
       standings: [
         standing({
           modelVersionId: "champion",
           role: "PRIMARY",
+          scoredDays: 60,
           metrics: computeVolatilitySettledMetrics(cells([300, 300, 300], 600)),
         }),
         standing({
           modelVersionId: "challenger",
           modelKey: "challenger-key",
+          scoredDays: 60,
           metrics: computeVolatilitySettledMetrics(cells([600, 600, 600], 60)),
         }),
       ],
@@ -191,18 +195,101 @@ describe("decideVolatilityCompetition", () => {
     expect(decision.previousPrimaryModelVersionId).toBe("champion");
   });
 
+  /*
+   * The session gates exist because rows and sessions are only interchangeable at a fixed roster
+   * size, and this project has models trained on 23, 20, 2 and 1 instrument. A row threshold means
+   * a different amount of time in market for each of them; a session threshold does not.
+   */
+  it("excludes a model that has the rows but not the sessions", () => {
+    // A pool-23 model reaches 69 settled rows in three sessions. Three sessions of one market is
+    // not three independent observations, which is exactly what the row floor cannot see.
+    const wideButBrief = standing({
+      scoredDays: 3,
+      metrics: computeVolatilitySettledMetrics(cells([25, 25, 25], 6)),
+    });
+
+    const decision = decideVolatilityCompetition({ standings: [wideButBrief], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("NO_QUALIFYING_MODEL");
+    expect(decision.excludedForSample).toBe(1);
+    expect(decision.explanation).toMatch(/scored sessions/);
+  });
+
+  it("excludes a model that has the sessions but not the rows", () => {
+    // The mirror: a single-instrument model reaches 15 sessions with 15 rows, where SE(macro-F1)
+    // is far too wide to rank anything. Sessions alone must not be sufficient.
+    const longButThin = standing({
+      scoredDays: 40,
+      metrics: computeVolatilitySettledMetrics(cells([5, 5, 5], 2)),
+    });
+
+    const decision = decideVolatilityCompetition({ standings: [longButThin], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("NO_QUALIFYING_MODEL");
+    expect(decision.excludedForSample).toBe(1);
+  });
+
+  it("qualifies a small roster on the same fifteen sessions as a large one", () => {
+    // The behaviour the change is for. A pool-2 model accumulating 4 rows a session clears the
+    // gate at 15 sessions, where the old 300-row rule would have made it wait ~150 sessions --
+    // and would have blocked every challenger behind it, because the promotion gate reads the
+    // incumbent's sample too.
+    const smallRoster = standing({
+      scoredDays: 15,
+      metrics: computeVolatilitySettledMetrics(cells([25, 25, 25], 6)),
+    });
+
+    const decision = decideVolatilityCompetition({ standings: [smallRoster], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("INITIAL_PRIMARY_ESTABLISHED");
+  });
+
+  it("will not dethrone on rows alone when the challenger is short of sessions", () => {
+    // 20 sessions, deliberately between the two gates: enough to qualify for the ranking (15) and
+    // short of the deeper promotion bar (38). A pool-23 model is well past 250 rows by then, so
+    // without the session gate this would dethrone a champion measured over months on twenty days
+    // of evidence.
+    const decision = decideVolatilityCompetition({
+      standings: [
+        standing({
+          modelVersionId: "champion",
+          role: "PRIMARY",
+          scoredDays: 60,
+          metrics: computeVolatilitySettledMetrics(cells([300, 300, 300], 600)),
+        }),
+        standing({
+          modelVersionId: "challenger",
+          modelKey: "challenger-key",
+          scoredDays: 20,
+          metrics: computeVolatilitySettledMetrics(cells([600, 600, 600], 60)),
+        }),
+      ],
+      asOfDate: TODAY,
+    });
+
+    expect(decision.reason).toBe("PRIMARY_RETAINED");
+    expect(decision.primaryModelVersionId).toBe("champion");
+    // The refusal names both units and both sides, so an operator can see which is short.
+    expect(decision.explanation).toMatch(/scored sessions/);
+    expect(decision.explanation).toMatch(/Challenger: 20 sessions/);
+  });
+
   it("will not dethrone until both sides pass the deeper promotion sample", () => {
+    // Both fixtures below carry 60 sessions, so the session gate is satisfied and the row floor is
+    // the only thing blocking. Without pinning sessions this test would pass for the wrong reason.
     const rules = { ...DEFAULT_VOLATILITY_COMPETITION_RULES, minimumSettledForPromotion: 100_000 };
     const decision = decideVolatilityCompetition({
       standings: [
         standing({
           modelVersionId: "champion",
           role: "PRIMARY",
+          scoredDays: 60,
           metrics: computeVolatilitySettledMetrics(cells([300, 300, 300], 600)),
         }),
         standing({
           modelVersionId: "challenger",
           modelKey: "challenger-key",
+          scoredDays: 60,
           metrics: computeVolatilitySettledMetrics(cells([600, 600, 600], 60)),
         }),
       ],

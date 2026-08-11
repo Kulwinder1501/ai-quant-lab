@@ -64,7 +64,33 @@ async function main(): Promise<void> {
   const ingestionRepository = new PostgresMarketDataIngestionRepository(database);
   let ingestionId: string | undefined;
   try {
-    const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
+    /*
+     * `--timeframe` accepts a comma-separated list.
+     *
+     * One process per timeframe was the previous arrangement, and it left three of the four
+     * timeframes the paper-trading bot scans with no live feed at all: measured 2026-08-11,
+     * NIFTY50/BANKNIFTY 1m was four days stale, 5m and 60m five days, and only 15m was current --
+     * so every 1m/5m/60m scan was skipped as STALE before any strategy ran. Collecting them in one
+     * process makes the deployment one service instead of four.
+     *
+     * Each timeframe still costs its own `fetchQuotes` per poll, because `CollectLiveMarketData`
+     * fetches inside `execute`. That is deliberate for now: the aggregation code carries careful
+     * rules about never sealing a partly-watched window, and threading a shared quote snapshot
+     * through it is a change to that core rather than to this CLI. If the provider's rate limit
+     * becomes the constraint, sharing one snapshot across timeframes is the fix.
+     */
+    const timeframes = requireOption(argumentsList, "timeframe")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => parseHistoricalTimeframe(entry));
+    if (timeframes.length === 0) {
+      throw new Error("--timeframe must name at least one timeframe.");
+    }
+    const duplicates = timeframes.filter((entry, index) => timeframes.indexOf(entry) !== index);
+    if (duplicates.length > 0) {
+      throw new Error(`--timeframe lists ${duplicates[0]} more than once.`);
+    }
     const requestedSymbols = getOption(argumentsList, "instruments");
     const instrumentRepository = new PostgresInstrumentRepository(database);
     const instruments = requestedSymbols
@@ -110,7 +136,7 @@ async function main(): Promise<void> {
       provider: provider.id,
       mode: "LIVE",
       requestMetadata: {
-        timeframe,
+        timeframes,
         pollSeconds: pollingSeconds,
         symbols: subscriptions.map((subscription) => subscription.instrument.symbol),
         providerInstrumentIds: subscriptions.map((subscription) => subscription.providerInstrumentId),
@@ -125,9 +151,13 @@ async function main(): Promise<void> {
     process.once("SIGTERM", stop);
 
     do {
-      const result = await collector.execute({ subscriptions, timeframe, ingestionId, now: new Date() });
-      finalizedCount += result.candlesFinalized;
-      console.info(JSON.stringify({ level: "info", message: "Live poll complete", ...result }));
+      for (const timeframe of timeframes) {
+        const result = await collector.execute({ subscriptions, timeframe, ingestionId, now: new Date() });
+        finalizedCount += result.candlesFinalized;
+        // Logged per timeframe: "the poll ran" and "this timeframe sealed a bar" are different
+        // facts, and a single merged line hides which aggregator is falling behind.
+        console.info(JSON.stringify({ level: "info", message: "Live poll complete", timeframe, ...result }));
+      }
       if (getOption(argumentsList, "once") === "true" || argumentsList.includes("--once") || stopping) {
         break;
       }

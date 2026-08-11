@@ -99,6 +99,22 @@ describe("scoreDirectionalSetup", () => {
     expect(crashing.shortConfidence).toBeLessThan(80);
   });
 
+  it("applies driver-tape soft bias when present and leaves scores unchanged when omitted", () => {
+    const plain = scoreDirectionalSetup(baseInput({ rsi: 60 }));
+    const withTape = scoreDirectionalSetup(baseInput({
+      rsi: 60,
+      driverTapeBias: {
+        long: { adjustment: -12, reasoning: "Driver tape weak for LONG: only 30% agree." },
+        short: { adjustment: 8, reasoning: "Driver tape supports SHORT." },
+      },
+    }));
+    expect(withTape.longConfidence).toBe(plain.longConfidence - 12);
+    expect(withTape.shortConfidence).toBe(plain.shortConfidence + 8);
+    // SHORT wins after the tape tilt, so the winner's reasoning carries the short line.
+    expect(withTape.side).toBe("SHORT");
+    expect(withTape.reasoning.some((line) => /Driver tape supports SHORT/.test(line))).toBe(true);
+  });
+
   it("weights adverse institutional flow more heavily than confirming flow, on both sides", () => {
     // Extreme outflows: -18 * 1.5 against a long, +18 for a short.
     const outflows = scoreDirectionalSetup(baseInput({ flowBias: flowBiasFor(-6_000, -1_000) }));

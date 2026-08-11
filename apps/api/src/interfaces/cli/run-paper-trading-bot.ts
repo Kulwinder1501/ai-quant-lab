@@ -22,6 +22,7 @@ import {
 import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
 import { PostgresRiskStateRepository } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
+import type { TradeSide } from "../../modules/strategy-engine/domain/strategy.js";
 
 /** Minutes in one bar of a timeframe, so a series is not called stale for lagging by design. */
 function barLengthMinutes(timeframe: string): number {
@@ -145,7 +146,7 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * none: measured 2026-08-07, NIFTY50 1m has 375 VWAP snapshots on 05 Aug's history bars and
  * **0** on today's live ones. Scanning it would produce nothing, slowly.
  */
-const SCAN_TIMEFRAMES = ["15m"] as const;
+const SCAN_TIMEFRAMES = ["1m", "5m", "15m", "60m"] as const;
 /**
  * Deliberately small. The account is Rs 1,000,000 and one NIFTY lot of a 200-point premium
  * is Rs 15,000, so this is not a capital limit -- it is a blast radius. The bot's edge is
@@ -256,7 +257,25 @@ async function main(): Promise<void> {
             continue;
           }
 
-          const results = await generator.execute({ instrumentId: instrument.id, timeframe });
+          let allowedSides: readonly TradeSide[] | undefined = undefined;
+          if (timeframe === "1m" && (symbol === "NIFTY50" || symbol === "BANKNIFTY")) {
+            // Default to empty array (no trades allowed) if we can't determine the bias
+            allowedSides = [];
+            const supertrendQuery = await database.query<{ trend: string }>(
+              `SELECT s.values->>'trend' as trend
+               FROM indicator_snapshots s
+               JOIN indicator_definitions ind ON ind.id = s.indicator_definition_id
+               JOIN candles c ON c.id = s.candle_id
+               WHERE c.instrument_id = $1 AND c.timeframe = '5m' AND ind.indicator_code = 'SUPERTREND'
+               ORDER BY c.close_time DESC LIMIT 1`,
+              [instrument.id]
+            );
+            const trend = supertrendQuery.rows[0]?.trend;
+            if (trend === "UP") allowedSides = ["LONG"];
+            else if (trend === "DOWN") allowedSides = ["SHORT"];
+          }
+
+          const results = await generator.execute({ instrumentId: instrument.id, timeframe, allowedSides });
           for (const result of results) {
             if (result.skippedReason) {
               // Reported rather than skipped in silence. "The strategy ran and found no

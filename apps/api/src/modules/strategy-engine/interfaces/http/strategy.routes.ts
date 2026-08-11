@@ -5,8 +5,8 @@ import {
 } from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
+import { loadIndexDriverTape } from "../../../market-data/application/load-index-driver-tape.js";
 import {
-  estimateContributionPts,
   resolveIndexDriverUniverse,
   SUPPORTED_DRIVER_INDEX_KEYS,
 } from "../../../market-data/domain/nifty50-driver-weights.js";
@@ -164,7 +164,9 @@ export function registerStrategyRoutes(
             bollinger: bollingerValues,
           },
           latestPattern: latest.patterns?.[0] || null,
-          thoughts: dependencies.aiAutonomousAgent.getThoughts(8),
+          // Read from the journal, not this process's memory: the tick runs in the scheduler, so
+          // the API's in-memory ring is always empty. Scoped to the watched symbol.
+          thoughts: await dependencies.aiAutonomousAgent.listRecentThoughts(8, symbol),
           reflections: await dependencies.aiAutonomousAgent.getReflections(6),
         })}\n\n`);
       } catch {
@@ -233,17 +235,16 @@ export function registerStrategyRoutes(
   });
 
   /**
-   * Index contribution heatmap tiles (NIFTY50 / BANKNIFTY / FINNIFTY / SENSEX).
+   * Index contribution heatmap tiles + tape metrics (breadth / concentration).
    * Approximate weights × live Yahoo day% × index level → est. index points.
-   * UI-only — not used by ML feature construction.
+   * Soft-filters the autonomous agent; not an ML feature schema column.
    */
   app.get("/api/v1/index-drivers", async (request, response, next) => {
     try {
       const indexKey = String(
         (request.query as { index?: string }).index ?? "NIFTY50",
       );
-      const universe = resolveIndexDriverUniverse(indexKey);
-      if (!universe) {
+      if (!resolveIndexDriverUniverse(indexKey)) {
         response.status(400).json({
           error: `Drivers heatmap supports: ${SUPPORTED_DRIVER_INDEX_KEYS.join(", ")}.`,
           supported: SUPPORTED_DRIVER_INDEX_KEYS,
@@ -251,53 +252,27 @@ export function registerStrategyRoutes(
         return;
       }
 
-      // Chunking and the per-symbol retry now live in the shared client, which keys results
-      // by the symbol asked for rather than by the one Yahoo echoes back.
-      const quoteBySymbol = await quoteLabSymbols([
-        universe.yahooIndexSymbol,
-        ...universe.drivers.map((row) => row.symbol),
-      ]);
-
-      const indexQuote = quoteBySymbol.get(universe.yahooIndexSymbol) ?? null;
-      const indexLevel = indexQuote?.regularMarketPrice ?? null;
-
-      const asOf = new Date().toISOString();
-      const drivers = universe.drivers
-        .map((row) => {
-          const quote = quoteBySymbol.get(row.symbol) ?? null;
-          const dayPct = quote?.regularMarketChangePercent ?? null;
-          const last = quote?.regularMarketPrice ?? null;
-          const estPts =
-            dayPct != null && indexLevel != null
-              ? estimateContributionPts(row.weightPct, dayPct, indexLevel)
-              : null;
-          return {
-            symbol: row.symbol,
-            name: row.name,
-            weightPct: row.weightPct,
-            dayPct,
-            last,
-            estPts,
-          };
-        })
-        .filter((d) => d.dayPct != null && d.estPts != null);
-
-      drivers.sort(
-        (a, b) => Math.abs(b.estPts ?? 0) - Math.abs(a.estPts ?? 0),
-      );
-
-      const estNetPts = drivers.reduce((sum, d) => sum + (d.estPts ?? 0), 0);
+      const tape = await loadIndexDriverTape(indexKey);
+      if (!tape) {
+        response.status(400).json({
+          error: `Drivers heatmap supports: ${SUPPORTED_DRIVER_INDEX_KEYS.join(", ")}.`,
+          supported: SUPPORTED_DRIVER_INDEX_KEYS,
+        });
+        return;
+      }
 
       response.status(200).json({
-        index: universe.key,
-        label: universe.label,
-        indexLevel,
-        estNetPts,
-        asOf,
+        index: tape.index,
+        label: tape.label,
+        indexLevel: tape.indexLevel,
+        indexDayPct: tape.indexDayPct,
+        estNetPts: tape.estNetPts,
+        asOf: tape.asOf,
+        rosterCount: tape.rosterCount,
+        tape: tape.tape,
         supported: SUPPORTED_DRIVER_INDEX_KEYS,
-        disclaimer:
-          "Est. points = weight% × day% × index / 10000. Weights are approximate (not live exchange free-float) — close to contribution, not exchange-official.",
-        drivers,
+        disclaimer: tape.disclaimer,
+        drivers: tape.drivers,
       });
     } catch (error) {
       next(error);

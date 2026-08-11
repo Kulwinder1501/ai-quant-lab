@@ -16,32 +16,40 @@ import type { TradeSide } from "./strategy.js";
  * same evidence. The side with the stronger score wins, and the number the winner carries is the
  * number that was computed for the direction actually traded.
  *
- * ## Measured: this score does not select, on either side
+ * ## Measured: the short side is actively harmful, the long side is neutral
  *
- * `npm run measure:directional-scorer` replays it over stored history, applies the agent's own
- * ATR bracket, and resolves each one with the paper-trading exit rules. Measured on NIFTY50 15m,
- * 4,993 scored bars, news/flow/macro held out (2026-08-10):
+ * `npm run measure:directional-scorer` replays it over stored history, applies the agent's own ATR
+ * bracket, and resolves each one with the paper-trading exit rules. On 15m with news/flow/macro
+ * held out, patterns current as of 2026-08-10, against a 0.3333 break-even hit rate:
  *
- * | side  | gated hit rate | unconditional | break-even | gated expectancy |
- * |-------|----------------|---------------|------------|------------------|
- * | LONG  | 0.3008 (n=256) | 0.3293        | 0.3333     | -0.10R           |
- * | SHORT | 0.3829 (n=175) | 0.3895        | 0.3333     | +0.14R           |
+ * | instrument | side  | gated hit (n) | gated expectancy | unconditional | delta   |
+ * |------------|-------|---------------|------------------|---------------|---------|
+ * | NIFTY50    | LONG  | 0.3351 (367)  | +0.005R          | 0.3370        | -0.0019 |
+ * | NIFTY50    | SHORT | 0.2950 (261)  | **-0.262R**      | 0.3595        | -0.0645 |
+ * | BANKNIFTY  | LONG  | 0.3850 (413)  | +0.182R          | 0.3568        | +0.0282 |
+ * | BANKNIFTY  | SHORT | 0.2478 (347)  | **-0.376R**      | 0.3315        | -0.0837 |
  *
  * The comparison that matters is gated against **unconditional** -- taking that side on every bar
- * regardless of score. Gating is *worse than not gating on both sides*. So the score is not
- * selecting setups; it is selecting a subset that performs slightly below the population it was
- * drawn from. The short side's positive expectancy is not the mirror working: the unconditional
- * column captures all of it and more, which makes it a property of this bracket on this
- * instrument over this window, not of the scoring.
+ * regardless of score. The short gate is below break-even on both instruments, strongly negative
+ * in expectancy, and 6-8 points worse than its own baseline: it does not merely fail to select, it
+ * reliably selects *bad* shorts. So `AGENT_EXECUTABLE_SIDES` in the agent excludes SHORT. It is
+ * still scored and journalled; it is not traded.
  *
- * Two limits on that reading, both real:
+ * The long gate is roughly neutral -- positive expectancy on both instruments but inconsistent in
+ * sign against its baseline, so no edge is claimed and none is needed for it to stay enabled.
+ *
+ * Two limits on the reading, both real:
  *
  * - With news and flow held out the ceiling is 75 (50 + 15 RSI + 10 envelope), so **clearing 80
- *   requires a pattern**. The gated population is therefore "bars carrying a >=0.7 pattern", not
- *   a general high-confidence population. Live, news and flow can add 28, so the gate is
- *   reachable without one.
- * - It could not be replicated on BANKNIFTY, which has **zero** 15m pattern detections stored, so
- *   its gated sample was n=1. That is a data-coverage gap, not a second data point.
+ *   requires a pattern**. The gated population is therefore "bars carrying a >=0.7 pattern", not a
+ *   general high-confidence population. Live, news and flow can add 28, so the gate is reachable
+ *   without one and the live gated population is wider than the one measured here.
+ * - An earlier run of this measurement reported the short side at 0.3829 with *positive*
+ *   expectancy, and the conclusion drawn from it was wrong. That run used a stale pattern set:
+ *   `analysis:detect-patterns` had no scheduled caller, so NIFTY50 15m detections stopped six days
+ *   short of its candles and BANKNIFTY had none at all. Since the gate effectively requires a
+ *   pattern, stale patterns move the gated population and can invert the result. Re-measure after
+ *   any change to pattern coverage, not only after changes to this file.
  *
  * ## What the code therefore claims
  *
@@ -92,6 +100,11 @@ export interface DirectionalSetupInput {
    * short. The caller does that, which keeps the tested implementation the only one.
    */
   flowBias: { long: FlowBiasVerdict; short: FlowBiasVerdict };
+  /**
+   * Live index-driver tape bias **per thesis** (breadth / concentration).
+   * Optional: omitted or null reasoning → no adjustment (same as missing FII).
+   */
+  driverTapeBias?: { long: FlowBiasVerdict; short: FlowBiasVerdict };
   /** Rolling news sentiment in [-1, 1], and 0 with no articles. */
   newsSentiment: number;
   newsLabel: string;
@@ -121,7 +134,7 @@ function scoreThesis(
   const long = side === "LONG";
   const {
     rsi, livePrice, bollingerUpper, bollingerLower, pattern,
-    flowBias, newsSentiment, newsLabel, hasMacroEvent, macroEventNames,
+    flowBias, driverTapeBias, newsSentiment, newsLabel, hasMacroEvent, macroEventNames,
   } = input;
 
   let confidence = BASE_CONFIDENCE;
@@ -191,6 +204,12 @@ function scoreThesis(
   // --- Institutional flow ---------------------------------------------------------------
   const bias = long ? flowBias.long : flowBias.short;
   if (bias.reasoning !== null) add(bias.adjustment, bias.reasoning);
+
+  // --- Index-driver tape (breadth / concentration) --------------------------------------
+  // Soft context from approximate Yahoo contributions. Missing / thin coverage stays
+  // unchecked — same honesty rule as institutional flow.
+  const tape = long ? driverTapeBias?.long : driverTapeBias?.short;
+  if (tape && tape.reasoning !== null) add(tape.adjustment, tape.reasoning);
 
   // --- News sentiment -------------------------------------------------------------------
   // Rule 1 is directional: heavy negative news freezes new *longs*, and heavy positive news is

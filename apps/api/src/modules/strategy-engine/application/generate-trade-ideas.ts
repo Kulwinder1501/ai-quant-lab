@@ -1,13 +1,15 @@
-import {
-  type StrategyMarketContextRepository,
-  type StrategyVersionRepository,
-  type TradeIdeaRepository,
+import type {
+  StrategyMarketContextRepository,
+  StrategyVersionRepository,
+  TradeIdeaRepository,
+  TradeSide,
 } from "../domain/strategy.js";
 import { registeredStrategies, strategySupportsTimeframe } from "../domain/strategy-registry.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
   timeframe: string;
+  allowedSides?: readonly TradeSide[];
 }
 
 export interface GenerateTradeIdeasResult {
@@ -24,6 +26,7 @@ export interface GenerateTradeIdeasResult {
 export interface ScanTradeIdeasInput {
   instrumentId: string;
   timeframe: string;
+  allowedSides?: readonly TradeSide[];
   /** How many of the most recent completed candles to evaluate. */
   lookback: number;
 }
@@ -103,7 +106,10 @@ export class GenerateTradeIdeas {
         }
 
         const strategy = new StrategyClass();
-        const proposals = strategy.evaluate(context, strategyVersion.configuration);
+        let proposals = strategy.evaluate(context, strategyVersion.configuration);
+        if (input.allowedSides) {
+          proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
+        }
         const tradeIdeas = await Promise.all(proposals.map((proposal) => this.tradeIdeaRepository.saveProposal({
           ...proposal,
           instrumentId: input.instrumentId,
@@ -209,7 +215,10 @@ export class GenerateTradeIdeas {
         let shortIdeas = 0;
 
         for (const context of contexts) {
-          const proposals = strategy.evaluate(context, strategyVersion.configuration);
+          let proposals = strategy.evaluate(context, strategyVersion.configuration);
+          if (input.allowedSides) {
+            proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
+          }
           for (const proposal of proposals) {
             const idea = await this.tradeIdeaRepository.saveProposal({
               ...proposal,

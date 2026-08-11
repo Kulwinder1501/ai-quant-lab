@@ -10,7 +10,7 @@ import {
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
-    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp"]);
+    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index"]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
   });

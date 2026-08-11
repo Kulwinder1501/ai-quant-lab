@@ -18,6 +18,8 @@ import { PostgresOptionChainRepository } from "../../../infrastructure/database/
 import { PostgresRiskStateRepository } from "../../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
+import { loadIndexDriverTape } from "../../market-data/application/load-index-driver-tape.js";
+import { driverTapeBias as scoreDriverTapeBias } from "../../market-data/domain/driver-tape.js";
 import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
 
 export interface AiBrainThought {
@@ -81,6 +83,32 @@ export const PRODUCTION_INDICATOR_VERSION = "ta-v1";
  */
 export const AGENT_ATR_STOP_MULTIPLE = 1.5;
 export const AGENT_REWARD_RISK_MULTIPLE = 2;
+
+/**
+ * Sides the agent will actually execute, as opposed to score.
+ *
+ * SHORT is scored, reported and journalled -- it is simply not traded, because it has been
+ * measured and it loses. `npm run measure:directional-scorer` replays the scorer over stored
+ * history with the agent's own bracket and the paper-trading exit rules. On 15m, patterns current
+ * as of 2026-08-10, against a 0.3333 break-even hit rate:
+ *
+ * | instrument | side  | gated hit (n)   | gated expectancy | unconditional hit | delta   |
+ * |------------|-------|-----------------|------------------|-------------------|---------|
+ * | NIFTY50    | LONG  | 0.3351 (367)    | +0.005R          | 0.3370            | -0.0019 |
+ * | NIFTY50    | SHORT | 0.2950 (261)    | **-0.262R**      | 0.3595            | -0.0645 |
+ * | BANKNIFTY  | LONG  | 0.3850 (413)    | +0.182R          | 0.3568            | +0.0282 |
+ * | BANKNIFTY  | SHORT | 0.2478 (347)    | **-0.376R**      | 0.3315            | -0.0837 |
+ *
+ * The short gate is below break-even on both instruments, strongly negative in expectancy, and
+ * 6-8 points *worse than taking every bar short* -- so it is not merely unhelpful, it reliably
+ * selects bad shorts. The long gate is roughly neutral: positive on both but inconsistent in
+ * sign relative to its baseline, so it is left enabled without any claim of edge.
+ *
+ * This is a measured gate, not the earlier structural argument. It should be revisited by
+ * re-running the measurement, not by reasoning about the terms -- and if the short side's numbers
+ * come back above its baseline on more than one instrument, add "SHORT" back here.
+ */
+export const AGENT_EXECUTABLE_SIDES: readonly TradeSide[] = ["LONG"];
 
 /**
  * Entry costs are **not** defined here.
@@ -277,17 +305,47 @@ export class AiAutonomousAgent {
   }
 
   /**
-   * Appends a thought, discarding the oldest beyond `MAX_RETAINED_THOUGHTS`.
+   * The thought stream as the dashboard should see it: from the database, not this process.
    *
-   * Every site that used to call `this.thoughts.push` directly goes through here. The array is
-   * only ever read as a tail slice, so retaining more than the window is pure growth in a
-   * process that never exits.
+   * `getThoughts` above reads the in-memory ring, which is only populated in the process that ran
+   * the tick. Since the tick moved to the scheduler's `AI_AGENT_TICK` job, that is never the API
+   * process serving the dashboard -- so the brain panel rendered zero thoughts beside six
+   * reflections while the agent was running normally elsewhere. Reflections were already persisted;
+   * thoughts were not. This is the read side of migration 052.
+   */
+  public async listRecentThoughts(limit = 15, symbol?: string): Promise<AiBrainThought[]> {
+    try {
+      return await this.aiJournalRepo.getRecentThoughts(limit, symbol);
+    } catch {
+      // A journal read failure must not blank a panel that has an in-process answer available.
+      return this.getThoughts(limit);
+    }
+  }
+
+  /**
+   * Appends a thought to the in-memory ring and persists it.
+   *
+   * Every site that used to call `this.thoughts.push` directly goes through here. The ring is
+   * bounded because it is only ever read as a tail slice, and retaining more than the window is
+   * pure growth in a process that never exits.
+   *
+   * The write is deliberately **not** awaited by callers: `tick` is on a scheduler cadence and a
+   * journal outage must not stop it evaluating stops or opening positions. A failure is logged and
+   * dropped, because a thought is a record of a decision rather than part of making one.
    */
   private recordThought(thought: AiBrainThought): void {
     this.thoughts.push(thought);
     if (this.thoughts.length > MAX_RETAINED_THOUGHTS) {
       this.thoughts.splice(0, this.thoughts.length - MAX_RETAINED_THOUGHTS);
     }
+    void this.aiJournalRepo.saveThought(thought).catch((error: unknown) => {
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "Failed to persist an agent thought; it stays in memory only.",
+        thoughtId: thought.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
   }
 
   public async getReflections(limit = 20): Promise<AiReflectionLog[]> {
@@ -334,7 +392,7 @@ export class AiAutonomousAgent {
       netPnl,
       profitFactor,
       reflections: await this.aiJournalRepo.getRecentReflections(10),
-      recentThoughts: this.getThoughts(10),
+      recentThoughts: await this.listRecentThoughts(10),
     };
   }
 
@@ -490,6 +548,20 @@ export class AiAutonomousAgent {
       console.warn("Error fetching institutional data:", e);
     }
 
+    // Index-driver tape (breadth / concentration). Soft context only — thin Yahoo
+    // coverage or unsupported symbols leave the term unchecked, same as missing FII.
+    let longDriverTape: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
+    let shortDriverTape: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
+    try {
+      const driverTape = await loadIndexDriverTape(symbol);
+      if (driverTape?.tape) {
+        longDriverTape = scoreDriverTapeBias("LONG", driverTape.tape);
+        shortDriverTape = scoreDriverTapeBias("SHORT", driverTape.tape);
+      }
+    } catch (e) {
+      console.warn("Error fetching index-driver tape:", e);
+    }
+
     const openTrades = await this.paperTradeRepo.listOpenByAccount(account.id);
     const existingTrades = openTrades.filter((t) => t.instrumentId === instId);
 
@@ -625,6 +697,7 @@ export class AiAutonomousAgent {
       // *inflows* carry the 1.5x against a short. A sign flip would not: the asymmetry would
       // then favour the short side on every reading.
       flowBias: { long: flowBias, short: shortFlowBias },
+      driverTapeBias: { long: longDriverTape, short: shortDriverTape },
       newsSentiment,
       newsLabel,
       hasMacroEvent,
@@ -670,6 +743,10 @@ export class AiAutonomousAgent {
         side: setupScore.side,
         longConfidence: setupScore.longConfidence,
         shortConfidence: setupScore.shortConfidence,
+        driverTape: {
+          long: longDriverTape,
+          short: shortDriverTape,
+        },
         reasoning,
       },
     };
@@ -678,6 +755,32 @@ export class AiAutonomousAgent {
     // 5. If confidence >= 80%, check margin and execute local paper trade!
     if (confidence >= 80) {
       this.lastTradeAttempt.set(symbol, Date.now());
+
+      // The measured side gate. A qualifying SHORT is recorded in full and not traded: the
+      // measurement behind `AGENT_EXECUTABLE_SIDES` shows the short gate selecting worse than its
+      // own unconditional baseline on both instruments tested. Journalled rather than dropped, so
+      // the population that *would* have been traded stays visible and the gate can be re-measured
+      // against it later.
+      if (!AGENT_EXECUTABLE_SIDES.includes(setupScore.side)) {
+        this.recordThought({
+          id: `th-${Date.now()}-side-gated`,
+          timestamp: new Date().toISOString(),
+          symbol,
+          action: "MONITORING",
+          confidence,
+          message: `${setupScore.side} setup qualified at ${confidence}% but ${setupScore.side} is not an `
+            + "executable side: measured gated hit rate falls below both break-even and its own "
+            + "unconditional baseline. Recorded, not traded.",
+          details: {
+            gatedSide: setupScore.side,
+            executableSides: [...AGENT_EXECUTABLE_SIDES],
+            longConfidence: setupScore.longConfidence,
+            shortConfidence: setupScore.shortConfidence,
+            reasoning,
+          },
+        });
+        return;
+      }
 
       if (existingTrades.length > 0) {
         this.recordThought({
