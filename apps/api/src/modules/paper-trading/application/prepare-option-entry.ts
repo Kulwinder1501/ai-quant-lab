@@ -236,6 +236,7 @@ export class PrepareOptionEntry {
     }
 
     const volume = await this.readSourceBarVolume(idea.source_candle_id, idea.symbol);
+    const scheduledMacro = await this.hasScheduledMacroEventToday(now);
     const entryCheck = validateOptionsEntry({
       proposedIdea: {
         side: idea.side,
@@ -247,6 +248,7 @@ export class PrepareOptionEntry {
       optionChain: usableChain ?? undefined,
       intendedStrike,
       intendedContractDelta: solvedGreeks?.delta ?? null,
+      ...(scheduledMacro === undefined ? {} : { hasMacroEvent: scheduledMacro }),
     });
     if (!entryCheck.isValid) {
       return {
@@ -373,6 +375,26 @@ export class PrepareOptionEntry {
     return iv;
   }
 
+  private async hasScheduledMacroEventToday(now: Date): Promise<boolean | undefined> {
+    const IST = "Asia/Kolkata";
+    const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(now);
+    const [y, m, d] = todayIst.split("-").map(Number);
+    const tomorrowUtc = new Date(Date.UTC(y!, m! - 1, d! + 1));
+    const tomorrowIst = tomorrowUtc.toISOString().slice(0, 10);
+    try {
+      const result = await this.database.query<{ count: string }>(`
+        SELECT count(*)::text AS count
+        FROM scheduled_macro_events
+        WHERE event_date IN ($1::date, $2::date)
+          AND verified = TRUE
+      `, [todayIst, tomorrowIst]);
+      return Number(result.rows[0]?.count ?? 0) > 0;
+    } catch {
+      // Omit the field so the validator reports unchecked rather than inventing a clear.
+      return undefined;
+    }
+  }
+
   /**
    * Volume of the bar the idea was actually raised on, via `source_candle_id`. The latest bar
    * is deliberately not substituted: validating an older idea against a later bar would judge
@@ -404,7 +426,12 @@ export class PrepareOptionEntry {
     }
     try {
       const result = await this.database.query<{
-        volume: string | null; timeframe: string; instrument_type: string; nearby_volume_bars: string;
+        volume: string | null;
+        timeframe: string;
+        instrument_type: string;
+        nearby_volume_bars: string;
+        proxy_volume: string | null;
+        proxy_symbol: string | null;
       }>(`
         SELECT c.volume, c.timeframe, i.instrument_type,
                (SELECT count(*) FROM candles peer
@@ -412,9 +439,24 @@ export class PrepareOptionEntry {
                    AND peer.timeframe = c.timeframe
                    AND peer.volume > 0
                    AND peer.open_time BETWEEN c.open_time - INTERVAL '7 days'
-                                          AND c.open_time + INTERVAL '7 days') AS nearby_volume_bars
+                                          AND c.open_time + INTERVAL '7 days') AS nearby_volume_bars,
+               proxy.volume AS proxy_volume,
+               proxy.symbol AS proxy_symbol
         FROM candles c
         JOIN instruments i ON i.id = c.instrument_id
+        LEFT JOIN LATERAL (
+          SELECT pc.volume, pi.symbol
+          FROM instruments pi
+          JOIN candles pc ON pc.instrument_id = pi.id
+            AND pc.timeframe = c.timeframe
+            AND pc.open_time = c.open_time
+            AND pc.is_complete = TRUE
+          WHERE pi.instrument_type = 'ETF'
+            AND pi.metadata ->> 'purpose' = 'tradable-index-proxy'
+            AND upper(pi.metadata ->> 'tracks') = upper(i.symbol)
+          ORDER BY pc.received_at DESC, pc.id DESC
+          LIMIT 1
+        ) proxy ON TRUE
         WHERE c.id = $1
       `, [sourceCandleId]);
       const bar = result.rows[0];
@@ -442,12 +484,20 @@ export class PrepareOptionEntry {
        * that could not be evaluated must never read like one that was.
        */
       if (bar.instrument_type === "INDEX") {
+        const proxyVolume = bar.proxy_volume === null ? Number.NaN : Number(bar.proxy_volume);
+        if (bar.timeframe === "5m" && Number.isFinite(proxyVolume) && proxyVolume > 0) {
+          return {
+            candleVolume: proxyVolume,
+            absenceReason: "",
+          };
+        }
         return {
           candleVolume: null,
-          absenceReason: `${symbol} is an INDEX, and index volume is not a usable confirmation `
-            + "signal: NSE publishes none, and the provider's history has a 2026 break that makes "
-            + "any volume-derived check a proxy for the calendar. Use an ETF proxy to confirm on "
-            + "traded volume",
+          absenceReason: bar.timeframe === "5m"
+            ? `${symbol} is an INDEX and its point-in-time ETF proxy `
+              + `(${bar.proxy_symbol ?? "not found"}) has no positive 5m volume for the source bar`
+            : `${symbol} is an INDEX, so ${bar.timeframe} index volume is not usable; only an exact `
+              + "5m ETF-proxy bar may confirm participation",
         };
       }
       if (Number(bar.nearby_volume_bars) === 0) {

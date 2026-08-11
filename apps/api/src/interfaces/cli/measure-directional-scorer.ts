@@ -205,8 +205,8 @@ async function main(): Promise<void> {
         },
         newsSentiment: 0,
         newsLabel: "HELD OUT",
-        hasMacroEvent: false,
-        macroEventNames: [],
+        hasHeadlineHeat: false,
+        headlineEventNames: [],
       });
       scored += 1;
 

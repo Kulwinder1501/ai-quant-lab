@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Pool } from "pg";
+import {
+  buildFyersAuthorizeUrl,
+  FYERS_ACCESS_TOKEN_TTL_MS,
+  FYERS_REFRESH_TOKEN_TTL_MS,
+  FYERS_VALIDATE_AUTHCODE_PATH,
+} from "./fyers-oauth.js";
 
 export const FYERS_PROVIDER_ID = "fyers-api-v3";
 
@@ -129,6 +135,121 @@ export class FyersTokenService {
     return createHash("sha256")
       .update(`${this.options.appId}:${this.options.appSecret}`)
       .digest("hex");
+  }
+
+  buildAuthorizeUrl(redirectUri: string, state: string): string {
+    return buildFyersAuthorizeUrl({
+      baseUrl: this.baseUrl,
+      appId: this.options.appId,
+      redirectUri,
+      state,
+    });
+  }
+
+  /**
+   * Exchange a one-time auth_code from the Fyers redirect for access + refresh tokens.
+   * Does not persist — call `storeTokens` after a successful exchange.
+   */
+  async exchangeAuthCode(authCode: string): Promise<{ accessToken: string; refreshToken: string }> {
+    const code = authCode.trim();
+    if (!code) {
+      throw new Error("No auth_code was supplied.");
+    }
+
+    let response: Awaited<ReturnType<FetchFunction>>;
+    try {
+      response = await this.fetch(`${this.baseUrl}${FYERS_VALIDATE_AUTHCODE_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          appIdHash: this.appIdHash(),
+          code,
+        }),
+      });
+    } catch (error) {
+      throw new Error(
+        `Fyers auth-code exchange could not reach the provider: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const payload = await response.json().catch(() => undefined) as
+      | { s?: string; code?: number; message?: string; access_token?: string; refresh_token?: string }
+      | undefined;
+
+    if (payload?.code === -371) {
+      throw new Error(
+        "Fyers rejected the appIdHash (-371). Check FYERS_APP_ID and FYERS_APP_SECRET —"
+        + " this is a credential-format problem, not an expired code.",
+      );
+    }
+    if (!response.ok || payload?.s !== "ok" || !payload.access_token || !payload.refresh_token) {
+      throw new Error(
+        `Fyers auth-code exchange failed (HTTP ${response.status}, code ${payload?.code ?? "none"}).`
+        + ` ${redactTokens(payload?.message ?? "No message supplied.")}`,
+      );
+    }
+
+    return {
+      accessToken: payload.access_token,
+      refreshToken: payload.refresh_token,
+    };
+  }
+
+  /** Persist tokens from a fresh authorize (CLI or web OAuth callback). */
+  async storeTokens(tokens: { accessToken: string; refreshToken: string }): Promise<{
+    accessTokenExpiresAt: Date;
+    refreshTokenExpiresAt: Date;
+  }> {
+    const now = this.now();
+    const accessTokenExpiresAt = new Date(now.getTime() + FYERS_ACCESS_TOKEN_TTL_MS);
+    const refreshTokenExpiresAt = new Date(now.getTime() + FYERS_REFRESH_TOKEN_TTL_MS);
+    await this.options.pool.query(
+      `INSERT INTO provider_credentials (
+         provider, access_token, access_token_expires_at,
+         refresh_token, refresh_token_expires_at, last_refreshed_at, last_error
+       ) VALUES ($1, $2, $3, $4, $5, $6, NULL)
+       ON CONFLICT (provider) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         access_token_expires_at = EXCLUDED.access_token_expires_at,
+         refresh_token = EXCLUDED.refresh_token,
+         refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
+         last_refreshed_at = EXCLUDED.last_refreshed_at,
+         last_error = NULL,
+         updated_at = NOW()`,
+      [
+        FYERS_PROVIDER_ID,
+        tokens.accessToken,
+        accessTokenExpiresAt,
+        tokens.refreshToken,
+        refreshTokenExpiresAt,
+        now,
+      ],
+    );
+    return { accessTokenExpiresAt, refreshTokenExpiresAt };
+  }
+
+  /**
+   * Clear stored tokens so the lab is "logged out" of Fyers until Connect runs again.
+   * Keeps the row so `last_error` can explain the disconnect.
+   */
+  async disconnect(): Promise<void> {
+    await this.options.pool.query(
+      `INSERT INTO provider_credentials (
+         provider, access_token, access_token_expires_at,
+         refresh_token, refresh_token_expires_at, last_refreshed_at, last_error
+       ) VALUES ($1, NULL, NULL, NULL, NULL, NULL, $2)
+       ON CONFLICT (provider) DO UPDATE SET
+         access_token = NULL,
+         access_token_expires_at = NULL,
+         refresh_token = NULL,
+         refresh_token_expires_at = NULL,
+         last_refreshed_at = NULL,
+         last_error = EXCLUDED.last_error,
+         updated_at = NOW()`,
+      [FYERS_PROVIDER_ID, "Disconnected via Settings. Connect Fyers again to resume."],
+    );
   }
 
   /**
@@ -342,7 +463,7 @@ export class FyersTokenService {
     // conservative window rather than trusting the token past it.
     return {
       accessToken: payload.access_token,
-      expiresAt: new Date(this.now().getTime() + 8 * 60 * 60_000),
+      expiresAt: new Date(this.now().getTime() + FYERS_ACCESS_TOKEN_TTL_MS),
     };
   }
 

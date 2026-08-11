@@ -76,7 +76,15 @@ interface Overrides {
   idea?: Record<string, unknown> | null;
   calendar?: OptionExpiryCalendar | null;
   snapshot?: OptionChainSnapshot | null;
-  barVolume?: { volume: string | null; timeframe: string; nearby_volume_bars: string } | null;
+  barVolume?: {
+    volume: string | null;
+    timeframe: string;
+    nearby_volume_bars: string;
+    instrument_type?: string;
+    proxy_volume?: string | null;
+    proxy_symbol?: string | null;
+  } | null;
+  scheduledEvents?: number | "error";
 }
 
 function service(overrides: Overrides = {}) {
@@ -88,9 +96,15 @@ function service(overrides: Overrides = {}) {
       }
       if (text.includes("nearby_volume_bars")) {
         const bar = overrides.barVolume === undefined
-          ? { volume: "150000", timeframe: "5m", nearby_volume_bars: "10000" }
+          ? { volume: "150000", timeframe: "5m", nearby_volume_bars: "10000", instrument_type: "EQUITY" }
           : overrides.barVolume;
         return { rows: (bar ? [bar] : []) as T[] };
+      }
+      if (text.includes("FROM scheduled_macro_events")) {
+        if (overrides.scheduledEvents === "error") {
+          throw new Error("calendar unavailable");
+        }
+        return { rows: [{ count: String(overrides.scheduledEvents ?? 0) }] as T[] };
       }
       // India VIX daily close, as a percentage.
       return { rows: [{ close: "13.5" }] as T[] };
@@ -230,11 +244,21 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     // `isValid: true` with a non-empty unchecked list is a weaker statement than one with an
     // empty list, and a caller that cannot tell them apart is the failure this project has
     // shipped twice.
-    const result = await service().execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+    const result = await service({ scheduledEvents: "error" })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
     expect(result.entry.unchecked.join(" ")).toContain("Macro events");
+  });
+
+  it("records a verified empty calendar as checked rather than unknown", async () => {
+    const result = await service({ scheduledEvents: 0 })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.unchecked.join(" ")).not.toContain("Macro events");
   });
 
   it("does not read a zero as absent participation when the feed itself stopped reporting", async () => {
@@ -261,6 +285,24 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     }).execute({ tradeIdeaId: "idea-1", now: NOW });
 
     expect(result).toMatchObject({ approved: false, reason: "OPTIONS_ENTRY_REJECTED" });
+  });
+
+  it("uses the exact 5m ETF proxy bar to confirm index participation", async () => {
+    const result = await service({
+      idea: { ...IDEA, reasoning: ["VOLATILITY_EXPANSION regime"] },
+      barVolume: {
+        volume: "0",
+        timeframe: "5m",
+        nearby_volume_bars: "0",
+        instrument_type: "INDEX",
+        proxy_volume: "42000",
+        proxy_symbol: "BANKBEES",
+      },
+    }).execute({ tradeIdeaId: "idea-1", now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.unchecked.join(" ")).not.toContain("Volume confirmation");
   });
 
   it("refuses an unknown trade idea", async () => {

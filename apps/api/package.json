@@ -14,6 +14,8 @@
     "data:collect:live": "tsx src/interfaces/cli/collect-live-market-data.ts",
     "data:collect:institutional": "tsx src/interfaces/cli/collect-institutional-data.ts",
     "data:collect:option-chain": "tsx src/interfaces/cli/collect-option-chain.ts",
+    "data:collect:option-premium-ticks": "tsx src/interfaces/cli/collect-option-premium-ticks.ts",
+    "paper:volatility-straddle": "tsx src/interfaces/cli/run-volatility-straddle.ts",
     "data:backfill:institutional": "tsx src/interfaces/cli/backfill-institutional-flows.ts",
     "data:auth:fyers": "tsx src/interfaces/cli/authorize-fyers.ts",
     "data:audit": "tsx src/interfaces/cli/audit-data-readiness.ts",

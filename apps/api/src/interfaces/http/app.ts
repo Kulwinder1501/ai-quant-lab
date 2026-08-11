@@ -19,6 +19,7 @@ import {
   securityHeaders,
 } from "./common/middleware.js";
 import { buildHttpDependencies } from "./dependencies.js";
+import { registerFyersAuthRoutes } from "./routes/fyers-auth.routes.js";
 import { registerHealthRoutes } from "./routes/health.routes.js";
 
 export interface ApplicationDependencies {
@@ -61,6 +62,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   app.use(createMutationRateLimiter({ maxRequests: mutationLimit, windowMs: 60_000 }));
 
   registerHealthRoutes(app, dependencies);
+  registerFyersAuthRoutes(app, dependencies, configuration);
   registerMarketScannerRoutes(app, dependencies);
   registerModelPredictionRoutes(app, dependencies);
   registerPaperTradingRoutes(app, dependencies);

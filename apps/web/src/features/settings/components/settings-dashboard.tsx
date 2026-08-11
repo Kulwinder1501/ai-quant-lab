@@ -1,11 +1,12 @@
 "use client";
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { PageHeader } from '../../../components/layout/page-header';
 import { GlassPanel } from '../../../components/ui/glass-panel';
 import { Select } from '../../../components/ui/select';
 import { ThemeToggle } from '../../../components/theme/theme-toggle';
 import { useAppStore } from '../../../stores/app-store';
+import { getApiV1Url } from '../../research/api';
 
 const INSTRUMENT_OPTIONS = [
   { value: 'NIFTY50', label: 'NIFTY 50' },
@@ -23,6 +24,35 @@ const TIMEFRAME_OPTIONS = [
   { value: '1d', label: '1 Day' },
 ];
 
+type FyersHealthStatus = 'OK' | 'EXPIRING_SOON' | 'ERROR' | 'EXPIRED' | 'MISSING';
+
+interface FyersHealthResponse {
+  status?: FyersHealthStatus;
+  reasons?: string[];
+  accessTokenExpiresAt?: string | null;
+  lastError?: string | null;
+  recoveryHint?: string;
+}
+
+function statusBadgeClass(status: FyersHealthStatus | 'UNKNOWN'): string {
+  switch (status) {
+    case 'OK':
+      return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+    case 'EXPIRING_SOON':
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-300';
+    case 'ERROR':
+    case 'EXPIRED':
+      return 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+    case 'MISSING':
+    default:
+      return 'border-slate-500/30 bg-slate-500/10 text-slate-300';
+  }
+}
+
+function needsReconnect(status: FyersHealthStatus | 'UNKNOWN'): boolean {
+  return status === 'MISSING' || status === 'EXPIRED' || status === 'ERROR' || status === 'UNKNOWN';
+}
+
 export function SettingsDashboard() {
   const {
     selectedInstrument,
@@ -34,6 +64,127 @@ export function SettingsDashboard() {
     apiBaseUrl,
     setApiBaseUrl,
   } = useAppStore();
+
+  const [fyersHealth, setFyersHealth] = useState<FyersHealthResponse | null>(null);
+  const [fyersError, setFyersError] = useState<string | null>(null);
+  const [fyersBanner, setFyersBanner] = useState<string | null>(null);
+  const [fyersBusy, setFyersBusy] = useState(false);
+
+  async function loadFyersHealth(): Promise<void> {
+    try {
+      const response = await fetch(`${getApiV1Url()}/health/fyers`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const payload = await response.json() as FyersHealthResponse;
+      setFyersHealth(payload);
+      setFyersError(null);
+    } catch (error) {
+      setFyersHealth(null);
+      setFyersError(error instanceof Error ? error.message : 'Fyers health unavailable.');
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const response = await fetch(`${getApiV1Url()}/health/fyers`, {
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+        });
+        const payload = await response.json() as FyersHealthResponse;
+        if (!cancelled) {
+          setFyersHealth(payload);
+          setFyersError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setFyersHealth(null);
+          setFyersError(error instanceof Error ? error.message : 'Fyers health unavailable.');
+        }
+      }
+    }
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const fyers = params.get('fyers');
+    const message = params.get('fyersMessage');
+    if (fyers === 'connected') {
+      setFyersBanner('Fyers connected. Tokens are stored on the API — not in this browser.');
+      void loadFyersHealth();
+    } else if (fyers === 'error') {
+      setFyersBanner(message || 'Fyers connect failed. Try again.');
+    }
+    if (fyers) {
+      params.delete('fyers');
+      params.delete('fyersMessage');
+      const next = params.toString();
+      const path = `${window.location.pathname}${next ? `?${next}` : ''}`;
+      window.history.replaceState({}, '', path);
+    }
+  }, []);
+
+  async function connectFyers(): Promise<void> {
+    setFyersBusy(true);
+    setFyersBanner(null);
+    try {
+      const returnTo = `${window.location.origin}/settings`;
+      const response = await fetch(
+        `${getApiV1Url()}/fyers/auth/start?returnTo=${encodeURIComponent(returnTo)}`,
+        { headers: { Accept: 'application/json' }, cache: 'no-store' },
+      );
+      const payload = await response.json() as { authorizeUrl?: string; error?: string; detail?: string };
+      if (!response.ok || !payload.authorizeUrl) {
+        setFyersBanner(payload.detail || payload.error || 'Could not start Fyers connect.');
+        return;
+      }
+      window.location.assign(payload.authorizeUrl);
+    } catch (error) {
+      setFyersBanner(error instanceof Error ? error.message : 'Could not start Fyers connect.');
+    } finally {
+      setFyersBusy(false);
+    }
+  }
+
+  async function disconnectFyers(): Promise<void> {
+    if (!window.confirm('Disconnect Fyers? Option collection and Fyers candles will stop until you reconnect.')) {
+      return;
+    }
+    setFyersBusy(true);
+    setFyersBanner(null);
+    try {
+      const response = await fetch(`${getApiV1Url()}/fyers/auth/disconnect`, {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+      });
+      const payload = await response.json() as { status?: string; error?: string };
+      if (!response.ok) {
+        setFyersBanner(payload.error || 'Disconnect failed.');
+        return;
+      }
+      setFyersBanner('Fyers disconnected.');
+      await loadFyersHealth();
+    } catch (error) {
+      setFyersBanner(error instanceof Error ? error.message : 'Disconnect failed.');
+    } finally {
+      setFyersBusy(false);
+    }
+  }
+
+  const fyersStatus = fyersHealth?.status ?? 'UNKNOWN';
+  const showConnect = needsReconnect(fyersStatus) || fyersStatus === 'EXPIRING_SOON';
+  const showDisconnect = fyersStatus === 'OK' || fyersStatus === 'EXPIRING_SOON';
 
   return (
     <div className="flex flex-col h-full space-y-6 p-6">
@@ -99,6 +250,78 @@ export function SettingsDashboard() {
                 <ThemeToggle />
               </div>
             </div>
+          </div>
+        </GlassPanel>
+
+        <GlassPanel className="p-6 flex flex-col gap-4 md:col-span-2">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-medium text-slate-200 mb-1">Fyers broker login</h3>
+              <p className="text-sm text-slate-400">
+                Connect in the browser. Tokens stay on the API — never in this page.
+              </p>
+            </div>
+            <span className={`rounded border px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${statusBadgeClass(fyersStatus)}`}>
+              {fyersStatus}
+            </span>
+          </div>
+
+          {fyersBanner && (
+            <p className={`text-sm ${fyersBanner.toLowerCase().includes('fail') || fyersBanner.toLowerCase().includes('error') || fyersBanner.toLowerCase().includes('invalid') ? 'text-rose-400' : 'text-emerald-300'}`}>
+              {fyersBanner}
+            </p>
+          )}
+
+          {fyersError && (
+            <p className="text-sm text-rose-400">{fyersError}</p>
+          )}
+
+          {!fyersError && fyersHealth && (
+            <div className="space-y-2 text-sm text-slate-300">
+              {fyersHealth.accessTokenExpiresAt && (
+                <p className="font-mono text-xs text-slate-400">
+                  Access token expires: {fyersHealth.accessTokenExpiresAt}
+                </p>
+              )}
+              {Array.isArray(fyersHealth.reasons) && fyersHealth.reasons.length > 0 && (
+                <ul className="list-disc space-y-1 pl-5 text-slate-400">
+                  {fyersHealth.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              )}
+              {fyersHealth.lastError && (
+                <p className="text-xs text-amber-300/90">Last error: {fyersHealth.lastError}</p>
+              )}
+              {(needsReconnect(fyersStatus) || fyersStatus === 'EXPIRING_SOON') && (
+                <p className="text-xs text-slate-500">
+                  {fyersHealth.recoveryHint ?? 'Connect Fyers below to refresh the session.'}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 pt-1">
+            {showConnect && (
+              <button
+                type="button"
+                disabled={fyersBusy}
+                onClick={() => { void connectFyers(); }}
+                className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-medium text-cyan-200 transition hover:bg-cyan-500/20 disabled:opacity-50"
+              >
+                {fyersBusy ? 'Starting…' : 'Connect Fyers'}
+              </button>
+            )}
+            {showDisconnect && (
+              <button
+                type="button"
+                disabled={fyersBusy}
+                onClick={() => { void disconnectFyers(); }}
+                className="rounded-lg border border-slate-600 bg-slate-900/80 px-4 py-2 text-sm font-medium text-slate-300 transition hover:border-rose-500/40 hover:text-rose-200 disabled:opacity-50"
+              >
+                Disconnect
+              </button>
+            )}
           </div>
         </GlassPanel>
       </div>

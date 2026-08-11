@@ -36,6 +36,7 @@ function fakePool(rows: {
     if (/FROM strategy_versions/i.test(sql)) return { rows: rows.strategyVersions ?? [] };
     if (/FROM institutional_flows/i.test(sql)) return { rows: rows.institutionalFlows ?? [] };
     if (/FROM paper_accounts/i.test(sql)) return { rows: rows.paperAccounts ?? [] };
+    if (/INSERT INTO driver_tape_adjustments/i.test(sql)) return { rows: [{ id: "driver-adjustment-1" }] };
     return { rows: [] };
   };
   const query = vi.fn(async (sql: string) => answer(sql));

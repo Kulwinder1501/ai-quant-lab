@@ -19,8 +19,10 @@ import { PostgresRiskStateRepository } from "../../../infrastructure/database/re
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
 import { loadIndexDriverTape } from "../../market-data/application/load-index-driver-tape.js";
-import { driverTapeBias as scoreDriverTapeBias } from "../../market-data/domain/driver-tape.js";
+import { driverTapeBias as scoreDriverTapeBias, type DriverTapeMetrics } from "../../market-data/domain/driver-tape.js";
 import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
+import { PostgresDriverTapeAdjustmentRepository } from "../../../infrastructure/database/repositories/postgres-driver-tape-adjustment-repository.js";
+import { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 
 export interface AiBrainThought {
   id: string;
@@ -248,6 +250,7 @@ export class AiAutonomousAgent {
       paperTradeRepo,
       candleRepo,
       new PostgresIndiaVixImpliedVolatilitySource(database),
+      new PostgresOptionPremiumTickRepository(database),
     );
     this.optionChainRepository = overrides?.optionChainRepository
       ?? new PostgresOptionChainRepository(database);
@@ -496,12 +499,15 @@ export class AiAutonomousAgent {
           ? `POSITIVE (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`
           : `NEUTRAL (${newsSentiment.toFixed(2)} score across ${newsSummary.articleCount} articles)`;
 
-    let hasMacroEvent = false;
-    let macroEventNames: string[] = [];
+    let hasHeadlineHeat = false;
+    let headlineEventNames: string[] = [];
+    let hasScheduledMacroEvent = false;
     if (this.checkMacroEvents) {
       const macroRes = await this.checkMacroEvents.execute();
-      hasMacroEvent = macroRes.hasMacroEvent;
-      macroEventNames = macroRes.events;
+      // Soft −10 uses headline heat only. Scheduled calendar is a hard gate downstream.
+      hasHeadlineHeat = macroRes.hasHeadlineHeat;
+      headlineEventNames = macroRes.headlineEvents;
+      hasScheduledMacroEvent = macroRes.hasScheduledEvent;
     }
 
     // Institutional Data
@@ -552,9 +558,11 @@ export class AiAutonomousAgent {
     // coverage or unsupported symbols leave the term unchecked, same as missing FII.
     let longDriverTape: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
     let shortDriverTape: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
+    let driverTapeMetrics: DriverTapeMetrics | null = null;
     try {
       const driverTape = await loadIndexDriverTape(symbol);
       if (driverTape?.tape) {
+        driverTapeMetrics = driverTape.tape;
         longDriverTape = scoreDriverTapeBias("LONG", driverTape.tape);
         shortDriverTape = scoreDriverTapeBias("SHORT", driverTape.tape);
       }
@@ -681,7 +689,7 @@ export class AiAutonomousAgent {
      * avoiding volatility crush. A real freeze needs a calendar of *scheduled* events, which this
      * project does not have -- see docs/pending-work.md 2.4.
      */
-    const setupScore = scoreDirectionalSetup({
+    const scoreInputWithoutTape = {
       rsi: rsiVal,
       livePrice,
       bollingerUpper: bbUpper,
@@ -697,11 +705,15 @@ export class AiAutonomousAgent {
       // *inflows* carry the 1.5x against a short. A sign flip would not: the asymmetry would
       // then favour the short side on every reading.
       flowBias: { long: flowBias, short: shortFlowBias },
-      driverTapeBias: { long: longDriverTape, short: shortDriverTape },
       newsSentiment,
       newsLabel,
-      hasMacroEvent,
-      macroEventNames,
+      hasHeadlineHeat,
+      headlineEventNames,
+    };
+    const scoreWithoutTape = scoreDirectionalSetup(scoreInputWithoutTape);
+    const setupScore = scoreDirectionalSetup({
+      ...scoreInputWithoutTape,
+      driverTapeBias: { long: longDriverTape, short: shortDriverTape },
     });
     const confidence = setupScore.confidence;
     const reasoning = setupScore.reasoning;
@@ -743,6 +755,8 @@ export class AiAutonomousAgent {
         side: setupScore.side,
         longConfidence: setupScore.longConfidence,
         shortConfidence: setupScore.shortConfidence,
+        hasScheduledMacroEvent,
+        hasHeadlineHeat,
         driverTape: {
           long: longDriverTape,
           short: shortDriverTape,
@@ -751,6 +765,36 @@ export class AiAutonomousAgent {
       },
     };
     this.recordThought(thought);
+
+    // Persist both thesis readings, including zero adjustments, so the selected population has
+    // a real control group. Exact candle/idea/trade links make eventual outcomes joinable.
+    const driverTapeRepository = new PostgresDriverTapeAdjustmentRepository(this.database);
+    const driverTapeAdjustmentIds: string[] = [];
+    if (driverTapeMetrics !== null) {
+      try {
+        for (const thesisSide of ["LONG", "SHORT"] as const) {
+          const tape = thesisSide === "LONG" ? longDriverTape : shortDriverTape;
+          driverTapeAdjustmentIds.push(await driverTapeRepository.insert({
+            underlyingSymbol: symbol,
+            thesisSide,
+            adjustment: tape.adjustment,
+            reasoning: tape.reasoning ?? "Driver tape measured; thresholds produced no adjustment.",
+            metrics: driverTapeMetrics,
+            preAdjustmentConfidence: thesisSide === "LONG"
+              ? scoreWithoutTape.longConfidence
+              : scoreWithoutTape.shortConfidence,
+            resultingConfidence: thesisSide === "LONG"
+              ? setupScore.longConfidence
+              : setupScore.shortConfidence,
+            resultingSide: setupScore.side,
+            thoughtId: thought.id,
+            sourceCandleId: ctx.candle.id,
+          }));
+        }
+      } catch (e) {
+        console.warn("driver_tape_adjustments insert failed:", e);
+      }
+    }
 
     // 5. If confidence >= 80%, check margin and execute local paper trade!
     if (confidence >= 80) {
@@ -900,6 +944,16 @@ export class AiAutonomousAgent {
           now: new Date(),
           notes: `AI Autonomous Execution (${confidence}% ${side} confidence). Confluence: ${reasoning[0]}`,
         });
+
+        if (driverTapeAdjustmentIds.length > 0) {
+          await driverTapeRepository.linkToDecision(
+            driverTapeAdjustmentIds,
+            proposal.id,
+            placement.opened ? placement.trade.id : null,
+          ).catch((error: unknown) => {
+            console.warn("driver_tape_adjustments decision link failed:", error);
+          });
+        }
 
         if (!placement.opened) {
           // A refusal is reported, never silently dropped: "the gate refused" and "no setup

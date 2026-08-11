@@ -153,8 +153,10 @@ services:
       - "node"
       - "apps/api/dist/interfaces/cli/collect-live-market-data.js"
       - "--provider=fyers"
-      - "--timeframe=1m"
-      - "--instruments=NIFTYBEES"
+      # These exact 5m ETF bars are the volume source for index-option entry gates.
+      # Keep 1m for scalp research while collecting both index proxies in the same poller.
+      - "--timeframe=1m,5m"
+      - "--instruments=NIFTYBEES,BANKBEES"
       - "--poll-seconds=15"
     environment:
       NODE_ENV: production

@@ -13,7 +13,7 @@ import { IngestRssNewsService } from "../../modules/news-sentiment/application/i
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
 
 /** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
-const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN"];
+const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
 
 /**
  * The scheduler process.
@@ -107,6 +107,7 @@ async function checkFyersAuthHealth(tokenService: FyersTokenService, database: D
     console.info(JSON.stringify(payload));
   } else {
     console.error(JSON.stringify(payload));
+    throw new Error(`Fyers credential is not session-usable (${assessment.status}): ${assessment.reasons.join(" ")}`);
   }
 }
 
@@ -150,8 +151,11 @@ async function main(): Promise<void> {
     INDICES_INTRADAY: 10 * 60 * 1000,
     INDIA_VIX_INTRADAY: 10 * 60 * 1000,
     OPTION_CHAIN: 10 * 60 * 1000,
+    // Two collects + ~25s sleep fits under a minute; 90s recovers the next tick after a dead claimant.
+    OPTION_PREMIUM_TICKS: 90 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
     AI_AGENT_TICK: 10 * 60 * 1000,
+    VOLATILITY_STRADDLE: 10 * 60 * 1000,
     // Full-series recompute over both engines; slower than the other intraday jobs by nature.
     PATTERN_DETECTION_INTRADAY: 20 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
@@ -412,16 +416,18 @@ async function main(): Promise<void> {
    */
   cron.schedule("*/2 9-15 * * 1-5", () => {
     void schedule("AI_AGENT_TICK", () => runCommand("npm", [
-      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=15m",
+      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=5m",
     ]));
   }, { timezone: IST });
 
-  // Once daily, well before the 9:15 open: proactively refresh the Fyers access token and
-  // report credential health, so a lapsed or soon-to-lapse refresh token is a visible log
-  // line at 8:00 rather than a silent trade refusal discovered mid-session. Skipped
-  // entirely (not merely a no-op alert) when Fyers isn't configured in this environment.
+  // Before open and throughout the session: a credential can become unusable after 08:00.
+  // `getAccessToken` is a database-only read while the token remains comfortably valid, so
+  // this cadence does not add provider traffic in the healthy case.
   if (fyersTokenService) {
     cron.schedule("0 8 * * 1-5", () => {
+      void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
+    }, { timezone: IST });
+    cron.schedule("*/15 9-15 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
     }, { timezone: IST });
   }
@@ -445,6 +451,34 @@ async function main(): Promise<void> {
     ]));
   }, { timezone: IST });
 
+  // Dense ATM premium ticks — twice per claimed minute (~25s apart) so θ-decay /
+  // micro-structure research has sub-minute samples. Forward-only like OPTION_CHAIN.
+  const schedulePremiumTicks = () => {
+    if (fyersTokenService) {
+      void schedule("OPTION_PREMIUM_TICKS", async () => {
+        const args = [
+          "run", "data:collect:option-premium-ticks", "--",
+          "--underlyings", "NIFTY50,BANKNIFTY",
+        ];
+        await runCommand("npm", args);
+        await new Promise<void>((resolve) => setTimeout(resolve, 25_000));
+        await runCommand("npm", args);
+      });
+    }
+  };
+  // Exactly 09:15-15:30 IST; do not fill the research table with pre-open/post-close repeats.
+  for (const expression of ["15-59 9 * * 1-5", "* 10-14 * * 1-5", "0-30 15 * * 1-5"]) {
+    cron.schedule(expression, schedulePremiumTicks, { timezone: IST });
+  }
+
+  // Vol-expansion long-straddle path: propose + gated open attempt. Refusals dominate;
+  // runs mid-session once per hour after the intraday prediction cadence.
+  cron.schedule("5 10-14 * * 1-5", () => {
+    void schedule("VOLATILITY_STRADDLE", () => runCommand("npm", [
+      "run", "paper:volatility-straddle",
+    ]));
+  }, { timezone: IST });
+
   // Every three minutes, matching the interval this replaced. It claims its due minute
   // like everything else, so replicas share the work rather than each ingesting the same
   // feeds and racing on the same article rows.
@@ -464,8 +498,9 @@ async function main(): Promise<void> {
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
-      ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT"] : []),
+      ...(fyersTokenService ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "OPTION_PREMIUM_TICKS"] : []),
       "OPTION_CHAIN",
+      "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
     ],
     timezone: IST,

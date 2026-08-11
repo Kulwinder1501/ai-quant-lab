@@ -80,6 +80,7 @@ async function loadLivePrices(symbols: readonly string[]): Promise<Record<string
  */
 async function observedChainQuoteFor(
   optionChainRepository: HttpDependencies["optionChainRepository"],
+  premiumTickRepository: HttpDependencies["optionPremiumTickRepository"],
   trade: { underlyingSymbol?: string | null; optionExpiry?: Date | null; optionStrike?: number | null; optionType?: string | null },
 ): Promise<Awaited<ReturnType<HttpDependencies["optionChainRepository"]["latestContractQuote"]>>> {
   if (
@@ -90,6 +91,21 @@ async function observedChainQuoteFor(
     return null;
   }
   try {
+    const dense = await premiumTickRepository.latestForContract({
+      underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
+      expiryDate: trade.optionExpiry,
+      strikePrice: trade.optionStrike,
+      optionType: trade.optionType,
+    });
+    if (dense?.bid != null && dense.ask != null && dense.bid > 0 && dense.ask >= dense.bid) {
+      return {
+        mid: (dense.bid + dense.ask) / 2,
+        bid: dense.bid,
+        ask: dense.ask,
+        observedAt: dense.observedAt,
+        impliedForward: null,
+      };
+    }
     return await optionChainRepository.latestContractQuote({
       underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
       expiryDate: trade.optionExpiry,
@@ -108,6 +124,7 @@ export function registerPaperTradingRoutes(
     | "listPaperTradeHistory"
     | "dashboardRepository"
     | "paperTradeRepository"
+    | "optionPremiumTickRepository"
     | "createPaperAccount"
     | "getPaperAccountSummary"
     | "openPaperTrade"
@@ -188,6 +205,7 @@ export function registerPaperTradingRoutes(
       const valuations = new Map(await Promise.all(currentOpenTrades.map(async (trade) => {
         const observedQuote = await observedChainQuoteFor(
           dependencies.optionChainRepository,
+          dependencies.optionPremiumTickRepository,
           trade,
         );
         return [
@@ -571,6 +589,7 @@ export function registerPaperTradingRoutes(
         // quote the summary displays. Without this the screen and the books disagree.
         const observedQuote = await observedChainQuoteFor(
           dependencies.optionChainRepository,
+          dependencies.optionPremiumTickRepository,
           openTrade,
         );
         const valuation = valuePaperTrade({
@@ -586,7 +605,11 @@ export function registerPaperTradingRoutes(
           });
           return;
         }
-        appliedExitPrice = valuation.markPrice;
+        // Closing a long option means selling it. A fresh observed bid is executable; the mid is
+        // a valuation mark only. Fall back to the server model/chain mid when no bid exists.
+        appliedExitPrice = observedQuote?.bid != null && observedQuote.bid > 0
+          ? observedQuote.bid
+          : valuation.markPrice;
         exitPriceSource = "SERVER_OPTION_MARK";
         valuationDetails = {
           requestedExitPrice: exitPrice,

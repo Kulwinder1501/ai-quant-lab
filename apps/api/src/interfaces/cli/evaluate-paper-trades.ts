@@ -4,6 +4,7 @@ import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
+import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
 import { getOption } from "./arguments.js";
@@ -19,6 +20,7 @@ async function main(): Promise<void> {
       new PostgresPaperTradeRepository(database),
       new PostgresCandleRepository(database),
       new PostgresIndiaVixImpliedVolatilitySource(database),
+      new PostgresOptionPremiumTickRepository(database),
     ).execute({
       accountId: account.id,
       asOf: parseOptionalTimestamp(argumentsList, "as-of", new Date()),

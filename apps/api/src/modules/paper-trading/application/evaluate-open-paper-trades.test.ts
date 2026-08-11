@@ -227,6 +227,41 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
+  it("prefers a fresh dense bid for option stops and exits at that sellable price", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = {
+      latestForContract: async () => ({
+        observedAt: new Date(asOf.getTime() - 15_000),
+        bid: 145,
+        ask: 147,
+        lastPrice: 146,
+        underlyingValue: null,
+      }),
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitPrice: 145,
+      exitReason: "STOP_LOSS",
+      details: expect.objectContaining({ source: "OPTION_PREMIUM_TICK_BID" }),
+    });
+  });
+
 
   it("isolates a trade it cannot evaluate instead of abandoning the rest of the batch", async () => {
     const closings: ClosePaperTradeInput[] = [];

@@ -1,10 +1,13 @@
 import type { Express } from "express";
-import { checkDatabaseReadiness } from "../../../infrastructure/database/database.js";
+import { checkDatabaseReadiness, type DatabasePool } from "../../../infrastructure/database/database.js";
+import { FyersTokenService } from "../../../infrastructure/market-data/fyers-token-service.js";
+import { assessFyersAuthHealth } from "../../../modules/market-data/domain/fyers-auth-health.js";
 import type { HttpDependencies } from "../dependencies.js";
 
 /** Jobs that stop data arriving, rather than merely delaying a report. */
-const CRITICAL_JOB_TYPES = ["OPTION_CHAIN", "EOD_PIPELINE"];
+const CRITICAL_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS", "EOD_PIPELINE"];
 const MAX_CRITICAL_SUCCESS_AGE_HOURS = 72;
+const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
 
 export function registerHealthRoutes(app: Express, { database }: Pick<HttpDependencies, "database">): void {
   app.get("/api/v1/health", (_request, response) => {
@@ -17,6 +20,70 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
       response.status(200).json({ status: "ready", database: databaseStatus });
     } catch {
       response.status(503).json({ status: "not_ready", database: { ready: false } });
+    }
+  });
+
+  /**
+   * Fyers credential usability for the trading session. Never returns tokens.
+   */
+  app.get("/api/v1/health/fyers", async (_request, response) => {
+    const appId = process.env.FYERS_APP_ID;
+    const appSecret = process.env.FYERS_APP_SECRET;
+    if (!appId || !appSecret) {
+      response.status(503).json({
+        status: "MISSING",
+        reasons: ["FYERS_APP_ID / FYERS_APP_SECRET are not configured in this environment."],
+        accessTokenExpiresAt: null,
+        lastError: null,
+        recoveryHint: "Connect Fyers in Settings (or npm run data:auth:fyers).",
+      });
+      return;
+    }
+
+    try {
+      const tokenService = new FyersTokenService({
+        pool: database as DatabasePool,
+        appId,
+        appSecret,
+        pin: process.env.FYERS_PIN ?? "",
+      });
+
+      const health = await tokenService.checkCredentialHealth();
+      const failures = await database.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM scheduled_job_runs
+         WHERE job_type = ANY($1) AND status = 'FAILED' AND claimed_at >= NOW() - INTERVAL '1 day'`,
+        [FYERS_DEPENDENT_JOB_TYPES],
+      );
+      const recentJobFailures = Number(failures.rows[0]?.count ?? 0);
+      const now = new Date();
+      const sessionClose = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 10, 0, 0, 0,
+      ));
+      const assessment = assessFyersAuthHealth({
+        now,
+        hasCredential: health.hasCredential,
+        accessTokenExpiresAt: health.accessTokenExpiresAt,
+        refreshTokenExpiresAt: health.refreshTokenExpiresAt,
+        lastError: health.lastError,
+        recentJobFailures,
+        mustRemainValidUntil: sessionClose.getTime() > now.getTime() ? sessionClose : undefined,
+      });
+
+      response.status(assessment.status === "OK" ? 200 : 503).json({
+        status: assessment.status,
+        reasons: assessment.reasons,
+        accessTokenExpiresAt: health.accessTokenExpiresAt?.toISOString() ?? null,
+        lastError: health.lastError,
+        recoveryHint: "Connect Fyers in Settings (or npm run data:auth:fyers).",
+      });
+    } catch (error) {
+      response.status(500).json({
+        status: "ERROR",
+        reasons: [error instanceof Error ? error.message : "Fyers health could not be read."],
+        accessTokenExpiresAt: null,
+        lastError: error instanceof Error ? error.message : String(error),
+        recoveryHint: "Connect Fyers in Settings (or npm run data:auth:fyers).",
+      });
     }
   });
 

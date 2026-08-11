@@ -13,8 +13,8 @@ function baseInput(overrides: Partial<DirectionalSetupInput> = {}): DirectionalS
     flowBias: { long: { adjustment: 0, reasoning: null }, short: { adjustment: 0, reasoning: null } },
     newsSentiment: 0,
     newsLabel: "NEUTRAL (No breaking news in last 12h)",
-    hasMacroEvent: false,
-    macroEventNames: [],
+    hasHeadlineHeat: false,
+    headlineEventNames: [],
     ...overrides,
   };
 }
@@ -129,8 +129,8 @@ describe("scoreDirectionalSetup", () => {
 
   it("discounts both sides equally for a headline-derived macro flag", () => {
     const withMacro = scoreDirectionalSetup(baseInput({
-      hasMacroEvent: true,
-      macroEventNames: ["monetary policy"],
+      hasHeadlineHeat: true,
+      headlineEventNames: ["monetary policy"],
     }));
     const withoutMacro = scoreDirectionalSetup(baseInput());
 
@@ -178,8 +178,8 @@ describe("scoreDirectionalSetup", () => {
       livePrice: 24_500,
       pattern: { code: "BEARISH_ENGULFING", direction: "BEARISH", confidence: 0.95 },
       newsSentiment: -0.9,
-      hasMacroEvent: true,
-      macroEventNames: ["policy"],
+      hasHeadlineHeat: true,
+      headlineEventNames: ["policy"],
       flowBias: flowBiasFor(-8_000, -2_000),
     }));
     expect(contradicted.longConfidence).toBeGreaterThanOrEqual(15);

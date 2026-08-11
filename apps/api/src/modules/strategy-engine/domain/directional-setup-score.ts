@@ -108,8 +108,12 @@ export interface DirectionalSetupInput {
   /** Rolling news sentiment in [-1, 1], and 0 with no articles. */
   newsSentiment: number;
   newsLabel: string;
-  hasMacroEvent: boolean;
-  macroEventNames: readonly string[];
+  /**
+   * Soft headline keyword heat only. Scheduled calendar hard-gates live in
+   * `validateOptionsEntry` via `hasMacroEvent` from the dated calendar — not here.
+   */
+  hasHeadlineHeat: boolean;
+  headlineEventNames: readonly string[];
 }
 
 export interface DirectionalSetupScore {
@@ -134,7 +138,7 @@ function scoreThesis(
   const long = side === "LONG";
   const {
     rsi, livePrice, bollingerUpper, bollingerLower, pattern,
-    flowBias, driverTapeBias, newsSentiment, newsLabel, hasMacroEvent, macroEventNames,
+    flowBias, driverTapeBias, newsSentiment, newsLabel, hasHeadlineHeat, headlineEventNames,
   } = input;
 
   let confidence = BASE_CONFIDENCE;
@@ -228,10 +232,10 @@ function scoreThesis(
   }
 
   // --- Side-agnostic caution ------------------------------------------------------------
-  // A headline-derived macro flag is uncertainty, not a direction, so it discounts both theses
+  // Headline keyword heat is uncertainty, not a direction, so it discounts both theses
   // equally. See the note in ai-autonomous-agent.ts on why this is -10 and not a block.
-  if (hasMacroEvent) {
-    add(-10, `Macro-event caution: recent coverage mentions ${macroEventNames.slice(0, 3).join(", ")}. `
+  if (hasHeadlineHeat) {
+    add(-10, `Macro-event caution: recent coverage mentions ${headlineEventNames.slice(0, 3).join(", ")}. `
       + "Headline-derived, not a scheduled-event calendar, so treated as context rather than a block.");
   }
 

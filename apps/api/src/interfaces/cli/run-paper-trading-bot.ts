@@ -21,8 +21,8 @@ import {
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
 import { PostgresRiskStateRepository } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
+import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
-import type { TradeSide } from "../../modules/strategy-engine/domain/strategy.js";
 
 /** Minutes in one bar of a timeframe, so a series is not called stale for lagging by design. */
 function barLengthMinutes(timeframe: string): number {
@@ -135,18 +135,13 @@ const BOT_ACCOUNT_NAME = "AutoBot";
  */
 const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
 /**
- * `5m` used to be here, and **no registered strategy supports it** -- trend-breakout takes
- * 15m/30m/60m/1d and momentum-scalp takes 1m. Every scan was a silent no-op: the generator
- * skipped both strategies and returned nothing, which is indistinguishable in the output from
- * a market with no setups. `assertScannableTimeframes` below turns that into a startup error.
+ * 5m is for momentum-scalp-index (volume-aware index path). 15m/60m feed trend-breakout.
  *
- * 1m is deliberately not scanned. It is the only fresh intraday series -- the live poller
- * writes it -- but its only strategy is momentum-scalp, which needs VWAP, and VWAP needs
- * volume. The Fyers quotes endpoint returns `volume: 0` for an index, so those bars carry
- * none: measured 2026-08-07, NIFTY50 1m has 375 VWAP snapshots on 05 Aug's history bars and
- * **0** on today's live ones. Scanning it would produce nothing, slowly.
+ * 1m is dropped: momentum-scalp needs VWAP and VWAP needs volume, but index quotes carry
+ * `volume: 0` from Fyers (measured 2026-08-07). Scanning 1m only burns cycles with no fills.
+ * `assertScannableTimeframes` turns an unsupported timeframe into a startup error.
  */
-const SCAN_TIMEFRAMES = ["1m", "5m", "15m", "60m"] as const;
+const SCAN_TIMEFRAMES = ["5m", "15m", "60m"] as const;
 /**
  * Deliberately small. The account is Rs 1,000,000 and one NIFTY lot of a 200-point premium
  * is Rs 15,000, so this is not a capital limit -- it is a blast radius. The bot's edge is
@@ -179,6 +174,17 @@ async function main(): Promise<void> {
   const database = createDatabasePool(environment.DATABASE_URL);
 
   try {
+    const { isNseHoliday } = await import("../../modules/market-data/domain/nse-session-calendar.js");
+    const holiday = await isNseHoliday(database, now);
+    if (holiday.holiday) {
+      console.info(JSON.stringify({
+        level: "info",
+        message: "NSE holiday; bot skipped.",
+        holiday: holiday.name,
+      }));
+      return;
+    }
+
     const accountRepository = new PostgresPaperAccountRepository(database);
     const instrumentRepository = new PostgresInstrumentRepository(database);
     const tradeRepository = new PostgresPaperTradeRepository(database);
@@ -257,25 +263,7 @@ async function main(): Promise<void> {
             continue;
           }
 
-          let allowedSides: readonly TradeSide[] | undefined = undefined;
-          if (timeframe === "1m" && (symbol === "NIFTY50" || symbol === "BANKNIFTY")) {
-            // Default to empty array (no trades allowed) if we can't determine the bias
-            allowedSides = [];
-            const supertrendQuery = await database.query<{ trend: string }>(
-              `SELECT s.values->>'trend' as trend
-               FROM indicator_snapshots s
-               JOIN indicator_definitions ind ON ind.id = s.indicator_definition_id
-               JOIN candles c ON c.id = s.candle_id
-               WHERE c.instrument_id = $1 AND c.timeframe = '5m' AND ind.indicator_code = 'SUPERTREND'
-               ORDER BY c.close_time DESC LIMIT 1`,
-              [instrument.id]
-            );
-            const trend = supertrendQuery.rows[0]?.trend;
-            if (trend === "UP") allowedSides = ["LONG"];
-            else if (trend === "DOWN") allowedSides = ["SHORT"];
-          }
-
-          const results = await generator.execute({ instrumentId: instrument.id, timeframe, allowedSides });
+          const results = await generator.execute({ instrumentId: instrument.id, timeframe });
           for (const result of results) {
             if (result.skippedReason) {
               // Reported rather than skipped in silence. "The strategy ran and found no
@@ -415,6 +403,7 @@ async function main(): Promise<void> {
       tradeRepository,
       new PostgresCandleRepository(database),
       new PostgresIndiaVixImpliedVolatilitySource(database),
+      new PostgresOptionPremiumTickRepository(database),
     ).execute({ accountId: account.id, asOf: now });
 
     console.info(JSON.stringify({

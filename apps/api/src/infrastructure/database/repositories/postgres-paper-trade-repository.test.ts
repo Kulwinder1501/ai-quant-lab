@@ -37,4 +37,69 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
     expect(statements).not.toContain("COMMIT");
     expect(release).toHaveBeenCalledOnce();
   });
+
+  it("rolls back the first structure leg when the second leg cannot open", async () => {
+    const statements: string[] = [];
+    let accountReads = 0;
+    const release = vi.fn();
+    const openedAt = new Date("2026-08-09T10:00:00.000Z");
+    const client = {
+      query: vi.fn(async (text: string) => {
+        const normalized = text.replace(/\s+/g, " ").trim();
+        statements.push(normalized);
+        if (text.includes("FROM paper_accounts") && text.includes("FOR UPDATE")) {
+          accountReads += 1;
+          return accountReads === 1
+            ? { rows: [{ id: "account-1", name: "pair", opening_balance: "100000", currency: "INR", is_active: true }] }
+            : { rows: [] };
+        }
+        if (text.includes("FROM trade_ideas") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: "idea-1", instrument_id: "instrument-1", side: "LONG",
+            entry_price: "100", stop_loss: "90", target_price: "110",
+            expires_at: null, lot_size: 75,
+          }] };
+        }
+        if (text.includes("AS available_capital")) return { rows: [{ available_capital: "100000" }] };
+        if (text.includes("INSERT INTO paper_trades")) return { rows: [{ id: "trade-1" }] };
+        if (text.includes("UPDATE trade_ideas SET status = 'ACCEPTED'")) return { rows: [{ id: "idea-1" }] };
+        if (text.includes("FROM paper_trades")) {
+          return { rows: [{
+            id: "trade-1", account_id: "account-1", trade_idea_id: "idea-1",
+            instrument_id: "instrument-1", timeframe: "5m", side: "LONG", status: "OPEN",
+            quantity: "75", entry_price: "100", stop_loss: "90", target_price: "110",
+            opened_at: openedAt, closed_at: null, exit_price: null, exit_reason: null,
+            realized_pnl: null, fees: "20", fee_breakdown: {}, slippage: "0", notes: "pair",
+            option_strike: null, option_expiry: null, option_type: null,
+            underlying_symbol: null, underlying_entry_price: null, entry_iv: null,
+          }] };
+        }
+        return { rows: [] };
+      }),
+      release,
+    };
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+    const repository = new PostgresPaperTradeRepository(database);
+    const input = (tradeIdeaId: string) => ({
+      accountId: "account-1",
+      tradeIdeaId,
+      quantity: 75,
+      fillPrice: 100,
+      openedAt,
+      entryFees: 20,
+      entrySlippage: 0,
+      notes: "pair",
+      stopLossOverride: 90,
+      targetPriceOverride: 110,
+    });
+
+    await expect(repository.openPairFromTradeIdeas([
+      input("idea-ce"), input("idea-pe"),
+    ])).rejects.toThrow("Paper account was not found or is inactive.");
+
+    expect(statements.filter((statement) => statement.startsWith("INSERT INTO paper_trades"))).toHaveLength(1);
+    expect(statements.at(-1)).toBe("ROLLBACK");
+    expect(statements).not.toContain("COMMIT");
+    expect(release).toHaveBeenCalledOnce();
+  });
 });

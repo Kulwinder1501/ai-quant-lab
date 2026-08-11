@@ -250,6 +250,37 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     }
   }
 
+  /**
+   * Opens both legs of a paper structure in one database transaction.
+   *
+   * If either idea, capital check, contract constraint, or insert fails, neither leg exists.
+   * This is intentionally concrete-repository functionality: the generic paper-trade domain
+   * does not claim every pair of trades is a structure.
+   */
+  async openPairFromTradeIdeas(
+    inputs: readonly [OpenPaperTradeInput, OpenPaperTradeInput],
+  ): Promise<readonly [PaperTrade, PaperTrade]> {
+    if (inputs[0].accountId !== inputs[1].accountId) {
+      throw new Error("Atomic option-pair legs must use the same paper account.");
+    }
+    const client = await this.database.connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      const first = await this.openFromTradeIdeaWithinTransaction(client, inputs[0]);
+      const second = await this.openFromTradeIdeaWithinTransaction(client, inputs[1]);
+      await client.query("COMMIT");
+      transactionStarted = false;
+      return [first, second];
+    } catch (error) {
+      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /** Creates the synthetic idea and opens its trade in one database transaction. */
   async openManualOption(input: OpenManualOptionTradeInput): Promise<PaperTrade> {
     const client = await this.database.connect();

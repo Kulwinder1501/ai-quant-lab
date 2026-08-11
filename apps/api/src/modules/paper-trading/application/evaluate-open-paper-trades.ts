@@ -48,6 +48,25 @@ export interface EvaluationFailure {
   message: string;
 }
 
+export interface DenseOptionPremiumReader {
+  latestForContract(
+    contract: {
+      underlyingSymbol: string;
+      expiryDate: Date;
+      strikePrice: number;
+      optionType: "CE" | "PE";
+    },
+    maxAgeMs?: number,
+    now?: Date,
+  ): Promise<{
+    observedAt: Date;
+    bid: number | null;
+    ask: number | null;
+    lastPrice: number | null;
+    underlyingValue: number | null;
+  } | null>;
+}
+
 function decimalToNumber(value: string, field: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -97,6 +116,7 @@ export class EvaluateOpenPaperTrades {
     private readonly paperTradeRepository: PaperTradeRepository,
     private readonly candleRepository: CandleRepository,
     private readonly impliedVolatilitySource?: ImpliedVolatilitySource,
+    private readonly densePremiums?: DenseOptionPremiumReader,
   ) {}
 
   async execute(input: EvaluateOpenPaperTradesInput): Promise<EvaluateOpenPaperTradesResult> {
@@ -392,12 +412,47 @@ export class EvaluateOpenPaperTrades {
       });
     }
 
+    const denseQuote = await this.densePremiums?.latestForContract({
+      underlyingSymbol: trade.underlyingSymbol!,
+      expiryDate: expiry,
+      strikePrice: trade.optionStrike!,
+      optionType: trade.optionType!,
+    }, 2 * 60_000, asOf) ?? null;
+    const suppliedLiveSpot = resolveLiveSpot(trade, livePrices);
+    const denseSpot = denseQuote?.underlyingValue != null
+      && Number.isFinite(denseQuote.underlyingValue) && denseQuote.underlyingValue > 0
+      ? denseQuote.underlyingValue
+      : undefined;
+    const liveSpot = suppliedLiveSpot ?? denseSpot;
+
+    // A long option exits by selling into the bid. The dense series is the only sub-minute
+    // executable mark in the system, so it outranks a theoretical premium whenever fresh.
+    if (denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0) {
+      const decision = decideOptionBuyerLiveExit(trade, denseQuote.bid, liveSpot);
+      if (decision) {
+        return closeOption({
+          exitPrice: denseQuote.bid,
+          exitReason: decision.reason,
+          closedAt: asOf,
+          details: {
+            source: "OPTION_PREMIUM_TICK_BID",
+            quoteObservedAt: denseQuote.observedAt.toISOString(),
+            bid: denseQuote.bid,
+            ask: denseQuote.ask,
+            lastPrice: denseQuote.lastPrice,
+            spot: liveSpot,
+            fillRule: decision.reason === "TARGET" ? "INTRABAR_TARGET" : (decision.reason === "TRAP_DETECTED" ? "TRAP_DETECTED" : "INTRABAR_STOP"),
+            eventType: decision.eventType,
+          },
+        });
+      }
+    }
+
     const volatility = await this.resolveVolatility(trade, asOf);
     if (volatility === null) {
       return null;
     }
 
-    const liveSpot = resolveLiveSpot(trade, livePrices);
     if (liveSpot !== undefined) {
       const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
       const decision = decideOptionBuyerLiveExit(trade, mark.premium, liveSpot);

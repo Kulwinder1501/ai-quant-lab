@@ -48,7 +48,7 @@ function parseOptions(argv: readonly string[]): Options {
   if (symbols.length === 0) {
     throw new Error("--symbols must name at least one instrument.");
   }
-  return { symbols, timeframe: (values.get("timeframe") ?? "15m").trim().toLowerCase() };
+  return { symbols, timeframe: (values.get("timeframe") ?? "5m").trim().toLowerCase() };
 }
 
 async function main(): Promise<void> {

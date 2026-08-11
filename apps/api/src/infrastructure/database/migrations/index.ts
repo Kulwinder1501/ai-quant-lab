@@ -51,6 +51,12 @@ import { addBaselineAccuracyMigration } from "./050-add-baseline-accuracy.js";
 import { reapplyBankniftyLotSizeMigration } from "./053-reapply-banknifty-lot-size.js";
 import { aiBrainThoughtsMigration } from "./052-ai-brain-thoughts.js";
 import { addVolatilityIndicesMigration } from "./051-add-volatility-indices.js";
+import { optionPremiumTicksMigration } from "./054-option-premium-ticks.js";
+import { driverTapeAdjustmentsMigration } from "./055-driver-tape-adjustments.js";
+import { scheduledEventsAndHolidaysMigration } from "./056-scheduled-events-and-holidays.js";
+import { calendarVerificationMigration } from "./057-calendar-verification.js";
+import { driverTapeOutcomeLinksMigration } from "./058-driver-tape-outcome-links.js";
+import { volatilityStraddleRunsMigration } from "./059-volatility-straddle-runs.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -106,4 +112,10 @@ export const migrations = [
   addVolatilityIndicesMigration,
   aiBrainThoughtsMigration,
   reapplyBankniftyLotSizeMigration,
+  optionPremiumTicksMigration,
+  driverTapeAdjustmentsMigration,
+  scheduledEventsAndHolidaysMigration,
+  calendarVerificationMigration,
+  driverTapeOutcomeLinksMigration,
+  volatilityStraddleRunsMigration,
 ];

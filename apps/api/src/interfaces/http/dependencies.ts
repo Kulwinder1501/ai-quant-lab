@@ -13,6 +13,7 @@ import { PostgresModelPredictionQueryRepository } from "../../infrastructure/dat
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresOffshoreDerivativeRepository } from "../../infrastructure/database/repositories/postgres-offshore-derivative-repository.js";
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeHistoryQueryRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-history-query-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
@@ -58,14 +59,16 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const strategyVersionRepository = new PostgresStrategyVersionRepository(pool);
   const strategyContextRepository = new PostgresStrategyMarketContextRepository(pool);
   const newsRepository = new PostgresNewsRepository(pool);
+  const optionPremiumTickRepository = new PostgresOptionPremiumTickRepository(pool);
 
   const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(
     paperTradeRepository,
     candleRepository,
     new PostgresIndiaVixImpliedVolatilitySource(pool),
+    optionPremiumTickRepository,
   );
 
-  const checkMacroEvents = new CheckMacroEventsService(newsRepository);
+  const checkMacroEvents = new CheckMacroEventsService(newsRepository, pool);
 
   const aiAutonomousAgent = new AiAutonomousAgent(
     pool,
@@ -105,6 +108,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     listModelVersions: new ListModelVersions(modelPerformanceRepository),
     dashboardRepository,
     paperTradeRepository,
+    optionPremiumTickRepository,
     instrumentRepository,
     createPaperAccount: new CreatePaperAccount(paperAccountRepository),
     getPaperAccountSummary: new GetPaperAccountSummary(paperTradeRepository),
