@@ -60,52 +60,54 @@ export function registerFyersAuthRoutes(
   });
 
   /**
-   * Fyers redirects here with `auth_code` + `state`. Exchange, store, bounce to Settings.
-   * Must match FYERS_REDIRECT_URI exactly in the Fyers app console.
+   * Fyers redirects here when FYERS_REDIRECT_URI points at the API.
+   * Must match the Fyers app console exactly.
    */
   app.get("/api/v1/fyers/auth/callback", async (request, response) => {
-    const environment = loadEnvironment();
     const origins = httpConfiguration.CORS_ORIGINS;
     const defaultReturn = `${origins[0]}${SETTINGS_PATH}`;
-
-    if (!hasFyersAuthorizationCredential(environment)) {
-      redirectSettings(response, defaultReturn, "error", "Fyers authorize is not configured.");
-      return;
-    }
-
     const rawState = typeof request.query.state === "string" ? request.query.state : "";
-    const { state, returnTo } = decodeStateWithReturnTo(rawState, origins, defaultReturn);
-    if (!verifyFyersOAuthState(environment.FYERS_APP_SECRET!, state)) {
-      redirectSettings(response, returnTo, "error", "OAuth state is invalid or expired. Try Connect again.");
-      return;
-    }
-
-    const authCode = firstQueryString(request, ["auth_code", "code"]);
+    const { returnTo } = decodeStateWithReturnTo(rawState, origins, defaultReturn);
+    const authCode = typeof request.query.auth_code === "string" ? request.query.auth_code.trim() : "";
     const providerError = firstQueryString(request, ["error", "message"]);
-    if (!authCode) {
-      redirectSettings(
-        response,
-        returnTo,
-        "error",
-        providerError ? redactTokens(providerError) : "Fyers did not return an auth_code.",
-      );
+
+    const result = await completeFyersAuthExchange({
+      database: database as DatabasePool,
+      authCode,
+      rawState,
+      origins,
+      providerError,
+    });
+
+    if (result.ok) {
+      redirectSettings(response, result.returnTo, "connected");
       return;
     }
+    redirectSettings(response, result.returnTo || defaultReturn, "error", result.error);
+  });
 
-    try {
-      const service = new FyersTokenService({
-        pool: database as DatabasePool,
-        appId: environment.FYERS_APP_ID!,
-        appSecret: environment.FYERS_APP_SECRET!,
-        pin: environment.FYERS_PIN ?? "",
-      });
-      const tokens = await service.exchangeAuthCode(authCode);
-      await service.storeTokens(tokens);
-      redirectSettings(response, returnTo, "connected");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Fyers auth-code exchange failed.";
-      redirectSettings(response, returnTo, "error", redactTokens(message));
+  /**
+   * SPA path: when FYERS_REDIRECT_URI is the web origin (e.g. http://localhost:3001),
+   * the browser lands with ?auth_code=… and the web app POSTs here to finish the exchange.
+   */
+  app.post("/api/v1/fyers/auth/exchange", async (request, response) => {
+    const body = (request.body ?? {}) as { auth_code?: unknown; state?: unknown };
+    const authCode = typeof body.auth_code === "string" ? body.auth_code.trim() : "";
+    const rawState = typeof body.state === "string" ? body.state : "";
+    const origins = httpConfiguration.CORS_ORIGINS;
+
+    const result = await completeFyersAuthExchange({
+      database: database as DatabasePool,
+      authCode,
+      rawState,
+      origins,
+    });
+
+    if (!result.ok) {
+      response.status(result.status).json({ error: result.error, returnTo: result.returnTo });
+      return;
     }
+    response.status(200).json({ status: "connected", returnTo: result.returnTo });
   });
 
   /** Clear stored Fyers tokens (lab "logged out"). */
@@ -139,6 +141,75 @@ function firstQueryString(request: Request, keys: string[]): string | null {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
+}
+
+async function completeFyersAuthExchange(input: {
+  database: DatabasePool;
+  authCode: string;
+  rawState: string;
+  origins: string[];
+  providerError?: string | null;
+}): Promise<
+  | { ok: true; returnTo: string }
+  | { ok: false; status: number; error: string; returnTo: string }
+> {
+  const environment = loadEnvironment();
+  const defaultReturn = `${input.origins[0]}${SETTINGS_PATH}`;
+  const { state, returnTo } = decodeStateWithReturnTo(input.rawState, input.origins, defaultReturn);
+
+  if (!hasFyersAuthorizationCredential(environment)) {
+    return {
+      ok: false,
+      status: 503,
+      error: "Fyers authorize is not configured.",
+      returnTo,
+    };
+  }
+
+  if (!verifyFyersOAuthState(environment.FYERS_APP_SECRET!, state)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "OAuth state is invalid or expired. Try Connect again.",
+      returnTo,
+    };
+  }
+
+  if (!input.authCode) {
+    return {
+      ok: false,
+      status: 400,
+      error: input.providerError
+        ? redactTokens(input.providerError)
+        : "Fyers did not return an auth_code.",
+      returnTo,
+    };
+  }
+
+  // Fyers also sends `code=200` as a status field — never treat that as the auth code.
+  if (/^\d{3}$/.test(input.authCode)) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Received a status code instead of auth_code. Try Connect again.",
+      returnTo,
+    };
+  }
+
+  try {
+    const service = new FyersTokenService({
+      pool: input.database,
+      appId: environment.FYERS_APP_ID!,
+      appSecret: environment.FYERS_APP_SECRET!,
+      pin: environment.FYERS_PIN ?? "",
+    });
+    const tokens = await service.exchangeAuthCode(input.authCode);
+    await service.storeTokens(tokens);
+    return { ok: true, returnTo };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Fyers auth-code exchange failed.";
+    return { ok: false, status: 502, error: redactTokens(message), returnTo };
+  }
 }
 
 function resolveReturnTo(candidate: string | undefined, origins: string[]): string {

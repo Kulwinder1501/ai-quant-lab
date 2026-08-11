@@ -12,6 +12,7 @@ import { TopBar } from "../../components/layout/top-bar";
 import { CommandPalette } from "../../components/ui/command-palette";
 import { KeyboardShortcutsDialog } from "../../components/ui/keyboard-shortcuts-dialog";
 import { NotificationBell } from "../../components/layout/notification-bell";
+import { FyersAuthCallbackCatcher } from "../../features/settings/components/fyers-auth-callback-catcher";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -19,6 +20,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <ToastProvider>
+      <FyersAuthCallbackCatcher />
       <div className="relative isolate min-h-screen bg-slate-950 flex flex-col lg:flex-row">
         <ScrollProgress />
         <AuroraBackdrop />
