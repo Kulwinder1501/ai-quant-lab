@@ -146,6 +146,59 @@ describe("CollectLiveMarketData", () => {
     expect([...candles.saved.values()][0]).toMatchObject({ isComplete: false });
   });
 
+  it("tracks each timeframe independently when one process collects several", async () => {
+    const quote = (observedAt: string, price: string, volume: string): LiveMarketQuote => ({
+      providerInstrumentId: "NSE:RELIANCE",
+      lastPrice: price,
+      cumulativeVolume: volume,
+      observedAt: new Date(observedAt),
+      exchangeTimestamp: null,
+    });
+    // The CLI invokes the same collector once per timeframe on every poll. Each pair below is
+    // the 1m and 5m view of one provider snapshot.
+    const quotes = [
+      quote("2026-07-24T03:45:10Z", "100", "1000"),
+      quote("2026-07-24T03:45:10Z", "100", "1000"),
+      quote("2026-07-24T03:46:10Z", "101", "1010"),
+      quote("2026-07-24T03:46:10Z", "101", "1010"),
+      quote("2026-07-24T03:50:10Z", "102", "1050"),
+      quote("2026-07-24T03:50:10Z", "102", "1050"),
+    ];
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => {
+        const next = quotes.shift();
+        return next ? [next] : [];
+      },
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider,
+      candles.repository,
+      new NseMarketSession(),
+      new Date("2026-07-24T03:45:00Z"),
+    );
+    const executePair = async (now: string) => {
+      for (const timeframe of ["1m", "5m"] as const) {
+        await collector.execute({
+          subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+          timeframe,
+          ingestionId: "live-ingestion",
+          now: new Date(now),
+        });
+      }
+    };
+
+    await executePair("2026-07-24T03:45:15Z");
+    await executePair("2026-07-24T03:46:15Z");
+    await executePair("2026-07-24T03:50:15Z");
+
+    const values = [...candles.saved.values()];
+    expect(values.some((candle) => candle.timeframe === "1m" && candle.isComplete)).toBe(true);
+    expect(values.some((candle) => candle.timeframe === "5m" && candle.isComplete)).toBe(true);
+    expect(values.some((candle) => candle.timeframe === "5m" && !candle.isComplete)).toBe(true);
+  });
+
   it("leaves an earlier run's unfinished bar incomplete rather than sealing a guess", async () => {
     // Sealing it would make a partial permanent, and `skipExisting` skips only completed
     // candles -- so left incomplete, the historical fetch corrects it.

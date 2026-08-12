@@ -56,7 +56,11 @@ export function registerMarketDataRoutes(
         volume: row.volume,
       }));
 
-      const indicators: Record<string, any[]> = { SMA: [], BB: [], RSI: [] };
+      const smcCodes = ["FVG", "BOS", "CHOCH", "LIQUIDITY_SWEEP", "ORDER_BLOCK", "EQUILIBRIUM_ZONE"] as const;
+      const indicators: Record<string, any[]> = {
+        SMA: [], BB: [], RSI: [],
+        ...Object.fromEntries(smcCodes.map((code) => [code, []])),
+      };
       const patterns: any[] = [];
       rows.forEach((row) => {
         const timestamp = row.openTime instanceof Date ? row.openTime.toISOString() : String(row.openTime);
@@ -77,6 +81,12 @@ export function registerMarketDataRoutes(
         if (rowIndicators["RSI"]) {
           const value = Number((rowIndicators["RSI"] as Record<string, unknown>).value);
           if (Number.isFinite(value)) indicators["RSI"]?.push({ timestamp, value });
+        }
+        for (const code of smcCodes) {
+          const values = rowIndicators[code];
+          if (values && typeof values === "object" && !Array.isArray(values)) {
+            indicators[code]?.push({ timestamp, ...(values as Record<string, unknown>) });
+          }
         }
         if (row.patterns && Array.isArray(row.patterns)) {
           row.patterns.forEach((pattern: any, patternIndex: number) => {

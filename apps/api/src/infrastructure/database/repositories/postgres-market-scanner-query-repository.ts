@@ -526,6 +526,12 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
             ON indicator_definitions.id = indicator_snapshots.indicator_definition_id
           WHERE indicator_snapshots.candle_id = c.id
             AND indicator_snapshots.calculated_at <= CURRENT_TIMESTAMP
+            AND (
+              indicator_definitions.indicator_code NOT IN (
+                'FVG', 'BOS', 'CHOCH', 'LIQUIDITY_SWEEP', 'ORDER_BLOCK', 'EQUILIBRIUM_ZONE'
+              )
+              OR indicator_definitions.algorithm_version = 'smc-v2'
+            )
         ), '[]'::jsonb) AS indicators,
         COALESCE((
           SELECT jsonb_agg(

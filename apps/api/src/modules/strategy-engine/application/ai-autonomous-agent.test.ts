@@ -46,13 +46,14 @@ function fakePool(rows: {
   } as unknown as FakePool;
 }
 
+const TEST_CONTEXT_CLOSE = new Date(Date.now() - 5 * 60_000);
 const BULLISH_CONTEXT = {
   candle: {
     id: "candle-1",
     instrumentId: "inst-1",
     timeframe: "15m",
-    openTime: new Date("2026-08-10T04:00:00.000Z"),
-    closeTime: new Date("2026-08-10T04:15:00.000Z"),
+    openTime: new Date(TEST_CONTEXT_CLOSE.getTime() - 15 * 60_000),
+    closeTime: TEST_CONTEXT_CLOSE,
     open: 24_000, high: 24_100, low: 23_950, close: 24_050, volume: 0, tickSize: 0.05,
   },
   indicators: [
@@ -185,6 +186,35 @@ describe("AiAutonomousAgent.tick", () => {
     });
     // And it must not reach the repository directly, which is what skipped every gate.
     expect(openFromTradeIdea).not.toHaveBeenCalled();
+  });
+
+  it("evaluates stops but refuses new proposals when the strategy context is stale", async () => {
+    const staleClose = new Date(Date.now() - 2 * 60 * 60_000);
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent, saveProposal, placeOption } = buildAgent({
+      database,
+      context: {
+        ...BULLISH_CONTEXT,
+        candle: {
+          ...BULLISH_CONTEXT.candle,
+          openTime: new Date(staleClose.getTime() - 15 * 60_000),
+          closeTime: staleClose,
+        },
+      },
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(saveProposal).not.toHaveBeenCalled();
+    expect(placeOption).not.toHaveBeenCalled();
+    const refusal = agent.getThoughts(10).find(
+      (thought) => thought.details.reason === "STALE_MARKET_CONTEXT",
+    );
+    expect(refusal).toBeDefined();
+    expect(refusal!.message).toMatch(/skipped new proposals/i);
   });
 
   it("records the premium it filled at, not the underlying's level", async () => {

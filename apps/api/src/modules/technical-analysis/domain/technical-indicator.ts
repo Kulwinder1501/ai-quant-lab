@@ -18,6 +18,9 @@ export const indicatorCodes = [
 export type IndicatorCode = (typeof indicatorCodes)[number];
 export type IndicatorValues = Record<string, number | string | boolean | null>;
 
+/** Corrected, point-in-time SMC series. Legacy ta-v1 SMC snapshots are not trade evidence. */
+export const SMC_ALGORITHM_VERSION = "smc-v2";
+
 export interface IndicatorDefinitionSpec {
   code: IndicatorCode;
   algorithmVersion: string;
@@ -106,37 +109,37 @@ export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
   },
   {
     code: "FVG",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: {},
     outputSchema: { top: "number", bottom: "number", type: "BULLISH|BEARISH", active: "boolean" },
   },
   {
     code: "BOS",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: { pivotLength: 5 },
     outputSchema: { type: "BULLISH_BOS|BEARISH_BOS", level: "number" },
   },
   {
     code: "CHOCH",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: { pivotLength: 5 },
     outputSchema: { type: "BULLISH_CHOCH|BEARISH_CHOCH", level: "number" },
   },
   {
     code: "LIQUIDITY_SWEEP",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: { pivotLength: 5 },
     outputSchema: { type: "BULLISH_SWEEP|BEARISH_SWEEP", level: "number" },
   },
   {
     code: "ORDER_BLOCK",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: { displacementThreshold: 1.5 },
-    outputSchema: { type: "BULLISH_OB|BEARISH_OB", top: "number", bottom: "number" },
+    outputSchema: { type: "BULLISH_OB|BEARISH_OB", top: "number", bottom: "number", blockBarOffset: "number" },
   },
   {
     code: "EQUILIBRIUM_ZONE",
-    algorithmVersion: "ta-v1",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
     parameters: { pivotLength: 5 },
     outputSchema: { top: "number", bottom: "number", equilibrium: "number" },
   },

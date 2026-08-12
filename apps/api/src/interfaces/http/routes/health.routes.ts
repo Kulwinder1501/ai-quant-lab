@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { checkDatabaseReadiness, type DatabasePool } from "../../../infrastructure/database/database.js";
+import { countUnrecoveredScheduledJobFailures } from "../../../infrastructure/database/repositories/postgres-scheduled-job-health-repository.js";
 import { FyersTokenService } from "../../../infrastructure/market-data/fyers-token-service.js";
 import { assessFyersAuthHealth } from "../../../modules/market-data/domain/fyers-auth-health.js";
 import type { HttpDependencies } from "../dependencies.js";
@@ -49,12 +50,10 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
       });
 
       const health = await tokenService.checkCredentialHealth();
-      const failures = await database.query<{ count: string }>(
-        `SELECT count(*)::text AS count FROM scheduled_job_runs
-         WHERE job_type = ANY($1) AND status = 'FAILED' AND claimed_at >= NOW() - INTERVAL '1 day'`,
-        [FYERS_DEPENDENT_JOB_TYPES],
+      const recentJobFailures = await countUnrecoveredScheduledJobFailures(
+        database,
+        FYERS_DEPENDENT_JOB_TYPES,
       );
-      const recentJobFailures = Number(failures.rows[0]?.count ?? 0);
       const now = new Date();
       const sessionClose = new Date(Date.UTC(
         now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 10, 0, 0, 0,

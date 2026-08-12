@@ -16,6 +16,7 @@ import { PostgresOptionChainRepository } from "../../infrastructure/database/rep
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeHistoryQueryRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-history-query-repository.js";
+import { PostgresPaperTradeNotificationRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-notification-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
@@ -49,6 +50,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const predictionRepository = new PostgresModelPredictionQueryRepository(pool);
   const marketScannerRepository = new PostgresMarketScannerQueryRepository(pool);
   const tradeHistoryRepository = new PostgresPaperTradeHistoryQueryRepository(pool);
+  const paperTradeNotificationRepository = new PostgresPaperTradeNotificationRepository(pool);
   const modelPerformanceRepository = new PostgresModelPerformanceQueryRepository(pool);
   const dashboardRepository = new PostgresDashboardQueryRepository(pool);
   const paperAccountRepository = new PostgresPaperAccountRepository(pool);
@@ -108,6 +110,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     listModelVersions: new ListModelVersions(modelPerformanceRepository),
     dashboardRepository,
     paperTradeRepository,
+    paperTradeNotificationRepository,
     optionPremiumTickRepository,
     instrumentRepository,
     createPaperAccount: new CreatePaperAccount(paperAccountRepository),

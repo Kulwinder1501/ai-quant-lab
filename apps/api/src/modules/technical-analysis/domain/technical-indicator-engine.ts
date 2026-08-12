@@ -273,35 +273,60 @@ function fvg(candles: readonly IndicatorCandle[]): IndicatorPoint[] {
   return valuesToPoints(candles, result);
 }
 
+interface ConfirmedSwing {
+  high: number | null;
+  low: number | null;
+}
+
+/**
+ * Confirms the pivot whose right-hand window closes on `knownAtIndex`.
+ *
+ * Keeping the candidate separate from the observation bar is the point-in-time boundary:
+ * a pivot at i does not exist as evidence until i + pivotLength has closed. Callers publish
+ * any BOS/CHOCH/sweep/zone on the current observation bar, never back on the pivot bar.
+ */
+function swingConfirmedAt(
+  candles: readonly IndicatorCandle[],
+  knownAtIndex: number,
+  pivotLength: number,
+): ConfirmedSwing {
+  const candidateIndex = knownAtIndex - pivotLength;
+  if (candidateIndex < pivotLength) return { high: null, low: null };
+
+  const candidate = candles[candidateIndex];
+  let isSwingHigh = true;
+  let isSwingLow = true;
+  for (let offset = 1; offset <= pivotLength; offset += 1) {
+    if (
+      candles[candidateIndex - offset].high >= candidate.high
+      || candles[candidateIndex + offset].high >= candidate.high
+    ) {
+      isSwingHigh = false;
+    }
+    if (
+      candles[candidateIndex - offset].low <= candidate.low
+      || candles[candidateIndex + offset].low <= candidate.low
+    ) {
+      isSwingLow = false;
+    }
+  }
+  return {
+    high: isSwingHigh ? candidate.high : null,
+    low: isSwingLow ? candidate.low : null,
+  };
+}
+
 function bos(candles: readonly IndicatorCandle[], pivotLength: number): IndicatorPoint[] {
   const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
   let lastSwingHigh: number | null = null;
   let lastSwingLow: number | null = null;
 
-  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
-    const currentHigh = candles[index].high;
-    const currentLow = candles[index].low;
-    let isSwingHigh = true;
-    let isSwingLow = true;
+  for (let index = 0; index < candles.length; index += 1) {
+    const confirmed = swingConfirmedAt(candles, index, pivotLength);
+    if (confirmed.high !== null) lastSwingHigh = confirmed.high;
+    if (confirmed.low !== null) lastSwingLow = confirmed.low;
 
-    for (let j = 1; j <= pivotLength; j++) {
-      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) {
-        isSwingHigh = false;
-      }
-      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) {
-        isSwingLow = false;
-      }
-    }
-
-    if (isSwingHigh) {
-      lastSwingHigh = currentHigh;
-    }
-    if (isSwingLow) {
-      lastSwingLow = currentLow;
-    }
-
-    // Now check for Break of Structure
-    // Note: We check if the current close breaks the LAST known swing high/low that was formed BEFORE this candle.
+    // A break is published on the bar that closes through an already-confirmed level.
     const close = candles[index].close;
     if (lastSwingHigh !== null && close > lastSwingHigh) {
       result[index] = { type: "BULLISH_BOS", level: rounded(lastSwingHigh) };
@@ -320,19 +345,10 @@ function choch(candles: readonly IndicatorCandle[], pivotLength: number): Indica
   let lastSwingLow: number | null = null;
   let currentTrend: "BULLISH" | "BEARISH" | null = null;
 
-  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
-    const currentHigh = candles[index].high;
-    const currentLow = candles[index].low;
-    let isSwingHigh = true;
-    let isSwingLow = true;
-
-    for (let j = 1; j <= pivotLength; j++) {
-      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
-      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
-    }
-
-    if (isSwingHigh) lastSwingHigh = currentHigh;
-    if (isSwingLow) lastSwingLow = currentLow;
+  for (let index = 0; index < candles.length; index += 1) {
+    const confirmed = swingConfirmedAt(candles, index, pivotLength);
+    if (confirmed.high !== null) lastSwingHigh = confirmed.high;
+    if (confirmed.low !== null) lastSwingLow = confirmed.low;
 
     const close = candles[index].close;
     
@@ -359,33 +375,28 @@ function liquiditySweep(candles: readonly IndicatorCandle[], pivotLength: number
   let lastSwingHigh: number | null = null;
   let lastSwingLow: number | null = null;
 
-  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
-    const currentHigh = candles[index].high;
-    const currentLow = candles[index].low;
-    let isSwingHigh = true;
-    let isSwingLow = true;
-
-    for (let j = 1; j <= pivotLength; j++) {
-      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
-      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
-    }
-
-    if (isSwingHigh) lastSwingHigh = currentHigh;
-    if (isSwingLow) lastSwingLow = currentLow;
+  for (let index = 0; index < candles.length; index += 1) {
+    const confirmed = swingConfirmedAt(candles, index, pivotLength);
+    if (confirmed.high !== null) lastSwingHigh = confirmed.high;
+    if (confirmed.low !== null) lastSwingLow = confirmed.low;
 
     const high = candles[index].high;
     const low = candles[index].low;
     const close = candles[index].close;
 
-    // Sweep: Pierces level but closes back inside
-    if (lastSwingHigh !== null && high > lastSwingHigh && close <= lastSwingHigh) {
-      result[index] = { type: "BEARISH_SWEEP", level: rounded(lastSwingHigh) };
-      lastSwingHigh = null; // consume
+    // Sweep: pierces a confirmed level but closes back inside. An outside bar which sweeps
+    // both sides is deliberately neutral; choosing whichever branch ran last would fabricate
+    // direction from an ambiguous candle.
+    const sweptHigh = lastSwingHigh !== null && high > lastSwingHigh && close <= lastSwingHigh;
+    const sweptLow = lastSwingLow !== null && low < lastSwingLow && close >= lastSwingLow;
+    if (sweptHigh && !sweptLow) {
+      result[index] = { type: "BEARISH_SWEEP", level: rounded(lastSwingHigh!) };
     }
-    if (lastSwingLow !== null && low < lastSwingLow && close >= lastSwingLow) {
-      result[index] = { type: "BULLISH_SWEEP", level: rounded(lastSwingLow) };
-      lastSwingLow = null; // consume
+    if (sweptLow && !sweptHigh) {
+      result[index] = { type: "BULLISH_SWEEP", level: rounded(lastSwingLow!) };
     }
+    if (sweptHigh) lastSwingHigh = null;
+    if (sweptLow) lastSwingLow = null;
   }
   return valuesToPoints(candles, result);
 }
@@ -421,16 +432,18 @@ function orderBlock(candles: readonly IndicatorCandle[], displacementThreshold: 
       const wasBullish = prevCandle.close > prevCandle.open;
 
       if (isBullishDisplacement && wasBearish) {
-        result[index - 1] = {
+        result[index] = {
           type: "BULLISH_OB",
           top: rounded(prevCandle.high),
           bottom: rounded(prevCandle.low),
+          blockBarOffset: 1,
         };
       } else if (!isBullishDisplacement && wasBullish) {
-        result[index - 1] = {
+        result[index] = {
           type: "BEARISH_OB",
           top: rounded(prevCandle.high),
           bottom: rounded(prevCandle.low),
+          blockBarOffset: 1,
         };
       }
     }
@@ -455,33 +468,10 @@ function equilibriumZone(candles: readonly IndicatorCandle[], pivotLength: numbe
   const result: Array<IndicatorValues | null> = Array(candles.length).fill(null);
   let lastSwingHigh: number | null = null;
   let lastSwingLow: number | null = null;
-  let pendingHigh: { value: number; knownAt: number } | null = null;
-  let pendingLow: { value: number; knownAt: number } | null = null;
-
-  for (let index = pivotLength; index < candles.length - pivotLength; index += 1) {
-    // Promote first: a swing detected earlier becomes usable once this bar is at or past
-    // the end of its confirmation window.
-    if (pendingHigh !== null && index >= pendingHigh.knownAt) {
-      lastSwingHigh = pendingHigh.value;
-      pendingHigh = null;
-    }
-    if (pendingLow !== null && index >= pendingLow.knownAt) {
-      lastSwingLow = pendingLow.value;
-      pendingLow = null;
-    }
-
-    const currentHigh = candles[index].high;
-    const currentLow = candles[index].low;
-    let isSwingHigh = true;
-    let isSwingLow = true;
-
-    for (let j = 1; j <= pivotLength; j++) {
-      if (candles[index - j].high >= currentHigh || candles[index + j].high >= currentHigh) isSwingHigh = false;
-      if (candles[index - j].low <= currentLow || candles[index + j].low <= currentLow) isSwingLow = false;
-    }
-
-    if (isSwingHigh) pendingHigh = { value: currentHigh, knownAt: index + pivotLength };
-    if (isSwingLow) pendingLow = { value: currentLow, knownAt: index + pivotLength };
+  for (let index = 0; index < candles.length; index += 1) {
+    const confirmed = swingConfirmedAt(candles, index, pivotLength);
+    if (confirmed.high !== null) lastSwingHigh = confirmed.high;
+    if (confirmed.low !== null) lastSwingLow = confirmed.low;
 
     if (lastSwingHigh !== null && lastSwingLow !== null) {
       result[index] = {

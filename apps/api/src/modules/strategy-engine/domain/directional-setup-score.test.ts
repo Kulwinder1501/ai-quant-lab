@@ -84,6 +84,26 @@ describe("scoreDirectionalSetup", () => {
     expect(bearish.shortConfidence).toBe(bullish.longConfidence);
   });
 
+  it("applies SMC as the same bounded directional term to both theses", () => {
+    const bullish = scoreDirectionalSetup(baseInput({
+      smcBias: {
+        long: { adjustment: 8, reasoning: "Bullish SMC." },
+        short: { adjustment: -8, reasoning: "Bullish SMC opposes short." },
+      },
+    }));
+    const bearish = scoreDirectionalSetup(baseInput({
+      smcBias: {
+        long: { adjustment: -8, reasoning: "Bearish SMC opposes long." },
+        short: { adjustment: 8, reasoning: "Bearish SMC." },
+      },
+    }));
+
+    expect(bullish.longConfidence).toBe(68);
+    expect(bullish.shortConfidence).toBe(52);
+    expect(bearish.longConfidence).toBe(52);
+    expect(bearish.shortConfidence).toBe(68);
+  });
+
   it("freezes a long on heavy negative news and a short on heavy positive news", () => {
     const crashing = scoreDirectionalSetup(baseInput({ newsSentiment: -0.8 }));
     expect(crashing.longConfidence).toBeLessThan(30);

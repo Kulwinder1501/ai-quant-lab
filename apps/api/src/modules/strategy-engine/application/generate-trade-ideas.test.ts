@@ -31,6 +31,7 @@ function qualifyingContext(): StrategyMarketContext {
       { code: "MACD", algorithmVersion: "ta-v1", parameters: { fastPeriod: 12, slowPeriod: 26, signalPeriod: 9 }, values: { macd: 1, signal: 0.5, histogram: 0.5 } },
       { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 2 } },
       { code: "SUPERTREND", algorithmVersion: "ta-v1", parameters: { atrPeriod: 10, multiplier: 3 }, values: { trend: "UP" } },
+      { code: "BOS", algorithmVersion: "smc-v2", parameters: { pivotLength: 5 }, values: { type: "BULLISH_BOS", level: 108 } },
     ],
     patterns: [{
       code: "BULLISH_ENGULFING",
@@ -218,7 +219,12 @@ describe("GenerateTradeIdeas", () => {
       expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "ATR:ta-v1" }),
       expect.objectContaining({ sourceType: "PATTERN", sourceReference: "BULLISH_ENGULFING:candlestick-v1" }),
       expect.objectContaining({ sourceType: "PRICE_ACTION", sourceReference: "BREAKOUT:price-action-v2" }),
+      expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "SMC:smc-v2", contribution: 0.05 }),
     ]));
+    expect(saved[0].evidence.smc).toMatchObject({
+      algorithmVersion: "smc-v2",
+      adjustment: 5,
+    });
   });
 
   it("scans a window of candles and surfaces SHORT proposals from bearish bars", async () => {

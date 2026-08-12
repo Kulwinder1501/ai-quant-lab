@@ -5,6 +5,7 @@ import type {
   TradeSide,
 } from "../domain/strategy.js";
 import { registeredStrategies, strategySupportsTimeframe } from "../domain/strategy-registry.js";
+import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -106,7 +107,8 @@ export class GenerateTradeIdeas {
         }
 
         const strategy = new StrategyClass();
-        let proposals = strategy.evaluate(context, strategyVersion.configuration);
+        let proposals = strategy.evaluate(context, strategyVersion.configuration)
+          .map((proposal) => applySmcConfluenceToProposal(context, proposal));
         if (input.allowedSides) {
           proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
         }
@@ -215,7 +217,8 @@ export class GenerateTradeIdeas {
         let shortIdeas = 0;
 
         for (const context of contexts) {
-          let proposals = strategy.evaluate(context, strategyVersion.configuration);
+          let proposals = strategy.evaluate(context, strategyVersion.configuration)
+            .map((proposal) => applySmcConfluenceToProposal(context, proposal));
           if (input.allowedSides) {
             proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
           }

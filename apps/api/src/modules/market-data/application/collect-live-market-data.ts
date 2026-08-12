@@ -29,6 +29,10 @@ interface ActiveCandle {
   lastCumulativeVolume: string | null;
 }
 
+function activeCandleKey(instrumentId: string, timeframe: HistoricalTimeframe): string {
+  return `${instrumentId}:${timeframe}`;
+}
+
 function metadataDecimal(metadata: Record<string, unknown>, key: string): string | null {
   const value = metadata[key];
   return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? value : null;
@@ -157,7 +161,10 @@ export class CollectLiveMarketData {
       return { applied: false, finalized: 0 };
     }
 
-    const key = subscription.instrument.id;
+    // One collector may aggregate several timeframes for the same instrument. Keying only by
+    // instrument let the first timeframe (1m in deployment) occupy the slot; 5m/15m/60m then
+    // mutated or rejected that 1m state instead of creating their own candles.
+    const key = activeCandleKey(subscription.instrument.id, timeframe);
     let active = this.activeCandles.get(key);
     if (!active) {
       const existing = await this.candleRepository.findByKey(subscription.instrument.id, timeframe, window.openTime);
@@ -271,7 +278,7 @@ export class CollectLiveMarketData {
         continue;
       }
       await this.candleRepository.upsert(toUpsertInput({ ...candle, isComplete: true }));
-      this.activeCandles.delete(candle.instrumentId);
+      this.activeCandles.delete(activeCandleKey(candle.instrumentId, timeframe));
       finalized += 1;
     }
     return finalized;

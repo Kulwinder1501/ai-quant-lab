@@ -105,6 +105,8 @@ export interface DirectionalSetupInput {
    * Optional: omitted or null reasoning → no adjustment (same as missing FII).
    */
   driverTapeBias?: { long: FlowBiasVerdict; short: FlowBiasVerdict };
+  /** Point-in-time smart-money-structure bias per thesis. Missing evidence is neutral. */
+  smcBias?: { long: FlowBiasVerdict; short: FlowBiasVerdict };
   /** Rolling news sentiment in [-1, 1], and 0 with no articles. */
   newsSentiment: number;
   newsLabel: string;
@@ -138,7 +140,7 @@ function scoreThesis(
   const long = side === "LONG";
   const {
     rsi, livePrice, bollingerUpper, bollingerLower, pattern,
-    flowBias, driverTapeBias, newsSentiment, newsLabel, hasHeadlineHeat, headlineEventNames,
+    flowBias, driverTapeBias, smcBias, newsSentiment, newsLabel, hasHeadlineHeat, headlineEventNames,
   } = input;
 
   let confidence = BASE_CONFIDENCE;
@@ -214,6 +216,12 @@ function scoreThesis(
   // unchecked — same honesty rule as institutional flow.
   const tape = long ? driverTapeBias?.long : driverTapeBias?.short;
   if (tape && tape.reasoning !== null) add(tape.adjustment, tape.reasoning);
+
+  // --- Smart-money structure ------------------------------------------------------------
+  // Corrected SMC observations are events known on this candle, not zones silently carried
+  // forward. The shared confluence module caps the total so stacked labels cannot dominate.
+  const smc = long ? smcBias?.long : smcBias?.short;
+  if (smc && smc.reasoning !== null) add(smc.adjustment, smc.reasoning);
 
   // --- News sentiment -------------------------------------------------------------------
   // Rule 1 is directional: heavy negative news freezes new *longs*, and heavy positive news is

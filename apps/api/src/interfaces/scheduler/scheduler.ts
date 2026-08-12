@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool, type DatabasePool } from "../../infrastructure/database/database.js";
+import { countUnrecoveredScheduledJobFailures } from "../../infrastructure/database/repositories/postgres-scheduled-job-health-repository.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
@@ -70,12 +71,10 @@ async function checkFyersAuthHealth(tokenService: FyersTokenService, database: D
   }
 
   const health = await tokenService.checkCredentialHealth();
-  const failures = await database.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM scheduled_job_runs
-     WHERE job_type = ANY($1) AND status = 'FAILED' AND claimed_at >= NOW() - INTERVAL '1 day'`,
-    [FYERS_DEPENDENT_JOB_TYPES],
+  const recentJobFailures = await countUnrecoveredScheduledJobFailures(
+    database,
+    FYERS_DEPENDENT_JOB_TYPES,
   );
-  const recentJobFailures = Number(failures.rows[0]?.count ?? 0);
 
   // The token must last until the close, because the intervals it would miss cannot be
   // backfilled. 15:30 IST is 10:00 UTC.

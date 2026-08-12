@@ -57,6 +57,7 @@ import { scheduledEventsAndHolidaysMigration } from "./056-scheduled-events-and-
 import { calendarVerificationMigration } from "./057-calendar-verification.js";
 import { driverTapeOutcomeLinksMigration } from "./058-driver-tape-outcome-links.js";
 import { volatilityStraddleRunsMigration } from "./059-volatility-straddle-runs.js";
+import { paperTradeNotificationStreamMigration } from "./060-paper-trade-notification-stream.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -118,4 +119,5 @@ export const migrations = [
   calendarVerificationMigration,
   driverTapeOutcomeLinksMigration,
   volatilityStraddleRunsMigration,
+  paperTradeNotificationStreamMigration,
 ];

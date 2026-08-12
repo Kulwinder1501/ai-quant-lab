@@ -14,7 +14,11 @@ import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/ge
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { OpenPaperTrade } from "../../modules/paper-trading/application/open-paper-trade.js";
 import { PrepareOptionEntry } from "../../modules/paper-trading/application/prepare-option-entry.js";
-import { assessDataFreshness, DEFAULT_MAX_BAR_AGE_MINUTES } from "../../modules/paper-trading/domain/bot-data-freshness.js";
+import {
+  assessDataFreshness,
+  barLengthMinutes,
+  DEFAULT_MAX_BAR_AGE_MINUTES,
+} from "../../modules/paper-trading/domain/bot-data-freshness.js";
 import {
   registeredStrategies,
   strategySupportsTimeframe,
@@ -23,14 +27,6 @@ import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-
 import { PostgresRiskStateRepository } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
-
-/** Minutes in one bar of a timeframe, so a series is not called stale for lagging by design. */
-function barLengthMinutes(timeframe: string): number {
-  const match = /^(\d+)([mhd])$/.exec(timeframe);
-  if (!match) return 0;
-  const size = Number(match[1]);
-  return match[2] === "m" ? size : match[2] === "h" ? size * 60 : size * 60 * 24;
-}
 
 /**
  * Refuses to start on a timeframe nothing can trade.

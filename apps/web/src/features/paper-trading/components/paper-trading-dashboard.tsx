@@ -14,6 +14,7 @@ import { TradeHistoryTable } from "./trade-history-table";
 import { CreateAccountModal } from "./create-account-modal";
 import { OpenTradeModal } from "./open-trade-modal";
 import { CloseTradeModal } from "./close-trade-modal";
+import { useAppStore } from "../../../stores/app-store";
 export interface TradeIdeaOption {
   id: string;
   instrumentSymbol: string;
@@ -27,8 +28,10 @@ export interface TradeIdeaOption {
 }
 
 export function PaperTradingDashboard() {
+  const activeAccountId = useAppStore((state) => state.activeAccountId);
+  const setActiveAccountId = useAppStore((state) => state.setActiveAccountId);
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>(activeAccountId ?? "");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -67,8 +70,14 @@ export function PaperTradingDashboard() {
 
   const applyAccounts = useCallback((list: PaperAccountSummary[]) => {
     setAccounts(list);
-    setSelectedAccountId((current) => (!current && list.length > 0 ? list[0].id : current));
-  }, []);
+    setSelectedAccountId((current) => {
+      if (activeAccountId && list.some((account) => account.id === activeAccountId)) {
+        return activeAccountId;
+      }
+      if (current && list.some((account) => account.id === current)) return current;
+      return list[0]?.id ?? "";
+    });
+  }, [activeAccountId]);
 
   const applyAccountsError = useCallback((err: unknown) => {
     if (isAbortError(err)) return;
@@ -103,9 +112,10 @@ export function PaperTradingDashboard() {
   // raise it from the event handler that triggers them.
   const selectAccount = useCallback((accId: string) => {
     setSelectedAccountId(accId);
+    setActiveAccountId(accId);
     setLoading(true);
     setError(null);
-  }, []);
+  }, [setActiveAccountId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -119,6 +129,26 @@ export function PaperTradingDashboard() {
     void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
     return () => controller.abort();
   }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
+
+  useEffect(() => {
+    const refreshOpenedAccount = (event: Event) => {
+      const notification = (event as CustomEvent<{ accountId?: string }>).detail;
+      void loadAccounts().then(applyAccounts, applyAccountsError);
+      if (notification?.accountId === selectedAccountId) {
+        void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+      }
+    };
+    window.addEventListener("automated-paper-trade-opened", refreshOpenedAccount);
+    return () => window.removeEventListener("automated-paper-trade-opened", refreshOpenedAccount);
+  }, [
+    selectedAccountId,
+    loadAccounts,
+    applyAccounts,
+    applyAccountsError,
+    loadSummary,
+    applySummary,
+    applySummaryError,
+  ]);
 
   const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();

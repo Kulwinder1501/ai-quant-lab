@@ -124,6 +124,7 @@ export function registerPaperTradingRoutes(
     | "listPaperTradeHistory"
     | "dashboardRepository"
     | "paperTradeRepository"
+    | "paperTradeNotificationRepository"
     | "optionPremiumTickRepository"
     | "createPaperAccount"
     | "getPaperAccountSummary"
@@ -133,6 +134,73 @@ export function registerPaperTradingRoutes(
     | "optionChainRepository"
   >,
 ): void {
+  /**
+   * Real-time automated trade-open notifications.
+   *
+   * The scheduler writes trades in a different process, so an in-memory event emitter in the
+   * API would miss every bot entry. This stream tails the committed paper_trade_events ledger
+   * instead. Delivery is read-only and outside the bot transaction: notification failure can
+   * never delay or roll back execution. A snapshot lets the browser establish a no-duplicate
+   * baseline and recover events missed during an SSE reconnect.
+   */
+  app.get("/api/v1/stream/paper-trade-notifications", async (request, response) => {
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+    response.write("retry: 3000\n\n");
+
+    const knownEventIds = new Set<string>();
+    let pollInFlight = false;
+    let closed = false;
+
+    const writeEvent = (event: string, data: unknown, id?: string): void => {
+      if (closed || response.writableEnded) return;
+      if (id) response.write(`id: ${id}\n`);
+      response.write(`event: ${event}\n`);
+      response.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const poll = async (initial: boolean): Promise<void> => {
+      if (closed || pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const recent = await dependencies.paperTradeNotificationRepository
+          .listRecentAutomatedOpens(50);
+        if (initial) {
+          for (const notification of recent) knownEventIds.add(notification.eventId);
+          writeEvent("snapshot", { data: recent });
+          return;
+        }
+
+        const unseen = recent
+          .filter((notification) => !knownEventIds.has(notification.eventId))
+          .reverse();
+        for (const notification of unseen) {
+          knownEventIds.add(notification.eventId);
+          writeEvent("trade-opened", notification, notification.eventId);
+        }
+      } catch {
+        // A transient read failure must not terminate EventSource's connection. The next poll
+        // re-reads the recent tail and therefore recovers the missed event without bot coupling.
+      } finally {
+        pollInFlight = false;
+      }
+    };
+
+    await poll(true);
+    const pollInterval = setInterval(() => { void poll(false); }, 2_000);
+    const heartbeatInterval = setInterval(() => {
+      if (!closed && !response.writableEnded) response.write(": keep-alive\n\n");
+    }, 15_000);
+
+    request.on("close", () => {
+      closed = true;
+      clearInterval(pollInterval);
+      clearInterval(heartbeatInterval);
+    });
+  });
+
   app.get("/api/v1/paper-trades", async (request, response, next) => {
     try {
       const result = await dependencies.listPaperTradeHistory.execute(parseTradeHistoryQuery(request));

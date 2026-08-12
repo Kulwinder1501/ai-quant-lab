@@ -23,6 +23,13 @@ import { driverTapeBias as scoreDriverTapeBias, type DriverTapeMetrics } from ".
 import type { CheckMacroEventsService } from "../../news-sentiment/application/check-macro-events.js";
 import { PostgresDriverTapeAdjustmentRepository } from "../../../infrastructure/database/repositories/postgres-driver-tape-adjustment-repository.js";
 import { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
+import {
+  assessDataFreshness,
+  barLengthMinutes,
+  DEFAULT_MAX_BAR_AGE_MINUTES,
+} from "../../paper-trading/domain/bot-data-freshness.js";
+import { measureSmcConfluence } from "../domain/smc-confluence.js";
+import { SMC_ALGORITHM_VERSION } from "../../technical-analysis/domain/technical-indicator.js";
 
 export interface AiBrainThought {
   id: string;
@@ -468,6 +475,34 @@ export class AiAutonomousAgent {
     const ctx = await this.marketContextRepo.findLatestCompleted({ instrumentId: instId, timeframe });
     if (!ctx) return;
 
+    // Stops above were still evaluated from live prices. New proposals, however, must not mix a
+    // live quote with indicators and patterns from an old completed bar. The paper bot already
+    // enforces this boundary; the autonomous path previously did not.
+    const contextFreshness = assessDataFreshness({
+      symbol: `${symbol} ${timeframe}`,
+      latestBarCloseTime: ctx.candle.closeTime,
+      now,
+      maxAgeMinutes: DEFAULT_MAX_BAR_AGE_MINUTES + barLengthMinutes(timeframe),
+    });
+    if (!contextFreshness.fresh) {
+      this.recordThought({
+        id: `th-${Date.now()}-stale-context`,
+        timestamp: ts,
+        symbol,
+        action: "MONITORING",
+        confidence: 0,
+        message: `Agent skipped new proposals: ${contextFreshness.explanation}`,
+        details: {
+          reason: "STALE_MARKET_CONTEXT",
+          freshnessReason: contextFreshness.reason,
+          timeframe,
+          latestBarCloseTime: ctx.candle.closeTime.toISOString(),
+          ageMinutes: contextFreshness.ageMinutes,
+        },
+      });
+      return;
+    }
+
     // 4. Perform Multi-Modal AI Analysis (Indicators + Pattern + News Sentiment)
     //
     // Matching on the code alone picked whichever algorithm version sorted first,
@@ -689,6 +724,7 @@ export class AiAutonomousAgent {
      * avoiding volatility crush. A real freeze needs a calendar of *scheduled* events, which this
      * project does not have -- see docs/pending-work.md 2.4.
      */
+    const smcConfluence = measureSmcConfluence(ctx);
     const scoreInputWithoutTape = {
       rsi: rsiVal,
       livePrice,
@@ -705,6 +741,7 @@ export class AiAutonomousAgent {
       // *inflows* carry the 1.5x against a short. A sign flip would not: the asymmetry would
       // then favour the short side on every reading.
       flowBias: { long: flowBias, short: shortFlowBias },
+      smcBias: { long: smcConfluence.long, short: smcConfluence.short },
       newsSentiment,
       newsLabel,
       hasHeadlineHeat,
@@ -760,6 +797,12 @@ export class AiAutonomousAgent {
         driverTape: {
           long: longDriverTape,
           short: shortDriverTape,
+        },
+        smc: {
+          algorithmVersion: SMC_ALGORITHM_VERSION,
+          long: smcConfluence.long,
+          short: smcConfluence.short,
+          signals: smcConfluence.signals,
         },
         reasoning,
       },

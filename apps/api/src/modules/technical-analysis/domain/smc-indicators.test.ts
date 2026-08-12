@@ -56,6 +56,26 @@ function barIndexOf(candleId: string): number {
 }
 
 describe("SMC indicators - point in time", () => {
+  // Prefix invariance is stricter than mutating an existing emitted point: it also catches a
+  // signal that was absent in the prefix and later appeared on an already-closed candle. That
+  // was the hole which let BOS/sweeps/zones lag five bars and order blocks lag one bar while
+  // the earlier regression stayed green.
+  for (const code of SMC_CODES) {
+    it(code + " never adds or changes a signal on a closed prefix", () => {
+      const definition = definitionFor(code);
+      const full = valuesByCandle(engine.calculate(series(MARKET), definition));
+
+      for (let length = 1; length <= MARKET.length; length += 1) {
+        const prefix = valuesByCandle(engine.calculate(series(MARKET.slice(0, length)), definition));
+        for (let index = 0; index < length; index += 1) {
+          const candleId = "c" + index;
+          expect(prefix.get(candleId) ?? null, `${code} revised ${candleId} after prefix ${length}`)
+            .toBe(full.get(candleId) ?? null);
+        }
+      }
+    });
+  }
+
   // The heart of it: edit a bar, and nothing before it may move. An indicator that fails
   // this is unusable as a model feature however good it looks on a chart.
   for (const code of SMC_CODES) {
@@ -145,6 +165,20 @@ describe("EQUILIBRIUM_ZONE", () => {
 });
 
 describe("ORDER_BLOCK", () => {
+  it("publishes on the displacement bar, with the block candle referenced behind it", () => {
+    const rows: Row[] = [[102, 103, 99, 100], [100, 112, 99, 111]];
+
+    const [point] = engine.calculate(series(rows), definitionFor("ORDER_BLOCK"));
+
+    expect(point!.candleId).toBe("c1");
+    expect(point!.values).toMatchObject({
+      type: "BULLISH_OB",
+      top: 103,
+      bottom: 99,
+      blockBarOffset: 1,
+    });
+  });
+
   it("measures displacement only against bars already seen", () => {
     // A late outsized bar must not retroactively make earlier bars ordinary by lifting the
     // average they were compared against.
@@ -165,7 +199,7 @@ describe("registered definitions", () => {
   it("every SMC code the engine handles is registered and callable", () => {
     for (const code of SMC_CODES) {
       const definition = definitionFor(code);
-      expect(definition.algorithmVersion).toBeTruthy();
+      expect(definition.algorithmVersion).toBe("smc-v2");
       // A pivot-based indicator with no pivotLength parameter would throw only here.
       expect(() => engine.calculate(series(MARKET), definition)).not.toThrow();
     }

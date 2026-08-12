@@ -17,6 +17,14 @@ export type DataFreshness =
 /** One trading day. Anything older than a session cannot describe the current market. */
 export const DEFAULT_MAX_BAR_AGE_MINUTES = 15;
 
+/** Minutes in one bar, used to allow the normal completion lag of a configured timeframe. */
+export function barLengthMinutes(timeframe: string): number {
+  const match = /^(\d+)([mhd])$/.exec(timeframe);
+  if (!match) return 0;
+  const size = Number(match[1]);
+  return match[2] === "m" ? size : match[2] === "h" ? size * 60 : size * 60 * 24;
+}
+
 export function assessDataFreshness(input: {
   symbol: string;
   latestBarCloseTime: Date | null;
