@@ -21,6 +21,7 @@
     "data:backfill:institutional": "npm run data:backfill:institutional --workspace @ai-quant-lab/api --",
     "data:auth:fyers": "npm run data:auth:fyers --workspace @ai-quant-lab/api --",
     "data:audit": "npm run data:audit --workspace @ai-quant-lab/api --",
+    "data:reconcile:provisional": "npm run data:reconcile:provisional --workspace @ai-quant-lab/api --",
     "data:audit:sequence": "npm run data:audit:sequence --workspace @ai-quant-lab/api --",
     "db:purge:yahoo-scalp": "npm run db:purge:yahoo-scalp --workspace @ai-quant-lab/api --",
     "analysis:calculate-indicators": "npm run analysis:calculate-indicators --workspace @ai-quant-lab/api --",

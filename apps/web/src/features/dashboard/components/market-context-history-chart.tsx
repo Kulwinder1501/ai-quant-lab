@@ -66,8 +66,11 @@ function compactCrore(value: number): string {
 export function MarketContextHistoryChart(props: Props) {
   const data = mergeSeries(props);
   return (
-    <GlassPanel className="p-5 border-white/10 bg-slate-900/60">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    /* A flex column so the plot fills whatever height the row is given rather than asserting its
+       own: the card is now pinned to the same height as the flows card beside it, and a fixed
+       plot height would either overflow that or leave dead space under the axis. */
+    <GlassPanel className="flex min-h-0 flex-col p-5 border-white/10 bg-slate-900/60">
+      <div className="flex shrink-0 flex-wrap items-start justify-between gap-3">
         <div>
           <span className="text-xs font-bold uppercase tracking-wider text-cyan-300">Market Context History</span>
           <h3 className="mt-1 text-lg font-bold text-white">Institutional Flow &amp; India VIX</h3>
@@ -81,11 +84,11 @@ export function MarketContextHistoryChart(props: Props) {
       </div>
 
       {data.length === 0 ? (
-        <div className="mt-5 flex h-64 items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-slate-500">
+        <div className="mt-5 flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-white/10 text-sm text-slate-500">
           No verified market-context history has been collected yet.
         </div>
       ) : (
-        <div className="mt-5 h-80 w-full">
+        <div className="mt-5 min-h-0 w-full flex-1">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 5, left: 0 }}>
               <CartesianGrid stroke="rgba(148,163,184,0.10)" vertical={false} />

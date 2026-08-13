@@ -100,6 +100,15 @@ function formatSession(date: string): string {
   return parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
 }
 
+/**
+ * Shared height for the flows card and the market-context chart beside it.
+ *
+ * Sized to the chart card's natural height: `p-5` padding, its header block, and the `h-80`
+ * (320px) plot area. Only applied from `xl`, where the two sit side by side; stacked on narrower
+ * screens each card takes the height it needs and neither has to match the other.
+ */
+const CONTEXT_CARD_HEIGHT = "xl:h-[470px]";
+
 export function InstitutionalContextCards() {
   const [context, setContext] = useState<InstitutionalContext | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,9 +167,18 @@ export function InstitutionalContextCards() {
   const stance = STANCE_COPY[flows.stance];
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+    /**
+     * Both cards are pinned to one height instead of letting content decide it. The flows card
+     * carries a ten-session list and so was always the taller of the two, stretching the row and
+     * leaving the chart beside it looking stunted. Capping the row and scrolling the list inside
+     * keeps the pair level.
+     *
+     * The class is written out rather than composed from a variable: Tailwind scans source text
+     * for literal class names, so an interpolated `xl:${...}` produces no CSS at all.
+     */
+    <div className={`grid grid-cols-1 gap-4 xl:grid-cols-2 ${CONTEXT_CARD_HEIGHT}`}>
       {/* FII / DII Institutional Flows */}
-      <GlassPanel className="flex flex-col p-6 border-white/10 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20">
+      <GlassPanel className="flex min-h-0 flex-col overflow-hidden p-6 border-white/10 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20">
         <div className="flex items-start justify-between gap-3">
           <div>
             <span className="text-xs font-bold uppercase tracking-wider text-emerald-300">
@@ -223,8 +241,12 @@ export function InstitutionalContextCards() {
             </div>
             <p className="mt-2 text-xs leading-relaxed text-slate-400">{stance.detail}</p>
 
-            <div className="mt-4 border-t border-white/5 pt-3">
-              <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            {/* The one region that gives: header, totals and footer stay pinned while the session
+                list scrolls, so the card holds the shared height no matter how many sessions the
+                collector has gathered. `min-h-0` is required -- without it a flex child refuses to
+                shrink below its content and the overflow never engages. */}
+            <div className="mt-4 flex min-h-0 flex-1 flex-col border-t border-white/5 pt-3">
+              <div className="flex shrink-0 items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
                 <span>Last {flows.sessionsCovered} session{flows.sessionsCovered === 1 ? "" : "s"}</span>
                 <span className="font-mono normal-case">
                   FII <span className={flowTone(flows.fiiTotalCr)}>{formatCrore(flows.fiiTotalCr)}</span>
@@ -232,7 +254,7 @@ export function InstitutionalContextCards() {
                   DII <span className={flowTone(flows.diiTotalCr)}>{formatCrore(flows.diiTotalCr)}</span>
                 </span>
               </div>
-              <ul className="mt-2 space-y-1">
+              <ul className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto custom-scrollbar pr-1">
                 {flows.history.slice(0, 10).map((session) => (
                   <li
                     key={session.date}
@@ -248,7 +270,7 @@ export function InstitutionalContextCards() {
               </ul>
             </div>
 
-            <p className="mt-auto pt-3 text-[10px] text-slate-500">
+            <p className="shrink-0 pt-3 text-[10px] text-slate-500">
               Session {formatSession(flows.latest.date)} · collected{" "}
               {new Date(flows.latest.publishedAt).toLocaleString("en-IN")}
             </p>

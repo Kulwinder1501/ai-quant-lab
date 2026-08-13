@@ -370,7 +370,11 @@ async function main(): Promise<void> {
       WHERE id = $1
     `, [claimedRunId, account.id, ceIdeaId, peIdeaId]);
 
-    const prepareEntry = new PrepareOptionEntry(database, optionChainRepository);
+    const prepareEntry = new PrepareOptionEntry(
+      database,
+      optionChainRepository,
+      new PostgresOptionPremiumTickRepository(database),
+    );
     const [cePrepared, pePrepared] = await Promise.all([
       prepareEntry.execute({ tradeIdeaId: ceIdeaId, lots: 1, now }),
       prepareEntry.execute({ tradeIdeaId: peIdeaId, lots: 1, now }),

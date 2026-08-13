@@ -4,8 +4,8 @@ import {
   type OptionGreeks,
 } from "@ai-quant-lab/pricing";
 import { floorLivePremiumToTick } from "../../pricing/domain/option-tick.js";
-import type { CompletedPriceCandle, PaperTradeExitDecision } from "./paper-trade-exit-policy.js";
-import type { PaperTrade } from "./paper-trading.js";
+import type { CompletedPriceCandle, ExitFillRule, PaperTradeExitDecision } from "./paper-trade-exit-policy.js";
+import type { PaperTrade, PaperTradeEventType, PaperTradeExitReason } from "./paper-trading.js";
 
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
@@ -124,6 +124,92 @@ export function priceOptionMarksAtOhlc(input: {
     low: mark(input.candle.low),
     close: mark(input.candle.close),
   };
+}
+
+/** One dense observation of the contract's sellable price. */
+export interface ObservedPremiumSample {
+  observedAt: Date;
+  /** The bid. A long option is exited by selling into it, so it is the executable price. */
+  bid: number | null;
+}
+
+export interface ObservedPremiumExitDecision {
+  reason: Extract<PaperTradeExitReason, "STOP_LOSS" | "TARGET">;
+  eventType: Extract<PaperTradeEventType, "STOP_LOSS_HIT" | "TARGET_HIT">;
+  /** The observed bid itself, not the barrier level. See the note below on gapping. */
+  exitPrice: number;
+  fillRule: Extract<ExitFillRule, "OBSERVED_TICK_STOP" | "OBSERVED_TICK_TARGET">;
+  observedAt: Date;
+}
+
+/**
+ * The first observed premium to cross a protective level, scanning oldest to newest.
+ *
+ * This is the answer to "was the barrier traded through between two evaluations?", using prices
+ * the provider actually published. It replaces the job that
+ * `priceOptionMarksAtOhlc` + `decideOptionBuyerExit` were doing badly: those reprice the
+ * *underlying's* OHLC through Black-Scholes and were measured ~10% below the real book on a stop
+ * sitting 4% from entry, so their error exceeded the distance being resolved.
+ *
+ * **Oldest-first is the whole point.** A position exits at the first moment a barrier was
+ * reached, not at the most recent sample -- taking the latest tick would let a level that was
+ * touched and recovered from go unrecorded, which is how a stop silently fails to fire.
+ *
+ * **Exits at the observed bid, not the barrier level.** `decideOptionBuyerExit` returns
+ * `trade.stopLoss` for an intrabar stop, which models a resting order filling exactly at its
+ * trigger. That is not available here and pretending otherwise would overstate the exit: when a
+ * premium gaps from above the stop straight to well below it, the sellable price is the printed
+ * bid. Reporting the bid keeps the fill honest in the direction that costs the account money.
+ *
+ * Samples without a positive bid are skipped rather than treated as a zero. A missing or
+ * zero-sized bid means no buyer was quoted -- a data gap, or a market with no liquidity at all --
+ * and reading it as "the premium is worth nothing" would fire a stop on absent data, which is the
+ * opposite of what an observed-price check is for.
+ */
+export function decideOptionBuyerObservedExit(
+  trade: PaperTrade,
+  samples: readonly ObservedPremiumSample[],
+  options: { stopLossEffectiveAt?: Date } = {},
+): ObservedPremiumExitDecision | null {
+  if (trade.status !== "OPEN") {
+    throw new Error("Only open paper trades can be evaluated for exits.");
+  }
+  if (trade.side !== "LONG") {
+    throw new Error("Option-buyer dynamic evaluation only supports LONG premium positions.");
+  }
+  if (options.stopLossEffectiveAt !== undefined
+    && Number.isNaN(options.stopLossEffectiveAt.getTime())) {
+    throw new Error("Stop-loss effective timestamp is invalid.");
+  }
+
+  for (const sample of samples) {
+    const bid = sample.bid;
+    if (bid === null || !Number.isFinite(bid) || bid <= 0) continue;
+    // A tightened stop must not be projected backward over old observations. Targets are not
+    // mutable, so they remain active for the position's whole lifetime and are still checked on
+    // samples before the current stop's effective time.
+    const stopWasActive = options.stopLossEffectiveAt === undefined
+      || sample.observedAt.getTime() >= options.stopLossEffectiveAt.getTime();
+    if (stopWasActive && bid <= trade.stopLoss) {
+      return {
+        reason: "STOP_LOSS",
+        eventType: "STOP_LOSS_HIT",
+        exitPrice: bid,
+        fillRule: "OBSERVED_TICK_STOP",
+        observedAt: sample.observedAt,
+      };
+    }
+    if (bid >= trade.targetPrice) {
+      return {
+        reason: "TARGET",
+        eventType: "TARGET_HIT",
+        exitPrice: bid,
+        fillRule: "OBSERVED_TICK_TARGET",
+        observedAt: sample.observedAt,
+      };
+    }
+  }
+  return null;
 }
 
 /**

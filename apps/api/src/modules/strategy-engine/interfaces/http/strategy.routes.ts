@@ -1,8 +1,4 @@
 import type { Express } from "express";
-import {
-  quoteLabSymbol,
-  quoteLabSymbols,
-} from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
 import { loadIndexDriverTape } from "../../../market-data/application/load-index-driver-tape.js";
@@ -15,6 +11,7 @@ export function registerStrategyRoutes(
   app: Express,
   dependencies: Pick<HttpDependencies,
     "database" | "dashboardRepository" | "generateTradeIdeas" | "aiAutonomousAgent"
+    | "marketQuoteClient"
   >,
 ): void {
 
@@ -111,7 +108,7 @@ export function registerStrategyRoutes(
 
         // A provider failure must not be disguised as a synthetic market tick, so a null
         // quote leaves every field on the stored bar and says so through `priceSource`.
-        const quote = await quoteLabSymbol(symbol);
+        const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
         if (quote !== null) {
           livePrice = quote.regularMarketPrice!;
           previousClose = quote.regularMarketPreviousClose ?? previousClose;
@@ -123,7 +120,7 @@ export function registerStrategyRoutes(
           liveHigh = quote.regularMarketDayHigh ?? liveHigh;
           liveLow = quote.regularMarketDayLow ?? liveLow;
           lastUpdated = quote.regularMarketTime?.toISOString() ?? lastUpdated;
-          priceSource = "YAHOO_QUOTE";
+          priceSource = quote.provider === "fyers-api-v3" ? "FYERS_QUOTE" : "YAHOO_QUOTE";
         }
 
         // This stream is read-only. The agent tick that used to run here now belongs to the
@@ -211,7 +208,7 @@ export function registerStrategyRoutes(
       pollInFlight = true;
       try {
         // One batched request per tick rather than seven concurrent ones per connected tab.
-        const quotes = await quoteLabSymbols(tiles.map((tile) => tile.symbol));
+        const quotes = await dependencies.marketQuoteClient.quoteSymbols(tiles.map((tile) => tile.symbol));
         const data = tiles.flatMap((tile) => {
           const quote = quotes.get(tile.symbol);
           if (quote === undefined) return [];
@@ -252,7 +249,7 @@ export function registerStrategyRoutes(
         return;
       }
 
-      const tape = await loadIndexDriverTape(indexKey);
+      const tape = await loadIndexDriverTape(dependencies.marketQuoteClient, indexKey);
       if (!tape) {
         response.status(400).json({
           error: `Drivers heatmap supports: ${SUPPORTED_DRIVER_INDEX_KEYS.join(", ")}.`,

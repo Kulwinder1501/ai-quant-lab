@@ -11,14 +11,32 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ai_quant_lab_ml.contracts import ALGORITHM_CHOICES, DatasetRequest, schema_version_for
-from ai_quant_lab_ml.features import build_labeled_examples, feature_schema
+from ai_quant_lab_ml.contracts import (
+    ALGORITHM_CHOICES,
+    DIRECTIONAL_ALPHABET,
+    LABEL_SCHEME_FIXED_HORIZON,
+    LABEL_SCHEME_TRIPLE_BARRIER,
+    LABEL_SCHEME_VOLATILITY_EXPANSION,
+    LABEL_SCHEMES,
+    CandleEvidence,
+    DatasetRequest,
+    LabeledExample,
+    schema_version_for,
+)
+from ai_quant_lab_ml.features import (
+    build_labeled_examples,
+    build_triple_barrier_examples,
+    build_volatility_expansion_examples,
+    feature_schema,
+)
 from ai_quant_lab_ml.leakage import run_leakage_audit
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
+from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 from train import (
     fraction,
     non_blank,
@@ -32,6 +50,17 @@ from train import (
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
+
+
+def build_audit_examples(
+    records: Sequence[CandleEvidence], request: DatasetRequest,
+) -> list[LabeledExample]:
+    """Dispatch to the exact label builder named by the audit request."""
+    if request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION:
+        return build_volatility_expansion_examples(records, request)
+    if request.label_scheme == LABEL_SCHEME_TRIPLE_BARRIER:
+        return build_triple_barrier_examples(records, request)
+    return build_labeled_examples(records, request)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-cutoff-at", help="Stored-data revision cutoff (defaults to the current UTC time).")
     parser.add_argument("--algorithm", choices=ALGORITHM_CHOICES, default="logistic", help="Model family to audit (default: logistic).")
     parser.add_argument("--horizon-bars", type=positive_int, default=5, help="Later completed bars used for each label (default: 5).")
-    parser.add_argument("--neutral-threshold-bps", type=non_negative_float, default=50.0, help="Inclusive forward-return neutral band in bps (default: 50).")
+    parser.add_argument("--neutral-threshold-bps", type=non_negative_float, default=50.0, help="Inclusive forward-return neutral band in bps (default: 50); fixed-horizon only.")
+    parser.add_argument(
+        "--label-scheme",
+        choices=LABEL_SCHEMES,
+        default=LABEL_SCHEME_FIXED_HORIZON,
+        help=(
+            "Target to audit. fixed-horizon-v1: sign of the forward return against the neutral "
+            "band. triple-barrier-v1: first ATR-scaled barrier reached. "
+            "volatility-expansion-v1: whether the forward range expands or contracts past "
+            "--expansion-band. Must match the trained model under review (default: fixed-horizon-v1)."
+        ),
+    )
+    parser.add_argument("--barrier-upper-multiple", type=positive_float, default=1.0, help="triple-barrier only: profit barrier in ATR units (default: 1.0).")
+    parser.add_argument("--barrier-lower-multiple", type=positive_float, default=1.0, help="triple-barrier only: stop barrier in ATR units (default: 1.0).")
+    parser.add_argument("--expansion-band", type=positive_float, default=0.25, help="volatility-expansion only: band around an unchanged range (default: 0.25).")
     parser.add_argument("--validation-fraction", type=strict_unit_interval, default=0.2, help="Chronological holdout fraction (default: 0.2).")
     parser.add_argument("--random-state", type=int, default=42, help="Deterministic random state (default: 42).")
     parser.add_argument("--database-url", help="PostgreSQL URL; defaults to DATABASE_URL in the root .env/environment.")
@@ -102,7 +145,12 @@ def main() -> int:
         data_cutoff_at=(parse_timestamp(args.data_cutoff_at) if args.data_cutoff_at else datetime.now(timezone.utc)),
         horizon_bars=args.horizon_bars,
         neutral_threshold_bps=args.neutral_threshold_bps,
+        label_scheme=args.label_scheme,
+        barrier_upper_multiple=args.barrier_upper_multiple,
+        barrier_lower_multiple=args.barrier_lower_multiple,
+        expansion_band=args.expansion_band,
     )
+    is_volatility = request.label_scheme == LABEL_SCHEME_VOLATILITY_EXPANSION
     if request.data_window_end <= request.data_window_start:
         parser.error("--to must be after --from.")
     if request.data_window_end > request.data_cutoff_at:
@@ -118,7 +166,7 @@ def main() -> int:
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = PostgresMlRepository(connection)
         records = repository.load_candle_evidence(request)
-        examples = build_labeled_examples(records, request)
+        examples = build_audit_examples(records, request)
         print(f"Auditing {len(examples)} labeled rows from {len(records)} candles.", file=sys.stderr)
         audit = run_leakage_audit(
             examples,
@@ -128,6 +176,9 @@ def main() -> int:
             hyperparameters=hyperparameters,
             random_state=args.random_state,
             validation_fraction=args.validation_fraction,
+            # The random baseline and shuffle ceiling follow the alphabet, so the
+            # volatility three-class target must not be scored against the directional one.
+            alphabet=VOLATILITY_ALPHABET if is_volatility else DIRECTIONAL_ALPHABET,
         )
 
     # The dataset identity travels with the verdict, so a stored report can never
@@ -142,7 +193,11 @@ def main() -> int:
             "dataWindowEnd": request.data_window_end.isoformat(),
             "dataCutoffAt": request.data_cutoff_at.isoformat(),
             "horizonBars": request.horizon_bars,
+            "labelScheme": request.label_scheme,
             "neutralThresholdBps": request.neutral_threshold_bps,
+            "barrierUpperMultiple": request.barrier_upper_multiple,
+            "barrierLowerMultiple": request.barrier_lower_multiple,
+            "expansionBand": request.expansion_band,
             "labeledRows": len(examples),
         },
         "hyperparameters": hyperparameters,

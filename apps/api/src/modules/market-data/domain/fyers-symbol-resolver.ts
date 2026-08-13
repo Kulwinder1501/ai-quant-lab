@@ -15,6 +15,7 @@ const indexSymbols: Record<string, string> = {
   FINNIFTY: "NSE:FINNIFTY-INDEX",
   MIDCPNIFTY: "NSE:MIDCPNIFTY-INDEX",
   NIFTYNXT50: "NSE:NIFTYNXT50-INDEX",
+  SENSEX: "BSE:SENSEX-INDEX",
 };
 
 export function resolveFyersSymbol(symbol: string): string {

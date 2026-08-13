@@ -42,27 +42,43 @@ export function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
           </div>
         ) : (
           thoughts.map((th) => {
-            let badgeColor = "bg-slate-800 text-slate-300 border-slate-700";
+            let badgeColor = "bg-slate-700/60 text-slate-200 border-slate-500/50";
             let icon = "🔍";
+            // The card's own surface, keyed to the same action as the badge. A flat near-black
+            // panel read as a dead hole punched in the glass surface around it and, worse, gave
+            // every entry the same weight -- an ANALYZING tick looked exactly as urgent as an
+            // EXECUTING one. Tinting the surface makes the log skimmable by action instead of
+            // requiring the badge to be read on each row.
+            let surface = "border-slate-500/25 bg-slate-800/50 hover:bg-slate-800/70";
+            let accent = "bg-slate-400/60";
             if (th.action === "EXECUTING") {
               badgeColor = "bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-md shadow-emerald-500/10";
+              surface = "border-emerald-500/30 bg-emerald-950/40 hover:bg-emerald-950/60";
+              accent = "bg-emerald-400";
               icon = "⚡";
             } else if (th.action === "PROPOSING") {
               badgeColor = "bg-amber-500/20 text-amber-300 border-amber-500/50";
+              surface = "border-amber-500/30 bg-amber-950/30 hover:bg-amber-950/50";
+              accent = "bg-amber-400";
               icon = "💡";
             } else if (th.action === "LEARNING") {
               badgeColor = "bg-purple-500/20 text-purple-300 border-purple-500/50";
+              surface = "border-purple-500/30 bg-purple-950/30 hover:bg-purple-950/50";
+              accent = "bg-purple-400";
               icon = "🎓";
             } else if (th.action === "MONITORING") {
               badgeColor = "bg-blue-500/20 text-blue-300 border-blue-500/50";
+              surface = "border-blue-500/30 bg-blue-950/30 hover:bg-blue-950/50";
+              accent = "bg-blue-400";
               icon = "👁️";
             }
 
             return (
               <div
                 key={th.id}
-                className="rounded-xl border border-white/10 bg-black/40 p-4 transition hover:border-white/20 hover:bg-black/60 shadow-sm"
+                className={`relative overflow-hidden rounded-xl border p-4 pl-5 shadow-sm transition ${surface}`}
               >
+                <span className={`absolute inset-y-0 left-0 w-1 ${accent}`} aria-hidden="true" />
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2">
                   <div className="flex items-center gap-2.5">
                     <span className="text-sm">{icon}</span>

@@ -507,8 +507,8 @@ def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, 
     """Shadow-predict for non-directional candidates.
 
     Identical in shape to ``run_competition_pool`` -- one broken artifact must not
-    silence the rest -- but draws its members from ``list_shadow_pool``, which is scoped
-    by label scheme rather than by enrollment. Predictions land in
+    silence the rest -- but draws its members from the explicit, sticky enrollment
+    returned by ``list_shadow_pool``. Predictions land in
     ``auxiliary_model_predictions`` because ``score_model`` routes by the model's own
     alphabet, so nothing directional is touched.
 

@@ -49,6 +49,7 @@ export interface OptionBuyerFillInput {
   observedFill?: {
     premium: number;
     impliedVolatility: number;
+    source?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK";
   };
 }
 
@@ -59,7 +60,9 @@ export interface OptionBuyerFill {
   strike: number;
   fillPremium: number;
   /** Where the entry premium came from, so a trade record is never ambiguous about it. */
-  fillSource: "OPTION_CHAIN_QUOTE" | "OPTION_MODEL";
+  fillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "OPTION_MODEL";
+  /** IV used for the entry greeks and both premium barriers. Persist this on the position. */
+  impliedVolatility: number;
   stopPremium: number;
   targetPremium: number;
   entryGreeks: OptionGreeks;
@@ -161,7 +164,10 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     side: "LONG",
     strike,
     fillPremium: roundMoney(fillPremium),
-    fillSource: input.observedFill === undefined ? "OPTION_MODEL" : "OPTION_CHAIN_QUOTE",
+    fillSource: input.observedFill === undefined
+      ? "OPTION_MODEL"
+      : (input.observedFill.source ?? "OPTION_CHAIN_QUOTE"),
+    impliedVolatility: volatility,
     stopPremium: roundMoney(stopPremium),
     targetPremium: roundMoney(targetPremium),
     entryGreeks,

@@ -2,6 +2,8 @@ import type { DatabasePool, DatabaseQueryable } from "../../infrastructure/datab
 import { PostgresAiJournalRepository } from "../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
+import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
+import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresDashboardQueryRepository } from "../../infrastructure/database/repositories/postgres-dashboard-query-repository.js";
 import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
@@ -62,6 +64,21 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const strategyContextRepository = new PostgresStrategyMarketContextRepository(pool);
   const newsRepository = new PostgresNewsRepository(pool);
   const optionPremiumTickRepository = new PostgresOptionPremiumTickRepository(pool);
+  const appId = process.env.FYERS_APP_ID;
+  const appSecret = process.env.FYERS_APP_SECRET;
+  const fyersTokenService = appId && appSecret
+    ? new FyersTokenService({
+      pool,
+      appId,
+      appSecret,
+      pin: process.env.FYERS_PIN ?? "",
+    })
+    : null;
+  const marketQuoteClient = new ProviderRoutedQuoteClient(
+    fyersTokenService && appId
+      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId })
+      : null,
+  );
 
   const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(
     paperTradeRepository,
@@ -82,18 +99,11 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     newsRepository,
     new PostgresAiJournalRepository(pool),
     checkMacroEvents,
+    { marketQuotes: marketQuoteClient },
   );
 
-  const appId = process.env.FYERS_APP_ID;
-  const appSecret = process.env.FYERS_APP_SECRET;
   let fyersLiveStreamer: FyersLiveStreamer | null = null;
-  if (appId && appSecret) {
-    const fyersTokenService = new FyersTokenService({
-      pool,
-      appId,
-      appSecret,
-      pin: process.env.FYERS_PIN ?? "",
-    });
+  if (appId && fyersTokenService) {
     fyersLiveStreamer = new FyersLiveStreamer({
       tokenService: fyersTokenService,
       appId,
@@ -112,6 +122,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     paperTradeRepository,
     paperTradeNotificationRepository,
     optionPremiumTickRepository,
+    marketQuoteClient,
     instrumentRepository,
     createPaperAccount: new CreatePaperAccount(paperAccountRepository),
     getPaperAccountSummary: new GetPaperAccountSummary(paperTradeRepository),

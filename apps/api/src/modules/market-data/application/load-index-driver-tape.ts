@@ -1,4 +1,4 @@
-import { quoteLabSymbols } from "../../../infrastructure/market-data/yahoo-quote-client.js";
+import type { MarketQuoteReader } from "../domain/market-quote.js";
 import {
   computeDriverTapeMetrics,
   type DriverTapeMetrics,
@@ -35,26 +35,28 @@ const DISCLAIMER =
   "Est. points = weight% × day% × index / 10000. Weights are approximate (not live exchange free-float) — close to contribution, not exchange-official. Breadth/concentration soft-filter the agent; they are not ML features.";
 
 /**
- * Live Yahoo-backed driver contributions + tape metrics for one supported index.
+ * Live provider-routed driver contributions + tape metrics for one supported index.
  * Returns null when the symbol has no driver universe (e.g. Hang Seng).
  */
 export async function loadIndexDriverTape(
+  quoteReader: MarketQuoteReader,
   indexKey: string,
 ): Promise<IndexDriverTape | null> {
   const universe = resolveIndexDriverUniverse(indexKey);
   if (!universe) return null;
-  return buildIndexDriverTape(universe);
+  return buildIndexDriverTape(quoteReader, universe);
 }
 
 async function buildIndexDriverTape(
+  quoteReader: MarketQuoteReader,
   universe: IndexDriverUniverse,
 ): Promise<IndexDriverTape> {
-  const quoteBySymbol = await quoteLabSymbols([
-    universe.yahooIndexSymbol,
+  const quoteBySymbol = await quoteReader.quoteSymbols([
+    universe.indexSymbol,
     ...universe.drivers.map((row) => row.symbol),
   ]);
 
-  const indexQuote = quoteBySymbol.get(universe.yahooIndexSymbol) ?? null;
+  const indexQuote = quoteBySymbol.get(universe.indexSymbol) ?? null;
   const indexLevel = indexQuote?.regularMarketPrice ?? null;
   const indexDayPct = indexQuote?.regularMarketChangePercent ?? null;
 

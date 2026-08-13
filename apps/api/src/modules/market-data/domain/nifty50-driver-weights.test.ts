@@ -34,9 +34,7 @@ describe("index driver weights", () => {
 
   it("resolves supported index keys from UI symbols", () => {
     expect(resolveIndexDriverUniverse("NIFTY50")?.key).toBe("NIFTY50");
-    expect(resolveIndexDriverUniverse("BANKNIFTY")?.yahooIndexSymbol).toBe(
-      "^NSEBANK",
-    );
+    expect(resolveIndexDriverUniverse("BANKNIFTY")?.indexSymbol).toBe("BANKNIFTY");
     expect(resolveIndexDriverUniverse("FINNIFTY")?.label).toBe("Fin Nifty");
     expect(resolveIndexDriverUniverse("SENSEX")?.key).toBe("SENSEX");
     expect(resolveIndexDriverUniverse("HANG SENG")).toBeNull();

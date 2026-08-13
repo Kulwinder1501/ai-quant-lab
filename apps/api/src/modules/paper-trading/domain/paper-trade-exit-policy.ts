@@ -10,7 +10,13 @@ export interface CompletedPriceCandle {
   close: number;
 }
 
-export type ExitFillRule = "OPEN_GAP_STOP" | "OPEN_GAP_TARGET" | "INTRABAR_STOP" | "INTRABAR_TARGET" | "CONSERVATIVE_STOP_FIRST" | "TRAP_DETECTED";
+/**
+ * `OBSERVED_TICK_*` are the only two rules resolved from a price that was actually quoted rather
+ * than inferred from a bar. They carry no stop-first counterpart on purpose: a single observed
+ * premium cannot sit both at or below the stop and at or above the target, so the ordering
+ * ambiguity `CONSERVATIVE_STOP_FIRST` exists to resolve simply does not arise.
+ */
+export type ExitFillRule = "OPEN_GAP_STOP" | "OPEN_GAP_TARGET" | "INTRABAR_STOP" | "INTRABAR_TARGET" | "CONSERVATIVE_STOP_FIRST" | "TRAP_DETECTED" | "OBSERVED_TICK_STOP" | "OBSERVED_TICK_TARGET";
 
 export interface PaperTradeExitDecision {
   reason: Extract<PaperTradeExitReason, "STOP_LOSS" | "TARGET" | "TRAP_DETECTED">;

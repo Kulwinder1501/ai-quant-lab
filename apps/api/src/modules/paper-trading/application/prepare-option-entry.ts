@@ -1,4 +1,10 @@
-import { nearestStrike } from "@ai-quant-lab/pricing";
+import {
+  impliedVolatilityFromPremium,
+  midPriceForIv,
+  nearestStrike,
+  RISK_FREE_RATE,
+  yearsToExpiry,
+} from "@ai-quant-lab/pricing";
 import { solveContractGreeksFromChain } from "../../market-data/domain/chain-greeks.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import {
@@ -41,8 +47,10 @@ import { mapIdeaToOptionBuyerFill, resolveOptionExpiryInstant } from "../domain/
 /** The gate refuses sub-1-DTE at anything short of top confidence, so do not choose one. */
 export const MINIMUM_DAYS_TO_EXPIRY = 2;
 
-/** Below this the entry falls back to the model, and the trade records that it did. */
+/** Chain context may be older because it supplies OI and paired strikes, not the execution. */
 const MAXIMUM_CHAIN_AGE_MINUTES = 40;
+/** An unattended market entry may only cross an ask observed in the last two minutes. */
+export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS = 2 * 60 * 1000;
 
 export interface PreparedOptionEntry {
   tradeIdeaId: string;
@@ -81,6 +89,7 @@ export type PrepareOptionEntryResult =
       | "NO_CALENDAR"
       | "EXPIRY_NOT_LISTED"
       | "NO_EXPIRY_FAR_ENOUGH_OUT"
+      | "NO_FRESH_EXECUTABLE_QUOTE"
       | "FILL_NOT_DERIVABLE"
       | "OPTIONS_ENTRY_REJECTED";
     explanation: string;
@@ -107,8 +116,31 @@ interface QueryableDatabase {
 }
 
 interface ChainReader {
-  latestExpiryCalendar(underlyingSymbol: string): Promise<OptionExpiryCalendar | null>;
-  latestSnapshot(input: { underlyingSymbol: string; expiryDate?: string }): Promise<OptionChainSnapshot | null>;
+  latestExpiryCalendar(underlyingSymbol: string, asOf?: Date): Promise<OptionExpiryCalendar | null>;
+  latestSnapshot(input: {
+    underlyingSymbol: string;
+    expiryDate?: string;
+    asOf?: Date;
+  }): Promise<OptionChainSnapshot | null>;
+}
+
+interface PremiumTickReader {
+  latestForContract(
+    contract: {
+      underlyingSymbol: string;
+      expiryDate: Date;
+      strikePrice: number;
+      optionType: "CE" | "PE";
+    },
+    maxAgeMs?: number,
+    now?: Date,
+  ): Promise<{
+    observedAt: Date;
+    bid: number | null;
+    ask: number | null;
+    lastPrice: number | null;
+    underlyingValue: number | null;
+  } | null>;
 }
 
 interface IdeaRow {
@@ -130,6 +162,7 @@ export class PrepareOptionEntry {
   constructor(
     private readonly database: QueryableDatabase,
     private readonly optionChainRepository: ChainReader,
+    private readonly premiumTicks?: PremiumTickReader,
   ) {}
 
   async execute(input: PrepareOptionEntryInput): Promise<PrepareOptionEntryResult> {
@@ -170,7 +203,7 @@ export class PrepareOptionEntry {
       };
     }
 
-    const calendar = await this.optionChainRepository.latestExpiryCalendar(underlyingSymbol);
+    const calendar = await this.optionChainRepository.latestExpiryCalendar(underlyingSymbol, now);
     const chosen = this.resolveExpiry(calendar, input.expiryDate, underlyingSymbol, now);
     if (!chosen.ok) return chosen.refusal;
     const settlementExpiry = chosen.expiryDate;
@@ -186,11 +219,12 @@ export class PrepareOptionEntry {
       .latestSnapshot({
         underlyingSymbol,
         expiryDate: settlementExpiry.toISOString().slice(0, 10),
+        asOf: now,
       })
       .catch(() => null);
-    // A snapshot older than the gap between collections describes a book that has moved.
-    // Falling back to the model is worse than filling at a stale ask but better than
-    // filling at a price nothing was offering; either way the trade records which it was.
+    // The chain supplies OI, paired strikes and a liquidity screen. It is not necessarily the
+    // execution source: the chain is collected every 15 minutes, while dense contract ticks are
+    // collected roughly twice a minute.
     const chainAgeMinutes = entryChain === null
       ? null
       : (now.getTime() - entryChain.observedAt.getTime()) / 60_000;
@@ -199,7 +233,7 @@ export class PrepareOptionEntry {
       ? entryChain
       : null;
 
-    const solvedGreeks = usableChain === null ? null : solveContractGreeksFromChain({
+    const chainGreeks = usableChain === null ? null : solveContractGreeksFromChain({
       snapshot: usableChain,
       strikePrice: intendedStrike,
       optionType: intendedOptionType,
@@ -210,9 +244,64 @@ export class PrepareOptionEntry {
     const intendedQuote = usableChain?.quotes.find(
       (quote) => quote.strikePrice === intendedStrike && quote.optionType === intendedOptionType,
     );
-    const observedFill = solvedGreeks !== null && intendedQuote?.ask != null && intendedQuote.ask > 0
-      ? { premium: intendedQuote.ask, impliedVolatility: solvedGreeks.impliedVolatility }
-      : undefined;
+    const denseQuote = await this.premiumTicks?.latestForContract({
+      underlyingSymbol,
+      expiryDate: settlementExpiry,
+      strikePrice: intendedStrike,
+      optionType: intendedOptionType,
+    }, MAXIMUM_EXECUTABLE_QUOTE_AGE_MS, now).catch(() => null) ?? null;
+
+    const freshChainQuote = entryChain !== null
+      && chainAgeMinutes !== null
+      && chainAgeMinutes >= 0
+      && chainAgeMinutes * 60_000 <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
+      && intendedQuote?.ask != null
+      && intendedQuote.ask > 0
+      && chainGreeks !== null
+      ? {
+        premium: intendedQuote.ask,
+        impliedVolatility: chainGreeks.impliedVolatility,
+        source: "OPTION_CHAIN_QUOTE" as const,
+        observedAt: entryChain.observedAt,
+      }
+      : null;
+
+    const denseMid = denseQuote === null ? null : midPriceForIv(denseQuote.bid, denseQuote.ask);
+    const denseSpot = denseQuote?.underlyingValue;
+    const denseIv = denseQuote !== null && denseMid !== null && denseSpot !== null
+      && denseSpot !== undefined && Number.isFinite(denseSpot) && denseSpot > 0
+      ? impliedVolatilityFromPremium({
+        spot: denseSpot,
+        strike: intendedStrike,
+        timeToExpiryYears: yearsToExpiry(denseQuote.observedAt, settlementExpiry),
+        riskFreeRate: RISK_FREE_RATE,
+        optionType: intendedOptionType,
+        premium: denseMid,
+      })
+      : null;
+    const freshDenseQuote = denseQuote?.ask != null && denseQuote.ask > 0
+      && denseIv?.measurable === true
+      ? {
+        premium: denseQuote.ask,
+        impliedVolatility: denseIv.impliedVolatility,
+        source: "OPTION_PREMIUM_TICK_ASK" as const,
+        observedAt: denseQuote.observedAt,
+      }
+      : null;
+
+    // Prefer the denser quote. Both readers are bounded to `observedAt <= now`, so neither can
+    // open a position using a price published after its decision timestamp.
+    const observedFill = freshDenseQuote ?? freshChainQuote;
+    if (observedFill === null) {
+      return {
+        approved: false,
+        reason: "NO_FRESH_EXECUTABLE_QUOTE",
+        explanation: `No executable ${underlyingSymbol} ${intendedStrike} ${intendedOptionType} ask `
+          + `at or before ${now.toISOString()} was available inside the `
+          + `${MAXIMUM_EXECUTABLE_QUOTE_AGE_MS / 1000}-second freshness window. `
+          + "The position was not opened; theoretical premiums are not executable fills.",
+      };
+    }
 
     let mapped: ReturnType<typeof mapIdeaToOptionBuyerFill>;
     try {
@@ -235,6 +324,25 @@ export class PrepareOptionEntry {
       };
     }
 
+    // Keep the chain's OI and paired-strike context, but screen the contract's spread against
+    // the same executable quote used for the fill. Otherwise a 15-minute-old spread could approve
+    // a book that is wide now (or refuse one that has since normalized).
+    const validationChain = usableChain === null ? undefined : freshDenseQuote === null ? usableChain : {
+      ...usableChain,
+      observedAt: freshDenseQuote.observedAt,
+      underlyingValue: denseQuote?.underlyingValue ?? usableChain.underlyingValue,
+      quotes: usableChain.quotes.map((quote) => (
+        quote.strikePrice === intendedStrike && quote.optionType === intendedOptionType
+          ? {
+            ...quote,
+            bid: denseQuote?.bid ?? quote.bid,
+            ask: denseQuote?.ask ?? quote.ask,
+            lastPrice: denseQuote?.lastPrice ?? quote.lastPrice,
+          }
+          : quote
+      )),
+    };
+
     const volume = await this.readSourceBarVolume(idea.source_candle_id, idea.symbol);
     const scheduledMacro = await this.hasScheduledMacroEventToday(now);
     const entryCheck = validateOptionsEntry({
@@ -245,9 +353,9 @@ export class PrepareOptionEntry {
       },
       candleVolume: volume.candleVolume,
       volumeAbsenceReason: volume.absenceReason,
-      optionChain: usableChain ?? undefined,
+      optionChain: validationChain,
       intendedStrike,
-      intendedContractDelta: solvedGreeks?.delta ?? null,
+      intendedContractDelta: mapped.entryGreeks.delta,
       ...(scheduledMacro === undefined ? {} : { hasMacroEvent: scheduledMacro }),
     });
     if (!entryCheck.isValid) {
@@ -278,7 +386,7 @@ export class PrepareOptionEntry {
           optionType: mapped.optionType,
           underlyingSymbol: idea.symbol,
           underlyingEntryPrice: mapped.underlyingEntryPrice,
-          entryIv: impliedVolatility,
+          entryIv: mapped.impliedVolatility,
         },
         entryFees: entryFees.total,
         unchecked: entryCheck.unchecked,
@@ -287,7 +395,7 @@ export class PrepareOptionEntry {
           option: {
             optionType: mapped.optionType,
             strike: mapped.strike,
-            impliedVolatility,
+            impliedVolatility: mapped.impliedVolatility,
             expiryDate: settlementExpiry.toISOString(),
             greeks: mapped.entryGreeks,
             underlyingEntry: Number(idea.entry_price),
@@ -295,11 +403,12 @@ export class PrepareOptionEntry {
           entryChecks: {
             fillSource: mapped.fillSource,
             sourceCandleVolume: volume.candleVolume,
-            observedAsk: intendedQuote?.ask ?? null,
+            observedAsk: observedFill.premium,
+            quoteObservedAt: observedFill.observedAt.toISOString(),
             reasons: entryCheck.reasons,
             unchecked: entryCheck.unchecked,
-            solvedDelta: solvedGreeks?.delta ?? null,
-            solvedImpliedVolatility: solvedGreeks?.impliedVolatility ?? null,
+            solvedDelta: mapped.entryGreeks.delta,
+            solvedImpliedVolatility: mapped.impliedVolatility,
             chainObservedAt: entryChain?.observedAt.toISOString() ?? null,
             chainAgeMinutes: chainAgeMinutes === null ? null : Number(chainAgeMinutes.toFixed(2)),
             chainUsable: usableChain !== null,

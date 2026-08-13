@@ -1,5 +1,4 @@
 import type { Express, NextFunction, Response } from "express";
-import { quoteLabSymbol } from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { InvalidHttpQueryError, parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
 import {
@@ -26,7 +25,10 @@ import { summariseIvPercentile, type DailyImpliedVolatility } from "../../domain
 
 export function registerMarketDataRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "dashboardRepository" | "getInstitutionalContext" | "optionChainRepository" | "fyersLiveStreamer">,
+  dependencies: Pick<HttpDependencies,
+    "dashboardRepository" | "getInstitutionalContext" | "optionChainRepository"
+    | "fyersLiveStreamer" | "marketQuoteClient"
+  >,
 ): void {
   app.get("/api/v1/candles", async (request, response, next) => {
     try {
@@ -129,7 +131,7 @@ export function registerMarketDataRoutes(
       const symbol = (queryString(request, "symbol") || "NIFTY50").toUpperCase();
       const timeframe = (queryString(request, "timeframe") || "1d").toLowerCase();
 
-      const quote = await quoteLabSymbol(symbol);
+      const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
       if (quote === null) {
         throw new Error(`Live quote provider returned no valid price for ${symbol}.`);
       }
@@ -194,7 +196,7 @@ export function registerMarketDataRoutes(
           latestPattern,
           status: "MARKET_LIVE",
           researchOnly: true,
-          priceSource: "YAHOO_QUOTE",
+          priceSource: quote.provider === "fyers-api-v3" ? "FYERS_QUOTE" : "YAHOO_QUOTE",
         },
       });
     } catch (error) {

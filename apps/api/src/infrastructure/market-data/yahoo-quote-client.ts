@@ -1,5 +1,6 @@
 import yahooFinance from "yahoo-finance2";
 import { resolveYahooSymbol } from "../../modules/market-data/domain/yahoo-symbol-resolver.js";
+import type { MarketQuote } from "../../modules/market-data/domain/market-quote.js";
 
 /**
  * One Yahoo quote client for the whole process, plus the narrow shape callers actually read.
@@ -15,7 +16,7 @@ import { resolveYahooSymbol } from "../../modules/market-data/domain/yahoo-symbo
  * ships a callable-module type that does not describe the class form this codebase uses.
  */
 
-export interface YahooQuote {
+export interface YahooQuote extends MarketQuote {
   symbol: string;
   /** Provider-supplied display name and venue. Null when the provider omits them. */
   shortName: string | null;
@@ -41,6 +42,7 @@ function toQuote(raw: Record<string, unknown>, fallbackSymbol: string): YahooQuo
   const time = raw.regularMarketTime;
   return {
     symbol: typeof raw.symbol === "string" ? raw.symbol : fallbackSymbol,
+    provider: "yahoo",
     shortName: typeof raw.shortName === "string" && raw.shortName !== "" ? raw.shortName : null,
     exchange: typeof raw.exchange === "string" && raw.exchange !== "" ? raw.exchange : null,
     regularMarketPrice: numberOrNull(raw.regularMarketPrice),

@@ -11,6 +11,7 @@ function build(options: {
   fetch: typeof fetch;
   maxDaysPerRequest?: number;
   getAccessToken?: () => Promise<string>;
+  now?: Date;
 }) {
   const getAccessToken = vi.fn(options.getAccessToken ?? (async () => "access-token"));
   const provider = new FyersHistoricalDataProvider({
@@ -18,7 +19,7 @@ function build(options: {
     appId: "APPID-100",
     fetch: options.fetch,
     maxDaysPerRequest: options.maxDaysPerRequest,
-    now: () => NOW,
+    now: () => options.now ?? NOW,
   });
   return { provider, getAccessToken };
 }
@@ -98,7 +99,7 @@ describe("FyersHistoricalDataProvider", () => {
     expect(getAccessToken).toHaveBeenCalledTimes(1);
   });
 
-  it("clamps range_to into the past so no in-progress candle is requested", async () => {
+  it("requests the current NSE date so completed intraday bars are not delayed a day", async () => {
     const ranges: string[] = [];
     const { provider } = build({
       fetch: async (input) => {
@@ -114,7 +115,27 @@ describe("FyersHistoricalDataProvider", () => {
       to: new Date("2026-12-31T00:00:00Z"),
     });
 
-    expect(ranges).toEqual(["2026-08-02"]);
+    expect(ranges).toEqual(["2026-08-03"]);
+  });
+
+  it("includes today's daily candle only after the NSE cash close", async () => {
+    const ranges: string[] = [];
+    const { provider } = build({
+      now: new Date("2026-08-03T11:00:00.000Z"), // 16:30 IST
+      fetch: async (input) => {
+        ranges.push(new URL(String(input)).searchParams.get("range_to")!);
+        return okBody([]);
+      },
+    });
+
+    await provider.fetchCandles({
+      providerInstrumentId: "SBIN",
+      timeframe: "1d",
+      from: new Date("2026-08-01T00:00:00Z"),
+      to: new Date("2026-12-31T00:00:00Z"),
+    });
+
+    expect(ranges).toEqual(["2026-08-03"]);
   });
 
   it("returns nothing rather than calling out when the whole range is in the future", async () => {
@@ -202,6 +223,33 @@ describe("FyersHistoricalDataProvider", () => {
     expect(result).toHaveLength(1);
   });
 
+  it("retries a transient network failure before succeeding", async () => {
+    const waits: number[] = [];
+    let calls = 0;
+    const provider = new FyersHistoricalDataProvider({
+      tokenService: { getAccessToken: async () => "access-token" },
+      appId: "APPID-100",
+      now: () => NOW,
+      sleep: async (ms) => { waits.push(ms); },
+      fetch: async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return okBody([[1782012600, 1, 2, 0.5, 1.5, 10]]);
+      },
+    });
+
+    const result = await provider.fetchCandles({
+      providerInstrumentId: "NIFTY50",
+      timeframe: "5m",
+      from: new Date("2026-07-01T00:00:00Z"),
+      to: new Date("2026-07-02T00:00:00Z"),
+    });
+
+    expect(calls).toBe(2);
+    expect(waits).toEqual([1000]);
+    expect(result).toHaveLength(1);
+  });
+
   it("honours Retry-After when Fyers supplies it", async () => {
     const waits: number[] = [];
     let calls = 0;
@@ -263,6 +311,8 @@ describe("FyersHistoricalDataProvider", () => {
       to: new Date("2026-07-02T00:00:00Z"),
     });
 
+    expect(result[0].openTime.getUTCHours()).toBe(3);
+    expect(result[0].openTime.getUTCMinutes()).toBe(45);
     expect(result[0].closeTime.getTime() - result[0].openTime.getTime()).toBe(6 * 60 * 60_000 + 15 * 60_000);
   });
 });

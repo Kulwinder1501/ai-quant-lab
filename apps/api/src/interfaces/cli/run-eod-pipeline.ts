@@ -1,34 +1,7 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-
-const ML_ALGORITHMS = ["xgboost", "lightgbm"];
-
-/**
- * Walk-forward folds for the promotion gate.
- *
- * `train.py` defaults `--folds` to 1 and nothing used to pass it, so every gate
- * decision rested on a single trailing block. Measured 2026-08-03 on NIFTY50 `1d`
- * (877 labelled rows): 3 folds leaves 58 validation rows, below the gate's own
- * `--minimum-validation-rows` of 60, and the run is refused as
- * INSUFFICIENT_VALIDATION_EVIDENCE. 2 folds leaves 87 and passes. Raising this
- * further needs more rows, not a smaller floor — the floor is the thing keeping a
- * 26-row "holdout" from being reported as evidence.
- */
-const WALK_FORWARD_FOLDS = "2";
-
-/**
- * Combinatorial Purged CV block count, report-only.
- *
- * CPCV has been implemented in `validation.py` since it was written and had never
- * once been invoked. It stays out of the promotion gate deliberately — it trains on
- * later data to score earlier data, which is a fair robustness question and an unfair
- * deployment simulation — but as a diagnostic it pays for itself immediately. On the
- * directional target it showed macro-F1 beating trivial on 100% of splits while
- * accuracy *lost* on 93%, which is the signature of a model spreading predictions
- * across classes rather than knowing anything. A single-metric gate cannot see that.
- */
-const CPCV_GROUPS = "6";
+import { buildEodTrainingPlan } from "./eod-training-plan.js";
 
 /**
  * The twenty research equities from migration 027, pooled into one cross-sectional
@@ -64,9 +37,6 @@ const RESEARCH_TRAINING_POOL = [
   ...RESEARCH_EQUITY_POOL,
   ...RESEARCH_INDEX_POOL,
 ].join(",");
-
-/** Viable only on the pooled dataset; 5 folds on a single instrument breaks the floor. */
-const POOLED_WALK_FORWARD_FOLDS = "5";
 
 // apps/api/{src|dist}/interfaces/cli → five levels up is the repo root. Every
 // step runs a root-level npm script from there, so the pipeline behaves the
@@ -111,28 +81,35 @@ async function main(): Promise<void> {
     const today = new Date().toISOString().split("T")[0];
     const nowIso = new Date().toISOString();
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    // Yahoo serves roughly 60 days of 15m bars. Requesting more does not fail; it
-    // silently returns less, which is how a 2.5-year request became six weeks of data.
-    const sixtyDaysAgo = new Date(Date.now() - 58 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
     console.info("============== EOD PIPELINE STARTED ==============");
 
-    // 1. Fetch EOD Historical Data for NIFTY50 via Yahoo Finance (last 7 days to ensure safety)
-    await runCommand("npm", [
-      "run", "data:collect:historical", "--",
-      "--provider", "fyers",
-      "--instrument", "NIFTY50",
-      "--timeframe", "15m",
-      "--from", sevenDaysAgo,
-      "--to", today,
-      "--skip-existing"
-    ]);
+    // 1. Heal the intraday index series from settled Fyers history. The live
+    // collector owns current bars, while this pass fills any windows missed by a
+    // restart. 30m and 60m are model-research inputs and need the same recovery
+    // path as 15m rather than relying on a permanently running process.
+    const intradayIndexSeries = ["NIFTY50", "BANKNIFTY"] as const;
+    const intradayTimeframes = ["15m", "30m", "60m"] as const;
+    for (const instrument of intradayIndexSeries) {
+      for (const timeframe of intradayTimeframes) {
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "fyers",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", sevenDaysAgo,
+          "--to", today,
+          "--skip-existing",
+        ]);
+      }
+    }
 
-    // 1a. Fetch 1d Historical Data for NIFTY50 and the Research Equity Pool
+    // 1a. Fetch 1d historical data for both independently-modelled indices and the research pool.
     // This is required before shadow-predict so that 1d models have fresh daily candles to score against.
     const allDailySeries = [
-      { symbol: "NIFTY50", provider: "yahoo" },
-      ...RESEARCH_EQUITY_POOL.map((symbol) => ({ symbol, provider: "yahoo" })),
+      { symbol: "NIFTY50", provider: "fyers" },
+      { symbol: "BANKNIFTY", provider: "fyers" },
+      ...RESEARCH_EQUITY_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
       ...RESEARCH_INDEX_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
     ];
     for (const { symbol, provider } of allDailySeries) {
@@ -147,7 +124,49 @@ async function main(): Promise<void> {
       ]);
     }
 
-    // 1b. Data-readiness audit (Phase 25, Workstream A). Measures every stored
+    // A newly collected daily candle needs its derived evidence before the readiness audit and
+    // fit. Refresh every member because the pooled model requires a consistent feature layer.
+    for (const { symbol } of allDailySeries) {
+      await runCommand("npm", [
+        "run", "analysis:calculate-indicators", "--",
+        "--instrument", symbol,
+        "--timeframe", "1d",
+        "--from", sevenDaysAgo,
+      ]);
+      await runCommand("npm", [
+        "run", "analysis:detect-patterns", "--",
+        "--instrument", symbol,
+        "--timeframe", "1d",
+        "--from", sevenDaysAgo,
+      ]);
+    }
+
+    // 1b. Refresh every derived feature used by the intraday model schemas over
+    // the healed range. Both commands calculate with full-history context while
+    // --from bounds writes to the rows that may have changed.
+    for (const instrument of intradayIndexSeries) {
+      for (const timeframe of intradayTimeframes) {
+        await runCommand("npm", [
+          "run", "analysis:calculate-indicators", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", sevenDaysAgo,
+        ]);
+        await runCommand("npm", [
+          "run", "analysis:detect-patterns", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", sevenDaysAgo,
+        ]);
+      }
+    }
+
+    // A collector that restarts during a candle intentionally leaves that partial
+    // row incomplete. Settled history above replaces on-grid rows; this removes
+    // only remaining orphans older than the readiness audit's one-hour grace.
+    await runCommand("npm", ["run", "data:reconcile:provisional"]);
+
+    // 1c. Data-readiness audit (Phase 25, Workstream A). Measures every stored
     // series, assigns READY/DEGRADED/STALE/INVALID, and persists the report the
     // training gate reads. Runs after collection so tonight's bars are measured,
     // before training so no model fits unaudited data. The audit itself exits 0
@@ -185,11 +204,9 @@ async function main(): Promise<void> {
     // ORDER IS LOAD-BEARING: this must run BEFORE the training steps, and it used to run
     // after them. `deployment_not_before` is max(trainingLabelAvailableEnd, dataCutoffAt)
     // and the training steps pass `--to nowIso`, so a model trained in this run carries a
-    // cutoff later than the candle it would score. `list_shadow_pool` takes the newest
-    // candidate per family, so after training the freshest model was always the
-    // un-scorable one: every prediction was refused with "at or before this model's
-    // training-information boundary" and the chain would have run indefinitely
-    // accumulating zero evidence while every step reported success.
+    // cutoff later than the candle it would score. Predicting before training also
+    // guarantees that a newly enrolled family never attempts to backdate a score onto
+    // the candle used during its fit.
     //
     // Predicting first uses the model from a previous run, whose cutoff predates today's
     // candle. Verified 2026-08-04: 61 predictions created after the move, 0 before it.
@@ -203,41 +220,18 @@ async function main(): Promise<void> {
     // competition pool (step 5) and must outperform the champion on live,
     // settled outcomes before the title changes hands.
     //
-    // The `15m` run below asks for history from 2024-01-01 and cannot get it: 15m is
-    // Yahoo-owned and Yahoo serves roughly 60 days at that interval, so the request is
-    // silently truncated to about six weeks. That, not the choice of algorithm, is why
-    // these models trained on ~780 rows and scored 0.29 holdout macro-F1 against a
-    // 0.333 random baseline. It is kept because the intraday prediction job consumes
-    // 15m models, and its window is now stated honestly rather than implied.
-    for (const algo of ML_ALGORITHMS) {
-      await runTrainingStep(`${algo} NIFTY50 15m directional`, [
-        "run", `ml:train:${algo}`, "--",
-        "--instrument", "NIFTY50",
-        "--timeframe", "15m",
-        // Truthful about the provider ceiling instead of asking for 2.5 years of bars
-        // that will never arrive.
-        "--from", sixtyDaysAgo,
-        "--to", nowIso,
-        "--folds", WALK_FORWARD_FOLDS,
-        "--cpcv-groups", CPCV_GROUPS,
-      ]);
-    }
+    // The `15m` run trained on ~780 rows scoring 0.29 holdout macro-F1 against a
+    // 0.333 random baseline for one reason only: it asked Yahoo for 2.5 years and got
+    // silently truncated to ~60 days. That reason is gone. 15m moved to Fyers on
+    // 2026-08-05 (candle_series_provenance), and Fyers paginates the full history —
+    // NIFTY50 15m now holds ~22k bars back to 2023-01. So the window is the real
+    // multi-year one, and with the row count no longer scarce the fold ceiling that
+    // forced 2 folds lifts too: 5 folds now span multiple market regimes.
 
     // 3b. Daily-timeframe candidates. `1d` is the only timeframe with multi-year
     // depth (883 NIFTY50 bars from 2023-01), so it is the only one where walk-forward
     // folds span more than one market regime. Same row count as the 15m run, vastly
     // better regime coverage.
-    for (const algo of ML_ALGORITHMS) {
-      await runTrainingStep(`${algo} NIFTY50 1d directional`, [
-        "run", `ml:train:${algo}`, "--",
-        "--instrument", "NIFTY50",
-        "--timeframe", "1d",
-        "--from", "2023-01-01",
-        "--to", nowIso,
-        "--folds", WALK_FORWARD_FOLDS,
-        "--cpcv-groups", CPCV_GROUPS,
-      ]);
-    }
 
     // 3c. Volatility-regime candidates, on their own label alphabet.
     //
@@ -248,18 +242,6 @@ async function main(): Promise<void> {
     // competition and settlement repositories both filter on
     // `validationProtocol.labelScheme`, so a volatility model is invisible to the
     // directional pool by construction, and may inform risk only.
-    for (const algo of ML_ALGORITHMS) {
-      await runTrainingStep(`${algo} NIFTY50 1d volatility`, [
-        "run", `ml:train:${algo}`, "--",
-        "--instrument", "NIFTY50",
-        "--timeframe", "1d",
-        "--from", "2023-01-01",
-        "--to", nowIso,
-        "--label-scheme", "volatility-expansion-v1",
-        "--folds", WALK_FORWARD_FOLDS,
-        "--cpcv-groups", CPCV_GROUPS,
-      ]);
-    }
 
     // 3d. Pooled cross-sectional volatility candidates.
     //
@@ -272,17 +254,10 @@ async function main(): Promise<void> {
     // from +0.1038 to +0.1042 — nothing, from twenty times the data — and its accuracy
     // still lost to trivial. That is the evidence that direction's failure is the
     // target and not the sample size, so no pooled directional run is scheduled.
-    for (const algo of ML_ALGORITHMS) {
-      await runTrainingStep(`${algo} pooled 1d volatility`, [
-        "run", `ml:train:${algo}`, "--",
-        "--instruments", RESEARCH_TRAINING_POOL,
-        "--timeframe", "1d",
-        "--from", "2023-01-01",
-        "--to", nowIso,
-        "--label-scheme", "volatility-expansion-v1",
-        "--folds", POOLED_WALK_FORWARD_FOLDS,
-        "--cpcv-groups", CPCV_GROUPS,
-      ]);
+    // Execute the tested matrix. BANKNIFTY and NIFTY50 are independent model families and never
+    // borrow each other's artifacts; each refused step is isolated by runTrainingStep.
+    for (const step of buildEodTrainingPlan(nowIso, RESEARCH_TRAINING_POOL)) {
+      await runTrainingStep(step.description, step.args);
     }
 
     // 4. Shadow-predict once for the whole pool so a day with no intraday runs

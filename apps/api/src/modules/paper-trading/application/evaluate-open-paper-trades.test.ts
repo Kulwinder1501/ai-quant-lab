@@ -3,7 +3,8 @@ import type { CandleRepository, PersistedCandle } from "../../market-data/domain
 import { EvaluateOpenPaperTrades } from "./evaluate-open-paper-trades.js";
 import type { ClosePaperTradeInput, PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
 import { FixedImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
-import { priceOptionMark } from "../domain/option-mark-to-market.js";
+import { priceOptionMark, priceOptionMarksAtOhlc } from "../domain/option-mark-to-market.js";
+import type { CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 
 function openTrade(): PaperTrade {
   return {
@@ -124,6 +125,50 @@ function candle(id: string, openTime: string, closeTime: string, open: number, h
   };
 }
 
+interface DenseSample {
+  observedAt: Date;
+  bid: number | null;
+  ask: number | null;
+  lastPrice: number | null;
+  underlyingValue: number | null;
+}
+
+function sample(observedAt: string, bid: number | null, underlyingValue: number | null = null): DenseSample {
+  return {
+    observedAt: new Date(observedAt),
+    bid,
+    ask: bid === null ? null : bid + 1.5,
+    lastPrice: bid,
+    underlyingValue,
+  };
+}
+
+/**
+ * A dense-reader stub.
+ *
+ * `series` defaults to empty so a test exercising only the point-in-time bid path does not
+ * silently also exercise the barrier scan, which now runs ahead of it.
+ */
+function denseReader(latest: DenseSample | null, series: DenseSample[] = []) {
+  return {
+    latestForContract: async () => latest,
+    listForContractBetween: async () => series,
+  };
+}
+
+/** The same numeric view of a bar the evaluator builds internally, for asserting marks in a test. */
+function toCandle(persisted: PersistedCandle): CompletedPriceCandle {
+  return {
+    id: persisted.id,
+    openTime: persisted.openTime,
+    closeTime: persisted.closeTime,
+    open: Number(persisted.open),
+    high: Number(persisted.high),
+    low: Number(persisted.low),
+    close: Number(persisted.close),
+  };
+}
+
 describe("EvaluateOpenPaperTrades", () => {
   it("skips the source bar and closes on the first later completed candle under the conservative policy", async () => {
     const closings: ClosePaperTradeInput[] = [];
@@ -237,15 +282,8 @@ describe("EvaluateOpenPaperTrades", () => {
       listIncomplete: async () => [],
       listCompleted: async () => [],
     };
-    const densePremiums = {
-      latestForContract: async () => ({
-        observedAt: new Date(asOf.getTime() - 15_000),
-        bid: 145,
-        ask: 147,
-        lastPrice: 146,
-        underlyingValue: null,
-      }),
-    };
+    // Empty series, so this isolates the latest-bid path from the barrier scan above it.
+    const densePremiums = denseReader(sample("2026-08-06T09:59:45.000Z", 145));
 
     const result = await new EvaluateOpenPaperTrades(
       stubRepo(trade, closings),
@@ -284,13 +322,11 @@ describe("EvaluateOpenPaperTrades", () => {
       listIncomplete: async () => [],
       listCompleted: async () => [],
     };
-    const densePremiums = {
-      latestForContract: async () => ({
-        observedAt: new Date(asOf.getTime() - 15_000),
-        bid: 200, ask: 202, lastPrice: 201,
-        underlyingValue: null,
-      }),
-    };
+    // The series holds too: every observed bid sits between the stop and the target.
+    const densePremiums = denseReader(
+      sample("2026-08-06T09:59:45.000Z", 200),
+      [sample("2026-08-06T09:59:15.000Z", 198), sample("2026-08-06T09:59:45.000Z", 200)],
+    );
 
     const result = await new EvaluateOpenPaperTrades(
       stubRepo(trade, closings),
@@ -300,6 +336,217 @@ describe("EvaluateOpenPaperTrades", () => {
     ).execute({ accountId: "account-1", asOf, livePrices: { NIFTY50: spot }, exitFees: 0 });
 
     // The fresh bid held, the model path was skipped, and nothing closed.
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("lets a fresh bid govern HOLD against the completed-candle path too", async () => {
+    // The regression. The HOLD test above passed while the bug was live, because its candle
+    // repository is empty -- so the fresh bid only ever had to outrank the *live* model mark.
+    // The completed-candle path below it was never gated, and it closes on the same kind of
+    // theoretical premium.
+    //
+    // Measured on the AutoBot account 2026-08-13: a BANKNIFTY 57700 CE (entry 547.27, stop
+    // 526.51, target 579.36) was booked STOP_LOSS at a theoretical 519.58 by
+    // OPTION_COMPLETED_CANDLE_EVALUATOR while the dense book was bid 576-581 -- at the
+    // position's own target. Same bar, both instruments: a NIFTY 24400 CE stopped by one paisa.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const spot = 24000;
+
+    // A completed bar whose theoretical marks sit far below the stop, so this test proves the
+    // gate rather than a scenario where the candle path happened to agree.
+    const bar = candle("prior", "2026-08-05T09:15:00.000Z", "2026-08-05T10:00:00.000Z", spot, spot + 20, spot - 20, spot);
+    const marks = priceOptionMarksAtOhlc({ trade, candle: toCandle(bar), volatility: 0.12 });
+    expect(Math.min(marks.open, marks.high, marks.low, marks.close)).toBeLessThan(trade.stopLoss);
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [bar],
+    };
+    // Between the stop and the target, in the latest quote and across the whole series: the real
+    // market says hold, so neither the barrier scan nor the point check may close this.
+    const densePremiums = denseReader(
+      sample("2026-08-06T09:59:45.000Z", 200, spot),
+      [sample("2026-08-06T09:59:15.000Z", 198, spot), sample("2026-08-06T09:59:45.000Z", 200, spot)],
+    );
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, livePrices: { NIFTY50: spot }, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("closes on a barrier crossed between evaluations, at the observed bid and its own timestamp", async () => {
+    // The gap the fresh-bid rule left open, now closed by observed data rather than by a model.
+    // The premium dipped to 148 at 09:50 -- below the 150 stop -- and recovered to 200 by the time
+    // this evaluator ran. A point-in-time reader sees only the 200 and holds forever, so the stop
+    // never fires; the bot samples every five minutes against a book quoted twice a minute, so
+    // most of the session is invisible to it.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:59:45.000Z", 200), [
+      sample("2026-08-06T09:49:30.000Z", 176),
+      sample("2026-08-06T09:50:00.000Z", 148),
+      sample("2026-08-06T09:55:00.000Z", 190),
+      sample("2026-08-06T09:59:45.000Z", 200),
+    ]);
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitReason: "STOP_LOSS",
+      // The observed bid, not the 150 barrier: a resting order filling exactly at its trigger is
+      // not available from a tick series, and claiming it would overstate the exit.
+      exitPrice: 148,
+      // The moment the barrier was crossed, not the moment the evaluator noticed.
+      closedAt: new Date("2026-08-06T09:50:00.000Z"),
+      details: expect.objectContaining({
+        source: "OPTION_PREMIUM_TICK_SERIES",
+        fillRule: "OBSERVED_TICK_STOP",
+        samplesScanned: 4,
+      }),
+    });
+  });
+
+  it("takes the earliest barrier crossing when a later sample crosses the other way", async () => {
+    // Ordering is the substance of the scan, not a detail. The premium stopped out at 09:50 and
+    // only then ran to the target; closing on the target would invent a winning trade out of a
+    // position that had already been stopped. Scanning newest-first, or taking the best price in
+    // the window, both produce exactly that.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, targetPrice: 260, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:59:45.000Z", 265), [
+      sample("2026-08-06T09:50:00.000Z", 149),
+      sample("2026-08-06T09:59:45.000Z", 265),
+    ]);
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(closings[0]).toMatchObject({
+      exitReason: "STOP_LOSS",
+      exitPrice: 149,
+      closedAt: new Date("2026-08-06T09:50:00.000Z"),
+    });
+  });
+
+  it("does not read a missing bid as a premium worth nothing", async () => {
+    // A null or zero bid means no buyer was quoted -- a collection gap, or a market with no
+    // liquidity. Treating it as 0 would fire a stop on absent data, which is precisely the
+    // fabrication an observed-price check exists to avoid.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:59:45.000Z", 200), [
+      sample("2026-08-06T09:50:00.000Z", null),
+      sample("2026-08-06T09:52:00.000Z", 0),
+      sample("2026-08-06T09:59:45.000Z", 200),
+    ]);
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("holds rather than inventing an exit when the production quote reader has no fresh bid", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180 });
+    const asOf = new Date("2026-08-06T10:00:00.000Z");
+    const spot = 24000;
+    const bar = candle("prior", "2026-08-05T09:15:00.000Z", "2026-08-05T10:00:00.000Z", spot, spot + 20, spot - 20, spot);
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [bar],
+    };
+    // A contract the dense collector never covered: no latest quote and no series at all.
+    const densePremiums = denseReader(null);
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("never closes a new position from a quote observed before it opened", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-13T09:30:01.616Z");
+    const trade = optionBuyerTrade({
+      openedAt,
+      optionExpiry: new Date("2026-08-18T10:00:00.000Z"),
+      entryPrice: 124.65,
+      stopLoss: 118.95,
+      targetPrice: 133.54,
+    });
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // The measured incident: this real bid was 34 seconds old and below the stop, but also
+    // existed before the position. It cannot be an exit fill for a trade opened later.
+    const densePremiums = denseReader(sample("2026-08-13T09:29:27.513Z", 65.65));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf: openedAt, livePrices: { NIFTY50: 24_345.15 }, exitFees: 0 });
+
     expect(result.tradesClosed).toBe(0);
     expect(closings).toHaveLength(0);
   });

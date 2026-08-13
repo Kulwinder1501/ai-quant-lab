@@ -18,7 +18,7 @@ export interface IndexDriverWeight {
 export interface IndexDriverUniverse {
   key: string;
   label: string;
-  yahooIndexSymbol: string;
+  indexSymbol: string;
   drivers: readonly IndexDriverWeight[];
 }
 
@@ -156,25 +156,25 @@ export const INDEX_DRIVER_UNIVERSES: Readonly<Record<string, IndexDriverUniverse
   NIFTY50: {
     key: "NIFTY50",
     label: "Nifty 50",
-    yahooIndexSymbol: "^NSEI",
+    indexSymbol: "NIFTY50",
     drivers: NIFTY50_DRIVER_WEIGHTS,
   },
   BANKNIFTY: {
     key: "BANKNIFTY",
     label: "Bank Nifty",
-    yahooIndexSymbol: "^NSEBANK",
+    indexSymbol: "BANKNIFTY",
     drivers: BANKNIFTY_DRIVER_WEIGHTS,
   },
   FINNIFTY: {
     key: "FINNIFTY",
     label: "Fin Nifty",
-    yahooIndexSymbol: "NIFTY_FIN_SERVICE.NS",
+    indexSymbol: "FINNIFTY",
     drivers: FINNIFTY_DRIVER_WEIGHTS,
   },
   SENSEX: {
     key: "SENSEX",
     label: "Sensex",
-    yahooIndexSymbol: "^BSESN",
+    indexSymbol: "SENSEX",
     drivers: SENSEX_DRIVER_WEIGHTS,
   },
 };

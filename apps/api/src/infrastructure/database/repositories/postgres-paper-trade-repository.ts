@@ -42,6 +42,7 @@ interface PaperTradeRow extends QueryResultRow {
   quantity: string;
   entry_price: string;
   stop_loss: string;
+  stop_loss_effective_at: Date;
   target_price: string;
   opened_at: Date;
   closed_at: Date | null;
@@ -90,6 +91,7 @@ const tradeColumns = `
   paper_trades.quantity,
   paper_trades.entry_price,
   paper_trades.stop_loss,
+  paper_trades.stop_loss_effective_at,
   paper_trades.target_price,
   paper_trades.opened_at,
   paper_trades.closed_at,
@@ -139,6 +141,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     quantity: toNumber(row.quantity, "trade quantity"),
     entryPrice: toNumber(row.entry_price, "trade entry price"),
     stopLoss: toNumber(row.stop_loss, "trade stop loss"),
+    stopLossEffectiveAt: row.stop_loss_effective_at,
     targetPrice: toNumber(row.target_price, "trade target price"),
     openedAt: row.opened_at,
     closedAt: row.closed_at,
@@ -392,10 +395,11 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO paper_trades (
         account_id, trade_idea_id, instrument_id, side, status, quantity,
-        entry_price, stop_loss, target_price, opened_at, fees, fee_breakdown, slippage, notes,
+        entry_price, stop_loss, stop_loss_effective_at, target_price, opened_at,
+        fees, fee_breakdown, slippage, notes,
         option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv
       ) VALUES (
-        $1, $2, $3, $4, $14, $5, $6, $7, $8, $9, $10, $13::jsonb, $11, $12,
+        $1, $2, $3, $4, $14, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
         $15, $16, $17, $18, $19, $20
       ) RETURNING id
     `, [
@@ -496,9 +500,9 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
 
       await client.query(`
         UPDATE paper_trades
-        SET status = 'OPEN', entry_price = $2
+        SET status = 'OPEN', entry_price = $2, opened_at = $3, stop_loss_effective_at = $3
         WHERE id = $1
-      `, [input.paperTradeId, input.fillPrice]);
+      `, [input.paperTradeId, input.fillPrice, input.filledAt]);
 
       await client.query(`
         INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
@@ -717,7 +721,9 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     assertPositiveFinite(newStopLoss, "New stop loss");
     await this.database.query(`
       UPDATE paper_trades
-      SET stop_loss = $2, notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $2::text, ']')
+      SET stop_loss = $2,
+          stop_loss_effective_at = CURRENT_TIMESTAMP,
+          notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $2::text, ']')
       WHERE id = $1 AND status = 'OPEN'
     `, [id, newStopLoss, reason || "Dynamic Stop-Loss Tightening"]);
   }

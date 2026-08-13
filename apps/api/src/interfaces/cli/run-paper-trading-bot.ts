@@ -201,7 +201,11 @@ async function main(): Promise<void> {
     const refused: Array<Record<string, unknown>> = [];
     const skipped: Array<Record<string, unknown>> = [];
 
-    const prepareEntry = new PrepareOptionEntry(database, new PostgresOptionChainRepository(database));
+    const prepareEntry = new PrepareOptionEntry(
+      database,
+      new PostgresOptionChainRepository(database),
+      new PostgresOptionPremiumTickRepository(database),
+    );
     const openTrade = new OpenPaperTrade(tradeRepository);
     const riskRepository = new PostgresRiskStateRepository(database);
     // Read once per run rather than per idea: within a single run nothing else opens

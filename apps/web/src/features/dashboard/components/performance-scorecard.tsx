@@ -113,7 +113,10 @@ export function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerf
       </div>
 
       {/* Daily Self-Reflection & Mistake Learning Journal */}
-      <div className="mt-8 rounded-2xl border border-purple-500/30 bg-black/40 p-6 backdrop-blur-md">
+      {/* Mirrors the autonomous brain panel's gradient, on purple instead of indigo: mostly slate
+          with the tint pooling in one corner. A flat purple fill at this size would compete with
+          the emerald/rose outcome tints on the rows inside. */}
+      <div className="mt-8 rounded-2xl border border-purple-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-purple-950/30 p-6 backdrop-blur-md">
         <div className="flex items-center gap-2.5 border-b border-white/10 pb-3">
           <span className="text-lg">🎓</span>
           <h4 className="text-base font-extrabold text-white">AI Daily Self-Training & Improvement Journal</h4>
@@ -158,7 +161,12 @@ export function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerf
                     <span className="font-bold text-slate-300 uppercase tracking-wider text-[10px]">Trade Analysis: </span>
                     <span className="text-slate-200">{ref.analysis}</span>
                   </div>
-                  <div className="rounded-lg bg-black/50 p-2.5 border border-purple-500/20 font-mono text-[11px] text-purple-200">
+                  {/* Same treatment as the LEARNING rows in the autonomous brain stream: a
+                      purple-tinted surface rather than a near-black one, with purple kept for the
+                      label accent only. Mid-purple body copy on near-black read as muddy magenta
+                      against the rose/emerald outcome tint behind it, so the rule text -- the part
+                      actually worth reading -- goes near-white. */}
+                  <div className="rounded-lg bg-purple-950/30 p-2.5 border border-purple-500/30 font-mono text-[11px] text-slate-200">
                     <strong className="text-purple-300 uppercase tracking-wider">⚡ Self-Correction Rule Learned: </strong>
                     {ref.improvementRule}
                   </div>

@@ -200,16 +200,20 @@ export class PostgresOptionChainRepository {
    * would report a calendar that never existed at any instant, and the whole point of this
    * lookup is to answer "does this contract trade?" from something that was actually seen.
    */
-  async latestExpiryCalendar(underlyingSymbol: string): Promise<OptionExpiryCalendar | null> {
+  async latestExpiryCalendar(
+    underlyingSymbol: string,
+    asOf = new Date(),
+  ): Promise<OptionExpiryCalendar | null> {
     const result = await this.pool.query(`
       SELECT provider, observed_at, expiry_date, expiry_kind
       FROM option_expiry_calendar
       WHERE underlying_symbol = $1
         AND observed_at = (
-          SELECT max(observed_at) FROM option_expiry_calendar WHERE underlying_symbol = $1
+          SELECT max(observed_at) FROM option_expiry_calendar
+          WHERE underlying_symbol = $1 AND observed_at <= $2
         )
       ORDER BY expiry_date
-    `, [underlyingSymbol]);
+    `, [underlyingSymbol, asOf]);
     if (result.rows.length === 0) return null;
 
     return {
@@ -313,13 +317,15 @@ export class PostgresOptionChainRepository {
   async latestSnapshot(input: {
     underlyingSymbol: string;
     expiryDate?: string;
+    asOf?: Date;
   }): Promise<OptionChainSnapshot | null> {
     const latest = await this.pool.query(`
       SELECT max(observed_at) AS observed_at
       FROM option_chain_snapshots
       WHERE underlying_symbol = $1
         AND ($2::date IS NULL OR expiry_date = $2::date)
-    `, [input.underlyingSymbol, input.expiryDate ?? null]);
+        AND observed_at <= $3
+    `, [input.underlyingSymbol, input.expiryDate ?? null, input.asOf ?? new Date()]);
     const observedAt = latest.rows[0]?.observed_at as Date | null | undefined;
     if (!observedAt) return null;
 

@@ -80,6 +80,29 @@ function formatRangeDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
+const IST_OFFSET_MS = 5.5 * 60 * 60_000;
+
+/** Current NSE calendar date, expressed as a UTC date key for Fyers. */
+function currentMarketDate(now: Date): Date {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  return new Date(Date.UTC(
+    ist.getUTCFullYear(),
+    ist.getUTCMonth(),
+    ist.getUTCDate(),
+  ));
+}
+
+function nseSessionOpenFor(epochSeconds: number): Date {
+  const ist = new Date(epochSeconds * 1000 + IST_OFFSET_MS);
+  return new Date(Date.UTC(
+    ist.getUTCFullYear(),
+    ist.getUTCMonth(),
+    ist.getUTCDate(),
+    3,
+    45,
+  ));
+}
+
 /**
  * Read-only adapter for Fyers API v3's historical endpoint. It never calls an order,
  * position, or funds endpoint.
@@ -121,8 +144,9 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
     // Fyers returns a partial candle for the interval in progress. Clamping to the
     // previous day keeps a provisional row out of every run; the importer would mark
     // it incomplete anyway, so this is hygiene rather than a correctness fix.
-    const yesterday = new Date(this.now().getTime() - 24 * 60 * 60_000);
-    const to = new Date(Math.min(request.to.getTime(), yesterday.getTime()));
+    const now = this.now();
+    const currentMarketDay = currentMarketDate(now);
+    const to = new Date(Math.min(request.to.getTime(), currentMarketDay.getTime()));
     if (to < request.from) {
       return [];
     }
@@ -137,7 +161,9 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
       candles.push(...await this.fetchChunk(request, symbol, accessToken, cursor, chunkEnd));
       cursor = addDays(chunkEnd, 1);
     }
-    return candles;
+    // Fyers can include the interval currently forming. Keep today's completed bars,
+    // which the VIX scheduler needs, and discard only rows whose close is still ahead.
+    return candles.filter((candle) => candle.closeTime.getTime() <= now.getTime());
   }
 
   private async fetchChunk(
@@ -172,15 +198,28 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
     // A multi-year 1m backfill is thousands of requests, and Fyers starts answering
     // 429 after a burst of roughly a dozen. Without backoff the campaign dies partway
     // and leaves a half-filled series that looks like a provider gap.
-    let response!: Response;
+    let response: Response | undefined;
     let payload: FyersHistoryResponse | undefined;
     for (let attempt = 0; ; attempt += 1) {
-      response = await this.fetch(endpoint, {
-        headers: { Authorization: `${this.options.appId}:${accessToken}` },
-      });
+      try {
+        response = await this.fetch(endpoint, {
+          headers: { Authorization: `${this.options.appId}:${accessToken}` },
+        });
+      } catch (error) {
+        if (attempt >= this.maxRetries) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `Fyers history request for ${symbol} ${request.timeframe} failed after `
+            + `${attempt + 1} network attempts: ${detail}`,
+          );
+        }
+        await this.sleep(Math.min(2 ** attempt * 1000, 30_000));
+        continue;
+      }
       payload = await response.json().catch(() => undefined) as FyersHistoryResponse | undefined;
       const rateLimited = response.status === 429 || payload?.code === 429;
-      if (!rateLimited || attempt >= this.maxRetries) break;
+      const retryableServerFailure = response.status === 408 || response.status >= 500;
+      if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries) break;
       // Honour Retry-After when Fyers sends it; otherwise exponential backoff.
       const retryAfter = Number(response.headers.get("retry-after"));
       const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
@@ -188,6 +227,8 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
         : Math.min(2 ** attempt * 1000, 30_000);
       await this.sleep(waitMs);
     }
+
+    if (!response) throw new Error(`Fyers history request for ${symbol} returned no response.`);
 
     // Fyers signals failure in the body with HTTP 200, so `response.ok` alone is not
     // a verdict; `s` is the field that decides.
@@ -209,7 +250,9 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
       throw new Error("Fyers returned a candle without a usable timestamp.");
     }
     // Epoch seconds, unlike Kite's offset-suffixed strings.
-    const openTime = new Date(epochSeconds * 1000);
+    const openTime = timeframe === "1d"
+      ? nseSessionOpenFor(epochSeconds)
+      : new Date(epochSeconds * 1000);
     return {
       openTime,
       closeTime: new Date(openTime.getTime() + timeframeDurationMs[timeframe]),

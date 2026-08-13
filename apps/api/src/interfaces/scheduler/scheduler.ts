@@ -232,15 +232,17 @@ async function main(): Promise<void> {
   cron.schedule("*/15 9-15 * * 1-5", () => {
     void schedule("INTRADAY_MODEL_PREDICTIONS", async () => {
       const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
-      await runCommand("npm", [
-        "run", "data:collect:historical", "--",
-        "--provider", "fyers",
-        "--instrument", "NIFTY50",
-        "--timeframe", "15m",
-        "--from", todayIst,
-        "--to", todayIst,
-        "--skip-existing",
-      ]);
+      for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "fyers",
+          "--instrument", instrument,
+          "--timeframe", "15m",
+          "--from", todayIst,
+          "--to", todayIst,
+          "--skip-existing",
+        ]);
+      }
       // Same-day Fyers history returns no intraday rows. NIFTYBEES 1m bars are
       // written continuously by live-collector-scalp-v2; refresh their overlays
       // before scoring instead of reporting a successful zero-row backfill.
@@ -271,7 +273,7 @@ async function main(): Promise<void> {
     for (const timeframe of timeframes) {
       await runCommand("npm", [
         "run", "data:collect:historical", "--",
-        "--provider", "yahoo",
+        "--provider", "fyers",
         "--instrument", "INDIAVIX",
         "--timeframe", timeframe,
         "--from", istDateKey(lookback),
@@ -307,9 +309,8 @@ async function main(): Promise<void> {
    * every-minute cron. Bounding the write leaves the values identical and the work
    * proportional to what actually changed.
    *
-   * Five days rather than one because nothing else recomputes index indicators -- the EOD
-   * pipeline does not -- so a missed session has to heal on the next run, including over
-   * a long weekend.
+   * Five days rather than one so a missed intraday run heals on the next pass,
+   * including over a long weekend; EOD provides a second recovery path.
    */
   const INDICATOR_WRITE_LOOKBACK_DAYS = 5;
 
@@ -378,6 +379,22 @@ async function main(): Promise<void> {
 
   cron.schedule("*/15 9-15 * * 1-5", () => {
     void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["15m"]));
+  }, { timezone: IST });
+
+  // Higher-timeframe models consume completed 30m/60m candles. Refreshing their
+  // derived features every minute would repeatedly traverse the same history with
+  // no new completed input, so keep this on the 15-minute boundary. The commands
+  // are idempotent and the five-day write window heals missed runs after restarts.
+  // Offset from the quarter-hour jobs so prediction, 15m pattern detection, and
+  // these heavier full-history calculations do not contend at the same second.
+  cron.schedule("7,22,37,52 9-15 * * 1-5", () => {
+    if (fyersTokenService) {
+      void schedule("HIGHER_TIMEFRAME_ANALYSIS", async () => {
+        // live-collector-v2 supplies these candles; EOD owns gap healing.
+        await calculateIndexIndicatorsIntraday(["30m", "60m"]);
+        await detectPatternsIntraday(["30m", "60m"]);
+      });
+    }
   }, { timezone: IST });
 
   cron.schedule("*/1 9-15 * * 1-5", () => {
@@ -463,6 +480,22 @@ async function main(): Promise<void> {
         await new Promise<void>((resolve) => setTimeout(resolve, 25_000));
         await runCommand("npm", args);
       });
+    }
+  };
+
+  const calculateIndexIndicatorsIntraday = async (timeframes: readonly string[]): Promise<void> => {
+    const indicatorsFrom = istDateKey(
+      new Date(Date.now() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
+    );
+    for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+      for (const timeframe of timeframes) {
+        await runCommand("npm", [
+          "run", "analysis:calculate-indicators", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", indicatorsFrom,
+        ]);
+      }
     }
   };
   // Exactly 09:15-15:30 IST; do not fill the research table with pre-open/post-close repeats.

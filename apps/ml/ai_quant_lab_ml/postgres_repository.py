@@ -1491,7 +1491,7 @@ class PostgresMlRepository:
         ]
 
     def list_shadow_pool(self, label_scheme: str, model_key: str | None = None) -> list[dict[str, Any]]:
-        """Latest CANDIDATE per model family for a *non-directional* label scheme.
+        """Explicitly enrolled model version per non-directional model family.
 
         The directional competition pool cannot serve these. ``model_competition_state``
         enrolls only directional models, deliberately: a volatility model was once
@@ -1499,19 +1499,14 @@ class PostgresMlRepository:
         unpromotable at the top of a group it could never score in. Relaxing that filter
         would reintroduce exactly that bug.
 
-        So a non-directional candidate shadow-predicts from here instead, and the clock
-        that guards it against backdating is its own ``trained_at`` rather than an
-        enrollment timestamp. That is the honest equivalent: a prediction for a candle
-        that closed before the model was trained is in-sample, and the caller's existing
-        ``enrolled_at`` guard enforces it unchanged once this supplies the value.
-
-        One row per ``model_key`` — the newest. Older versions of the same family would
-        otherwise each write a prediction for the same candle and inflate the record of a
-        family that has only one current answer.
+        Membership comes from ``volatility_shadow_enrollments``. Training writes that
+        row only after the candidate clears its statistical gate, and enrollment is
+        sticky: a failed experiment or a newer retrain cannot silently replace the
+        exact version accumulating live evidence.
         """
 
         query = """
-            SELECT DISTINCT ON (model_versions.model_key)
+            SELECT
                 model_versions.id,
                 model_versions.model_key,
                 model_versions.version,
@@ -1522,22 +1517,25 @@ class PostgresMlRepository:
                 model_versions.feature_schema,
                 model_versions.validation_metrics,
                 model_versions.trained_at,
-                model_versions.promoted_at
-            FROM model_versions
-            WHERE (model_versions.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = %s
+                model_versions.promoted_at,
+                volatility_shadow_enrollments.enrolled_at AS shadow_enrolled_at
+            FROM volatility_shadow_enrollments
+            INNER JOIN model_versions
+              ON model_versions.id = volatility_shadow_enrollments.model_version_id
+            WHERE volatility_shadow_enrollments.label_scheme = %s
+              AND (model_versions.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = %s
               AND model_versions.stage IN ('CANDIDATE', 'PRODUCTION')
         """
-        parameters: list[Any] = [_require_non_blank(label_scheme, "Label scheme")]
+        normalized_label_scheme = _require_non_blank(label_scheme, "Label scheme")
+        parameters: list[Any] = [normalized_label_scheme, normalized_label_scheme]
         if label_scheme in DIRECTIONAL_LABEL_SCHEMES:
             raise ValueError(
                 f"{label_scheme} is directional and belongs to the competition pool, not the shadow pool."
             )
         if model_key is not None:
-            query += " AND model_versions.model_key = %s"
+            query += " AND volatility_shadow_enrollments.model_key = %s"
             parameters.append(_require_non_blank(model_key, "Model key"))
-        # Prefer the newest trained_at, then the highest version when clocks tie
-        # (re-registration of the same research artifact keeps trained_at fixed).
-        query += " ORDER BY model_versions.model_key, model_versions.trained_at DESC, model_versions.version DESC"
+        query += " ORDER BY volatility_shadow_enrollments.model_key"
 
         with self._connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(query, tuple(parameters))
@@ -1546,9 +1544,7 @@ class PostgresMlRepository:
             {
                 "model_version": _to_model_version(row),
                 "role": "SHADOW",
-                # Guarding by trained_at keeps the no-backdating property with a clock
-                # that actually exists for an unenrolled candidate.
-                "enrolled_at": _require_valid_datetime(row["trained_at"], "Trained at"),
+                "enrolled_at": _require_valid_datetime(row["shadow_enrolled_at"], "Shadow enrolled at"),
                 "competition_group": _require_non_blank(str(row["model_key"]), "Model key"),
             }
             for row in rows

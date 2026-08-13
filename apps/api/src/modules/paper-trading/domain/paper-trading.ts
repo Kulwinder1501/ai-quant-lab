@@ -44,6 +44,8 @@ export interface PaperTrade {
   quantity: number;
   entryPrice: number;
   stopLoss: number;
+  /** First instant at which the currently persisted stopLoss was active. */
+  stopLossEffectiveAt?: Date;
   targetPrice: number;
   openedAt: Date;
   closedAt: Date | null;

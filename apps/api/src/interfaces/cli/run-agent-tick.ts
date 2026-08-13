@@ -1,7 +1,6 @@
 import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
-import { quoteLabSymbol } from "../../infrastructure/market-data/yahoo-quote-client.js";
 import { buildHttpDependencies } from "../http/dependencies.js";
 import { AiAgentTickCoordinator } from "../../modules/strategy-engine/application/ai-agent-tick-coordinator.js";
 
@@ -64,7 +63,7 @@ async function main(): Promise<void> {
     const outcomes: Array<Record<string, unknown>> = [];
 
     for (const symbol of options.symbols) {
-      const quote = await quoteLabSymbol(symbol);
+      const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
       if (quote === null) {
         // Reported, not silently skipped: "the agent evaluated and did nothing" and "the
         // agent never ran" are the same empty output otherwise, and only one is a market

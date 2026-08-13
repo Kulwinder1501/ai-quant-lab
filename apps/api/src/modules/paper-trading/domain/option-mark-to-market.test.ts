@@ -3,6 +3,7 @@ import {
   TRAP_PREMIUM_TOLERANCE_FRACTION,
   decideOptionBuyerExit,
   decideOptionBuyerLiveExit,
+  decideOptionBuyerObservedExit,
   isOptionBuyerTrade,
   priceOptionMark,
   priceOptionMarksAtOhlc,
@@ -97,6 +98,26 @@ describe("option-mark-to-market", () => {
       exitPrice: 310,
     });
     expect(decideOptionBuyerLiveExit(trade, 180)).toBeNull();
+  });
+
+  it("does not apply a tightened stop to observations from before it became active", () => {
+    const trade = optionTrade({ stopLoss: 170, targetPrice: 260, entryPrice: 180 });
+    const stopLossEffectiveAt = new Date("2026-07-28T10:10:00.000Z");
+    const decision = decideOptionBuyerObservedExit(trade, [
+      { observedAt: new Date("2026-07-28T10:05:00.000Z"), bid: 160 },
+      { observedAt: new Date("2026-07-28T10:11:00.000Z"), bid: 175 },
+    ], { stopLossEffectiveAt });
+
+    expect(decision).toBeNull();
+  });
+
+  it("still detects a target reached before the current stop became active", () => {
+    const trade = optionTrade({ stopLoss: 170, targetPrice: 260, entryPrice: 180 });
+    const decision = decideOptionBuyerObservedExit(trade, [
+      { observedAt: new Date("2026-07-28T10:05:00.000Z"), bid: 265 },
+    ], { stopLossEffectiveAt: new Date("2026-07-28T10:10:00.000Z") });
+
+    expect(decision).toMatchObject({ reason: "TARGET", exitPrice: 265 });
   });
 
   it("uses conservative stop-first when OHLC marks touch both barriers", () => {

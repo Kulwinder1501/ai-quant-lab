@@ -85,6 +85,13 @@ interface Overrides {
     proxy_symbol?: string | null;
   } | null;
   scheduledEvents?: number | "error";
+  premiumTick?: {
+    observedAt: Date;
+    bid: number | null;
+    ask: number | null;
+    lastPrice: number | null;
+    underlyingValue: number | null;
+  } | null;
 }
 
 function service(overrides: Overrides = {}) {
@@ -114,7 +121,18 @@ function service(overrides: Overrides = {}) {
     latestExpiryCalendar: async () => overrides.calendar === undefined ? calendar() : overrides.calendar,
     latestSnapshot: async () => overrides.snapshot === undefined ? chain() : overrides.snapshot,
   };
-  return new PrepareOptionEntry(database, chainReader);
+  const premiumTicks = {
+    latestForContract: async () => overrides.premiumTick === undefined
+      ? {
+        observedAt: NOW,
+        bid: 745,
+        ask: 752,
+        lastPrice: 748,
+        underlyingValue: 57_720,
+      }
+      : overrides.premiumTick,
+  };
+  return new PrepareOptionEntry(database, chainReader, premiumTicks);
 }
 
 describe("PrepareOptionEntry - choosing the contract", () => {
@@ -177,25 +195,33 @@ describe("PrepareOptionEntry - pricing the entry", () => {
     if (!result.approved) return;
     expect(result.entry.fillPrice).toBe(752);
     expect(result.entry.feeBreakdown.entryChecks).toMatchObject({
-      fillSource: "OPTION_CHAIN_QUOTE",
+      fillSource: "OPTION_PREMIUM_TICK_ASK",
       observedAsk: 752,
+      quoteObservedAt: NOW.toISOString(),
     });
   });
 
-  it("falls back to the model on a stale chain, and records that it did", async () => {
-    // Falling back is worse than a stale ask but better than a price nothing was offering.
-    // What must not happen is the trade being unable to say which it was.
+  it("refuses a stale chain when no fresh executable tick exists", async () => {
+    // The measured failure was a model entry at 124.65 while the real ask was about 67.50.
+    // A missing quote is a refusal, not permission to invent a fill.
     const stale = chain({ observedAt: new Date(NOW.getTime() - 90 * 60 * 1000) });
-    const result = await service({ snapshot: stale }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+    const result = await service({ snapshot: stale, premiumTick: null })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "NO_FRESH_EXECUTABLE_QUOTE" });
+  });
+
+  it("uses the latest dense ask when the chain context is older", async () => {
+    const olderChain = chain({ observedAt: new Date(NOW.getTime() - 15 * 60 * 1000) });
+    const result = await service({ snapshot: olderChain }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
+    expect(result.entry.fillPrice).toBe(752);
     expect(result.entry.feeBreakdown.entryChecks).toMatchObject({
-      fillSource: "OPTION_MODEL",
-      chainUsable: false,
-      observedAsk: null,
+      fillSource: "OPTION_PREMIUM_TICK_ASK",
+      quoteObservedAt: NOW.toISOString(),
     });
-    expect(result.entry.fillPrice).not.toBe(752);
   });
 
   it("sizes in whole lots, never in units", async () => {
@@ -214,7 +240,16 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
   it("refuses a wide spread and says by how much", async () => {
     const wide = chain();
     wide.quotes[0] = { ...wide.quotes[0]!, bid: 700, ask: 800 };
-    const result = await service({ snapshot: wide }).execute({ tradeIdeaId: "idea-1", now: NOW });
+    const result = await service({
+      snapshot: wide,
+      premiumTick: {
+        observedAt: NOW,
+        bid: 700,
+        ask: 800,
+        lastPrice: 750,
+        underlyingValue: 57_720,
+      },
+    }).execute({ tradeIdeaId: "idea-1", now: NOW });
 
     expect(result).toMatchObject({ approved: false, reason: "OPTIONS_ENTRY_REJECTED" });
     if (result.approved) return;

@@ -1,5 +1,4 @@
 import type { Express, Request } from "express";
-import { quoteLabSymbols } from "../../../../infrastructure/market-data/yahoo-quote-client.js";
 import { respondToRouteError } from "../../../../interfaces/http/common/route-errors.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import {
@@ -49,13 +48,16 @@ function parseTradeHistoryQuery(request: Request): {
   };
 }
 
-async function loadLivePrices(symbols: readonly string[]): Promise<Record<string, number>> {
+async function loadLivePrices(
+  quoteReader: HttpDependencies["marketQuoteClient"],
+  symbols: readonly string[],
+): Promise<Record<string, number>> {
   const livePrices: Record<string, number> = {};
   if (symbols.length === 0) return livePrices;
 
   // Batched rather than one request per symbol: this runs on the account-summary and close
   // paths, which are called with every open position's underlying at once.
-  const quotes = await quoteLabSymbols(symbols);
+  const quotes = await quoteReader.quoteSymbols(symbols);
   for (const [symbol, quote] of quotes) {
     livePrices[symbol] = quote.regularMarketPrice!;
   }
@@ -132,6 +134,7 @@ export function registerPaperTradingRoutes(
     | "evaluateOpenPaperTrades"
     | "closePaperTrade"
     | "optionChainRepository"
+    | "marketQuoteClient"
   >,
 ): void {
   /**
@@ -256,7 +259,7 @@ export function registerPaperTradingRoutes(
           (symbol): symbol is string => typeof symbol === "string" && symbol.length > 0,
         ),
       )];
-      const livePrices = await loadLivePrices(activeSymbols);
+      const livePrices = await loadLivePrices(dependencies.marketQuoteClient, activeSymbols);
       const summary = await dependencies.getPaperAccountSummary.execute(accountId);
       const fullSummary = await dependencies.dashboardRepository.getPaperAccountFullSummary(accountId, summary);
       let currentVolatility: number | null = null;
@@ -383,6 +386,7 @@ export function registerPaperTradingRoutes(
         const prepared = await new PrepareOptionEntry(
           dependencies.database,
           dependencies.optionChainRepository,
+          dependencies.optionPremiumTickRepository,
         ).execute({
           tradeIdeaId,
           expiryDate,
@@ -543,7 +547,10 @@ export function registerPaperTradingRoutes(
         underlyingEntryPrice = null;
       }
       if (underlyingEntryPrice === null) {
-        const livePrices = await loadLivePrices([String(underlyingSymbol).toUpperCase()]);
+        const livePrices = await loadLivePrices(
+          dependencies.marketQuoteClient,
+          [String(underlyingSymbol).toUpperCase()],
+        );
         underlyingEntryPrice = livePrices[String(underlyingSymbol).toUpperCase()] ?? null;
       }
 
@@ -612,7 +619,7 @@ export function registerPaperTradingRoutes(
       const result = await dependencies.evaluateOpenPaperTrades.execute({
         accountId,
         asOf: new Date(),
-        livePrices: await loadLivePrices(activeSymbols),
+        livePrices: await loadLivePrices(dependencies.marketQuoteClient, activeSymbols),
       });
       response.status(200).json({ data: result });
     } catch (error) {
@@ -644,7 +651,9 @@ export function registerPaperTradingRoutes(
           return;
         }
         const symbol = openTrade.underlyingSymbol ?? openTrade.instrumentSymbol;
-        const livePrices = symbol ? await loadLivePrices([symbol.toUpperCase()]) : {};
+        const livePrices = symbol
+          ? await loadLivePrices(dependencies.marketQuoteClient, [symbol.toUpperCase()])
+          : {};
         let currentVolatility: number | null = null;
         try {
           currentVolatility = await new PostgresIndiaVixImpliedVolatilitySource(

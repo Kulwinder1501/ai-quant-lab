@@ -30,6 +30,7 @@ import {
 } from "../../paper-trading/domain/bot-data-freshness.js";
 import { measureSmcConfluence } from "../domain/smc-confluence.js";
 import { SMC_ALGORITHM_VERSION } from "../../technical-analysis/domain/technical-indicator.js";
+import type { MarketQuoteReader } from "../../market-data/domain/market-quote.js";
 
 export interface AiBrainThought {
   id: string;
@@ -228,6 +229,7 @@ export class AiAutonomousAgent {
   private readonly openOptionPosition: OpenOptionPositionFromIdea;
   /** Read-only, for pricing a breaker exit against the observed book. */
   private readonly optionChainRepository: ContractQuoteReader;
+  private readonly marketQuotes: MarketQuoteReader | null;
   private lastTradeAttempt: Map<string, number> = new Map();
 
   constructor(
@@ -251,6 +253,7 @@ export class AiAutonomousAgent {
     overrides?: {
       openOptionPosition?: OpenOptionPositionFromIdea;
       optionChainRepository?: ContractQuoteReader;
+      marketQuotes?: MarketQuoteReader;
     },
   ) {
     this.evaluateTrades = new EvaluateOpenPaperTrades(
@@ -261,8 +264,13 @@ export class AiAutonomousAgent {
     );
     this.optionChainRepository = overrides?.optionChainRepository
       ?? new PostgresOptionChainRepository(database);
+    this.marketQuotes = overrides?.marketQuotes ?? null;
     this.openOptionPosition = overrides?.openOptionPosition ?? new OpenOptionPositionFromIdea(
-      new PrepareOptionEntry(database, new PostgresOptionChainRepository(database)),
+      new PrepareOptionEntry(
+        database,
+        new PostgresOptionChainRepository(database),
+        new PostgresOptionPremiumTickRepository(database),
+      ),
       new OpenPaperTrade(paperTradeRepo),
       new PostgresRiskStateRepository(database),
     );
@@ -595,7 +603,9 @@ export class AiAutonomousAgent {
     let shortDriverTape: InstitutionalFlowBias = { adjustment: 0, reasoning: null };
     let driverTapeMetrics: DriverTapeMetrics | null = null;
     try {
-      const driverTape = await loadIndexDriverTape(symbol);
+      const driverTape = this.marketQuotes === null
+        ? null
+        : await loadIndexDriverTape(this.marketQuotes, symbol);
       if (driverTape?.tape) {
         driverTapeMetrics = driverTape.tape;
         longDriverTape = scoreDriverTapeBias("LONG", driverTape.tape);

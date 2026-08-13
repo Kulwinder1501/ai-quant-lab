@@ -7,6 +7,7 @@ from ai_quant_lab_ml.straddle_economics import (
     black_scholes_straddle,
     breakeven_precision,
     build_entries,
+    cost_aware_promotion_verdict,
     realised_volatility,
 )
 
@@ -86,6 +87,38 @@ class BreakevenPrecisionTests(unittest.TestCase):
     def test_returns_none_without_both_populations(self) -> None:
         self.assertIsNone(breakeven_precision([entry(0.02, True)], reverted=False)["breakevenPrecision"])
         self.assertEqual(breakeven_precision([], reverted=False)["entries"], 0)
+
+
+class CostAwarePromotionVerdictTests(unittest.TestCase):
+    def test_precision_cannot_pass_a_fee_losing_strategy(self) -> None:
+        result = cost_aware_promotion_verdict(
+            gated_pnls=[0.0001] * 100,
+            always_enter_pnls=[0.0002] * 400,
+            fee_bps=5,
+        )
+
+        self.assertEqual(result["decision"], "DO_NOT_PROMOTE")
+        self.assertIn("positiveNetMean", result["failedChecks"])
+        self.assertIn("beatsAlwaysEnter", result["failedChecks"])
+
+    def test_requires_sample_depth_and_a_positive_lower_bound(self) -> None:
+        too_few = cost_aware_promotion_verdict(
+            gated_pnls=[0.002] * 40,
+            always_enter_pnls=[0.0001] * 200,
+        )
+        self.assertEqual(too_few["decision"], "DO_NOT_PROMOTE")
+        self.assertFalse(too_few["checks"]["minimumScored"])
+        self.assertFalse(too_few["checks"]["minimumGated"])
+
+    def test_passes_only_when_every_economic_check_clears(self) -> None:
+        result = cost_aware_promotion_verdict(
+            gated_pnls=[0.002] * 100,
+            always_enter_pnls=[0.0006] * 400,
+            fee_bps=5,
+        )
+
+        self.assertEqual(result["decision"], "COST_GATE_PASSED")
+        self.assertEqual(result["failedChecks"], [])
 
 
 class BuildEntriesTests(unittest.TestCase):

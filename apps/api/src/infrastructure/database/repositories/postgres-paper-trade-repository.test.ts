@@ -103,3 +103,41 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
     expect(release).toHaveBeenCalledOnce();
   });
 });
+
+describe("PostgresPaperTradeRepository timing boundaries", () => {
+  it("moves opened_at and stop effectiveness to the actual pending fill time", async () => {
+    const filledAt = new Date("2026-08-13T05:15:00.000Z");
+    const statements: Array<{ text: string; parameters: unknown[] | undefined }> = [];
+    const client = {
+      query: vi.fn(async (text: string, parameters?: unknown[]) => {
+        statements.push({ text: text.replace(/\s+/g, " ").trim(), parameters });
+        if (text.includes("SELECT id FROM paper_trades")) return { rows: [{ id: "trade-1" }] };
+        if (text.includes("FROM paper_trades") && !text.includes("SELECT id")) return { rows: [] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+
+    await expect(new PostgresPaperTradeRepository(database).fillPendingTrade({
+      paperTradeId: "trade-1",
+      fillPrice: 180,
+      filledAt,
+    })).rejects.toThrow("Unable to resolve filled trade.");
+
+    const update = statements.find((statement) => statement.text.startsWith("UPDATE paper_trades"));
+    expect(update?.text).toContain("opened_at = $3");
+    expect(update?.text).toContain("stop_loss_effective_at = $3");
+    expect(update?.parameters).toEqual(["trade-1", 180, filledAt]);
+  });
+
+  it("timestamps every stop revision", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const database = { query } as unknown as DatabasePool;
+
+    await new PostgresPaperTradeRepository(database).updateStopLoss("trade-1", 170, "tighten");
+
+    const [sql] = query.mock.calls[0] as unknown as [string];
+    expect(sql).toContain("stop_loss_effective_at = CURRENT_TIMESTAMP");
+  });
+});

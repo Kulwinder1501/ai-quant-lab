@@ -112,6 +112,36 @@ def model_row(**overrides: Any) -> Row:
 
 
 class PostgresMlRepositoryTests(unittest.TestCase):
+    def test_shadow_pool_reads_only_explicitly_enrolled_versions(self) -> None:
+        enrolled_at = at(22)
+        connection = FakeConnection([[
+            model_row(
+                model_key="volatility-expansion-xgboost--NIFTY50--60m--h2",
+                validation_metrics={
+                    "validationProtocol": {"labelScheme": "volatility-expansion-v1"},
+                    "promotionAssessment": {"decision": "INITIAL_BASELINE_THRESHOLD_MET"},
+                },
+                shadow_enrolled_at=enrolled_at,
+            )
+        ]])
+
+        members = PostgresMlRepository(connection).list_shadow_pool("volatility-expansion-v1")
+
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0]["enrolled_at"], enrolled_at)
+        query, parameters = connection.calls[0]
+        self.assertIn("FROM volatility_shadow_enrollments", query)
+        self.assertIn("model_versions.id = volatility_shadow_enrollments.model_version_id", query)
+        self.assertEqual(parameters, ("volatility-expansion-v1", "volatility-expansion-v1"))
+
+    def test_directional_scheme_cannot_query_the_auxiliary_shadow_pool(self) -> None:
+        connection = FakeConnection([])
+
+        with self.assertRaisesRegex(ValueError, "directional"):
+            PostgresMlRepository(connection).list_shadow_pool("fixed-horizon-v1")
+
+        self.assertEqual(connection.calls, [])
+
     def test_loads_cutoff_bounded_source_evidence_and_later_labels(self) -> None:
         connection = FakeConnection([
             [{"id": "instrument-1", "symbol": "NIFTY50"}],

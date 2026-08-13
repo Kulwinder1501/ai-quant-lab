@@ -32,6 +32,74 @@ TRADING_DAYS_PER_YEAR = 252
 CALENDAR_DAYS_PER_YEAR = 365.0
 
 
+def _mean_and_standard_error(values: Sequence[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return mean, None
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return mean, math.sqrt(variance / len(values))
+
+
+def cost_aware_promotion_verdict(
+    *,
+    gated_pnls: Sequence[float],
+    always_enter_pnls: Sequence[float],
+    fee_bps: float = 5.0,
+    minimum_scored: int = 300,
+    minimum_gated: int = 60,
+    confidence_z: float = 1.96,
+) -> dict[str, object]:
+    """Fail-closed economic gate for a shadow volatility strategy.
+
+    P&L values are fractions of spot. Passing requires enough observations, a
+    positive fee-adjusted mean, a positive lower confidence bound, and an
+    improvement over entering on every opportunity. Precision alone is not an
+    economic verdict because the label and option payoff are different targets.
+    """
+
+    if not math.isfinite(fee_bps) or fee_bps < 0:
+        raise ValueError("fee_bps must be a non-negative finite number.")
+    if minimum_scored < 1 or minimum_gated < 1:
+        raise ValueError("minimum sample sizes must be positive integers.")
+    if not math.isfinite(confidence_z) or confidence_z <= 0:
+        raise ValueError("confidence_z must be a positive finite number.")
+
+    gated_mean, gated_se = _mean_and_standard_error(gated_pnls)
+    always_mean, _ = _mean_and_standard_error(always_enter_pnls)
+    fee_fraction = fee_bps / 10_000
+    gated_net = None if gated_mean is None else gated_mean - fee_fraction
+    always_net = None if always_mean is None else always_mean - fee_fraction
+    lower_bound = (
+        None if gated_net is None or gated_se is None
+        else gated_net - confidence_z * gated_se
+    )
+
+    checks = {
+        "minimumScored": len(always_enter_pnls) >= minimum_scored,
+        "minimumGated": len(gated_pnls) >= minimum_gated,
+        "positiveNetMean": gated_net is not None and gated_net > 0,
+        "positiveNetLowerBound": lower_bound is not None and lower_bound > 0,
+        "beatsAlwaysEnter": (
+            gated_net is not None and always_net is not None and gated_net > always_net
+        ),
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    return {
+        "decision": "COST_GATE_PASSED" if not failed else "DO_NOT_PROMOTE",
+        "feeBps": fee_bps,
+        "minimumScored": minimum_scored,
+        "minimumGated": minimum_gated,
+        "confidenceZ": confidence_z,
+        "gatedNetMeanBps": None if gated_net is None else gated_net * 10_000,
+        "alwaysEnterNetMeanBps": None if always_net is None else always_net * 10_000,
+        "gatedNetLowerBoundBps": None if lower_bound is None else lower_bound * 10_000,
+        "checks": checks,
+        "failedChecks": failed,
+    }
+
+
 def _normal_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 

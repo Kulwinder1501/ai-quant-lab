@@ -69,19 +69,8 @@ function providerFromArguments(
  */
 const timeframeOwner: Record<string, "fyers" | "yahoo"> = {
   "1m": "fyers", "3m": "fyers", "5m": "fyers", "10m": "fyers", "15m": "fyers",
-  "30m": "yahoo", "60m": "yahoo", "1d": "yahoo",
+  "30m": "fyers", "60m": "fyers", "1d": "fyers",
 };
-
-/**
- * Instruments whose every timeframe stays Yahoo-owned regardless of the table above.
- *
- * The Fyers partition exists for tradable price series (indices, ETF proxies,
- * futures) where intraday history was re-sourced from Fyers. INDIAVIX is not part of
- * that program: its 1m/5m/15m series has only ever been Yahoo-sourced, the
- * INDIA_VIX_INTRADAY scheduler job collects it via Yahoo every five minutes, and
- * re-sourcing it would itself be the provider mix the partition forbids.
- */
-const yahooOwnedInstruments = new Set(["INDIAVIX"]);
 
 const providerIds: Record<string, string> = { fyers: "fyers-api-v3", yahoo: "yahoo" };
 
@@ -122,7 +111,7 @@ async function assertProviderOwnsTimeframe(
     );
   }
 
-  const owner = yahooOwnedInstruments.has(symbol.toUpperCase()) ? "yahoo" : timeframeOwner[timeframe];
+  const owner = timeframeOwner[timeframe];
   if (!owner || provider === owner) return;
   throw new Error(
     `The ${symbol} ${timeframe} series has no declaration yet, and policy assigns a new `

@@ -8,6 +8,7 @@ import {
 import {
   decideOptionBuyerExit,
   decideOptionBuyerLiveExit,
+  decideOptionBuyerObservedExit,
   isOptionBuyerTrade,
   priceOptionMark,
   priceOptionMarksAtOhlc,
@@ -48,23 +49,39 @@ export interface EvaluationFailure {
   message: string;
 }
 
+interface DenseContractKey {
+  underlyingSymbol: string;
+  expiryDate: Date;
+  strikePrice: number;
+  optionType: "CE" | "PE";
+}
+
+interface DenseObservation {
+  observedAt: Date;
+  bid: number | null;
+  ask: number | null;
+  lastPrice: number | null;
+  underlyingValue: number | null;
+}
+
 export interface DenseOptionPremiumReader {
   latestForContract(
-    contract: {
-      underlyingSymbol: string;
-      expiryDate: Date;
-      strikePrice: number;
-      optionType: "CE" | "PE";
-    },
+    contract: DenseContractKey,
     maxAgeMs?: number,
     now?: Date,
-  ): Promise<{
-    observedAt: Date;
-    bid: number | null;
-    ask: number | null;
-    lastPrice: number | null;
-    underlyingValue: number | null;
-  } | null>;
+  ): Promise<DenseObservation | null>;
+  /**
+   * Every observation in `(after, to]`, oldest first, for the barrier scan.
+   *
+   * Required rather than optional: without it a position's stop is enforced only at the instants
+   * this evaluator happens to run, and a reader that silently lacked the method would look
+   * identical to a quiet market. Every construction site already passes the Postgres repository.
+   */
+  listForContractBetween(
+    contract: DenseContractKey,
+    after: Date,
+    to: Date,
+  ): Promise<DenseObservation[]>;
 }
 
 function decimalToNumber(value: string, field: string): number {
@@ -110,7 +127,24 @@ function resolveLiveSpot(trade: PaperTrade, livePrices?: Record<string, number>)
   return undefined;
 }
 
-/** Applies the documented exit policy to closed candles that began after a simulated fill. */
+/**
+ * Applies the documented exit policy to closed candles that began after a simulated fill.
+ *
+ * Option-buyer positions are resolved in a strict order of authority, and it is an order of
+ * *evidence quality* rather than convenience:
+ *
+ * 1. **Expiry settlement** -- the contract no longer exists, so nothing else can apply.
+ * 2. **The observed tick series** (`decideOptionBuyerObservedExit`) -- every quoted bid since the
+ *    position opened, oldest first. This is the only check that can see a barrier crossed
+ *    *between* two runs of this evaluator, and it answers with prices the provider published.
+ * 3. **The latest fresh bid** -- one real executable price, for the current instant and for trap
+ *    detection. Final in both directions, including when it says hold.
+ * 4. **The theoretical model** -- only when no bid exists at all (outside the session, or a strike
+ *    outside the collected window). It is an estimate of a price nobody was quoting, and it has
+ *    been measured wrong by more than the barrier distances it is asked to resolve.
+ *
+ * Every step above the model is observed data; the model is the fallback and never overrules one.
+ */
 export class EvaluateOpenPaperTrades {
   constructor(
     private readonly paperTradeRepository: PaperTradeRepository,
@@ -412,12 +446,64 @@ export class EvaluateOpenPaperTrades {
       });
     }
 
-    const denseQuote = await this.densePremiums?.latestForContract({
+    const contractKey = {
       underlyingSymbol: trade.underlyingSymbol!,
       expiryDate: expiry,
       strikePrice: trade.optionStrike!,
       optionType: trade.optionType!,
-    }, 2 * 60_000, asOf) ?? null;
+    };
+
+    // The barrier scan, over prices that were actually quoted, and first because the *earliest*
+    // crossing is the exit. Everything below it examines a single instant -- the latest quote, or
+    // a modelled premium -- and so cannot see a level that was reached and recovered from between
+    // two runs of this evaluator. That blind spot is not theoretical: this bot runs every five
+    // minutes against a book sampled roughly twice a minute, so it never observes most of the
+    // session at all.
+    //
+    // Samples are read from `openedAt` rather than from the previous evaluation on purpose. There is no
+    // stored "last evaluated at", and deriving one would make the answer depend on scheduler
+    // history; re-reading the position's whole life is idempotent (a crossing closes the trade,
+    // after which it is no longer open) and self-heals positions held through an outage or
+    // through the window when this check did not exist. The immutable target is checked across
+    // that full history; the stop predicate separately ignores samples before the current stop's
+    // persisted effective timestamp, so tightening a stop cannot manufacture a historical exit.
+    const observedSamples = await this.densePremiums?.listForContractBetween(
+      contractKey,
+      trade.openedAt,
+      asOf,
+    ) ?? [];
+    const observedExit = decideOptionBuyerObservedExit(trade, observedSamples, {
+      stopLossEffectiveAt: trade.stopLossEffectiveAt,
+    });
+    if (observedExit) {
+      // Deliberately does not touch `eligibleCandlesRead`: no candle was read, and counting a
+      // tick-resolved exit there would misreport which evidence closed the position.
+      return closeOption({
+        exitPrice: observedExit.exitPrice,
+        exitReason: observedExit.reason,
+        // The moment the barrier was actually crossed, not the moment this noticed.
+        closedAt: observedExit.observedAt,
+        details: {
+          source: "OPTION_PREMIUM_TICK_SERIES",
+          quoteObservedAt: observedExit.observedAt.toISOString(),
+          bid: observedExit.exitPrice,
+          // Recorded so a surprising exit can be re-derived from the tick table: an exit is only
+          // as trustworthy as the window it was found in.
+          scannedFrom: trade.openedAt.toISOString(),
+          scannedTo: asOf.toISOString(),
+          stopLossEffectiveAt: trade.stopLossEffectiveAt?.toISOString(),
+          samplesScanned: observedSamples.length,
+          fillRule: observedExit.fillRule,
+          eventType: observedExit.eventType,
+        },
+      });
+    }
+
+    const denseQuote = await this.densePremiums?.latestForContract(
+      contractKey,
+      2 * 60_000,
+      asOf,
+    ) ?? null;
     const suppliedLiveSpot = resolveLiveSpot(trade, livePrices);
     const denseSpot = denseQuote?.underlyingValue != null
       && Number.isFinite(denseQuote.underlyingValue) && denseQuote.underlyingValue > 0
@@ -427,7 +513,10 @@ export class EvaluateOpenPaperTrades {
 
     // A long option exits by selling into the bid. The dense series is the only sub-minute
     // executable mark in the system, so it outranks a theoretical premium whenever fresh.
-    const freshBid = denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0
+    const quoteIsAfterEntry = denseQuote !== null
+      && denseQuote.observedAt.getTime() > trade.openedAt.getTime();
+    const freshBid = quoteIsAfterEntry
+      && denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0
       ? denseQuote.bid
       : null;
     if (freshBid !== null) {
@@ -449,12 +538,36 @@ export class EvaluateOpenPaperTrades {
           },
         });
       }
-      // A fresh executable bid that does not trigger governs the HOLD too. It measures this exact
-      // instant, so the theoretical mark below -- which estimates the same instant and has been
-      // measured 179 points off a real quote on this project's own book -- must not be allowed to
-      // close a position the real market would keep open. The completed-candle path further down
-      // still runs: it answers a different question (a barrier crossed on a bar between sparse
-      // evaluations) that a point-in-time quote cannot see.
+      // A fresh executable bid that does not trigger governs the HOLD, and it governs it
+      // *completely* -- hence the return rather than a fall-through to the theoretical paths.
+      //
+      // This used to fall through, on the reasoning that the completed-candle path answers a
+      // different question (a barrier crossed between sparse evaluations) that a point-in-time
+      // quote cannot see. It does, but it answers it with `priceOptionMarksAtOhlc`, whose error
+      // is larger than the barrier it is asked to resolve. Measured on this account 2026-08-13:
+      // a BANKNIFTY 57700 CE was booked STOP_LOSS at a theoretical 519.58 while the real book
+      // was bid 576-581 -- above the position's own 579.36 target. The model was ~50 points
+      // (~10%) below the market on a stop sitting 21 points (~4%) from entry, so the estimate's
+      // noise was more than twice the distance it was measuring, and the exit it produced was
+      // a coin toss dressed as a stop. The same run stopped a NIFTY 24400 CE out by one paisa.
+      //
+      // So the theoretical marks are a last resort, not a second opinion: they stay reachable
+      // below for contracts with no fresh bid (outside the session, or outside the collected
+      // strike window), and are never allowed to overrule a live market that says hold.
+      //
+      // Nothing is lost by returning here. The barrier-crossing question the completed-candle
+      // path was reaching for is answered above by `decideOptionBuyerObservedExit`, against
+      // observed bids instead of estimated ones.
+      return null;
+    }
+
+    // A pre-entry quote is not evidence about a position that did not yet exist. Production
+    // supplies the dense reader for every option position, so if no post-entry executable bid is
+    // available the safe answer is HOLD. Falling through to Black-Scholes here was the exact
+    // failure that booked a 47.96% same-millisecond loss: a model entry near 124.65 was compared
+    // with a real 65.65 bid observed 34 seconds before the trade opened.
+    if (this.densePremiums) {
+      return null;
     }
 
     const volatility = await this.resolveVolatility(trade, asOf);
@@ -462,9 +575,10 @@ export class EvaluateOpenPaperTrades {
       return null;
     }
 
-    // Only estimate the current premium with the model when no fresh executable bid was available.
-    // When one was, it already decided the current instant above.
-    if (freshBid === null && liveSpot !== undefined) {
+    // Everything from here down is the no-fresh-bid fallback: the early return above means
+    // `freshBid` is necessarily null by this point, so these paths only ever estimate a premium
+    // nothing was quoting.
+    if (liveSpot !== undefined) {
       const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
       const decision = decideOptionBuyerLiveExit(trade, mark.premium, liveSpot);
       if (decision) {
