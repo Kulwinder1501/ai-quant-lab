@@ -22,3 +22,7 @@ scratch/
 # Same intent, for probes written beside the code they poke at rather than in scratch/.
 # Four of these were committed because only the directory form was listed here.
 scratch_*.ts
+
+# Database backups and large dumps
+backups/
+*.dump
