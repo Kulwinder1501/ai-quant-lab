@@ -121,12 +121,33 @@ export function assessFyersAuthHealth(input: FyersAuthHealthInput): FyersAuthHea
     escalate("ERROR", `Last recorded Fyers error: ${input.lastError}`);
   }
 
+  // A dependent job failing is evidence *something* is wrong with Fyers, not evidence the
+  // credential lapsed — and it may not even be that. Measured 2026-08-12: OPTION_PREMIUM_TICKS
+  // failed 24 times with `HTTP 429, code 429. request limit reached`, which is the dense ATM
+  // poller exhausting a rate limit and has nothing to do with authentication. Those 24 failures
+  // drove 16 of that day's 24 health checks to throw "Fyers credential is not session-usable",
+  // naming a lapsed token as the cause while the token was valid the whole time.
+  //
+  // So this stays a secondary signal and defers to the primary one. When the access token's own
+  // expiry proves it usable, the failures are reported without a verdict attached; when it does
+  // not, the escalation above has already fired on better evidence, and this adds to it. Judging
+  // the credential by anything other than `access_token_expires_at` is what produced the false
+  // alarm in the first place.
   if (input.recentJobFailures > 0) {
-    escalate(
-      "ERROR",
-      `${input.recentJobFailures} Fyers-dependent scheduled job run(s) failed in the lookback `
-      + "window. A lapsed access token is the most common cause.",
-    );
+    const accessTokenLive = expiresAt !== null
+      && !Number.isNaN(expiresAt.getTime())
+      && expiresAt.getTime() > input.now.getTime();
+    const failures = `${input.recentJobFailures} Fyers-dependent scheduled job run(s) failed in `
+      + "the lookback window.";
+    if (accessTokenLive) {
+      reasons.push(
+        `${failures} The access token is valid until ${expiresAt.toISOString()}, so this is not `
+        + "an authentication lapse — check the failing job's own error, which is a rate limit "
+        + "(HTTP 429) often enough to be the first thing to rule out.",
+      );
+    } else {
+      escalate("ERROR", `${failures} A lapsed access token is the most common cause.`);
+    }
   }
 
   return { status, reasons };

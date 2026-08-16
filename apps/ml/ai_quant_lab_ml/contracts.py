@@ -97,6 +97,20 @@ FEATURE_SCHEMA_VERSION_V5 = "ml-feature-v5"
 FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v3"
 FEATURE_SCHEMA_VERSION_SCALP_V2 = "ml-feature-scalp-v2"
 
+#: v7 with the two candlestick-pattern aggregates removed, and nothing else changed.
+#:
+#: An ablation contract, not a production one. Measured 2026-08-17: bars firing a pattern reached
+#: EXPANSION 5.7-7.1 points more often than bars that did not, on both indices at 15m (z = +8.9
+#: and +11.0). That is a real separation, and the opposite of what the same patterns do on the
+#: directional target. But patterns are *derived from* `candle.range_bps`, the wick columns, the
+#: body, and `indicator.ATR.value_ratio` — all of which v7 already carries — so a univariate gap
+#: says nothing about whether these two columns add anything a tree cannot already reconstruct.
+#:
+#: Answering that needs the same fit twice, differing only in these columns. It is registered as a
+#: real version rather than patched in at runtime because the schema version is part of the model
+#: key, and an ablated artifact must be impossible to confuse with a production one.
+FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -105,6 +119,7 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,

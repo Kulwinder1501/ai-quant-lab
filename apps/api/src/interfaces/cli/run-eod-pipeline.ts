@@ -1,7 +1,10 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { buildEodTrainingPlan } from "./eod-training-plan.js";
+import { loadEnvironment } from "../../config/environment.js";
+import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { PostgresModelTrainingRecencyRepository } from "../../infrastructure/database/repositories/postgres-model-training-recency-repository.js";
+import { buildEodTrainingPlan, selectDueTrainingSteps } from "./eod-training-plan.js";
 
 /**
  * The twenty research equities from migration 027, pooled into one cross-sectional
@@ -55,6 +58,31 @@ async function runCommand(command: string, args: string[]): Promise<void> {
   });
 }
 
+/**
+ * Read model recency and live degradation state, holding a connection only for those queries.
+ *
+ * The pool is opened and closed around the read rather than for the pipeline's lifetime: the
+ * training steps that follow are measured in hours, and a pool parked open across them would
+ * hold a connection idle through the longest phase of the run for a single `GROUP BY`.
+ */
+async function loadModelTrainingState(): Promise<{
+  latestTrainedAt: ReadonlyMap<string, Date>;
+  degradedModelKeys: ReadonlySet<string>;
+}> {
+  const environment = loadEnvironment();
+  const database = createDatabasePool(environment.DATABASE_URL);
+  try {
+    const repository = new PostgresModelTrainingRecencyRepository(database);
+    const [latestTrainedAt, degradedModelKeys] = await Promise.all([
+      repository.getLatestTrainedAtByModelKey(),
+      repository.getDegradedVolatilityModelKeys(),
+    ]);
+    return { latestTrainedAt, degradedModelKeys };
+  } finally {
+    await database.end();
+  }
+}
+
 const trainingFailures: string[] = [];
 
 /**
@@ -76,6 +104,35 @@ async function runTrainingStep(description: string, args: string[]): Promise<voi
   }
 }
 
+const collectionFailures: string[] = [];
+
+/**
+ * Collection steps are isolated for the same reason training steps are, and the omission was
+ * expensive. This pipeline failed all four of its runs in the week to 2026-08-16, and two of
+ * them died here at step 1: `Completed candles are immutable` on 2026-08-10, and
+ * `The BANKNIFTY 1d series is declared as yahoo, not fyers` on 2026-08-13.
+ *
+ * Neither is a reason to skip settlement, but that is what happened — the process aborted
+ * before `models:settle-auxiliary` ran, so nothing was graded on either day. The volatility
+ * competition needs 15 scored sessions to qualify a model and 38 to dethrone one, so a single
+ * uncorrectable bar in one series was stopping the evidence clock for every model in the
+ * system, including the only target measured to carry signal.
+ *
+ * Healing is best-effort by nature: it re-fetches a window that is usually already stored, so
+ * the useful outcome is what it repaired, not that every candle was writable. A refusal from
+ * the immutability guard is that guard working correctly. The run still exits non-zero at the
+ * end when any step failed, so nothing here becomes silent.
+ */
+async function runCollectionStep(description: string, args: string[]): Promise<void> {
+  try {
+    await runCommand("npm", args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    collectionFailures.push(`${description}: ${message}`);
+    console.error(`\n⚠️ Collection step failed and was skipped — ${description}: ${message}`);
+  }
+}
+
 async function main(): Promise<void> {
   try {
     const today = new Date().toISOString().split("T")[0];
@@ -92,7 +149,7 @@ async function main(): Promise<void> {
     const intradayTimeframes = ["15m", "30m", "60m"] as const;
     for (const instrument of intradayIndexSeries) {
       for (const timeframe of intradayTimeframes) {
-        await runCommand("npm", [
+        await runCollectionStep(`heal ${instrument} ${timeframe}`, [
           "run", "data:collect:historical", "--",
           "--provider", "fyers",
           "--instrument", instrument,
@@ -113,7 +170,7 @@ async function main(): Promise<void> {
       ...RESEARCH_INDEX_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
     ];
     for (const { symbol, provider } of allDailySeries) {
-      await runCommand("npm", [
+      await runCollectionStep(`collect ${symbol} 1d`, [
         "run", "data:collect:historical", "--",
         "--provider", provider,
         "--instrument", symbol,
@@ -220,65 +277,85 @@ async function main(): Promise<void> {
     // competition pool (step 5) and must outperform the champion on live,
     // settled outcomes before the title changes hands.
     //
-    // The `15m` run trained on ~780 rows scoring 0.29 holdout macro-F1 against a
-    // 0.333 random baseline for one reason only: it asked Yahoo for 2.5 years and got
-    // silently truncated to ~60 days. That reason is gone. 15m moved to Fyers on
-    // 2026-08-05 (candle_series_provenance), and Fyers paginates the full history —
-    // NIFTY50 15m now holds ~22k bars back to 2023-01. So the window is the real
-    // multi-year one, and with the row count no longer scarce the fold ceiling that
-    // forced 2 folds lifts too: 5 folds now span multiple market regimes.
-
-    // 3b. Daily-timeframe candidates. `1d` is the only timeframe with multi-year
-    // depth (883 NIFTY50 bars from 2023-01), so it is the only one where walk-forward
-    // folds span more than one market regime. Same row count as the 15m run, vastly
-    // better regime coverage.
-
-    // 3c. Volatility-regime candidates, on their own label alphabet.
-    //
-    // This is the one target measured to carry signal. On NIFTY50 `1d` under CPCV it
-    // beat the trivial predictor on macro-F1 *and* accuracy on 100% of splits
+    // Every scheduled configuration targets volatility expansion, on its own label
+    // alphabet. This is the one target measured to carry signal. On NIFTY50 `1d` under
+    // CPCV it beat the trivial predictor on macro-F1 *and* accuracy on 100% of splits
     // (0.3982 vs 0.1595, and 0.4043 vs 0.3148), where the directional target won
-    // macro-F1 alone. These models cannot reach a directional consumer: the
-    // competition and settlement repositories both filter on
-    // `validationProtocol.labelScheme`, so a volatility model is invisible to the
-    // directional pool by construction, and may inform risk only.
+    // macro-F1 alone; pooled cross-sectionally it reached mean macro-F1 0.4404 over 5
+    // folds and again beat trivial on both metrics (0.4509 vs 0.1635, 0.4666 vs 0.3250),
+    // the only configuration so far to clear the promotion gate's initial baseline.
+    //
+    // These models cannot reach a directional consumer: the competition and settlement
+    // repositories both filter on `validationProtocol.labelScheme`, so a volatility
+    // model is invisible to the directional pool by construction, and informs risk only.
+    //
+    // No directional configuration is scheduled any more. `eod-training-plan.ts` carries
+    // the evidence for each exclusion, including the one question still open on 15m.
+    //
+    // 3b. Cadence and degradation gate. Each configuration refits once its cadence has
+    // elapsed, or earlier when its current PRIMARY has enough live evidence and no longer
+    // beats the trivial majority-class predictor on accuracy and macro-F1.
+    //
+    // Each due fit receives a dated immutable key. Reusing one key would be inert because
+    // shadow enrollment is sticky; a new key gives the refit its own live evidence while the
+    // stable family identity prevents nightly churn. See `eod-training-plan.ts`.
+    //
+    // A failure to read recency falls back to training everything, which is the previous
+    // behaviour and the safe direction: it wastes compute rather than silently skipping a
+    // refit that was due.
+    const plan = buildEodTrainingPlan(nowIso, RESEARCH_TRAINING_POOL);
+    let latestTrainedAt: ReadonlyMap<string, Date>;
+    let degradedModelKeys: ReadonlySet<string>;
+    try {
+      ({ latestTrainedAt, degradedModelKeys } = await loadModelTrainingState());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`\n⚠️ Could not read training recency — treating every configuration as due: ${message}`);
+      latestTrainedAt = new Map();
+      degradedModelKeys = new Set();
+    }
+    const { due, skipped, degradationTriggered } = selectDueTrainingSteps(
+      plan,
+      latestTrainedAt,
+      new Date(),
+      degradedModelKeys,
+    );
+    for (const trigger of degradationTriggered) {
+      console.warn(
+        `Live performance triggered an early refit — ${trigger.step.description}: `
+        + `${trigger.matchedModelKey} no longer beats the trivial baseline.`,
+      );
+    }
+    for (const held of skipped) {
+      console.info(
+        `⏭️  Inside refit cadence, skipped — ${held.step.description}: last trained `
+        + `${held.lastTrainedAt.toISOString()} (${held.daysSinceLastTrained.toFixed(1)}d ago, `
+        + `cadence ${held.step.cadenceDays}d), matched ${held.matchedModelKey}.`,
+      );
+    }
+    console.info(`\nTraining ${due.length} of ${plan.length} configurations.`);
 
-    // 3d. Pooled cross-sectional volatility candidates.
-    //
-    // Measured 2026-08-03, and the only configuration so far to clear the promotion
-    // gate's initial baseline: 5 folds, mean macro-F1 0.4404, and under CPCV it beat
-    // the trivial predictor on macro-F1 (0.4509 vs 0.1635) *and* accuracy
-    // (0.4666 vs 0.3250) on 100% of splits.
-    //
-    // The same pooling applied to the directional target moved its CPCV macro-F1 edge
-    // from +0.1038 to +0.1042 — nothing, from twenty times the data — and its accuracy
-    // still lost to trivial. That is the evidence that direction's failure is the
-    // target and not the sample size, so no pooled directional run is scheduled.
-    // Execute the tested matrix. BANKNIFTY and NIFTY50 are independent model families and never
+    // Execute the due matrix. BANKNIFTY and NIFTY50 are independent model families and never
     // borrow each other's artifacts; each refused step is isolated by runTrainingStep.
-    for (const step of buildEodTrainingPlan(nowIso, RESEARCH_TRAINING_POOL)) {
+    for (const step of due) {
       await runTrainingStep(step.description, step.args);
     }
 
-    // 4. Shadow-predict once for the whole pool so a day with no intraday runs
-    // still records at least one prediction per model (idempotent per candle).
-    await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
-
-    // 5. Daily competition: enroll qualifying fresh candidates, rank the pool on
-    // rolling settled macro-F1, and promote the challenger only after consistent
-    // live outperformance.
-    await runCommand("npm", ["run", "models:compete"]);
-
-    // 5b. Volatility competition, on settled non-directional outcomes. Its own table and
+    // 4. Volatility competition, on settled non-directional outcomes. Its own table and
     // its own rules: the settled floor is 300 rather than the directional 60, because a
     // pooled model writes one prediction per instrument per session, so sixty rows can be
     // three sessions of twenty correlated names rather than sixty observations. A PRIMARY
     // here informs risk and regime context only.
     await runCommand("npm", ["run", "models:compete:volatility"]);
 
-    if (trainingFailures.length > 0) {
-      console.error("\n============== EOD PIPELINE COMPLETE WITH TRAINING FAILURES ==============");
-      for (const failure of trainingFailures) console.error(` - ${failure}`);
+    // Reported together, and after the competitions have run. Both lists are isolated failures
+    // the run survived, so the distinction that matters to a reader is which stage degraded --
+    // a skipped heal leaves a gap in one series, a skipped fit leaves a candidate unbuilt, and
+    // neither implies the settlement and grading below them were skipped too.
+    if (trainingFailures.length > 0 || collectionFailures.length > 0) {
+      console.error("\n============== EOD PIPELINE COMPLETE WITH FAILURES ==============");
+      for (const failure of collectionFailures) console.error(` - collection — ${failure}`);
+      for (const failure of trainingFailures) console.error(` - training — ${failure}`);
       process.exitCode = 1;
       return;
     }

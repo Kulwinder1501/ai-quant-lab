@@ -9,6 +9,7 @@ __pycache__/
 data/
 models/
 postgres-data/
+.claude/settings.local.json
 
 # Local .env backups — never commit; they hold live secrets.
 .env.bak*

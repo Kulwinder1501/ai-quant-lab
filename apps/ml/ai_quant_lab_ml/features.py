@@ -31,6 +31,7 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_V6,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -310,6 +311,16 @@ FEATURE_SCHEMA_V7: tuple[str, ...] = (
 # importable because v5 artifacts remain loadable and their feature vectors
 # must be reconstructible bit-for-bit at inference.
 FEATURE_SCHEMA_V5: tuple[str, ...] = _build_feature_schema_v5()
+
+# The ablation contract: v7 minus the two candlestick aggregates. Derived from v7 by filtering
+# rather than written out, so it cannot drift out of step the next time v7 changes, and the
+# assertion below fails loudly if either column is ever renamed.
+FEATURE_SCHEMA_V7_NO_PATTERN: tuple[str, ...] = tuple(
+    column for column in FEATURE_SCHEMA_V7
+    if column not in ("pattern.bullish_confidence", "pattern.bearish_confidence")
+)
+assert len(FEATURE_SCHEMA_V7_NO_PATTERN) == len(FEATURE_SCHEMA_V7) - 2
+
 FEATURE_SCHEMA: tuple[str, ...] = FEATURE_SCHEMA_V7
 FEATURE_SCHEMA_SCALP_V2: tuple[str, ...] = _build_feature_schema_scalp(_LEGACY_MARKET_FEATURES)
 FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp(_MARKET_FEATURES)
@@ -324,6 +335,7 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_V5: FEATURE_SCHEMA_V5,
     FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 

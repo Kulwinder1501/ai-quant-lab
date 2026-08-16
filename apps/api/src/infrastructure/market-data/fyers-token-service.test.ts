@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  FYERS_PROVIDER_ID,
   FyersRefreshError,
   FyersTokenService,
   isRetryableRefreshFailure,
@@ -184,5 +185,28 @@ describe("FyersTokenService refresh retry", () => {
 
     await expect(service.getAccessToken()).resolves.toBe("still-valid");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("FyersTokenService interactive authentication status", () => {
+  it("records a redacted login failure without clearing an older usable token", async () => {
+    // Declared with its parameters so `query.mock.calls[0]` is a two-element tuple; an
+    // argument-less mock types the call as `[]` and the destructuring below cannot compile.
+    const query = vi.fn(async (_sql: string, _parameters: unknown[]) => ({ rows: [] }));
+    const service = new FyersTokenService({
+      pool: { query } as never,
+      appId: "APPID-100",
+      appSecret: "secret",
+      pin: "1234",
+    });
+    const echoedSecret = "a".repeat(48);
+
+    await service.recordAuthenticationFailure(`Exchange failed: ${echoedSecret}`);
+
+    expect(query).toHaveBeenCalledOnce();
+    const [sql, parameters] = query.mock.calls[0]!;
+    expect(sql).toContain("last_error = EXCLUDED.last_error");
+    expect(sql).not.toContain("access_token = NULL");
+    expect(parameters).toEqual([FYERS_PROVIDER_ID, "Exchange failed: <redacted>"]);
   });
 });

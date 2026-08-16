@@ -9,6 +9,10 @@ import { countUnrecoveredScheduledJobFailures } from "../../infrastructure/datab
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
+import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
+import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
+import { OptionPremiumTickStreamer } from "../../infrastructure/market-data/option-premium-tick-streamer.js";
 import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
@@ -222,7 +226,7 @@ async function main(): Promise<void> {
     void schedule("EOD_PIPELINE", () => runCommand("npm", ["run", "pipeline:eod"]));
   }, { timezone: IST });
 
-  // Intraday shadow predictions for the model-competition pool. Labels are
+  // Intraday shadow predictions for the volatility competition pool. Labels are
   // session-partitioned (a bar near the close has no same-session forward bars),
   // so predictions must be made during the session to ever settle; a single EOD
   // prediction on the day's final bar would never mature. Each run ingests the
@@ -252,7 +256,6 @@ async function main(): Promise<void> {
         "--timeframe", "1m",
         "--from", todayIst,
       ]);
-      await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
     });
   }, { timezone: IST });
@@ -467,8 +470,49 @@ async function main(): Promise<void> {
     ]));
   }, { timezone: IST });
 
-  // Dense ATM premium ticks — twice per claimed minute (~25s apart) so θ-decay /
-  // micro-structure research has sub-minute samples. Forward-only like OPTION_CHAIN.
+  /**
+   * The socket-fed premium tick writer, which owns this series while it is connected.
+   *
+   * Hosted here rather than in the API process on purpose. Collection is this process's job, and
+   * the API restarts on its own schedule — a UI deploy should not punch a hole in the series the
+   * paper-trading bot resolves its stops against.
+   */
+  let premiumTickStreamer: OptionPremiumTickStreamer | null = null;
+  if (fyersTokenService && fyersAppId) {
+    const liveStreamer = new FyersLiveStreamer({
+      appId: fyersAppId,
+      tokenService: fyersTokenService,
+    });
+    premiumTickStreamer = new OptionPremiumTickStreamer({
+      underlyingSymbols: ["NIFTY50", "BANKNIFTY"],
+      streamer: liveStreamer,
+      chainRepository: new PostgresOptionChainRepository(database),
+      tickRepository: new PostgresOptionPremiumTickRepository(database),
+    });
+    try {
+      await liveStreamer.connect();
+      await premiumTickStreamer.start();
+    } catch (error) {
+      // A socket that will not connect is a degradation, not a reason to start no scheduler at
+      // all. The HTTP poller below still runs, so the series continues at its old resolution.
+      console.error(JSON.stringify({
+        level: "error",
+        message: "Could not start the option premium tick stream; falling back to polling only",
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      premiumTickStreamer = null;
+    }
+  }
+
+  // Dense ATM premium ticks over HTTP. This used to run twice per claimed minute (~25s apart),
+  // which is what exhausted the provider's rate limit: 97 of 1,038 runs in the week to
+  // 2026-08-16 failed on `HTTP 429 request limit reached`, and on 2026-08-12 those failures also
+  // drove 16 of 24 auth health checks to declare a valid credential unusable.
+  //
+  // With the socket writing the same table continuously, this drops to a single run and becomes
+  // the floor under it rather than the source. That matters because a socket fails by going
+  // quiet: if it drops, this still deposits a quote on every cron tick, so the series degrades
+  // to its old resolution instead of stopping. Forward-only like OPTION_CHAIN.
   const schedulePremiumTicks = () => {
     if (fyersTokenService) {
       void schedule("OPTION_PREMIUM_TICKS", async () => {
@@ -477,8 +521,10 @@ async function main(): Promise<void> {
           "--underlyings", "NIFTY50,BANKNIFTY",
         ];
         await runCommand("npm", args);
-        await new Promise<void>((resolve) => setTimeout(resolve, 25_000));
-        await runCommand("npm", args);
+        if (premiumTickStreamer === null) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 25_000));
+          await runCommand("npm", args);
+        }
       });
     }
   };
@@ -503,9 +549,25 @@ async function main(): Promise<void> {
     cron.schedule(expression, schedulePremiumTicks, { timezone: IST });
   }
 
-  // Vol-expansion long-straddle path: propose + gated open attempt. Refusals dominate;
-  // runs mid-session once per hour after the intraday prediction cadence.
-  cron.schedule("5 10-14 * * 1-5", () => {
+  // Vol-expansion long-straddle path: propose + gated open attempt. Refusals dominate.
+  //
+  // Runs five minutes after each intraday prediction, not once an hour. The hourly version
+  // (`5 10-14`) could not work and never did: it opened zero positions across thirteen runs, and
+  // the account it trades from was never even created. The cause was arithmetic, not the gate --
+  // `INTRADAY_MODEL_PREDICTIONS` writes on `*/15`, a prediction is only usable for
+  // `MAXIMUM_PREDICTION_AGE_MINUTES` (20), and an hourly sampler therefore arrived after most of
+  // them had expired. Measured 2026-08-16, NIFTY50 held 204 EXPANSION predictions, 122 of them at
+  // or above the 0.44 confidence bar and 128 unsettled, while the straddle refused every run with
+  // NO_EXPANSION_PREDICTION. Supply was never the problem.
+  //
+  // The heaviest write bucket is 16:06 IST -- the EOD shadow-predict pass, 278 rows -- which sits
+  // two hours past the old window's last run and stays out of reach either way. Extending the
+  // session window here would not capture it, because those predictions are for the *next*
+  // session's open, not a mid-session entry.
+  //
+  // The `:05` offset is kept deliberately. Matching `*/15` exactly would race the prediction
+  // writer on the same minute and read the grid slot before it was filled.
+  cron.schedule("5,20,35,50 9-15 * * 1-5", () => {
     void schedule("VOLATILITY_STRADDLE", () => runCommand("npm", [
       "run", "paper:volatility-straddle",
     ]));
@@ -553,6 +615,19 @@ async function main(): Promise<void> {
           message: "Could not record an interrupted run on shutdown",
           process: processIdentity,
           jobType: run.jobType,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    }
+    // Stopped before the pool closes: its final flush writes the quotes already in hand, and
+    // that write needs the connection.
+    if (premiumTickStreamer) {
+      try {
+        await premiumTickStreamer.stop();
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Could not stop the option premium tick stream cleanly",
           error: error instanceof Error ? error.message : String(error),
         }));
       }

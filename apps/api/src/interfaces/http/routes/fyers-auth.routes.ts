@@ -175,40 +175,44 @@ async function completeFyersAuthExchange(input: {
     };
   }
 
+  const service = new FyersTokenService({
+    pool: input.database,
+    appId: environment.FYERS_APP_ID!,
+    appSecret: environment.FYERS_APP_SECRET!,
+    pin: environment.FYERS_PIN ?? "",
+  });
+  const failedAuthenticatedAttempt = async (
+    status: number,
+    error: string,
+  ): Promise<{ ok: false; status: number; error: string; returnTo: string }> => {
+    const safeError = redactTokens(error);
+    // Reporting the OAuth error must not depend on the diagnostic write succeeding.
+    await service.recordAuthenticationFailure(safeError).catch(() => undefined);
+    return { ok: false, status, error: safeError, returnTo };
+  };
+
   if (!input.authCode) {
-    return {
-      ok: false,
-      status: 400,
-      error: input.providerError
-        ? redactTokens(input.providerError)
-        : "Fyers did not return an auth_code.",
-      returnTo,
-    };
+    return failedAuthenticatedAttempt(
+      400,
+      input.providerError || "Fyers did not return an auth_code.",
+    );
   }
 
   // Fyers also sends `code=200` as a status field — never treat that as the auth code.
   if (/^\d{3}$/.test(input.authCode)) {
-    return {
-      ok: false,
-      status: 400,
-      error: "Received a status code instead of auth_code. Try Connect again.",
-      returnTo,
-    };
+    return failedAuthenticatedAttempt(
+      400,
+      "Received a status code instead of auth_code. Try Connect again.",
+    );
   }
 
   try {
-    const service = new FyersTokenService({
-      pool: input.database,
-      appId: environment.FYERS_APP_ID!,
-      appSecret: environment.FYERS_APP_SECRET!,
-      pin: environment.FYERS_PIN ?? "",
-    });
     const tokens = await service.exchangeAuthCode(input.authCode);
     await service.storeTokens(tokens);
     return { ok: true, returnTo };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Fyers auth-code exchange failed.";
-    return { ok: false, status: 502, error: redactTokens(message), returnTo };
+    return failedAuthenticatedAttempt(502, message);
   }
 }
 

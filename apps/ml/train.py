@@ -25,6 +25,7 @@ from ai_quant_lab_ml.contracts import (
     ALGORITHM_CHOICES,
     FEATURE_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     SCALP_TIMEFRAMES,
     DIRECTIONAL_ALPHABET,
     LABEL_SCHEME_FIXED_HORIZON,
@@ -328,7 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
     # timeframes are excluded: their schema is not versioned by this pair.
     parser.add_argument(
         "--feature-schema",
-        choices=(FEATURE_SCHEMA_VERSION, FEATURE_SCHEMA_VERSION_V5),
+        choices=(
+            FEATURE_SCHEMA_VERSION,
+            FEATURE_SCHEMA_VERSION_V5,
+            FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+        ),
         default=None,
         help=(
             "Override the swing feature-schema version for an A/B capacity comparison "

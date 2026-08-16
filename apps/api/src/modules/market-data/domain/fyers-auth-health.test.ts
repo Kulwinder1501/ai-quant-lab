@@ -87,11 +87,28 @@ describe("assessFyersAuthHealth", () => {
     expect(assessment.reasons.join(" ")).toMatch(/SEBI/);
   });
 
-  it("counts recent Fyers job failures and names the usual cause", () => {
+  it("reports recent job failures without blaming a token that is demonstrably valid", () => {
+    // Measured 2026-08-12: 24 OPTION_PREMIUM_TICKS runs failed on `HTTP 429 request limit
+    // reached`, and this check turned them into 16 "credential is not session-usable" throws
+    // naming a lapsed token, while the token was valid all day. The failures are still worth
+    // surfacing; the verdict about the credential is not this signal's to make.
     const assessment = assessFyersAuthHealth(base({ recentJobFailures: 3 }));
 
-    expect(assessment.status).toBe("ERROR");
+    expect(assessment.status).toBe("OK");
     expect(assessment.reasons.join(" ")).toMatch(/3 Fyers-dependent scheduled job run\(s\) failed/);
+    expect(assessment.reasons.join(" ")).not.toMatch(/lapsed access token/);
+    expect(assessment.reasons.join(" ")).toMatch(/rate limit/);
+  });
+
+  it("still blames the token for job failures once it is no longer valid", () => {
+    // The signal is secondary, not discarded: with no valid access token the failures are
+    // corroborating evidence and the escalation stands.
+    const assessment = assessFyersAuthHealth(base({
+      accessTokenExpiresAt: new Date(NOW.getTime() - 60 * 60_000),
+      recentJobFailures: 3,
+    }));
+
+    expect(assessment.status).toBe("EXPIRED");
     expect(assessment.reasons.join(" ")).toMatch(/lapsed access token/);
   });
 

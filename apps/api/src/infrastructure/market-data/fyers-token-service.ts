@@ -231,6 +231,25 @@ export class FyersTokenService {
   }
 
   /**
+   * Record a failed, state-verified interactive login attempt.
+   *
+   * Do not clear an older token here: a mistyped/replayed auth code must not stop a
+   * session that is still serving market data. The health endpoint nevertheless needs
+   * to surface the failed attempt, otherwise the Settings page shows a green `OK` badge
+   * beside the OAuth error. A later successful `storeTokens` clears this field.
+   */
+  async recordAuthenticationFailure(message: string): Promise<void> {
+    await this.options.pool.query(
+      `INSERT INTO provider_credentials (provider, last_error)
+       VALUES ($1, $2)
+       ON CONFLICT (provider) DO UPDATE SET
+         last_error = EXCLUDED.last_error,
+         updated_at = NOW()`,
+      [FYERS_PROVIDER_ID, redactTokens(message)],
+    );
+  }
+
+  /**
    * Clear stored tokens so the lab is "logged out" of Fyers until Connect runs again.
    * Keeps the row so `last_error` can explain the disconnect.
    */
