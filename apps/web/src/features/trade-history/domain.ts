@@ -32,6 +32,15 @@ export interface TradeHistoryRecord {
   fees: number | null;
   slippage: number | null;
   notes: string;
+  /**
+   * The option contract, when the row is one.
+   *
+   * `side` is LONG on every option position because the bot only buys, so it cannot separate a
+   * call from a put. These carry the identity the ledger shows in its place.
+   */
+  optionType: "CE" | "PE" | null;
+  optionStrike: number | null;
+  underlyingSymbol: string | null;
 }
 
 export interface TradeHistorySummary {

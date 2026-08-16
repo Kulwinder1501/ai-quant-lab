@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { formatNumber, formatTimestamp } from "../../research/presentation";
 import { formatNseMarketElapsedDuration } from "../domain/nse-market-time";
+import { MarketLoader } from "../../../components/ui/market-loader";
 import {
-  isLongTradeSide,
   isOptionPaperTrade,
   paperTradeContractLabel,
   type PaperAccountFullSummary,
@@ -46,10 +46,14 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
 
   if (loading && !summary) {
     return (
-      <div className="py-12 text-center text-sm font-semibold text-slate-400">
-        <span className="inline-block h-6 w-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-3" />
-        <p>Loading open positions and calculating live valuations...</p>
-      </div>
+      <MarketLoader
+        className="py-12"
+        label="Valuing open positions"
+        // Named because this wait has a real cause: each open option is marked against a live
+        // quote, and a lapsed Fyers credential turns that into a minutes-long retry rather than
+        // a fast failure. A reader who knows that stops wondering whether the page is broken.
+        sublabel="Marking each contract against the live book"
+      />
     );
   }
 
@@ -98,7 +102,6 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
             const currentPrice = valuation?.status === "AVAILABLE" ? valuation.markPrice : null;
             const underlyingPrice = valuation?.underlyingPrice ?? quote?.livePrice ?? null;
             const direction = quote?.direction || "NONE";
-            const isLong = isLongTradeSide(trade.side);
             const isOption = isOptionPaperTrade(trade);
             const greeks = valuation?.status === "AVAILABLE" ? valuation.greeks : null;
             const livePnl = valuation?.status === "AVAILABLE" ? valuation.unrealizedPnl : null;
@@ -125,13 +128,21 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
                     ID: {trade.id.substring(0, 8)}...
                   </span>
                 </td>
+                {/* CE/PE rather than LONG/SHORT. An option buyer is always LONG, so this column
+                    rendered a bought call and a bought put identically.
+
+                    A non-option row keeps its side, in neutral slate rather than the emerald/rose
+                    that now means call-versus-put — one palette cannot carry both without a green
+                    badge meaning "call" on one row and "long" on the next. */}
                 <td className="py-4 px-4">
                   <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-black ${
-                    isLong
-                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                      : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                    !isOption
+                      ? "bg-slate-500/20 text-slate-300 border border-slate-500/30"
+                      : trade.optionType === "PE"
+                        ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                        : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                   }`}>
-                    {trade.side}
+                    {isOption ? trade.optionType : trade.side}
                   </span>
                 </td>
                 <td className="py-4 px-4 font-bold text-slate-200">{formatNumber(trade.quantity, 0)}</td>

@@ -32,6 +32,10 @@ function record(overrides: Partial<TradeHistoryRecord> = {}): TradeHistoryRecord
     fees: 5,
     slippage: 1,
     notes: "",
+    // These cases exercise timeframe-based mode grouping, not contract rendering.
+    optionType: null,
+    optionStrike: null,
+    underlyingSymbol: null,
     ...overrides,
   };
 }

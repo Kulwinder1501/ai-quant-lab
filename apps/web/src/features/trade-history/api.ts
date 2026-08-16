@@ -58,6 +58,9 @@ export function parseTradeHistoryRecord(value: unknown): TradeHistoryRecord | nu
     fees: asNumber(record.fees),
     slippage: asNumber(record.slippage),
     notes: asString(record.notes) ?? "",
+    optionType: record.optionType === "CE" || record.optionType === "PE" ? record.optionType : null,
+    optionStrike: asNumber(record.optionStrike),
+    underlyingSymbol: asString(record.underlyingSymbol),
   };
 }
 

@@ -1,8 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { PageHeader } from '../../../components/layout/page-header';
 import { GlassPanel } from '../../../components/ui/glass-panel';
+import { MarketLoader } from '../../../components/ui/market-loader';
 import { Select } from '../../../components/ui/select';
 import { ThemeToggle } from '../../../components/theme/theme-toggle';
 import { useAppStore } from '../../../stores/app-store';
@@ -69,6 +71,10 @@ export function SettingsDashboard() {
   const [fyersError, setFyersError] = useState<string | null>(null);
   const [fyersBanner, setFyersBanner] = useState<string | null>(null);
   const [fyersBusy, setFyersBusy] = useState(false);
+  // Held separately from `fyersBusy` because it is terminal: the component is on its way out, so
+  // the overlay must not be clearable by anything that finishes after it.
+  const [fyersRedirecting, setFyersRedirecting] = useState(false);
+  const router = useRouter();
 
   async function loadFyersHealth(): Promise<void> {
     try {
@@ -135,13 +141,31 @@ export function SettingsDashboard() {
     // stripped above, so this cannot re-run and cascade. Disabled with that justification rather
     // than deferred, because the rule tracks the set transitively through a microtask wrapper too.
     if (fyers === 'connected') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot OAuth redirect banner
-      setFyersBanner('Fyers connected. Tokens are stored on the API — not in this browser.');
-      void loadFyersHealth();
+      // A successful connect hands the user back to a settings page they only opened in order to
+      // fix the connection, so it takes them onward to the dashboard.
+      //
+      // The navigation deliberately does not wait on a health refresh. It used to, so the
+      // dashboard would land on fresh status rather than the stale pre-connect value — but
+      // `/health/fyers` can take as long as any other Fyers-backed call, and this very page has
+      // measured a 91-second hang on a lapsed credential. That turned a redirect into a
+      // minute-and-a-half stare at a "connected" overlay. The dashboard fetches its own health on
+      // mount, so blocking here bought nothing and risked everything.
+      //
+      // `replace`, not `push`: Back should return to wherever they started, not to a settings
+      // page mid-redirect that would immediately bounce them forward again.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot OAuth redirect handover
+      setFyersRedirecting(true);
+      router.replace('/dashboard');
     } else if (fyers === 'error') {
       setFyersBanner(message || 'Fyers connect failed. Try again.');
+      // The page may be retained across a client-side callback navigation. Refresh now
+      // instead of leaving the previous green status visible until the 60-second poll.
+      void loadFyersHealth();
     }
-  }, []);
+    // `router` is referentially stable across renders in the app router, so listing it satisfies
+    // the dependency rule without making this one-shot effect run more than once — the URL params
+    // it reads are stripped above, so a second run would find nothing anyway.
+  }, [router]);
 
   async function connectFyers(): Promise<void> {
     setFyersBusy(true);
@@ -194,11 +218,24 @@ export function SettingsDashboard() {
   const showConnect = needsReconnect(fyersStatus) || fyersStatus === 'EXPIRING_SOON';
   const showDisconnect = fyersStatus === 'OK' || fyersStatus === 'EXPIRING_SOON';
 
+  // Returned before the page so the settings form is never briefly interactive underneath a
+  // navigation that is already committed.
+  if (fyersRedirecting) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-6">
+        <MarketLoader
+          label="Fyers connected"
+          sublabel="Tokens are stored on the API, never in this browser. Taking you to the dashboard…"
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full space-y-6 p-6">
-      <PageHeader 
+      <PageHeader
         eyebrow="Application Configuration"
-        title="Settings" 
+        title="Settings"
         description="Configure your AI Quant Lab preferences and system settings."
       />
 
@@ -307,6 +344,18 @@ export function SettingsDashboard() {
                 </p>
               )}
             </div>
+          )}
+
+          {/* The wait between clicking connect and Fyers taking over the tab is a real one --
+              the API has to be asked for an authorize URL first -- so it gets the loader rather
+              than a disabled button that looks like nothing happened. */}
+          {fyersBusy && (
+            <MarketLoader
+              className="py-4"
+              label="Opening the Fyers session"
+              size="sm"
+              sublabel="You will be handed to Fyers to authorise this app"
+            />
           )}
 
           <div className="flex flex-wrap gap-3 pt-1">

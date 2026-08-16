@@ -33,6 +33,11 @@ function record(overrides: Partial<PaperTradeHistoryRecord> = {}): PaperTradeHis
     fees: 5,
     slippage: 1,
     notes: "",
+    // An index position rather than an option, which is what these summary figures are written
+    // against. The option fields carry the contract identity the ledger renders.
+    optionType: null,
+    optionStrike: null,
+    underlyingSymbol: null,
     ...overrides,
   };
 }

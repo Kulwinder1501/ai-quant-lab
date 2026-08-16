@@ -1,6 +1,7 @@
 import { formatNumber, formatTimestamp } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { DataTable } from "../../../components/ui/data-table";
+import { MarketLoader } from "../../../components/ui/market-loader";
 import type { PaperAccountFullSummary, PaperTradeRow } from "../../paper-trading/domain";
 
 /** `DataTable` and `exportToCsv` require an index signature, which an interface does not provide. */
@@ -35,14 +36,32 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
     },
     {
       key: "side",
-      label: "Side",
-      render: (order: OrderRow) => (
-        <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-black ${
-          order.side === "BUY" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-        }`}>
-          {order.side}
-        </span>
-      )
+      label: "Contract",
+      // CE/PE rather than BUY/SELL. The bot only ever buys options, so this column read BUY on
+      // every option row and could not say whether the order was a call or a put.
+      //
+      // A non-option row keeps its side, in neutral slate rather than the emerald/rose that now
+      // means call-versus-put, so one palette is never asked to carry two different meanings.
+      render: (order: OrderRow) => {
+        const label = order.optionType ?? order.side;
+        const tone = order.optionType === "PE"
+          ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+          : order.optionType === "CE"
+            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+            : "bg-slate-500/20 text-slate-300 border border-slate-500/30";
+        return (
+          <div>
+            <span className={`inline-flex px-2.5 py-1 rounded-md text-xs font-black ${tone}`}>
+              {label}
+            </span>
+            {order.optionStrike != null && (
+              <span className="block text-[11px] font-normal text-slate-500 mt-0.5">
+                {order.underlyingSymbol ?? order.instrumentSymbol} {formatNumber(order.optionStrike, 0)}
+              </span>
+            )}
+          </div>
+        );
+      }
     },
     {
       key: "quantity",
@@ -131,10 +150,11 @@ export function OrdersTable({ filteredOrders, summary, loading }: OrdersTablePro
       </div>
 
       {loading && !summary ? (
-        <div className="py-12 text-center text-sm font-semibold text-slate-400">
-          <span className="inline-block h-6 w-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin mb-3" />
-          <p>Loading completed order audit log...</p>
-        </div>
+        <MarketLoader
+          className="py-12"
+          label="Replaying the execution log"
+          sublabel="Every fill is a local simulation, never a routed order"
+        />
       ) : filteredOrders.length === 0 ? (
         <div className="py-16 text-center rounded-2xl border border-dashed border-white/10 bg-slate-950/40 p-8">
           <span className="text-3xl">📜</span>

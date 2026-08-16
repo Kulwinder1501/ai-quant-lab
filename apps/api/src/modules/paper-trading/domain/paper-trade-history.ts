@@ -37,6 +37,16 @@ export interface PaperTradeHistoryRecord {
   fees: number;
   slippage: number;
   notes: string;
+  /**
+   * The option contract, when the position is one.
+   *
+   * `side` cannot stand in for this. An option buyer is always LONG — `mapIdeaToOptionBuyerFill`
+   * hard-codes it — so a ledger showing only LONG/SHORT renders a bought call and a bought put
+   * identically, which is the ambiguity these three fields exist to remove.
+   */
+  optionType: "CE" | "PE" | null;
+  optionStrike: number | null;
+  underlyingSymbol: string | null;
 }
 
 export type TradeOutcomeFilter = "WIN" | "LOSS" | "BREAK_EVEN";

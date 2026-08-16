@@ -61,10 +61,27 @@ export default {
           "0%": { backgroundColor: "rgb(244 63 94 / 0.25)" },
           "100%": { backgroundColor: "transparent" },
         },
+        /**
+         * The loading state, on the same principle as the flashes above: motion that runs and
+         * ends in CSS, with no React state and no timer to leak on unmount.
+         *
+         * `candle-breathe` scales a bar about its base so a row of them reads as candles
+         * forming, and `tape-sweep` runs a highlight across that row like a tape being read.
+         */
+        "candle-breathe": {
+          "0%, 100%": { transform: "scaleY(0.3)", opacity: "0.4" },
+          "50%": { transform: "scaleY(1)", opacity: "1" },
+        },
+        "tape-sweep": {
+          "0%": { transform: "translateX(-140%)" },
+          "100%": { transform: "translateX(340%)" },
+        },
       },
       animation: {
         "flash-up": "flash-up 800ms ease-out 1",
         "flash-down": "flash-down 800ms ease-out 1",
+        "candle-breathe": "candle-breathe 1400ms ease-in-out infinite",
+        "tape-sweep": "tape-sweep 2200ms linear infinite",
       },
     },
   },
