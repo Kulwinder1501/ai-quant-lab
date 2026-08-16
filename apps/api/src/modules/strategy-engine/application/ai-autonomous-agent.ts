@@ -716,6 +716,40 @@ export class AiAutonomousAgent {
       }
     }
 
+    // PROFIT TRAILING STOP: If trade is in profit by >= 1%, move stop to breakeven + trail 0.5%
+    if (existingTrades.length > 0 && this.paperTradeRepo.updateStopLoss) {
+      for (const t of existingTrades) {
+        // Calculate profit percentage
+        const pnlPct = t.side === "LONG" 
+          ? (livePrice - t.entryPrice) / t.entryPrice 
+          : (t.entryPrice - livePrice) / t.entryPrice;
+        
+        if (pnlPct >= 0.01) {
+          const trailDistance = livePrice * 0.005; // 0.5% trail
+          const tightSl = Number((t.side === "LONG" ? livePrice - trailDistance : livePrice + trailDistance).toFixed(2));
+          
+          // Only ever moves the stop closer to the price, and never through it.
+          const isTighter = t.side === "LONG"
+            ? t.stopLoss < tightSl && tightSl < livePrice
+            : t.stopLoss > tightSl && tightSl > livePrice;
+            
+          if (isTighter) {
+            await this.paperTradeRepo.updateStopLoss(t.id, tightSl, `Profit Trailing Stop (1% active, 0.5% trail)`);
+            this.recordThought({
+              id: `th-${Date.now()}-sl-profit-trail`,
+              timestamp: ts,
+              symbol,
+              action: "MONITORING",
+              confidence: 85,
+              message: `💰 PROFIT TRAILING STOP: ${symbol} is +${(pnlPct * 100).toFixed(2)}% in profit. Tightened ${t.side} Stop Loss to ₹${tightSl} to lock in gains.`,
+              details: { tradeId: t.id, side: t.side, oldSl: t.stopLoss, newSl: tightSl, pnlPct },
+            });
+            t.stopLoss = tightSl;
+          }
+        }
+      }
+    }
+
     /**
      * Both directions are scored from the same evidence, and the better-supported one wins.
      *
@@ -783,16 +817,16 @@ export class AiAutonomousAgent {
       id: `th-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       timestamp: ts,
       symbol,
-      action: confidence >= 80 ? "PROPOSING" : "ANALYZING",
+      action: confidence >= 75 ? "PROPOSING" : "ANALYZING",
       confidence,
       // The winning side is named. The old message asserted the setup was "aligned across RSI,
       // Bollinger Bands, and News Sentiment" without saying which way, which read as bullish
       // regardless of what the score meant.
-      message: confidence >= 80
+      message: confidence >= 75
         ? `🔥 HIGH CONFIDENCE ${setupScore.side} SETUP (${confidence}%): ${symbol} aligned across RSI, `
           + "Bollinger Bands, and News Sentiment. Initiating trade proposal."
         : `Scanning ${symbol} @ ₹${livePrice.toFixed(2)}. Best thesis ${setupScore.side} at ${confidence}% `
-          + `(long ${setupScore.longConfidence}% / short ${setupScore.shortConfidence}%, threshold 80%). `
+          + `(long ${setupScore.longConfidence}% / short ${setupScore.shortConfidence}%, threshold 75%). `
           + "Waiting for stronger multi-modal confluence.",
       details: {
         rsi: rsiVal.toFixed(1),
@@ -849,8 +883,8 @@ export class AiAutonomousAgent {
       }
     }
 
-    // 5. If confidence >= 80%, check margin and execute local paper trade!
-    if (confidence >= 80) {
+    // 5. If confidence >= 75%, check margin and execute local paper trade!
+    if (confidence >= 75) {
       this.lastTradeAttempt.set(symbol, Date.now());
 
       // The measured side gate. A qualifying SHORT is recorded in full and not traded: the
