@@ -33,6 +33,11 @@ const VOLATILITY_LABEL_SCHEME = "volatility-expansion-v1";
 const VOLATILITY_HORIZON_BARS = "5";
 const VOLATILITY_EXPANSION_BAND = "0.25";
 const SWING_FEATURE_SCHEMA_VERSION = "ml-feature-v7";
+/**
+ * Earliest bar any scheduled configuration may train on. See the window note on
+ * `buildEodTrainingPlan` for why this opens at 2022 and which series it actually changes.
+ */
+const TRAINING_WINDOW_START = "2022-01-01";
 
 /**
  * Minimum days between refits of one configuration.
@@ -160,6 +165,21 @@ function trainArgs(input: {
  *
  * `--to` must not exceed `--data-cutoff-at`, which defaults to now, so a wall-clock `nowIso`
  * refuses.
+ *
+ * ## Why the window opens at 2022 and not 2023
+ *
+ * Widened 2026-08-16, after BANKNIFTY 1d was backfilled from a series that had been empty. Only
+ * one scheduled series holds pre-2023 daily bars — BANKNIFTY 1d, by 248 of its 1,145 — so this
+ * is a 28% sample increase for that configuration and a no-op everywhere else: NIFTY50 1d starts
+ * 2023-01-02, and no member of the pooled roster has a daily bar before 2023, so the panel stays
+ * balanced rather than acquiring one member with a longer history than its peers.
+ *
+ * A start date earlier than the data is harmless — the query returns what exists — so this does
+ * not need to be per-instrument. It matters because the daily gate is sample-starved: 888
+ * labelled rows support only two walk-forward folds above the 60-row evidence floor, and on
+ * 2026-08-16 BANKNIFTY lightgbm scored 0.3793 against a 0.40 threshold while its CPCV beat
+ * trivial by +0.2351 on every split. The signal reads as real and under-evidenced, which is the
+ * one situation where more history is the right lever.
  */
 export function buildEodTrainingPlan(
   nowIso: string,
@@ -190,7 +210,7 @@ export function buildEodTrainingPlan(
           algorithm,
           symbol,
           timeframe: "1d",
-          from: "2023-01-01",
+          from: TRAINING_WINDOW_START,
           to: nowIso,
           folds: SINGLE_DAILY_WALK_FORWARD_FOLDS,
           labelScheme: VOLATILITY_LABEL_SCHEME,
@@ -211,7 +231,7 @@ export function buildEodTrainingPlan(
         algorithm,
         instruments: researchTrainingPool,
         timeframe: "1d",
-        from: "2023-01-01",
+        from: TRAINING_WINDOW_START,
         to: nowIso,
         folds: POOLED_WALK_FORWARD_FOLDS,
         labelScheme: VOLATILITY_LABEL_SCHEME,

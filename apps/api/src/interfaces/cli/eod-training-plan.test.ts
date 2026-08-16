@@ -71,6 +71,15 @@ describe("buildEodTrainingPlan", () => {
     );
   });
 
+  it("opens every scheduled window at 2022, so the one series with earlier bars can use them", () => {
+    // Widened from 2023-01-01 once BANKNIFTY 1d was backfilled. Only that series holds pre-2023
+    // daily bars, so this is a 28% sample increase there and a no-op elsewhere — a start date
+    // earlier than the data returns what exists.
+    for (const step of plan) {
+      expect(step.args).toEqual(expect.arrayContaining(["--from", "2022-01-01"]));
+    }
+  });
+
   it("distinguishes rosters of equal length, so a member swap is a configuration with no artifact", () => {
     const swapped = buildEodTrainingPlan(now, "SBIN,TCS")
       .find((step) => step.description === "xgboost pooled 1d volatility");
