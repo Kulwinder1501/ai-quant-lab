@@ -103,11 +103,31 @@ async function assertProviderOwnsTimeframe(
   const declaredSource = declared.rows[0]?.source;
   if (declaredSource) {
     if (providerIds[provider] === declaredSource) return;
+
+    /*
+     * A declaration nobody writes is its own failure, not a provider conflict. BANKNIFTY 1d
+     * was declared "fyers" -- the CLI flag -- where every collector writes the provider id
+     * "fyers-api-v3", so the foreign key on `candles` rejected every row and the series sat at
+     * zero bars while the mismatch branch below reported "declared as fyers, not fyers".
+     * Comparing an id against a flag is what made that unreadable, so say which namespace each
+     * value is from and name the repair.
+     */
+    if (!Object.values(providerIds).includes(declaredSource)) {
+      throw new Error(
+        `The ${symbol} ${timeframe} series is declared as source "${declaredSource}", which no `
+        + `collector writes. Valid sources are ${Object.values(providerIds).join(", ")} -- the `
+        + `provider ids, not the --provider flag names (${Object.keys(providerIds).join(", ")}). `
+        + `The foreign key on candles will reject every row until the declaration is corrected: `
+        + `UPDATE candle_series_provenance SET source = '<valid id>' WHERE instrument_id = `
+        + `'${instrumentId}' AND timeframe = '${timeframe}'.`,
+      );
+    }
+
     throw new Error(
-      `The ${symbol} ${timeframe} series is declared as ${declaredSource}, not ${provider}. `
-      + `Mixing providers within one series creates train/serve skew, and the foreign key on `
-      + `candles will reject the rows anyway. To reassign: delete that series' candles, update `
-      + `candle_series_provenance, then collect.`,
+      `The ${symbol} ${timeframe} series is declared as ${declaredSource}, not `
+      + `${providerIds[provider]} (--provider ${provider}). Mixing providers within one series `
+      + `creates train/serve skew, and the foreign key on candles will reject the rows anyway. `
+      + `To reassign: delete that series' candles, update candle_series_provenance, then collect.`,
     );
   }
 

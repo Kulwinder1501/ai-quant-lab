@@ -211,6 +211,26 @@ describe("FyersLiveStreamer", () => {
     expect(delays).toEqual([5_000]);
   });
 
+  it("stays closed after close(), rather than reading its own shutdown as a drop", async () => {
+    // close() fires the vendor's "close" event -- the same one a network drop fires. Without a
+    // deliberate-shutdown flag the streamer dialled back in forever, and each attempt asked an
+    // already-ended pool for a token.
+    const socket = fakeSocket();
+    const scheduled = scheduler();
+    const streamer = build(socket, scheduled);
+
+    await streamer.connect();
+    socket.fire("connect");
+    streamer.close();
+    socket.fire("close");
+
+    expect(scheduled.delays).toEqual([]);
+
+    // And a later connect() cannot revive it.
+    await streamer.connect();
+    expect(scheduled.delays).toEqual([]);
+  });
+
   it("does not send to a socket whose handshake has not completed", async () => {
     // Sending to an unopened socket throws inside the vendor library.
     const socket = fakeSocket();

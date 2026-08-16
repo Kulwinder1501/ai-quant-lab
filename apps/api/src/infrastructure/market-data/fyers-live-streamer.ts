@@ -107,13 +107,24 @@ export class FyersLiveStreamer extends EventEmitter {
   private reconnecting = false;
   private reconnectAttempts = 0;
   private droppedMessages = 0;
+  /**
+   * Set by `close()` so a deliberate shutdown is not read as a dropped connection.
+   *
+   * `socket.close()` fires the vendor's `close` event, which is the same event a network drop
+   * fires, so without this the reconnect handler treats shutdown as failure and dials back in
+   * forever. Observed directly: closing the socket and ending the pool produced an unbounded
+   * backoff loop logging "Cannot use a pool after calling end on the pool" -- the reconnect was
+   * asking a closed pool for a token. The scheduler's `process.exit(0)` hid this in production;
+   * any host that waits for a clean exit would hang.
+   */
+  private closed = false;
 
   constructor(private readonly options: FyersLiveStreamerOptions) {
     super();
   }
 
   async connect(): Promise<void> {
-    if (this.socket || this.reconnecting) return;
+    if (this.socket || this.reconnecting || this.closed) return;
 
     try {
       const accessToken = await this.options.tokenService.getAccessToken();
@@ -172,7 +183,7 @@ export class FyersLiveStreamer extends EventEmitter {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnecting) return;
+    if (this.reconnecting || this.closed) return;
     this.reconnecting = true;
     this.reconnectAttempts += 1;
     const delay = reconnectDelayMs(this.reconnectAttempts);
@@ -206,7 +217,9 @@ export class FyersLiveStreamer extends EventEmitter {
     if (this.isSocketConnected()) this.socket!.unsubscribe(symbols);
   }
 
+  /** Shuts the socket for good. A closed streamer stays closed; `connect()` becomes a no-op. */
   close(): void {
+    this.closed = true;
     if (!this.socket) return;
     this.socket.close();
     this.socket = null;

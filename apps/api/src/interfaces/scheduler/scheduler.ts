@@ -478,11 +478,15 @@ async function main(): Promise<void> {
    * paper-trading bot resolves its stops against.
    */
   let premiumTickStreamer: OptionPremiumTickStreamer | null = null;
+  // Held outside the block so shutdown can close the socket. The tick streamer stops its own
+  // timers but does not own the connection, so without this reference nothing ever closes it.
+  let premiumTickSocket: FyersLiveStreamer | null = null;
   if (fyersTokenService && fyersAppId) {
     const liveStreamer = new FyersLiveStreamer({
       appId: fyersAppId,
       tokenService: fyersTokenService,
     });
+    premiumTickSocket = liveStreamer;
     premiumTickStreamer = new OptionPremiumTickStreamer({
       underlyingSymbols: ["NIFTY50", "BANKNIFTY"],
       streamer: liveStreamer,
@@ -632,6 +636,9 @@ async function main(): Promise<void> {
         }));
       }
     }
+    // Closed after the final flush but before the pool: a live socket outlasting the pool
+    // reconnects, and the reconnect asks the closed pool for a token.
+    premiumTickSocket?.close();
     await database.end();
     process.exit(0);
   };
