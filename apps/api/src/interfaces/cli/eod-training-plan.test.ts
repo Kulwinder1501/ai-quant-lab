@@ -53,14 +53,14 @@ describe("buildEodTrainingPlan", () => {
     ]));
   });
 
-  it("derives complete family keys and dated refit keys that match train.py's identity", () => {
+  it("derives complete family keys that match train.py's identity", () => {
     const nifty = plan.find((step) => step.description === "xgboost NIFTY50 1d volatility");
     expect(nifty?.modelFamilyKey).toBe(
       "volatility-expansion-xgboost--NIFTY50--1d--h5--ml-feature-v7--volatility-expansion-v1--band0.25",
     );
     expect(nifty?.args).toEqual(expect.arrayContaining([
       "--model-key",
-      `${nifty!.modelFamilyKey}--refit-20260813`,
+      nifty!.modelFamilyKey,
     ]));
     // Ground truth from train.py's own hash: sha256("INFY,SBIN")[:8] via hashlib is 71ffbbe3.
     // Hardcoded rather than recomputed with the same helper, so this asserts the TypeScript
@@ -69,6 +69,17 @@ describe("buildEodTrainingPlan", () => {
     expect(pooled?.modelFamilyKey).toBe(
       "volatility-expansion-xgboost--pool2-71ffbbe3--1d--h5--ml-feature-v7--volatility-expansion-v1--band0.25",
     );
+  });
+
+  it("dates no scheduled model key, so successive refits version one lineage", () => {
+    // A `--refit-YYYYMMDD` suffix shipped briefly and made every night a new family: twelve keys
+    // from one run, all at version 1, none with an incumbent to compete against. Promotion and
+    // sticky shadow enrollment both key on model_key, so a key that moves daily disables both.
+    for (const step of plan) {
+      const modelKey = step.args[step.args.indexOf("--model-key") + 1];
+      expect(modelKey).toBe(step.modelFamilyKey);
+      expect(modelKey).not.toMatch(/refit-\d{8}/);
+    }
   });
 
   it("distinguishes rosters of equal length, so a member swap is a configuration with no artifact", () => {
