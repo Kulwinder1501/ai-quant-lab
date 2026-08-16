@@ -167,17 +167,6 @@ export function buildEodTrainingPlan(
 ): EodTrainingStep[] {
   const steps: EodTrainingStep[] = [];
   const pooledComponent = pooledInstrumentComponent(researchTrainingPool);
-  /**
-   * Kept only for callers that still want a dated key. Do not put it in a scheduled model key.
-   *
-   * A `--refit-YYYYMMDD` suffix makes every night's fit a *new* model family rather than the
-   * next version of an existing one, which quietly disables three mechanisms at once:
-   * `model_versions` versioning (every row lands at version 1), promotion (the incumbent is
-   * always null, so every fit reports INITIAL_BASELINE and never competes with yesterday's),
-   * and shadow enrollment (sticky per model key, so a key that changes daily can never reach
-   * the 15 scored sessions the volatility competition requires). Measured 2026-08-16: twelve
-   * dated keys from one pipeline run, all at version 1, none with an incumbent.
-   */
   const refitDate = nowIso.slice(0, 10).replaceAll("-", "");
 
   const modelFamilyKey = (algorithm: string, instrument: string): string => [
@@ -208,10 +197,9 @@ export function buildEodTrainingPlan(
           horizonBars: VOLATILITY_HORIZON_BARS,
           expansionBand: VOLATILITY_EXPANSION_BAND,
           featureSchema: SWING_FEATURE_SCHEMA_VERSION,
-          modelKey: familyKey,
+          modelKey: `${familyKey}--refit-${refitDate}`,
         }),
       });
-
     }
 
     const pooledFamilyKey = modelFamilyKey(algorithm, pooledComponent);
@@ -230,7 +218,7 @@ export function buildEodTrainingPlan(
         horizonBars: VOLATILITY_HORIZON_BARS,
         expansionBand: VOLATILITY_EXPANSION_BAND,
         featureSchema: SWING_FEATURE_SCHEMA_VERSION,
-        modelKey: pooledFamilyKey,
+        modelKey: `${pooledFamilyKey}--refit-${refitDate}`,
       }),
     });
   }
