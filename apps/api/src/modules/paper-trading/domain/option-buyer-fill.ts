@@ -50,8 +50,40 @@ export interface OptionBuyerFillInput {
     premium: number;
     impliedVolatility: number;
     source?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK";
+    /**
+     * The quoted bid at entry, which is the basis the *exits* are measured on.
+     *
+     * A long option is closed by selling into the bid, and `evaluate-open-paper-trades`
+     * compares both barriers against the observed bid series. The barriers themselves were
+     * Black-Scholes premiums carrying the IV solved from the mid, so they sat half a spread
+     * above the series they are tested against: the bid reached a mid-basis stop before the
+     * mid did, and had to clear an extra half-spread to reach a mid-basis target. Both errors
+     * ran against the position, which is what made stops fire early and targets go unreached.
+     *
+     * Supplying the bid moves both barriers onto the bid basis so they are compared like with
+     * like. Omit it only when no bid is observable; the barriers then stay on the model basis
+     * and the old asymmetry returns, which `exitBasisOffset` in the result makes explicit.
+     */
+    bid?: number | null;
   };
 }
+
+/**
+ * How far the premium risk-reward may drift from the underlying idea's own, as a ratio.
+ *
+ * Repricing an underlying setup into premium space does not preserve risk-reward, and it is not
+ * supposed to: an option is convex, so an adverse move costs less premium than a favourable move
+ * gains, and some drift is the contract behaving correctly. What is not correct is drift without
+ * bound. Measured across the 19 positions closed on 2026-08-14, every idea carried an underlying
+ * risk-reward of exactly 1.50 while the premium geometry ranged from 0.30 to 24.40 — one trade
+ * risking Rs 42.83 to make Rs 12.69, another risking Rs 0.80 to make Rs 19.52. Neither is the
+ * strategy's risk model; both are the mapping losing it.
+ *
+ * Three allows genuine convexity through and refuses the pathological end. It is deliberately a
+ * ratio rather than an absolute band, because it has to hold for any idea's risk-reward, not just
+ * the 1.50 this strategy currently emits.
+ */
+export const MAXIMUM_RISK_REWARD_DISTORTION = 3;
 
 export interface OptionBuyerFill {
   optionType: OptionType;
@@ -65,6 +97,13 @@ export interface OptionBuyerFill {
   impliedVolatility: number;
   stopPremium: number;
   targetPremium: number;
+  /**
+   * Premium added to both barriers to move them from the model's mid basis onto the bid basis
+   * the exit evaluator measures against. Negative by construction when a bid was observed, since
+   * the bid sits below the mid. Zero means no bid was available and the barriers remain on the
+   * model basis — worth recording, because that is the case where a stop can still fire early.
+   */
+  exitBasisOffset: number;
   entryGreeks: OptionGreeks;
   timeToExpiryYears: number;
   underlyingEntryPrice: number;
@@ -138,8 +177,27 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     OPTION_TICK_SIZE,
     input.observedFill?.premium ?? entryGreeks.premium,
   );
-  const stopPremium = Math.max(OPTION_TICK_SIZE, stopGreeks.premium);
-  const targetPremium = Math.max(OPTION_TICK_SIZE, targetGreeks.premium);
+
+  // Move both barriers onto the basis they are actually tested against.
+  //
+  // The entry is the ask, the IV is solved from the mid, and the exit evaluator compares the
+  // barriers against the observed *bid*. Leaving the barriers at their model (mid-basis) value
+  // therefore tested them against a series running half a spread below them, which made the stop
+  // trigger early and the target unreachable by the same amount, both against the position.
+  // Shifting by (observed bid - model premium at entry spot) restores like-for-like comparison.
+  //
+  // Note this makes the *measured* risk-reward worse, not better: risk now spans ask-to-bid, so
+  // it carries the full round-trip spread the position genuinely pays. That cost was always
+  // being paid — it was just landing in the exit rather than being visible in the geometry.
+  const observedBid = input.observedFill?.bid;
+  const exitBasisOffset = observedBid != null
+    && Number.isFinite(observedBid)
+    && observedBid > 0
+    ? observedBid - entryGreeks.premium
+    : 0;
+
+  const stopPremium = Math.max(OPTION_TICK_SIZE, stopGreeks.premium + exitBasisOffset);
+  const targetPremium = Math.max(OPTION_TICK_SIZE, targetGreeks.premium + exitBasisOffset);
 
   // Black-Scholes premium is monotonic in spot, so with coherent inputs the ordering
   // always holds -- except when the option is so far out of the money, or so close to
@@ -159,6 +217,31 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     );
   }
 
+  // The strategy's risk model must survive the trip into premium space. Ordering alone does not
+  // check that: a setup risking Rs 42.83 to make Rs 12.69 satisfies stop < fill < target
+  // perfectly well, and nine of the nineteen positions closed on 2026-08-14 would have been
+  // refused here. Compared as a ratio against the idea's own risk-reward, so a strategy that
+  // changes its geometry does not silently drift past this guard.
+  const underlyingRisk = Math.abs(input.underlyingEntry - input.underlyingStop);
+  const underlyingReward = Math.abs(input.underlyingTarget - input.underlyingEntry);
+  const premiumRisk = fillPremium - stopPremium;
+  const premiumReward = targetPremium - fillPremium;
+  if (underlyingRisk > 0 && premiumRisk > 0) {
+    const underlyingRiskReward = underlyingReward / underlyingRisk;
+    const premiumRiskReward = premiumReward / premiumRisk;
+    const distortion = premiumRiskReward / underlyingRiskReward;
+    if (distortion > MAXIMUM_RISK_REWARD_DISTORTION
+      || distortion < 1 / MAXIMUM_RISK_REWARD_DISTORTION) {
+      throw new Error(
+        `Repricing distorted the idea's risk-reward beyond ${MAXIMUM_RISK_REWARD_DISTORTION}x: `
+        + `underlying ${underlyingRiskReward.toFixed(2)}:1 became premium `
+        + `${premiumRiskReward.toFixed(2)}:1 (${distortion.toFixed(2)}x) for the ${strike} `
+        + `${optionType}, risking ${premiumRisk.toFixed(2)} to make ${premiumReward.toFixed(2)}. `
+        + "The premium geometry is not the strategy's risk model; move the strike or the expiry.",
+      );
+    }
+  }
+
   return {
     optionType,
     side: "LONG",
@@ -170,6 +253,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     impliedVolatility: volatility,
     stopPremium: roundMoney(stopPremium),
     targetPremium: roundMoney(targetPremium),
+    exitBasisOffset: roundMoney(exitBasisOffset),
     entryGreeks,
     timeToExpiryYears: T,
     underlyingEntryPrice: input.underlyingEntry,

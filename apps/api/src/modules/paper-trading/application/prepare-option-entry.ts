@@ -260,6 +260,9 @@ export class PrepareOptionEntry {
       && chainGreeks !== null
       ? {
         premium: intendedQuote.ask,
+        // The exit evaluator measures both barriers against the bid, so the bid travels with
+        // the fill to keep them on one basis. See `exitBasisOffset` in `option-buyer-fill`.
+        bid: intendedQuote.bid,
         impliedVolatility: chainGreeks.impliedVolatility,
         source: "OPTION_CHAIN_QUOTE" as const,
         observedAt: entryChain.observedAt,
@@ -283,6 +286,7 @@ export class PrepareOptionEntry {
       && denseIv?.measurable === true
       ? {
         premium: denseQuote.ask,
+        bid: denseQuote.bid,
         impliedVolatility: denseIv.impliedVolatility,
         source: "OPTION_PREMIUM_TICK_ASK" as const,
         observedAt: denseQuote.observedAt,
