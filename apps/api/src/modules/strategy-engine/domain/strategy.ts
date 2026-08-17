@@ -6,6 +6,7 @@ import type {
 } from "../../pattern-recognition/domain/market-pattern.js";
 
 import type { RegimeContext } from "./regime.js";
+import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
 
 export type TradeSide = "LONG" | "SHORT";
 export type TradeIdeaStatus = "PROPOSED" | "ACCEPTED" | "EXPIRED" | "REJECTED";
@@ -73,6 +74,24 @@ export interface StrategyMarketContext {
     details: Record<string, unknown>;
   }>;
   regime?: RegimeContext;
+  /**
+   * Trend and level context from slower timeframes, for confluence scoring.
+   *
+   * Optional because absence is a legitimate state, not an error: `calculateHtfTrendAlignment`
+   * and `calculateHtfSrConfluence` both return 0 -- neutral, no bonus and no penalty -- when this
+   * is missing, so a strategy that reads it degrades to its single-timeframe behaviour rather
+   * than refusing. Making it required would also break every context producer at once, including
+   * the backtest engine, for a field none of them can supply yet.
+   *
+   * **Nothing populates this today.** No resolver for `ResolveHtfInput` exists and no repository
+   * sets the field, so every confluence score is currently 0 and the HTF terms contribute
+   * nothing. That has to be built before any result is read as evidence about confluence -- the
+   * same trap as a pattern strategy scoring against an empty `pattern_detections` table, which
+   * looked for a full session like a strategy finding no setups. Populating it needs the
+   * anti-lookahead rule in `ResolveHtfInput`: the higher-timeframe candle must have
+   * `closeTime <= asOf`, or a 60m bar that has not closed leaks the future into a 5m signal.
+   */
+  higherTimeframes?: readonly HigherTimeframeContext[];
 }
 
 export interface StrategyMarketContextRepository {
