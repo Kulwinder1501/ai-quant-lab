@@ -12,6 +12,12 @@ import { PostgresScheduledJobClaimRepository } from "../../infrastructure/databa
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { PostgresOpenPositionContractRepository } from "../../infrastructure/database/repositories/postgres-open-position-contract-repository.js";
+import { PostgresOpenTradeAccountRepository } from "../../infrastructure/database/repositories/postgres-open-trade-account-repository.js";
+import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
+import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
+import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
+import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
+import { SweepOpenPaperTradeExits } from "../../modules/paper-trading/application/sweep-open-paper-trade-exits.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { OptionPremiumTickStreamer } from "../../infrastructure/market-data/option-premium-tick-streamer.js";
 import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
@@ -425,7 +431,13 @@ async function main(): Promise<void> {
   }, { timezone: IST });
 
   /**
-   * Exit-only sweep, on a tighter cadence than the bot that opens positions.
+   * The floor under tick-driven exit evaluation, not the primary path.
+   *
+   * `onTicksWritten` above evaluates exits within a flush of the quote that crossed the barrier,
+   * which is a few seconds. This remains because a socket fails by going quiet: if the stream
+   * drops, stalls, or never connected, nothing would evaluate at all, and an exit path that
+   * stops silently is the worst version of this bug rather than a fixed one. It is also the only
+   * path when the process starts with positions already open and the market already moving.
    *
    * The bot evaluates its open trades at the end of its own five-minute run, so a barrier
    * crossed at :49:03 stayed open until :50:01 -- measured, on a target that filled correctly at
@@ -521,6 +533,25 @@ async function main(): Promise<void> {
    * the API restarts on its own schedule — a UI deploy should not punch a hole in the series the
    * paper-trading bot resolves its stops against.
    */
+  /**
+   * Exit evaluation, driven by the tick writer below rather than by a cron.
+   *
+   * Built here because this process is the one holding the stream: the barrier a position cares
+   * about becomes knowable the instant its quote is persisted, so the shortest honest path from
+   * quote to exit is to evaluate right after the write. The per-minute PAPER_TRADE_EXIT_SWEEP
+   * cron stays as the floor under it -- a socket fails by going quiet, and a feed that stops
+   * without erroring would otherwise stop enforcing stops without erroring either.
+   */
+  const sweepOpenPaperTradeExits = new SweepOpenPaperTradeExits(
+    new PostgresOpenTradeAccountRepository(database),
+    new EvaluateOpenPaperTrades(
+      new PostgresPaperTradeRepository(database),
+      new PostgresCandleRepository(database),
+      new PostgresIndiaVixImpliedVolatilitySource(database),
+      new PostgresOptionPremiumTickRepository(database),
+    ),
+  );
+
   let premiumTickStreamer: OptionPremiumTickStreamer | null = null;
   // Held outside the block so shutdown can close the socket. The tick streamer stops its own
   // timers but does not own the connection, so without this reference nothing ever closes it.
@@ -540,6 +571,22 @@ async function main(): Promise<void> {
       // does not. A strike that drifts out of the band is exactly the one whose stop still has
       // to resolve, and its tick series would go quiet at the moment it matters most.
       requiredContracts: new PostgresOpenPositionContractRepository(database),
+      onTicksWritten: async () => {
+        const result = await sweepOpenPaperTradeExits.execute();
+        // Silent on the common case. This runs every few seconds all session, so logging every
+        // pass would bury the two things worth seeing: a position closing, and a stop that could
+        // not be evaluated -- which means it is not being enforced.
+        if (result.tradesClosed > 0 || result.failures.length > 0) {
+          console.info(JSON.stringify({
+            level: result.failures.length > 0 ? "warn" : "info",
+            message: "Tick-driven exit sweep",
+            accountsSwept: result.accountsSwept,
+            tradesClosed: result.tradesClosed,
+            closedTradeIds: result.closedTradeIds,
+            failures: result.failures,
+          }));
+        }
+      },
     });
     try {
       await liveStreamer.connect();

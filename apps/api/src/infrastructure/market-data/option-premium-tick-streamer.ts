@@ -33,6 +33,21 @@ export interface OptionPremiumTickStreamerOptions {
   maximumTickAgeMs?: number;
   strikeBand?: number;
   now?: () => Date;
+  /**
+   * Called after a flush that wrote rows, with what it wrote.
+   *
+   * This is how exit evaluation rides the tick loop instead of a cron: the barrier a position
+   * cares about becomes visible the moment the quote that crossed it is persisted, so the
+   * handler runs against a table that already contains it. Nothing about this class depends on
+   * what the handler does -- it is deliberately a callback rather than a paper-trading
+   * dependency, so market-data collection does not import a trading module to stay honest about
+   * which way the dependency points.
+   *
+   * A handler that throws or hangs must not take the writer with it: the caller owns its own
+   * errors and its own concurrency, and this awaits it only so a slow handler cannot overlap
+   * itself through the flush timer.
+   */
+  onTicksWritten?: (result: { inserted: number; skipped: number }) => Promise<void> | void;
 }
 
 const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
@@ -70,6 +85,7 @@ export class OptionPremiumTickStreamer {
   private readonly underlyingByProviderSymbol = new Map<string, string>();
   private contracts: AtmPremiumContract[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
+  private flushing = false;
   private resubscribeTimer: NodeJS.Timeout | null = null;
   private readonly onTick = (tick: Tick): void => this.record(tick);
 
@@ -83,7 +99,12 @@ export class OptionPremiumTickStreamer {
     this.options.streamer.on("tick", this.onTick);
     await this.refreshSubscriptions();
     this.flushTimer = setInterval(() => {
-      void this.flush();
+      // Skipped rather than queued when the previous cycle is still running. A write plus its
+      // handler that outlives the interval would otherwise stack timers on top of each other,
+      // and the next tick's data supersedes this one anyway.
+      if (this.flushing) return;
+      this.flushing = true;
+      void this.flush().finally(() => { this.flushing = false; });
     }, this.options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);
     this.resubscribeTimer = setInterval(() => {
       void this.refreshSubscriptions();
@@ -177,6 +198,23 @@ export class OptionPremiumTickStreamer {
     const result = await this.options.tickRepository.insertTicks(rows);
     for (const row of rows) {
       this.lastFlushedAt.set(row.providerSymbol.toUpperCase(), row.observedAt.getTime());
+    }
+
+    // After the write, never before: a handler that reads the tick table must find the quotes
+    // this cycle produced. Only when something landed -- a flush that inserted nothing has
+    // told the handler nothing it did not already know.
+    if (result.inserted > 0 && this.options.onTicksWritten) {
+      try {
+        await this.options.onTicksWritten(result);
+      } catch (error) {
+        // The writer's job is the series. A handler failure is reported and the series continues,
+        // because dropping quotes would turn someone else's bug into a gap in the record.
+        console.error(JSON.stringify({
+          level: "error",
+          message: "An option premium tick handler failed; the tick series is unaffected",
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
     }
     return result;
   }
