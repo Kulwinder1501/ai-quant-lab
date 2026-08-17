@@ -550,7 +550,30 @@ async function main(): Promise<void> {
   // figure rather than its level, so intra-session granularity matters; but each run is
   // one request per underlying against a provider that answers 429 after roughly a dozen
   // rapid calls.
-  cron.schedule("*/15 9-15 * * 1-5", () => {
+  //
+  // ## Why these minutes rather than `*/15`
+  //
+  // On `*/15` this ran at :00, which is the busiest minute in the schedule: ten jobs claim
+  // there, four of them calling Fyers -- this, INDICES_INTRADAY's six history requests,
+  // OPTION_PREMIUM_TICKS, and FYERS_AUTH_HEALTH_CHECK's token refresh -- plus the trading bot
+  // and the agent tick. Measured 2026-08-17 at both 06:00 and 07:00: all four underlyings came
+  // back `HTTP 429, code 429. request limit reached`, and this job lost the burst it was
+  // sharing. That is not a harmless retry, because the failure cascades: the snapshot ages past
+  // the forty-minute freshness guard in `selectAtmPremiumContracts`, so OPTION_PREMIUM_TICKS
+  // then refuses every run with NO_FRESH_ATM_CONTRACTS, the socket falls back to subscribing the
+  // underlyings alone, and the tick series every option exit resolves against stops being
+  // written. On 2026-08-17 that ran for fifty minutes.
+  //
+  // The minutes are odd, not multiples of 3 or 5, and not HIGHER_TIMEFRAME_ANALYSIS's
+  // 7,22,37,52 -- which between them clear `*/2` (AI_AGENT_TICK), `*/3` (RSS_NEWS_INGESTION),
+  // `*/5` (PAPER_TRADING_BOT, the liveness check), `5,20,35,50` (VOLATILITY_STRADDLE) and every
+  // `*/15` job. Only the every-minute jobs still coincide, and those cannot be avoided.
+  //
+  // Spacing is 12/18/12/18 rather than an even 15 because `*/2` claims every even minute, so no
+  // all-odd set can be evenly spaced. The widest gap is 18 minutes, still less than half the
+  // forty-minute guard, so a single missed run cannot starve the tick collector the way a
+  // failed `*/15` run could once the next one was 30 minutes out.
+  cron.schedule("11,23,41,53 9-15 * * 1-5", () => {
     void schedule("OPTION_CHAIN", () => runCommand("npm", [
       "run", "data:collect:option-chain", "--",
       "--underlyings", "NIFTY50,BANKNIFTY,SBIN,RELIANCE",
