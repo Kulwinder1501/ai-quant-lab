@@ -423,8 +423,22 @@ async function main(): Promise<void> {
     }
   };
 
+  /*
+   * 1m and 5m are here for the scalp bots, and their absence was a silent dead end.
+   *
+   * Patterns existed on exactly the autonomous agent's band -- 15m, 30m, 60m, 1d -- and on nothing
+   * the bots trade. Measured 2026-08-17: 24,178 index 5m bars and 111,340 index 1m bars with zero
+   * pattern detections between them. AutoBot-Sniper's whole premise is pattern-gated scalping on
+   * 1m/5m, so it could not have fired a single signal no matter how its rules were tuned, and it
+   * reported RULES_NOT_MET on every evaluation -- indistinguishable from a genuinely quiet market.
+   *
+   * Cost measured before adding them, because this helper rescans the full completed series on
+   * every invocation and that is what once let a per-minute job reach 330 concurrent runs: 5m is
+   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. Four passes at a
+   * fifteen-minute cadence is well inside the 20-minute abandoned-claim horizon for this job.
+   */
   cron.schedule("*/15 9-15 * * 1-5", () => {
-    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["15m"]));
+    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
   }, { timezone: IST });
 
   // Higher-timeframe models consume completed 30m/60m candles. Refreshing their
