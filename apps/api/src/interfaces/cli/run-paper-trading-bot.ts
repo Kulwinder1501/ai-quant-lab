@@ -33,7 +33,6 @@ import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/d
  *
  * The generator skips a strategy whose `supportedTimeframes` do not include the requested
  * one, and reports nothing -- so a misconfigured timeframe looks exactly like a quiet market.
- * That is how this bot spent its time scanning 5m, which no strategy has ever supported.
  */
 function assertScannableTimeframes(timeframes: readonly string[]): void {
   for (const timeframe of timeframes) {
@@ -52,14 +51,6 @@ function assertScannableTimeframes(timeframes: readonly string[]): void {
 
 /**
  * Refuses at startup to scan an instrument that is not active.
- *
- * `is_active` is how this project marks an instrument as research-only -- migration 027's
- * twenty training equities and migration 030's two ETF proxies all carry `FALSE`, each with a
- * comment saying activation is a separate decision. `POST /trade-ideas/generate` enforces that
- * with `AND is_active = TRUE`, but `findByExchangeAndSymbol` deliberately does not filter (the
- * collectors must reach inactive rows to backfill them), so an unattended bot reading the same
- * repository could trade one without anything objecting. Checked at startup rather than per
- * scan: a symbol list is a deployment decision, and this should fail before the first order.
  */
 async function assertScannableSymbols(
   repository: { findByExchangeAndSymbol(exchange: "NSE", symbol: string): Promise<{ isActive: boolean } | null> },
@@ -85,64 +76,66 @@ function contractKey(underlying: string, expiry: Date, strike: number, optionTyp
   return `${underlying} ${expiry.toISOString().slice(0, 10)} ${strike} ${optionType}`;
 }
 
-/**
- * Opens **paper** option positions from generated signals, and evaluates the open ones.
- *
- * Nothing here reaches a broker. Every position is a row in `paper_trades`, priced against
- * the observed book; there is no order path and none should be added here.
- *
- * It previously opened a position in NIFTY50 or BANKNIFTY at the *index close*, which is not
- * a purchasable instrument, sized at `quantity: 1` against lots of 75 and 15, and passed
- * `entryFees: 0`. Every P&L it produced was wrong in three independent ways and none of them
- * surfaced as an error, so it was made signal-only until the options path could carry it.
- *
- * It now routes through `PrepareOptionEntry` -- the same code the HTTP route uses, not a
- * second copy of it. That is the whole point of the shared service: the gates it enforces
- * (the expiry must be one the provider lists, the entry premium must be the book's ask, the
- * pre-trade checklist must actually run) are each invisible when missing, and this caller
- * runs unattended every five minutes.
- *
- * Two limits are the bot's own, because an interactive caller does not need them: it will
- * not hold more than `MAX_CONCURRENT_POSITIONS`, and it will not open a second position in a
- * contract it already holds. Without those, a signal that persists across scans becomes a
- * new position every five minutes.
- */
+export interface BotSandboxSpec {
+  name: string;
+  allowedStrategies: readonly string[];
+  initialBalance: number;
+}
 
-const BOT_ACCOUNT_NAME = "AutoBot";
 /**
- * `NIFTYBEES` is deliberately **not** here, and it is worth recording why, because adding it
- * looks obviously right: `live-collector-scalp-v2` writes its 1m bars, it is the one intraday
- * series with real volume, and momentum-scalp needs volume for VWAP.
+ * Two scalping sandboxes whose only intended difference is candlestick and price-action patterns.
  *
- * Two things stop it, and neither is visible from this file alone.
+ * Sniper deliberately carries Classic's `momentum-scalp-index` as well as the pattern strategies,
+ * because the question being asked is "do patterns add anything to the strategy already running",
+ * and that is only answerable if both bots see the same base signal. It listed the pattern
+ * strategy alone until 2026-08-17, which made the two arms disjoint rather than nested: Sniper
+ * took no trade at all that day while Classic took eleven, so the comparison had one arm with a
+ * sample of zero.
  *
- * 1. Migration 030 registers it `is_active = FALSE` and says in as many words that activating
- *    it for the scanner or strategy engine is a separate, explicit decision. `POST
- *    /trade-ideas/generate` honours that with `AND is_active = TRUE`;
- *    `findByExchangeAndSymbol` does not filter, so scanning it here would have quietly
- *    overridden the flag from the one path that never checks it.
- * 2. The bot's only entry path is `prepareEntry`, which buys an **option** on the idea's
- *    underlying. NIFTYBEES is an ETF with no options chain, so every idea it raised would be
- *    refused at NO_STRIKE_STEP/NO_CALENDAR -- a scan that cannot produce a position no matter
- *    what the market does.
+ * Overlapping strategies are safe and are the point. `trade_idea_id` on `paper_trades` carries no
+ * uniqueness constraint and `prepare-option-entry` has no consumed-guard, so one idea legitimately
+ * becomes one position per account -- both bots acting on the same signal, which is the
+ * comparison. Every per-bot limit is already scoped to its account: `heldContracts`,
+ * `MAX_CONCURRENT_POSITIONS`, and the risk state lookup.
  *
- * Trading it needs an equity/ETF entry path plus a deliberate activation, so it stays out
- * until both exist. `assertScannableSymbols` below enforces the `is_active` half.
+ * `trend-breakout` stays on Classic alone. It is a 15m-and-slower trend strategy rather than a
+ * scalp, it raised one idea on 2026-08-17 against momentum-scalp-index's sixty-one, and it is the
+ * one asymmetry left between the arms -- worth removing if the pattern comparison is to be clean,
+ * but that is a decision about what Classic is, not about patterns.
  */
+export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
+  {
+    name: "AutoBot-Classic",
+    allowedStrategies: ["momentum-scalp-index", "trend-breakout"],
+    initialBalance: 1_000_000,
+  },
+  {
+    name: "AutoBot-Sniper",
+    allowedStrategies: [
+      "momentum-scalp-index",
+      "momentum-scalp-pattern",
+      "momentum-scalp-pattern-v2",
+    ],
+    initialBalance: 1_000_000,
+  },
+];
+
 const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
 /**
- * 5m is for momentum-scalp-index (volume-aware index path). 15m/60m feed trend-breakout.
+ * The scalp band, and only the scalp band.
  *
- * 1m is dropped: momentum-scalp needs VWAP and VWAP needs volume, but index quotes carry
- * `volume: 0` from Fyers (measured 2026-08-07). Scanning 1m only burns cycles with no fills.
- * `assertScannableTimeframes` turns an unsupported timeframe into a startup error.
+ * These bots own 1m-15m. 30m, 60m and 1d belong to the autonomous agent's directional, intraday
+ * and swing work, so scanning them here would have two systems trading the same bars.
+ *
+ * `60m` was in this list until 2026-08-17 and could never have worked: `INDICES_INTRADAY` collects
+ * 1m, 5m and 15m only, so the newest 60m bar was the 09:15 one for the rest of the session, and
+ * the sole 60m-capable strategy is `trend-breakout`, which is not a scalp. `1m` was missing at the
+ * same time, which is why `momentum-scalp` -- supported on 1m alone -- could never run at all.
+ *
+ * `3m` is left out deliberately: both pattern strategies support it, but nothing collects a 3m
+ * series, so including it would only add TIMEFRAME_UNSUPPORTED noise against absent bars.
  */
-const SCAN_TIMEFRAMES = ["5m", "15m", "60m"] as const;
-/**
- * Deliberately small. The account is Rs 1,000,000 and one NIFTY lot of a 200-point premium
- * is Rs 15,000, so this is not a capital limit -- it is a blast radius. The bot's edge is
- * unproven, and its own trade history is the evidence that will decide whether it has one.
- */
+const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
@@ -185,21 +178,7 @@ async function main(): Promise<void> {
     const instrumentRepository = new PostgresInstrumentRepository(database);
     const tradeRepository = new PostgresPaperTradeRepository(database);
 
-    // Before the account is touched: a symbol list that should not be traded is a
-    // configuration error, and it must not get as far as raising an idea.
     await assertScannableSymbols(instrumentRepository, SCAN_SYMBOLS);
-
-    let account = await accountRepository.findByName(BOT_ACCOUNT_NAME);
-    if (!account) {
-      account = await accountRepository.create({ name: BOT_ACCOUNT_NAME, openingBalance: 1_000_000 });
-      console.info(JSON.stringify({ level: "info", message: "Created bot account", account: BOT_ACCOUNT_NAME }));
-    }
-
-    const opened: Array<Record<string, unknown>> = [];
-    /** What each strategy actually did, so an empty run is never ambiguous. */
-    const strategyOutcomes: Array<Record<string, unknown>> = [];
-    const refused: Array<Record<string, unknown>> = [];
-    const skipped: Array<Record<string, unknown>> = [];
 
     const prepareEntry = new PrepareOptionEntry(
       database,
@@ -208,39 +187,30 @@ async function main(): Promise<void> {
     );
     const openTrade = new OpenPaperTrade(tradeRepository);
     const riskRepository = new PostgresRiskStateRepository(database);
-    // Read once per run rather than per idea: within a single run nothing else opens
-    // positions on this account, and the count is re-derived on the next run anyway.
-    const existingOpen = await tradeRepository.listOpenByAccount(account.id);
-    const heldContracts = new Set(
-      existingOpen
-        .filter((trade) => trade.optionStrike != null && trade.optionExpiry != null)
-        .map((trade) => contractKey(
-          String(trade.underlyingSymbol ?? ""),
-          trade.optionExpiry as Date,
-          Number(trade.optionStrike),
-          String(trade.optionType ?? ""),
-        )),
+
+    const generator = new GenerateTradeIdeas(
+      new PostgresStrategyVersionRepository(database),
+      new PostgresStrategyMarketContextRepository(database),
+      new PostgresTradeIdeaRepository(database),
     );
-    let openPositions = existingOpen.length;
+
+    // Collect fresh trade ideas per symbol and timeframe once per run
+    const generatedBySeries: Array<{
+      symbol: string;
+      timeframe: string;
+      results: Awaited<ReturnType<typeof generator.execute>>;
+      skippedReason?: string;
+      explanation?: string;
+    }> = [];
+
+    const skippedSeries: Array<Record<string, unknown>> = [];
 
     if (minutes < LAST_SIGNAL_MINUTES) {
-      const generator = new GenerateTradeIdeas(
-        new PostgresStrategyVersionRepository(database),
-        new PostgresStrategyMarketContextRepository(database),
-        new PostgresTradeIdeaRepository(database),
-      );
-
       for (const symbol of SCAN_SYMBOLS) {
         const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
         if (!instrument) continue;
 
         for (const timeframe of SCAN_TIMEFRAMES) {
-          // Freshness is checked on **the series the ideas are raised from**, before
-          // generating. Checking 1m while scanning 5m is not a freshness check: 1m is
-          // currently written by the live poller and 5m by the history collector, so the
-          // gate would pass on a series that is up to date while the strategy reads bars
-          // from the day before. Generating first would also leave a trade idea in the
-          // table that reads as though it described the current market.
           const latest = await database.query<{ close_time: Date }>(
             `SELECT close_time FROM candles
              WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
@@ -251,11 +221,10 @@ async function main(): Promise<void> {
             symbol: `${symbol} ${timeframe}`,
             latestBarCloseTime: latest.rows[0]?.close_time ?? null,
             now,
-            // One bar of slack: a 5m series is expected to lag by up to its own bar length.
             maxAgeMinutes: DEFAULT_MAX_BAR_AGE_MINUTES + barLengthMinutes(timeframe),
           });
           if (!freshness.fresh) {
-            skipped.push({ symbol, timeframe, reason: freshness.reason, explanation: freshness.explanation });
+            skippedSeries.push({ symbol, timeframe, reason: freshness.reason, explanation: freshness.explanation });
             console.error(JSON.stringify({
               level: "error", message: "Skipped a series on stale data", symbol, timeframe,
               reason: freshness.reason, explanation: freshness.explanation,
@@ -264,167 +233,196 @@ async function main(): Promise<void> {
           }
 
           const results = await generator.execute({ instrumentId: instrument.id, timeframe });
-          for (const result of results) {
-            if (result.skippedReason) {
-              // Reported rather than skipped in silence. "The strategy ran and found no
-              // setup" and "the strategy never ran" produce the same empty output
-              // otherwise, and only one of them is a market observation.
-              strategyOutcomes.push({
-                symbol, timeframe, strategy: result.strategyKey,
-                skippedReason: result.skippedReason,
-                ...(result.failureMessage ? { failureMessage: result.failureMessage } : {}),
-              });
-              continue;
-            }
-            strategyOutcomes.push({
-              symbol, timeframe, strategy: result.strategyKey,
-              skippedReason: null,
-              candidatesGenerated: result.candidatesGenerated,
-              ideasRaised: result.tradeIdeaIds.length,
-            });
-            for (const tradeIdeaId of result.tradeIdeaIds) {
-              if (openPositions >= MAX_CONCURRENT_POSITIONS) {
-                refused.push({
-                  tradeIdeaId, symbol, reason: "POSITION_LIMIT",
-                  explanation: `Already holding ${openPositions} positions, the limit is ${MAX_CONCURRENT_POSITIONS}.`,
-                });
-                continue;
-              }
-
-              // The service picks the contract from the provider's calendar and
-              // fills at the observed ask; everything it refuses on is reported rather than
-              // counted as a pass.
-              const prepared = await prepareEntry.execute({ tradeIdeaId, lots: 1, now });
-              if (!prepared.approved) {
-                refused.push({
-                  tradeIdeaId, symbol, timeframe,
-                  reason: prepared.reason,
-                  explanation: prepared.explanation,
-                  ...(prepared.reasons ? { reasons: prepared.reasons } : {}),
-                  ...(prepared.unchecked ? { unchecked: prepared.unchecked } : {}),
-                });
-                continue;
-              }
-
-              const entry = prepared.entry;
-              const riskState = await riskRepository.findRiskState({
-                accountId: account.id,
-                instrumentId: instrument.id,
-                asOf: now,
-                maxRegimeAgeMinutes: 60,
-              });
-              const riskDecision = evaluateRisk({
-                instrumentId: instrument.id,
-                decisionTimestamp: now,
-                side: entry.side,
-                entryPrice: entry.fillPrice,
-                stopLoss: entry.stopLossOverride,
-                targetPrice: entry.targetPriceOverride,
-                lotSize: entry.lotSize,
-              }, riskState);
-              if (!riskDecision.approved) {
-                refused.push({
-                  tradeIdeaId,
-                  symbol,
-                  timeframe,
-                  reason: "RISK_CONTROL_VETO",
-                  explanation: `Risk engine refused the entry: ${riskDecision.reasonCodes.join(", ")}.`,
-                });
-                continue;
-              }
-              // The bot deliberately starts at one lot. The portfolio engine may reduce
-              // that allowance, but it cannot silently size an unattended strategy up.
-              const approvedQuantity = Math.min(entry.quantity, riskDecision.approvedQuantity);
-              const key = contractKey(
-                entry.optionContract.underlyingSymbol,
-                entry.optionContract.optionExpiry,
-                entry.optionContract.optionStrike,
-                entry.optionContract.optionType,
-              );
-              if (heldContracts.has(key)) {
-                refused.push({
-                  tradeIdeaId, symbol, reason: "ALREADY_HOLDING",
-                  explanation: `A position in ${key} is already open; a persisting signal must not `
-                    + "become a new position on every scan.",
-                });
-                continue;
-              }
-
-              const riskNote = ` Risk checks: ${riskDecision.reasonCodes.join(", ")}.`;
-
-              const trade = await openTrade.execute({
-                accountId: account.id,
-                tradeIdeaId,
-                fillPrice: entry.fillPrice,
-                quantity: approvedQuantity,
-                openedAt: now,
-                entryFees: entry.entryFees,
-                entrySlippage: 0,
-                notes: `Opened by ${BOT_ACCOUNT_NAME} from a ${timeframe} ${symbol} signal.${riskNote}`,
-                orderType: "MARKET",
-                stopLossOverride: entry.stopLossOverride,
-                targetPriceOverride: entry.targetPriceOverride,
-                sideOverride: entry.side,
-                feeBreakdown: entry.feeBreakdown,
-                applyBrokerageFees: false,
-                optionContract: entry.optionContract,
-              });
-
-              heldContracts.add(key);
-              openPositions += 1;
-              opened.push({
-                paperTradeId: trade.id,
-                tradeIdeaId,
-                symbol,
-                timeframe,
-                contract: key,
-                fillPremium: entry.fillPrice,
-                stopPremium: entry.stopLossOverride,
-                targetPremium: entry.targetPriceOverride,
-                quantity: approvedQuantity,
-                lotSize: entry.lotSize,
-                entryFees: entry.entryFees,
-                estimatedExitFees: Number(calculateExitFees(entry.fillPrice, approvedQuantity).total.toFixed(2)),
-                fillSource: (entry.feeBreakdown.entryChecks as { fillSource?: string } | undefined)?.fillSource,
-                barAgeMinutes: Math.round(freshness.ageMinutes),
-                // Reported on every position, not only when empty: a trade that passed a
-                // partially-evaluated gate should say so on its own record.
-                unchecked: entry.unchecked,
-              });
-            }
-          }
+          generatedBySeries.push({ symbol, timeframe, results });
         }
       }
     }
 
-    // Existing positions still need their stops enforced. Fees are the brokerage model's,
-    // not zero: a close priced without them reports a profit the account never had.
-    const evaluation = await new EvaluateOpenPaperTrades(
-      tradeRepository,
-      new PostgresCandleRepository(database),
-      new PostgresIndiaVixImpliedVolatilitySource(database),
-      new PostgresOptionPremiumTickRepository(database),
-    ).execute({ accountId: account.id, asOf: now });
+    const botReports: Array<Record<string, unknown>> = [];
+
+    // Execute isolated trading logic for each bot sandbox in DUAL_BOT_SANDBOX
+    for (const botSpec of DUAL_BOT_SANDBOX) {
+      let account = await accountRepository.findByName(botSpec.name);
+      if (!account) {
+        account = await accountRepository.create({ name: botSpec.name, openingBalance: botSpec.initialBalance });
+        console.info(JSON.stringify({ level: "info", message: "Created bot account", account: botSpec.name }));
+      }
+
+      const opened: Array<Record<string, unknown>> = [];
+      const strategyOutcomes: Array<Record<string, unknown>> = [];
+      const refused: Array<Record<string, unknown>> = [];
+
+      const existingOpen = await tradeRepository.listOpenByAccount(account.id);
+      const heldContracts = new Set(
+        existingOpen
+          .filter((trade) => trade.optionStrike != null && trade.optionExpiry != null)
+          .map((trade) => contractKey(
+            String(trade.underlyingSymbol ?? ""),
+            trade.optionExpiry as Date,
+            Number(trade.optionStrike),
+            String(trade.optionType ?? ""),
+          )),
+      );
+      let openPositions = existingOpen.length;
+
+      for (const { symbol, timeframe, results } of generatedBySeries) {
+        const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
+        if (!instrument) continue;
+
+        // Filter results to only strategies permitted for this specific bot
+        const botResults = results.filter((res) => botSpec.allowedStrategies.includes(res.strategyKey));
+
+        for (const result of botResults) {
+          if (result.skippedReason) {
+            strategyOutcomes.push({
+              symbol, timeframe, strategy: result.strategyKey,
+              skippedReason: result.skippedReason,
+              ...(result.failureMessage ? { failureMessage: result.failureMessage } : {}),
+            });
+            continue;
+          }
+
+          strategyOutcomes.push({
+            symbol, timeframe, strategy: result.strategyKey,
+            skippedReason: null,
+            candidatesGenerated: result.candidatesGenerated,
+            ideasRaised: result.tradeIdeaIds.length,
+          });
+
+          for (const tradeIdeaId of result.tradeIdeaIds) {
+            if (openPositions >= MAX_CONCURRENT_POSITIONS) {
+              refused.push({
+                tradeIdeaId, symbol, reason: "POSITION_LIMIT",
+                explanation: `Already holding ${openPositions} positions, the limit is ${MAX_CONCURRENT_POSITIONS}.`,
+              });
+              continue;
+            }
+
+            const prepared = await prepareEntry.execute({ tradeIdeaId, lots: 1, now });
+            if (!prepared.approved) {
+              refused.push({
+                tradeIdeaId, symbol, timeframe,
+                reason: prepared.reason,
+                explanation: prepared.explanation,
+                ...(prepared.reasons ? { reasons: prepared.reasons } : {}),
+                ...(prepared.unchecked ? { unchecked: prepared.unchecked } : {}),
+              });
+              continue;
+            }
+
+            const entry = prepared.entry;
+            const riskState = await riskRepository.findRiskState({
+              accountId: account.id,
+              instrumentId: instrument.id,
+              asOf: now,
+              maxRegimeAgeMinutes: 60,
+            });
+            const riskDecision = evaluateRisk({
+              instrumentId: instrument.id,
+              decisionTimestamp: now,
+              side: entry.side,
+              entryPrice: entry.fillPrice,
+              stopLoss: entry.stopLossOverride,
+              targetPrice: entry.targetPriceOverride,
+              lotSize: entry.lotSize,
+            }, riskState);
+
+            if (!riskDecision.approved) {
+              refused.push({
+                tradeIdeaId, symbol, timeframe,
+                reason: "RISK_CONTROL_VETO",
+                explanation: `Risk engine refused the entry: ${riskDecision.reasonCodes.join(", ")}.`,
+              });
+              continue;
+            }
+
+            const approvedQuantity = Math.min(entry.quantity, riskDecision.approvedQuantity);
+            const key = contractKey(
+              entry.optionContract.underlyingSymbol,
+              entry.optionContract.optionExpiry,
+              entry.optionContract.optionStrike,
+              entry.optionContract.optionType,
+            );
+            if (heldContracts.has(key)) {
+              refused.push({
+                tradeIdeaId, symbol, reason: "ALREADY_HOLDING",
+                explanation: `A position in ${key} is already open; a persisting signal must not become a new position on every scan.`,
+              });
+              continue;
+            }
+
+            const riskNote = ` Risk checks: ${riskDecision.reasonCodes.join(", ")}.`;
+
+            const trade = await openTrade.execute({
+              accountId: account.id,
+              tradeIdeaId,
+              fillPrice: entry.fillPrice,
+              quantity: approvedQuantity,
+              openedAt: now,
+              entryFees: entry.entryFees,
+              entrySlippage: 0,
+              notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}`,
+              orderType: "MARKET",
+              stopLossOverride: entry.stopLossOverride,
+              targetPriceOverride: entry.targetPriceOverride,
+              sideOverride: entry.side,
+              feeBreakdown: entry.feeBreakdown,
+              applyBrokerageFees: false,
+              optionContract: entry.optionContract,
+            });
+
+            heldContracts.add(key);
+            openPositions += 1;
+            opened.push({
+              paperTradeId: trade.id,
+              tradeIdeaId,
+              symbol,
+              timeframe,
+              contract: key,
+              fillPremium: entry.fillPrice,
+              stopPremium: entry.stopLossOverride,
+              targetPremium: entry.targetPriceOverride,
+              quantity: approvedQuantity,
+              lotSize: entry.lotSize,
+              entryFees: entry.entryFees,
+              estimatedExitFees: Number(calculateExitFees(entry.fillPrice, approvedQuantity).total.toFixed(2)),
+              fillSource: (entry.feeBreakdown.entryChecks as { fillSource?: string } | undefined)?.fillSource,
+              unchecked: entry.unchecked,
+            });
+          }
+        }
+      }
+
+      // Evaluate open positions for this bot account
+      const evaluation = await new EvaluateOpenPaperTrades(
+        tradeRepository,
+        new PostgresCandleRepository(database),
+        new PostgresIndiaVixImpliedVolatilitySource(database),
+        new PostgresOptionPremiumTickRepository(database),
+      ).execute({ accountId: account.id, asOf: now });
+
+      botReports.push({
+        botName: botSpec.name,
+        accountId: account.id,
+        allowedStrategies: botSpec.allowedStrategies,
+        positionsOpened: opened.length,
+        signalsRefused: refused.length,
+        openPositionsAfterRun: openPositions,
+        tradesEvaluated: evaluation.openTradesRead + evaluation.pendingTradesRead,
+        tradesClosed: evaluation.tradesClosed,
+        evaluationFailures: evaluation.evaluationFailures,
+        opened,
+        strategyOutcomes,
+        refused,
+      });
+    }
 
     console.info(JSON.stringify({
       level: "info",
-      message: "Paper trading bot run complete",
-      mode: "OPTION_BUYER",
-      positionsOpened: opened.length,
-      signalsRefused: refused.length,
-      openPositionsAfterRun: openPositions,
-      positionLimit: MAX_CONCURRENT_POSITIONS,
-      skippedSymbols: skipped.length,
-      strategiesRun: strategyOutcomes.filter((outcome) => outcome.skippedReason === null).length,
-      tradesEvaluated: evaluation.openTradesRead + evaluation.pendingTradesRead,
-      tradesClosed: evaluation.tradesClosed,
-      evaluationFailures: evaluation.evaluationFailures,
-      opened,
-      strategyOutcomes,
-      // Refusals are output, not noise. A run that opens nothing has to be distinguishable
-      // from a run that found nothing.
-      refused,
-      skipped,
+      message: "Paper trading dual-bot run complete",
+      timestamp: now.toISOString(),
+      skippedSeries,
+      bots: botReports,
     }, null, 2));
   } finally {
     await database.end();
