@@ -76,6 +76,29 @@ function parsePositionSizing(argumentsList: string[]): BacktestPositionSizing {
   return value;
 }
 
+/**
+ * Strategy configuration overrides merged over the registered version's, as JSON.
+ *
+ * Needed to run an arm that differs only in a strategy setting: without it, comparing two
+ * configurations means editing the registration, which changes what every other run means. The
+ * merge is shallow and the result is reported on the run, so an arm cannot be mistaken for the
+ * registered default afterwards.
+ */
+function parseStrategyConfigurationOverride(argumentsList: string[]): Record<string, unknown> | null {
+  const raw = getOption(argumentsList, "strategy-config")?.trim();
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`--strategy-config must be valid JSON, received "${raw}".`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("--strategy-config must be a JSON object of setting overrides.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 /** A decimal fraction in (0, 1], falling back to the engine default. */
 function parseFractionOption(argumentsList: string[], option: string, fallback: number): number {
   const raw = getOption(argumentsList, option);
@@ -114,6 +137,7 @@ async function main(): Promise<void> {
       throw new Error(`Strategy version ${strategyVersion.strategyKey}@${strategyVersion.version} is not active.`);
     }
 
+    const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
     const marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
@@ -128,7 +152,9 @@ async function main(): Promise<void> {
       new BacktestEngine(new StrategyClass()),
     ).execute({
       strategyVersionId: strategyVersion.id,
-      strategyConfiguration: strategyVersion.configuration,
+      strategyConfiguration: configurationOverride === null
+        ? strategyVersion.configuration
+        : { ...strategyVersion.configuration, ...configurationOverride },
       instrumentId: instrument.id,
       timeframe,
       dataWindowStart,
@@ -155,6 +181,7 @@ async function main(): Promise<void> {
       dataCutoffAt: dataCutoffAt.toISOString(),
       // Recorded on the run so an arm cannot be mistaken for its control after the fact.
       higherTimeframes: higherTimeframeBuckets ?? null,
+      strategyConfigurationOverride: configurationOverride ?? null,
       ...result,
     }));
   } finally {
