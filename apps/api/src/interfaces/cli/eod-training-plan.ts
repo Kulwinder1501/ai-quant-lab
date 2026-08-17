@@ -253,25 +253,6 @@ export function buildEodTrainingPlan(
           modelKey: `${familyKey}--refit-${refitDate}`,
         }),
       });
-
-      for (const timeframe of ["15m", "30m", "60m"]) {
-        const dirFamilyKey = `directional-${algorithm}--${symbol}--${timeframe}--${SWING_FEATURE_SCHEMA_VERSION}`;
-        steps.push({
-          description: `${algorithm} ${symbol} ${timeframe} directional`,
-          modelFamilyKey: dirFamilyKey,
-          cadenceDays: 1,
-          args: trainArgs({
-            algorithm,
-            symbol,
-            timeframe,
-            from: TRAINING_WINDOW_START,
-            to: nowIso,
-            folds: POOLED_WALK_FORWARD_FOLDS,
-            featureSchema: SWING_FEATURE_SCHEMA_VERSION,
-            modelKey: `${dirFamilyKey}--refit-${refitDate}`,
-          }),
-        });
-      }
     }
 
     const pooledFamilyKey = modelFamilyKey(algorithm, pooledComponent);
