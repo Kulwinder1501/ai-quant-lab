@@ -5,7 +5,14 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool, type DatabasePool } from "../../infrastructure/database/database.js";
-import { countUnrecoveredScheduledJobFailures } from "../../infrastructure/database/repositories/postgres-scheduled-job-health-repository.js";
+import {
+  countUnrecoveredScheduledJobFailures,
+  findLatestScheduledJobCompletions,
+} from "../../infrastructure/database/repositories/postgres-scheduled-job-health-repository.js";
+import {
+  findOverdueScheduledJobs,
+  type ScheduledJobExpectation,
+} from "../../modules/scheduling/domain/scheduled-job-liveness.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
@@ -670,6 +677,68 @@ async function main(): Promise<void> {
     void schedule("VOLATILITY_STRADDLE", () => runCommand("npm", [
       "run", "paper:volatility-straddle",
     ]));
+  }, { timezone: IST });
+
+  /**
+   * Reports a job that has stopped completing, which nothing else notices.
+   *
+   * The auth health check counts FAILED rows, so a failing job is visible. A job that stops
+   * claiming writes no row at all, produces no failure, and therefore looks healthy: on
+   * 2026-08-17 OPTION_CHAIN completed every fifteen minutes until 05:45, then produced nothing at
+   * 06:15 or 06:30 while every-minute jobs in the same process kept claiming. The chain snapshot
+   * went an hour stale, OPTION_PREMIUM_TICKS refused with NO_FRESH_ATM_CONTRACTS for fifty
+   * minutes, and it was found by hand. The cause is still unknown -- the container's logs, which
+   * held the `skippedReason`, were gone by the time anyone looked -- so this exists to make the
+   * next occurrence loud and dated rather than to explain that one.
+   *
+   * Deliberately not raised as a job failure: it reports on other jobs, so recording its own
+   * findings as failures would make the health signal circular.
+   *
+   * `since` is process start, not market open. A job cannot be expected to have completed before
+   * the process that schedules it existed, and using market open would report every job as
+   * overdue for the first minutes after a mid-session deploy.
+   */
+  const LIVENESS_EXPECTATIONS: readonly ScheduledJobExpectation[] = [
+    { jobType: "OPTION_CHAIN", intervalMs: 15 * 60_000 },
+    { jobType: "OPTION_PREMIUM_TICKS", intervalMs: 60_000, toleratedIntervals: 10 },
+    { jobType: "PAPER_TRADE_EXIT_SWEEP", intervalMs: 60_000, toleratedIntervals: 10 },
+    { jobType: "PAPER_TRADING_BOT", intervalMs: 5 * 60_000, toleratedIntervals: 4 },
+    { jobType: "INDICES_INTRADAY", intervalMs: 60_000, toleratedIntervals: 10 },
+  ];
+  const processStartedAt = new Date();
+
+  cron.schedule("*/5 9-15 * * 1-5", () => {
+    void (async () => {
+      try {
+        const overdue = findOverdueScheduledJobs({
+          expectations: LIVENESS_EXPECTATIONS,
+          lastCompletedAt: await findLatestScheduledJobCompletions(
+            database,
+            LIVENESS_EXPECTATIONS.map((expectation) => expectation.jobType),
+          ),
+          now: new Date(),
+          since: processStartedAt,
+        });
+        if (overdue.length === 0) return;
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Scheduled jobs have stopped completing",
+          process: processIdentity,
+          overdue: overdue.map((job) => ({
+            jobType: job.jobType,
+            lastCompletedAt: job.lastCompletedAt?.toISOString() ?? null,
+            silentForMinutes: Math.round(job.silentForMs / 60_000),
+            toleratedMinutes: Math.round(job.toleratedSilenceMs / 60_000),
+          })),
+        }));
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Could not check scheduled job liveness",
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+    })();
   }, { timezone: IST });
 
   // Every three minutes, matching the interval this replaced. It claims its due minute
