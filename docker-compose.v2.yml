@@ -73,7 +73,23 @@ services:
       FYERS_PIN: ${FYERS_PIN:-}
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+      # Keeps this process's own log lines on the bind mount below, where they survive the
+      # container. Docker stores json-file logs under the container's directory and deletes them
+      # with it, so `--force-recreate` destroys them -- and a skipped run writes nothing to
+      # scheduled_job_runs by design, so that log is the only record a skip ever leaves. On
+      # 2026-08-17 OPTION_CHAIN stopped claiming for 45 minutes and the container was recreated
+      # before anyone read it, which made the cause unrecoverable.
+      SCHEDULER_LOG_FILE: /app/logs/scheduler.log
+    # Caps what Docker itself keeps, which is about disk rather than retention: rotation limits
+    # size, it does not make a log outlive its container. SCHEDULER_LOG_FILE is what survives.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     volumes:
+      # Diagnostic log lines that must outlive the container, per SCHEDULER_LOG_FILE above.
+      - ./logs:/app/logs
       # Trained pickle artifacts must outlive the container: model_versions rows
       # reference them by absolute path, and the competition pool reloads them
       # for shadow predictions on every intraday run.

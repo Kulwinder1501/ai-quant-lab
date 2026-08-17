@@ -26,3 +26,8 @@ scratch_*.ts
 # Database backups and large dumps
 backups/
 *.dump
+
+# Scheduler diagnostic logs, bind-mounted out of the container so they survive a recreate
+# (SCHEDULER_LOG_FILE in docker-compose.v2.yml). Read after an incident, never committed --
+# machine output that can run to tens of megabytes.
+logs/

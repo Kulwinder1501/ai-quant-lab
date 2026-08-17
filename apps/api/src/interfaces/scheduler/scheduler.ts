@@ -30,6 +30,7 @@ import { OptionPremiumTickStreamer } from "../../infrastructure/market-data/opti
 import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
+import { createSchedulerLogSink } from "./scheduler-log-sink.js";
 
 /** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
@@ -68,8 +69,38 @@ function runCommand(command: string, args: string[]): Promise<void> {
   return runChildCommand(command, args, { cwd: REPO_ROOT });
 }
 
+/**
+ * A copy of this process's own log lines, on a bind mount that outlives the container.
+ *
+ * Docker deletes `json-file` logs with the container, so `--force-recreate` destroys the
+ * `Scheduled job skipped` lines that are the only record of a skip -- `runExclusively`
+ * deliberately writes no row for a run that did not happen. That is precisely how the
+ * 2026-08-17 OPTION_CHAIN stall became unexplainable: the container was recreated before anyone
+ * read its log. Set SCHEDULER_LOG_FILE to keep the evidence.
+ */
+const logSink = createSchedulerLogSink(process.env.SCHEDULER_LOG_FILE, {
+  onError: (message) => {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "Could not write the scheduler log file; continuing without it",
+      error: message,
+    }));
+  },
+});
+
+function emit(line: Record<string, unknown>): string {
+  const serialized = JSON.stringify(line);
+  logSink.write(serialized);
+  return serialized;
+}
+
 function log(message: string, extra: Record<string, unknown> = {}): void {
-  console.info(JSON.stringify({ level: "info", message, process: processIdentity, ...extra }));
+  console.info(emit({ level: "info", message, process: processIdentity, ...extra }));
+}
+
+/** The error counterpart of `log`, so failures reach the durable sink too. */
+function logError(message: string, extra: Record<string, unknown> = {}): void {
+  console.error(emit({ level: "error", message, process: processIdentity, ...extra }));
 }
 
 /**
@@ -214,13 +245,10 @@ async function main(): Promise<void> {
         { overlap: "SKIP", abandonedAfterMs: ABANDONED_AFTER_MS[jobType] },
       );
       if (result.abandonedRuns) {
-        console.error(JSON.stringify({
-          level: "error",
-          message: "Reconciled scheduled runs whose claimant is gone",
-          process: processIdentity,
+        logError("Reconciled scheduled runs whose claimant is gone", {
           jobType,
           abandonedRuns: result.abandonedRuns,
-        }));
+        });
       }
       log(result.ran ? "Scheduled job completed" : "Scheduled job skipped", {
         jobType,
@@ -229,14 +257,11 @@ async function main(): Promise<void> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(JSON.stringify({
-        level: "error",
-        message: "Scheduled job failed",
-        process: processIdentity,
+      logError("Scheduled job failed", {
         jobType,
         scheduledFor: scheduledFor.toISOString(),
         error: message,
-      }));
+      });
     }
   }
 
@@ -720,17 +745,14 @@ async function main(): Promise<void> {
           since: processStartedAt,
         });
         if (overdue.length === 0) return;
-        console.error(JSON.stringify({
-          level: "error",
-          message: "Scheduled jobs have stopped completing",
-          process: processIdentity,
+        logError("Scheduled jobs have stopped completing", {
           overdue: overdue.map((job) => ({
             jobType: job.jobType,
             lastCompletedAt: job.lastCompletedAt?.toISOString() ?? null,
             silentForMinutes: Math.round(job.silentForMs / 60_000),
             toleratedMinutes: Math.round(job.toleratedSilenceMs / 60_000),
           })),
-        }));
+        });
       } catch (error) {
         console.error(JSON.stringify({
           level: "error",
