@@ -65,6 +65,49 @@ function predictionHorizonYears(timeframe: string, horizonBars: number): number 
 }
 
 /**
+ * Calendar minutes one bar spans, which is a different clock from `TIMEFRAME_MINUTES`.
+ *
+ * Volatility accumulates in market time -- that is why a daily bar counts as 375 minutes above --
+ * but theta runs on the calendar, and an option does not stop decaying overnight. Five daily bars
+ * hold 1,875 trading minutes and consume about seven calendar days of a contract's life. The two
+ * numbers answer different questions and neither substitutes for the other: the first scales the
+ * implied move the signal is compared against, the second measures how much of the contract's
+ * remaining life the signal's span covers.
+ *
+ * Intraday entries are exact only while the horizon stays inside one session. A 15m/h5 signal at
+ * 15:15 IST reaches into tomorrow, spanning 75 trading minutes but eighteen calendar hours; the
+ * ratio below understates the mismatch in that window rather than overstating it.
+ */
+const TIMEFRAME_CALENDAR_MINUTES: Readonly<Record<string, number>> = {
+  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
+  "1d": 1440,
+};
+
+function horizonCalendarYears(timeframe: string, horizonBars: number): number | null {
+  const minutes = TIMEFRAME_CALENDAR_MINUTES[timeframe];
+  if (minutes === undefined || !Number.isFinite(horizonBars) || horizonBars < 1) return null;
+  return (minutes * horizonBars) / (365 * 24 * 60);
+}
+
+/**
+ * The most remaining contract life, per unit of prediction horizon, that this path will finance.
+ *
+ * Derived rather than chosen. The position is closed on premium barriers with no time stop, so the
+ * binding constraint is the hold-to-expiry one: the underlying has to travel the whole premium,
+ * and an at-the-money premium scales with the square root of remaining life. A tenor of `n` times
+ * the horizon therefore costs `sqrt(n)` times the move the signal predicts. At 4 that is a 2x
+ * penalty -- already severe, and the point past which the mismatch dominates every other term.
+ *
+ * Measured 2026-08-17: a 15m/h5 prediction spans 75 minutes against the 8-day contract the
+ * calendar offered, a ratio of 154 and a 12x penalty. No listed expiry is short enough to fix
+ * that, because the signal is the wrong length, not the contract. So the selection changed
+ * direction: instead of taking the freshest prediction and buying whatever tenor exists, take the
+ * freshest prediction whose horizon the tenor can actually express, and refuse when none can.
+ * A daily-bar model reaches a weekly expiry; a 15-minute one never will.
+ */
+const MAXIMUM_TENOR_HORIZON_RATIO = 4;
+
+/**
  * Trailing high-low envelope at the signal bar — usable before settlement.
  * `realized_trailing_range` is only filled when the auxiliary prediction settles.
  */
@@ -181,6 +224,19 @@ async function main(): Promise<void> {
       return;
     }
 
+    /*
+     * The tenor is settled before the prediction is chosen, because it is the fixed side. The
+     * listed calendar decides what remaining life is buyable; the only free choice is which
+     * signal's horizon that life can express. Selecting the prediction first and taking whatever
+     * expiry existed is what produced a 75-minute view carried on an 8-day contract.
+     */
+    const optionChainRepository = new PostgresOptionChainRepository(database);
+    const calendar = await optionChainRepository.latestExpiryCalendar(UNDERLYING);
+    const expirySelection = selectNearestListedExpiry(calendar, now, MINIMUM_DAYS_TO_EXPIRY);
+    const tenorYears = expirySelection.usable
+      ? (expirySelection.expiryDate.getTime() - now.getTime()) / (365 * 24 * 60 * 60 * 1000)
+      : null;
+
     const predictionResult = await database.query<ExpansionRow>(`
       SELECT p.id, p.prediction, p.confidence, p.realized_trailing_range, p.source_candle_id,
              p.instrument_id, p.evidence_cutoff_at,
@@ -205,7 +261,10 @@ async function main(): Promise<void> {
       ORDER BY
         p.evidence_cutoff_at DESC,
         p.created_at DESC
-      LIMIT 1
+      -- Candidates, not one row: several volatility models can be enrolled on different
+      -- timeframes at once, and the horizon that matches the buyable tenor is not always the
+      -- freshest prediction. Freshness still orders them, so the match is the freshest usable one.
+      LIMIT 25
     `, [
       instrument.id,
       VOLATILITY_LABEL_SCHEME,
@@ -214,8 +273,12 @@ async function main(): Promise<void> {
       MAXIMUM_PREDICTION_AGE_MINUTES,
     ]);
 
-    const row = predictionResult.rows[0];
-    if (!row || !isVolatilityLabel(row.prediction)) {
+    // flatMap rather than filter so the label narrows: the domain input takes a VolatilityLabel,
+    // and a boolean predicate would leave it a bare string.
+    const candidates = predictionResult.rows.flatMap((candidate) => isVolatilityLabel(candidate.prediction)
+      ? [{ ...candidate, prediction: candidate.prediction }]
+      : []);
+    if (candidates.length === 0) {
       console.info(JSON.stringify({
         level: "info",
         message: "Volatility straddle refused",
@@ -226,27 +289,78 @@ async function main(): Promise<void> {
       return;
     }
 
-    const expansionBand = row.expansion_band === null ? null : Number(row.expansion_band);
-    const horizonBars = row.horizon_bars === null ? 5 : Number(row.horizon_bars);
-    const horizonYears = predictionHorizonYears(
-      row.source_timeframe,
-      Number.isInteger(horizonBars) ? horizonBars : 5,
-    );
-    if (horizonYears === null) {
-      // Refused rather than defaulted. This number sets the threshold the signal must clear, so
-      // an assumed one would quietly make the gate stricter or looser than the evidence warrants.
+    /*
+     * Pick the freshest candidate whose horizon the buyable tenor can express. `horizonBars`
+     * defaults to 5 only when the model version recorded none, which is how it has always
+     * behaved; the bar length is never defaulted, because it sets the threshold the signal must
+     * clear and an assumed one moves that threshold silently.
+     */
+    const assessed = candidates.map((candidate) => {
+      const bars = candidate.horizon_bars === null ? 5 : Number(candidate.horizon_bars);
+      const horizonBars = Number.isInteger(bars) ? bars : 5;
+      const calendarYears = horizonCalendarYears(candidate.source_timeframe, horizonBars);
+      return {
+        candidate,
+        horizonBars,
+        horizonYears: predictionHorizonYears(candidate.source_timeframe, horizonBars),
+        // Null tenor means no listed expiry was usable. The ratio is then unknown rather than
+        // infinite, and the domain refuses EXPIRY_UNLISTED a few lines below on the same facts.
+        tenorRatio: tenorYears === null || calendarYears === null ? null : tenorYears / calendarYears,
+      };
+    });
+    const unknownHorizon = assessed.filter((entry) => entry.horizonYears === null);
+    const matched = assessed.find((entry) => entry.horizonYears !== null
+      && (entry.tenorRatio === null || entry.tenorRatio <= MAXIMUM_TENOR_HORIZON_RATIO));
+
+    if (!matched) {
+      if (unknownHorizon.length === assessed.length) {
+        console.info(JSON.stringify({
+          level: "warn",
+          message: "Volatility straddle refused",
+          actionable: false,
+          reason: "PREDICTION_HORIZON_UNKNOWN",
+          explanation: `Timeframe "${unknownHorizon[0]!.candidate.source_timeframe}" has no known bar `
+            + "length, so the horizon the predicted range spans cannot be computed and the implied "
+            + "move cannot be scaled to it.",
+          sourceTimeframe: unknownHorizon[0]!.candidate.source_timeframe,
+          horizonBars: unknownHorizon[0]!.horizonBars,
+        }));
+        return;
+      }
+      const ratios = assessed
+        .map((entry) => entry.tenorRatio)
+        .filter((ratio): ratio is number => ratio !== null)
+        .sort((left, right) => left - right);
+      const closestRatio = ratios[0];
+      const tenorDays = tenorYears === null ? null : tenorYears * 365;
       console.info(JSON.stringify({
-        level: "warn",
+        level: "info",
         message: "Volatility straddle refused",
         actionable: false,
-        reason: "PREDICTION_HORIZON_UNKNOWN",
-        explanation: `Timeframe "${row.source_timeframe}" has no known bar length, so the horizon `
-          + "the predicted range spans cannot be computed and the implied move cannot be scaled to it.",
-        sourceTimeframe: row.source_timeframe,
-        horizonBars,
+        reason: "NO_HORIZON_MATCHED_TENOR",
+        explanation: `The nearest listed expiry at least ${MINIMUM_DAYS_TO_EXPIRY} days out leaves `
+          + `${tenorDays === null ? "an unknown number of" : tenorDays.toFixed(1)} days of contract life. The `
+          + `closest prediction horizon covers 1/${closestRatio === undefined ? "?" : closestRatio.toFixed(1)} of `
+          + `it, past the ${MAXIMUM_TENOR_HORIZON_RATIO} limit, which is a `
+          + `${closestRatio === undefined ? "n unmeasured" : `${Math.sqrt(closestRatio).toFixed(1)}x`} penalty on the `
+          + "move the signal has to produce. Buying this tenor finances time the signal says nothing about, and "
+          + "it is why the premium gate refused every live evaluation. Closing it needs a longer-horizon "
+          + "volatility model, not a different strike or a nearer expiry.",
+        tenorDays: tenorDays === null ? null : Number(tenorDays.toFixed(2)),
+        candidates: assessed.map((entry) => ({
+          predictionId: entry.candidate.id,
+          timeframe: entry.candidate.source_timeframe,
+          horizonBars: entry.horizonBars,
+          tenorRatio: entry.tenorRatio === null ? null : Number(entry.tenorRatio.toFixed(2)),
+        })),
       }));
       return;
     }
+
+    const row = matched.candidate;
+    const horizonBars = matched.horizonBars;
+    const horizonYears = matched.horizonYears as number;
+    const expansionBand = row.expansion_band === null ? null : Number(row.expansion_band);
     let trailingRange = row.realized_trailing_range === null
       ? null
       : Number(row.realized_trailing_range);
@@ -274,10 +388,6 @@ async function main(): Promise<void> {
 
     const ivSource = new PostgresIndiaVixImpliedVolatilitySource(database);
     const impliedVolatility = await ivSource.resolveAsOf(now);
-
-    const optionChainRepository = new PostgresOptionChainRepository(database);
-    const calendar = await optionChainRepository.latestExpiryCalendar(UNDERLYING);
-    const expirySelection = selectNearestListedExpiry(calendar, now, MINIMUM_DAYS_TO_EXPIRY);
 
     const instrumentMeta = await database.query<{ lot_size: number; strike_step: string | null }>(`
       SELECT lot_size, strike_step FROM instruments WHERE id = $1
@@ -323,6 +433,12 @@ async function main(): Promise<void> {
         actionable: false,
         reason: proposal.reason,
         explanation: proposal.explanation,
+        // Present only for the economics gates, and the reason the refusal is auditable: the
+        // horizon terms say what the same signal would have been worth on a matched tenor.
+        economics: proposal.economics ?? null,
+        sourceTimeframe: row.source_timeframe,
+        horizonBars,
+        tenorRatio: matched.tenorRatio === null ? null : Number(matched.tenorRatio.toFixed(2)),
         predictionConfidence: Number(row.confidence),
         evidenceCutoffAt: row.evidence_cutoff_at,
       }));

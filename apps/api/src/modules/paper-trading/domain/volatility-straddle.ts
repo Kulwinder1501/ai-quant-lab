@@ -104,6 +104,34 @@ export interface StraddleEconomics {
   conservativeExcursion: number;
   /** conservativeExcursion / requiredMove. Above 1 means the conservative case pays. */
   conservativeCoverage: number;
+  /**
+   * Years to expiry still left when the prediction's horizon ends — the moment the signal's
+   * information is spent and everything after it is an unforecast coin flip financed by theta.
+   */
+  timeToExpiryAtHorizonYears: number;
+  /**
+   * Premium lost to time alone over the horizon: the same straddle repriced `horizon` later with
+   * the spot unchanged. This is what the position actually pays for the wait, and it is far
+   * smaller than the tenor suggests — an eight-day option held seventy-five minutes pays
+   * seventy-five minutes of decay, not eight days of it.
+   */
+  decayCostOverHorizon: number;
+  /**
+   * What the straddle is worth at the horizon if the conservative excursion happens: repriced at
+   * `timeToExpiryAtHorizonYears` with the spot displaced by `conservativeExcursion`, averaged over
+   * up and down. Mark-to-market, not the expiry payoff, because the position is closed on premium
+   * barriers rather than carried to settlement.
+   */
+  horizonExitValue: number;
+  /**
+   * `horizonExitValue - totalPremium`. The signal's whole worth per underlying unit, before
+   * transaction costs: gamma gain on the predicted move, less decay over the horizon.
+   *
+   * Positive here and negative under `requiredMove` is the normal case, and the gap between the
+   * two is the tenor mismatch in rupees. `requiredMove` asks the underlying to travel the entire
+   * premium, which is the right question only for a position held to expiry.
+   */
+  horizonNetPerUnit: number;
 }
 
 export interface ProposeStraddleInput {
@@ -148,10 +176,24 @@ export type StraddleProposal =
     timeToExpiryYears: number;
     rationale: string;
   }
-  | { actionable: false; reason: StraddleRefusalReason; explanation: string };
+  | {
+    actionable: false;
+    reason: StraddleRefusalReason;
+    explanation: string;
+    /**
+     * Present when the refusal came from the economics rather than from a missing input. A
+     * verdict about money should be auditable as numbers, not only as prose: this is what lets a
+     * caller log why the structure failed without re-deriving it from the sentence.
+     */
+    economics?: StraddleEconomics;
+  };
 
-function refuse(reason: StraddleRefusalReason, explanation: string): StraddleProposal {
-  return { actionable: false, reason, explanation };
+function refuse(
+  reason: StraddleRefusalReason,
+  explanation: string,
+  economics?: StraddleEconomics,
+): StraddleProposal {
+  return { actionable: false, reason, explanation, ...(economics ? { economics } : {}) };
 }
 
 function roundToTick(value: number): number {
@@ -225,16 +267,34 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
   }
 
   const strike = nearestStrike(input.underlyingSpot, input.strikeStep);
+  const riskFreeRate = input.riskFreeRate ?? RISK_FREE_RATE;
   const priceLeg = (optionType: OptionType): StraddleLeg => {
     const greeks = priceEuropeanOption({
       spot: input.underlyingSpot,
       strike,
       timeToExpiryYears,
-      riskFreeRate: input.riskFreeRate ?? RISK_FREE_RATE,
+      riskFreeRate,
       volatility: input.impliedVolatility as number,
       optionType,
     });
     return { optionType, strike, premium: greeks.premium, greeks };
+  };
+  /**
+   * Both legs of the same strike repriced at an arbitrary spot and remaining life. Used to value
+   * the position at the horizon, where it is actually closed, rather than at expiry.
+   */
+  const straddleValueAt = (spot: number, remainingYears: number): number => {
+    const price = (optionType: OptionType): number => priceEuropeanOption({
+      spot,
+      strike,
+      // Negative or zero remaining life returns intrinsic value, which is the correct payoff for
+      // a horizon that reaches or overruns the expiry.
+      timeToExpiryYears: Math.max(remainingYears, 0),
+      riskFreeRate,
+      volatility: input.impliedVolatility as number,
+      optionType,
+    }).premium;
+    return price("CE") + price("PE");
   };
   // Same strike for both legs: a straddle, not a strangle. An ATM strike keeps the
   // structure as close to delta-neutral as a two-leg position gets, so the payoff depends
@@ -259,6 +319,41 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     * input.impliedVolatility
     * Math.sqrt(input.predictionHorizonYears);
 
+  /*
+   * Mark-to-market at the horizon.
+   *
+   * The position is closed on premium barriers, so its holding period is the span over which the
+   * signal says anything -- not the option's remaining life. Valuing it at expiry asks the
+   * underlying to travel the whole premium; valuing it at the horizon asks only that gamma on the
+   * predicted move beat decay over the same minutes. The second is the trade being taken.
+   *
+   * The excursion is applied to the spot rather than to the strike so that entry and exit share
+   * one basis: the entry premium was priced at `underlyingSpot`, which sits within half a strike
+   * step of `strike`.
+   */
+  const timeToExpiryAtHorizonYears = timeToExpiryYears - input.predictionHorizonYears;
+  const excursion = predictedForwardRange / 2;
+  const decayCostOverHorizon = totalPremium - straddleValueAt(input.underlyingSpot, timeToExpiryAtHorizonYears);
+  const upValue = straddleValueAt(input.underlyingSpot + excursion, timeToExpiryAtHorizonYears);
+  /*
+   * The mean of the two directions, not the worse of them.
+   *
+   * A strike set at the spot is not delta-neutral -- the forward sits above it, so the pair carries
+   * a small positive delta -- and at these excursions that linear term is several times the gamma
+   * term. Taking the worse side would therefore report the cost of the strike's tilt rather than
+   * the value of the predicted move, and it would do so on top of the halving that already made
+   * this the conservative case: two helpings of caution stacked until the quantity the structure
+   * actually monetises disappeared under them. A symmetric range around the strike lands either
+   * side, the delta term cancels across the pair, and what remains is the convexity. That is also
+   * the term the closed-form implied-move gate compares, which is why the two now agree.
+   *
+   * A downward excursion larger than the spot is not a price path, so the upward leg stands alone
+   * there; the guard also keeps `priceEuropeanOption` from being handed a spot of zero.
+   */
+  const horizonExitValue = input.underlyingSpot - excursion > 0
+    ? (upValue + straddleValueAt(input.underlyingSpot - excursion, timeToExpiryAtHorizonYears)) / 2
+    : upValue;
+
   const economics: StraddleEconomics = {
     totalPremium,
     deployedCapital: totalPremium * quantity,
@@ -273,41 +368,76 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     // either direction. Treating the whole range as favourable excursion assumes the
     // underlying travels it in one direction without retracing, which is the best case
     // rather than the expected one.
-    conservativeExcursion: predictedForwardRange / 2,
-    conservativeCoverage: predictedForwardRange / 2 / totalPremium,
+    conservativeExcursion: excursion,
+    conservativeCoverage: excursion / totalPremium,
+    timeToExpiryAtHorizonYears,
+    decayCostOverHorizon,
+    horizonExitValue,
+    horizonNetPerUnit: horizonExitValue - totalPremium,
   };
 
-  // The ATM straddle premium is the market's own forecast of the move. Predicting a range the
-  // market has already priced is not an edge, however accurate it is.
-  //
-  // Still checked first, but the reason changed with the horizon fix. It used to be that this
-  // gate was strictly weaker than the half-range gate below — an ATM premium is roughly 0.8x the
-  // full-life implied move, so anything failing here failed there too. Now this gate measures the
-  // horizon-scaled implied move while the premium gates measure full-life premium, so neither
-  // dominates: a short-horizon signal can beat implied over its own 75 minutes and still fail to
-  // cover eight days of premium. Order is kept because "the market already prices this" is the
-  // more fundamental objection — a signal with no edge over implied is not worth financing at any
-  // tenor — and because it is the cheaper check.
-  if (predictedForwardRange <= impliedMoveOverHorizon) {
+  /*
+   * The ATM straddle premium is the market's own forecast of the move. Predicting a range the
+   * market has already priced is not an edge, however accurate it is.
+   *
+   * Both sides of this comparison are displacements now. `predictedForwardRange` is a high-low
+   * envelope, so it counts movement in both directions, while `spot * sigma * sqrt(t)` is a
+   * one-sided standard deviation; comparing them directly credited the signal with about twice
+   * the move it claims. That is the same error as the tenor mismatch one scale down -- two
+   * quantities that look comparable and are not -- and `conservativeExcursion` is the half-range
+   * the rest of the module already uses for exactly this reason.
+   *
+   * The correction is not cosmetic: it is the condition the repriced mark-to-market independently
+   * arrives at. Gamma gain over the horizon is about `0.5 * gamma * displacement^2` and decay is
+   * about `premium * dt / (2 * T)`; for an at-the-money straddle those cross precisely where the
+   * displacement equals `spot * sigma * sqrt(dt)`. So this gate and the sign of
+   * `horizonNetPerUnit` are the same statement, one closed-form and one repriced, and the test
+   * suite asserts they agree.
+   */
+  if (economics.conservativeExcursion <= impliedMoveOverHorizon) {
     return refuse(
       "MARKET_ALREADY_PRICES_THE_MOVE",
-      `The predicted forward range ${predictedForwardRange.toFixed(2)} does not exceed the implied `
-      + `move ${impliedMoveOverHorizon.toFixed(2)} the option chain prices over the same horizon `
-      + `(${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)} minutes; the full-life implied `
-      + `move to expiry is ${impliedMove.toFixed(2)}). Buying premium here bets that realised `
-      + "volatility beats implied volatility, and this signal does not claim that.",
+      `The predicted range ${predictedForwardRange.toFixed(2)} gives a half-range displacement of `
+      + `${economics.conservativeExcursion.toFixed(2)}, which does not exceed the `
+      + `${impliedMoveOverHorizon.toFixed(2)} the option chain prices over the same `
+      + `${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)} minutes (the full-life implied move to `
+      + `expiry is ${impliedMove.toFixed(2)}). Buying premium here bets that realised volatility beats `
+      + "implied volatility, and this signal does not claim that.",
+      economics,
     );
   }
 
-  // A range R around an at-the-money strike gives roughly R/2 of displacement in either
-  // direction. The conservative (half-range) excursion must clear the total premium, or
-  // the structure loses on a realistic outcome even when the signal is right.
+  /*
+   * A range R around an at-the-money strike gives roughly R/2 of displacement in either
+   * direction. The conservative (half-range) excursion must clear the total premium, or the
+   * structure loses on a realistic outcome even when the signal is right.
+   *
+   * This is the hold-to-expiry constraint, and it binds because nothing closes the position at
+   * the horizon: the exit evaluator only watches premium barriers, so the worst case is carrying
+   * the contract to settlement and the gate has to price that. The refusal states the tenor
+   * penalty explicitly, because the number is the whole objection: required move scales with the
+   * square root of remaining life, so an eight-day contract expressing a seventy-five-minute view
+   * needs about twelve times the move the signal predicts, and no listed contract is short enough
+   * to close that gap. What closes it is aligning the two spans -- see `horizonNetPerUnit`, which
+   * is what the same signal is worth when the position is released at the horizon instead.
+   */
   if (economics.conservativeExcursion <= totalPremium) {
+    // Exact while the horizon lies inside one session, where trading and calendar time coincide;
+    // for a daily-bar horizon the elapsed calendar span is longer and the penalty smaller.
+    const tenorPenalty = Math.sqrt(timeToExpiryYears / input.predictionHorizonYears);
     return refuse(
       "PREMIUM_EXCEEDS_PREDICTED_MOVE",
       `The two legs cost ${totalPremium.toFixed(2)} but the conservative half-range excursion is only `
       + `${economics.conservativeExcursion.toFixed(2)} (from a ${predictedForwardRange.toFixed(2)} predicted range). `
-      + "The expected directional move does not reach breakeven, so this loses money when the signal is correct.",
+      + "The expected directional move does not reach breakeven, so this loses money when the signal is correct. "
+      + `The contract has ${(timeToExpiryYears * 365).toFixed(1)} days left against a `
+      + `${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)}-minute prediction, which is a `
+      + `${tenorPenalty.toFixed(1)}x tenor penalty on the required move. Released at the horizon the same `
+      + `signal nets ${economics.horizonNetPerUnit.toFixed(2)} per unit `
+      + `(${economics.horizonExitValue.toFixed(2)} exit value against ${totalPremium.toFixed(2)} paid, after `
+      + `${economics.decayCostOverHorizon.toFixed(2)} of decay), so the refusal is the mismatch between the `
+      + "signal's span and the contract's, not an absence of predicted movement.",
+      economics,
     );
   }
 
@@ -323,6 +453,8 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
       + `${strike} straddle at ${totalPremium.toFixed(2)} combined premium; breakeven outside `
       + `${economics.breakevenLower.toFixed(2)}-${economics.breakevenUpper.toFixed(2)}. Predicted `
       + `range ${predictedForwardRange.toFixed(2)} against an implied move of ${impliedMove.toFixed(2)}, `
-      + `conservative coverage ${economics.conservativeCoverage.toFixed(2)}x.`,
+      + `conservative coverage ${economics.conservativeCoverage.toFixed(2)}x. Released at the prediction `
+      + `horizon the structure nets ${economics.horizonNetPerUnit.toFixed(2)} per unit after `
+      + `${economics.decayCostOverHorizon.toFixed(2)} of decay.`,
   };
 }

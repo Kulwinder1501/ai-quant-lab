@@ -181,6 +181,42 @@ describe("proposeVolatilityStraddle", () => {
       }
     });
 
+    it("compares displacement against displacement, not a two-sided range against one", () => {
+      // A high-low range counts movement both ways; sigma*sqrt(t) is one-sided. A range just over
+      // the implied move used to pass, crediting the signal with twice the displacement it claims.
+      const spot = 24_000;
+      const iv = 0.14;
+      const horizonYears = (15 * 5) / (365 * 24 * 60);
+      const impliedOverHorizon = spot * iv * Math.sqrt(horizonYears);
+      // Range beats implied; half-range does not. This is the window the old comparison let through.
+      const trailingRange = (impliedOverHorizon * 1.5) / 1.25;
+
+      const proposal = proposeVolatilityStraddle(input({ trailingRange, predictionHorizonYears: horizonYears }));
+
+      expect(proposal).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
+      if (proposal.actionable) return;
+      expect(proposal.economics?.predictedForwardRange).toBeGreaterThan(impliedOverHorizon);
+      expect(proposal.economics?.conservativeExcursion).toBeLessThan(impliedOverHorizon);
+    });
+
+    it("carries the economics on an economics refusal, so the verdict is numbers and not prose", () => {
+      const proposal = proposeVolatilityStraddle(input({ trailingRange: 1300, impliedVolatility: 0.30 }));
+
+      expect(proposal).toMatchObject({ actionable: false, reason: "PREMIUM_EXCEEDS_PREDICTED_MOVE" });
+      if (proposal.actionable) return;
+      expect(proposal.economics).toBeDefined();
+      expect(proposal.economics!.totalPremium).toBeGreaterThan(proposal.economics!.conservativeExcursion);
+    });
+
+    it("omits economics when the refusal is a missing input rather than a verdict about money", () => {
+      const proposal = proposeVolatilityStraddle(input({ impliedVolatility: null }));
+
+      expect(proposal).toMatchObject({ actionable: false, reason: "NO_IMPLIED_VOLATILITY" });
+      if (proposal.actionable) return;
+      // "Unpriceable" and "priced and rejected" must not read the same.
+      expect(proposal.economics).toBeUndefined();
+    });
+
     it("reports both the horizon-scaled and full-life implied move, so the gate is auditable", () => {
       const proposal = proposeVolatilityStraddle(input());
       if (!proposal.actionable) throw new Error(`expected actionable, got ${proposal.reason}`);
@@ -198,6 +234,89 @@ describe("proposeVolatilityStraddle", () => {
 
       expect(cheap.actionable).toBe(true);
       expect(dear.actionable).toBe(false);
+    });
+  });
+
+  describe("horizon economics", () => {
+    it("charges the horizon's decay rather than the whole tenor's", () => {
+      const proposal = proposeVolatilityStraddle(input());
+      if (!proposal.actionable) throw new Error(`expected actionable, got ${proposal.reason}`);
+      const { economics } = proposal;
+
+      // 75 minutes is about 0.65% of an eight-day life, and an at-the-money premium scales with
+      // its square root, so the wait costs roughly 0.33% of the premium. The hold-to-expiry view
+      // charges the entire premium instead, and that gap is the tenor mismatch in one number.
+      expect(economics.decayCostOverHorizon).toBeGreaterThan(0);
+      expect(economics.decayCostOverHorizon).toBeLessThan(economics.totalPremium * 0.01);
+      expect(economics.timeToExpiryAtHorizonYears).toBeLessThan(proposal.timeToExpiryYears);
+      expect(economics.timeToExpiryAtHorizonYears).toBeGreaterThan(0);
+    });
+
+    // The whole point of the fix, as one assertion: a signal the expiry payoff calls a loser is a
+    // winner when the position is released at the horizon. The refusal is about the contract's
+    // length, not about the signal being weak.
+    it("shows a positive horizon net on a signal the expiry payoff refuses", () => {
+      // Half-range 200 clears the 40-point implied move over 75 minutes, and falls well short of
+      // the ~398 premium an eight-day contract charges.
+      const proposal = proposeVolatilityStraddle(input({ trailingRange: 320 }));
+
+      expect(proposal).toMatchObject({ actionable: false, reason: "PREMIUM_EXCEEDS_PREDICTED_MOVE" });
+      if (proposal.actionable) return;
+      const economics = proposal.economics!;
+      expect(economics.conservativeExcursion).toBeLessThan(economics.requiredMove);
+      expect(economics.horizonNetPerUnit).toBeGreaterThan(0);
+      expect(proposal.explanation).toMatch(/tenor penalty/);
+    });
+
+    // Two independent derivations of the same condition: the closed-form gate compares the
+    // half-range against sigma*sqrt(dt), the economics reprice both legs dt later. For an
+    // at-the-money straddle gamma gain and decay cross exactly where those are equal, so the sign
+    // of the repriced net has to follow the gate. If these ever disagree, one of them is wrong.
+    it("agrees with the closed-form implied-move gate about where the horizon stops paying", () => {
+      const spot = 24_000;
+      const iv = 0.14;
+      const horizonYears = (15 * 5) / (365 * 24 * 60);
+      const impliedOverHorizon = spot * iv * Math.sqrt(horizonYears);
+      const atExcursionMultiple = (multiple: number) => {
+        const proposal = proposeVolatilityStraddle(input({
+          underlyingSpot: spot,
+          impliedVolatility: iv,
+          predictionHorizonYears: horizonYears,
+          // conservativeExcursion is half the range, so a multiple of the implied move needs twice that.
+          trailingRange: (impliedOverHorizon * multiple * 2) / 1.25,
+        }));
+        const economics = proposal.actionable ? proposal.economics : proposal.economics;
+        if (!economics) throw new Error("economics missing from an economics verdict");
+        return {
+          net: economics.horizonNetPerUnit,
+          refusedByGate: !proposal.actionable && proposal.reason === "MARKET_ALREADY_PRICES_THE_MOVE",
+        };
+      };
+
+      // Either side of the crossover, and close to it: the gate and the repriced net turn over
+      // together. The 10% margin is the second-order approximation's error, not slack in the claim.
+      const under = atExcursionMultiple(0.9);
+      const over = atExcursionMultiple(1.1);
+      expect(under.net).toBeLessThan(0);
+      expect(under.refusedByGate).toBe(true);
+      expect(over.net).toBeGreaterThan(0);
+      expect(over.refusedByGate).toBe(false);
+      // Far from it, the same ordering holds and the magnitudes grow with the square of the move.
+      expect(atExcursionMultiple(0.5).net).toBeLessThan(under.net);
+      expect(atExcursionMultiple(4).net).toBeGreaterThan(over.net);
+    });
+
+    it("values a horizon that overruns the expiry at the expiry payoff", () => {
+      // A 20-day horizon on an 8-day contract: there is no mark-to-market left to take, and the
+      // straddle is worth its intrinsic value. Repricing at a negative remaining life would be
+      // meaningless, so the excursion itself is the answer.
+      const proposal = proposeVolatilityStraddle(input({ predictionHorizonYears: 20 / 365 }));
+      if (!proposal.actionable) throw new Error(`expected actionable, got ${proposal.reason}`);
+      const { economics } = proposal;
+
+      expect(economics.timeToExpiryAtHorizonYears).toBeLessThan(0);
+      expect(economics.horizonExitValue).toBeCloseTo(economics.conservativeExcursion, 2);
+      expect(economics.decayCostOverHorizon).toBeCloseTo(economics.totalPremium, 2);
     });
   });
 
