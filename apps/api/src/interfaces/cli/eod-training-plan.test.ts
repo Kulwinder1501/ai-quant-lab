@@ -71,12 +71,12 @@ describe("buildEodTrainingPlan", () => {
     );
   });
 
-  it("opens every scheduled window at 2022, so the one series with earlier bars can use them", () => {
-    // Widened from 2023-01-01 once BANKNIFTY 1d was backfilled. Only that series holds pre-2023
-    // daily bars, so this is a 28% sample increase there and a no-op elsewhere — a start date
-    // earlier than the data returns what exists.
+  it("opens every scheduled window at 2017, so the series with earlier bars can use them", () => {
+    // Widened 2023-01-01 → 2022-01-01 once BANKNIFTY 1d was backfilled, then → 2017-01-01 once
+    // NIFTY50 1d was, which took its two-fold holdout from 114 rows to 238. A start date earlier
+    // than the data returns what exists, so this is a no-op on every series without the history.
     for (const step of plan) {
-      expect(step.args).toEqual(expect.arrayContaining(["--from", "2022-01-01"]));
+      expect(step.args).toEqual(expect.arrayContaining(["--from", "2017-01-01"]));
     }
   });
 

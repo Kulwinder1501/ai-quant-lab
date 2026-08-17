@@ -35,9 +35,9 @@ const VOLATILITY_EXPANSION_BAND = "0.25";
 const SWING_FEATURE_SCHEMA_VERSION = "ml-feature-v7";
 /**
  * Earliest bar any scheduled configuration may train on. See the window note on
- * `buildEodTrainingPlan` for why this opens at 2022 and which series it actually changes.
+ * `buildEodTrainingPlan` for why this opens at 2017 and which series it actually changes.
  */
-const TRAINING_WINDOW_START = "2022-01-01";
+const TRAINING_WINDOW_START = "2017-01-01";
 
 /**
  * Minimum days between refits of one configuration.
@@ -166,7 +166,40 @@ function trainArgs(input: {
  * `--to` must not exceed `--data-cutoff-at`, which defaults to now, so a wall-clock `nowIso`
  * refuses.
  *
- * ## Why the window opens at 2022 and not 2023
+ * ## Why the window opens at 2017 (2026-08-17)
+ *
+ * NIFTY50 1d held 898 bars from 2023-01-02 while the gate needs a terminal holdout it can measure.
+ * Fyers serves this series back to 2017, so it was backfilled to 2,385 bars. At two folds that
+ * takes the holdout from 114 rows to 238 and training from 1,018 to 2,138, which is the reason for
+ * the change: a macro-F1 over three classes on 114 rows has a standard error wider than the margin
+ * the gate is deciding on, and every conclusion drawn from it inherits that.
+ *
+ * **It did not clear the gate, and the honest reading is that it was never going to on its own.**
+ * Five runs on 2026-08-17, all INITIAL_BASELINE_THRESHOLD_NOT_MET against 0.40:
+ *
+ * | window | rows | folds | wf mean | final fold | gate min | CPCV vs trivial |
+ * |---|---|---|---|---|---|---|
+ * | 2022 xgboost | 1,137 | 2 | 0.3099 | 0.2654 | 0.2654 | 0.3998, +0.2396, 100% |
+ * | 2022 lightgbm | 1,137 | 2 | 0.3816 | 0.3692 | 0.3692 | 0.4029, +0.2426, 100% |
+ * | 2017 lightgbm | 2,376 | 2 | 0.3976 | 0.3513 | 0.3513 | 0.4023, +0.2381, 100% |
+ * | 2017 lightgbm | 2,376 | 5 | 0.3887 | 0.3882 | 0.3887 | 0.4023, +0.2381, 100% |
+ * | 2017 xgboost | 2,376 | 5 | 0.3760 | 0.3774 | 0.3760 | 0.4082, +0.2440, 100% |
+ *
+ * Doubling the sample moved the two-fold mean 0.3816 → 0.3976 and left the terminal fold worse,
+ * 0.3692 → 0.3513. That is the finding rather than a contradiction: CPCV sits at 0.40 in every
+ * configuration with a std of 0.017-0.029 and beats trivial on 100% of splits, while walk-forward
+ * swings across 0.31-0.40 depending on which recent stretch the last fold lands on. The skill
+ * estimate is stable and the gate's binding term is not. BANKNIFTY enrolled at 0.4169 the day
+ * after its own backfill having scored 0.3793 hours earlier, which is the same noise from the
+ * other side, and it should temper confidence in that enrollment too.
+ *
+ * So this window is kept for the evidence quality it buys, not because it enrolls anything. It
+ * changes NIFTY50 1d only: BANKNIFTY 1d starts 2022-01-03 and no pooled member holds a daily bar
+ * before 2023, so the panel stays balanced. `SINGLE_DAILY_WALK_FORWARD_FOLDS` deliberately stays
+ * at 2 — NIFTY50 now supports five folds at 95 rows each, but BANKNIFTY would fall to about 45,
+ * under the gate's 60-row floor, and one series' history cannot set the other's fold count.
+ *
+ * ## Why the window opened at 2022 and not 2023
  *
  * Widened 2026-08-16, after BANKNIFTY 1d was backfilled from a series that had been empty. Only
  * one scheduled series holds pre-2023 daily bars — BANKNIFTY 1d, by 248 of its 1,145 — so this
