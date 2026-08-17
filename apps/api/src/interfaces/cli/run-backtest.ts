@@ -8,6 +8,12 @@ import { BacktestEngine, defaultBacktestConfiguration } from "../../modules/back
 import type { BacktestPositionSizing } from "../../modules/backtesting/domain/backtesting.js";
 import { requireRegisteredStrategy } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { PostgresBacktestMarketDataRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-market-data-repository.js";
+import type { BacktestMarketDataRepository } from "../../modules/backtesting/domain/backtesting.js";
+import {
+  attachHigherTimeframes,
+  defaultHigherTimeframeResolverOptions,
+  type HigherTimeframeResolverOptions,
+} from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
@@ -15,6 +21,51 @@ import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arg
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
   return value ? parseDateOption(value, false) : fallback;
+}
+
+/**
+ * Higher-timeframe buckets to resolve, as base-bar counts: `--higher-timeframes 15m:3,60m:12`.
+ *
+ * Omitted means no higher-timeframe context, which is the existing behaviour and the control arm.
+ * Both arms load the same contexts through the same repository and differ only in whether this
+ * decoration runs, so a difference in results cannot come from a difference in data.
+ */
+function parseHigherTimeframeBuckets(
+  argumentsList: string[],
+): HigherTimeframeResolverOptions["buckets"] | null {
+  const raw = getOption(argumentsList, "higher-timeframes")?.trim();
+  if (!raw) return null;
+  const buckets = raw.split(",").map((entry) => {
+    const [htfTimeframe, bars] = entry.split(":");
+    const barsPerBucket = Number(bars);
+    if (!htfTimeframe?.trim() || !Number.isInteger(barsPerBucket) || barsPerBucket < 2) {
+      throw new Error(
+        `--higher-timeframes entries must be "<timeframe>:<baseBars>" with at least 2 base bars, received "${entry}".`,
+      );
+    }
+    return { htfTimeframe: htfTimeframe.trim(), barsPerBucket };
+  });
+  if (buckets.length === 0) throw new Error("--higher-timeframes was empty.");
+  return buckets;
+}
+
+/**
+ * Wraps the market-data repository to attach higher-timeframe context after loading.
+ *
+ * A decorator rather than a change to the repository or the replay engine: the engine takes
+ * contexts as data and neither layer needs to know this exists, so the control arm runs code that
+ * is byte-identical to what it ran before this flag was added.
+ */
+class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly buckets: HigherTimeframeResolverOptions["buckets"],
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    const contexts = await this.inner.listContexts(input);
+    return attachHigherTimeframes(contexts, { ...defaultHigherTimeframeResolverOptions, buckets: this.buckets });
+  }
 }
 
 function parsePositionSizing(argumentsList: string[]): BacktestPositionSizing {
@@ -63,9 +114,17 @@ async function main(): Promise<void> {
       throw new Error(`Strategy version ${strategyVersion.strategyKey}@${strategyVersion.version} is not active.`);
     }
 
+    const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
+    const marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
+      ? new PostgresBacktestMarketDataRepository(database)
+      : new HigherTimeframeDecoratedMarketData(
+        new PostgresBacktestMarketDataRepository(database),
+        higherTimeframeBuckets,
+      );
+
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
-      new PostgresBacktestMarketDataRepository(database),
+      marketData,
       new BacktestEngine(new StrategyClass()),
     ).execute({
       strategyVersionId: strategyVersion.id,
@@ -94,6 +153,8 @@ async function main(): Promise<void> {
       dataWindowStart: dataWindowStart.toISOString(),
       dataWindowEnd: dataWindowEnd.toISOString(),
       dataCutoffAt: dataCutoffAt.toISOString(),
+      // Recorded on the run so an arm cannot be mistaken for its control after the fact.
+      higherTimeframes: higherTimeframeBuckets ?? null,
       ...result,
     }));
   } finally {
