@@ -98,15 +98,22 @@ export interface BotSandboxSpec {
  * comparison. Every per-bot limit is already scoped to its account: `heldContracts`,
  * `MAX_CONCURRENT_POSITIONS`, and the risk state lookup.
  *
- * `trend-breakout` stays on Classic alone. It is a 15m-and-slower trend strategy rather than a
- * scalp, it raised one idea on 2026-08-17 against momentum-scalp-index's sixty-one, and it is the
- * one asymmetry left between the arms -- worth removing if the pattern comparison is to be clean,
- * but that is a decision about what Classic is, not about patterns.
+ * The arms are now exactly nested: Classic is the base strategy, Sniper is the base strategy plus
+ * patterns. Nothing else differs, so a difference in their results is attributable to patterns
+ * and to nothing else. `trend-breakout` was removed from Classic on 2026-08-17 to get there -- it
+ * is a 15m-and-slower trend strategy rather than a scalp, so it was both an asymmetry between the
+ * arms and outside the band these bots own.
+ *
+ * That leaves `trend-breakout` traded by no bot. It is still registered, so idea generation still
+ * runs it and its ideas remain available to research and backtesting; the autonomous agent does
+ * not read this registry and is unaffected. `momentum-scalp` is unowned for the same reason.
+ * Neither is a bug, but an unowned strategy produces ideas nothing will act on, which is worth
+ * knowing before reading an idea count as intent to trade.
  */
 export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Classic",
-    allowedStrategies: ["momentum-scalp-index", "trend-breakout"],
+    allowedStrategies: ["momentum-scalp-index"],
     initialBalance: 1_000_000,
   },
   {
@@ -134,6 +141,13 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  *
  * `3m` is left out deliberately: both pattern strategies support it, but nothing collects a 3m
  * series, so including it would only add TIMEFRAME_UNSUPPORTED noise against absent bars.
+ *
+ * `15m` is kept even though no strategy either bot now runs supports it -- all three are 1m/3m/5m,
+ * and the only 15m-capable strategy left the sandbox with `trend-breakout`. It stays because 1m-15m
+ * is the band these bots are defined to own, so a 15m-capable scalp strategy should become
+ * tradeable by adding it to a bot rather than by also remembering to widen this list. The cost is
+ * a TIMEFRAME_UNSUPPORTED line per strategy per symbol per run, which is noise in the report and
+ * nothing more. Drop it if that noise ever obscures something real.
  */
 const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
