@@ -158,6 +158,10 @@ async function main(): Promise<void> {
     // Two collects + ~25s sleep fits under a minute; 90s recovers the next tick after a dead claimant.
     OPTION_PREMIUM_TICKS: 90 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
+    // One spawn per account holding an open position, on a per-minute cron. Kept short on
+    // purpose: this is the job that closes positions, so a dead claimant must not block the
+    // next minute's sweep for anything like the ten minutes the other intraday jobs allow.
+    PAPER_TRADE_EXIT_SWEEP: 3 * 60 * 1000,
     AI_AGENT_TICK: 10 * 60 * 1000,
     VOLATILITY_STRADDLE: 10 * 60 * 1000,
     // Full-series recompute over both engines; slower than the other intraday jobs by nature.
@@ -418,6 +422,45 @@ async function main(): Promise<void> {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
+  }, { timezone: IST });
+
+  /**
+   * Exit-only sweep, on a tighter cadence than the bot that opens positions.
+   *
+   * The bot evaluates its open trades at the end of its own five-minute run, so a barrier
+   * crossed at :49:03 stayed open until :50:01 -- measured, on a target that filled correctly at
+   * 405.20 but sat visibly unclosed for 58 seconds first. The exit price and time are right
+   * either way, because the evaluator replays the observed tick series and books the crossing at
+   * the tick that caused it. What was wrong is how long the position stays live in between:
+   * capital is committed, the dashboard shows a position that has already hit its target, and
+   * anyone watching reasonably concludes the stop did not fire.
+   *
+   * Running the whole bot every minute is the wrong fix -- that is the path that opens
+   * positions, and it would quintuple entries to speed up exits. This runs only
+   * `EvaluateOpenPaperTrades`, which closes and never opens.
+   *
+   * Accounts are read from the open positions themselves rather than from the bot's roster.
+   * `run-paper-trading-bot.ts` calls `main()` at module scope, so importing its `DUAL_BOT_SANDBOX`
+   * would run the whole bot inside this process on startup -- opening positions and closing the
+   * pool out from under the scheduler. Deriving the list from the data also sweeps an account the
+   * bot does not own, which is what an operator's manually opened position is.
+   *
+   * Nothing to do on a quiet minute: with no open trades this costs one indexed query and spawns
+   * no process at all.
+   */
+  cron.schedule("* 9-15 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("PAPER_TRADE_EXIT_SWEEP", async () => {
+      const accounts = await database.query<{ name: string }>(
+        `SELECT DISTINCT account.name
+           FROM paper_trades trade
+           JOIN paper_accounts account ON account.id = trade.account_id
+          WHERE trade.status = 'OPEN'`,
+      );
+      for (const account of accounts.rows) {
+        await runCommand("npm", ["run", "paper:trades:evaluate", "--", "--account", account.name]);
+      }
+    });
   }, { timezone: IST });
 
   /**
