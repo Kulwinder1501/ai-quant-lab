@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getApiV1Url, getResearchJson, postResearchJson } from "../../research/api";
@@ -70,9 +70,15 @@ export function PositionsDashboard() {
   }, []);
 
   const applySummary = useCallback((data?: PaperAccountFullSummary) => {
-    if (data) {
-      setSummary(data);
+    if (!data) {
+      // A response carrying no payload used to count as success and silently keep the previous
+      // summary, so a closed position stayed on screen as "running" with nothing to indicate the
+      // list had stopped updating. Say so instead of holding stale rows.
+      setError("The positions summary came back empty; the list below may be out of date.");
+      setLoading(false);
+      return;
     }
+    setSummary(data);
     setError(null);
     setLoading(false);
   }, []);
@@ -83,10 +89,28 @@ export function PositionsDashboard() {
     setLoading(false);
   }, []);
 
+  /**
+   * Sequence number of the newest summary request, so a slow response cannot overwrite a newer one.
+   *
+   * These polls used to race: two in flight, the older resolving last, and the list reverting to
+   * a position that had already closed. Ordering is not guaranteed by arrival, so it is tracked.
+   */
+  const summaryRequestRef = useRef(0);
+
   const refreshSummary = useCallback(() => {
     if (!selectedAccountId) return;
+    const requestId = ++summaryRequestRef.current;
     setLoading(true);
-    void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+    void loadSummary(selectedAccountId).then(
+      (data) => {
+        if (requestId !== summaryRequestRef.current) return;
+        applySummary(data);
+      },
+      (err: unknown) => {
+        if (requestId !== summaryRequestRef.current) return;
+        applySummaryError(err);
+      },
+    );
   }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   // 3. Connect to Server-Sent Events (SSE) live ticking stream for real-time P&L & AI Execution
@@ -194,9 +218,22 @@ export function PositionsDashboard() {
     }, 2000);
     const summaryTimer = setInterval(refreshSummary, 3000);
 
+    /*
+     * Browsers throttle background timers hard — to roughly once a minute after a few minutes
+     * hidden — while EventSource keeps delivering. That combination is the dangerous one: prices
+     * tick, the "Live SSE Ticking" badge stays lit, and the trade list silently ages, so a
+     * position closed a minute ago still reads as running. Refetching the moment the tab is
+     * looked at again means what is on screen is current whenever anyone is actually reading it.
+     */
+    const refreshOnVisible = () => {
+      if (document.visibilityState === "visible") refreshSummary();
+    };
+    document.addEventListener("visibilitychange", refreshOnVisible);
+
     return () => {
       clearInterval(quoteTimer);
       clearInterval(summaryTimer);
+      document.removeEventListener("visibilitychange", refreshOnVisible);
     };
   }, [loadLiveQuotes, applyLiveQuotes, ignoreLiveQuotesError, refreshSummary]);
 
