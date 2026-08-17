@@ -11,6 +11,7 @@ import { PostgresNewsRepository } from "../../infrastructure/database/repositori
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
+import { PostgresOpenPositionContractRepository } from "../../infrastructure/database/repositories/postgres-open-position-contract-repository.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { OptionPremiumTickStreamer } from "../../infrastructure/market-data/option-premium-tick-streamer.js";
 import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
@@ -492,6 +493,10 @@ async function main(): Promise<void> {
       streamer: liveStreamer,
       chainRepository: new PostgresOptionChainRepository(database),
       tickRepository: new PostgresOptionPremiumTickRepository(database),
+      // Without this the subscription is only the ATM band, which tracks spot while a position
+      // does not. A strike that drifts out of the band is exactly the one whose stop still has
+      // to resolve, and its tick series would go quiet at the moment it matters most.
+      requiredContracts: new PostgresOpenPositionContractRepository(database),
     });
     try {
       await liveStreamer.connect();
