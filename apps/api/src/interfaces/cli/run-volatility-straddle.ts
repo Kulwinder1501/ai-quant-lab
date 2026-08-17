@@ -39,6 +39,29 @@ interface ExpansionRow {
   source_candle_id: string | null;
   instrument_id: string;
   evidence_cutoff_at: Date;
+  source_timeframe: string;
+}
+
+/** Bar length in minutes, for the timeframes any volatility model is fitted on. */
+const TIMEFRAME_MINUTES: Readonly<Record<string, number>> = {
+  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
+  // A daily bar is one trading session, not 24 hours. Using 1,440 would inflate the horizon by
+  // almost four times and let a 1d signal clear a gate it had not earned.
+  "1d": 375,
+};
+
+/**
+ * How far ahead a prediction reaches, in years, from its bar length and horizon.
+ *
+ * Calendar years, matching `yearsToExpiry` and the annualisation convention of the implied
+ * volatility it will be multiplied against. Returns null for a timeframe this does not know
+ * rather than guessing: the straddle gate depends on this number, and a wrong horizon silently
+ * moves the threshold it enforces.
+ */
+function predictionHorizonYears(timeframe: string, horizonBars: number): number | null {
+  const minutes = TIMEFRAME_MINUTES[timeframe];
+  if (minutes === undefined || !Number.isFinite(horizonBars) || horizonBars < 1) return null;
+  return (minutes * horizonBars) / (365 * 24 * 60);
 }
 
 /**
@@ -162,7 +185,10 @@ async function main(): Promise<void> {
       SELECT p.id, p.prediction, p.confidence, p.realized_trailing_range, p.source_candle_id,
              p.instrument_id, p.evidence_cutoff_at,
              (mv.validation_metrics -> 'validationProtocol' ->> 'expansionBand') AS expansion_band,
-             (mv.validation_metrics -> 'validationProtocol' ->> 'horizonBars') AS horizon_bars
+             (mv.validation_metrics -> 'validationProtocol' ->> 'horizonBars') AS horizon_bars,
+             -- The bar length this prediction was made on. With horizonBars it gives the span the
+             -- predicted range covers, which is what the implied move has to be scaled to.
+             source_candle.timeframe AS source_timeframe
       FROM auxiliary_model_predictions p
       INNER JOIN model_versions mv ON mv.id = p.model_version_id
       INNER JOIN volatility_shadow_enrollments vse
@@ -202,6 +228,25 @@ async function main(): Promise<void> {
 
     const expansionBand = row.expansion_band === null ? null : Number(row.expansion_band);
     const horizonBars = row.horizon_bars === null ? 5 : Number(row.horizon_bars);
+    const horizonYears = predictionHorizonYears(
+      row.source_timeframe,
+      Number.isInteger(horizonBars) ? horizonBars : 5,
+    );
+    if (horizonYears === null) {
+      // Refused rather than defaulted. This number sets the threshold the signal must clear, so
+      // an assumed one would quietly make the gate stricter or looser than the evidence warrants.
+      console.info(JSON.stringify({
+        level: "warn",
+        message: "Volatility straddle refused",
+        actionable: false,
+        reason: "PREDICTION_HORIZON_UNKNOWN",
+        explanation: `Timeframe "${row.source_timeframe}" has no known bar length, so the horizon `
+          + "the predicted range spans cannot be computed and the implied move cannot be scaled to it.",
+        sourceTimeframe: row.source_timeframe,
+        horizonBars,
+      }));
+      return;
+    }
     let trailingRange = row.realized_trailing_range === null
       ? null
       : Number(row.realized_trailing_range);
@@ -267,6 +312,7 @@ async function main(): Promise<void> {
       expansionBand: expansionBand !== null && Number.isFinite(expansionBand) && expansionBand > 0
         ? expansionBand
         : 0.25,
+      predictionHorizonYears: horizonYears,
       now,
     });
 

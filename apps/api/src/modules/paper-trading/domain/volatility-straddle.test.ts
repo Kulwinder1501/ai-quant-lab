@@ -19,6 +19,8 @@ function input(overrides: Partial<ProposeStraddleInput> = {}): ProposeStraddleIn
     // so cases about other conditions are not silently also testing the economics gates.
     trailingRange: 1_400,
     expansionBand: 0.25,
+    // 5 bars of 15m = 75 minutes, the shape of the models that actually feed this.
+    predictionHorizonYears: (15 * 5) / (365 * 24 * 60),
     now: NOW,
     ...overrides,
   };
@@ -137,12 +139,54 @@ describe("proposeVolatilityStraddle", () => {
     // An ATM straddle's premium is the market's own forecast of the move. Predicting a
     // range the chain already prices is not an edge, however accurate it is.
     it("refuses when the market already prices a larger move than predicted", () => {
-      // Trailing range clears the premium gate but sits under the implied move.
-      const proposal = proposeVolatilityStraddle(input({ trailingRange: 700, impliedVolatility: 0.28 }));
+      // Recalibrated when the gate moved to the horizon-scaled implied move. The numbers had to
+      // change because the comparison did: at 28% IV the chain prices ~80 points over 75 minutes
+      // against ~1,800 over the option's eight-day life, so the old 700-point range no longer
+      // fails this gate. A 50-point range does, which is the same condition being tested --
+      // predicting less than the market already prices -- expressed on the correct horizon.
+      const proposal = proposeVolatilityStraddle(input({ trailingRange: 50, impliedVolatility: 0.28 }));
 
       expect(proposal).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
       if (proposal.actionable) return;
       expect(proposal.explanation).toMatch(/realised volatility beats implied volatility/);
+    });
+
+    it("compares the prediction against implied over its own horizon, not the option's life", () => {
+      // The defect this replaced. A 15m/h5 prediction spans 75 minutes; the expiry here is 8 days
+      // out. Measured live 2026-08-17: every evaluation refused at a predicted 43.44 against a
+      // full-life implied move of 408.18 -- roughly 9x, which is the horizon ratio and not a
+      // market judgment, so the straddle could never fire whatever the signal said.
+      const horizonYears = (15 * 5) / (365 * 24 * 60);
+      const spot = 24_300;
+      const iv = 0.1134;
+      const overHorizon = spot * iv * Math.sqrt(horizonYears);
+      const overOptionLife = spot * iv * Math.sqrt(8 / 365);
+
+      // A range that beats implied over 75 minutes but not over eight days: previously refused.
+      const trailingRange = ((overHorizon + overOptionLife) / 2) / 1.25;
+      expect(trailingRange * 1.25).toBeGreaterThan(overHorizon);
+      expect(trailingRange * 1.25).toBeLessThan(overOptionLife);
+
+      const proposal = proposeVolatilityStraddle(input({
+        underlyingSpot: spot,
+        impliedVolatility: iv,
+        trailingRange,
+        predictionHorizonYears: horizonYears,
+      }));
+
+      // It must get past this gate now. Whether it survives the premium gates is a separate
+      // question and deliberately not asserted here.
+      if (!proposal.actionable) {
+        expect(proposal.reason).not.toBe("MARKET_ALREADY_PRICES_THE_MOVE");
+      }
+    });
+
+    it("reports both the horizon-scaled and full-life implied move, so the gate is auditable", () => {
+      const proposal = proposeVolatilityStraddle(input());
+      if (!proposal.actionable) throw new Error(`expected actionable, got ${proposal.reason}`);
+      // The horizon is a fraction of the option's life, so the scaled move must be the smaller.
+      expect(proposal.economics.impliedMoveOverHorizon).toBeLessThan(proposal.economics.impliedMove);
+      expect(proposal.economics.impliedMoveOverHorizon).toBeGreaterThan(0);
     });
 
     it("keeps the implied-move comparison honest as IV rises", () => {

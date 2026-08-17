@@ -76,12 +76,21 @@ export interface StraddleEconomics {
    */
   requiredMove: number;
   /**
-   * The move the market is pricing over the horizon, `spot * sigma * sqrt(T)`. The ATM
-   * straddle costs roughly `0.8x` this, so it is the benchmark the signal has to beat
-   * rather than a number to compare premium against directly.
+   * The move the market prices over the option's *whole remaining life*,
+   * `spot * sigma * sqrt(timeToExpiry)`. The ATM straddle costs roughly `0.8x` this, so it is the
+   * benchmark the premium has to be judged against -- not the benchmark for the signal, which
+   * reaches only as far as its own horizon. See `impliedMoveOverHorizon`.
    */
   impliedMove: number;
-  /** `trailingRange * (1 + band)` — the narrowest range the label's threshold implies. */
+  /**
+   * The same move re-scaled to the prediction's horizon, `spot * sigma * sqrt(horizon)`.
+   *
+   * This is what `predictedForwardRange` is comparable to, and comparing against `impliedMove`
+   * instead is what kept the straddle permanently refused: a 15m/h5 prediction spans 75 minutes
+   * and was being measured against an eight-day move.
+   */
+  impliedMoveOverHorizon: number;
+  /** `trailingRange * (1 + band)` — the narrowest range the label's threshold implies, over the prediction horizon. */
   predictedForwardRange: number;
   /**
    * Best-case favourable excursion from an ATM strike: the underlying travelling the
@@ -113,6 +122,18 @@ export interface ProposeStraddleInput {
   trailingRange: number | null;
   /** The model's own `validationProtocol.expansionBand`, never a default. */
   expansionBand: number;
+  /**
+   * How far ahead the prediction reaches, in years: `horizonBars * barLength`.
+   *
+   * Required rather than optional, because the alternative was silently wrong.
+   * `predictedForwardRange` is scaled to this horizon -- a 15m model at h5 predicts the next 75
+   * minutes -- while an option's implied move covers its whole remaining life. Comparing the two
+   * directly asks whether a 75-minute range beats an eight-day move, which nothing satisfies:
+   * measured 2026-08-17, every live evaluation refused MARKET_ALREADY_PRICES_THE_MOVE at 43.44
+   * against 408.18, a ratio that is horizon mismatch rather than market judgment. A default here
+   * would let a caller reintroduce that silently.
+   */
+  predictionHorizonYears: number;
   now?: Date;
   riskFreeRate?: number;
 }
@@ -224,6 +245,19 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
   const quantity = input.lotSize * input.lots;
   const predictedForwardRange = input.trailingRange * (1 + input.expansionBand);
   const impliedMove = input.underlyingSpot * input.impliedVolatility * Math.sqrt(timeToExpiryYears);
+  /*
+   * The same implied move re-scaled to the prediction's own horizon, which is what
+   * `predictedForwardRange` measures. Both sides now describe the same span of time, so
+   * "does realised beat implied" is a question the signal can actually answer.
+   *
+   * `impliedMove` above is kept and still reported: it is the move priced into the premium this
+   * position pays, and the premium gates below are the ones that must reckon with holding an
+   * eight-day option to express a seventy-five-minute view. Re-scaling the comparison does not
+   * make that mismatch disappear -- it moves it to where it belongs, which is the economics.
+   */
+  const impliedMoveOverHorizon = input.underlyingSpot
+    * input.impliedVolatility
+    * Math.sqrt(input.predictionHorizonYears);
 
   const economics: StraddleEconomics = {
     totalPremium,
@@ -232,6 +266,7 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     breakevenLower: strike - totalPremium,
     requiredMove: totalPremium,
     impliedMove,
+    impliedMoveOverHorizon,
     predictedForwardRange,
     optimisticExcursion: predictedForwardRange,
     // A range of R around an at-the-money strike gives roughly R/2 of displacement in
@@ -242,18 +277,25 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
     conservativeCoverage: predictedForwardRange / 2 / totalPremium,
   };
 
-  // The ATM straddle premium is the market's own forecast of the move. Predicting a
-  // range the market has already priced is not an edge, however accurate it is. Checked
-  // first: an ATM straddle's premium is itself roughly 0.8x the implied move, so the
-  // half-range gate below refuses everything this gate would and more — running this one
-  // second would leave it permanently unreachable and its distinct message would never
-  // surface even when it is the more fundamental reason the trade is off.
-  if (predictedForwardRange <= impliedMove) {
+  // The ATM straddle premium is the market's own forecast of the move. Predicting a range the
+  // market has already priced is not an edge, however accurate it is.
+  //
+  // Still checked first, but the reason changed with the horizon fix. It used to be that this
+  // gate was strictly weaker than the half-range gate below — an ATM premium is roughly 0.8x the
+  // full-life implied move, so anything failing here failed there too. Now this gate measures the
+  // horizon-scaled implied move while the premium gates measure full-life premium, so neither
+  // dominates: a short-horizon signal can beat implied over its own 75 minutes and still fail to
+  // cover eight days of premium. Order is kept because "the market already prices this" is the
+  // more fundamental objection — a signal with no edge over implied is not worth financing at any
+  // tenor — and because it is the cheaper check.
+  if (predictedForwardRange <= impliedMoveOverHorizon) {
     return refuse(
       "MARKET_ALREADY_PRICES_THE_MOVE",
       `The predicted forward range ${predictedForwardRange.toFixed(2)} does not exceed the implied `
-      + `move ${impliedMove.toFixed(2)} the option chain is already pricing. Buying premium here bets `
-      + "that realised volatility beats implied volatility, and this signal does not claim that.",
+      + `move ${impliedMoveOverHorizon.toFixed(2)} the option chain prices over the same horizon `
+      + `(${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)} minutes; the full-life implied `
+      + `move to expiry is ${impliedMove.toFixed(2)}). Buying premium here bets that realised `
+      + "volatility beats implied volatility, and this signal does not claim that.",
     );
   }
 
