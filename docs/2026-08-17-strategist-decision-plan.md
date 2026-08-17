@@ -60,28 +60,61 @@ observed.
 
 ## What survives, and it is two separate changes
 
-### A. Shared portfolio trade limit
+### A. Daily trade cap, keyed on account and trading day
 
-The only remaining control with a direct safety argument: one cap across both executors, enforced
-transactionally so Classic and Sniper cannot each spend the last slot.
+**Decided: capacity is keyed on `(account_id, trading day)`, not on a strategist decision.** A
+decision-scoped window made TTL the de facto rate limiter, because every refresh silently restored
+capacity. A calendar day cannot expire mid-session.
 
-Enforce it in `PostgresPaperTradeRepository.openFromTradeIdeaWithinTransaction`. That is the real
+This settles what the control *is*. Counting trades ever opened in the day makes it a **throughput
+cap**, and that is now unambiguous rather than conflated, because concurrent exposure is already
+capped elsewhere: `defaultRiskPolicy.maxConcurrentPositions = 3`, applied by `evaluateRisk`, which
+the bots already call. The two controls live in different layers and neither duplicates the other.
+Nothing about exposure needs to be built here.
+
+**Consequence worth stating: this is a per-account cap, not a shared one.** Classic and Sniper are
+separate accounts with separate balances, so each gets its own capacity — and that is correct. A cap
+shared across both arms would have let whichever bot fired first starve the other, making the
+pattern comparison a race rather than an experiment. The frozen plan's "maximum new portfolio trades
+across all executors" would have confounded the A/B it was meant to protect. The gate's remaining
+job is serialising concurrent writes *within* one account: overlapping timeframe scans in a cycle,
+or a bot cycle racing the exit sweep.
+
+`maxTrades` therefore leaves `StrategistDecision` entirely and becomes account policy. And
+`strategist_decision_id` on `paper_trades` is now audit-only — the review asked for it to be indexed
+because the gate would count by it, and that rationale is void. Index it only if an audit query
+needs it.
+
+Enforce in `PostgresPaperTradeRepository.openFromTradeIdeaWithinTransaction`. That is the real
 chokepoint — one file writes `INSERT INTO paper_trades`, and its three public entry points
 (`openFromTradeIdea`, `openPairFromTradeIdeas`, `openManualOption`) all funnel through that private
-method, which is already the transaction boundary. The frozen plan put the gate in an application
-service "or equivalent", which would have left the straddle's atomic two-leg path and manual option
-entries outside the limit.
+method, which is already the transaction boundary. An application-layer gate would have left the
+straddle's atomic two-leg path and manual option entries outside the cap.
 
-**Unresolved, and it should be resolved before implementation:** counting trades *ever opened* under
-a capacity key makes this a throughput cap, not an exposure cap. Those are different controls.
-Portfolio risk is about concurrent exposure; churn is about rate. Both are legitimate, neither is
-the other, and the frozen plan named one and described the other. This matters concretely here:
-measured over 1,885 sessions the scalp strategies take 7–10 trades per session per instrument, so
-whether a cap is generous or exhausted in ten minutes depends entirely on the window it is counted
-over — and no default was given for the cap or the window.
+**Mechanics:**
 
-Recommendation: key capacity on something that does not expire mid-session (account + trading day),
-so a new decision cannot silently restore capacity and make TTL the de facto rate limiter.
+- **Trading day is the IST session date**, matching the scheduler's `Asia/Kolkata` timezone. An NSE
+  session (09:15–15:30 IST) never crosses midnight IST, so the date is unambiguous.
+- **Filter on a half-open `opened_at` range** computed from that date, not on
+  `(opened_at AT TIME ZONE 'Asia/Kolkata')::date`. An expression on the column cannot use a plain
+  btree index; a range can.
+- **A new index is required.** Neither existing index serves this count:
+  `paper_trades_open_idx` is `(account_id, opened_at DESC) WHERE status = 'OPEN'`, and a daily cap
+  counts closed trades too; `paper_trades_history_idx` is on `closed_at`. Add
+  `(account_id, opened_at)` with no partial predicate.
+- **Serialise with `pg_advisory_xact_lock`** on the account and day rather than adding a capacity
+  table. The count stays derived from `paper_trades`, so it is a single source of truth that cannot
+  drift from the trades it describes, there is no create-on-first-trade path, and the lock releases
+  on commit *or* rollback — which makes the rollback test free rather than something to arrange. A
+  `hashtext` collision would serialise two unrelated accounts, costing a little contention and never
+  miscounting.
+
+**The cap's value is not yet measurable.** Live history is a single session — Classic 21 trades,
+Sniper 2, Alpha Simulation Fund 1 — and the Sniper's 2 predates pattern detection existing on
+1m/5m/15m, so it reflects an empty `pattern_detections` table rather than the strategy. Backtests
+put the scalp strategies at 7–10 trades per session per instrument. Set the cap as a runaway guard
+placed above observed behaviour, not as a throttle shaping it, and revisit once ~20 sessions of
+post-fix history exist. A cap tight enough to bind is a strategy change wearing a safety label.
 
 ### B. Append-only regime record
 
@@ -133,11 +166,15 @@ Surviving tests, renumbered:
 4. Expiry boundary: `evaluationAsOf === validUntil` is expired.
 5. Scope precedence: instrument+timeframe beats instrument beats market, with a deterministic
    tiebreak when two rows tie on `as_of`.
-6. Capacity exhausted: enforced at the write boundary; the second executor is rejected.
-7. Concurrent executors at the final slot: exactly one succeeds.
-8. Rollback on insert failure leaves capacity available.
-9. Closed trades and the capacity window: whichever semantics section A settles on, asserted
-   explicitly rather than left to the counting query.
+6. Capacity exhausted for an account on a day: enforced at the write boundary, the next open rejected.
+7. Two concurrent opens on one account at its final slot: exactly one succeeds.
+8. **Accounts are independent**: Classic exhausting its cap leaves Sniper's untouched. This replaces
+   the frozen plan's "Sniper cannot exceed the shared limit after Classic consumes slots", which
+   would now be asserting a bug.
+9. Rollback on insert failure leaves capacity available (the advisory lock releases either way).
+10. Closed trades consume capacity: a scalp opened and closed in two minutes still counts.
+11. Day boundary: a trade opened at 15:29 IST and one at 09:16 IST the next morning fall in
+    different windows, and a trade near midnight UTC is attributed to its IST session date.
 
 Dropped along with the confluence term: every alignment-behaviour test, and the
 `positionSizeMultiplier` assertions unless a sizing path is built.
