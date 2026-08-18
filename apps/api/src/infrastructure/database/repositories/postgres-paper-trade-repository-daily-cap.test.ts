@@ -68,6 +68,35 @@ const OPEN_INPUT = {
   notes: "cap test",
 };
 
+/**
+ * Two accounts, each with its own cap and its own count, resolved from the accountId the query is
+ * given. Whether the *database* isolates them is not in question; what this can show is that the
+ * gate keys both the cap and the count on the account it was asked about, so one account being
+ * exhausted says nothing about another.
+ */
+function twoAccountHarness(accounts: Record<string, { cap: number; openedToday: number }>) {
+  const statements: string[] = [];
+  const client = {
+    query: vi.fn(async (text: string, values?: unknown[]) => {
+      statements.push(text.replace(/\s+/g, " ").trim());
+      const accountId = String(values?.[0] ?? "");
+      const state = accounts[accountId];
+      if (text.includes("COUNT(*) AS opened_today")) {
+        return { rows: [{ opened_today: String(state?.openedToday ?? 0) }] };
+      }
+      if (text.includes("FROM paper_accounts") && text.includes("FOR UPDATE")) {
+        if (!state) return { rows: [] };
+        return { rows: [{ ...accountRow(state.cap), id: accountId, name: accountId }] };
+      }
+      if (text.includes("FROM trade_ideas") && text.includes("FOR UPDATE")) return { rows: [] };
+      return { rows: [] };
+    }),
+    release: vi.fn(),
+  };
+  const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+  return { statements, repository: new PostgresPaperTradeRepository(database) };
+}
+
 describe("daily trade cap at the open boundary", () => {
   it("does not count anything when the account has no cap", async () => {
     const { statements, repository } = harness({ dailyTradeCap: null });
@@ -132,6 +161,52 @@ describe("daily trade cap at the open boundary", () => {
 
     await expect(repository.openFromTradeIdea(OPEN_INPUT))
       .rejects.toThrow(/AutoBot-Classic has opened 21 trade\(s\) on 2026-08-17, reaching its daily cap of 21/);
+  });
+
+  /*
+   * Closed trades consume capacity. This is true by construction -- the count carries no status
+   * predicate -- but construction is exactly what a later edit changes, and adding
+   * `AND status = 'OPEN'` would make the cap evadable by the churn it exists to bound while every
+   * other test here stayed green. Asserted on the query's shape because a stubbed count cannot
+   * distinguish which rows the database would have counted; the shape is the only place the
+   * decision is actually recorded.
+   */
+  it("counts every row in the window, with no status or evidence filter", async () => {
+    const { statements, repository } = harness({ dailyTradeCap: 60, openedToday: 5 });
+
+    await expect(repository.openFromTradeIdea(OPEN_INPUT)).rejects.toThrow(/Trade idea was not found/);
+
+    const countStatement = statements.find((statement) => statement.includes("COUNT(*) AS opened_today"));
+    expect(countStatement).toBeDefined();
+    // The three predicates the count is allowed to have.
+    expect(countStatement).toContain("account_id = $1");
+    expect(countStatement).toContain("opened_at >= $2");
+    expect(countStatement).toContain("opened_at < $3");
+    // A scalp opened and closed inside two minutes still consumed a slot.
+    expect(countStatement).not.toContain("status");
+    // Excluded-from-evidence governs whether a trade informs P&L, not whether it happened.
+    expect(countStatement).not.toContain("excluded_from_evidence");
+  });
+
+  // Replaces the frozen plan's "Sniper cannot exceed the shared limit after Classic consumes
+  // slots", which would now be asserting a bug: a cap shared across the two bot arms would let
+  // whichever fired first starve the other and turn the pattern comparison into a race.
+  it("keeps accounts independent, so one at its cap does not block another", async () => {
+    const { statements, repository } = twoAccountHarness({
+      "AutoBot-Classic": { cap: 5, openedToday: 5 }, // exhausted
+      "AutoBot-Sniper": { cap: 5, openedToday: 0 }, // untouched
+    });
+
+    await expect(repository.openFromTradeIdea({ ...OPEN_INPUT, accountId: "AutoBot-Classic" }))
+      .rejects.toThrow(DailyTradeCapReachedError);
+
+    // The other account gets past the cap gate and fails later, on the stubbed idea lookup.
+    await expect(repository.openFromTradeIdea({ ...OPEN_INPUT, accountId: "AutoBot-Sniper" }))
+      .rejects.toThrow(/Trade idea was not found/);
+
+    // Both counts were scoped to the account being opened for, not to a shared key.
+    const countCalls = statements.filter((statement) => statement.includes("COUNT(*) AS opened_today"));
+    expect(countCalls).toHaveLength(2);
   });
 
   it("rolls a structure back whole when its second leg would cross the cap", async () => {
