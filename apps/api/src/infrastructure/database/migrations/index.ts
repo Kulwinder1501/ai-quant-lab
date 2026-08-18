@@ -48,9 +48,9 @@ import { purgeInProgressSeedBarsMigration } from "./047-purge-in-progress-seed-b
 import { purgeLookAheadSmcSnapshotsMigration } from "./048-purge-look-ahead-smc-snapshots.js";
 import { reconcileAbandonedJobRunsMigration } from "./049-reconcile-abandoned-job-runs.js";
 import { addBaselineAccuracyMigration } from "./050-add-baseline-accuracy.js";
-import { reapplyBankniftyLotSizeMigration } from "./053-reapply-banknifty-lot-size.js";
-import { aiBrainThoughtsMigration } from "./052-ai-brain-thoughts.js";
 import { addVolatilityIndicesMigration } from "./051-add-volatility-indices.js";
+import { aiBrainThoughtsMigration } from "./052-ai-brain-thoughts.js";
+import { reapplyBankniftyLotSizeMigration } from "./053-reapply-banknifty-lot-size.js";
 import { optionPremiumTicksMigration } from "./054-option-premium-ticks.js";
 import { driverTapeAdjustmentsMigration } from "./055-driver-tape-adjustments.js";
 import { scheduledEventsAndHolidaysMigration } from "./056-scheduled-events-and-holidays.js";
@@ -59,6 +59,11 @@ import { driverTapeOutcomeLinksMigration } from "./058-driver-tape-outcome-links
 import { volatilityStraddleRunsMigration } from "./059-volatility-straddle-runs.js";
 import { paperTradeNotificationStreamMigration } from "./060-paper-trade-notification-stream.js";
 import { paperTradeStopEffectiveAtMigration } from "./061-paper-trade-stop-effective-at.js";
+import { expandPatternCodesMigration } from "./062-expand-pattern-codes.js";
+import { expandPriceActionEventsMigration } from "./063-expand-price-action-events.js";
+import { paperTradePartialExitsMigration } from "./064-paper-trade-partial-exits.js";
+import { expandAdditionalPatternsMigration } from "./065-expand-additional-patterns.js";
+import { paperAccountDailyTradeCapMigration } from "./066-paper-account-daily-trade-cap.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -122,4 +127,9 @@ export const migrations = [
   volatilityStraddleRunsMigration,
   paperTradeNotificationStreamMigration,
   paperTradeStopEffectiveAtMigration,
+  expandPatternCodesMigration,
+  expandPriceActionEventsMigration,
+  paperTradePartialExitsMigration,
+  expandAdditionalPatternsMigration,
+  paperAccountDailyTradeCapMigration,
 ];

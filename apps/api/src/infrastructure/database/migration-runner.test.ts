@@ -61,4 +61,15 @@ describe("database migrations", () => {
     await expect(runMigrations(second.pool, migrationsToRun)).resolves.toEqual({ applied: [], skipped: ["001-test"] });
     expect(second.queries).not.toContain("BEGIN");
   });
+
+  it("verifies migration 065 expands check constraints additively for candlestick codes and chart patterns", () => {
+    const migration065 = migrations.find((m) => m.id === "065-expand-additional-patterns");
+    expect(migration065).toBeDefined();
+    expect(migration065!.sql).toContain("INVERTED_HAMMER");
+    expect(migration065!.sql).toContain("SPINNING_TOP");
+    expect(migration065!.sql).toContain("HEAD_AND_SHOULDERS");
+    expect(migration065!.sql).toContain("INVERSE_HEAD_AND_SHOULDERS");
+    expect(migration065!.sql).toContain("RISING_WEDGE");
+    expect(migration065!.sql).toContain("FALLING_WEDGE");
+  });
 });
