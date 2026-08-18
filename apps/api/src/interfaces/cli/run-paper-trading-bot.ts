@@ -24,7 +24,13 @@ import {
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { calculateExitFees } from "../../modules/paper-trading/domain/brokerage-calculator.js";
-import { PostgresRiskStateRepository } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
+import {
+  PostgresRiskStateRepository,
+  VOLATILITY_LABEL_SCHEME,
+} from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
+import { PostgresRegimeObservationRepository } from "../../infrastructure/database/repositories/postgres-regime-observation-repository.js";
+import { buildRegimeObservation } from "../../modules/strategy-engine/domain/regime-observation.js";
+import type { RegimeContext } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 
@@ -156,6 +162,58 @@ const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
 /** An intraday signal raised after this has no session left to resolve in. */
 const LAST_SIGNAL_MINUTES = 15 * 60 + 25;
 
+/**
+ * Records the regime observed for one series, returning its id, or null if it could not be recorded.
+ *
+ * Both readings are already in hand at this point and both were being discarded: the volatility
+ * regime is derived per bar by the context repository, and the model regime is read by the risk
+ * gate. Neither survived the run, so answering "did trades opened in HIGH_VOL fare worse?" later
+ * meant re-deriving from `candles`, `indicator_snapshots`, and whichever model is in PRODUCTION
+ * *then* -- three moving inputs, so the answer would drift without anything being wrong.
+ *
+ * Failure is swallowed on purpose. This record is research, not a control: a trade that cannot have
+ * its regime recorded must still open, unstamped. Throwing here would let a research table decide
+ * whether the bot trades, which is the one thing this must never do. The error is logged so a
+ * persistent failure is visible rather than silent.
+ */
+async function recordRegimeObservation(input: {
+  regimeRepository: PostgresRegimeObservationRepository;
+  riskRepository: PostgresRiskStateRepository;
+  instrumentId: string;
+  timeframe: string;
+  sourceCandleId: string | null;
+  volatility: RegimeContext | null;
+  now: Date;
+}): Promise<string | null> {
+  try {
+    const model = await input.riskRepository.findVolatilityRegime({
+      instrumentId: input.instrumentId,
+      asOf: input.now,
+      // Matches the window the risk gate itself uses, so the recorded reading is the one the
+      // decision could see rather than a more generous lookback taken for the record's benefit.
+      maxAgeMinutes: 60,
+    });
+    const stored = await input.regimeRepository.record(buildRegimeObservation({
+      instrumentId: input.instrumentId,
+      timeframe: input.timeframe,
+      sourceCandleId: input.sourceCandleId,
+      observedAt: input.now,
+      volatility: input.volatility,
+      model,
+      modelLabelScheme: VOLATILITY_LABEL_SCHEME,
+    }));
+    return stored.id;
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error",
+      message: "Could not record the regime observation; trades will open unstamped.",
+      timeframe: input.timeframe,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    return null;
+  }
+}
+
 function istMinutesSinceMidnight(now: Date): number {
   const formatted = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Kolkata", hour: "numeric", minute: "numeric", hour12: false,
@@ -201,6 +259,7 @@ async function main(): Promise<void> {
     );
     const openTrade = new OpenPaperTrade(tradeRepository);
     const riskRepository = new PostgresRiskStateRepository(database);
+    const regimeRepository = new PostgresRegimeObservationRepository(database);
 
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
@@ -213,6 +272,12 @@ async function main(): Promise<void> {
       symbol: string;
       timeframe: string;
       results: Awaited<ReturnType<typeof generator.execute>>;
+      /**
+       * Recorded once per series, so both bots stamp the same observation. The regime is a property
+       * of the bar, not of the account that acted on it -- writing one row per bot would make a
+       * later `GROUP BY regime` double-count every bar both bots traded.
+       */
+      regimeObservationId: string | null;
       skippedReason?: string;
       explanation?: string;
     }> = [];
@@ -247,7 +312,19 @@ async function main(): Promise<void> {
           }
 
           const results = await generator.execute({ instrumentId: instrument.id, timeframe });
-          generatedBySeries.push({ symbol, timeframe, results });
+          // Every strategy evaluated the same bar, so any result carries the same reading. The
+          // first with a candle id is the bar that was actually evaluated.
+          const evaluated = results.find((result) => result.sourceCandleId !== null);
+          const regimeObservationId = await recordRegimeObservation({
+            regimeRepository,
+            riskRepository,
+            instrumentId: instrument.id,
+            timeframe,
+            sourceCandleId: evaluated?.sourceCandleId ?? null,
+            volatility: evaluated?.regime ?? null,
+            now,
+          });
+          generatedBySeries.push({ symbol, timeframe, results, regimeObservationId });
         }
       }
     }
@@ -279,7 +356,7 @@ async function main(): Promise<void> {
       );
       let openPositions = existingOpen.length;
 
-      for (const { symbol, timeframe, results } of generatedBySeries) {
+      for (const { symbol, timeframe, results, regimeObservationId } of generatedBySeries) {
         const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
         if (!instrument) continue;
 
@@ -383,6 +460,7 @@ async function main(): Promise<void> {
               feeBreakdown: entry.feeBreakdown,
               applyBrokerageFees: false,
               optionContract: entry.optionContract,
+              regimeObservationId,
             });
 
             heldContracts.add(key);
@@ -402,6 +480,7 @@ async function main(): Promise<void> {
               estimatedExitFees: Number(calculateExitFees(entry.fillPrice, approvedQuantity).total.toFixed(2)),
               fillSource: (entry.feeBreakdown.entryChecks as { fillSource?: string } | undefined)?.fillSource,
               unchecked: entry.unchecked,
+              regimeObservationId,
             });
           }
         }

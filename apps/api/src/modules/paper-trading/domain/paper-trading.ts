@@ -66,6 +66,14 @@ export interface PaperTrade {
   underlyingSymbol?: string | null;
   underlyingEntryPrice?: number | null;
   entryIv?: number | null;
+  /**
+   * The regime observed when this trade was opened, for research and audit only.
+   *
+   * Null means the observation was not recorded, never that the market had no regime. No execution
+   * path reads this, and nothing must start: the moment a gate depends on it, an unrecorded
+   * observation becomes a behaviour change rather than a gap in the record.
+   */
+  regimeObservationId?: string | null;
 }
 
 export interface PaperTradeEvent {
@@ -119,6 +127,11 @@ export interface OpenPaperTradeInput {
   optionContract?: OptionContractSpec;
   /** Result of the strict 11-factor options entry validation checklist. */
   optionsValidationResult?: Record<string, unknown>;
+  /**
+   * Regime observed at decision time, stamped for research. Optional by design: a caller that
+   * cannot record an observation still opens the trade, unstamped.
+   */
+  regimeObservationId?: string | null;
 }
 
 export interface ClosePaperTradeInput {

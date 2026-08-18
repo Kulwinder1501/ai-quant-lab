@@ -4,6 +4,7 @@ import type {
   TradeIdeaRepository,
   TradeSide,
 } from "../domain/strategy.js";
+import type { RegimeContext } from "../domain/regime.js";
 import { registeredStrategies, strategySupportsTimeframe } from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
 
@@ -22,6 +23,14 @@ export interface GenerateTradeIdeasResult {
   skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | null;
   /** Present only when skippedReason is STRATEGY_FAILED. */
   failureMessage?: string;
+  /**
+   * The volatility regime carried by the evaluated bar, or null when it could not be measured.
+   *
+   * Surfaced because the context repository derives it per bar and every caller discarded it, so a
+   * later "did this fire in HIGH_VOL?" could only be answered by re-deriving from series that get
+   * backfilled and recomputed. Nothing in the generator reads it; it exists to be recorded.
+   */
+  regime: RegimeContext | null;
 }
 
 export interface ScanTradeIdeasInput {
@@ -77,6 +86,7 @@ export class GenerateTradeIdeas {
             candidatesGenerated: 0,
             tradeIdeaIds: [],
             skippedReason: "TIMEFRAME_UNSUPPORTED",
+            regime: context?.regime ?? null,
           });
           continue;
         }
@@ -90,6 +100,7 @@ export class GenerateTradeIdeas {
             candidatesGenerated: 0,
             tradeIdeaIds: [],
             skippedReason: "STRATEGY_INACTIVE",
+            regime: context?.regime ?? null,
           });
           continue;
         }
@@ -102,6 +113,7 @@ export class GenerateTradeIdeas {
             candidatesGenerated: 0,
             tradeIdeaIds: [],
             skippedReason: "NO_COMPLETED_CANDLE",
+            regime: null,
           });
           continue;
         }
@@ -126,6 +138,7 @@ export class GenerateTradeIdeas {
           candidatesGenerated: proposals.length,
           tradeIdeaIds: tradeIdeas.map((idea) => idea.id),
           skippedReason: proposals.length === 0 ? "RULES_NOT_MET" : null,
+          regime: context.regime ?? null,
         });
       } catch (error) {
         results.push({
@@ -136,6 +149,7 @@ export class GenerateTradeIdeas {
           tradeIdeaIds: [],
           skippedReason: "STRATEGY_FAILED",
           failureMessage: error instanceof Error ? error.message : String(error),
+          regime: context?.regime ?? null,
         });
       }
     }

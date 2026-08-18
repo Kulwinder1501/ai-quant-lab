@@ -203,6 +203,8 @@ describe("GenerateTradeIdeas", () => {
       candidatesGenerated: 1,
       tradeIdeaIds: ["idea-1"],
       skippedReason: null,
+      // Null because this fixture's context carries no regime, not because the field is unused.
+      regime: null,
     });
     expect(saved[0]).toMatchObject({
       instrumentId: "instrument-1",
@@ -315,8 +317,50 @@ describe("GenerateTradeIdeas", () => {
       candidatesGenerated: 0,
       tradeIdeaIds: [],
       skippedReason: "TIMEFRAME_UNSUPPORTED",
+      regime: null,
     });
     expect(saved.every((idea) => idea.strategyVersionId === "strategy-version-trend-breakout")).toBe(true);
+  });
+
+  // The context repository derives this per bar and every caller discarded it, so the only thing
+  // that makes the field worth having is that it is populated from the evaluated bar. A field
+  // declared and left null is the failure mode this codebase has hit repeatedly -- it reads as a
+  // working feature returning a neutral answer.
+  it("surfaces the regime carried by the evaluated bar", async () => {
+    const withRegime: StrategyMarketContext = {
+      ...qualifyingContext(),
+      regime: { regime: "HIGH_VOL", valueRatio: 1.25 },
+    };
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => withRegime,
+      listCompletedContexts: async () => [withRegime],
+    };
+
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]))
+      .execute({ instrumentId: "instrument-1", timeframe: "1d" });
+
+    expect(result.find((entry) => entry.strategyKey === "trend-breakout")?.regime)
+      .toEqual({ regime: "HIGH_VOL", valueRatio: 1.25 });
+    // Carried on every entry, including one skipped for an unsupported timeframe: the reading
+    // belongs to the bar, not to whichever strategy happened to run on it.
+    expect(result.find((entry) => entry.strategyKey === "momentum-scalp")?.regime)
+      .toEqual({ regime: "HIGH_VOL", valueRatio: 1.25 });
+  });
+
+  it("reports an unmeasurable regime as null rather than omitting the field", async () => {
+    // `deriveVolatilityRegime` returns null for a gap in the VIX series, and that null has to reach
+    // the record: a missing field would later be indistinguishable from a calm market.
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
+    };
+
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]))
+      .execute({ instrumentId: "instrument-1", timeframe: "1d" });
+
+    const entry = result.find((item) => item.strategyKey === "trend-breakout");
+    expect(entry).toHaveProperty("regime");
+    expect(entry?.regime).toBeNull();
   });
 
   it("does not run a swing strategy against a one-minute candle", async () => {

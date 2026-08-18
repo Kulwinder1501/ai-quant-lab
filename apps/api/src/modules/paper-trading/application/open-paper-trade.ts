@@ -25,6 +25,8 @@ export interface OpenPaperTradeRequest {
   feeBreakdown?: Record<string, unknown>;
   /** Persists strike/expiry/type/IV for live Black–Scholes mark-to-market. */
   optionContract?: OptionContractSpec;
+  /** Regime observed at decision time. Research and audit only; nothing reads it back to trade. */
+  regimeObservationId?: string | null;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -71,6 +73,7 @@ export class OpenPaperTrade {
       targetPriceOverride: input.targetPriceOverride,
       sideOverride: input.sideOverride,
       optionContract: input.optionContract,
+      regimeObservationId: input.regimeObservationId ?? null,
     };
     return this.paperTradeRepository.openFromTradeIdea(request);
   }

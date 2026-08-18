@@ -64,6 +64,7 @@ import { expandPriceActionEventsMigration } from "./063-expand-price-action-even
 import { paperTradePartialExitsMigration } from "./064-paper-trade-partial-exits.js";
 import { expandAdditionalPatternsMigration } from "./065-expand-additional-patterns.js";
 import { paperAccountDailyTradeCapMigration } from "./066-paper-account-daily-trade-cap.js";
+import { regimeObservationsMigration } from "./067-regime-observations.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -132,4 +133,5 @@ export const migrations = [
   paperTradePartialExitsMigration,
   expandAdditionalPatternsMigration,
   paperAccountDailyTradeCapMigration,
+  regimeObservationsMigration,
 ];

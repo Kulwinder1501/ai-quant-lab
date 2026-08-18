@@ -61,6 +61,7 @@ interface PaperTradeRow extends QueryResultRow {
   underlying_symbol: string | null;
   underlying_entry_price: string | null;
   entry_iv: string | null;
+  regime_observation_id: string | null;
 }
 
 interface CapitalRow extends QueryResultRow {
@@ -117,7 +118,8 @@ const tradeColumns = `
   paper_trades.option_type,
   paper_trades.underlying_symbol,
   paper_trades.underlying_entry_price,
-  paper_trades.entry_iv
+  paper_trades.entry_iv,
+  paper_trades.regime_observation_id
 `;
 
 function toNumber(value: string, field: string): number {
@@ -174,6 +176,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     entryIv: row.entry_iv === null || row.entry_iv === undefined
       ? null
       : toNumber(row.entry_iv, "entry IV"),
+    regimeObservationId: row.regime_observation_id ?? null,
   };
 }
 
@@ -448,10 +451,11 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         account_id, trade_idea_id, instrument_id, side, status, quantity,
         entry_price, stop_loss, stop_loss_effective_at, target_price, opened_at,
         fees, fee_breakdown, slippage, notes,
-        option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv
+        option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv,
+        regime_observation_id
       ) VALUES (
         $1, $2, $3, $4, $14, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
-        $15, $16, $17, $18, $19, $20
+        $15, $16, $17, $18, $19, $20, $21
       ) RETURNING id
     `, [
       input.accountId, idea.id, idea.instrument_id, side, input.quantity,
@@ -460,6 +464,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       contract?.optionStrike ?? null, contract?.optionExpiry ?? null,
       contract?.optionType ?? null, contract?.underlyingSymbol ?? null,
       contract?.underlyingEntryPrice ?? null, contract?.entryIv ?? null,
+      input.regimeObservationId ?? null,
     ]);
     const paperTradeId = inserted.rows[0]?.id;
     if (!paperTradeId) {
