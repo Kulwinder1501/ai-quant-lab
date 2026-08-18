@@ -102,12 +102,13 @@ straddle's atomic two-leg path and manual option entries outside the cap.
   `paper_trades_open_idx` is `(account_id, opened_at DESC) WHERE status = 'OPEN'`, and a daily cap
   counts closed trades too; `paper_trades_history_idx` is on `closed_at`. Add
   `(account_id, opened_at)` with no partial predicate.
-- **Serialise with `pg_advisory_xact_lock`** on the account and day rather than adding a capacity
-  table. The count stays derived from `paper_trades`, so it is a single source of truth that cannot
-  drift from the trades it describes, there is no create-on-first-trade path, and the lock releases
-  on commit *or* rollback — which makes the rollback test free rather than something to arrange. A
-  `hashtext` collision would serialise two unrelated accounts, costing a little contention and never
-  miscounting.
+- **Serialisation needed nothing new.** This called for `pg_advisory_xact_lock`; the implementation
+  uses neither that nor a capacity table, because `openFromTradeIdeaWithinTransaction` already takes
+  the account row `FOR UPDATE`. That holds the account for the rest of the transaction, so two
+  concurrent bot cycles cannot both read the same count and both insert — the lock that makes this
+  safe was already in the right place. It releases on commit *or* rollback, so a failed insert
+  leaves capacity available without anything being arranged. The count stays derived from
+  `paper_trades` rather than a capacity row that could drift from the trades it describes.
 
 **The cap's value is not yet measurable.** Live history is a single session — Classic 21 trades,
 Sniper 2, Alpha Simulation Fund 1 — and the Sniper's 2 predates pattern detection existing on
@@ -155,6 +156,27 @@ codebase has now hit three times: `higherTimeframes` declared and never populate
 reporting `RULES_NOT_MET` against an empty `pattern_detections` table, and equity 30m scoring
 against 0% indicator coverage. Each looked like a working feature returning a neutral answer.
 
+## Status, 2026-08-18
+
+**Section A is built and deployed.** `d1868f6` domain, `06f368a` migration sequence closed and 066
+registered, `95becf9` enforcement, `8144d30` the two guard tests. Applied to the live database and
+verified in the running scheduler. It is **inert**: every account's `daily_trade_cap` is null, so
+enabling it is a per-account `UPDATE` — and the calibration caveat below still holds, since two
+sessions is not a distribution.
+
+Session counts so far: Classic 21 then 12, Sniper 2 then 11. The Sniper's jump is the
+`pattern_detections` fix landing, not a strategy change — yesterday's 2 measured an empty table.
+
+**Section B has not been started.** No `StrategistDecision` artefact exists in the codebase, and it
+changes no trading behaviour by design, so it stays optional. After the confluence result, it is
+worth building only when there is a question you actually want it to answer.
+
+Verification: items 6, 8, 10, 11 done; 1-5 belong to Section B; **7 and 9 remain open and cannot be
+closed with the current harness** — a real race and a mid-transaction insert failure both need two
+live connections rather than a fake client. Do not mark them done on the strength of the ordering
+assertion that stands in for 7; it proves the count follows the lock, not that a race resolves to
+one winner.
+
 ## Verification plan
 
 Surviving tests, renumbered:
@@ -171,7 +193,7 @@ Surviving tests, renumbered:
 8. **Accounts are independent**: Classic exhausting its cap leaves Sniper's untouched. This replaces
    the frozen plan's "Sniper cannot exceed the shared limit after Classic consumes slots", which
    would now be asserting a bug.
-9. Rollback on insert failure leaves capacity available (the advisory lock releases either way).
+9. Rollback on insert failure leaves capacity available (the account row lock releases either way).
 10. Closed trades consume capacity: a scalp opened and closed in two minutes still counts.
 11. Day boundary: a trade opened at 15:29 IST and one at 09:16 IST the next morning fall in
     different windows, and a trade near midnight UTC is attributed to its IST session date.
