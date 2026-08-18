@@ -10,6 +10,7 @@ import type {
   PaperTradeRepository,
 } from "../../../modules/paper-trading/domain/paper-trading.js";
 import { validateQuantity } from "../../../modules/paper-trading/domain/lot-size-validator.js";
+import { decideDailyTradeCap, istTradingDayWindow } from "../../../modules/paper-trading/domain/daily-trade-cap.js";
 import type { TradeSide } from "../../../modules/strategy-engine/domain/strategy.js";
 import type { DatabaseClient, DatabasePool } from "../database.js";
 
@@ -78,6 +79,15 @@ export interface OpenManualOptionTradeInput extends Omit<OpenPaperTradeInput, "t
 }
 
 class TradeIdeaExpiredError extends Error {}
+
+/**
+ * The account has already opened its permitted number of trades for this IST trading day.
+ *
+ * Exported and distinct so a caller can treat it as a skip rather than a failure: a bot hitting its
+ * cap is the control working, not an error to alert on, and a bare `Error` would read the same as a
+ * broken fill.
+ */
+export class DailyTradeCapReachedError extends Error {}
 
 const accountColumns = "id, name, opening_balance, currency, is_active";
 const tradeColumns = `
@@ -329,14 +339,55 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     assertNonNegativeFinite(input.entrySlippage, "Entry slippage");
     assertDate(input.openedAt, "Opened at");
 
-    const accountResult = await client.query<PaperAccountRow>(`
-      SELECT ${accountColumns}
+    const accountResult = await client.query<PaperAccountRow & { daily_trade_cap: number | null }>(`
+      SELECT ${accountColumns}, daily_trade_cap
       FROM paper_accounts
       WHERE id = $1 AND is_active = TRUE
       FOR UPDATE
     `, [input.accountId]);
-    if (!accountResult.rows[0]) {
+    const account = accountResult.rows[0];
+    if (!account) {
       throw new Error("Paper account was not found or is inactive.");
+    }
+
+    /*
+     * Daily throughput cap.
+     *
+     * Placed here because the `FOR UPDATE` above already holds the account row for the rest of the
+     * transaction, which serialises every open on this account: two concurrent bot cycles cannot
+     * both read the same count and both insert. No advisory lock or capacity table is needed -- the
+     * lock that makes this safe was already in the right place, and the count stays derived from
+     * `paper_trades` so it cannot drift from the trades it describes.
+     *
+     * Every row in the window counts, whatever its status and whether or not it is excluded from
+     * evidence. The cap bounds actions taken; `excluded_from_evidence` governs whether a trade
+     * informs P&L evidence, not whether it happened. Counting only OPEN rows would make the cap
+     * evadable by the churn it exists to bound.
+     *
+     * For a two-leg structure this reads the transaction's own uncommitted first leg, so a straddle
+     * that would cross the cap on its second leg rolls back whole. Both legs or neither is the only
+     * correct outcome for a straddle.
+     */
+    const dailyTradeCap = account.daily_trade_cap === null || account.daily_trade_cap === undefined
+      ? null
+      : Number(account.daily_trade_cap);
+    if (dailyTradeCap !== null) {
+      const tradingDay = istTradingDayWindow(input.openedAt);
+      const openedTodayResult = await client.query<{ opened_today: string }>(`
+        SELECT COUNT(*) AS opened_today
+        FROM paper_trades
+        WHERE account_id = $1
+          AND opened_at >= $2
+          AND opened_at < $3
+      `, [input.accountId, tradingDay.start, tradingDay.end]);
+      const openedToday = Number(openedTodayResult.rows[0]?.opened_today ?? 0);
+      const capDecision = decideDailyTradeCap({ openedToday, cap: dailyTradeCap });
+      if (!capDecision.allowed) {
+        throw new DailyTradeCapReachedError(
+          `Account ${account.name} has opened ${openedToday} trade(s) on ${tradingDay.istDate}, `
+          + `reaching its daily cap of ${dailyTradeCap}.`,
+        );
+      }
     }
 
     const ideaResult = await client.query<LockedTradeIdeaRow & { lot_size: number }>(`
