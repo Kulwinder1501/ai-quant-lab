@@ -65,6 +65,7 @@ import { paperTradePartialExitsMigration } from "./064-paper-trade-partial-exits
 import { expandAdditionalPatternsMigration } from "./065-expand-additional-patterns.js";
 import { paperAccountDailyTradeCapMigration } from "./066-paper-account-daily-trade-cap.js";
 import { regimeObservationsMigration } from "./067-regime-observations.js";
+import { candidateLedgerMigration } from "./068-candidate-ledger.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -134,4 +135,5 @@ export const migrations = [
   expandAdditionalPatternsMigration,
   paperAccountDailyTradeCapMigration,
   regimeObservationsMigration,
+  candidateLedgerMigration,
 ];

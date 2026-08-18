@@ -1,4 +1,5 @@
 import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
+import { measureExcursions } from "./excursions.js";
 
 /**
  * Thresholds that turn measured excursions into research tags.
@@ -139,25 +140,23 @@ export function buildTradeReview(input: TradeReviewInput): TradeReview {
   let maximumAdverseExcursionR: number | null = null;
   let maximumFavourableExcursionR: number | null = null;
 
-  if (input.candles.length === 0) {
+  // Shared with the candidate settlement rather than computed here. The two are compared against each
+  // other, so a second copy of this arithmetic would drift at the clamp or the rounding while looking
+  // obviously correct.
+  const excursions = measureExcursions({
+    side: input.side,
+    entryPrice: input.entryPrice,
+    riskPerUnit,
+    candles: input.candles,
+  });
+  if (excursions === null) {
     observations.push("No holding-period candles were available, so excursions could not be measured.");
     proposedResearchTags.push("NO_HOLDING_PERIOD_DATA");
   } else {
-    const highest = Math.max(...input.candles.map((candle) => candle.high));
-    const lowest = Math.min(...input.candles.map((candle) => candle.low));
-    const worstPrice = input.side === "LONG" ? lowest : highest;
-    const bestPrice = input.side === "LONG" ? highest : lowest;
-
-    // Clamped at zero: a position that never traded against the entry has no adverse
-    // excursion, and a negative one would be a favourable move wearing the wrong sign.
-    maximumAdverseExcursion = rounded(Math.max(0, input.side === "LONG"
-      ? input.entryPrice - worstPrice
-      : worstPrice - input.entryPrice));
-    maximumFavourableExcursion = rounded(Math.max(0, input.side === "LONG"
-      ? bestPrice - input.entryPrice
-      : input.entryPrice - bestPrice));
-    maximumAdverseExcursionR = rounded(maximumAdverseExcursion / riskPerUnit);
-    maximumFavourableExcursionR = rounded(maximumFavourableExcursion / riskPerUnit);
+    maximumAdverseExcursion = excursions.maximumAdverse;
+    maximumFavourableExcursion = excursions.maximumFavourable;
+    maximumAdverseExcursionR = excursions.maximumAdverseR;
+    maximumFavourableExcursionR = excursions.maximumFavourableR;
 
     observations.push(
       `Ran ${maximumFavourableExcursionR}R in favour and ${maximumAdverseExcursionR}R against `

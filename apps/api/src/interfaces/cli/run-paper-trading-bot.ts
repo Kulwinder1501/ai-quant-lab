@@ -30,6 +30,10 @@ import {
   VOLATILITY_LABEL_SCHEME,
 } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { PostgresRegimeObservationRepository } from "../../infrastructure/database/repositories/postgres-regime-observation-repository.js";
+import {
+  PostgresCandidateLedgerRepository,
+  type CandidateDecisionInput,
+} from "../../infrastructure/database/repositories/postgres-candidate-ledger-repository.js";
 import { buildRegimeObservation } from "../../modules/strategy-engine/domain/regime-observation.js";
 import type { RegimeContext } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
@@ -268,6 +272,7 @@ async function main(): Promise<void> {
     const openTrade = new OpenPaperTrade(tradeRepository);
     const riskRepository = new PostgresRiskStateRepository(database);
     const regimeRepository = new PostgresRegimeObservationRepository(database);
+    const ledger = new PostgresCandidateLedgerRepository(database);
 
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
@@ -533,9 +538,59 @@ async function main(): Promise<void> {
         new PostgresOptionPremiumTickRepository(database),
       ).execute({ accountId: account.id, asOf: now });
 
+      /*
+       * Persist this account's decisions, derived from the arrays the run already built.
+       *
+       * Done here rather than at each of the six decision sites, so a refusal added later is recorded
+       * without anyone remembering to. Until now every reason -- NO_FRESH_EXECUTABLE_QUOTE,
+       * OPTIONS_ENTRY_REJECTED, ALREADY_HOLDING, POSITION_LIMIT, RISK_CONTROL_VETO -- lived only in
+       * this container's log, which rotates. That is the "why did we pass on it" data, and it was
+       * being destroyed daily.
+       *
+       * Failure is swallowed per row on purpose: this is a research ledger, and losing a decision
+       * record must not fail a trading cycle. It is logged so a persistent failure is visible.
+       */
+      const decisionsToRecord: CandidateDecisionInput[] = [
+        ...opened.map((entry) => ({
+          tradeIdeaId: String(entry.tradeIdeaId),
+          accountId: account.id,
+          decidedAt: now,
+          decision: "EXECUTED" as const,
+          reason: "OPENED",
+          explanation: `Opened ${String(entry.contract ?? "")} at ${String(entry.fillPremium ?? "")}.`,
+          paperTradeId: String(entry.paperTradeId),
+          regimeObservationId: (entry.regimeObservationId as string | null) ?? null,
+        })),
+        ...refused.map((entry) => ({
+          tradeIdeaId: String(entry.tradeIdeaId),
+          accountId: account.id,
+          decidedAt: now,
+          decision: "REFUSED" as const,
+          reason: String(entry.reason),
+          explanation: String(entry.explanation ?? ""),
+          regimeObservationId: null,
+        })),
+      ];
+      let decisionsRecorded = 0;
+      for (const decision of decisionsToRecord) {
+        try {
+          await ledger.recordDecision(decision);
+          decisionsRecorded += 1;
+        } catch (error) {
+          console.error(JSON.stringify({
+            level: "error",
+            message: "Could not record a candidate decision; the trade is unaffected.",
+            bot: botSpec.name,
+            tradeIdeaId: decision.tradeIdeaId,
+            reason: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      }
+
       botReports.push({
         botName: botSpec.name,
         accountId: account.id,
+        decisionsRecorded,
         allowedStrategies: botSpec.allowedStrategies,
         positionsOpened: opened.length,
         signalsRefused: refused.length,

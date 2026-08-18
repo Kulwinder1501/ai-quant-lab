@@ -211,6 +211,9 @@ async function main(): Promise<void> {
     // Full-series recompute over both engines; slower than the other intraday jobs by nature.
     PATTERN_DETECTION_INTRADAY: 20 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
+    // Research only, and deliberately the most patient claim here: a candidate cannot be settled
+    // before its horizon elapses, so a stalled claimant costs nothing but a later sweep.
+    CANDIDATE_SETTLEMENT: 30 * 60 * 1000,
   };
 
   /**
@@ -506,6 +509,29 @@ async function main(): Promise<void> {
    * Nothing to do on a quiet minute: with no open trades this costs one indexed query and spawns
    * no process at all.
    */
+  /**
+   * Settles candidates whose horizon has elapsed, so the ledger can say what the trades nobody took
+   * would have done.
+   *
+   * Research only: nothing reads a settlement at decision time, so this is scheduled where it cannot
+   * compete with execution. Half-hourly through the session picks up short horizons while they are
+   * fresh, and the 16:10 run catches every candidate whose horizon crossed the close.
+   *
+   * Deliberately not gated on `fyersTokenService`: this reads stored bars, so it works on a day the
+   * feed never authenticated -- which is exactly a day worth measuring.
+   */
+  cron.schedule("15,45 9-15 * * 1-5", () => {
+    void schedule("CANDIDATE_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "1000"]);
+    });
+  }, { timezone: IST });
+
+  cron.schedule("10 16 * * 1-5", () => {
+    void schedule("CANDIDATE_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "5000"]);
+    });
+  }, { timezone: IST });
+
   cron.schedule("* 9-15 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("PAPER_TRADE_EXIT_SWEEP", async () => {
@@ -819,6 +845,8 @@ async function main(): Promise<void> {
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
+      // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
+      "CANDIDATE_SETTLEMENT",
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS"]
         : []),
