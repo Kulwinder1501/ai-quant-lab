@@ -2,7 +2,17 @@
 
 export type TradeHistoryStatus = "OPEN" | "CLOSED" | "CANCELLED";
 export type TradeHistorySide = "LONG" | "SHORT";
-export type TradeHistoryExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED";
+export type TradeHistoryExitReason =
+  | "STOP_LOSS"
+  | "TARGET"
+  | "MANUAL"
+  | "CANCELLED"
+  | "MOMENTUM_STALL"
+  | "RUNNER_TRAIL"
+  | "T1_TARGET"
+  | "T2_TARGET"
+  | "TRAP_DETECTED"
+  | "EXPIRED";
 export type TradeOutcomeFilter = "WIN" | "LOSS" | "BREAK_EVEN";
 
 export interface TradeHistoryRecord {
@@ -152,6 +162,12 @@ export function summarizeTradeHistory(records: readonly TradeHistoryRecord[]): T
     TARGET: 0,
     MANUAL: 0,
     CANCELLED: 0,
+    MOMENTUM_STALL: 0,
+    RUNNER_TRAIL: 0,
+    T1_TARGET: 0,
+    T2_TARGET: 0,
+    TRAP_DETECTED: 0,
+    EXPIRED: 0,
   };
   for (const record of records) {
     if (record.exitReason) exitReasonCounts[record.exitReason] += 1;

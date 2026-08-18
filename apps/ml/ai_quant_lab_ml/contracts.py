@@ -92,6 +92,9 @@ DIRECTIONAL_ALPHABET = LabelAlphabet(name="direction", labels=LABELS, abstain_la
 # volatility shadow families trained under v5 keep building settled history
 # while v6 lineages start fresh.
 FEATURE_SCHEMA_VERSION = "ml-feature-v7"
+FEATURE_SCHEMA_VERSION_V9 = "ml-feature-v9"
+FEATURE_SCHEMA_VERSION_V8 = "ml-feature-v8"
+FEATURE_SCHEMA_VERSION_V8_GEOMETRY = "ml-feature-v8-geometry"
 FEATURE_SCHEMA_VERSION_V6 = "ml-feature-v6"
 FEATURE_SCHEMA_VERSION_V5 = "ml-feature-v5"
 FEATURE_SCHEMA_VERSION_SCALP = "ml-feature-scalp-v3"
@@ -115,6 +118,9 @@ FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V9,
+    FEATURE_SCHEMA_VERSION_V8,
+    FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
     FEATURE_SCHEMA_VERSION_V6,
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_SCALP,

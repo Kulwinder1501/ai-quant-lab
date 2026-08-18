@@ -76,4 +76,53 @@ describe("FyersQuoteClient", () => {
 
     await expect(client.quoteSymbol("BANKNIFTY")).rejects.toThrow(/invalid token/);
   });
+
+  it("retries on HTTP 429 and succeeds on subsequent attempt", async () => {
+    let attempt = 0;
+    const sleep = vi.fn(async () => {});
+    const client = new FyersQuoteClient({
+      appId: "APP-100",
+      tokenService: { getAccessToken: async () => "token" },
+      sleep,
+      fetch: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return new Response(JSON.stringify({ s: "error", code: 429, message: "request limit reached" }), {
+            status: 429,
+            headers: { "Retry-After": "1" },
+          });
+        }
+        return new Response(JSON.stringify({
+          s: "ok",
+          d: [{
+            n: "NSE:NIFTY50-INDEX",
+            s: "ok",
+            v: { lp: 24650, prev_close_price: 24500 },
+          }],
+        }), { status: 200 });
+      },
+    });
+
+    const quote = await client.quoteSymbol("NIFTY50");
+    expect(quote?.regularMarketPrice).toBe(24650);
+    expect(attempt).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(1000);
+  });
+
+  it("throws after exhausting max retries on persistent 429", async () => {
+    const sleep = vi.fn(async () => {});
+    const client = new FyersQuoteClient({
+      appId: "APP-100",
+      tokenService: { getAccessToken: async () => "token" },
+      maxRetries: 2,
+      sleep,
+      fetch: async () => new Response(
+        JSON.stringify({ s: "error", code: 429, message: "request limit reached" }),
+        { status: 429 },
+      ),
+    });
+
+    await expect(client.quoteSymbol("NIFTY50")).rejects.toThrow(/HTTP 429/);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
 });

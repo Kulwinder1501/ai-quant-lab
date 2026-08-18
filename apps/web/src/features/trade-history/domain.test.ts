@@ -86,6 +86,12 @@ describe("trade history modes", () => {
       TARGET: 1,
       MANUAL: 0,
       CANCELLED: 0,
+      MOMENTUM_STALL: 0,
+      RUNNER_TRAIL: 0,
+      T1_TARGET: 0,
+      T2_TARGET: 0,
+      TRAP_DETECTED: 0,
+      EXPIRED: 0,
     });
   });
 

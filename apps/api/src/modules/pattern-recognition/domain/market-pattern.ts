@@ -1,8 +1,12 @@
 export const candlestickPatternCodes = [
   "DOJI",
+  "DRAGONFLY_DOJI",
+  "GRAVESTONE_DOJI",
   "HAMMER",
+  "INVERTED_HAMMER",
   "HANGING_MAN",
   "SHOOTING_STAR",
+  "SPINNING_TOP",
   "BULLISH_ENGULFING",
   "BEARISH_ENGULFING",
   "MORNING_STAR",
@@ -13,11 +17,43 @@ export const candlestickPatternCodes = [
   "THREE_BLACK_CROWS",
   "INSIDE_BAR",
   "OUTSIDE_BAR",
+  "PIERCING_LINE",
+  "DARK_CLOUD_COVER",
+  "TWEEZER_BOTTOM",
+  "TWEEZER_TOP",
+  "BULLISH_MARUBOZU",
+  "BEARISH_MARUBOZU",
+  "THREE_INSIDE_UP",
+  "THREE_INSIDE_DOWN",
 ] as const;
 
 export type CandlestickPatternCode = (typeof candlestickPatternCodes)[number];
 export type PatternDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
-export type PriceActionEventCode = "BREAKOUT" | "BREAKDOWN" | "SUPPORT" | "RESISTANCE" | "UPTREND" | "DOWNTREND" | "RANGE" | "PULLBACK" | "SWING_HIGH" | "SWING_LOW";
+
+export const priceActionEventCodes = [
+  "BREAKOUT",
+  "BREAKDOWN",
+  "SUPPORT",
+  "RESISTANCE",
+  "UPTREND",
+  "DOWNTREND",
+  "RANGE",
+  "PULLBACK",
+  "SWING_HIGH",
+  "SWING_LOW",
+  "DOUBLE_BOTTOM",
+  "DOUBLE_TOP",
+  "BULL_FLAG",
+  "BEAR_FLAG",
+  "ASCENDING_TRIANGLE",
+  "DESCENDING_TRIANGLE",
+  "HEAD_AND_SHOULDERS",
+  "INVERSE_HEAD_AND_SHOULDERS",
+  "RISING_WEDGE",
+  "FALLING_WEDGE",
+] as const;
+
+export type PriceActionEventCode = (typeof priceActionEventCodes)[number];
 
 export interface PatternCandle {
   id: string;
@@ -82,9 +118,13 @@ export interface PriceActionEventRepository {
 
 export const candlestickPatternDescriptions: Record<CandlestickPatternCode, string> = {
   DOJI: "Small real body relative to the full candle range.",
+  DRAGONFLY_DOJI: "Doji with a long lower shadow and virtually no upper shadow.",
+  GRAVESTONE_DOJI: "Doji with a long upper shadow and virtually no lower shadow.",
   HAMMER: "Lower-shadow reversal shape confirmed after a decline.",
+  INVERTED_HAMMER: "Upper-shadow reversal shape confirmed after a decline at support.",
   HANGING_MAN: "Lower-shadow warning shape confirmed after an advance.",
   SHOOTING_STAR: "Upper-shadow reversal shape confirmed after an advance.",
+  SPINNING_TOP: "Small real body with roughly balanced upper and lower shadows.",
   BULLISH_ENGULFING: "Bullish real body engulfs the preceding bearish body.",
   BEARISH_ENGULFING: "Bearish real body engulfs the preceding bullish body.",
   MORNING_STAR: "Three-candle bullish reversal sequence after a decline.",
@@ -95,4 +135,13 @@ export const candlestickPatternDescriptions: Record<CandlestickPatternCode, stri
   THREE_BLACK_CROWS: "Three consecutive declining bearish candles.",
   INSIDE_BAR: "Current range is contained in the preceding range.",
   OUTSIDE_BAR: "Current range contains the preceding range.",
+  PIERCING_LINE: "Bullish reversal opening below prior low and closing above midpoint of prior bearish body.",
+  DARK_CLOUD_COVER: "Bearish reversal opening above prior high and closing below midpoint of prior bullish body.",
+  TWEEZER_BOTTOM: "Two consecutive candles with matching lows within volatility tolerance.",
+  TWEEZER_TOP: "Two consecutive candles with matching highs within volatility tolerance.",
+  BULLISH_MARUBOZU: "Strong bullish candle with long body and minimal shadows.",
+  BEARISH_MARUBOZU: "Strong bearish candle with long body and minimal shadows.",
+  THREE_INSIDE_UP: "Bullish Harami followed by a third bullish candle closing above the first candle open.",
+  THREE_INSIDE_DOWN: "Bearish Harami followed by a third bearish candle closing below the first candle open.",
 };
+

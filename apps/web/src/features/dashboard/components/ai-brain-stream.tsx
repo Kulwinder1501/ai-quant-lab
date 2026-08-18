@@ -1,3 +1,4 @@
+import React, { memo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import type { AiBrainThought, LivePriceData } from "./live-price-dashboard";
 
@@ -6,7 +7,7 @@ interface AiBrainStreamProps {
   thoughts: AiBrainThought[];
 }
 
-export function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
+export const AiBrainStream = memo(function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
   return (
     <GlassPanel className="flex h-full min-h-0 flex-col p-6 md:p-8 border-cyan-500/40 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950/30 shadow-2xl">
       <div className="flex shrink-0 flex-col justify-between gap-4 sm:flex-row sm:items-center border-b border-white/10 pb-4">
@@ -125,4 +126,9 @@ export function AiBrainStream({ data, thoughts }: AiBrainStreamProps) {
       </div>
     </GlassPanel>
   );
-}
+}, (prev, next) => {
+  return (
+    prev.data.symbol === next.data.symbol &&
+    prev.thoughts === next.thoughts
+  );
+});

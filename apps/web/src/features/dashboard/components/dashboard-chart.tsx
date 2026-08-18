@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, memo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { InteractiveChart } from "../../charts/components/interactive-chart";
 import { postResearchJson } from "../../research/api";
@@ -12,7 +12,7 @@ const MODES = ["Clean", "Indicators", "Patterns"] as const;
 type Timeframe = (typeof TIMEFRAMES)[number];
 type ChartMode = (typeof MODES)[number];
 
-export function DashboardChart({ symbol }: { symbol: string }) {
+export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol: string }) {
   const [chartData, setChartData] = useState<ChartPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
@@ -115,4 +115,4 @@ export function DashboardChart({ symbol }: { symbol: string }) {
       </div>
     </GlassPanel>
   );
-}
+});

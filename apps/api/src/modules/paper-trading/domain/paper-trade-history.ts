@@ -181,6 +181,10 @@ export function summarizePaperTradeHistory(records: readonly PaperTradeHistoryRe
     CANCELLED: 0,
     EXPIRED: 0,
     TRAP_DETECTED: 0,
+    T1_TARGET: 0,
+    T2_TARGET: 0,
+    RUNNER_TRAIL: 0,
+    MOMENTUM_STALL: 0,
   };
   for (const record of records) {
     if (record.exitReason) {

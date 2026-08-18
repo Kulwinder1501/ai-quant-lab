@@ -16,6 +16,7 @@ function openTrade(): PaperTrade {
     side: "LONG",
     status: "OPEN",
     quantity: 10,
+    remainingQuantity: 10,
     entryPrice: 100,
     stopLoss: 95,
     targetPrice: 110,
@@ -41,6 +42,7 @@ function optionBuyerTrade(overrides: Partial<PaperTrade> = {}): PaperTrade {
     side: "LONG",
     status: "OPEN",
     quantity: 75,
+    remainingQuantity: 75,
     entryPrice: 180,
     stopLoss: 120,
     targetPrice: 260,
@@ -80,6 +82,8 @@ function stubRepoMany(trades: PaperTrade[], closings: ClosePaperTradeInput[]): P
         realizedPnl: 0,
       };
     },
+    executeExitSlice: async () => { throw new Error("not used"); },
+    listPartialExitsByTradeId: async () => [],
     findAccountPerformanceData: async () => null,
   };
 }
@@ -102,6 +106,8 @@ function stubRepo(trade: PaperTrade, closings: ClosePaperTradeInput[]): PaperTra
         realizedPnl: 0,
       };
     },
+    executeExitSlice: async () => { throw new Error("not used"); },
+    listPartialExitsByTradeId: async () => [],
     findAccountPerformanceData: async () => null,
   };
 }
@@ -183,6 +189,8 @@ describe("EvaluateOpenPaperTrades", () => {
         closings.push(input);
         return { ...trade, status: "CLOSED", closedAt: input.closedAt, exitPrice: input.exitPrice, exitReason: input.exitReason, realizedPnl: -53 };
       },
+      executeExitSlice: async () => { throw new Error("not used"); },
+      listPartialExitsByTradeId: async () => [],
       findAccountPerformanceData: async () => null,
     };
     const candleRepository: CandleRepository = {
@@ -556,10 +564,6 @@ describe("EvaluateOpenPaperTrades", () => {
     const asOf = new Date("2026-08-06T10:00:00.000Z");
     const spot = 24000;
 
-    // A SHORT carrying option columns is a contract the buyer-only path cannot model, so
-    // it throws. The database now forbids the row (migration 023), but the evaluator must
-    // still survive one: before this, the throw aborted the loop and every later trade
-    // went unevaluated, leaving live stops unenforced while looking like an outage.
     const unmodellable = optionBuyerTrade({ id: "opt-bad", side: "SHORT" });
     const healthy = optionBuyerTrade({ id: "opt-good", stopLoss: 150, entryPrice: 180 });
 
@@ -617,5 +621,149 @@ describe("EvaluateOpenPaperTrades", () => {
       exitPrice: 0,
       details: expect.objectContaining({ source: "OPTION_EXPIRY_SETTLEMENT", eventType: "EXPIRED" }),
     });
+  });
+
+  it("exits with MOMENTUM_STALL on 5m timeframe if position has stalled for >= 20 mins and not reached +0.5R", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 180 + 15 = 195
+      // Reward 45 on risk 30 is 1.5R, inside the <= 1.6 band the stall applies to. This fixture
+      // was 260 (2.67R), which the scalp gate excludes, so the test asserted a stall the
+      // evaluator had deliberately stopped taking.
+      targetPrice: 225,
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // Fresh bid of 185 (< 195 threshold)
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      paperTradeId: "opt-1",
+      exitReason: "MOMENTUM_STALL",
+      exitPrice: 185,
+      closedAt: asOf,
+      details: expect.objectContaining({ source: "MOMENTUM_STALL_EVALUATOR" }),
+    });
+  });
+
+  it("holds when position has run >= +0.5R even if elapsed time >= 20 mins", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      // 1.5R, so the scalp gate lets the stall apply and the +0.5R guard is what holds the
+      // position. At the previous 2.67R this passed because the gate excluded the trade outright,
+      // which meant it would have gone on passing even if the guard broke.
+      targetPrice: 225,
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // Fresh bid of 200 (>= 195 threshold, and below the 225 target)
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 200));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  // The scalp gate itself, which nothing asserted before. Its whole purpose is to let directional
+  // setups sit through a flat twenty minutes, so without this the gate could be deleted and the
+  // suite would stay green.
+  it("does not stall out a directional setup, however flat it has gone", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      targetPrice: 260, // Reward 80 on risk 30 is 2.67R, outside the <= 1.6 scalp band
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // Same stalled conditions as the scalp case: 21 minutes elapsed and a bid short of +0.5R.
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  // The band is inclusive, so exactly 1.6R is a scalp. Pins the comparison operator: with `<`
+  // instead of `<=` this trade would be held and nothing else in the suite would notice.
+  it("treats exactly 1.6R as a scalp and stalls it out", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      targetPrice: 228, // Reward 48 on risk 30 is exactly 1.6R
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({ exitReason: "MOMENTUM_STALL", exitPrice: 185 });
   });
 });

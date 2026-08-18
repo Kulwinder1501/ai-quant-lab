@@ -418,12 +418,17 @@ export class AiAutonomousAgent {
     const now = new Date();
     const ts = now.toISOString();
 
-    // 1. Resolve active paper account
-    let account = await this.accountRepo.findByName("Default Paper Account");
+    // 1. Resolve active paper account dedicated to the AI Autonomous Agent ("AutoBot")
+    let account = await this.accountRepo.findByName("AutoBot");
+    if (!account) {
+      account = await this.accountRepo.findByName("Default Paper Account");
+    }
     if (!account) {
       const client = await this.database.connect();
       try {
-        const res = await client.query<{ id: string }>("SELECT id FROM paper_accounts LIMIT 1");
+        const res = await client.query<{ id: string }>(
+          "SELECT id FROM paper_accounts WHERE name = 'AutoBot' OR is_active = TRUE ORDER BY (name = 'AutoBot') DESC LIMIT 1",
+        );
         if (res.rows[0]?.id) {
           account = await this.accountRepo.findById(res.rows[0].id);
         }
@@ -1283,6 +1288,7 @@ export class AiAutonomousAgent {
         side: r.side,
         status: "CLOSED",
         quantity: Number(r.quantity),
+        remainingQuantity: 0,
         entryPrice: Number(r.entry_price),
         stopLoss: Number(r.stop_loss),
         targetPrice: Number(r.target_price),

@@ -42,6 +42,13 @@ export interface OptionsValidationContext {
    * project has already paid for twice.
    */
   intendedContractDelta?: number | null;
+  /**
+   * IV percentile of the underlying series (0-100).
+   * When null, allowed but recorded as unchecked/unavailable.
+   */
+  ivPercentile?: number | null;
+  /** Configurable ceiling for IV percentile gate. Default is 85%. */
+  ivPercentileCeiling?: number;
 }
 
 export interface OptionsValidationResult {
@@ -170,6 +177,21 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
     if (hasVolatilityExpansion) {
       reasons.push("Volatility expansion regime confirmed. Premium buying is justified.");
     }
+  }
+
+  // 12: IV Percentile Ceiling Gate
+  const ivPercentileCeiling = context.ivPercentileCeiling ?? 85;
+  if (context.ivPercentile !== null && context.ivPercentile !== undefined) {
+    if (context.ivPercentile >= ivPercentileCeiling) {
+      isValid = false;
+      reasons.push(
+        `IV Regime Alert: IV percentile ${context.ivPercentile.toFixed(0)}% >= ${ivPercentileCeiling}% ceiling. Options buying in extreme elevated IV risks severe volatility crush.`,
+      );
+    } else {
+      reasons.push(`IV percentile ${context.ivPercentile.toFixed(0)}% clears ceiling (${ivPercentileCeiling}%).`);
+    }
+  } else {
+    unchecked.push("IV percentile: IV percentile is unavailable; trade allowed but ivPercentileUnavailable is recorded.");
   }
 
   return {

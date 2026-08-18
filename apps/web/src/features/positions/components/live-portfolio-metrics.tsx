@@ -1,4 +1,4 @@
-import React from "react";
+import React, { memo } from "react";
 import { formatNumber, formatPercentage } from "../../research/presentation";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 
@@ -15,7 +15,7 @@ interface LivePortfolioMetricsProps {
   };
 }
 
-export function LivePortfolioMetrics({ livePortfolioStats }: LivePortfolioMetricsProps) {
+export const LivePortfolioMetrics = memo(function LivePortfolioMetrics({ livePortfolioStats }: LivePortfolioMetricsProps) {
   return (
     <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-4">
       <GlassPanel className="p-5 border-cyan-500/30 bg-gradient-to-br from-slate-950 via-slate-900 to-cyan-950/20">
@@ -62,4 +62,4 @@ export function LivePortfolioMetrics({ livePortfolioStats }: LivePortfolioMetric
       </GlassPanel>
     </div>
   );
-}
+});

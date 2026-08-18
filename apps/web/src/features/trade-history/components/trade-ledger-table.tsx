@@ -19,14 +19,26 @@ function exitReasonLabel(record: TradeHistoryRecord): string {
   switch (record.exitReason) {
     case "TARGET":
       return "Target reached";
+    case "T1_TARGET":
+      return "Target 1 reached";
+    case "T2_TARGET":
+      return "Target 2 reached";
     case "STOP_LOSS":
       return "Stop loss hit";
+    case "RUNNER_TRAIL":
+      return "Trailing stop triggered";
+    case "MOMENTUM_STALL":
+      return "Momentum stall exit";
+    case "TRAP_DETECTED":
+      return "Trap / Sweep detected";
+    case "EXPIRED":
+      return "EOD Session expired";
     case "MANUAL":
       return "Closed manually";
     case "CANCELLED":
       return "Cancelled";
     default:
-      return "Not recorded";
+      return record.exitReason ?? "Not recorded";
   }
 }
 

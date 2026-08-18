@@ -32,21 +32,29 @@ function finiteOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** Canonical-symbol quote reader backed only by the Fyers Quotes API. */
+export interface FyersQuoteClientOptions {
+  tokenService: { getAccessToken(): Promise<string> };
+  appId: string;
+  fetch?: FetchFunction;
+  baseUrl?: string;
+  now?: () => Date;
+  maxRetries?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Canonical-symbol quote reader backed only by the Fyers Quotes API with retry on 429 rate limits. */
 export class FyersQuoteClient implements MarketQuoteReader {
   private readonly fetch: FetchFunction;
   private readonly baseUrl: string;
+  private readonly maxRetries: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor(private readonly options: {
-    tokenService: { getAccessToken(): Promise<string> };
-    appId: string;
-    fetch?: FetchFunction;
-    baseUrl?: string;
-    now?: () => Date;
-  }) {
+  constructor(private readonly options: FyersQuoteClientOptions) {
     if (!options.appId.trim()) throw new Error("Fyers quotes require an app ID.");
     this.fetch = options.fetch ?? globalThis.fetch;
     this.baseUrl = options.baseUrl ?? "https://api-t1.fyers.in";
+    this.maxRetries = options.maxRetries ?? 3;
+    this.sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async quoteSymbol(symbol: string): Promise<MarketQuote | null> {
@@ -68,13 +76,39 @@ export class FyersQuoteClient implements MarketQuoteReader {
       const batch = providerSymbols.slice(offset, offset + 50);
       const endpoint = new URL("/data/quotes", this.baseUrl);
       endpoint.searchParams.set("symbols", batch.join(","));
-      const response = await this.fetch(endpoint, {
-        headers: { Authorization: `${this.options.appId}:${accessToken}` },
-      });
-      const payload = await response.json().catch(() => undefined) as FyersQuotePayload | undefined;
-      if (!response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
+
+      let response: Response | undefined;
+      let payload: FyersQuotePayload | undefined;
+
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          response = await this.fetch(endpoint, {
+            headers: { Authorization: `${this.options.appId}:${accessToken}` },
+          });
+        } catch (error) {
+          if (attempt >= this.maxRetries) {
+            const detail = error instanceof Error ? error.message : String(error);
+            throw new Error(`Fyers quote request failed after ${attempt + 1} network attempts: ${detail}`);
+          }
+          await this.sleep(Math.min(2 ** attempt * 500, 10_000));
+          continue;
+        }
+
+        payload = await response.json().catch(() => undefined) as FyersQuotePayload | undefined;
+        const rateLimited = response.status === 429 || payload?.code === 429;
+        const retryableServerFailure = response.status === 408 || response.status >= 500;
+        if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries) break;
+
+        const retryAfter = Number(response.headers.get("retry-after"));
+        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : Math.min(2 ** attempt * 500, 10_000);
+        await this.sleep(waitMs);
+      }
+
+      if (!response || !response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
         throw new Error(
-          `Fyers quote request failed with HTTP ${response.status}, code ${payload?.code ?? "none"}. `
+          `Fyers quote request failed with HTTP ${response?.status ?? "none"}, code ${payload?.code ?? "none"}. `
           + `${payload?.message ?? "No quote rows returned."}`,
         );
       }

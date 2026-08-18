@@ -374,6 +374,110 @@ class FeatureConstructionTests(unittest.TestCase):
         definition = feature_definition()
 
         self.assertEqual(definition["schemaVersion"], FEATURE_SCHEMA_VERSION)
+
+    def test_unknown_schema_version_is_rejected(self) -> None:
+        with self.assertRaises(FeatureConstructionError):
+            feature_schema("ml-feature-v99")
+        with self.assertRaises(FeatureConstructionError):
+            features_of(evidence(), schema_version="ml-feature-v99")
+
+    def test_breadth_context_reaches_the_v6_feature_vector(self) -> None:
+        """The seven breadth columns must be fed by the attached context.
+
+        A declared column with no loader is the institutional-flow bug again: a
+        guaranteed-NaN feature silently imputed to a training-fold constant.
+        """
+
+        source = evidence()
+        with_breadth = dataclasses.replace(
+            source,
+            breadth=BreadthContext(
+                observed_at=source.close_time,
+                advance_decline=0.4,
+                median_return_bps=35.0,
+                return_dispersion_bps=120.0,
+                above_sma20_share=0.65,
+                median_volume_ratio=1.1,
+                bank_it_spread_bps=-42.0,
+                index_return_gap_bps=18.0,
+            ),
+        )
+
+        observed = features_of(with_breadth)
+        self.assertAlmostEqual(observed["breadth.advance_decline_ratio"], 0.4, places=10)
+        self.assertAlmostEqual(observed["breadth.median_return_bps"], 35.0, places=10)
+        self.assertAlmostEqual(observed["breadth.return_dispersion_bps"], 120.0, places=10)
+        self.assertAlmostEqual(observed["breadth.above_sma20_ratio"], 0.65, places=10)
+        self.assertAlmostEqual(observed["breadth.median_volume_ratio"], 1.1, places=10)
+        self.assertAlmostEqual(observed["breadth.bank_it_spread_bps"], -42.0, places=10)
+        self.assertAlmostEqual(observed["cross.nifty_banknifty_return_gap_bps"], 18.0, places=10)
+
+        # No context is missing evidence, never a silent zero.
+        absent = features_of(source)
+        for name in (
+            "breadth.advance_decline_ratio",
+            "breadth.median_return_bps",
+            "breadth.return_dispersion_bps",
+            "breadth.above_sma20_ratio",
+            "breadth.median_volume_ratio",
+            "breadth.bank_it_spread_bps",
+            "cross.nifty_banknifty_return_gap_bps",
+        ):
+            self.assertTrue(math.isnan(absent[name]), name)
+
+    def test_duplicate_evidence_order_does_not_change_feature_values(self) -> None:
+        first = evidence(
+            indicators=(
+                IndicatorEvidence("RSI", "ta-v2", {"period": 14, "smoothing": "WILDER"}, {"value": 60}),
+                IndicatorEvidence("RSI", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 50}),
+            ),
+            patterns=(
+                PatternEvidence("DOJI", "candlestick-v1", "NEUTRAL", 0.3),
+                PatternEvidence("DOJI", "candlestick-v1", "NEUTRAL", 0.6),
+            ),
+        )
+        reordered = evidence(
+            indicators=tuple(reversed(first.indicators)),
+            patterns=tuple(reversed(first.patterns)),
+        )
+
+        self.assert_feature_mappings_equal(features_of(first), features_of(reordered))
+        self.assertEqual(features_of(first)["indicator.RSI.value"], 50.0)
+        # The per-code neutral column exists only in the v5 contract.
+        v5_features = features_of(first, schema_version=FEATURE_SCHEMA_VERSION_V5)
+        self.assertEqual(v5_features["pattern.DOJI.neutral_confidence"], 0.6)
+
+    def test_uses_only_the_explicit_algorithm_versions(self) -> None:
+        mixed_versions = evidence(
+            indicators=(IndicatorEvidence("RSI", "ta-v2", {"period": 14, "smoothing": "WILDER"}, {"value": 99.0}),),
+            patterns=(PatternEvidence("HAMMER", "candlestick-v2", "BULLISH", 0.99),),
+            events=(PriceActionEvidence("BREAKOUT", "price-action-v3", "BULLISH", 0.99, 101.0),),
+        )
+
+        default_features = features_of(mixed_versions)
+        selected_features = features_of(
+            mixed_versions,
+            indicator_algorithm_version="ta-v2",
+            pattern_algorithm_version="candlestick-v2",
+            price_action_algorithm_version="price-action-v3",
+        )
+
+        self.assertTrue(math.isnan(default_features["indicator.RSI.value"]))
+        self.assertEqual(default_features["pattern.bullish_confidence"], 0.0)
+        self.assertEqual(default_features["price_action.bullish_confidence"], 0.0)
+        self.assertEqual(selected_features["indicator.RSI.value"], 99.0)
+        self.assertEqual(selected_features["pattern.bullish_confidence"], 0.99)
+        self.assertEqual(selected_features["price_action.bullish_confidence"], 0.99)
+
+    def test_same_version_with_non_default_indicator_parameters_is_not_a_v1_feature(self) -> None:
+        non_default = evidence(indicators=(IndicatorEvidence("RSI", "ta-v1", {"period": 21, "smoothing": "WILDER"}, {"value": 61.0}),))
+
+        self.assertTrue(math.isnan(features_of(non_default)["indicator.RSI.value"]))
+
+    def test_feature_definition_is_json_safe_and_declares_fixed_parameters(self) -> None:
+        definition = feature_definition()
+
+        self.assertEqual(definition["schemaVersion"], FEATURE_SCHEMA_VERSION)
         self.assertEqual(definition["indicatorParameters"]["RSI"], {"period": 14, "smoothing": "WILDER"})
         self.assertEqual(definition["indicatorParameters"]["SUPERTREND"], {"atrPeriod": 10, "multiplier": 3})
         definition["features"].append("mutated")
@@ -395,6 +499,121 @@ class FeatureConstructionTests(unittest.TestCase):
         self.assertEqual([example.candle_id for example in examples], ["candle-0", "candle-1"])
         self.assertEqual([example.label for example in examples], ["BULLISH", "BEARISH"])
         self.assertAlmostEqual(examples[0].forward_return, 103 / 101 - 1)
+
+    def test_v8_geometry_and_v8_full_schema_contracts(self) -> None:
+        from ai_quant_lab_ml.contracts import (
+            FEATURE_SCHEMA_VERSION_V8,
+            FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
+            FEATURE_SCHEMA_VERSION_V9,
+        )
+        from ai_quant_lab_ml.features import (
+            FEATURE_SCHEMA_V8,
+            FEATURE_SCHEMA_V8_GEOMETRY,
+            FEATURE_SCHEMA_V9,
+            _CANDLE_GEOMETRY_FEATURES,
+            _PATTERN_BINARY_FEATURES,
+            _PATTERN_BINARY_FEATURES_V8,
+        )
+
+        self.assertEqual(len(_CANDLE_GEOMETRY_FEATURES), 11)
+        self.assertEqual(len(_PATTERN_BINARY_FEATURES_V8), 24)
+        self.assertEqual(len(_PATTERN_BINARY_FEATURES), 26)
+        self.assertEqual(len(FEATURE_SCHEMA_V8_GEOMETRY), len(FEATURE_SCHEMA) + 11)
+        self.assertEqual(len(FEATURE_SCHEMA_V8), len(FEATURE_SCHEMA_V8_GEOMETRY) + 24)
+        self.assertEqual(len(FEATURE_SCHEMA_V9), len(FEATURE_SCHEMA_V8) + 2)
+
+        schema_v8_geom = feature_schema(FEATURE_SCHEMA_VERSION_V8_GEOMETRY)
+        self.assertEqual(schema_v8_geom, FEATURE_SCHEMA_V8_GEOMETRY)
+
+        schema_v8 = feature_schema(FEATURE_SCHEMA_VERSION_V8)
+        self.assertEqual(schema_v8, FEATURE_SCHEMA_V8)
+
+        schema_v9 = feature_schema(FEATURE_SCHEMA_VERSION_V9)
+        self.assertEqual(schema_v9, FEATURE_SCHEMA_V9)
+
+    def test_candlestick_geometry_scale_free_and_zero_division_protection(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8_GEOMETRY
+
+        # Standard candle with ATR = 2.0
+        # Open 100, High 103, Low 99, Close 101 (body = 1, range = 4, upper_wick = 2, lower_wick = 1)
+        # Prior close 100, prior high 102, prior low 98
+        candle_with_atr = evidence(
+            indicators=(
+                IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 2.0}),
+            )
+        )
+        vec = build_feature_vector(
+            candle_with_atr,
+            prior_close=100.0,
+            median_volume=800.0,
+            prior_high=102.0,
+            prior_low=98.0,
+            schema_version=FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
+        )
+
+        self.assertAlmostEqual(vec["candle.body_atr_ratio"], 1.0 / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.upper_wick_atr_ratio"], 2.0 / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.lower_wick_atr_ratio"], 1.0 / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.range_atr_ratio"], 4.0 / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.close_position_within_range"], (101.0 - 99.0) / 4.0, places=6)
+        self.assertAlmostEqual(vec["candle.body_to_range_ratio"], 1.0 / 4.0, places=6)
+        self.assertAlmostEqual(vec["candle.upper_wick_to_range_ratio"], 2.0 / 4.0, places=6)
+        self.assertAlmostEqual(vec["candle.lower_wick_to_range_ratio"], 1.0 / 4.0, places=6)
+        self.assertAlmostEqual(vec["candle.gap_from_previous_close_atr"], (100.0 - 100.0) / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.close_vs_previous_high_atr"], (101.0 - 102.0) / 2.0, places=6)
+        self.assertAlmostEqual(vec["candle.close_vs_previous_low_atr"], (101.0 - 98.0) / 2.0, places=6)
+
+        # Zero ATR / Zero Range protection: should safely return NaN without ZeroDivisionError
+        flat_candle = CandleEvidence(
+            candle_id="flat-1",
+            instrument_id="inst-1",
+            symbol="NIFTY50",
+            timeframe="1d",
+            open_time=START,
+            close_time=START + timedelta(hours=6),
+            open=100.0,
+            high=100.0,
+            low=100.0,
+            close=100.0,
+            volume=100.0,
+            indicators=(
+                IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 0.0}),
+            ),
+            patterns=(),
+            price_action_events=(),
+            future_close=100.0,
+            future_close_time=START + timedelta(days=1),
+        )
+        flat_vec = build_feature_vector(
+            flat_candle,
+            prior_close=100.0,
+            median_volume=100.0,
+            schema_version=FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
+        )
+        self.assertTrue(math.isnan(flat_vec["candle.body_atr_ratio"]))
+        self.assertTrue(math.isnan(flat_vec["candle.close_position_within_range"]))
+        self.assertTrue(math.isnan(flat_vec["candle.body_to_range_ratio"]))
+
+    def test_v8_multi_hot_pattern_flags(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8
+
+        candle_with_patterns = evidence(
+            patterns=(
+                PatternEvidence("HAMMER", "candlestick-v1", "BULLISH", 0.85),
+                PatternEvidence("PIERCING_LINE", "candlestick-v1", "BULLISH", 0.90),
+            )
+        )
+        vec = build_feature_vector(
+            candle_with_patterns,
+            prior_close=100.0,
+            median_volume=800.0,
+            schema_version=FEATURE_SCHEMA_VERSION_V8,
+        )
+
+        self.assertEqual(vec["pattern.is_hammer"], 1.0)
+        self.assertEqual(vec["pattern.is_piercing_line"], 1.0)
+        self.assertEqual(vec["pattern.is_shooting_star"], 0.0)
+        self.assertEqual(vec["pattern.is_tweezer_bottom"], 0.0)
 
 
 if __name__ == "__main__":

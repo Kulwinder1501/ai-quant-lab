@@ -1,3 +1,4 @@
+import React, { memo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tooltip } from "../../../components/ui/tooltip";
 import type { AgentPerformanceMetrics, AiReflectionLog } from "./live-price-dashboard";
@@ -9,7 +10,7 @@ interface PerformanceScorecardProps {
   setPerfPeriod: (p: string) => void;
 }
 
-export function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerfPeriod }: PerformanceScorecardProps) {
+export const PerformanceScorecard = memo(function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerfPeriod }: PerformanceScorecardProps) {
   return (
     <GlassPanel className="p-6 md:p-8 border-emerald-500/40 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950/20 shadow-2xl">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center border-b border-white/10 pb-4">
@@ -178,4 +179,4 @@ export function PerformanceScorecard({ metrics, reflections, perfPeriod, setPerf
       </div>
     </GlassPanel>
   );
-}
+});

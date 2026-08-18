@@ -32,6 +32,9 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_V6,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V8,
+    FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
+    FEATURE_SCHEMA_VERSION_V9,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -164,7 +167,7 @@ _INDICATOR_PARAMETERS: Mapping[str, Mapping[str, Any]] = {
     "SUPERTREND": {"atrPeriod": 10, "multiplier": 3},
 }
 
-_PATTERN_CODES: tuple[str, ...] = (
+_PATTERN_CODES_V5: tuple[str, ...] = (
     "DOJI",
     "HAMMER",
     "HANGING_MAN",
@@ -180,6 +183,40 @@ _PATTERN_CODES: tuple[str, ...] = (
     "INSIDE_BAR",
     "OUTSIDE_BAR",
 )
+
+_PATTERN_CODES_V8: tuple[str, ...] = (
+    "DOJI",
+    "DRAGONFLY_DOJI",
+    "GRAVESTONE_DOJI",
+    "HAMMER",
+    "HANGING_MAN",
+    "SHOOTING_STAR",
+    "BULLISH_ENGULFING",
+    "BEARISH_ENGULFING",
+    "MORNING_STAR",
+    "EVENING_STAR",
+    "BULLISH_HARAMI",
+    "BEARISH_HARAMI",
+    "THREE_WHITE_SOLDIERS",
+    "THREE_BLACK_CROWS",
+    "INSIDE_BAR",
+    "OUTSIDE_BAR",
+    "PIERCING_LINE",
+    "DARK_CLOUD_COVER",
+    "TWEEZER_BOTTOM",
+    "TWEEZER_TOP",
+    "BULLISH_MARUBOZU",
+    "BEARISH_MARUBOZU",
+    "THREE_INSIDE_UP",
+    "THREE_INSIDE_DOWN",
+)
+
+_PATTERN_CODES_V9_ADDITIONS: tuple[str, ...] = (
+    "INVERTED_HAMMER",
+    "SPINNING_TOP",
+)
+
+_PATTERN_CODES: tuple[str, ...] = _PATTERN_CODES_V8 + _PATTERN_CODES_V9_ADDITIONS
 
 _PRICE_ACTION_EVENT_TYPES: tuple[str, ...] = (
     "BREAKOUT",
@@ -206,7 +243,7 @@ def _build_feature_schema_v5() -> tuple[str, ...]:
     supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
     pattern_features = tuple(
         f"pattern.{code}.{direction.lower()}_confidence"
-        for code in _PATTERN_CODES
+        for code in _PATTERN_CODES_V5
         for direction in _DIRECTIONS
     )
     price_action_features = tuple(
@@ -306,6 +343,45 @@ FEATURE_SCHEMA_V7: tuple[str, ...] = (
     + FEATURE_SCHEMA_V6[29:]
 )
 
+# 11 scale-free candlestick geometry features normalised by ATR or Range.
+_CANDLE_GEOMETRY_FEATURES: tuple[str, ...] = (
+    "candle.body_atr_ratio",
+    "candle.upper_wick_atr_ratio",
+    "candle.lower_wick_atr_ratio",
+    "candle.range_atr_ratio",
+    "candle.close_position_within_range",
+    "candle.body_to_range_ratio",
+    "candle.upper_wick_to_range_ratio",
+    "candle.lower_wick_to_range_ratio",
+    "candle.gap_from_previous_close_atr",
+    "candle.close_vs_previous_high_atr",
+    "candle.close_vs_previous_low_atr",
+)
+
+# Model B schema: Model A (V7) + raw candle geometry
+FEATURE_SCHEMA_V8_GEOMETRY: tuple[str, ...] = FEATURE_SCHEMA_V7 + _CANDLE_GEOMETRY_FEATURES
+
+# Multi-hot binary pattern flags for the 24 frozen textbook patterns under V8
+_PATTERN_BINARY_FEATURES_V8: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES_V8
+)
+
+# Model C schema (V8): Model B (V8_GEOMETRY: 49) + named multi-hot pattern flags (24) = 73 features
+FEATURE_SCHEMA_V8: tuple[str, ...] = FEATURE_SCHEMA_V8_GEOMETRY + _PATTERN_BINARY_FEATURES_V8
+assert len(FEATURE_SCHEMA_V8) == 73, f"FEATURE_SCHEMA_V8 must have exactly 73 features, got {len(FEATURE_SCHEMA_V8)}"
+
+# Model D schema (V9): V8 (73) + inverted_hammer + spinning_top (2) = 75 features
+_PATTERN_BINARY_FEATURES_V9_ADDITIONS: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES_V9_ADDITIONS
+)
+FEATURE_SCHEMA_V9: tuple[str, ...] = FEATURE_SCHEMA_V8 + _PATTERN_BINARY_FEATURES_V9_ADDITIONS
+assert len(FEATURE_SCHEMA_V9) == 75, f"FEATURE_SCHEMA_V9 must have exactly 75 features, got {len(FEATURE_SCHEMA_V9)}"
+
+# Multi-hot binary pattern flags for all known patterns
+_PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
+)
+
 # A tuple, rather than a data-dependent list, is the versioned model contract.
 # FEATURE_SCHEMA is always the *current* swing schema; the v5 tuple stays
 # importable because v5 artifacts remain loadable and their feature vectors
@@ -331,6 +407,9 @@ FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp(_MARKET_FEAT
 # scored against v6 columns.
 _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION: FEATURE_SCHEMA_V7,
+    FEATURE_SCHEMA_VERSION_V9: FEATURE_SCHEMA_V9,
+    FEATURE_SCHEMA_VERSION_V8: FEATURE_SCHEMA_V8,
+    FEATURE_SCHEMA_VERSION_V8_GEOMETRY: FEATURE_SCHEMA_V8_GEOMETRY,
     FEATURE_SCHEMA_VERSION_V6: FEATURE_SCHEMA_V6,
     FEATURE_SCHEMA_VERSION_V5: FEATURE_SCHEMA_V5,
     FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
@@ -469,6 +548,8 @@ def build_feature_vector(
     *,
     prior_close: float,
     median_volume: float,
+    prior_high: float = _nan(),
+    prior_low: float = _nan(),
     schema_version: str = FEATURE_SCHEMA_VERSION,
     indicator_algorithm_version: str = "ta-v1",
     pattern_algorithm_version: str = "candlestick-v1",
@@ -509,21 +590,64 @@ def build_feature_vector(
                 if high_price <= gap_half_price:
                     is_gap_defended = 1.0
 
+    # Geometry calculations with NaN / Zero-division safety
+    body = abs(close_price - open_price)
+    range_val = high_price - low_price
+    upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
+
+    body_atr_ratio = body / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    upper_wick_atr_ratio = upper_wick / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    lower_wick_atr_ratio = lower_wick / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    range_atr_ratio = range_val / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+
+    close_position_within_range = (close_price - low_price) / range_val if range_val > 0 else _nan()
+    body_to_range_ratio = body / range_val if range_val > 0 else _nan()
+    upper_wick_to_range_ratio = upper_wick / range_val if range_val > 0 else _nan()
+    lower_wick_to_range_ratio = lower_wick / range_val if range_val > 0 else _nan()
+
+    gap_from_previous_close_atr = (
+        (open_price - prior_close) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_close))
+        else _nan()
+    )
+    close_vs_previous_high_atr = (
+        (close_price - prior_high) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_high))
+        else _nan()
+    )
+    close_vs_previous_low_atr = (
+        (close_price - prior_low) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_low))
+        else _nan()
+    )
+
     schema_keys = feature_schema(schema_version)
     values: dict[str, float] = {name: _nan() for name in schema_keys}
     values.update(
         {
             "candle.close_return_bps": _ratio_bps(close_price, prior_close),
             "candle.overnight_gap_bps": overnight_gap_bps,
-            "candle.high_atr_ratio": (high_price - close_price) / atr_val if atr_val > 0 else _nan(),
-            "candle.low_atr_ratio": (close_price - low_price) / atr_val if atr_val > 0 else _nan(),
-            "candle.volume_median_ratio": volume / median_volume if median_volume > 0 else _nan(),
+            "candle.high_atr_ratio": (high_price - close_price) / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan(),
+            "candle.low_atr_ratio": (close_price - low_price) / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan(),
+            "candle.volume_median_ratio": volume / median_volume if (math.isfinite(median_volume) and median_volume > 0) else _nan(),
             "candle.body_return_bps": _ratio_bps(close_price, open_price),
             "candle.range_bps": _ratio_bps(high_price, low_price),
             "candle.upper_wick_bps": _ratio_bps(high_price, max(open_price, close_price)),
             "candle.lower_wick_bps": _ratio_bps(min(open_price, close_price), low_price),
             "candle.gap_fill_bps": gap_fill_bps,
             "candle.is_gap_defended": is_gap_defended,
+            "candle.body_atr_ratio": body_atr_ratio,
+            "candle.upper_wick_atr_ratio": upper_wick_atr_ratio,
+            "candle.lower_wick_atr_ratio": lower_wick_atr_ratio,
+            "candle.range_atr_ratio": range_atr_ratio,
+            "candle.close_position_within_range": close_position_within_range,
+            "candle.body_to_range_ratio": body_to_range_ratio,
+            "candle.upper_wick_to_range_ratio": upper_wick_to_range_ratio,
+            "candle.lower_wick_to_range_ratio": lower_wick_to_range_ratio,
+            "candle.gap_from_previous_close_atr": gap_from_previous_close_atr,
+            "candle.close_vs_previous_high_atr": close_vs_previous_high_atr,
+            "candle.close_vs_previous_low_atr": close_vs_previous_low_atr,
             "market.fii_net_flow_ratio": _numeric_or_nan(candle.fii_net_flow_ratio),
             "market.dii_net_flow_ratio": _numeric_or_nan(candle.dii_net_flow_ratio),
             "market.fii_futures_net_flow_ratio": _numeric_or_nan(candle.fii_futures_net_flow_ratio),
@@ -566,6 +690,8 @@ def build_feature_vector(
             for pattern in candle.patterns
             if pattern.code.upper() == pattern_code and pattern.algorithm_version == pattern_algorithm_version
         ]
+        # Multi-hot binary flag: 1.0 if this pattern was detected on this candle, 0.0 otherwise
+        values[f"pattern.is_{pattern_code.lower()}"] = 1.0 if matching else 0.0
         for direction in _DIRECTIONS:
             confidences = (
                 _numeric_or_nan(pattern.confidence)
@@ -737,7 +863,9 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
     # at or before the candle it describes.
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
     prior_close = _nan()
-    
+    prior_high = _nan()
+    prior_low = _nan()
+
     # Process chronologically so relative metrics work correctly
     sorted_records = sorted(records, key=lambda c: c.close_time)
 
@@ -746,13 +874,15 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if math.isfinite(current_volume):
             volume_window.append(current_volume)
         median_volume = statistics.median(volume_window) if volume_window else _nan()
-        
+
         try:
             _validate_evidence_scope(candle, request)
         except FeatureConstructionError:
             prior_close = _source_number(candle.close, "close")
+            prior_high = _source_number(candle.high, "high")
+            prior_low = _source_number(candle.low, "low")
             continue
-            
+
         label_result = label_from_future_close(
             source_close=candle.close,
             future_close=candle.future_close,
@@ -760,6 +890,8 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         )
         if label_result is None:
             prior_close = _source_number(candle.close, "close")
+            prior_high = _source_number(candle.high, "high")
+            prior_low = _source_number(candle.low, "low")
             continue
         if candle.future_close_time is None:
             raise FeatureConstructionError(
@@ -785,6 +917,8 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
                     candle,
                     prior_close=prior_close,
                     median_volume=median_volume,
+                    prior_high=prior_high,
+                    prior_low=prior_low,
                     schema_version=schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,
@@ -794,6 +928,8 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
             )
         )
         prior_close = _source_number(candle.close, "close")
+        prior_high = _source_number(candle.high, "high")
+        prior_low = _source_number(candle.low, "low")
 
     return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
 

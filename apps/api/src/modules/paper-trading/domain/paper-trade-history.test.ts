@@ -143,7 +143,16 @@ describe("summarizePaperTradeHistory", () => {
     // consumer can render a stable set of buckets. EXPIRED joined it with option
     // force-close at expiry.
     expect(summary.exitReasonCounts).toEqual({
-      TARGET: 1, STOP_LOSS: 1, MANUAL: 0, CANCELLED: 0, EXPIRED: 0, TRAP_DETECTED: 0,
+      TARGET: 1,
+      STOP_LOSS: 1,
+      MANUAL: 0,
+      CANCELLED: 0,
+      EXPIRED: 0,
+      TRAP_DETECTED: 0,
+      T1_TARGET: 0,
+      T2_TARGET: 0,
+      RUNNER_TRAIL: 0,
+      MOMENTUM_STALL: 0,
     });
   });
 

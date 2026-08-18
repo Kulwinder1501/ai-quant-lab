@@ -1,5 +1,6 @@
 "use client";
 
+import React, { memo, useMemo } from "react";
 import {
   Bar,
   CartesianGrid,
@@ -63,8 +64,8 @@ function compactCrore(value: number): string {
   return `${value < 0 ? "−" : ""}₹${Math.abs(value / 1000).toFixed(1)}k`;
 }
 
-export function MarketContextHistoryChart(props: Props) {
-  const data = mergeSeries(props);
+export const MarketContextHistoryChart = memo(function MarketContextHistoryChart(props: Props) {
+  const data = useMemo(() => mergeSeries(props), [props.flows, props.indiaVix]);
   return (
     /* A flex column so the plot fills whatever height the row is given rather than asserting its
        own: the card is now pinned to the same height as the flows card beside it, and a fixed
@@ -115,4 +116,4 @@ export function MarketContextHistoryChart(props: Props) {
       )}
     </GlassPanel>
   );
-}
+});

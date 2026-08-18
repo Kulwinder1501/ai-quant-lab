@@ -47,6 +47,7 @@ interface PaperTradeRow extends QueryResultRow {
   side: TradeSide;
   status: PaperTrade["status"];
   quantity: string;
+  remaining_quantity?: string | null;
   entry_price: string;
   stop_loss: string;
   stop_loss_effective_at: Date;
@@ -105,6 +106,7 @@ const tradeColumns = `
   paper_trades.side,
   paper_trades.status,
   paper_trades.quantity,
+  paper_trades.remaining_quantity,
   paper_trades.entry_price,
   paper_trades.stop_loss,
   paper_trades.stop_loss_effective_at,
@@ -156,6 +158,9 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     side: row.side,
     status: row.status,
     quantity: toNumber(row.quantity, "trade quantity"),
+    remainingQuantity: row.remaining_quantity !== null && row.remaining_quantity !== undefined
+      ? toNumber(row.remaining_quantity, "trade remaining quantity")
+      : toNumber(row.quantity, "trade quantity"),
     entryPrice: toNumber(row.entry_price, "trade entry price"),
     stopLoss: toNumber(row.stop_loss, "trade stop loss"),
     stopLossEffectiveAt: row.stop_loss_effective_at,
@@ -209,16 +214,17 @@ function hasGeometryForFill(side: TradeSide, fillPrice: number, stopLoss: number
     : targetPrice < fillPrice && fillPrice < stopLoss;
 }
 
-function exitEventType(reason: PaperTradeExitReason): Extract<
-  PaperTradeEventType,
-  "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED" | "EXPIRED" | "TRAP_DETECTED"
-> {
+function exitEventType(reason: PaperTradeExitReason): PaperTradeEventType {
   switch (reason) {
     case "STOP_LOSS":
       return "STOP_LOSS_HIT";
     case "TARGET":
+    case "T1_TARGET":
+    case "T2_TARGET":
       return "TARGET_HIT";
     case "MANUAL":
+    case "MOMENTUM_STALL":
+    case "RUNNER_TRAIL":
       return "MANUALLY_CLOSED";
     case "CANCELLED":
       return "CANCELLED";
@@ -496,13 +502,13 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     const contract = input.optionContract;
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO paper_trades (
-        account_id, trade_idea_id, instrument_id, side, status, quantity,
+        account_id, trade_idea_id, instrument_id, side, status, quantity, remaining_quantity,
         entry_price, stop_loss, stop_loss_effective_at, target_price, opened_at,
         fees, fee_breakdown, slippage, notes,
         option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv,
         regime_observation_id
       ) VALUES (
-        $1, $2, $3, $4, $14, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
+        $1, $2, $3, $4, $14, $5, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
         $15, $16, $17, $18, $19, $20, $21
       ) RETURNING id
     `, [
@@ -632,6 +638,189 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     }
   }
 
+  async executeExitSlice(input: import("../../../modules/paper-trading/domain/paper-trading.js").ExecuteExitSliceInput): Promise<PaperTrade> {
+    assertPositiveFinite(input.quantity, "Quantity");
+    assertNonNegativeFinite(input.exitPrice, "Exit price");
+    assertNonNegativeFinite(input.exitFees, "Exit fees");
+    assertDate(input.exitedAt, "Exited at");
+
+    const client = await this.database.connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+
+      const tradeRes = await client.query<PaperTradeRow>(`
+        SELECT ${tradeColumns}
+        FROM paper_trades
+        LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+        LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+        WHERE paper_trades.id = $1 AND paper_trades.status = 'OPEN'
+        FOR UPDATE OF paper_trades
+      `, [input.paperTradeId]);
+
+      const tradeRow = tradeRes.rows[0];
+      if (!tradeRow) {
+        throw new Error("Paper trade was not found, or is already closed/cancelled.");
+      }
+      const trade = toPaperTrade(tradeRow);
+
+      if (input.quantity > trade.remainingQuantity + 1e-9) {
+        throw new Error(`Exit quantity (${input.quantity}) exceeds remaining trade quantity (${trade.remainingQuantity}).`);
+      }
+
+      if (input.idempotencyKey) {
+        const existingSlice = await client.query(`
+          SELECT id FROM paper_trade_partial_exits WHERE idempotency_key = $1
+        `, [input.idempotencyKey]);
+        if (existingSlice.rows.length > 0) {
+          await client.query("COMMIT");
+          transactionStarted = false;
+          return trade;
+        }
+      }
+
+      const directionSign = trade.side === "LONG" ? 1 : -1;
+      const sliceGrossPnl = (input.exitPrice - trade.entryPrice) * input.quantity * directionSign;
+      const sliceNetPnl = sliceGrossPnl - input.exitFees - (input.exitSlippage ?? 0);
+
+      await client.query(`
+        INSERT INTO paper_trade_partial_exits (
+          paper_trade_id, exit_price, quantity, exit_reason, exit_fees, realized_pnl, exited_at, idempotency_key, notes
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [
+        trade.id,
+        input.exitPrice,
+        input.quantity,
+        input.exitReason,
+        input.exitFees,
+        sliceNetPnl,
+        input.exitedAt,
+        input.idempotencyKey ?? null,
+        input.notes ?? null,
+      ]);
+
+      const newRemaining = Math.max(0, trade.remainingQuantity - input.quantity);
+      const isFullyClosed = newRemaining < 1e-6;
+
+      await client.query(`
+        SELECT id FROM paper_accounts WHERE id = $1 FOR UPDATE
+      `, [trade.accountId]);
+
+      if (isFullyClosed) {
+        await client.query(`
+          UPDATE paper_trades
+          SET
+            status = 'CLOSED',
+            remaining_quantity = 0,
+            closed_at = $2,
+            exit_price = $3,
+            exit_reason = $4,
+            fees = fees + $5,
+            slippage = slippage + $6,
+            fee_breakdown = COALESCE(paper_trades.fee_breakdown, '{}'::jsonb)
+              || jsonb_build_object(
+                'exit',
+                COALESCE($7::jsonb, jsonb_build_object('total', $5))
+              ),
+            realized_pnl = (
+              SELECT COALESCE(SUM(realized_pnl), 0)
+              FROM paper_trade_partial_exits
+              WHERE paper_trade_id = $1
+            ) - COALESCE((fee_breakdown->'entry'->>'total')::numeric, 0)
+          WHERE id = $1
+        `, [
+          trade.id,
+          input.exitedAt,
+          input.exitPrice,
+          input.exitReason,
+          input.exitFees,
+          input.exitSlippage ?? 0,
+          JSON.stringify(input.feeBreakdown ?? { total: input.exitFees }),
+        ]);
+      } else {
+        await client.query(`
+          UPDATE paper_trades
+          SET
+            remaining_quantity = $2,
+            fees = fees + $3,
+            slippage = slippage + $4
+          WHERE id = $1
+        `, [
+          trade.id,
+          newRemaining,
+          input.exitFees,
+          input.exitSlippage ?? 0,
+        ]);
+      }
+
+      await client.query(`
+        INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+      `, [
+        trade.id,
+        isFullyClosed ? exitEventType(input.exitReason) : "PARTIAL_EXIT",
+        input.exitPrice,
+        input.quantity,
+        JSON.stringify({
+          ...input.details,
+          exitReason: input.exitReason,
+          exitFees: input.exitFees,
+          sliceNetPnl,
+          remainingQuantity: newRemaining,
+        }),
+        input.exitedAt,
+      ]);
+
+      await client.query("COMMIT");
+      transactionStarted = false;
+
+      const updated = await findPaperTradeById(client, trade.id);
+      if (!updated) throw new Error("Unable to resolve updated paper trade.");
+      return updated;
+    } catch (error) {
+      if (transactionStarted) await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listPartialExitsByTradeId(paperTradeId: string): Promise<import("../../../modules/paper-trading/domain/paper-trading.js").PaperTradePartialExit[]> {
+    const result = await this.database.query<{
+      id: string;
+      paper_trade_id: string;
+      exit_price: string;
+      quantity: string;
+      exit_reason: PaperTradeExitReason;
+      exit_fees: string;
+      realized_pnl: string;
+      exited_at: Date;
+      idempotency_key: string | null;
+      notes: string | null;
+      created_at: Date;
+    }>(`
+      SELECT id, paper_trade_id, exit_price, quantity, exit_reason, exit_fees, realized_pnl, exited_at, idempotency_key, notes, created_at
+      FROM paper_trade_partial_exits
+      WHERE paper_trade_id = $1
+      ORDER BY exited_at ASC, created_at ASC
+    `, [paperTradeId]);
+
+    return result.rows.map((row) => ({
+      id: row.id,
+      paperTradeId: row.paper_trade_id,
+      exitPrice: toNumber(row.exit_price, "exit price"),
+      quantity: toNumber(row.quantity, "quantity"),
+      exitReason: row.exit_reason,
+      exitFees: toNumber(row.exit_fees, "exit fees"),
+      realizedPnl: toNumber(row.realized_pnl, "realized P/L"),
+      exitedAt: row.exited_at,
+      idempotencyKey: row.idempotency_key,
+      notes: row.notes,
+      createdAt: row.created_at,
+    }));
+  }
+
   async close(input: ClosePaperTradeInput): Promise<PaperTrade> {
     assertNonNegativeFinite(input.exitPrice, "Exit price");
     assertNonNegativeFinite(input.exitFees, "Exit fees");
@@ -645,29 +834,12 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       transactionStarted = true;
 
       const openTrade = await client.query<PaperTradeRow>(`
-        SELECT
-          paper_trades.id,
-          paper_trades.account_id,
-          paper_trades.trade_idea_id,
-          paper_trades.instrument_id,
-          NULL::text AS timeframe,
-          paper_trades.side,
-          paper_trades.status,
-          paper_trades.quantity,
-          paper_trades.entry_price,
-          paper_trades.stop_loss,
-          paper_trades.target_price,
-          paper_trades.opened_at,
-          paper_trades.closed_at,
-          paper_trades.exit_price,
-          paper_trades.exit_reason,
-          paper_trades.realized_pnl,
-          paper_trades.fees,
-          paper_trades.slippage,
-          paper_trades.notes
+        SELECT ${tradeColumns}
         FROM paper_trades
+        LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+        LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
         WHERE paper_trades.id = $1 AND paper_trades.status IN ('OPEN', 'PENDING')
-        FOR UPDATE
+        FOR UPDATE OF paper_trades
       `, [input.paperTradeId]);
       const existing = openTrade.rows[0];
       if (!existing) {
@@ -695,8 +867,6 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         throw new Error("Closed at cannot be before the paper trade was opened.");
       }
 
-      // This lock shares the same ordering guard used by fills, keeping a
-      // simultaneous close from racing an account-capacity calculation.
       await client.query(`
         SELECT id
         FROM paper_accounts
@@ -704,10 +874,34 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         FOR UPDATE
       `, [existing.account_id]);
 
+      const trade = toPaperTrade(existing);
+      const remainingQty = trade.remainingQuantity;
+
+      // Delegate the actual closing exit slice to unified exit slice accounting
+      const directionSign = trade.side === "LONG" ? 1 : -1;
+      const sliceGrossPnl = (input.exitPrice - trade.entryPrice) * remainingQty * directionSign;
+      const sliceNetPnl = sliceGrossPnl - input.exitFees - input.exitSlippage;
+
+      await client.query(`
+        INSERT INTO paper_trade_partial_exits (
+          paper_trade_id, exit_price, quantity, exit_reason, exit_fees, realized_pnl, exited_at, notes
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        trade.id,
+        input.exitPrice,
+        remainingQty,
+        input.exitReason,
+        input.exitFees,
+        sliceNetPnl,
+        input.closedAt,
+        "Full / final exit",
+      ]);
+
       const closed = await client.query<ClosedTradeUpdateRow>(`
         UPDATE paper_trades
         SET
           status = 'CLOSED',
+          remaining_quantity = 0,
           closed_at = $2,
           exit_price = $3,
           exit_reason = $4,
@@ -718,10 +912,11 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
               'exit',
               COALESCE($7::jsonb, jsonb_build_object('total', $5))
             ),
-          realized_pnl = CASE paper_trades.side
-            WHEN 'LONG' THEN ($3 - paper_trades.entry_price) * paper_trades.quantity
-            WHEN 'SHORT' THEN (paper_trades.entry_price - $3) * paper_trades.quantity
-          END - (paper_trades.fees + $5) - (paper_trades.slippage + $6)
+          realized_pnl = (
+            SELECT COALESCE(SUM(realized_pnl), 0)
+            FROM paper_trade_partial_exits
+            WHERE paper_trade_id = $1
+          ) - COALESCE((fee_breakdown->'entry'->>'total')::numeric, 0)
         WHERE paper_trades.id = $1 AND paper_trades.status = 'OPEN'
         RETURNING id, realized_pnl, fees, slippage
       `, [
@@ -745,7 +940,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.paperTradeId,
         exitEventType(input.exitReason),
         input.exitPrice,
-        toNumber(existing.quantity, "trade quantity"),
+        remainingQty,
         JSON.stringify({
           ...input.details,
           exitFees: input.exitFees,
@@ -757,14 +952,14 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.closedAt,
       ]);
 
-      const trade = await findPaperTradeById(client, input.paperTradeId);
-      if (!trade) {
+      const resultTrade = await findPaperTradeById(client, input.paperTradeId);
+      if (!resultTrade) {
         throw new Error("Unable to resolve the closed paper trade.");
       }
 
       await client.query("COMMIT");
       transactionStarted = false;
-      return trade;
+      return resultTrade;
     } catch (error) {
       if (transactionStarted) {
         await client.query("ROLLBACK");

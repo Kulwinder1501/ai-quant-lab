@@ -3,7 +3,11 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # Every branch, not just main. The node job's `npm run lint` is `tsc --noEmit`
+    # against a fresh `actions/checkout`, which is the only check that sees a file
+    # imported by committed code but never `git add`ed. Local runs compile against
+    # the working copy, where the file is present, so they cannot catch it.
+    branches: ['**']
 
 permissions:
   contents: read

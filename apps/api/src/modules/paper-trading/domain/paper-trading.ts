@@ -1,7 +1,17 @@
 import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
-export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED" | "EXPIRED" | "TRAP_DETECTED";
+export type PaperTradeExitReason =
+  | "STOP_LOSS"
+  | "TARGET"
+  | "MANUAL"
+  | "CANCELLED"
+  | "EXPIRED"
+  | "TRAP_DETECTED"
+  | "T1_TARGET"
+  | "T2_TARGET"
+  | "RUNNER_TRAIL"
+  | "MOMENTUM_STALL";
 export type PaperTradeEventType =
   | "PENDING_PLACED"
   | "OPENED"
@@ -10,7 +20,8 @@ export type PaperTradeEventType =
   | "MANUALLY_CLOSED"
   | "CANCELLED"
   | "EXPIRED"
-  | "TRAP_DETECTED";
+  | "TRAP_DETECTED"
+  | "PARTIAL_EXIT";
 export type OptionContractType = "CE" | "PE";
 
 export interface PaperAccount {
@@ -42,6 +53,7 @@ export interface PaperTrade {
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: number;
+  remainingQuantity: number;
   entryPrice: number;
   stopLoss: number;
   /** First instant at which the currently persisted stopLoss was active. */
@@ -146,6 +158,34 @@ export interface ClosePaperTradeInput {
   feeBreakdown?: Record<string, unknown>;
 }
 
+export interface PaperTradePartialExit {
+  id: string;
+  paperTradeId: string;
+  exitPrice: number;
+  quantity: number;
+  exitReason: PaperTradeExitReason;
+  exitFees: number;
+  realizedPnl: number;
+  exitedAt: Date;
+  idempotencyKey?: string | null;
+  notes?: string | null;
+  createdAt: Date;
+}
+
+export interface ExecuteExitSliceInput {
+  paperTradeId: string;
+  exitPrice: number;
+  quantity: number;
+  exitReason: PaperTradeExitReason;
+  exitFees: number;
+  exitSlippage?: number;
+  exitedAt: Date;
+  idempotencyKey?: string;
+  notes?: string;
+  details?: Record<string, unknown>;
+  feeBreakdown?: Record<string, unknown>;
+}
+
 export interface FillPendingTradeInput {
   paperTradeId: string;
   fillPrice: number;
@@ -160,6 +200,10 @@ export interface PaperTradeRepository {
   listPendingByAccount(accountId: string): Promise<PaperTrade[]>;
   /** Atomically closes an OPEN trade and records its corresponding exit event. */
   close(input: ClosePaperTradeInput): Promise<PaperTrade>;
+  /** Atomically executes an exit slice, records partial exit, updates remaining_quantity and realized_pnl. */
+  executeExitSlice(input: ExecuteExitSliceInput): Promise<PaperTrade>;
+  /** Lists all partial exits recorded for a given trade id. */
+  listPartialExitsByTradeId(paperTradeId: string): Promise<PaperTradePartialExit[]>;
   /** Fills a PENDING trade, moving it to OPEN. */
   fillPendingTrade(input: FillPendingTradeInput): Promise<PaperTrade>;
   updateStopLoss?(id: string, newStopLoss: number, reason?: string): Promise<void>;

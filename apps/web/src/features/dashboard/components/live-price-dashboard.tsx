@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getApiV1Url, getResearchJson } from "../../research/api";
@@ -134,14 +134,14 @@ export function LivePriceDashboard() {
   }, [perfPeriod, loadPerformanceMetrics, applyPerformanceMetrics, applyPerformanceMetricsError]);
 
   // The stream is reset where the selection changes rather than in the effect
-  // below, because a synchronous state write in an effect body cascades a
-  // render. On first mount the initial state values already say "connecting".
-  const selectSymbol = (symbol: string) => {
-    if (symbol === selectedSymbol) return;
-    setSelectedSymbol(symbol);
-    setState("loading");
-    setIsStreaming(false);
-  };
+  const selectSymbol = useCallback((symbol: string) => {
+    setSelectedSymbol((current) => {
+      if (symbol === current) return current;
+      setState("loading");
+      setIsStreaming(false);
+      return symbol;
+    });
+  }, []);
 
   // Connect to Server-Sent Events (SSE) live ticking stream
   useEffect(() => {
@@ -186,8 +186,8 @@ export function LivePriceDashboard() {
   }, [selectedSymbol, timeframe]);
 
   const isPositive = (data?.change ?? 0) >= 0;
-  const thoughts = data?.thoughts ?? metrics?.recentThoughts ?? [];
-  const reflections = data?.reflections ?? metrics?.reflections ?? [];
+  const thoughts = useMemo(() => data?.thoughts ?? metrics?.recentThoughts ?? [], [data?.thoughts, metrics?.recentThoughts]);
+  const reflections = useMemo(() => data?.reflections ?? metrics?.reflections ?? [], [data?.reflections, metrics?.reflections]);
 
   return (
     <>

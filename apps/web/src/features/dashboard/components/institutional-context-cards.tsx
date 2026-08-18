@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, { memo, useCallback, useEffect, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tooltip } from "../../../components/ui/tooltip";
 import { getResearchJson } from "../../research/api";
@@ -109,7 +109,7 @@ function formatSession(date: string): string {
  */
 const CONTEXT_CARD_HEIGHT = "xl:h-[470px]";
 
-export function InstitutionalContextCards() {
+export const InstitutionalContextCards = memo(function InstitutionalContextCards() {
   const [context, setContext] = useState<InstitutionalContext | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -280,4 +280,4 @@ export function InstitutionalContextCards() {
       <MarketContextHistoryChart flows={flows.history} indiaVix={indiaVix}  />
     </div>
   );
-}
+});

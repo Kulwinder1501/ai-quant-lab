@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, memo } from "react";
 import { formatNumber, formatTimestamp } from "../../research/presentation";
 import { formatNseMarketElapsedDuration } from "../domain/nse-market-time";
 import { MarketLoader } from "../../../components/ui/market-loader";
@@ -18,7 +18,7 @@ export interface LiveQuote {
   direction?: "UP" | "DOWN" | "NONE";
 }
 
-export type LiveQuoteMap = Record<string, LiveQuote>;
+export type LiveQuoteMap = Record<string, LiveQuote | undefined>;
 
 /** Resolves only the underlying quote. It must never be used as an option premium. */
 export function resolveLiveQuote(tradeSymbol?: string, quotes?: LiveQuoteMap): LiveQuote | undefined {
@@ -37,10 +37,10 @@ interface ActivePositionsTableProps {
   handleOpenCloseModal: (trade: PaperTradeRow) => void;
 }
 
-export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenCloseModal }: ActivePositionsTableProps) {
+export const ActivePositionsTable = memo(function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenCloseModal }: ActivePositionsTableProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    const id = window.setInterval(() => setNowMs(Date.now()), 10000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -281,4 +281,4 @@ export function ActivePositionsTable({ summary, loading, liveQuotes, handleOpenC
       </table>
     </div>
   );
-}
+});

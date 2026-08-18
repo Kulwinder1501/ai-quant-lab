@@ -196,6 +196,32 @@ describe("FyersLiveMarketDataProvider", () => {
     await expect(provider.fetchQuotes(["NSE:SBIN-EQ"])).rejects.toThrow(/Fyers quote request failed/);
   });
 
+  it("retries on HTTP 429 and succeeds when limit clears", async () => {
+    let attempt = 0;
+    const sleep = vi.fn(async () => {});
+    const provider = new FyersLiveMarketDataProvider({
+      tokenService: tokenService(),
+      appId: "APP-100",
+      sleep,
+      fetch: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return new Response(JSON.stringify({ s: "error", code: 429, message: "request limit reached" }), {
+            status: 429,
+            headers: { "Retry-After": "2" },
+          });
+        }
+        return payload([SBIN]);
+      },
+    });
+
+    const quotes = await provider.fetchQuotes(["NSE:SBIN-EQ"]);
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0]?.providerInstrumentId).toBe("NSE:SBIN-EQ");
+    expect(attempt).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(2000);
+  });
+
   it("refuses to be constructed without an app id", () => {
     expect(() => new FyersLiveMarketDataProvider({ tokenService: tokenService(), appId: "  " }))
       .toThrow("requires an app ID");

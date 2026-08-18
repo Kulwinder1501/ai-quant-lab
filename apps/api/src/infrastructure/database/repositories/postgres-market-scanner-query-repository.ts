@@ -1,10 +1,12 @@
 import type { QueryResultRow } from "pg";
 import type { InstrumentType } from "../../../modules/market-data/domain/instrument.js";
 import type { ModelPredictionLabel, ModelStage } from "../../../modules/model-predictions/domain/model-prediction.js";
-import type {
-  CandlestickPatternCode,
-  PatternDirection,
-  PriceActionEventCode,
+import {
+  candlestickPatternCodes,
+  priceActionEventCodes,
+  type CandlestickPatternCode,
+  type PatternDirection,
+  type PriceActionEventCode,
 } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { IndicatorCode, IndicatorValues } from "../../../modules/technical-analysis/domain/technical-indicator.js";
 import type {
@@ -88,34 +90,8 @@ const knownIndicatorCodes = [
   "ORDER_BLOCK",
   "EQUILIBRIUM_ZONE",
 ] as const;
-const knownPatternCodes = [
-  "DOJI",
-  "HAMMER",
-  "HANGING_MAN",
-  "SHOOTING_STAR",
-  "BULLISH_ENGULFING",
-  "BEARISH_ENGULFING",
-  "MORNING_STAR",
-  "EVENING_STAR",
-  "BULLISH_HARAMI",
-  "BEARISH_HARAMI",
-  "THREE_WHITE_SOLDIERS",
-  "THREE_BLACK_CROWS",
-  "INSIDE_BAR",
-  "OUTSIDE_BAR",
-] as const;
-const knownPriceActionEventCodes = [
-  "BREAKOUT",
-  "BREAKDOWN",
-  "SUPPORT",
-  "RESISTANCE",
-  "UPTREND",
-  "DOWNTREND",
-  "RANGE",
-  "PULLBACK",
-  "SWING_HIGH",
-  "SWING_LOW",
-] as const;
+const knownPatternCodes: readonly string[] = candlestickPatternCodes;
+const knownPriceActionEventCodes: readonly string[] = priceActionEventCodes;
 const knownDirections = ["BULLISH", "BEARISH", "NEUTRAL"] as const;
 const knownModelStages = ["CANDIDATE", "PRODUCTION", "REJECTED", "ARCHIVED"] as const;
 

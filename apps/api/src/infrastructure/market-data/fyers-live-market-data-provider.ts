@@ -25,6 +25,8 @@ export interface FyersLiveMarketDataProviderOptions {
   appId: string;
   fetch?: FetchFunction;
   baseUrl?: string;
+  maxRetries?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const maxInstrumentsPerRequest = 50;
@@ -67,11 +69,13 @@ function decimal(value: number | null | undefined, field: string): string | null
   return String(value);
 }
 
-/** Read-only polling adapter for Fyers Data API v3 Quotes endpoint. */
+/** Read-only polling adapter for Fyers Data API v3 Quotes endpoint with rate-limit retry. */
 export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
   readonly id = FYERS_PROVIDER_ID;
   private readonly fetch: FetchFunction;
   private readonly baseUrl: string;
+  private readonly maxRetries: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(private readonly options: FyersLiveMarketDataProviderOptions) {
     if (!options.appId.trim()) {
@@ -79,6 +83,8 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
     }
     this.fetch = options.fetch ?? globalThis.fetch;
     this.baseUrl = options.baseUrl ?? "https://api-t1.fyers.in";
+    this.maxRetries = options.maxRetries ?? 3;
+    this.sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async fetchQuotes(providerInstrumentIds: string[]): Promise<LiveMarketQuote[]> {
@@ -98,16 +104,40 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
     const endpoint = new URL("/data/quotes", this.baseUrl);
     endpoint.searchParams.set("symbols", providerInstrumentIds.join(","));
 
-    const response = await this.fetch(endpoint, {
-      headers: {
-        Authorization: `${this.options.appId}:${accessToken}`,
-      },
-    });
+    let response: Response | undefined;
+    let payload: FyersQuotePayload | undefined;
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        response = await this.fetch(endpoint, {
+          headers: {
+            Authorization: `${this.options.appId}:${accessToken}`,
+          },
+        });
+      } catch (error) {
+        if (attempt >= this.maxRetries) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Fyers live quote request failed after ${attempt + 1} network attempts: ${detail}`);
+        }
+        await this.sleep(Math.min(2 ** attempt * 500, 10_000));
+        continue;
+      }
+
+      payload = await response.json().catch(() => undefined) as FyersQuotePayload | undefined;
+      const rateLimited = response.status === 429 || payload?.code === 429;
+      const retryableServerFailure = response.status === 408 || response.status >= 500;
+      if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries) break;
+
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(2 ** attempt * 500, 10_000);
+      await this.sleep(waitMs);
+    }
     
-    const payload = await response.json().catch(() => undefined) as FyersQuotePayload | undefined;
-    if (!response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
+    if (!response || !response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
       const detail = payload?.message ? ` ${payload.message}` : "";
-      throw new Error(`Fyers quote request failed with HTTP ${response.status}.${detail}`);
+      throw new Error(`Fyers quote request failed with HTTP ${response?.status ?? "none"}.${detail}`);
     }
 
     const observedAt = new Date();

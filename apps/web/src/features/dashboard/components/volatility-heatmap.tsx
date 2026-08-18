@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, { memo, useCallback, useEffect, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { getResearchJson } from "../../research/api";
 
@@ -92,7 +92,7 @@ function formatClock(iso: string): string {
  * Index drivers contribution heatmap (weight% × day% × index / 10000).
  * Follows the selected Market Watch / dashboard index when a roster exists.
  */
-export function VolatilityHeatmap({
+export const VolatilityHeatmap = memo(function VolatilityHeatmap({
   selectedSymbol = "NIFTY50",
 }: {
   selectedSymbol?: string;
@@ -278,4 +278,4 @@ export function VolatilityHeatmap({
       </p>
     </GlassPanel>
   );
-}
+});

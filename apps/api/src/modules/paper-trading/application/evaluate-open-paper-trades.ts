@@ -1,6 +1,6 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
-import type { PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
+import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
 import {
   calculateExitFees,
   calculateExercisedExpiryFees,
@@ -390,7 +390,7 @@ export class EvaluateOpenPaperTrades {
 
     const closeOption = async (args: {
       exitPrice: number;
-      exitReason: "STOP_LOSS" | "TARGET" | "EXPIRED" | "TRAP_DETECTED";
+      exitReason: PaperTradeExitReason;
       closedAt: Date;
       details: Record<string, unknown>;
       exercisedIntrinsic?: number;
@@ -558,6 +558,34 @@ export class EvaluateOpenPaperTrades {
       // Nothing is lost by returning here. The barrier-crossing question the completed-candle
       // path was reaching for is answered above by `decideOptionBuyerObservedExit`, against
       // observed bids instead of estimated ones.
+      // Momentum Stall Stop (5m timeframe, elapsed market time >= 20 mins, gain < 0.5R)
+      // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
+      // Directional setups (target ~2R+) are given more room to breathe and form the trend.
+      if (trade.timeframe === "5m") {
+        const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
+        const initialRisk = trade.entryPrice - trade.stopLoss;
+        const initialReward = trade.targetPrice - trade.entryPrice;
+        const isScalp = initialRisk > 0 ? (initialReward / initialRisk) <= 1.6 : false;
+        
+        if (isScalp && elapsedMinutes >= 20 && initialRisk > 0 && freshBid < trade.entryPrice + 0.5 * initialRisk) {
+          return closeOption({
+            exitPrice: freshBid,
+            exitReason: "MOMENTUM_STALL",
+            closedAt: asOf,
+            details: {
+              source: "MOMENTUM_STALL_EVALUATOR",
+              elapsedMinutes,
+              freshBid,
+              entryPrice: trade.entryPrice,
+              initialRisk,
+              initialReward,
+              isScalp,
+              eventType: "MANUALLY_CLOSED",
+            },
+          });
+        }
+      }
+
       return null;
     }
 

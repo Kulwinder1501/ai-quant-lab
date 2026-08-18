@@ -47,10 +47,67 @@ describe("validateOptionsEntry", () => {
       intendedStrike: 57_700,
       intendedContractDelta: 0.51,
       hasMacroEvent: false,
+      ivPercentile: 50,
     });
 
     expect(result.isValid).toBe(true);
     expect(result.unchecked).toEqual([]);
+  });
+
+  it("refuses when IV percentile is at or above ceiling", () => {
+    const result = validateOptionsEntry({
+      proposedIdea: IDEA,
+      candleVolume: 12_000,
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      ivPercentile: 88, // >= 85% default ceiling
+    });
+
+    expect(result.isValid).toBe(false);
+    expect(result.reasons.join(" ")).toMatch(/IV percentile 88% >= 85% ceiling/);
+  });
+
+  it("passes when IV percentile is below custom ceiling", () => {
+    const passed = validateOptionsEntry({
+      proposedIdea: IDEA,
+      candleVolume: 12_000,
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      ivPercentile: 65,
+      ivPercentileCeiling: 70,
+    });
+    const failed = validateOptionsEntry({
+      proposedIdea: IDEA,
+      candleVolume: 12_000,
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      ivPercentile: 72,
+      ivPercentileCeiling: 70,
+    });
+
+    expect(passed.isValid).toBe(true);
+    expect(failed.isValid).toBe(false);
+  });
+
+  it("allows trade but records unchecked when IV percentile is unavailable", () => {
+    const result = validateOptionsEntry({
+      proposedIdea: IDEA,
+      candleVolume: 12_000,
+      optionChain: chain(),
+      intendedStrike: 57_700,
+      intendedContractDelta: 0.51,
+      hasMacroEvent: false,
+      ivPercentile: null,
+    });
+
+    expect(result.isValid).toBe(true);
+    expect(result.unchecked.join(" ")).toMatch(/IV percentile is unavailable/);
   });
 
   it("refuses a far-OTM contract on delta", () => {

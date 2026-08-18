@@ -1,5 +1,6 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import { CandlestickPatternEngine } from "../domain/candlestick-pattern-engine.js";
+import { ChartPatternEngine } from "../domain/chart-pattern-engine.js";
 import {
   candlestickPatternDescriptions,
   type PatternCandle,
@@ -85,6 +86,7 @@ export class DetectMarketPatterns {
     private readonly priceActionEventRepository: PriceActionEventRepository,
     private readonly candlestickEngine = new CandlestickPatternEngine(),
     private readonly priceActionEngine = new PriceActionEngine(),
+    private readonly chartPatternEngine = new ChartPatternEngine(),
   ) {}
 
   async execute(input: DetectMarketPatternsInput): Promise<DetectMarketPatternsResult> {
@@ -94,7 +96,9 @@ export class DetectMarketPatterns {
     const candlestickAlgorithmVersion = input.candlestickAlgorithmVersion ?? "candlestick-v1";
     const priceActionAlgorithmVersion = input.priceActionAlgorithmVersion ?? "price-action-v2";
     const patterns = this.candlestickEngine.detect(candles);
-    const events = this.priceActionEngine.detect(candles);
+    const priceEvents = this.priceActionEngine.detect(candles);
+    const chartEvents = this.chartPatternEngine.detect(candles);
+    const events = [...priceEvents, ...chartEvents];
     
     const openTimeByCandleId = new Map<string, number>();
     for (const c of candles) {

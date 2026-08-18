@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { MomentumScalpPatternStrategy, MomentumScalpPatternStrategyV2 } from "./momentum-scalp-pattern-strategy.js";
 import { MomentumScalpStrategy } from "./momentum-scalp-strategy.js";
 import { TrendBreakoutStrategy } from "./trend-breakout-strategy.js";
 import {
@@ -10,9 +11,11 @@ import {
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
-    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index"]);
+    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2"]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
+    expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
+    expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {

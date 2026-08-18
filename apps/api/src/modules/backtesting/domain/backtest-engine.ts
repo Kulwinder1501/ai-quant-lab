@@ -177,6 +177,7 @@ function createPosition(
     side: proposal.side,
     status: "OPEN",
     quantity,
+    remainingQuantity: quantity,
     entryPrice: fillPrice,
     stopLoss: proposal.stopLoss,
     targetPrice: proposal.targetPrice,
