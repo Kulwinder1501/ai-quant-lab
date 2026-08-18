@@ -11,6 +11,11 @@ import type {
 } from "../../../modules/paper-trading/domain/paper-trading.js";
 import { validateQuantity } from "../../../modules/paper-trading/domain/lot-size-validator.js";
 import { decideDailyTradeCap, istTradingDayWindow } from "../../../modules/paper-trading/domain/daily-trade-cap.js";
+import {
+  DailyTradeCapReachedError,
+  TradeIdeaExpiredError,
+  TradeIdeaUnavailableError,
+} from "../../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import type { TradeSide } from "../../../modules/strategy-engine/domain/strategy.js";
 import type { DatabaseClient, DatabasePool } from "../database.js";
 
@@ -79,16 +84,10 @@ export interface OpenManualOptionTradeInput extends Omit<OpenPaperTradeInput, "t
   instrumentId: string;
 }
 
-class TradeIdeaExpiredError extends Error {}
-
-/**
- * The account has already opened its permitted number of trades for this IST trading day.
- *
- * Exported and distinct so a caller can treat it as a skip rather than a failure: a bot hitting its
- * cap is the control working, not an error to alert on, and a bare `Error` would read the same as a
- * broken fill.
- */
-export class DailyTradeCapReachedError extends Error {}
+// Re-exported so existing importers keep working; the definitions moved to the domain, because
+// whether a failure is ordinary or a fault decides whether a bot cycle continues and is not a
+// database detail.
+export { DailyTradeCapReachedError, TradeIdeaExpiredError, TradeIdeaUnavailableError };
 
 const accountColumns = "id, name, opening_balance, currency, is_active";
 const tradeColumns = `
@@ -405,7 +404,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     `, [input.tradeIdeaId]);
     const idea = ideaResult.rows[0];
     if (!idea) {
-      throw new Error("Trade idea was not found or is no longer proposed.");
+      throw new TradeIdeaUnavailableError("Trade idea was not found or is no longer proposed.");
     }
     validateQuantity(input.quantity, Number(idea.lot_size));
     if (idea.expires_at && idea.expires_at.getTime() <= input.openedAt.getTime()) {

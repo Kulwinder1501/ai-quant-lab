@@ -5,6 +5,7 @@ import { PostgresCandleRepository } from "../../infrastructure/database/reposito
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
+import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
@@ -330,6 +331,12 @@ async function main(): Promise<void> {
     }
 
     const botReports: Array<Record<string, unknown>> = [];
+    /**
+     * Faults, as opposed to refusals. Collected across every bot and acted on only after the whole
+     * cycle has run, so a genuine problem still marks the job FAILED without costing the
+     * open-position evaluation that used to be skipped when a failure aborted mid-run.
+     */
+    const unexpectedOpenFailures: Array<Record<string, unknown>> = [];
 
     // Execute isolated trading logic for each bot sandbox in DUAL_BOT_SANDBOX
     for (const botSpec of DUAL_BOT_SANDBOX) {
@@ -444,24 +451,49 @@ async function main(): Promise<void> {
 
             const riskNote = ` Risk checks: ${riskDecision.reasonCodes.join(", ")}.`;
 
-            const trade = await openTrade.execute({
-              accountId: account.id,
-              tradeIdeaId,
-              fillPrice: entry.fillPrice,
-              quantity: approvedQuantity,
-              openedAt: now,
-              entryFees: entry.entryFees,
-              entrySlippage: 0,
-              notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}`,
-              orderType: "MARKET",
-              stopLossOverride: entry.stopLossOverride,
-              targetPriceOverride: entry.targetPriceOverride,
-              sideOverride: entry.side,
-              feeBreakdown: entry.feeBreakdown,
-              applyBrokerageFees: false,
-              optionContract: entry.optionContract,
-              regimeObservationId,
-            });
+            let trade;
+            try {
+              trade = await openTrade.execute({
+                accountId: account.id,
+                tradeIdeaId,
+                fillPrice: entry.fillPrice,
+                quantity: approvedQuantity,
+                openedAt: now,
+                entryFees: entry.entryFees,
+                entrySlippage: 0,
+                notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}`,
+                orderType: "MARKET",
+                stopLossOverride: entry.stopLossOverride,
+                targetPriceOverride: entry.targetPriceOverride,
+                sideOverride: entry.side,
+                feeBreakdown: entry.feeBreakdown,
+                applyBrokerageFees: false,
+                optionContract: entry.optionContract,
+                regimeObservationId,
+              });
+            } catch (error) {
+              // Scoped to this one idea. The next idea, the next bot, and every account's
+              // open-position evaluation all still run -- that last one is what an aborted run used
+              // to cost, and it matters more than the trade that was missed.
+              const failure = classifyOpenFailure(error);
+              refused.push({
+                tradeIdeaId, symbol, timeframe,
+                reason: failure.reason,
+                explanation: failure.explanation,
+              });
+              if (!failure.expected) {
+                unexpectedOpenFailures.push({
+                  bot: botSpec.name, tradeIdeaId, symbol, timeframe, explanation: failure.explanation,
+                });
+                console.error(JSON.stringify({
+                  level: "error",
+                  message: "Opening a paper trade failed for a reason this bot does not expect.",
+                  bot: botSpec.name, tradeIdeaId, symbol, timeframe,
+                  explanation: failure.explanation,
+                }));
+              }
+              continue;
+            }
 
             heldContracts.add(key);
             openPositions += 1;
@@ -515,8 +547,18 @@ async function main(): Promise<void> {
       message: "Paper trading dual-bot run complete",
       timestamp: now.toISOString(),
       skippedSeries,
+      unexpectedOpenFailures,
       bots: botReports,
     }, null, 2));
+
+    // Raised at the end rather than where it happened, so the cycle finishes its work first. A
+    // contended or capped idea is not in here; those are refusals and the run stays healthy.
+    if (unexpectedOpenFailures.length > 0) {
+      throw new Error(
+        `${unexpectedOpenFailures.length} paper trade open(s) failed unexpectedly. `
+        + "Every other bot and the open-position evaluation still ran; see unexpectedOpenFailures.",
+      );
+    }
   } finally {
     await database.end();
   }

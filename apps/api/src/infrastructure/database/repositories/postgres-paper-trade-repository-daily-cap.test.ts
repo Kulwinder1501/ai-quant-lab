@@ -1,6 +1,10 @@
 import type { DatabasePool } from "../database.js";
 import { describe, expect, it, vi } from "vitest";
-import { DailyTradeCapReachedError, PostgresPaperTradeRepository } from "./postgres-paper-trade-repository.js";
+import {
+  DailyTradeCapReachedError,
+  PostgresPaperTradeRepository,
+  TradeIdeaUnavailableError,
+} from "./postgres-paper-trade-repository.js";
 
 /**
  * The daily cap is enforced inside the transaction that opens every trade, so these assert on the
@@ -96,6 +100,18 @@ function twoAccountHarness(accounts: Record<string, { cap: number; openedToday: 
   const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
   return { statements, repository: new PostgresPaperTradeRepository(database) };
 }
+
+describe("contended trade ideas at the open boundary", () => {
+  it("throws a typed error when the idea is no longer PROPOSED", async () => {
+    // The paper trading bot classifies on the error type, not the message. A bare Error here would
+    // be classified as an unexpected fault and mark every contended cycle FAILED -- which is exactly
+    // the behaviour this replaced, so a regression would otherwise be invisible.
+    const { repository } = harness({ dailyTradeCap: null, ideaRows: [] });
+
+    await expect(repository.openFromTradeIdea(OPEN_INPUT))
+      .rejects.toThrow(TradeIdeaUnavailableError);
+  });
+});
 
 describe("daily trade cap at the open boundary", () => {
   it("does not count anything when the account has no cap", async () => {
