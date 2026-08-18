@@ -63,6 +63,10 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
         if (text.includes("AS available_capital")) return { rows: [{ available_capital: "100000" }] };
         if (text.includes("INSERT INTO paper_trades")) return { rows: [{ id: "trade-1" }] };
         if (text.includes("UPDATE trade_ideas SET status = 'ACCEPTED'")) return { rows: [{ id: "idea-1" }] };
+        // The one-position-per-idea-per-account check. Answered before the generic paper_trades
+        // branch below, which exists for the trade lookup after the insert; left to fall through it
+        // would report that this account had already traded the idea.
+        if (text.includes("AND trade_idea_id = $2")) return { rows: [] };
         if (text.includes("FROM paper_trades")) {
           return { rows: [{
             id: "trade-1", account_id: "account-1", trade_idea_id: "idea-1",

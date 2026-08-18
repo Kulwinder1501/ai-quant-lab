@@ -212,6 +212,42 @@ connections rather than a fake client. Do not mark them done on the strength of 
 assertion that stands in for 7; it proves the count follows the lock, not that a race resolves to
 one winner.
 
+## The dual-bot A/B was confounded, and every comparison before 2026-08-18 is void
+
+`openFromTradeIdeaWithinTransaction` selected the idea `WHERE status = 'PROPOSED'` and then set it to
+`ACCEPTED`, so one idea became one position **globally** rather than per account. Both bots run
+`momentum-scalp-index`; Classic is iterated first in `DUAL_BOT_SANDBOX`, so it consumed every shared
+signal and Sniper's attempt threw.
+
+Measured 2026-08-18: **no trade idea had ever produced more than one trade.** Over three days Classic
+took 34 `momentum-scalp-index` against Sniper's 12 plus 1 pattern trade. Sniper's 12 are not a random
+half — they are precisely the ideas Classic *declined*, usually because Classic was at
+`maxConcurrentPositions`. So Sniper's sample of the shared base strategy is conditioned on the other
+arm being full.
+
+The `DUAL_BOT_SANDBOX` comment asserted the opposite: "one idea legitimately becomes one position per
+account -- both bots acting on the same signal, which is the comparison." It cited
+`paper_trades_one_per_idea_per_account_idx`, which is genuinely UNIQUE on `(account_id,
+trade_idea_id)` — the schema had always meant per-account. Only this gate disagreed.
+
+**Fixed 2026-08-18.** The gate admits `PROPOSED` or `ACCEPTED`; the `ACCEPTED` write is idempotent;
+and one position per idea per account is now an explicit check under the account lock. That last part
+is not optional — the status gate had been providing per-account idempotence *by accident*, and the
+bot re-reads the same completed bar every cycle, so without it an account would re-attempt an idea it
+already traded until the bar rolled.
+
+`ACCEPTED` was carrying two meanings. "Some account acted on this" has real readers: `saveProposal`'s
+upsert is `DO UPDATE ... WHERE trade_ideas.status = 'PROPOSED'`, so a taken idea's geometry can no
+longer be rewritten under the account holding it, and `trade_ideas_open_idx` already counted
+`ACCEPTED` as open. "This idea is spent" had no reader except the gate. Only the first survives.
+
+**Consequence for the record: discard, do not adjust.** Every Classic-vs-Sniper pattern comparison
+from trades opened before 2026-08-18 is confounded, including the session counts in the Status
+section above (Classic 21 then 12, Sniper 2 then 11). Those are not a nested comparison and no
+correction recovers one from them. Independently, patterns made a 5m scalp monotonically worse in
+backtest on both deep index ETFs across 13.7k-18.6k trades per cell, so the live arm was never the
+strong evidence here.
+
 ## HEAD does not typecheck, and has not since 9da5990
 
 Found while verifying B's commit in a clean worktree. `strategy.ts` and `higher-timeframe-resolver.ts`

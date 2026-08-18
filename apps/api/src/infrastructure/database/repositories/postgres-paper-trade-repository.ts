@@ -13,6 +13,7 @@ import { validateQuantity } from "../../../modules/paper-trading/domain/lot-size
 import { decideDailyTradeCap, istTradingDayWindow } from "../../../modules/paper-trading/domain/daily-trade-cap.js";
 import {
   DailyTradeCapReachedError,
+  TradeIdeaAlreadyTakenError,
   TradeIdeaExpiredError,
   TradeIdeaUnavailableError,
 } from "../../../modules/paper-trading/domain/paper-trade-open-errors.js";
@@ -87,7 +88,12 @@ export interface OpenManualOptionTradeInput extends Omit<OpenPaperTradeInput, "t
 // Re-exported so existing importers keep working; the definitions moved to the domain, because
 // whether a failure is ordinary or a fault decides whether a bot cycle continues and is not a
 // database detail.
-export { DailyTradeCapReachedError, TradeIdeaExpiredError, TradeIdeaUnavailableError };
+export {
+  DailyTradeCapReachedError,
+  TradeIdeaAlreadyTakenError,
+  TradeIdeaExpiredError,
+  TradeIdeaUnavailableError,
+};
 
 const accountColumns = "id, name, opening_balance, currency, is_active";
 const tradeColumns = `
@@ -392,6 +398,26 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       }
     }
 
+    /*
+     * ACCEPTED is admitted, so a second account can act on a signal a first account already took.
+     *
+     * This read `status = 'PROPOSED'` only until 2026-08-18, which made one idea one position
+     * *globally* rather than per account. That silently broke the experiment the two bots exist for:
+     * whichever bot was iterated first consumed every shared signal, so the other's sample of the
+     * shared strategy was exactly the ideas the first had declined -- usually because it was at its
+     * concurrent-position limit. Measured: no idea had ever produced more than one trade.
+     *
+     * `ACCEPTED` was carrying two meanings. "Some account has acted on this" has real readers: the
+     * generator's upsert is `DO UPDATE ... WHERE trade_ideas.status = 'PROPOSED'`, so an accepted
+     * idea's stop and target can no longer be rewritten under the account holding it, and
+     * `trade_ideas_open_idx` already counts ACCEPTED as an open idea. "This idea is spent" had no
+     * reader anywhere except this gate. Only the first meaning survives.
+     *
+     * `FOR UPDATE OF trade_ideas` does the serialising: a second account blocks here until the first
+     * commits, then reads the ACCEPTED row rather than an empty result. EXPIRED and REJECTED stay
+     * excluded, so the expiry check below is still a real bound on how long a signal is actionable --
+     * and every idea in the last day carried one, from two minutes to four hours.
+     */
     const ideaResult = await client.query<LockedTradeIdeaRow & { lot_size: number }>(`
       SELECT
         trade_ideas.id, trade_ideas.instrument_id, trade_ideas.side,
@@ -399,17 +425,40 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         trade_ideas.expires_at, instruments.lot_size
       FROM trade_ideas
       INNER JOIN instruments ON instruments.id = trade_ideas.instrument_id
-      WHERE trade_ideas.id = $1 AND trade_ideas.status = 'PROPOSED'
+      WHERE trade_ideas.id = $1 AND trade_ideas.status IN ('PROPOSED', 'ACCEPTED')
       FOR UPDATE OF trade_ideas
     `, [input.tradeIdeaId]);
     const idea = ideaResult.rows[0];
     if (!idea) {
-      throw new TradeIdeaUnavailableError("Trade idea was not found or is no longer proposed.");
+      throw new TradeIdeaUnavailableError(
+        "Trade idea was not found, or has expired or been rejected.",
+      );
     }
     validateQuantity(input.quantity, Number(idea.lot_size));
     if (idea.expires_at && idea.expires_at.getTime() <= input.openedAt.getTime()) {
+      // Scoped to PROPOSED deliberately. An idea that already produced a position must not be
+      // relabelled EXPIRED: that would record a signal nobody acted on, and the position pointing at
+      // it would contradict its own idea.
       await client.query(`UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`, [idea.id]);
       throw new TradeIdeaExpiredError("Trade idea expired before the simulated opening time.");
+    }
+
+    // One position per idea *per account*, which is what `paper_trades_one_per_idea_per_account_idx`
+    // has always said. This check is not decoration: the status gate above was doing this job by
+    // accident, and admitting ACCEPTED removes that. The bot re-reads the same completed bar every
+    // cycle and the generator hands back the same idea row, so without this an account would
+    // re-attempt an idea it already traded on every cycle until the bar rolled -- reaching the unique
+    // index and surfacing as a raw constraint violation, which reads as a fault rather than a repeat.
+    //
+    // Race-safe because the account row is already held `FOR UPDATE` from the capacity gate above, so
+    // two concurrent opens on one account serialise here; two different accounts never contend.
+    const existingForAccount = await client.query<{ id: string }>(`
+      SELECT id FROM paper_trades WHERE account_id = $1 AND trade_idea_id = $2 LIMIT 1
+    `, [input.accountId, idea.id]);
+    if (existingForAccount.rows[0]) {
+      throw new TradeIdeaAlreadyTakenError(
+        `Account ${account.name} already holds a position opened from this trade idea.`,
+      );
     }
 
     const stopLoss = input.stopLossOverride ?? toNumber(idea.stop_loss, "trade idea stop loss");
@@ -486,12 +535,17 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       notes: input.notes,
     }), input.openedAt, eventType]);
 
+    // Idempotent: the second account to act on a signal finds the idea already ACCEPTED, which is
+    // now the ordinary path rather than an error. Scoped to PROPOSED it would have thrown here after
+    // the INSERT had already run, rolling back a legitimate position at the very last statement.
     const accepted = await client.query<{ id: string }>(`
       UPDATE trade_ideas SET status = 'ACCEPTED'
-      WHERE id = $1 AND status = 'PROPOSED'
+      WHERE id = $1 AND status IN ('PROPOSED', 'ACCEPTED')
       RETURNING id
     `, [idea.id]);
     if (!accepted.rows[0]) {
+      // Unreachable while the row lock taken above is held for the whole transaction. Kept as an
+      // assertion: it fires only if some future writer changes the status without the lock.
       throw new Error("Trade idea could not be marked as accepted.");
     }
 

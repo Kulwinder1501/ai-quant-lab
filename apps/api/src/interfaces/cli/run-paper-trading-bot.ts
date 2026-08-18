@@ -99,11 +99,18 @@ export interface BotSandboxSpec {
  * took no trade at all that day while Classic took eleven, so the comparison had one arm with a
  * sample of zero.
  *
- * Overlapping strategies are safe and are the point. `trade_idea_id` on `paper_trades` carries no
- * uniqueness constraint and `prepare-option-entry` has no consumed-guard, so one idea legitimately
- * becomes one position per account -- both bots acting on the same signal, which is the
- * comparison. Every per-bot limit is already scoped to its account: `heldContracts`,
- * `MAX_CONCURRENT_POSITIONS`, and the risk state lookup.
+ * Overlapping strategies are safe and are the point: one idea becomes one position per account, so
+ * both bots act on the same signal, which is the comparison. Every per-bot limit is already scoped to
+ * its account -- `heldContracts`, `MAX_CONCURRENT_POSITIONS`, and the risk state lookup -- and
+ * `paper_trades_one_per_idea_per_account_idx` is UNIQUE on `(account_id, trade_idea_id)`, i.e. per
+ * account rather than globally.
+ *
+ * That was aspirational until 2026-08-18. This comment previously justified it with "`trade_idea_id`
+ * on `paper_trades` carries no uniqueness constraint", which was wrong twice over: the index above
+ * exists, and the real obstacle was elsewhere -- `openFromTradeIdeaWithinTransaction` required the
+ * idea to be `PROPOSED` and then set it to `ACCEPTED`, so the first bot to open consumed the signal
+ * and the second was refused. Sniper's shared-strategy trades were therefore the ideas Classic had
+ * declined, and every comparison from before that date is confounded rather than merely noisy.
  *
  * The arms are now exactly nested: Classic is the base strategy, Sniper is the base strategy plus
  * patterns. Nothing else differs, so a difference in their results is attributable to patterns

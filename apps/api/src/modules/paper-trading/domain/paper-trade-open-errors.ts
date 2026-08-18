@@ -17,13 +17,24 @@
 export class TradeIdeaExpiredError extends Error {}
 
 /**
- * The idea is gone or no longer `PROPOSED`, so this account cannot open from it.
+ * The idea is gone, or has expired or been rejected, so no account can open from it.
  *
- * Named so callers do not have to match on message text. This does not make two accounts able to act
- * on one idea -- that is a separate design question about where `ACCEPTED` belongs. It only stops the
- * loser of the race from being reported as a fault.
+ * Named so callers do not have to match on message text. Since 2026-08-18 this no longer fires merely
+ * because another account got there first: `ACCEPTED` is admitted at the gate, so both bots can act
+ * on a shared signal. What remains is a genuinely unusable idea.
  */
 export class TradeIdeaUnavailableError extends Error {}
+
+/**
+ * This account already holds a position opened from this idea.
+ *
+ * The ordinary case, not a fault: the bot re-evaluates the same completed bar on every cycle and the
+ * generator hands back the same idea row, so an account that traded a signal will be offered it again
+ * until the bar rolls. One position per idea per account is the rule
+ * `paper_trades_one_per_idea_per_account_idx` has always encoded; this reports reaching it as a
+ * repeat rather than letting it surface as a unique-constraint violation.
+ */
+export class TradeIdeaAlreadyTakenError extends Error {}
 
 /**
  * The account has already opened its permitted number of trades for this IST trading day.
@@ -55,6 +66,9 @@ export function classifyOpenFailure(error: unknown): OpenFailureClassification {
         + "Expected while two bots share a strategy; it is contention, not a fault.",
       expected: true,
     };
+  }
+  if (error instanceof TradeIdeaAlreadyTakenError) {
+    return { reason: "TRADE_IDEA_ALREADY_TAKEN", explanation: error.message, expected: true };
   }
   if (error instanceof TradeIdeaExpiredError) {
     return {

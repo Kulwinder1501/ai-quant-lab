@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyOpenFailure,
   DailyTradeCapReachedError,
+  TradeIdeaAlreadyTakenError,
   TradeIdeaExpiredError,
   TradeIdeaUnavailableError,
 } from "./paper-trade-open-errors.js";
@@ -19,6 +20,23 @@ describe("classifyOpenFailure", () => {
     );
     expect(classification.reason).toBe("TRADE_IDEA_UNAVAILABLE");
     expect(classification.expected).toBe(true);
+  });
+
+  it("treats an account re-offered an idea it already traded as an ordinary outcome", () => {
+    // Fires on every bot cycle until the bar rolls, because the generator keeps returning the same
+    // idea row for the same completed bar. Classified as a fault it would fail most runs.
+    const classification = classifyOpenFailure(
+      new TradeIdeaAlreadyTakenError("Account AutoBot-Sniper already holds a position from this idea."),
+    );
+    expect(classification.reason).toBe("TRADE_IDEA_ALREADY_TAKEN");
+    expect(classification.expected).toBe(true);
+  });
+
+  it("keeps taken-by-this-account distinct from unusable-for-everyone", () => {
+    // These had the same reason code before the gate admitted ACCEPTED, and collapsing them again
+    // would hide whether the shared-idea fix is actually working in the live reports.
+    expect(classifyOpenFailure(new TradeIdeaAlreadyTakenError("x")).reason)
+      .not.toBe(classifyOpenFailure(new TradeIdeaUnavailableError("y")).reason);
   });
 
   it("treats an expired idea as an ordinary outcome", () => {
