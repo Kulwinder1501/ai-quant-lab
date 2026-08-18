@@ -66,6 +66,7 @@ import { expandAdditionalPatternsMigration } from "./065-expand-additional-patte
 import { paperAccountDailyTradeCapMigration } from "./066-paper-account-daily-trade-cap.js";
 import { regimeObservationsMigration } from "./067-regime-observations.js";
 import { candidateLedgerMigration } from "./068-candidate-ledger.js";
+import { optionTickRejectedVolumeMigration } from "./069-option-tick-rejected-volume.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -136,4 +137,5 @@ export const migrations = [
   paperAccountDailyTradeCapMigration,
   regimeObservationsMigration,
   candidateLedgerMigration,
+  optionTickRejectedVolumeMigration,
 ];

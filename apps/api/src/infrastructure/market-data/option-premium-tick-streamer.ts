@@ -104,10 +104,32 @@ export class OptionPremiumTickStreamer {
       // and the next tick's data supersedes this one anyway.
       if (this.flushing) return;
       this.flushing = true;
-      void this.flush().finally(() => { this.flushing = false; });
+      // `.finally` does not handle a rejection, so this was `void`-ing a rejected promise: on
+      // 2026-08-18 one impossible volume from the feed became an unhandled rejection, killed the
+      // whole scheduler process, and did it again on restart -- 25 times, taking every other
+      // scheduled job down with it for the rest of the session.
+      //
+      // Reported and dropped rather than retried. The next tick supersedes this one, so a failed
+      // flush costs a few seconds of the series; stopping the process costs the session.
+      void this.flush()
+        .catch((error: unknown) => {
+          console.error(JSON.stringify({
+            level: "error",
+            message: "An option premium tick flush failed; the next cycle will carry on.",
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        })
+        .finally(() => { this.flushing = false; });
     }, this.options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);
     this.resubscribeTimer = setInterval(() => {
-      void this.refreshSubscriptions();
+      // Same hazard as the flush above: an unhandled rejection here would end the process.
+      void this.refreshSubscriptions().catch((error: unknown) => {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Refreshing option premium subscriptions failed; the existing set stays in place.",
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
     }, this.options.resubscribeIntervalMs ?? DEFAULT_RESUBSCRIBE_INTERVAL_MS);
   }
 

@@ -12,6 +12,13 @@ export interface OptionPremiumTickRow {
   bid: number | null;
   ask: number | null;
   volume: number | null;
+  /**
+   * The reported volume when it was rejected as impossible, otherwise null.
+   *
+   * Never set at the same time as `volume`. See `normaliseTradedVolume`: a negative cumulative count
+   * is a wrapped counter, and it is recorded rather than repaired or thrown away.
+   */
+  volumeRaw: number | null;
   underlyingValue: number | null;
 }
 
@@ -35,6 +42,9 @@ function toTick(row: Record<string, unknown>): OptionPremiumTickRow {
     bid: row.bid === null ? null : Number(row.bid),
     ask: row.ask === null ? null : Number(row.ask),
     volume: row.volume === null ? null : Number(row.volume),
+    // Read back unchanged. A reader that silently substituted the rejected figure for the trusted one
+    // would undo the whole point of keeping them apart.
+    volumeRaw: row.volume_raw === null || row.volume_raw === undefined ? null : Number(row.volume_raw),
     underlyingValue: row.underlying_value === null ? null : Number(row.underlying_value),
   };
 }
@@ -50,8 +60,8 @@ export class PostgresOptionPremiumTickRepository {
         `
         INSERT INTO option_premium_ticks (
           underlying_symbol, provider, observed_at, expiry_date, strike_price, option_type,
-          provider_symbol, last_price, bid, ask, volume, underlying_value
-        ) VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8,$9,$10,$11,$12)
+          provider_symbol, last_price, bid, ask, volume, underlying_value, volume_raw
+        ) VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (underlying_symbol, observed_at, expiry_date, strike_price, option_type)
         DO NOTHING
         `,
@@ -68,6 +78,7 @@ export class PostgresOptionPremiumTickRepository {
           tick.ask,
           tick.volume,
           tick.underlyingValue,
+          tick.volumeRaw,
         ],
       );
       if ((result.rowCount ?? 0) > 0) inserted += 1;

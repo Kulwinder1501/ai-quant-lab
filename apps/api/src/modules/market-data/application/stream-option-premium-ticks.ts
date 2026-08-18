@@ -1,5 +1,6 @@
 import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
 import type { OptionPremiumTickRow } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
+import { normaliseTradedVolume } from "../domain/traded-volume.js";
 
 /**
  * One quote held in memory between flushes, with the instant it arrived.
@@ -61,6 +62,11 @@ export function selectFlushableTicks(input: SelectFlushableTicksInput): OptionPr
     const lastFlushed = input.lastFlushedAt.get(key);
     if (lastFlushed !== undefined && observedAt <= lastFlushed) continue;
 
+    // Normalised at the one place every tick row is built, rather than at the insert. A negative
+    // cumulative volume once reached the database, was correctly refused by a CHECK, and took the
+    // scheduler down 25 times over; the value has no business getting that far.
+    const tradedVolume = normaliseTradedVolume(buffered.volume);
+
     rows.push({
       underlyingSymbol: contract.underlyingSymbol,
       provider: input.provider,
@@ -72,7 +78,8 @@ export function selectFlushableTicks(input: SelectFlushableTicksInput): OptionPr
       lastPrice: buffered.lastPrice,
       bid: buffered.bid,
       ask: buffered.ask,
-      volume: buffered.volume,
+      volume: tradedVolume.volume,
+      volumeRaw: tradedVolume.rejectedRaw,
       underlyingValue: input.underlyingValues.get(contract.underlyingSymbol) ?? null,
     });
   }

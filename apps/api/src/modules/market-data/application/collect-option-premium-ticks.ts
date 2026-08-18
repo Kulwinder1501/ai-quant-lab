@@ -4,6 +4,7 @@ import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-tok
 import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
 import { selectAtmPremiumContracts } from "../domain/atm-premium-contracts.js";
 import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
+import { normaliseTradedVolume } from "../domain/traded-volume.js";
 
 export interface CollectOptionPremiumTicksInput {
   underlyingSymbols: readonly string[];
@@ -92,6 +93,7 @@ export class CollectOptionPremiumTicks {
       const ticks = contracts.flatMap((contract) => {
         const quote = richQuotes.get(contract.providerSymbol.toUpperCase());
         if (!quote) return [];
+        const tradedVolume = normaliseTradedVolume(quote.volume);
         return [{
           underlyingSymbol: contract.underlyingSymbol,
           provider: FYERS_PROVIDER_ID,
@@ -103,7 +105,10 @@ export class CollectOptionPremiumTicks {
           lastPrice: quote.lastPrice,
           bid: quote.bid,
           ask: quote.ask,
-          volume: quote.volume,
+          // The polling path carries the same exposure as the socket: the provider's traded-volume
+          // counter can arrive wrapped, and an impossible value must not reach a CHECK constraint.
+          volume: tradedVolume.volume,
+          volumeRaw: tradedVolume.rejectedRaw,
           // Same HTTP observation as the option bid/ask. Reusing the 15-minute chain spot here
           // made the dense series look fresh while trap detection was anchored to a stale index.
           underlyingValue: liveUnderlying !== null && liveUnderlying > 0 ? liveUnderlying : null,
