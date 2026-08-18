@@ -119,28 +119,62 @@ post-fix history exist. A cap tight enough to bind is a strategy change wearing 
 
 ### B. Append-only regime record
 
-Keep `StrategistDecision` as a point-in-time observation with **no read path into execution**. Its
-value is research: it lets a later question — did trades opened in BEARISH regimes fare worse? — be
-answered without re-deriving regime, which is the kind of re-derivation that produces a different
-answer each time.
+**Built 2026-08-18 (`2a175d1`), and smaller than specified.** The intent was right: a point-in-time
+observation with **no read path into execution**, whose value is research — it lets a later question,
+did trades opened in a HIGH_VOL regime fare worse, be answered without re-deriving regime.
 
-Keep exactly as specified, because this part was right:
+`StrategistDecision` does not appear, because the regime it would have carried already existed twice
+and both readings were being thrown away:
 
-- `evaluationAsOf` as the time source rather than wall-clock, so backtest, replay, and live agree.
-- The boundary rule: at `evaluationAsOf === validUntil` the decision is already expired.
-- A future decision (`createdAt` or `asOf` after `evaluationAsOf`) is **absent**, not expired.
-- Scope precedence instrument+timeframe → instrument → market.
+- `regime.ts` derives India VIX close over its own SMA(20) into `HIGH_VOL | LOW_VOL` per bar, inside
+  `PostgresStrategyMarketContextRepository`. Every caller dropped it, `GenerateTradeIdeas` included.
+- `PostgresRiskStateRepository.findVolatilityRegime` reads the PRODUCTION volatility model's
+  `CONTRACTION | STABLE | EXPANSION` at open time for the risk gate, then drops it.
 
-One fix to the repository: `findLatestActive` needs a total order. Append-only means several rows
-can be active at one precedence level, and the codebase convention is a full tiebreak chain
-(`ORDER BY … DESC, created_at DESC, id DESC`). Without the `id` tiebreak two decisions sharing an
-`as_of` resolve arbitrarily — the scope-precedence test passes while live behaviour flaps.
+So the gap was never a missing regime. It was that neither reading survived the run, and both derive
+from inputs that move: `candles` and `indicator_snapshots` get backfilled and recomputed under new
+algorithm versions, and the model reading is filtered to whichever model is in PRODUCTION *now*, so
+promoting a model silently changes what a past bar "was". Re-deriving months later answers a
+different question than the bot answered at the time, and the two can disagree without anything
+being wrong. That is the whole case for storing it.
 
-Executors stamp `strategist_decision_id` on the trade for (A)'s counting and (B)'s audit trail;
-that is their entire involvement. The column is nullable UUID, indexed, added in a numbered
-TypeScript migration under `apps/api/src/infrastructure/database/migrations/` (next is `066-`) and
-registered in that directory's `index.ts` — not a SQL file under `apps/api/migrations/`, which does
-not exist.
+**What was dropped from the spec, and why.** `validUntil`, the expiry boundary, and scope precedence
+instrument+timeframe → instrument → market are all read-path machinery for choosing which decision is
+current — and there is no read path. The observation is taken for the exact `(instrument, timeframe,
+bar)` being evaluated, so there is nothing to select among and no TTL to expire. `findLatestActive`
+and its total-order tiebreak go with them. Verification items 2, 4 and 5 tested that machinery and
+are dropped, not deferred.
+
+The name went too. A regime observation called a "strategist decision" is exactly the naming that
+lets an inert field read as a working feature.
+
+**Item 3 survives, and it is the one rule that still bites.** A reading whose evidence postdates the
+observation is **absent**, not late: `buildRegimeObservation` drops it and a CHECK constraint
+enforces it independently, because a future reading stored as though it were visible is worse than no
+reading — every later analysis would trust it, and nothing in the row would show the clock was wrong.
+
+**Unknown is recorded as a reading.** Both sources return null for "cannot tell", and a
+`completeness` column keeps observed-and-unclassifiable distinct from never-observed — a distinction
+no `WHERE regime IS NULL` can recover. The value ratio is stored beside the label so a later
+threshold change stays auditable, and the source constants travel with every row: `HIGH_VOL` means
+"above 1.0 against SMA(20) of INDIAVIX under ta-v1", and changing any of those changes what a stored
+label meant.
+
+**What was built:** `regime-observation.ts` (domain), migration `067-regime-observations`
+(append-only table plus a nullable `paper_trades.regime_observation_id`),
+`PostgresRegimeObservationRepository` (`record` is idempotent and first-writer-wins on the bar),
+`regime` surfaced on `GenerateTradeIdeasResult`, and the recording wired into
+`run-paper-trading-bot.ts` — once per series, so both bots stamp the same observation rather than
+double-counting the bar.
+
+**Behaviour is unchanged, by construction.** The column is nullable, nothing gates on it, and a
+failure to record leaves the trade unstamped rather than unopened. A research table must never decide
+whether the bot trades.
+
+Verified: the five schema guards against the live database, and nine mutations each killing a named
+test. Two of those mutations were wrong on the first pass — one edited a doc comment instead of the
+SQL, one produced `&& &&` and failed to compile while looking like a kill — so both anchors now take
+the surrounding syntax.
 
 ## What is dropped unless a sizing path is built first
 
@@ -167,15 +201,30 @@ sessions is not a distribution.
 Session counts so far: Classic 21 then 12, Sniper 2 then 11. The Sniper's jump is the
 `pattern_detections` fix landing, not a strategy change — yesterday's 2 measured an empty table.
 
-**Section B has not been started.** No `StrategistDecision` artefact exists in the codebase, and it
-changes no trading behaviour by design, so it stays optional. After the confluence result, it is
-worth building only when there is a question you actually want it to answer.
+**Section B is built and deployed to the database** (`2a175d1`, migration applied). It is recording
+nothing yet: the scheduler runs an image built before this landed, so observations begin at the next
+rebuild. Section B above records what it became and what was dropped.
 
-Verification: items 6, 8, 10, 11 done; 1-5 belong to Section B; **7 and 9 remain open and cannot be
-closed with the current harness** — a real race and a mid-transaction insert failure both need two
-live connections rather than a fake client. Do not mark them done on the strength of the ordering
+Verification: items 6, 8, 10, 11 done; 1 and 3 done as part of B; **2, 4 and 5 are dropped** with the
+validity-window and scope-precedence machinery they tested; **7 and 9 remain open and cannot be closed
+with the current harness** — a real race and a mid-transaction insert failure both need two live
+connections rather than a fake client. Do not mark them done on the strength of the ordering
 assertion that stands in for 7; it proves the count follows the lock, not that a race resolves to
 one winner.
+
+## HEAD does not typecheck, and has not since 9da5990
+
+Found while verifying B's commit in a clean worktree. `strategy.ts` and `higher-timeframe-resolver.ts`
+both `import ... from "./multi-timeframe-confluence.js"`, and that file is **untracked** — it exists
+only in the working tree. So the committed tree has two TS2307 errors that no local check sees,
+because every local run compiles against the working copy where the file is present.
+
+`higher-timeframe-resolver.ts` is mine; committing it against an uncommitted module was my error. The
+fix is not mine to make: `multi-timeframe-confluence.ts`, both `momentum-scalp-pattern-strategy` files
+and the other untracked pattern-recognition modules need to land together. Until they do, a fresh
+clone cannot build.
+
+Section B's own commit adds no errors — the same two, and only those two, appear at `HEAD~1`.
 
 ## Verification plan
 
