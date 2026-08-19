@@ -29,6 +29,7 @@
     "trading:paper:bot": "tsx src/interfaces/cli/run-paper-trading-bot.ts",
     "research:settle-candidates": "tsx src/interfaces/cli/settle-candidates.ts",
     "research:experiment-a": "tsx src/interfaces/cli/run-experiment-a.ts",
+    "research:stop-sweep": "tsx src/interfaces/cli/run-stop-multiple-sweep.ts",
     "agent:tick": "tsx src/interfaces/cli/run-agent-tick.ts",
     "measure:directional-scorer": "tsx src/interfaces/cli/measure-directional-scorer.ts",
     "measure:effective-sample-size": "tsx src/interfaces/cli/measure-effective-sample-size.ts",
