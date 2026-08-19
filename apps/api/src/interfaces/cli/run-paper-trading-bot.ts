@@ -96,31 +96,49 @@ export interface BotSandboxSpec {
 /**
  * Two scalping sandboxes whose only intended difference is candlestick and price-action patterns.
  *
- * Sniper deliberately carries Classic's `momentum-scalp-index` as well as the pattern strategies,
- * because the question being asked is "do patterns add anything to the strategy already running",
- * and that is only answerable if both bots see the same base signal. It listed the pattern
- * strategy alone until 2026-08-17, which made the two arms disjoint rather than nested: Sniper
- * took no trade at all that day while Classic took eleven, so the comparison had one arm with a
- * sample of zero.
+ * ## The arms are disjoint, and the question is "instead of", not "in addition to"
  *
- * Overlapping strategies are safe and are the point: one idea becomes one position per account, so
- * both bots act on the same signal, which is the comparison. Every per-bot limit is already scoped to
- * its account -- `heldContracts`, `MAX_CONCURRENT_POSITIONS`, and the risk state lookup -- and
- * `paper_trades_one_per_idea_per_account_idx` is UNIQUE on `(account_id, trade_idea_id)`, i.e. per
- * account rather than globally.
+ * Classic runs the base scalp. Sniper runs the pattern strategies and nothing else. A difference
+ * between them therefore answers "do the pattern strategies beat the base strategy", not "do patterns
+ * add to it".
  *
- * That was aspirational until 2026-08-18. This comment previously justified it with "`trade_idea_id`
- * on `paper_trades` carries no uniqueness constraint", which was wrong twice over: the index above
- * exists, and the real obstacle was elsewhere -- `openFromTradeIdeaWithinTransaction` required the
- * idea to be `PROPOSED` and then set it to `ACCEPTED`, so the first bot to open consumed the signal
- * and the second was refused. Sniper's shared-strategy trades were therefore the ideas Classic had
- * declined, and every comparison from before that date is confounded rather than merely noisy.
+ * The additive question is the more interesting one and it is what this file attempted from
+ * 2026-08-17, with Sniper carrying `momentum-scalp-index` as well so both arms saw the same base
+ * signal. It was abandoned on 2026-08-19 because it is not measurable here, and the reason is
+ * structural rather than a matter of tuning:
  *
- * The arms are now exactly nested: Classic is the base strategy, Sniper is the base strategy plus
- * patterns. Nothing else differs, so a difference in their results is attributable to patterns
- * and to nothing else. `trend-breakout` was removed from Classic on 2026-08-17 to get there -- it
- * is a 15m-and-slower trend strategy rather than a scalp, so it was both an asymmetry between the
- * arms and outside the band these bots own.
+ * Both strategy families fire on the same instrument and timeframe, so `prepare-option-entry`
+ * resolves their signals to the *same* ATM contract. Sniper is therefore already holding the contract
+ * from its base trade when the pattern signal arrives, and `heldContracts` refuses it as
+ * ALREADY_HOLDING. Measured over the two sessions the nested arrangement actually ran: pattern
+ * strategies raised 31 ideas on 08-18 and 4 on 08-19, of which Sniper converted **2 and 0**. Of the
+ * four refusals recorded on 08-19, three were ALREADY_HOLDING. The treatment arm was being absorbed
+ * into positions it already held, so the experiment had a control and almost no treatment.
+ *
+ * Note what it was *not*: there were zero POSITION_LIMIT refusals, so this was never
+ * `MAX_CONCURRENT_POSITIONS` crowding the pattern trades out. Loosening the contract guard would
+ * "fix" it only by letting one account hold two positions in the same contract with different stops,
+ * which is the thing that guard exists to prevent.
+ *
+ * ## Why disjoint is safe now, having failed before
+ *
+ * Sniper listed the pattern strategies alone until 2026-08-17 and took **no trade at all** that day
+ * against Classic's eleven, which is what motivated nesting. That was not a flaw in the disjoint
+ * design: `pattern_detections` was empty on 1m/5m/15m, so the pattern strategies reported
+ * RULES_NOT_MET against a table with nothing in it. Detection has since been fixed and is healthy
+ * (2,145 detections on 1m and 529 on 5m over the last two sessions), and the strategies now raise
+ * ideas of their own. Sniper will get a thin sample rather than an empty one -- and, unlike under
+ * nesting, it will get *all* of it instead of losing three signals in four to the contract guard.
+ *
+ * The other objection to disjoint arms is also gone. Before 2026-08-18,
+ * `openFromTradeIdeaWithinTransaction` required an idea to be `PROPOSED` and then set it to
+ * `ACCEPTED`, so whichever bot ran first consumed a shared signal outright. Disjoint arms never share
+ * an idea, so that gate no longer bears on this either way -- but it is why every Classic-vs-Sniper
+ * comparison from before that date is confounded rather than merely noisy, and should be discarded.
+ *
+ * `trend-breakout` was removed from Classic on 2026-08-17 -- it is a 15m-and-slower trend strategy
+ * rather than a scalp, so it was both an asymmetry between the arms and outside the band these bots
+ * own.
  *
  * That leaves `trend-breakout` traded by no bot. It is still registered, so idea generation still
  * runs it and its ideas remain available to research and backtesting; the autonomous agent does
@@ -136,8 +154,9 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   },
   {
     name: "AutoBot-Sniper",
+    // Patterns only. `momentum-scalp-index` was here from 2026-08-17 to 2026-08-19 to make the arms
+    // nested; see above for why that could not be measured.
     allowedStrategies: [
-      "momentum-scalp-index",
       "momentum-scalp-pattern",
       "momentum-scalp-pattern-v2",
     ],
