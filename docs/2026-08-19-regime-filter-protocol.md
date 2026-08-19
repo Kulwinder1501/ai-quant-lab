@@ -4,40 +4,98 @@ Supersedes the frozen "Base Architectures & Regime Filtering" plan. The hypothes
 experimental design is rebuilt, because three of the original's five frozen periods have no data and
 the one period that does was designated untouched.
 
-Everything below was measured against the live v2 database on 2026-08-19.
+Everything below was measured against the live v2 database on 2026-08-19, **after** correcting a
+grading defect described in §1b. Numbers taken before that correction were measured on a biased subset
+and are shown only for comparison.
 
-## 1. The hypothesis survives, and it is narrower than it looked
+## 1. The hypothesis survives, and it is weaker than the first measurement suggested
 
-The original plan's audit was right on every point I could check. The volatility model has real skill,
-it is concentrated in `CONTRACTION`, and it is not the base-rate artifact that killed the
-triple-barrier work:
+The volatility model has real skill and it is not the base-rate artifact that killed the triple-barrier
+work. But the first pass overstated it, and the corrected picture reshuffles which label is strongest:
 
-| prediction | accuracy | realized base rate | edge |
-|---|---|---|---|
-| CONTRACTION | 55.9% (n=111) | 35.5% | **+20.4pp** |
-| STABLE | 43.8% (n=121) | 32.5% | +11.3pp |
-| EXPANSION | 39.3% (n=300) | 32.0% | +7.3pp |
+| prediction | accuracy | realized base rate | edge | edge before correction |
+|---|---|---|---|---|
+| STABLE | 51.3% (n=156) | 35.7% | **+15.6pp** | +11.3pp |
+| CONTRACTION | 46.2% (n=208) | 34.6% | **+11.6pp** | +20.4pp |
+| EXPANSION | 36.2% (n=481) | 29.7% | +6.5pp | +7.3pp |
 
-The headline cell holds up under a strict test:
+`CONTRACTION`'s overall edge nearly halved once the grading bias was removed, and `STABLE` is now the
+strongest label. The protocol still targets `CONTRACTION` because it is the one with a high-confidence
+cell worth acting on, but the reshuffle is a warning that these rankings are not yet stable.
 
-| | |
-|---|---|
-| CONTRACTION at confidence ≥ 0.60 | **11 / 12** = 0.917 |
-| exact one-sided binomial vs the 0.355 base rate | **p = 9.2 × 10⁻⁵** |
-| Bonferroni ×10, for the cells that were scanned | p = 9.2 × 10⁻⁴ |
-| Wilson 95% interval | **[0.646, 0.985]** |
+The headline cell, corrected:
 
-So the effect is not eyeballed and it is not the majority class. It is the first thing in this system
-that clears a base-rate comparison and a multiplicity penalty together.
+| | before (biased) | **after (corrected)** |
+|---|---|---|
+| CONTRACTION at confidence ≥ 0.60 | 11 / 12 = 0.917 | **16 / 23 = 0.696** |
+| exact one-sided binomial vs base | p = 9.2 × 10⁻⁵ | **p = 6.7 × 10⁻⁴** |
+| Bonferroni ×10 for scanned cells | p = 9.2 × 10⁻⁴ | p = 6.7 × 10⁻³ |
+| Wilson 95% interval | [0.646, 0.985] | **[0.491, 0.844]** |
 
-Three limits belong next to it, permanently:
+**The effect survived doubling the sample and removing a bias, which most hypotheses in this system
+have not.** It remains the single best signal available here. But plan against 69.6%, not 91.7%, and
+note the Wilson floor is now 0.491 — honestly, "somewhere between coin-flip-plus and quite good."
 
-- **n = 12, over 15 calendar days.** The prediction stream begins 2026-08-04. "91.7%" honestly reads
-  as "somewhere between two-thirds and near-certain."
-- **It fires 0.80 times per day.** Against a strategy taking ~14 trades a day this is a small
-  defensive trim, not a transformation. Reaching n = 100 takes ~125 trading sessions.
+Split by instrument it is currently a **BANKNIFTY** result:
+
+| instrument | high-confidence CONTRACTION | exact p |
+|---|---|---|
+| BANKNIFTY | 12 / 17 = 70.6% | 2.7 × 10⁻³ |
+| NIFTY50 | 4 / 6 = 66.7% | **0.113 — not significant** |
+
+BANKNIFTY's pre-correction 9/9 was the mid-session subset (§1c).
+
+Three limits belong next to all of this, permanently:
+
+- **n = 23.** The prediction stream begins 2026-08-04.
+- **It is a small defensive trim, not a transformation.** Against a strategy taking ~14 trades a day,
+  reaching n = 100 in this cell takes on the order of 100+ trading sessions.
 - **The confidence scale is uncalibrated.** A 0.60 cut is a threshold on a number nothing has
-  calibrated, so the threshold itself is a free parameter and must be frozen before use, not tuned.
+  calibrated, so the threshold is a free parameter and must be frozen before use, never tuned.
+
+## 1b. The grading defect, and why the first numbers were wrong
+
+215 predictions carried permanent `Trailing window has N of 5 required bars` verdicts that had been
+recorded while the 15m series still had gaps. The gaps were later repaired — every recent session now
+holds exactly 25 bars — but `recordUnsettleable` is terminal, so those rows were never retried. A stale
+verdict standing on repaired data.
+
+Clearing only the trailing-window reasons and re-running settlement (the `INTRADAY_SESSION_ENDED_BEFORE_HORIZON`
+verdicts were left alone, being genuinely permanent) gave:
+
+```
+examined 680 → settled 57, re-marked unsettleable 158, notYetMatured 465
+```
+
+57 recovered, 158 correctly re-confirmed as truly session-truncated. Every number in §1 above moved as
+a result. There was **no** backlog of matured-but-ungraded predictions — an earlier claim to that
+effect came from filtering `realized_label IS NULL`, which also matches rows already adjudicated
+unsettleable. All 465 genuinely-pending rows have source candles from the last four sessions and are
+legitimately waiting.
+
+**Operational note:** an unsettleable verdict is permanent by design, so any future repair to a candle
+series should be followed by clearing the affected verdicts and re-running settlement. Otherwise the
+repair is invisible to every model already graded against the broken data.
+
+## 1c. The signal is only measurable mid-session, and that is structural
+
+After the correction, the settled 15m sample still spans exactly **10:30 – 14:00**. The recovered
+predictions all fell *inside* that window; it did not widen.
+
+The boundary is the label rule, not the data. For intraday timeframes both windows are confined to one
+IST session, so a bar before 10:30 can never have 5 same-session trailing bars, and a bar after 14:00
+can never have 5 forward bars. 223 predictions are permanently ungradeable for exactly this reason.
+
+So a `CONTRACTION` call can only ever be validated across the calmest 3.5 hours of a 6.25-hour session
+— which is precisely when ranges naturally stay tight. Applying the filter all session while validating
+it only mid-session would be testing one distribution and deploying on another.
+
+**Letting the trailing window cross the session boundary is rejected.** It would unlock the open, but
+overnight gaps would inflate the trailing range and bias the label toward CONTRACTION — manufacturing
+the very effect under test. The same-session rule is correct; it is merely restrictive.
+
+**Frozen constraint: the filter applies only to signals between 10:30 and 14:00 IST.** Outside that
+window it does not act, because outside that window it has never been measured.
 
 ## 2. The binding constraint: no instrument has both the history and the signal
 
@@ -59,17 +117,22 @@ exist before 2026.
 **Regime predictions** begin 2026-08-04 and exist nowhere earlier: NIFTY50 650 raised / 222 settled,
 BANKNIFTY 362 / 127, NIFTYBEES 162 / 123, twenty equities at 39 / 3 each.
 
-**And the signal does not replicate onto the deep series.** This is the decisive measurement:
+**And the signal does not replicate onto the deep series.** This is the decisive measurement,
+post-correction:
 
-| instrument | CONTRACTION, any confidence | vs 35.5% base |
-|---|---|---|
-| BANKNIFTY | 28/47 = **59.6%** | +24pp |
-| NIFTY50 | 27/49 = **55.1%** | +20pp |
-| **NIFTYBEES** | 3/11 = **27.3%** | **−8pp, below base** |
+| instrument | CONTRACTION, any confidence | vs 34.6% base | before correction |
+|---|---|---|---|
+| NIFTY50 | 48/91 = **52.7%** | +18pp | 27/49 = 55.1% |
+| BANKNIFTY | 40/97 = **41.2%** | +7pp | 28/47 = 59.6% |
+| **NIFTYBEES** | 4/16 = **25.0%** | **−10pp, below base** | 3/11 = 27.3% |
 
-The 11/12 headline cell is **9/9 BANKNIFTY plus 2/3 NIFTY50, and zero NIFTYBEES**. So the skill lives
-on the two indices — the series with 153–175 sessions of 5m — while the 1,888-session ETF series shows
-the effect pointing the wrong way on the sample it has.
+The high-confidence cell is **12/17 BANKNIFTY plus 4/6 NIFTY50, and zero NIFTYBEES**. So the skill
+lives on the two indices — the series with 153–175 sessions of 5m — while the 1,888-session ETF series
+shows the effect pointing the wrong way on the sample it has.
+
+Note the instability across the correction: at any confidence BANKNIFTY fell from 59.6% to 41.2% while
+NIFTY50 held near 53%, yet in the high-confidence cell BANKNIFTY is the stronger of the two. Which index
+is "best" is not yet a stable fact, and no design decision should rest on it.
 
 That is the exact shape of the confluence failure: monotone on two ETFs, reversed on twenty equities.
 Here it is visible *before* the experiment rather than after, which is the only good news about it.
@@ -173,17 +236,22 @@ working (35 candidates carried both within a day of deployment). Two properties 
 
 ### Measurement B1 — signal-level isolation
 
-Population: all settled candidates on BANKNIFTY and NIFTY50 from 2026-08-04 forward.
+Population: all settled candidates on BANKNIFTY and NIFTY50 from 2026-08-04 forward, **restricted to
+signals whose source bar closes between 10:30 and 14:00 IST** (§1c). Signals outside that window are
+excluded from both groups, because the regime label backing the filter is not gradeable there and never
+will be under the current rule.
 
 - **BLOCKED GROUP:** `model_regime = 'CONTRACTION' AND model_confidence >= 0.60`
-- **ALLOWED GROUP:** everything else
+- **ALLOWED GROUP:** everything else inside the window
 
 Compare net expectancy of BLOCKED against ALLOWED, Holm-adjusted, at the 2-bps endpoint.
 
-**Pre-registered minimum sample: 100 settled candidates in the BLOCKED group.** At the observed 0.80
-firings per day that is roughly 125 sessions. Reporting B1 before that threshold is prohibited; an
-interim look is a peek, and peeking at a growing sample until it is significant is how this becomes a
-fishing expedition.
+**Pre-registered minimum sample: 100 settled candidates in the BLOCKED group.** The cell stood at 23 on
+2026-08-19, so this is on the order of 100+ further trading sessions. Two cautions on the arithmetic:
+the earlier "0.80 firings per day" estimate counted rows that were in fact permanently ungradeable, and
+the one-off recovery in §1b will not repeat. Reporting B1 before the threshold is prohibited — an
+interim look is a peek, and peeking at a growing sample until it turns significant is how this becomes
+a fishing expedition.
 
 If BLOCKED does not show significantly lower expectancy: `REGIME_FILTER_REJECTED`, and B2 is skipped.
 
@@ -223,9 +291,17 @@ Written before running, so they cannot be renegotiated afterwards:
 - **Gate:** winner has negative 2-bps expectancy on either index → `BASE_DOES_NOT_TRANSFER`, ends.
 - **B1:** BLOCKED expectancy not significantly lower → `REGIME_FILTER_REJECTED`, ends.
 - **B2:** any of the six conditions fails → filter rejected, base architecture kept unfiltered.
-- **Any stage:** if the NIFTYBEES CONTRACTION accuracy stays below the 35.5% base rate as its sample
+- **Any stage:** if the NIFTYBEES CONTRACTION accuracy stays below the 34.6% base rate as its sample
   grows past n = 50, record `REGIME_SIGNAL_IS_INDEX_SPECIFIC`. That does not kill B on the indices, but
-  it forbids generalising the filter to any non-index instrument.
+  it forbids generalising the filter to any non-index instrument. It currently sits at 4/16 = 25.0%.
+- **Any stage:** if the high-confidence CONTRACTION accuracy falls below **45%** as the sample grows,
+  record `REGIME_SIGNAL_DECAYED` and stop. This threshold is set now, before the data arrives, because
+  the cell has already moved from 91.7% (n=12) to 69.6% (n=23) once a bias was removed, and a metric
+  that has halved its edge under one correction can do so again. 45% is deliberately above the 34.6%
+  base rate: a filter that merely beats chance is not worth the machinery.
+- **Never:** do not re-derive the 0.60 confidence threshold, the 10:30–14:00 window, or the label rule
+  from the data being tested. Each is frozen here. Changing any of them invalidates every settlement
+  recorded under the old definition and restarts B's sample from zero.
 
 ## 9. What is unchanged from the original
 
