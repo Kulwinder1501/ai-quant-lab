@@ -40,6 +40,7 @@
     "paper:trades:evaluate": "npm run paper:trades:evaluate --workspace @ai-quant-lab/api --",
     "paper:trades:close": "npm run paper:trades:close --workspace @ai-quant-lab/api --",
     "paper:accounts:summary": "npm run paper:accounts:summary --workspace @ai-quant-lab/api --",
+    "research:settle-candidates": "npm run research:settle-candidates --workspace @ai-quant-lab/api --",
     "backtest:run": "npm run backtest:run --workspace @ai-quant-lab/api --",
     "models:settle-predictions": "npm run models:settle-predictions --workspace @ai-quant-lab/api",
     "models:settle-auxiliary": "npm run models:settle-auxiliary --workspace @ai-quant-lab/api --",
