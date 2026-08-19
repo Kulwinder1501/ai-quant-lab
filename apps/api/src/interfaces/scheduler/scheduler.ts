@@ -214,6 +214,8 @@ async function main(): Promise<void> {
     // Research only, and deliberately the most patient claim here: a candidate cannot be settled
     // before its horizon elapses, so a stalled claimant costs nothing but a later sweep.
     CANDIDATE_SETTLEMENT: 30 * 60 * 1000,
+    // Once-a-day integrity check; a stalled claim just means the next EOD run does the looking.
+    CANDLE_GAP_CHECK: 30 * 60 * 1000,
   };
 
   /**
@@ -532,6 +534,23 @@ async function main(): Promise<void> {
     });
   }, { timezone: IST });
 
+  /**
+   * End-of-day check that the day's index bars actually all arrived.
+   *
+   * Runs at 16:20 IST, after the session has closed and the collector has stopped, so today's bars are
+   * final. Its whole job is to make a silent collection gap loud the same day: the August 2026 gaps
+   * went unnoticed for weeks because nothing looked. `data:detect-gaps` exits non-zero on an
+   * unambiguous miss, so a gap surfaces here as a FAILED job rather than in a backtest months later.
+   *
+   * It does not backfill — that writes to the production series through the provenance guard and stays
+   * a deliberate manual step. The failed-job details carry the exact repair command.
+   */
+  cron.schedule("20 16 * * 1-5", () => {
+    void schedule("CANDLE_GAP_CHECK", async () => {
+      await runCommand("npm", ["run", "data:detect-gaps", "--", "--lookback-days", "5"]);
+    });
+  }, { timezone: IST });
+
   cron.schedule("* 9-15 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("PAPER_TRADE_EXIT_SWEEP", async () => {
@@ -847,6 +866,7 @@ async function main(): Promise<void> {
       "PATTERN_DETECTION_INTRADAY",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
+      "CANDLE_GAP_CHECK",
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS"]
         : []),
