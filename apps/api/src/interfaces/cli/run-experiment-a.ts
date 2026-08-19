@@ -44,8 +44,8 @@ const HORIZON_BARS = CONFIG.expiryCandles;
 const COST_LADDER = [1, 2, 5] as const;
 const PRIMARY_BPS = 2;
 
-const INSTRUMENTS = ["NIFTYBEES", "BANKBEES"] as const;
-const ARCHITECTURES = [
+const DEFAULT_INSTRUMENTS = ["NIFTYBEES", "BANKBEES"];
+const ALL_ARCHITECTURES = [
   { label: "1m", barsPerBucket: 1 },
   { label: "3m", barsPerBucket: 3 },
   { label: "5m", barsPerBucket: 5 },
@@ -134,7 +134,12 @@ function auditOneMinuteSeries(bars: readonly RawBar[], symbol: string): {
 }
 
 /** Attaches in-memory indicator snapshots to an aggregated series. */
-function buildContexts(bars: readonly CompletedPriceCandle[], instrumentId: string, timeframe: string): StrategyMarketContext[] {
+function buildContexts(
+  bars: readonly CompletedPriceCandle[],
+  instrumentId: string,
+  timeframe: string,
+  tickSize: number,
+): StrategyMarketContext[] {
   const candles = bars.map((bar) => ({
     id: bar.id, openTime: bar.openTime, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: 0,
   }));
@@ -173,8 +178,9 @@ function buildContexts(bars: readonly CompletedPriceCandle[], instrumentId: stri
       low: bar.low,
       close: bar.close,
       volume: 0,
-      // ETF tick size. Only used as a floor on the stop distance.
-      tickSize: 0.01,
+      // Read from `instruments`, not assumed: an index ticks at 0.05 and an ETF at 0.01, and applying
+      // one to the other would move the floor under every stop distance.
+      tickSize,
     },
     indicators: byCandle.get(bar.id) ?? [],
     patterns: [],
@@ -255,21 +261,38 @@ function netDaily(trades: readonly TradeRecord[], costBps: number): DailyExpecta
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const periodArg = argv.includes("--period") ? argv[argv.indexOf("--period") + 1] : "BASE_SELECTION";
+  const flag = (name: string): string | undefined => argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined;
+  const periodArg = flag("--period") ?? "BASE_SELECTION";
   const period = PERIODS[periodArg as keyof typeof PERIODS];
   if (!period) throw new Error(`--period must be one of ${Object.keys(PERIODS).join(", ")}.`);
+
+  const INSTRUMENTS = (flag("--instruments") ?? DEFAULT_INSTRUMENTS.join(",")).split(",").map((s) => s.trim()).filter(Boolean);
+  const onlyArg = flag("--only");
+  const ARCHITECTURES = onlyArg
+    ? ALL_ARCHITECTURES.filter((a) => onlyArg.split(",").map((s) => s.trim()).includes(a.label))
+    : [...ALL_ARCHITECTURES];
+  if (ARCHITECTURES.length === 0) throw new Error("--only selected no known architecture.");
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
 
   try {
     const readiness: string[] = [];
-    // Pooled across both instruments: the protocol selects one architecture, not one per symbol.
+    // Pooled across instruments: the protocol selects one architecture, not one per symbol. Kept per
+    // instrument as well, because the A->B gate requires each instrument to clear the bar on its own.
     const tradesByArchitecture = new Map<string, TradeRecord[]>(ARCHITECTURES.map((a) => [a.label, []]));
     const unresolvedByArchitecture = new Map<string, number>(ARCHITECTURES.map((a) => [a.label, 0]));
+    const tradesByInstrument = new Map<string, TradeRecord[]>();
     let sessions = 0;
 
     for (const symbol of INSTRUMENTS) {
+      const tickRow = await database.query<{ tick_size: string }>(
+        "SELECT tick_size FROM instruments WHERE symbol = $1", [symbol],
+      );
+      if (!tickRow.rows[0]) throw new Error(`${symbol} is not a registered instrument.`);
+      const tickSize = Number(tickRow.rows[0].tick_size);
+      if (!Number.isFinite(tickSize) || tickSize <= 0) throw new Error(`${symbol} has an unusable tick size.`);
+
       const rows = await database.query<{
         id: string; open_time: Date; close_time: Date; open: string; high: string; low: string; close: string;
       }>(`
@@ -297,9 +320,10 @@ async function main(): Promise<void> {
       for (const architecture of ARCHITECTURES) {
         // Aggregated from the audited regular-session bars only.
         const aggregated = aggregateBars(audit.regular, architecture.barsPerBucket);
-        const contexts = buildContexts(aggregated, instrumentId, architecture.label);
+        const contexts = buildContexts(aggregated, instrumentId, architecture.label, tickSize);
         const { trades, unresolved } = evaluateArchitecture(contexts, aggregated);
         tradesByArchitecture.get(architecture.label)!.push(...trades);
+        tradesByInstrument.set(`${symbol}|${architecture.label}`, trades);
         unresolvedByArchitecture.set(architecture.label, unresolvedByArchitecture.get(architecture.label)! + unresolved);
       }
     }
@@ -325,13 +349,35 @@ async function main(): Promise<void> {
       };
     });
 
+    // Per instrument at the primary endpoint. The A->B gate is not satisfied by a pooled average: a
+    // winner that works on one index and not the other is drift, which is the failure mode this whole
+    // protocol was rebuilt around.
+    const perInstrument = [...tradesByInstrument.entries()].map(([key, trades]) => {
+      const [symbol, architecture] = key.split("|");
+      const summary = summariseExpectancy(netDaily(trades, PRIMARY_BPS));
+      return {
+        instrument: symbol!,
+        architecture: architecture!,
+        trades: trades.length,
+        days: summary.days,
+        netMeanDailyR_at2bp: Number(summary.meanDailyR.toFixed(5)),
+        ci95: summary.ci95?.map((v) => Number(v.toFixed(5))) ?? null,
+        nonNegative: summary.meanDailyR >= 0,
+      };
+    });
+
     // Pairwise contrasts at the primary endpoint, paired on the session, Holm-adjusted as a family.
-    const dailyAt2 = new Map(ARCHITECTURES.map((a) => [a.label, netDaily(tradesByArchitecture.get(a.label)!, PRIMARY_BPS)]));
-    const contrasts = applyHolm([
-      pairedDelta("3m - 1m", dailyAt2.get("3m")!, dailyAt2.get("1m")!),
-      pairedDelta("5m - 1m", dailyAt2.get("5m")!, dailyAt2.get("1m")!),
-      pairedDelta("5m - 3m", dailyAt2.get("5m")!, dailyAt2.get("3m")!),
-    ]).map((delta) => ({
+    // Only meaningful when more than one architecture ran.
+    const dailyAt2 = new Map<string, DailyExpectancy[]>(
+      ARCHITECTURES.map((a) => [a.label, netDaily(tradesByArchitecture.get(a.label)!, PRIMARY_BPS)]),
+    );
+    const CONTRAST_PAIRS: readonly (readonly [string, string, string])[] = [
+      ["3m - 1m", "3m", "1m"], ["5m - 1m", "5m", "1m"], ["5m - 3m", "5m", "3m"],
+    ];
+    const candidateContrasts = CONTRAST_PAIRS
+      .filter(([, left, right]) => dailyAt2.has(left) && dailyAt2.has(right))
+      .map(([label, left, right]) => pairedDelta(label, dailyAt2.get(left)!, dailyAt2.get(right)!));
+    const contrasts = applyHolm(candidateContrasts).map((delta) => ({
       contrast: delta.label,
       pairedDays: delta.pairedDays,
       meanDelta: Number(delta.meanDelta.toFixed(5)),
@@ -342,23 +388,34 @@ async function main(): Promise<void> {
     }));
 
     const winners = contrasts.filter((c) => c.significant);
+    // A single architecture on a fresh instrument set is the A->B gate rather than a selection run.
+    const isGate = ARCHITECTURES.length === 1;
+    const failing = perInstrument.filter((entry) => !entry.nonNegative);
+
     console.info(JSON.stringify({
       level: "info",
-      message: "Experiment A complete",
+      message: isGate ? "Gate A->B complete" : "Experiment A complete",
+      mode: isGate ? "GATE" : "SELECTION",
       period: periodArg,
       window: period,
       instruments: INSTRUMENTS,
+      architectures: ARCHITECTURES.map((a) => a.label),
       sessions,
       strategy: "momentum-scalp-index",
       horizonBars: HORIZON_BARS,
       primaryEndpointBps: PRIMARY_BPS,
       readinessWarnings: readiness,
       matrix,
+      perInstrument,
       contrasts,
-      // The protocol's terminal outcome. Reported rather than inferred, so a null result is a result.
-      verdict: winners.length === 0
-        ? "NO_UNIQUE_WINNER — no contrast's 95% CI excludes zero after Holm adjustment"
-        : `Significant contrasts: ${winners.map((w) => w.contrast).join(", ")}`,
+      // The protocol's terminal outcomes. Reported rather than inferred, so a null result is a result.
+      verdict: isGate
+        ? (failing.length === 0
+          ? "GATE_PASSED — non-negative 2-bps expectancy on every instrument"
+          : `BASE_DOES_NOT_TRANSFER — negative 2-bps expectancy on ${failing.map((f) => f.instrument).join(", ")}`)
+        : (winners.length === 0
+          ? "NO_UNIQUE_WINNER — no contrast's 95% CI excludes zero after Holm adjustment"
+          : `Significant contrasts: ${winners.map((w) => w.contrast).join(", ")}`),
     }, null, 2));
   } finally {
     await database.end();
