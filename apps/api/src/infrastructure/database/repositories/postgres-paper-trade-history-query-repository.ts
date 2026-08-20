@@ -143,6 +143,15 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
       parameters.push(input.openedTo);
       conditions.push(`pt.opened_at <= $${parameters.length}`);
     }
+    if (input.activityFrom !== undefined && input.activityToExclusive !== undefined) {
+      parameters.push(input.activityFrom, input.activityToExclusive);
+      const fromParameter = parameters.length - 1;
+      const toParameter = parameters.length;
+      conditions.push(`(
+        (pt.opened_at >= $${fromParameter} AND pt.opened_at < $${toParameter})
+        OR (pt.closed_at >= $${fromParameter} AND pt.closed_at < $${toParameter})
+      )`);
+    }
     if (input.outcome === "WIN") {
       conditions.push("pt.realized_pnl > 0");
     } else if (input.outcome === "LOSS") {

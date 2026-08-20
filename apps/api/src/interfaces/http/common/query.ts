@@ -31,14 +31,24 @@ export function parseUtcTimestamp(value: string, field: string): Date {
   return parsed;
 }
 
-export function parseDateOrUtcTimestamp(value: string, field: string): Date {
+/** UTC half-open range occupied by one Asia/Kolkata calendar date. */
+export function parseIstCalendarDateRange(value: string, field: string): { from: Date; toExclusive: Date } {
   const trimmed = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const parsedDate = new Date(`${trimmed}T00:00:00.000Z`);
-    if (!Number.isNaN(parsedDate.getTime()) && parsedDate.toISOString().slice(0, 10) === trimmed) {
-      return parsedDate;
-    }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new InvalidHttpQueryError(`${field} must be a calendar date in YYYY-MM-DD format.`);
+  }
+
+  const [yearText, monthText, dayText] = trimmed.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const utcCalendarDay = new Date(Date.UTC(year, month - 1, day));
+  if (utcCalendarDay.toISOString().slice(0, 10) !== trimmed) {
     throw new InvalidHttpQueryError(`${field} must be a valid calendar date.`);
   }
-  return parseUtcTimestamp(trimmed, field);
+
+  // IST is fixed at UTC+05:30 and has no daylight-saving transitions.
+  const istOffsetMilliseconds = (5 * 60 + 30) * 60_000;
+  const from = new Date(utcCalendarDay.getTime() - istOffsetMilliseconds);
+  return { from, toExclusive: new Date(from.getTime() + 24 * 60 * 60_000) };
 }

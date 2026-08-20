@@ -61,6 +61,31 @@ export async function scanCandleCoverage(database: DatabasePool, input: ScanInpu
     throw new Error("lookbackDays must be a positive integer.");
   }
 
+  // Enumerate expected regular sessions independently of candle rows. Without this calendar side,
+  // an entirely absent day produces no bucket and is therefore invisible to a row-driven scan.
+  const expectedResult = await database.query<{ session: string }>(`
+    WITH bounds AS (
+      SELECT CASE
+        WHEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::time >= TIME '15:30'
+          THEN (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
+        ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date - 1
+      END AS end_day
+    )
+    SELECT session_day::date::text AS session
+    FROM bounds
+    CROSS JOIN LATERAL generate_series(
+      bounds.end_day - ($1::integer - 1),
+      bounds.end_day,
+      INTERVAL '1 day'
+    ) AS sessions(session_day)
+    WHERE EXTRACT(ISODOW FROM session_day) BETWEEN 1 AND 5
+      AND NOT EXISTS (
+        SELECT 1 FROM nse_holidays holiday WHERE holiday.holiday_date = session_day::date
+      )
+    ORDER BY session_day ASC
+  `, [input.lookbackDays]);
+  const expectedSessions = expectedResult.rows.map((row) => row.session);
+
   const confirmed: ScannedSession[] = [];
   const tailShort: ScannedSession[] = [];
   const complete: ScannedSession[] = [];
@@ -72,10 +97,10 @@ export async function scanCandleCoverage(database: DatabasePool, input: ScanInpu
       FROM candles c
       JOIN instruments i ON i.id = c.instrument_id
       WHERE i.symbol = $1 AND c.timeframe = $2 AND c.is_complete = TRUE
-        -- Completed sessions only: never the in-progress day, which would always look short.
+        -- The expected-session calendar decides whether today is complete. Over-reading today's
+        -- completed candles before the close is harmless because that date has no expected bucket yet.
         AND c.close_time >= (CURRENT_DATE - make_interval(days => $3))
-        AND c.close_time < date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
-                            AT TIME ZONE 'Asia/Kolkata'
+        AND c.close_time < CURRENT_TIMESTAMP
       ORDER BY c.close_time ASC
     `, [symbol, input.timeframe, input.lookbackDays]);
 
@@ -91,7 +116,8 @@ export async function scanCandleCoverage(database: DatabasePool, input: ScanInpu
       else bySession.set(day, [index]);
     }
 
-    for (const [day, indices] of bySession) {
+    for (const day of expectedSessions) {
+      const indices = bySession.get(day) ?? [];
       sessionsChecked += 1;
       const coverage = classifySessionCoverage({ presentMinuteIndices: indices, barsExpected });
       const scanned: ScannedSession = { instrument: symbol, session: day, timeframe: input.timeframe, coverage };

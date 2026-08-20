@@ -65,7 +65,8 @@ function compactCrore(value: number): string {
 }
 
 export const MarketContextHistoryChart = memo(function MarketContextHistoryChart(props: Props) {
-  const data = useMemo(() => mergeSeries(props), [props.flows, props.indiaVix]);
+  const { flows, indiaVix } = props;
+  const data = useMemo(() => mergeSeries({ flows, indiaVix }), [flows, indiaVix]);
   return (
     /* A flex column so the plot fills whatever height the row is given rather than asserting its
        own: the card is now pinned to the same height as the flows card beside it, and a fixed

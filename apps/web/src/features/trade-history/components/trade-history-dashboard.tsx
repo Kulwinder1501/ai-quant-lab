@@ -7,6 +7,7 @@ import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { errorMessage, isAbortError } from "../../../lib/errors";
+import { formatIstDate } from "../../../lib/ist-date";
 import { Tabs } from "../../../components/ui/tabs";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
 import { parseTradeHistoryEnvelope } from "../api";
@@ -15,6 +16,7 @@ import {
   isTradeInMode,
   isTradeInTimeframe,
   isTradeOnDate,
+  listTradeHistoryTimeframes,
   summarizeTradeHistory,
   tradeHistoryQuery,
   type TradeHistoryFilters,
@@ -27,23 +29,11 @@ import { TradeLedgerTable } from "./trade-ledger-table";
 const limitChoices = [50, 100, 250, 500] as const;
 
 function getTodayDate(): string {
-  try {
-    return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-  } catch {
-    return new Date().toISOString().slice(0, 10);
-  }
+  return formatIstDate(new Date());
 }
 
 function getYesterdayDate(): string {
-  try {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
-  } catch {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    return d.toISOString().slice(0, 10);
-  }
+  return formatIstDate(new Date(Date.now() - 24 * 60 * 60_000));
 }
 
 /**
@@ -120,6 +110,10 @@ export function TradeHistoryDashboard({ initialMode = "all" }: { initialMode?: T
     () => [...new Set((page?.records ?? []).map((record) => record.instrumentSymbol))].sort(),
     [page?.records],
   );
+  const timeframeOptions = useMemo(
+    () => listTradeHistoryTimeframes(page?.records ?? []),
+    [page?.records],
+  );
 
   const update = <K extends keyof TradeHistoryFilters>(key: K, value: TradeHistoryFilters[K]) => {
     setFilters((previous) => ({ ...previous, [key]: value }));
@@ -138,7 +132,7 @@ export function TradeHistoryDashboard({ initialMode = "all" }: { initialMode?: T
           tabs={[
             { id: "all", label: "All Trades", icon: <Layers className="size-4" /> },
             { id: "scalp", label: "Scalp (1m - 15m)", icon: <Timer className="size-4" /> },
-            { id: "swing", label: "Swing (1d+)", icon: <TrendingUp className="size-4" /> },
+            { id: "swing", label: "Swing (30m+)", icon: <TrendingUp className="size-4" /> },
           ]}
           activeId={mode}
           onChange={(id) => applyMode(id as TradeHistoryMode)}
@@ -215,11 +209,9 @@ export function TradeHistoryDashboard({ initialMode = "all" }: { initialMode?: T
               value={filters.timeframe}
             >
               <option className="bg-slate-900" value="ALL">All Timeframes</option>
-              <option className="bg-slate-900" value="1m">1m</option>
-              <option className="bg-slate-900" value="3m">3m</option>
-              <option className="bg-slate-900" value="5m">5m</option>
-              <option className="bg-slate-900" value="15m">15m</option>
-              <option className="bg-slate-900" value="1d">1d</option>
+              {timeframeOptions.map((timeframe) => (
+                <option className="bg-slate-900" key={timeframe} value={timeframe}>{timeframe}</option>
+              ))}
             </select>
           </label>
 

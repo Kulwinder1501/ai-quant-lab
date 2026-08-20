@@ -82,6 +82,14 @@ export class ListPaperTradeHistory {
     if (openedFrom && openedTo && openedFrom > openedTo) {
       throw new InvalidTradeHistoryQueryError("openedFrom must not be later than openedTo.");
     }
+    const activityFrom = requireTimestamp(input.activityFrom, "activityFrom");
+    const activityToExclusive = requireTimestamp(input.activityToExclusive, "activityToExclusive");
+    if ((activityFrom === undefined) !== (activityToExclusive === undefined)) {
+      throw new InvalidTradeHistoryQueryError("activityFrom and activityToExclusive must be supplied together.");
+    }
+    if (activityFrom && activityToExclusive && activityFrom >= activityToExclusive) {
+      throw new InvalidTradeHistoryQueryError("activityFrom must be earlier than activityToExclusive.");
+    }
 
     const query: ListPaperTradeHistoryInput = {
       accountId: normalizeOptionalText(input.accountId, "accountId"),
@@ -92,6 +100,8 @@ export class ListPaperTradeHistory {
       outcome: requireMember(input.outcome, outcomes, "outcome"),
       openedFrom,
       openedTo,
+      activityFrom,
+      activityToExclusive,
       // One extra row reveals whether the ledger was cut short, so the UI can say
       // so instead of silently presenting a partial history as complete.
       limit: limit + 1,

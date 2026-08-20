@@ -1,3 +1,5 @@
+import { isTimestampOnIstDate } from "../../lib/ist-date";
+
 /** Read-only view types for the simulated-trade ledger served by GET /paper-trades. */
 
 export type TradeHistoryStatus = "OPEN" | "CLOSED" | "CANCELLED";
@@ -131,7 +133,9 @@ const average = (values: number[]): number | null => (
 export function isTradeInMode(record: TradeHistoryRecord, mode: TradeHistoryMode): boolean {
   if (mode === "all") return true;
   const tf = record.timeframe?.trim().toLowerCase() ?? "";
-  const isScalp = tf === "1m" || tf === "3m" || tf === "5m" || tf === "15m" || (tf === "" && record.notes?.toLowerCase().includes("scalp"));
+  const minuteMatch = /^(\d+)m$/.exec(tf);
+  const isScalp = (minuteMatch !== null && Number(minuteMatch[1]) <= 15)
+    || (tf === "" && record.notes?.toLowerCase().includes("scalp"));
   return mode === "scalp" ? isScalp : !isScalp;
 }
 
@@ -139,28 +143,7 @@ export function isTradeInMode(record: TradeHistoryRecord, mode: TradeHistoryMode
 export function isTradeOnDate(record: TradeHistoryRecord, dateFilter: string): boolean {
   if (!dateFilter || !dateFilter.trim()) return true;
   const target = dateFilter.trim();
-
-  const matches = (timestampStr: string | null | undefined): boolean => {
-    if (!timestampStr) return false;
-    const raw = String(timestampStr).trim();
-    if (raw.slice(0, 10) === target) return true;
-    try {
-      const d = new Date(raw);
-      if (!Number.isNaN(d.getTime())) {
-        // Indian Standard Time (IST - Asia/Kolkata)
-        if (d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === target) return true;
-        // User's Local Timezone
-        if (d.toLocaleDateString("en-CA") === target) return true;
-        // UTC
-        if (d.toISOString().slice(0, 10) === target) return true;
-      }
-    } catch {
-      // ignore parsing error
-    }
-    return false;
-  };
-
-  return matches(record.openedAt) || matches(record.closedAt);
+  return isTimestampOnIstDate(record.openedAt, target) || isTimestampOnIstDate(record.closedAt, target);
 }
 
 /** Matches trade record against selected timeframe filter (e.g. 1m, 3m, 5m, 15m, 1d). */
@@ -168,6 +151,27 @@ export function isTradeInTimeframe(record: TradeHistoryRecord, timeframeFilter: 
   if (!timeframeFilter || timeframeFilter === "ALL") return true;
   const tf = record.timeframe?.trim().toLowerCase() ?? "";
   return tf === timeframeFilter.trim().toLowerCase();
+}
+
+const standardTradeHistoryTimeframes = ["1m", "3m", "5m", "10m", "15m", "30m", "60m", "1d"] as const;
+
+function timeframeDurationMinutes(timeframe: string): number {
+  const match = /^(\d+)(m|h|d)$/.exec(timeframe);
+  if (!match) return Number.POSITIVE_INFINITY;
+  const amount = Number(match[1]);
+  return amount * (match[2] === "d" ? 1440 : match[2] === "h" ? 60 : 1);
+}
+
+/** Standard choices plus any legacy timeframe actually present in the ledger. */
+export function listTradeHistoryTimeframes(records: readonly TradeHistoryRecord[]): string[] {
+  const timeframes = new Set<string>(standardTradeHistoryTimeframes);
+  for (const record of records) {
+    const timeframe = record.timeframe?.trim().toLowerCase();
+    if (timeframe) timeframes.add(timeframe);
+  }
+  return [...timeframes].sort((left, right) => (
+    timeframeDurationMinutes(left) - timeframeDurationMinutes(right) || left.localeCompare(right)
+  ));
 }
 
 /** Rebuilds the summary after the Swing/Scalp partition has been applied. */

@@ -60,6 +60,9 @@ export interface ListPaperTradeHistoryInput {
   outcome?: TradeOutcomeFilter;
   openedFrom?: Date;
   openedTo?: Date;
+  /** Half-open IST activity-day range applied to either the open or close timestamp. */
+  activityFrom?: Date;
+  activityToExclusive?: Date;
   limit: number;
 }
 

@@ -24,6 +24,16 @@ import type { CompletedPriceCandle } from "../../modules/paper-trading/domain/pa
 
 const DEFAULT_LIMIT = 500;
 
+/**
+ * A candidate's horizon can close on the exact same tick the sweep runs on -- 5m candidates with a
+ * 15-minute horizon land on :15/:45, which is also the sweep's own schedule. Ingestion takes a few
+ * seconds to persist that closing bar (observed p50 ~6s, p95 ~15s for on-time bars), so without this
+ * the sweep always wins that race and marks a fully-available horizon UNSETTLEABLE before the last
+ * bar exists. This only delays when a candidate becomes *eligible*; it does not wait once picked up,
+ * so a genuine multi-minute gap still resolves as UNSETTLEABLE rather than being masked.
+ */
+const INGESTION_GRACE_MS = 60_000;
+
 function parseArguments(argv: readonly string[]): { limit: number; asOf: Date } {
   let limit = DEFAULT_LIMIT;
   let asOf = new Date();
@@ -54,7 +64,10 @@ async function main(): Promise<void> {
 
   try {
     const ledger = new PostgresCandidateLedgerRepository(database);
-    const candidates = await ledger.listUnsettledCandidates({ settledBefore: asOf, limit });
+    const candidates = await ledger.listUnsettledCandidates({
+      settledBefore: new Date(asOf.getTime() - INGESTION_GRACE_MS),
+      limit,
+    });
 
     const outcomes: Record<string, number> = {};
     let written = 0;

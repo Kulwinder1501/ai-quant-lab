@@ -3,7 +3,7 @@ import { respondToRouteError } from "../../../../interfaces/http/common/route-er
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import {
   InvalidHttpQueryError,
-  parseDateOrUtcTimestamp,
+  parseIstCalendarDateRange,
   parseLimit,
   parseUtcTimestamp,
   queryString,
@@ -32,25 +32,18 @@ function parseTradeHistoryQuery(request: Request): {
   outcome?: TradeOutcomeFilter;
   openedFrom?: Date;
   openedTo?: Date;
+  activityFrom?: Date;
+  activityToExclusive?: Date;
   limit?: number;
 } {
   const openedFrom = queryString(request, "openedFrom");
   const openedTo = queryString(request, "openedTo");
   const date = queryString(request, "date");
 
-  let fromDate = openedFrom === undefined ? undefined : parseDateOrUtcTimestamp(openedFrom, "openedFrom");
-  let toDate = openedTo === undefined ? undefined : parseDateOrUtcTimestamp(openedTo, "openedTo");
-
-  if (date !== undefined && fromDate === undefined && toDate === undefined) {
-    const trimmedDate = date.trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmedDate)) {
-      // Span full IST and UTC day (18:00 UTC previous day to 23:59:59 UTC current day)
-      const baseUtc = new Date(`${trimmedDate}T00:00:00.000Z`);
-      fromDate = new Date(baseUtc.getTime() - 6 * 3600 * 1000);
-      toDate = new Date(`${trimmedDate}T23:59:59.999Z`);
-      toDate = new Date(toDate.getTime() + 6 * 3600 * 1000);
-    }
+  if (date !== undefined && (openedFrom !== undefined || openedTo !== undefined)) {
+    throw new InvalidHttpQueryError("date cannot be combined with openedFrom or openedTo.");
   }
+  const activityRange = date === undefined ? undefined : parseIstCalendarDateRange(date, "date");
 
   return {
     accountId: queryString(request, "accountId"),
@@ -59,8 +52,10 @@ function parseTradeHistoryQuery(request: Request): {
     side: queryString(request, "side")?.toUpperCase() as TradeSide | undefined,
     exitReason: queryString(request, "exitReason")?.toUpperCase() as PaperTradeExitReason | undefined,
     outcome: queryString(request, "outcome")?.toUpperCase() as TradeOutcomeFilter | undefined,
-    openedFrom: fromDate,
-    openedTo: toDate,
+    openedFrom: openedFrom === undefined ? undefined : parseUtcTimestamp(openedFrom, "openedFrom"),
+    openedTo: openedTo === undefined ? undefined : parseUtcTimestamp(openedTo, "openedTo"),
+    activityFrom: activityRange?.from,
+    activityToExclusive: activityRange?.toExclusive,
     limit: parseLimit(request),
   };
 }

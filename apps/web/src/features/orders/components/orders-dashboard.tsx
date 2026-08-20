@@ -6,6 +6,7 @@ import { exportToCsv } from "../../../lib/export";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { errorMessage, isAbortError } from "../../../lib/errors";
+import { isTimestampOnIstDate } from "../../../lib/ist-date";
 import type { PaperAccountSummary, PaperAccountFullSummary } from "../../paper-trading/domain";
 import { OrdersFilterBar } from "./orders-filter-bar";
 import { OrdersStats } from "./orders-stats";
@@ -102,10 +103,8 @@ export function OrdersDashboard() {
       if (filterOutcome === "LOSS" && pnl >= 0) return false;
 
       if (filterDate) {
-        const openedAtStr = order.openedAt != null ? String(order.openedAt) : "";
-        const closedAtStr = order.closedAt != null ? String(order.closedAt) : "";
-        const matchesOpened = openedAtStr.slice(0, 10) === filterDate || (openedAtStr !== "" && new Date(openedAtStr).toLocaleDateString("en-CA") === filterDate);
-        const matchesClosed = closedAtStr.slice(0, 10) === filterDate || (closedAtStr !== "" && new Date(closedAtStr).toLocaleDateString("en-CA") === filterDate);
+        const matchesOpened = isTimestampOnIstDate(order.openedAt == null ? null : String(order.openedAt), filterDate);
+        const matchesClosed = isTimestampOnIstDate(order.closedAt == null ? null : String(order.closedAt), filterDate);
         if (!matchesOpened && !matchesClosed) return false;
       }
 

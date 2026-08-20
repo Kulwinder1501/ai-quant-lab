@@ -3,6 +3,7 @@ import {
   isTradeInMode,
   isTradeInTimeframe,
   isTradeOnDate,
+  listTradeHistoryTimeframes,
   summarizeTradeHistory,
   type TradeHistoryRecord,
 } from "./domain";
@@ -47,6 +48,8 @@ describe("trade history modes", () => {
     const swing = record({ timeframe: "1d" });
     const scalp1m = record({ timeframe: " 1M " });
     const scalp5m = record({ timeframe: "5m" });
+    const scalp10m = record({ timeframe: "10m" });
+    const swing30m = record({ timeframe: "30m" });
     const legacy = record({ timeframe: null });
 
     expect(isTradeInMode(swing, "swing")).toBe(true);
@@ -59,6 +62,8 @@ describe("trade history modes", () => {
 
     expect(isTradeInMode(scalp5m, "scalp")).toBe(true);
     expect(isTradeInMode(scalp5m, "swing")).toBe(false);
+    expect(isTradeInMode(scalp10m, "scalp")).toBe(true);
+    expect(isTradeInMode(swing30m, "swing")).toBe(true);
     expect(isTradeInMode(legacy, "swing")).toBe(true);
   });
 
@@ -112,6 +117,13 @@ describe("trade history modes", () => {
     expect(isTradeOnDate(trade, "2026-08-19")).toBe(true);
     expect(isTradeOnDate(trade, "2026-08-18")).toBe(false);
     expect(isTradeOnDate(older, "2026-08-18")).toBe(true);
+
+    const crossesUtcMidnight = record({
+      openedAt: "2026-08-18T20:00:00.000Z",
+      closedAt: "2026-08-19T02:00:00.000Z",
+    });
+    expect(isTradeOnDate(crossesUtcMidnight, "2026-08-19")).toBe(true);
+    expect(isTradeOnDate(crossesUtcMidnight, "2026-08-18")).toBe(false);
   });
 
   it("filters trades accurately by timeframe (isTradeInTimeframe)", () => {
@@ -122,5 +134,11 @@ describe("trade history modes", () => {
     expect(isTradeInTimeframe(t1m, "1m")).toBe(true);
     expect(isTradeInTimeframe(t1m, "5m")).toBe(false);
     expect(isTradeInTimeframe(t5m, "5m")).toBe(true);
+  });
+
+  it("offers every supported timeframe and retains legacy values found in records", () => {
+    const options = listTradeHistoryTimeframes([record({ timeframe: "2h" })]);
+
+    expect(options).toEqual(["1m", "3m", "5m", "10m", "15m", "30m", "60m", "2h", "1d"]);
   });
 });
