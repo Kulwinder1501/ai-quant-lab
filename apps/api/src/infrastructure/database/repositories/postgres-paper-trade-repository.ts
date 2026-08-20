@@ -321,8 +321,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
           entry_price, stop_loss, target_price, risk_reward, confidence,
           reasoning, evidence, expires_at
         ) VALUES (
-          $1, NULL, NULL, 'LONG', 'PROPOSED', $2, $3, $4, 0, 1.0,
-          '{"summary":"Manual options chain trade"}', '[]', NOW() + INTERVAL '1 day'
+          $1, NULL, NULL, 'LONG', 'PROPOSED', $2, $3, $4, 2.0, 1.0,
+          '["Manual options chain trade"]'::jsonb, '{}'::jsonb, NOW() + INTERVAL '1 day'
         ) RETURNING id
       `, [input.instrumentId, input.fillPrice, input.fillPrice * 0.5, input.fillPrice * 2]);
       const tradeIdeaId = ideaResult.rows[0]?.id;

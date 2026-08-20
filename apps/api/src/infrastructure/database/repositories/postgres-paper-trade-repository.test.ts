@@ -38,6 +38,60 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
+  // Regression guard for the synthetic-idea INSERT. The client is mocked, so this cannot exercise
+  // the real Postgres CHECK constraints -- instead it asserts that the literal values the INSERT
+  // writes have the JSON types and sign those constraints require. This is the shape that once
+  // shipped inverted (reasoning as an object, evidence as an array, risk_reward as 0), which threw a
+  // raw 23514 on every call; the assertions below fail on each of those three mistakes.
+  it("writes literals that satisfy the trade_ideas reasoning/evidence/risk_reward CHECK constraints", async () => {
+    const statements: string[] = [];
+    const client = {
+      query: vi.fn(async (text: string) => {
+        statements.push(text.replace(/\s+/g, " ").trim());
+        if (text.includes("INSERT INTO trade_ideas")) return { rows: [{ id: "idea-1" }] };
+        // Nothing back for the account lookup, so the open aborts right after the synthetic idea is
+        // inserted -- the INSERT statement under test has already been captured by then.
+        if (text.includes("FROM paper_accounts")) return { rows: [] };
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+
+    await expect(new PostgresPaperTradeRepository(database).openManualOption({
+      accountId: "account-1",
+      instrumentId: "instrument-1",
+      quantity: 75,
+      fillPrice: 100,
+      openedAt: new Date("2026-08-09T10:00:00.000Z"),
+      entryFees: 20,
+      entrySlippage: 0,
+      notes: "test",
+      stopLossOverride: 50,
+      targetPriceOverride: 200,
+    })).rejects.toThrow();
+
+    const insert = statements.find((statement) => statement.startsWith("INSERT INTO trade_ideas"));
+    expect(insert).toBeDefined();
+
+    // Column order in the INSERT is `... reasoning, evidence ...`, so the two single-quoted JSON
+    // literals (each starting with `[` or `{`) appear reasoning-first. `'LONG'`, `'PROPOSED'` and
+    // `'1 day'` do not start with a bracket, so they are not matched.
+    const jsonLiterals = [...insert!.matchAll(/'((?:\[|\{)[^']*(?:\]|\}))'(?:::jsonb)?/g)].map((match) => match[1]);
+    expect(jsonLiterals).toHaveLength(2);
+    const [reasoning, evidence] = jsonLiterals.map((literal) => JSON.parse(literal) as unknown);
+
+    // reasoning JSONB NOT NULL CHECK (jsonb_typeof(reasoning) = 'array')
+    expect(Array.isArray(reasoning)).toBe(true);
+    // evidence JSONB NOT NULL CHECK (jsonb_typeof(evidence) = 'object')
+    expect(evidence !== null && typeof evidence === "object" && !Array.isArray(evidence)).toBe(true);
+
+    // risk_reward NUMERIC NOT NULL CHECK (risk_reward > 0) -- the value between the $4 stop param and confidence.
+    const riskReward = insert!.match(/\$4,\s*([0-9.]+)\s*,/);
+    expect(riskReward).not.toBeNull();
+    expect(Number(riskReward![1])).toBeGreaterThan(0);
+  });
+
   it("rolls back the first structure leg when the second leg cannot open", async () => {
     const statements: string[] = [];
     let accountReads = 0;
