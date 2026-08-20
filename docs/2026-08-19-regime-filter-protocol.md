@@ -315,3 +315,34 @@ terminal research outcomes treated as legitimate results rather than failures.
 The one addition to the anti-lookahead contract: **the model's training window must end before the
 test period begins**, and that must be asserted, not assumed. Guarding the prediction timestamp alone
 is insufficient and was the original's most dangerous gap.
+
+## Addendum (2026-08-20) — the base architecture does not clear costs on the indices, and both cost levers are now exhausted
+
+This is an empirical postscript, not part of the pre-registered protocol above. Two exploratory sweeps
+were run on the index 2026 block **after** the A→B gate had already consumed it, so neither can confirm
+anything — each can only generate or kill a hypothesis, and anything alive would need untouched data.
+Both returned terminal negatives, and together they bound the problem.
+
+The A→B gate found the base momentum-scalp architecture net-negative on the indices at 2 bps despite a
+small *positive* gross edge (+0.0301 R/day): a 5-minute ATR bracket is too tight to carry the friction.
+That leaves exactly two levers that move cost without touching the signal — bracket **width** and
+holding-period **horizon** — because round-trip cost in R is `bps × price / riskPerUnit` and depends on
+neither the number of trades nor the signal itself.
+
+- **Stop-multiple sweep** (`research:stop-sweep`) → `NO_VIABLE_STOP_MULTIPLE`. Cost in R falls as
+  `1/width`, exactly as predicted, but the gross edge is ~13× too small to close, and widening only
+  scales the timed-out mass toward zero.
+- **Horizon sweep** (`research:horizon-sweep`, this addendum) → `NO_VIABLE_HORIZON`. Lengthening
+  `expiryCandles` from 3 to 75 drives the resolved share from 0.68 to 0.9999 (timeouts collapse from
+  ~3,900 to 1) and lifts the resolved target-hit rate to **41.1%** — a hair above the 40% geometric
+  break-even for a 1.5 reward:risk. That yields a gross edge of only +0.047 R/day against a fixed
+  0.376 R/trade cost, so net stays pinned at **−0.33 R/day**, full 95% CI below zero on both NIFTY50 and
+  BANKNIFTY at every horizon.
+
+The horizon sweep is the direct test of the one open question the stop sweep left — *does the signal
+predict a move large enough to pay friction at any holding period?* Given unlimited room to play out,
+the signal resolves almost every bracket and still barely beats a coin-weighted break-even. The answer
+is no. **The momentum-scalp index architecture is finished, not mistuned:** a regime filter refines
+*which* of these trades to take, and refining a base that clears no cost-covering configuration at any
+width or horizon cannot produce a positive expectancy. Before Experiment B is worth running, a base
+architecture that clears 2 bps on untouched data has to exist first — and on the indices, none does.

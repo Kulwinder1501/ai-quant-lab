@@ -216,6 +216,8 @@ async function main(): Promise<void> {
     CANDIDATE_SETTLEMENT: 30 * 60 * 1000,
     // Once-a-day integrity check; a stalled claim just means the next EOD run does the looking.
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
+    // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
+    CANDLE_GAP_HEAL: 30 * 60 * 1000,
   };
 
   /**
@@ -535,15 +537,37 @@ async function main(): Promise<void> {
   }, { timezone: IST });
 
   /**
+   * End-of-day append-only backfill of any confirmed collection gap.
+   *
+   * Runs at 16:18 IST, a hair before the detector below, so a recoverable gap is repaired before it
+   * would page anyone. `data:heal-gaps --apply` fetches only the sessions the shared scan flags as
+   * unambiguous misses, only from Fyers, and only with `--skip-existing`, so it can add the missing
+   * minutes but never revise a bar the collector already wrote. It re-scans afterwards and exits
+   * non-zero if a gap survived the repair — a venue gap or an unauthenticated feed still surfaces.
+   *
+   * Needs the Fyers credential, so it is gated like the other collecting jobs; when there is no token
+   * the detector below still runs and still alarms, it simply cannot self-heal.
+   */
+  cron.schedule("18 16 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("CANDLE_GAP_HEAL", async () => {
+      await runCommand("npm", ["run", "data:heal-gaps", "--", "--apply", "--lookback-days", "5"]);
+    });
+  }, { timezone: IST });
+
+  /**
    * End-of-day check that the day's index bars actually all arrived.
    *
    * Runs at 16:20 IST, after the session has closed and the collector has stopped, so today's bars are
-   * final. Its whole job is to make a silent collection gap loud the same day: the August 2026 gaps
-   * went unnoticed for weeks because nothing looked. `data:detect-gaps` exits non-zero on an
-   * unambiguous miss, so a gap surfaces here as a FAILED job rather than in a backtest months later.
+   * final, and just after the healer above. Its whole job is to make a silent collection gap loud the
+   * same day: the August 2026 gaps went unnoticed for weeks because nothing looked. `data:detect-gaps`
+   * exits non-zero on an unambiguous miss, so a gap surfaces here as a FAILED job rather than in a
+   * backtest months later.
    *
-   * It does not backfill — that writes to the production series through the provenance guard and stays
-   * a deliberate manual step. The failed-job details carry the exact repair command.
+   * It writes nothing itself. With the healer running first, a routine gap is already repaired by the
+   * time this runs and it passes; anything it still reports is a gap the healer could not fix (or one it
+   * was not configured to reach), which is exactly what deserves attention. It is also the independent
+   * no-write safety net: if the healer has a fault, this still catches the gap.
    */
   cron.schedule("20 16 * * 1-5", () => {
     void schedule("CANDLE_GAP_CHECK", async () => {
@@ -868,7 +892,9 @@ async function main(): Promise<void> {
       "CANDIDATE_SETTLEMENT",
       "CANDLE_GAP_CHECK",
       ...(fyersTokenService
-        ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS"]
+        ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
+           // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
+           "CANDLE_GAP_HEAL"]
         : []),
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
