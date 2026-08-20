@@ -92,11 +92,13 @@ export interface TradeHistoryPage {
   truncated: boolean;
 }
 
-export type TradeHistoryMode = "swing" | "scalp";
+export type TradeHistoryMode = "all" | "scalp" | "swing";
 
 export interface TradeHistoryFilters {
   accountId: string;
   instrumentSymbol: string;
+  timeframe: string;
+  date: string;
   status: TradeHistoryStatus | "ALL";
   side: TradeHistorySide | "ALL";
   exitReason: TradeHistoryExitReason | "ALL";
@@ -107,6 +109,8 @@ export interface TradeHistoryFilters {
 export const defaultTradeHistoryFilters: TradeHistoryFilters = {
   accountId: "ALL",
   instrumentSymbol: "",
+  timeframe: "ALL",
+  date: "",
   status: "ALL",
   side: "ALL",
   exitReason: "ALL",
@@ -121,13 +125,49 @@ const average = (values: number[]): number | null => (
 );
 
 /**
- * Scalp trades are generated from the dedicated 1m strategy. Everything else,
- * including older records without timeframe metadata, remains in Swing so a
- * legacy trade never disappears from both tabs.
+ * Scalp trades are generated from intraday scalping strategies (1m, 3m, 5m, 15m).
+ * Swing trades represent higher timeframe or positional holds (1d, etc.).
  */
 export function isTradeInMode(record: TradeHistoryRecord, mode: TradeHistoryMode): boolean {
-  const isScalp = record.timeframe?.trim().toLowerCase() === "1m";
+  if (mode === "all") return true;
+  const tf = record.timeframe?.trim().toLowerCase() ?? "";
+  const isScalp = tf === "1m" || tf === "3m" || tf === "5m" || tf === "15m" || (tf === "" && record.notes?.toLowerCase().includes("scalp"));
   return mode === "scalp" ? isScalp : !isScalp;
+}
+
+/** Matches trade record against selected single-date filter (YYYY-MM-DD). */
+export function isTradeOnDate(record: TradeHistoryRecord, dateFilter: string): boolean {
+  if (!dateFilter || !dateFilter.trim()) return true;
+  const target = dateFilter.trim();
+
+  const matches = (timestampStr: string | null | undefined): boolean => {
+    if (!timestampStr) return false;
+    const raw = String(timestampStr).trim();
+    if (raw.slice(0, 10) === target) return true;
+    try {
+      const d = new Date(raw);
+      if (!Number.isNaN(d.getTime())) {
+        // Indian Standard Time (IST - Asia/Kolkata)
+        if (d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) === target) return true;
+        // User's Local Timezone
+        if (d.toLocaleDateString("en-CA") === target) return true;
+        // UTC
+        if (d.toISOString().slice(0, 10) === target) return true;
+      }
+    } catch {
+      // ignore parsing error
+    }
+    return false;
+  };
+
+  return matches(record.openedAt) || matches(record.closedAt);
+}
+
+/** Matches trade record against selected timeframe filter (e.g. 1m, 3m, 5m, 15m, 1d). */
+export function isTradeInTimeframe(record: TradeHistoryRecord, timeframeFilter: string): boolean {
+  if (!timeframeFilter || timeframeFilter === "ALL") return true;
+  const tf = record.timeframe?.trim().toLowerCase() ?? "";
+  return tf === timeframeFilter.trim().toLowerCase();
 }
 
 /** Rebuilds the summary after the Swing/Scalp partition has been applied. */
@@ -212,6 +252,7 @@ export function tradeHistoryQuery(filters: TradeHistoryFilters): string {
   if (filters.side !== "ALL") parameters.set("side", filters.side);
   if (filters.exitReason !== "ALL") parameters.set("exitReason", filters.exitReason);
   if (filters.outcome !== "ALL") parameters.set("outcome", filters.outcome);
+  if (filters.date && filters.date.trim()) parameters.set("date", filters.date.trim());
   parameters.set("limit", String(filters.limit));
   return `/paper-trades?${parameters.toString()}`;
 }

@@ -60,10 +60,10 @@ export function TradeLedgerTable({ records, pageTruncated, pageLimit }: { record
           )}
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto max-h-[600px] rounded-xl border border-white/5 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
           <table className="w-full border-collapse text-left">
-            <thead>
-              <tr className="border-b border-white/10 text-xs font-bold uppercase tracking-wider text-slate-400">
+            <thead className="sticky top-0 z-20 bg-slate-950/95 backdrop-blur border-b border-white/10 shadow-sm">
+              <tr className="text-xs font-bold uppercase tracking-wider text-slate-400">
                 <th className="px-4 py-3">Instrument</th>
                 <th className="px-4 py-3">Account</th>
                 <th className="px-4 py-3">Contract</th>

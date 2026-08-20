@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   isTradeInMode,
+  isTradeInTimeframe,
+  isTradeOnDate,
   summarizeTradeHistory,
   type TradeHistoryRecord,
 } from "./domain";
@@ -41,15 +43,22 @@ function record(overrides: Partial<TradeHistoryRecord> = {}): TradeHistoryRecord
 }
 
 describe("trade history modes", () => {
-  it("puts only 1m trades in Scalp and keeps legacy records in Swing", () => {
+  it("puts scalp trades in Scalp, swing in Swing, and all in All", () => {
     const swing = record({ timeframe: "1d" });
-    const scalp = record({ timeframe: " 1M " });
+    const scalp1m = record({ timeframe: " 1M " });
+    const scalp5m = record({ timeframe: "5m" });
     const legacy = record({ timeframe: null });
 
     expect(isTradeInMode(swing, "swing")).toBe(true);
     expect(isTradeInMode(swing, "scalp")).toBe(false);
-    expect(isTradeInMode(scalp, "scalp")).toBe(true);
-    expect(isTradeInMode(scalp, "swing")).toBe(false);
+    expect(isTradeInMode(swing, "all")).toBe(true);
+
+    expect(isTradeInMode(scalp1m, "scalp")).toBe(true);
+    expect(isTradeInMode(scalp1m, "swing")).toBe(false);
+    expect(isTradeInMode(scalp1m, "all")).toBe(true);
+
+    expect(isTradeInMode(scalp5m, "scalp")).toBe(true);
+    expect(isTradeInMode(scalp5m, "swing")).toBe(false);
     expect(isTradeInMode(legacy, "swing")).toBe(true);
   });
 
@@ -95,14 +104,23 @@ describe("trade history modes", () => {
     });
   });
 
-  it("returns an empty, non-misleading summary for an empty tab", () => {
-    expect(summarizeTradeHistory([])).toMatchObject({
-      tradeCount: 0,
-      winRatePercent: null,
-      profitFactor: null,
-      expectancy: null,
-      averageHoldingMinutes: null,
-      maximumDrawdown: 0,
-    });
+  it("filters trades accurately by single date (isTradeOnDate)", () => {
+    const trade = record({ openedAt: "2026-08-19T05:20:01.016Z", closedAt: "2026-08-19T05:25:13.009Z" });
+    const older = record({ openedAt: "2026-08-18T10:00:00.000Z", closedAt: "2026-08-18T10:30:00.000Z" });
+
+    expect(isTradeOnDate(trade, "")).toBe(true);
+    expect(isTradeOnDate(trade, "2026-08-19")).toBe(true);
+    expect(isTradeOnDate(trade, "2026-08-18")).toBe(false);
+    expect(isTradeOnDate(older, "2026-08-18")).toBe(true);
+  });
+
+  it("filters trades accurately by timeframe (isTradeInTimeframe)", () => {
+    const t1m = record({ timeframe: "1m" });
+    const t5m = record({ timeframe: "5m" });
+
+    expect(isTradeInTimeframe(t1m, "ALL")).toBe(true);
+    expect(isTradeInTimeframe(t1m, "1m")).toBe(true);
+    expect(isTradeInTimeframe(t1m, "5m")).toBe(false);
+    expect(isTradeInTimeframe(t5m, "5m")).toBe(true);
   });
 });

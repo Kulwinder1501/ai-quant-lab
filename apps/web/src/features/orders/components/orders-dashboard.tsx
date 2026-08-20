@@ -20,6 +20,7 @@ export function OrdersDashboard() {
   const [error, setError] = useState<string | null>(null);
 
   // Filters
+  const [filterDate, setFilterDate] = useState<string>("");
   const [filterSymbol, setFilterSymbol] = useState<string>("ALL");
   const [filterSide, setFilterSide] = useState<string>("ALL");
   const [filterOutcome, setFilterOutcome] = useState<string>("ALL");
@@ -100,9 +101,17 @@ export function OrdersDashboard() {
       if (filterOutcome === "WIN" && pnl <= 0) return false;
       if (filterOutcome === "LOSS" && pnl >= 0) return false;
 
+      if (filterDate) {
+        const openedAtStr = order.openedAt != null ? String(order.openedAt) : "";
+        const closedAtStr = order.closedAt != null ? String(order.closedAt) : "";
+        const matchesOpened = openedAtStr.slice(0, 10) === filterDate || (openedAtStr !== "" && new Date(openedAtStr).toLocaleDateString("en-CA") === filterDate);
+        const matchesClosed = closedAtStr.slice(0, 10) === filterDate || (closedAtStr !== "" && new Date(closedAtStr).toLocaleDateString("en-CA") === filterDate);
+        if (!matchesOpened && !matchesClosed) return false;
+      }
+
       return true;
     });
-  }, [summary?.closedTrades, filterSymbol, filterSide, filterOutcome]);
+  }, [summary?.closedTrades, filterSymbol, filterSide, filterOutcome, filterDate]);
 
   const orderStats = useMemo(() => {
     const list = filteredOrders;
@@ -133,50 +142,51 @@ export function OrdersDashboard() {
   }, [filteredOrders]);
 
   return (
-      <div className="space-y-6">
+    <div className="space-y-6">
+      {/* Account & Filter Control Bar */}
+      <Reveal>
+        <OrdersFilterBar
+          accounts={accounts}
+          selectedAccountId={selectedAccountId}
+          setSelectedAccountId={setSelectedAccountId}
+          filterDate={filterDate}
+          setFilterDate={setFilterDate}
+          filterSymbol={filterSymbol}
+          setFilterSymbol={setFilterSymbol}
+          filterSide={filterSide}
+          setFilterSide={setFilterSide}
+          filterOutcome={filterOutcome}
+          setFilterOutcome={setFilterOutcome}
+          onRefresh={refreshSummary}
+        />
+      </Reveal>
 
-        {/* Account & Filter Control Bar */}
-        <Reveal>
-          <OrdersFilterBar
-            accounts={accounts}
-            selectedAccountId={selectedAccountId}
-            setSelectedAccountId={setSelectedAccountId}
-            filterSymbol={filterSymbol}
-            setFilterSymbol={setFilterSymbol}
-            filterSide={filterSide}
-            setFilterSide={setFilterSide}
-            filterOutcome={filterOutcome}
-            setFilterOutcome={setFilterOutcome}
-            onRefresh={refreshSummary}
-          />
-        </Reveal>
+      {error && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-sm font-semibold">
+          {error}
+        </div>
+      )}
 
-        {error && (
-          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-sm font-semibold">
-            {error}
-          </div>
-        )}
+      {/* Execution Summary Cards */}
+      <Reveal delayMs={100}>
+        <div className="flex justify-end mb-4">
+          <button
+            type="button"
+            onClick={() => exportToCsv(filteredOrders, "orders")}
+            disabled={filteredOrders.length === 0}
+            className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+          >
+            <Download className="h-4 w-4" />
+            Export CSV
+          </button>
+        </div>
+        <OrdersStats orderStats={orderStats} />
+      </Reveal>
 
-        {/* Execution Summary Cards */}
-        <Reveal delayMs={100}>
-          <div className="flex justify-end mb-4">
-            <button
-              type="button"
-              onClick={() => exportToCsv(filteredOrders, "orders")}
-              disabled={filteredOrders.length === 0}
-              className="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
-            >
-              <Download className="h-4 w-4" />
-              Export CSV
-            </button>
-          </div>
-          <OrdersStats orderStats={orderStats} />
-        </Reveal>
-
-        {/* Completed Orders Table */}
-        <Reveal delayMs={200}>
-          <OrdersTable filteredOrders={filteredOrders} summary={summary} loading={loading} />
-        </Reveal>
-      </div>
+      {/* Completed Orders Table */}
+      <Reveal delayMs={200}>
+        <OrdersTable filteredOrders={filteredOrders} summary={summary} loading={loading} />
+      </Reveal>
+    </div>
   );
 }

@@ -7,6 +7,6 @@ export default async function TradeHistoryPage({
   searchParams: Promise<{ mode?: string }>;
 }) {
   const { mode } = await searchParams;
-  const initialMode: TradeHistoryMode = mode === "scalp" ? "scalp" : "swing";
+  const initialMode: TradeHistoryMode = mode === "scalp" ? "scalp" : mode === "swing" ? "swing" : "all";
   return <TradeHistoryDashboard initialMode={initialMode} />;
 }

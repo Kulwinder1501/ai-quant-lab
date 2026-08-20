@@ -30,3 +30,15 @@ export function parseUtcTimestamp(value: string, field: string): Date {
   }
   return parsed;
 }
+
+export function parseDateOrUtcTimestamp(value: string, field: string): Date {
+  const trimmed = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const parsedDate = new Date(`${trimmed}T00:00:00.000Z`);
+    if (!Number.isNaN(parsedDate.getTime()) && parsedDate.toISOString().slice(0, 10) === trimmed) {
+      return parsedDate;
+    }
+    throw new InvalidHttpQueryError(`${field} must be a valid calendar date.`);
+  }
+  return parseUtcTimestamp(trimmed, field);
+}

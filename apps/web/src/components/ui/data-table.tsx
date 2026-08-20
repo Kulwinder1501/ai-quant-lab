@@ -24,10 +24,10 @@ function renderCell(value: unknown): ReactNode {
 // have no implicit index signature and so are not assignable to that constraint.
 export function DataTable<T extends object>({ columns, data, emptyMessage = "No data available", loading = false }: DataTableProps<T>) {
   return (
-    <div className="w-full overflow-x-auto rounded-2xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm">
+    <div className="w-full overflow-x-auto overflow-y-auto max-h-[600px] rounded-2xl border border-slate-800 bg-slate-900/50 backdrop-blur-sm scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
       <table className="w-full text-left border-collapse">
-        <thead>
-          <tr className="bg-slate-800/50 text-slate-400 font-semibold uppercase text-xs border-b border-slate-800">
+        <thead className="sticky top-0 z-20 bg-slate-900/95 backdrop-blur border-b border-slate-800 shadow-sm">
+          <tr className="text-slate-400 font-semibold uppercase text-xs">
             {columns.map((col) => (
               <th 
                 key={col.key} 

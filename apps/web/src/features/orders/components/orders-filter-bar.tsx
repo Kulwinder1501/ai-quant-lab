@@ -6,6 +6,8 @@ interface OrdersFilterBarProps {
   accounts: PaperAccountSummary[];
   selectedAccountId: string;
   setSelectedAccountId: (id: string) => void;
+  filterDate: string;
+  setFilterDate: (val: string) => void;
   filterSymbol: string;
   setFilterSymbol: (val: string) => void;
   filterSide: string;
@@ -19,6 +21,8 @@ export function OrdersFilterBar({
   accounts,
   selectedAccountId,
   setSelectedAccountId,
+  filterDate,
+  setFilterDate,
   filterSymbol,
   setFilterSymbol,
   filterSide,
@@ -49,6 +53,27 @@ export function OrdersFilterBar({
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
+        {/* Date Filter */}
+        <div className="flex items-center gap-2 bg-slate-950/80 rounded-xl px-3 py-1.5 border border-white/10">
+          <span className="text-xs font-semibold text-slate-400">Date:</span>
+          <input
+            type="date"
+            value={filterDate}
+            onChange={(e) => setFilterDate(e.target.value)}
+            className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer [color-scheme:dark]"
+          />
+          {filterDate && (
+            <button
+              type="button"
+              onClick={() => setFilterDate("")}
+              className="text-xs font-bold text-slate-400 hover:text-white"
+              title="Clear date"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
         <div className="flex items-center gap-2 bg-slate-950/80 rounded-xl px-3 py-1.5 border border-white/10">
           <span className="text-xs font-semibold text-slate-400">Symbol:</span>
           <select
