@@ -43,6 +43,7 @@
     "paper:trades:evaluate": "npm run paper:trades:evaluate --workspace @ai-quant-lab/api --",
     "paper:trades:close": "npm run paper:trades:close --workspace @ai-quant-lab/api --",
     "paper:accounts:summary": "npm run paper:accounts:summary --workspace @ai-quant-lab/api --",
+    "research:evaluate-ofi": "npm run research:evaluate-ofi --workspace @ai-quant-lab/api --",
     "data:collect:depth-frames": "npm run data:collect:depth-frames --workspace @ai-quant-lab/api --",
     "research:settle-candidates": "npm run research:settle-candidates --workspace @ai-quant-lab/api --",
     "research:experiment-a": "npm run research:experiment-a --workspace @ai-quant-lab/api --",

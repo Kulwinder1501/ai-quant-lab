@@ -313,10 +313,39 @@ now only recorded where a chain existed to lose.
 **No IC, no evaluation, no verdict on whether OFI predicts anything.** That is Phase 4, and it stays
 shut until Phase 1's full-session gate is met.
 
-**Phase 4 — incremental value.** IC across the 1s–60s ladder with bootstrap uncertainty, and
-half-life. The question is not "does OFI predict" but "does it predict *beyond* what the existing
-indicator set already captures". A signal that merely rediscovers Supertrend is not incremental.
-*Gate:* significant IC that survives every placebo, at a horizon longer than our observed
+**Phase 4 — incremental value.** ⚠️ **RUNNER WIRED, GATE ENFORCED IN CODE, NO RESULT PRODUCED.**
+`research:evaluate-ofi` reads stored frames, builds observations, and runs the IC ladder through the
+R0 harness — and **refuses to compute an IC at all** unless the capture passes: sequence health
+`RECONSTRUCTIBLE`, window at least `--min-session-minutes` (default 300), and zero foreign rows.
+
+The gate is enforced here rather than only written down because *a gate that lives in a document gets
+skipped by whoever is in a hurry* — most likely the author, on the day the first interesting number
+appears. The most plausible way this programme produces a false positive is not a subtle statistical
+error; it is looking at a three-minute midday capture, seeing an IC of 0.08, and deciding the gate
+was pedantic. Now that is a refusal with an exit code rather than a judgement call.
+
+`ofi-signal-observations.ts` owns the join where look-ahead bugs actually live, with two asymmetric
+rules that are wrong if made symmetric:
+
+- **The feature may not cross an OFI break.** It is a sum of deltas, so a trailing window that would
+  reach back past a snapshot, gap or duplicate is truncated at the segment boundary. A short window
+  is honest; a window spanning a hole is not.
+- **The forward return may cross one.** A price is a price. Refusing returns across gaps would
+  silently drop exactly the volatile moments the feed is likeliest to hiccup through — a selection
+  bias on the *label*, which is worse than a shorter feature window.
+
+Two further choices, both to avoid manufacturing an IC: the horizon is in **milliseconds, not
+frames** (a frame-count horizon means different clock time depending on how busy the book was, which
+correlates the label with activity, which correlates with the feature), and the forward endpoint must
+be **strictly later** than the decision instant, never equal, because a same-millisecond frame could
+have been processed either side of it.
+
+*Verified refusing, on real data:* pointed at the 2026-08-21 captures it reported sequence health
+`RECONSTRUCTIBLE` (1,915 comparable pairs, 0 missed), built **1,901 observations with 0 look-ahead
+violations** across 6 segments — and refused, because the window spans 44.8 minutes against the
+required 300. The plumbing is demonstrably sound and the number is still withheld.
+
+*Gate:* significant IC surviving every placebo, at a horizon longer than our observed
 decision-to-order latency. A signal with a half-life shorter than our reaction time is unmonetizable
 regardless of significance.
 

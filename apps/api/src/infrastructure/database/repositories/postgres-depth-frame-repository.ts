@@ -118,6 +118,80 @@ export class PostgresDepthFrameRepository {
   }
 
   /**
+   * Full frames for one symbol, oldest first, for feature construction.
+   *
+   * Scoped by capture session when one is given. A window-scoped read is offered for analysing a
+   * whole trading day across several collector restarts, but it can mix concurrent writers — see
+   * `countForeignRowsInWindow` before trusting one.
+   */
+  async listFrames(input: {
+    providerSymbol: string;
+    captureSessionId?: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<Array<{
+    sequenceNo: number | null;
+    receivedAt: Date;
+    isSnapshot: boolean;
+    isDuplicate: boolean;
+    isRegression: boolean;
+    gapBefore: number | null;
+    bidPrice: number[];
+    bidQty: number[];
+    askPrice: number[];
+    askQty: number[];
+  }>> {
+    const conditions = ["provider_symbol = $1"];
+    const values: unknown[] = [input.providerSymbol.toUpperCase()];
+    if (input.captureSessionId) {
+      values.push(input.captureSessionId);
+      conditions.push(`capture_session_id = $${values.length}`);
+    }
+    if (input.from) {
+      values.push(input.from);
+      conditions.push(`received_at >= $${values.length}`);
+    }
+    if (input.to) {
+      values.push(input.to);
+      conditions.push(`received_at <= $${values.length}`);
+    }
+
+    const result = await this.database.query<{
+      sequence_no: string | null;
+      received_at: Date;
+      is_snapshot: boolean;
+      is_duplicate: boolean;
+      is_regression: boolean;
+      gap_before: number | null;
+      bid_price: string[];
+      bid_qty: string[];
+      ask_price: string[];
+      ask_qty: string[];
+    }>(
+      `SELECT sequence_no, received_at, is_snapshot, is_duplicate, is_regression, gap_before,
+              bid_price, bid_qty, ask_price, ask_qty
+       FROM depth_frames
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY received_at ASC, sequence_no ASC`,
+      values,
+    );
+
+    return result.rows.map((row) => ({
+      sequenceNo: row.sequence_no === null ? null : Number(row.sequence_no),
+      receivedAt: row.received_at,
+      isSnapshot: row.is_snapshot,
+      isDuplicate: row.is_duplicate,
+      isRegression: row.is_regression,
+      gapBefore: row.gap_before,
+      // NUMERIC[] and BIGINT[] both arrive as string arrays from node-postgres.
+      bidPrice: row.bid_price.map(Number),
+      bidQty: row.bid_qty.map(Number),
+      askPrice: row.ask_price.map(Number),
+      askQty: row.ask_qty.map(Number),
+    }));
+  }
+
+  /**
    * Rows for this symbol inside the window that some *other* writer produced.
    *
    * Turns contamination from an invisible corruption into a reported number. A non-zero count means

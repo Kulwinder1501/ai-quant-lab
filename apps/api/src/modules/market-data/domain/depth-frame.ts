@@ -185,8 +185,12 @@ export function parseDepthFrame(input: ParseDepthFrameInput): DepthFrame | null 
  * uncomputable from anything this system stored before Phase 1. Returns null when either side is
  * absent — a one-sided book has no mid, and substituting the traded price would invent one.
  */
-export function microprice(frame: Pick<DepthFrame,
-  "bidPrice" | "bidQty" | "askPrice" | "askQty">): number | null {
+export function microprice(frame: {
+  readonly bidPrice: readonly number[];
+  readonly bidQty: readonly number[];
+  readonly askPrice: readonly number[];
+  readonly askQty: readonly number[];
+}): number | null {
   const bidPrice = frame.bidPrice[0] ?? 0;
   const askPrice = frame.askPrice[0] ?? 0;
   const bidQty = frame.bidQty[0] ?? 0;

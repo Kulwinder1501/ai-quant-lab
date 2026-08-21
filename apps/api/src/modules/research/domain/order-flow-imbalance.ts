@@ -136,6 +136,8 @@ export type OfiBreakCause = "SNAPSHOT" | "SEQUENCE_GAP" | "DUPLICATE" | "NOT_COM
 export interface OfiObservation {
   readonly at: Date;
   readonly sequenceNo: number | null;
+  /** Index into the input frames, so a caller can recover the book this increment came from. */
+  readonly frameIndex: number;
   /** The increment contributed by this frame. */
   readonly delta: number;
   /** Running sum within this segment only. */
@@ -194,6 +196,7 @@ export function accumulateOrderFlowImbalance(
   let previous: OfiFrame | null = null;
   let runningSum = 0;
   let observationCount = 0;
+  let frameIndex = -1;
 
   const closeSegment = (): void => {
     if (currentObservations.length > 0) {
@@ -204,6 +207,7 @@ export function accumulateOrderFlowImbalance(
   };
 
   for (const frame of frames) {
+    frameIndex += 1;
     const breaksChain: OfiBreakCause | null = frame.isDuplicate
       ? "DUPLICATE"
       : frame.isSnapshot
@@ -257,6 +261,7 @@ export function accumulateOrderFlowImbalance(
     currentObservations.push({
       at: frame.receivedAt,
       sequenceNo: frame.sequenceNo,
+      frameIndex,
       delta: increment.total,
       cumulative: runningSum,
     });
