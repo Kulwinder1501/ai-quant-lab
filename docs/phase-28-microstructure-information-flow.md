@@ -1,6 +1,7 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS: PHASE 0 COMPLETE (PASS). PHASE 2 BUILT. PHASE 1 NOT STARTED.**
+**STATUS: PHASES 0, 1 AND 2 COMPLETE. PHASE 1 GATE MET IN MINIATURE ONLY — a full session has
+not yet been captured. PHASE 3 NOT STARTED.**
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -174,12 +175,67 @@ staging is that the cheap, reusable work (R0) lands before the expensive, specul
 **Phase 0 — data feasibility.** ✅ **PASS** (§1). Depth with sizes, order counts, and sequencing is
 available on the instruments we trade.
 
-**Phase 1 — raw event capture.** A `TbtDepthStreamer` alongside the existing streamer (separate
-socket, raw-token auth, string channels). A new append-only table storing, per frame: ticker,
-sequence number, `feedTime`, `sendTime`, our own millisecond receive time, snapshot flag, and the
-level arrays. Derive gap/duplicate flags from sequence discontinuity rather than trusting the feed.
-*Gate:* a full session captured with a quantified sequence-gap rate. Publish the gap rate; a feed we
-cannot characterise is not a feed we can research on.
+**Phase 1 — raw event capture.** ✅ **BUILT AND RUNNING LIVE.** Components:
+
+- `migrations/070-depth-frames.ts` — append-only event log. **No unique constraint on
+  `(provider_symbol, sequence_no)`**, which looks like an omission and is the design: a replayed
+  sequence number is the finding, and a unique index would turn it into an insert error the
+  collector has to swallow or die on. Duplicates are flagged and kept. A CHECK enforces that all six
+  level arrays share a length and that `levels_stored <= levels_available`.
+- `domain/depth-frame.ts` — vendor payload → storable event. Copies every array, because the SDK
+  keeps **one mutable `Depth` object per symbol** and hands the same instance to every callback; a
+  buffer of references would end a session holding N pointers to the final book. Also exports
+  `microprice`, as the cheapest possible proof the captured data supports what Phase 3 needs.
+- `domain/depth-frame-sequencing.ts` — gap/duplicate/regression classification and the gate metric.
+  **A snapshot is not a gap:** the feed re-bases on snapshot, so the sequence number can jump
+  arbitrarily and legitimately, and calling that loss would report a healthy reconnect as a broken
+  feed. This is the module's most likely false alarm and is tested directly.
+- `application/capture-depth-frames.ts` — buffering and continuity stamping.
+- `infrastructure/market-data/fyers-tbt-depth-streamer.ts` — the socket, with all four
+  silent-failure conventions encoded and tested.
+- `repositories/postgres-depth-frame-repository.ts` — batched append. At feed peak a
+  row-per-INSERT repository would let the buffer grow faster than it drains, which surfaces as
+  dropped frames and therefore as *false gaps in the gate metric itself*. The batch is a correctness
+  requirement, not an optimisation.
+- `cli/collect-depth-frames.ts` — the daemon, plus both `package.json` proxies (root included,
+  remembering `139a1db`, where a missing root proxy made a scheduled job unrunnable for a full day).
+
+**`gap_before` counts against the last *stored* frame, not the last *received* one.** If continuity
+were tracked against everything received, the row after a frame we dropped ourselves would record
+`gapBefore: 0` and the table would claim contiguity across a hole of our own making — and any book
+reconstructed across it would be silently wrong. Tracking against what was persisted means
+`gap_before` honestly reads "sequence numbers absent from this table before this row", whatever the
+cause; `selfDropped` in the run report separates our losses from the vendor's.
+
+**One bug this found in itself, live.** The first capture logged "Connected" twice. `connect()`
+guarded on `socket` being null, but `getAccessToken()` suspends, so `subscribe()`'s implicit connect
+and the caller's explicit `connect()` both passed the guard and built a socket — two sockets on one
+token, both bound to the same emitter, which would have counted and persisted every frame twice. Now
+guarded by a `connecting` flag set synchronously before the first await, and covered by a test that
+races the two entry points.
+
+*Gate — met in miniature, not yet at session scale.* Live capture 2026-08-21 on
+`NSE:BANKNIFTY26AUGFUT` and `NSE:BANKNIFTY26AUG57700CE`:
+
+| | result |
+|---|---|
+| frames written | 957 across two contracts |
+| sequence continuity | **0 missed, 0 regressions**, 1 duplicate (a genuine feed replay, correctly flagged) |
+| self-inflicted drops | 0 |
+| flush failures | 0 |
+| `levels_available` | 50 on every frame; stored 10 |
+| verdict | `RECONSTRUCTIBLE` on the run that cleared the minimum-pairs bar |
+
+Microprice computes from stored rows and moves correctly with size imbalance (bid 270 against ask 90
+pulled it to 57755.75, above the mid) — the quantity that was uncomputable from anything this system
+stored before Phase 1.
+
+**The gate is not fully met and should not be reported as such.** These were 2-3 minute captures.
+The pre-registered gate is *a full session*, and a three-minute window at midday says nothing about
+the open, the close, or a high-volume expiry-day book — which is exactly when a feed sheds frames.
+`INSUFFICIENT_SAMPLE` fired correctly on the first run (358 comparable pairs against a 500 minimum),
+and that guard is the reason the miniature result cannot be mistaken for the real one. Phase 3 must
+not begin until a full session has been captured and its rate published.
 
 **Phase 2 — R0 falsification harness.** ✅ **BUILT**, ahead of Phase 1 and deliberately so: it is
 the only component whose value survives the programme failing, and it can be built and tested

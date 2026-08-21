@@ -36,6 +36,7 @@
     "agent:tick": "tsx src/interfaces/cli/run-agent-tick.ts",
     "measure:directional-scorer": "tsx src/interfaces/cli/measure-directional-scorer.ts",
     "measure:effective-sample-size": "tsx src/interfaces/cli/measure-effective-sample-size.ts",
+    "data:collect:depth-frames": "tsx src/interfaces/cli/collect-depth-frames.ts",
     "measure:strategy-tier": "tsx src/interfaces/cli/measure-strategy-tier.ts",
     "verify:cap-concurrency": "tsx src/interfaces/cli/verify-cap-concurrency.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
