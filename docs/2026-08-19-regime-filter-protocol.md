@@ -346,3 +346,36 @@ is no. **The momentum-scalp index architecture is finished, not mistuned:** a re
 *which* of these trades to take, and refining a base that clears no cost-covering configuration at any
 width or horizon cannot produce a positive expectancy. Before Experiment B is worth running, a base
 architecture that clears 2 bps on untouched data has to exist first — and on the indices, none does.
+
+## Addendum (2026-08-21) — the remaining bar sizes were swept too, and they close the question
+
+The addendum above exhausted bracket width and holding horizon. The one axis left was bar size, and
+it is now measured. Both runs used `measureTier`'s gated-vs-unconditional methodology — the column
+that matters is whether the strategy beats *the same geometry taken on every bar*, not its raw rate.
+
+- **15m** (stored bars, frictionless): NIFTY50 LONG 19.2% and SHORT 38.0%, both below the 40%
+  break-even. BANKNIFTY SHORT 39.0%, below. BANKNIFTY LONG 41.9%, clearing break-even and beating
+  baseline by 0.9pp.
+- **3m** (derived from audited 1m via `aggregateBars`, session-anchored, partial buckets discarded):
+  LONG dead on both (36.2% / 38.0%). NIFTY50 SHORT 42.1%, clears break-even and beats baseline by
+  0.49pp. BANKNIFTY SHORT 40.4% — clears break-even but sits **0.96pp below its own baseline**.
+
+Neither apparent winner is usable, for two independent reasons.
+
+**It does not replicate.** 3m SHORT passes on NIFTY50 and fails against baseline on BANKNIFTY, on
+the same rule and the same 20k-bar sample. Cross-instrument replication is the cheapest robustness
+check available here and §5 already made it mandatory; this fails it.
+
+**The search produced exactly the number of winners chance predicts.** Eight side/timeframe cells
+were compared with no multiplicity correction. One-to-two thin passes at margins under 1pp is the
+null hypothesis behaving normally. This document insists on Holm adjustment for the *experiments* it
+governs; the same discipline applied to this sweep disqualifies its own best cell.
+
+**Terminal outcome: `NO_VIABLE_BAR_SIZE`.** All three cost-and-geometry axes — width, horizon, bar
+size — are now exhausted on this architecture. 1m was disabled in the strategy registry on
+2026-08-20 (89 closed live trades, −Rs 13,858, 82% of it BANKNIFTY). 5m remains enabled and is a
+known-dead configuration whose live sample is merely too small to have shown the drawdown yet.
+
+The pivot away from directional bar prediction is recorded in
+[phase-28-microstructure-information-flow.md](phase-28-microstructure-information-flow.md), whose
+Phase 0 established that the order-book data such a pivot requires is in fact available.

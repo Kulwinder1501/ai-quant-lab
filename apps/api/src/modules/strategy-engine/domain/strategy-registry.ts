@@ -53,7 +53,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
   {
     registration: momentumScalpIndexStrategyRegistration,
     StrategyClass: MomentumScalpIndexStrategy,
-    supportedTimeframes: ["1m", "5m"],
+    // 1m dropped 2026-08-20: closed paper trades on 1m were 89 trades / -Rs 13,858 net (30-41% win
+    // rate on both NIFTY50 and BANKNIFTY, worse on BANKNIFTY), against 5m's roughly break-even -Rs
+    // 674 over 76 trades. Matches the research findings that this architecture has no viable edge at
+    // any bracket width or holding horizon on either index (NO_VIABLE_STOP_MULTIPLE, NO_VIABLE_HORIZON).
+    supportedTimeframes: ["5m"],
   },
   {
     registration: momentumScalpPatternStrategyRegistration,
