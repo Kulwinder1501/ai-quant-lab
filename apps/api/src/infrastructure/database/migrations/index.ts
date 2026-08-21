@@ -68,6 +68,7 @@ import { regimeObservationsMigration } from "./067-regime-observations.js";
 import { candidateLedgerMigration } from "./068-candidate-ledger.js";
 import { optionTickRejectedVolumeMigration } from "./069-option-tick-rejected-volume.js";
 import { depthFramesMigration } from "./070-depth-frames.js";
+import { depthFrameCaptureSessionMigration } from "./071-depth-frame-capture-session.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -140,4 +141,5 @@ export const migrations = [
   candidateLedgerMigration,
   optionTickRejectedVolumeMigration,
   depthFramesMigration,
+  depthFrameCaptureSessionMigration,
 ];

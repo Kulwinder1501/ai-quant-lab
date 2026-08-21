@@ -19,8 +19,14 @@ import type { ClassifiedFrame } from "../../../modules/market-data/domain/depth-
 export class PostgresDepthFrameRepository {
   constructor(private readonly database: DatabasePool) {}
 
-  /** Appends a batch. Returns how many rows were written. */
-  async append(rows: readonly DepthFrameRow[]): Promise<number> {
+  /**
+   * Appends a batch, attributed to one capture session. Returns how many rows were written.
+   *
+   * `captureSessionId` is not optional by design: a row that cannot be attributed cannot be excluded
+   * from someone else's health report, which is how a concurrent writer corrupted a gap rate once
+   * already. See migration 071.
+   */
+  async append(rows: readonly DepthFrameRow[], captureSessionId: string): Promise<number> {
     if (rows.length === 0) return 0;
 
     /** Array columns need an explicit cast, by position, or Postgres infers text[]. */
@@ -28,7 +34,7 @@ export class PostgresDepthFrameRepository {
       9: "::numeric[]", 10: "::bigint[]", 11: "::integer[]",
       12: "::numeric[]", 13: "::bigint[]", 14: "::integer[]",
     };
-    const COLUMNS_PER_ROW = 21;
+    const COLUMNS_PER_ROW = 22;
 
     const values: unknown[] = [];
     const tuples: string[] = [];
@@ -59,6 +65,7 @@ export class PostgresDepthFrameRepository {
         row.isDuplicate,
         row.isRegression,
         row.payloadDigest,
+        captureSessionId,
       );
     });
 
@@ -67,7 +74,8 @@ export class PostgresDepthFrameRepository {
          provider, provider_symbol, sequence_no, exchange_feed_time, vendor_send_time,
          received_at, is_snapshot, levels_stored, levels_available,
          bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
-         total_buy_qty, total_sell_qty, gap_before, is_duplicate, is_regression, payload_digest
+         total_buy_qty, total_sell_qty, gap_before, is_duplicate, is_regression, payload_digest,
+         capture_session_id
        ) VALUES ${tuples.join(", ")}`,
       values,
     );
@@ -82,8 +90,7 @@ export class PostgresDepthFrameRepository {
    */
   async listClassifiedFrames(input: {
     providerSymbol: string;
-    from: Date;
-    to: Date;
+    captureSessionId: string;
   }): Promise<ClassifiedFrame[]> {
     const result = await this.database.query<{
       sequence_no: string | null;
@@ -94,9 +101,9 @@ export class PostgresDepthFrameRepository {
     }>(
       `SELECT sequence_no, gap_before, is_duplicate, is_regression, is_snapshot
        FROM depth_frames
-       WHERE provider_symbol = $1 AND received_at >= $2 AND received_at <= $3
+       WHERE provider_symbol = $1 AND capture_session_id = $2
        ORDER BY received_at ASC, sequence_no ASC`,
-      [input.providerSymbol.toUpperCase(), input.from, input.to],
+      [input.providerSymbol.toUpperCase(), input.captureSessionId],
     );
 
     return result.rows.map((row) => ({
@@ -108,6 +115,31 @@ export class PostgresDepthFrameRepository {
       isRegression: row.is_regression,
       isSnapshot: row.is_snapshot,
     }));
+  }
+
+  /**
+   * Rows for this symbol inside the window that some *other* writer produced.
+   *
+   * Turns contamination from an invisible corruption into a reported number. A non-zero count means
+   * another collector was capturing the same contract concurrently, so anything computed over the
+   * window rather than over `capture_session_id` — including any hand-written analysis query a
+   * researcher runs later — is mixing two streams.
+   */
+  async countForeignRowsInWindow(input: {
+    providerSymbol: string;
+    captureSessionId: string;
+    from: Date;
+    to: Date;
+  }): Promise<number> {
+    const result = await this.database.query<{ foreign_rows: string }>(
+      `SELECT COUNT(*) AS foreign_rows
+       FROM depth_frames
+       WHERE provider_symbol = $1
+         AND received_at >= $3 AND received_at <= $4
+         AND (capture_session_id IS DISTINCT FROM $2)`,
+      [input.providerSymbol.toUpperCase(), input.captureSessionId, input.from, input.to],
+    );
+    return Number(result.rows[0]?.foreign_rows ?? 0);
   }
 
   /** Symbols captured in a window, with frame counts. Used to report a session at a glance. */

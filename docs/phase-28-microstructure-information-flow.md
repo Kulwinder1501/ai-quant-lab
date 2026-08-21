@@ -1,7 +1,8 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS: PHASES 0, 1 AND 2 COMPLETE. PHASE 1 GATE MET IN MINIATURE ONLY — a full session has
-not yet been captured. PHASE 3 NOT STARTED.**
+**STATUS: PHASES 0, 1, 2 BUILT; PHASE 3 COMPUTATION BUILT BUT NOT EVALUATED. PHASE 1 GATE MET IN
+MINIATURE ONLY — a full session has not yet been captured, so no signal result may be claimed.
+PHASE 4 SHUT.**
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -282,9 +283,35 @@ below 0.5 — proving the instrument is sensitive enough that its PASS verdicts 
 noise returns `NO_SIGNAL`; a feature that is a stale copy of a return three observations old is
 caught by the negative-lag probe rather than by anything else.
 
-**Phase 3 — signal construction.** OFI from level-size deltas between sequenced frames; microprice
-from top-of-book sizes; quote-imbalance and spread dynamics as cheaper companions. Every signal
-point-in-time by construction and run through Phase 2's harness.
+**Phase 3 — signal construction.** ⚠️ **COMPUTATION BUILT, NOT EVALUATED.** The distinction is the
+point: writing the estimator is not the gated step, *drawing a conclusion from it* is.
+`research/domain/order-flow-imbalance.ts` implements the canonical Cont-Kukanov-Stoikov OFI —
+per-level signed queue change, extended across levels — plus `microprice` in `depth-frame.ts`.
+21 tests, all on synthetic books with hand-checked expected values.
+
+**It refuses to accumulate across a discontinuity, and this is where Phase 1 pays off.** OFI is a
+cumulative sum, so it is only defined along an unbroken chain. Three things break it, and all three
+are refusals rather than approximations: a **snapshot** (the feed restates the book, so differencing
+across it invents an enormous imbalance from nothing), a **sequence gap** (real queue changes
+happened unseen; differencing across the hole attributes all of them to one update and every later
+value inherits the error), and a **duplicate** (a replayed frame contributes its flow twice, and is
+not a valid baseline for the next frame either). `accumulateOrderFlowImbalance` therefore emits
+**segments** with the breaks and their causes, never one continuous series that quietly spans holes.
+
+Without `gap_before`, `is_snapshot` and `is_duplicate` on every stored row, none of those breaks
+would be detectable after the fact, and an OFI series computed over the table would look perfectly
+well-formed while being wrong wherever the feed hiccuped.
+
+Verified against real captured rows: 1,193 frames → 1,187 observations across 5 segments, longest
+371, breaking on 1 duplicate and 4 snapshots — the 4 being the opening snapshot of each separate
+capture run, which is exactly right, since OFI must not accumulate across two different sessions.
+
+*One bug its own tests caught:* the first version recorded the **opening** snapshot as a chain break,
+which would have reported every clean capture as damaged and made zero breaks unreachable. A break is
+now only recorded where a chain existed to lose.
+
+**No IC, no evaluation, no verdict on whether OFI predicts anything.** That is Phase 4, and it stays
+shut until Phase 1's full-session gate is met.
 
 **Phase 4 — incremental value.** IC across the 1s–60s ladder with bootstrap uncertainty, and
 half-life. The question is not "does OFI predict" but "does it predict *beyond* what the existing

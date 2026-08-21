@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
@@ -26,9 +27,21 @@ import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-
  * researcher would actually query. A capture that cannot publish that verdict has not met the gate,
  * however many rows it wrote.
  *
+ * ## It is a daemon, so it says so while it runs
+ *
+ * Without `--minutes` this runs until interrupted, and it deliberately does not log per frame -- at
+ * the feed's peak that would flood a session's output and cost more than the capture. The first
+ * version therefore printed one startup line and then nothing, which is indistinguishable from a
+ * hung process; it was reported as "not working" when it was in fact capturing normally. A heartbeat
+ * every `--progress-seconds` now reports frames, rows and buffer depth, so silence means stalled
+ * rather than merely quiet.
+ *
  * Usage:
  *   collect-depth-frames --symbols=NSE:BANKNIFTY26AUGFUT[,...] [--levels=10]
  *                        [--flush-seconds=2] [--minutes=N] [--min-pairs=500]
+ *                        [--progress-seconds=30]
+ *
+ * Ctrl+C (or SIGTERM) stops it and prints the integrity report.
  */
 
 interface Options {
@@ -38,6 +51,7 @@ interface Options {
   /** Stop after this many minutes. Omitted means run until interrupted. */
   minutes: number | null;
   minimumComparablePairs: number;
+  progressSeconds: number;
 }
 
 function parseOptions(argv: readonly string[]): Options {
@@ -69,6 +83,7 @@ function parseOptions(argv: readonly string[]): Options {
     flushSeconds: positive("flush-seconds", 2),
     minutes: values.has("minutes") ? positive("minutes", 1) : null,
     minimumComparablePairs: Math.floor(positive("min-pairs", 500)),
+    progressSeconds: positive("progress-seconds", 30),
   };
 }
 
@@ -82,6 +97,9 @@ async function main(): Promise<void> {
   const repository = new PostgresDepthFrameRepository(database);
   const buffer = new DepthFrameBuffer("fyers-tbt", DEFAULT_MAX_BUFFERED_FRAMES);
   const startedAt = new Date();
+  // Attributes every row this process writes, so the report below describes this capture rather than
+  // whatever else happened to be writing the same contract. See migration 071.
+  const captureSessionId = randomUUID();
 
   const streamer = new FyersTbtDepthStreamer({
     tokenService: new FyersTokenService({
@@ -101,7 +119,7 @@ async function main(): Promise<void> {
     const rows = buffer.drain();
     if (rows.length === 0) return;
     try {
-      written += await repository.append(rows);
+      written += await repository.append(rows, captureSessionId);
     } catch (error) {
       // Counted and logged, never silent: a failing flush is indistinguishable from a quiet feed in
       // the row count alone, and it is the most likely cause of an unexplained gap.
@@ -117,11 +135,29 @@ async function main(): Promise<void> {
 
   const flushTimer = setInterval(() => { void flush(); }, options.flushSeconds * 1_000);
 
+  // The heartbeat. Without it a working daemon is indistinguishable from a hung one.
+  const progressTimer = setInterval(() => {
+    const bufferStats = buffer.stats();
+    const streamStats = streamer.stats();
+    console.info(JSON.stringify({
+      level: "info",
+      message: "Depth capture progress",
+      elapsedSeconds: Math.round((Date.now() - startedAt.getTime()) / 1_000),
+      framesReceived: streamStats.framesReceived,
+      rowsWritten: written,
+      buffered: bufferStats.buffered,
+      selfDropped: bufferStats.selfDropped,
+      flushFailures,
+      lastFrameAt: streamStats.lastFrameAt?.toISOString() ?? null,
+    }));
+  }, options.progressSeconds * 1_000);
+
   let finished = false;
   const finish = async (reason: string): Promise<void> => {
     if (finished) return;
     finished = true;
     clearInterval(flushTimer);
+    clearInterval(progressTimer);
     streamer.close();
     await flush();
 
@@ -133,11 +169,20 @@ async function main(): Promise<void> {
     for (const symbol of options.symbols) {
       const classified = await repository.listClassifiedFrames({
         providerSymbol: symbol,
+        captureSessionId,
+      });
+      const foreignRows = await repository.countForeignRowsInWindow({
+        providerSymbol: symbol,
+        captureSessionId,
         from: startedAt,
         to: finishedAt,
       });
       perSymbol.push({
         symbol,
+        // Non-zero means another writer was capturing this contract at the same time. The health
+        // below is still sound (it is scoped to this session), but any window-scoped query a
+        // researcher writes later would mix the two streams.
+        foreignRowsInWindow: foreignRows,
         health: summariseSequenceHealth(classified, {
           minimumComparablePairs: options.minimumComparablePairs,
         }),
@@ -148,6 +193,7 @@ async function main(): Promise<void> {
       level: "info",
       message: "Depth frame capture complete",
       stoppedBecause: reason,
+      captureSessionId,
       window: { from: startedAt.toISOString(), to: finishedAt.toISOString() },
       levelsStored: options.levels,
       rowsWritten: written,
@@ -177,10 +223,14 @@ async function main(): Promise<void> {
   console.info(JSON.stringify({
     level: "info",
     message: "Starting depth frame capture",
+    captureSessionId,
     symbols: options.symbols,
     levels: options.levels,
     flushSeconds: options.flushSeconds,
     minutes: options.minutes,
+    note: options.minutes === null
+      ? `Running until interrupted; progress every ${options.progressSeconds}s. Ctrl+C to stop and report.`
+      : `Stopping after ${options.minutes} minute(s).`,
   }));
 
   streamer.subscribe(options.symbols);
