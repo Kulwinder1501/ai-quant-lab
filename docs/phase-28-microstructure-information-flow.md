@@ -1,6 +1,6 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS: PHASE 0 COMPLETE (PASS). PHASES 1+ NOT STARTED.**
+**STATUS: PHASE 0 COMPLETE (PASS). PHASE 2 BUILT. PHASE 1 NOT STARTED.**
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -181,14 +181,50 @@ level arrays. Derive gap/duplicate flags from sequence discontinuity rather than
 *Gate:* a full session captured with a quantified sequence-gap rate. Publish the gap rate; a feed we
 cannot characterise is not a feed we can research on.
 
-**Phase 2 — R0 falsification harness.** The negative-lag diagnostic, true placebos (sign-flip,
-wrong-day matched-time, block permutation, circular shift), the dual future-injection test, and a
-reusable runtime `LOOKAHEAD_VIOLATION` guard comparing feature-as-of against prediction-as-of.
-*Build this before any signal is evaluated.* It is the highest-leverage item in the whole programme
-because it protects every future experiment, not just this one — and this codebase has already
-shipped a look-ahead bug that needed a retroactive data purge (migration `048`).
-*Gate:* placebos return IC ≈ 0 and injected future returns produce absurd fake alpha. If the harness
-cannot detect a bug we deliberately introduced, it cannot clear a signal we hope is real.
+**Phase 2 — R0 falsification harness.** ✅ **BUILT**, ahead of Phase 1 and deliberately so: it is
+the only component whose value survives the programme failing, and it can be built and tested
+without a single byte of depth data. Landed as `apps/api/src/modules/research/domain/`:
+
+- `lookahead-guard.ts` — reusable runtime `LOOKAHEAD_VIOLATION`, comparing feature-as-of against
+  decision time. Refuses an *unverifiable* timestamp as its own violation class rather than passing
+  it, because an invalid `Date` compares false against every bound and a naive check therefore
+  reports compliance exactly where it knows least.
+- `information-coefficient.ts` — Spearman IC (Pearson alongside, since the gap between them
+  reveals outlier dominance), averaged ranks so a quiet constant book contributes nothing rather
+  than a spurious ordering, seeded percentile bootstrap. Returns `null`, never `0`, when a series is
+  constant: `0` asserts a measured absence, `null` says nothing was measurable, and conflating them
+  lets a broken pipeline read as an honest negative.
+- `placebos.ts` — sign-flip, block permutation, circular shift, wrong-day-matched-time. All seeded;
+  an unreproducible band invites re-rolling until the real signal clears.
+- `falsification-harness.ts` — orchestrates the above into one verdict, with the failure ordering
+  described below.
+
+**The band is self-calibrating.** There is no hard-coded "significant IC" threshold, because such a
+number is a free parameter inviting exactly the tuning the harness exists to prevent. `placeboBand`
+is the largest absolute IC any label-destroying transform achieves, and the real IC must beat it.
+This automatically widens the bar on data that is easy to spuriously correlate — which order-flow
+data is, since both book imbalance and short-horizon returns are strongly autocorrelated.
+
+**One calibration trap, found by its own tests and worth not reintroducing.** The first version
+judged negative lags against `placeboBand` too. That is wrong: the band is a *maximum over several*
+placebo draws, so on a clean informative feature the placebos collapse toward zero and the band goes
+tiny — while a single lag probe still carries `~1/sqrt(n)` sampling noise. It failed legitimate
+signals for "predicting the past" roughly half the time, including deliberately injected perfect
+foresight. The lag threshold is now `max(placeboBand, sigma / sqrt(n - 1))`: the first term catches
+autocorrelation-driven spurious correlation that an analytic floor is blind to, the second stops a
+tiny band from manufacturing failures. Neither alone suffices.
+
+**Verdict ordering is load-bearing**, not stylistic: a look-ahead violation short-circuits before any
+IC is reported (a leak corrupts every lag equally, so reporting lags would dress a bug up as a weak
+result); a placebo breach outranks any signal claim, because a result from a broken instrument is not
+a result.
+
+*Gate — met:* 52 tests, 4 files. The two integrity tests the source plan specifies both hold. Test A:
+evidence dated 1ms after the decision fails closed with `FAIL_LOOKAHEAD`. Test B: a feature that *is*
+the forward return reports |IC| ≈ 1 with a bootstrap interval above 0.9 while every placebo stays
+below 0.5 — proving the instrument is sensitive enough that its PASS verdicts mean something. Pure
+noise returns `NO_SIGNAL`; a feature that is a stale copy of a return three observations old is
+caught by the negative-lag probe rather than by anything else.
 
 **Phase 3 — signal construction.** OFI from level-size deltas between sequenced frames; microprice
 from top-of-book sizes; quote-imbalance and spread dynamics as cheaper companions. Every signal
@@ -239,9 +275,12 @@ Written before the data arrives, so they cannot be renegotiated afterwards.
 
 ## 6. Open questions
 
-- **Concurrent connection limits.** The scheduler and two live collectors already hold Fyers sockets.
-  TBT would add another. Unverified whether the app tier caps this. Check before Phase 1 ships, not
-  after it destabilises the live feed.
+- ~~**Concurrent connection limits.**~~ **Substantially answered.** The Phase 0 spike ran while
+  `scheduler-v2`, `live-collector-v2` and `live-collector-scalp-v2` were all up and holding sockets,
+  and the TBT connection opened and streamed normally as a fourth. That is evidence a fourth
+  concurrent connection is fine on this app tier; it does not locate the actual cap, so a Phase 1
+  ingester that subscribes many symbols should still watch for connection-level errors rather than
+  assume headroom.
 - **TBT retention and volume.** At 1000+ updates/second per active symbol, storing raw frames for a
   full option chain is a materially different storage problem from 1m bars. Scope the subscription
   narrowly (a handful of ATM contracts) and measure the write rate before widening.
