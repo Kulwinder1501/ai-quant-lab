@@ -187,6 +187,57 @@ services:
       api-v2:
         condition: service_healthy
 
+  depth-collector-v2:
+    image: aiquantlab-api-v2:latest
+    container_name: ai-quant-lab-depth-collector-v2
+    restart: unless-stopped
+    # Phase 28's raw L2 capture. A daemon for the same reason the other collectors are: it holds a
+    # socket for the session, so the scheduler's overlap guard would write off a run that never ends.
+    #
+    # This is a FOURTH concurrent Fyers socket (scheduler + two collectors already hold one each).
+    # A fourth was verified working live on 2026-08-21 while all three others were connected; the
+    # actual per-app cap is unknown, so a connection-level error here is the first thing to check if
+    # the other feeds start misbehaving after this service is enabled.
+    #
+    # ## Two known limitations, both deliberate rather than overlooked
+    #
+    # **The symbol is hardcoded and rolls.** NSE:BANKNIFTY26AUGFUT stops existing after the August
+    # expiry. This feed accepts a subscription to a dead contract and then delivers nothing, with no
+    # error -- indistinguishable from a quiet book. The collector's --stale-after-seconds guard logs
+    # a loud ERROR during market hours when no frames arrive, which converts a silent months-long
+    # failure into a visible one, but it does NOT fix the roll. Update this symbol each expiry until
+    # front-month resolution is built.
+    #
+    # **There is no retention policy.** At the observed ~240 frames/minute/symbol, a full session is
+    # roughly 90k rows per symbol per day. depth_frames is append-only with six numeric arrays per
+    # row, so this grows materially faster than any other table here. Size it before letting it run
+    # for weeks.
+    command:
+      - "node"
+      - "apps/api/dist/interfaces/cli/collect-depth-frames.js"
+      - "--symbols=NSE:BANKNIFTY26AUGFUT"
+      - "--levels=10"
+      - "--flush-seconds=2"
+      - "--progress-seconds=300"
+      - "--stale-after-seconds=300"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+      FYERS_APP_ID: ${FYERS_APP_ID:-}
+      FYERS_APP_SECRET: ${FYERS_APP_SECRET:-}
+      FYERS_PIN: ${FYERS_PIN:-}
+      NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      database-v2:
+        condition: service_healthy
+      api-v2:
+        condition: service_healthy
+
   web-v2:
     build:
       context: .

@@ -10,6 +10,7 @@ import {
   DEFAULT_MAX_BUFFERED_FRAMES,
 } from "../../modules/market-data/application/capture-depth-frames.js";
 import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-frame-sequencing.js";
+import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 
 /**
  * Captures raw order-book depth for a set of contracts and reports the feed's integrity (Phase 28
@@ -41,6 +42,22 @@ import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-
  *                        [--flush-seconds=2] [--minutes=N] [--min-pairs=500]
  *                        [--progress-seconds=30]
  *
+ * ## The staleness guard, and the failure it exists for
+ *
+ * Contract symbols roll. `NSE:BANKNIFTY26AUGFUT` stops existing after the August expiry, and an ATM
+ * option symbol stops being ATM long before that. Subscribing to a dead symbol does not error --
+ * this feed accepts the subscription and delivers **nothing**, which is the same shape as a quiet
+ * book. A long-running collector pointed at a rolled contract would therefore look healthy while
+ * capturing zero frames, and the first sign of trouble would be an empty table weeks later.
+ *
+ * So during market hours, a gap of `--stale-after-seconds` with no frames is logged as an ERROR on
+ * every check. It deliberately does **not** exit: this project has already lost a session to a
+ * crash-restart loop (85 restarts on 2026-08-18), and a self-killing daemon under
+ * `restart: unless-stopped` would reproduce that shape. Loud and running beats dead and restarting.
+ *
+ * The guard is a mitigation, not a fix. The real fix is resolving the front-month and ATM symbols at
+ * subscribe time instead of hardcoding them, which is not built yet.
+ *
  * Ctrl+C (or SIGTERM) stops it and prints the integrity report.
  */
 
@@ -52,6 +69,8 @@ interface Options {
   minutes: number | null;
   minimumComparablePairs: number;
   progressSeconds: number;
+  /** Seconds of silence during market hours before an ERROR is logged. */
+  staleAfterSeconds: number;
 }
 
 function parseOptions(argv: readonly string[]): Options {
@@ -84,6 +103,7 @@ function parseOptions(argv: readonly string[]): Options {
     minutes: values.has("minutes") ? positive("minutes", 1) : null,
     minimumComparablePairs: Math.floor(positive("min-pairs", 500)),
     progressSeconds: positive("progress-seconds", 30),
+    staleAfterSeconds: positive("stale-after-seconds", 300),
   };
 }
 
@@ -135,10 +155,34 @@ async function main(): Promise<void> {
 
   const flushTimer = setInterval(() => { void flush(); }, options.flushSeconds * 1_000);
 
+  const marketSession = new NseMarketSession(
+    (process.env.NSE_HOLIDAYS ?? "").split(",").map((day) => day.trim()).filter((day) => day !== ""),
+  );
+
   // The heartbeat. Without it a working daemon is indistinguishable from a hung one.
   const progressTimer = setInterval(() => {
     const bufferStats = buffer.stats();
     const streamStats = streamer.stats();
+
+    // Silence during market hours is the symptom of a rolled or mistyped symbol, which this feed
+    // reports by delivering nothing at all rather than by erroring. See the header.
+    const now = new Date();
+    if (marketSession.isOpen(now)) {
+      const lastFrameMs = streamStats.lastFrameAt?.getTime() ?? startedAt.getTime();
+      const silentForSeconds = Math.round((now.getTime() - lastFrameMs) / 1_000);
+      if (silentForSeconds >= options.staleAfterSeconds) {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "No depth frames during market hours; the subscription may be dead.",
+          silentForSeconds,
+          symbols: options.symbols,
+          hint: "A rolled or mistyped contract is accepted by this feed and then delivers nothing. "
+            + "Check the expiry and strike are still live.",
+          framesReceived: streamStats.framesReceived,
+        }));
+      }
+    }
+
     console.info(JSON.stringify({
       level: "info",
       message: "Depth capture progress",
