@@ -108,6 +108,48 @@ describe("falsification harness", () => {
     expect(Math.abs(report.negativeLagIcs[0]!.ic!)).toBeGreaterThan(0.9);
   });
 
+  it("retains negative lags as diagnostics when causal features include realised returns", () => {
+    const returns: number[] = [];
+    const random = createSeededRandom(77);
+    for (let index = 0; index < 400; index += 1) returns.push(random() - 0.5);
+    const observations = build(400, (index) => ({
+      featureValue: index >= 3 ? returns[index - 3]! : 0,
+      forwardReturn: returns[index]!,
+    }));
+
+    const report = runFalsificationHarness(observations, {
+      seed: 4,
+      bootstrapSamples: 50,
+      negativeLags: [-3],
+      negativeLagMode: "diagnostic",
+    });
+
+    expect(Math.abs(report.negativeLagIcs[0]!.ic!)).toBeGreaterThan(0.9);
+    expect(report.verdict).not.toBe("FAIL_NEGATIVE_LAG");
+  });
+
+  it("does not call an overlapping forward label a past-return lag", () => {
+    const returns: number[] = [];
+    const random = createSeededRandom(88);
+    for (let index = 0; index < 400; index += 1) returns.push(random() - 0.5);
+    const observations = build(400, (index) => ({
+      featureValue: index > 0 ? returns[index - 1]! : 0,
+      forwardReturn: returns[index]!,
+    })).map((observation) => ({
+      ...observation,
+      labelEndAt: new Date(observation.at.getTime() + 15 * 60_000),
+    }));
+
+    const report = runFalsificationHarness(observations, {
+      seed: 4,
+      bootstrapSamples: 50,
+      negativeLags: [-1],
+    });
+
+    expect(report.negativeLagIcs[0]).toMatchObject({ lag: -1, sampleSize: 7 });
+    expect(report.verdict).not.toBe("FAIL_NEGATIVE_LAG");
+  });
+
   it("refuses to report a verdict below the pre-declared minimum sample", () => {
     const observations = build(40, (_, random) => ({
       featureValue: random(),

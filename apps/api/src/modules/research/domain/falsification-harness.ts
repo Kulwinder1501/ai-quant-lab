@@ -76,6 +76,8 @@ export interface FalsificationObservation {
   readonly featureValue: number;
   /** Return realised *after* `at` over the horizon under test. */
   readonly forwardReturn: number;
+  /** When that forward return became fully known; required to reject overlapping lag probes. */
+  readonly labelEndAt?: Date;
 }
 
 export interface FalsificationOptions {
@@ -98,6 +100,12 @@ export interface FalsificationOptions {
    * is roughly a two-sided 0.003 per probe and tolerates the handful of probes run here.
    */
   readonly negativeLagSigma?: number;
+  /**
+   * `hard` is appropriate for features that cannot causally depend on past returns.
+   * Use `diagnostic` for explicitly price-derived features such as momentum, where correlation
+   * with realised history is expected and is not evidence of timestamp leakage.
+   */
+  readonly negativeLagMode?: "hard" | "diagnostic";
 }
 
 export type FalsificationVerdict =
@@ -150,8 +158,18 @@ function alignAtLag(
   for (let index = 0; index < observations.length; index += 1) {
     const partner = index + lag;
     if (partner < 0 || partner >= observations.length) continue;
-    feature.push(observations[index]!.featureValue);
-    forwardReturn.push(observations[partner]!.forwardReturn);
+    const observation = observations[index]!;
+    const partnerObservation = observations[partner]!;
+    // On overlapping decision grids, row i-1's "forward" return can still end after row i's
+    // decision. Calling that a past return manufactured a negative-lag failure for every 15m+
+    // target. A lag probe is causal only when the paired label was fully resolved by this decision.
+    if (
+      lag < 0
+      && partnerObservation.labelEndAt
+      && partnerObservation.labelEndAt.getTime() > observation.at.getTime()
+    ) continue;
+    feature.push(observation.featureValue);
+    forwardReturn.push(partnerObservation.forwardReturn);
   }
   return { feature, forwardReturn };
 }
@@ -188,9 +206,16 @@ export function runFalsificationHarness(
   );
 
   const natural = alignAtLag(observations, 0);
+  const dayFormatter = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" });
+  const dayKeys = observations.map((observation) => (
+    observation.at instanceof Date && !Number.isNaN(observation.at.getTime())
+      ? dayFormatter.format(observation.at)
+      : "INVALID"
+  ));
   const real = informationCoefficient(natural.feature, natural.forwardReturn, {
     bootstrapSamples,
     seed,
+    dayKeys,
   });
 
   // A look-ahead violation corrupts every number below it, so the report stops describing a signal
@@ -319,9 +344,15 @@ export function runFalsificationHarness(
 
   const breachingLags = negativeLagIcs.filter((entry) => {
     const magnitude = absOrNull(entry.ic);
-    return magnitude !== null && negativeLagThreshold !== null && magnitude > negativeLagThreshold;
+    // A horizon-overlap filter can leave only a handful of overnight boundary pairs for a short
+    // offset. Judging that tiny remainder against the full-sample noise floor recreates the false
+    // failure through small-n variance, so a lag must independently clear the declared sample floor.
+    return entry.sampleSize >= minimumSample
+      && magnitude !== null
+      && negativeLagThreshold !== null
+      && magnitude > negativeLagThreshold;
   });
-  if (breachingLags.length > 0) {
+  if (breachingLags.length > 0 && (options.negativeLagMode ?? "hard") === "hard") {
     for (const entry of breachingLags) {
       failures.push(
         `Negative lag ${entry.lag} produced |IC| ${Math.abs(entry.ic!).toFixed(4)}, above the `

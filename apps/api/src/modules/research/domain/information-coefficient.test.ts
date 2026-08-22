@@ -97,6 +97,8 @@ describe("informationCoefficient", () => {
     expect(measured.sampleSize).toBe(60);
     expect(measured.confidenceInterval).not.toBeNull();
     expect(measured.confidenceInterval!.lower).toBeGreaterThan(0);
+    expect(measured.pValue).not.toBeNull();
+    expect(measured.pValue!).toBeLessThan(0.05);
   });
 
   it("is deterministic for a fixed seed", () => {
@@ -132,5 +134,34 @@ describe("informationCoefficient", () => {
     const measured = informationCoefficient(new Array(40).fill(2), perfect.slice(0, 40), { seed: 1 });
     expect(measured.ic).toBeNull();
     expect(measured.confidenceInterval).toBeNull();
+  });
+
+  it("supports day-block bootstrap when dayKeys are provided", () => {
+    const random = createSeededRandom(42);
+    // 10 sessions, 10 samples per session = 100 samples
+    const dayKeys: string[] = [];
+    const feature: number[] = [];
+    const forward: number[] = [];
+    for (let day = 0; day < 10; day += 1) {
+      const dayStr = `2026-01-${String(day + 1).padStart(2, "0")}`;
+      const dayEffect = day * 0.5;
+      for (let sample = 0; sample < 10; sample += 1) {
+        dayKeys.push(dayStr);
+        const f = random() + dayEffect;
+        feature.push(f);
+        forward.push(f + random() * 0.2); // positive relationship
+      }
+    }
+
+    const measured = informationCoefficient(feature, forward, {
+      seed: 7,
+      bootstrapSamples: 200,
+      dayKeys,
+    });
+
+    expect(measured.ic).toBeGreaterThan(0.5);
+    expect(measured.sampleSize).toBe(100);
+    expect(measured.confidenceInterval).not.toBeNull();
+    expect(measured.confidenceInterval!.lower).toBeGreaterThan(0);
   });
 });

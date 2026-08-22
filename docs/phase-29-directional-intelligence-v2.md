@@ -1,6 +1,12 @@
 # Phase 29 — Directional Intelligence V2 (Label Study)
 
-**STATUS: PROTOCOL. NOTHING BUILT.**
+**STATUS: D0/D1 BUILT AND AUDITED; D2 BUILT, 8/60 PREMIUM SESSIONS COLLECTED; D3 NOT STARTED.**
+
+The D0 dataset/label generator, strict candle audit, target-specific overlap accounting and D1
+purged-OOF baselines live under `apps/api/src/modules/research/directional-v2`. This remains a
+research path: it is deliberately not connected to live strategy generation, model promotion or
+paper trading. D2 has an immutable premium-space runner but has not reached its evidence minimum;
+D3 forward OOS remains mandatory before any such wiring.
 
 A label study, not a strategy. Its question is narrow and prior: **which formulation of "direction" is
 learnable at all**, before a single model is tuned. The best possible outcome of D0/D1 is "target X
@@ -122,10 +128,12 @@ relevant pair independently, and a split verdict is recorded as drift rather tha
 
 ### 2.3 Multiplicity control — the biggest hole in the blueprint
 
-Six label families × three horizons × several `k` values is **50+ cells**, and the blueprint specifies
-no correction. On 2026-08-21 an eight-cell timeframe sweep in this project produced one apparent
-winner at a sub-1pp margin, and that winner was disqualified *by this project's own standard* as what
-the null hypothesis does when you look eight times. Fifty cells will produce several.
+Even one threshold produces multiple label/model families across three horizons, and any later
+threshold grid expands that family rapidly. The first D0/D1 pass is frozen at `k = 0.5`
+(`tripleBarrierMultiplier = 1.0`); changing or expanding that grid requires a protocol revision
+before inspecting results. On 2026-08-21 an eight-cell timeframe sweep in this project produced one
+apparent winner at a sub-1pp margin, and that winner was disqualified *by this project's own standard*
+as what the null hypothesis does when you look eight times.
 
 - Holm–Bonferroni across the pre-declared family, via the existing `applyHolm`.
 - Because the cell count is large, also report **Deflated Sharpe / PBO** at the D2 stage, where a
@@ -150,19 +158,19 @@ seasonality shows up as a placebo that scores as well as the real thing.
 
 ## 3. The structural change: the deep 1m history is on the wrong instruments
 
-Measured 2026-08-21:
+Measured and strictly audited 2026-08-22 after the settled FYERS refill:
 
 | series | sessions | from | notes |
 |---|---|---|---|
-| NIFTYBEES 1m | **899** | 2023-01-02 | 100% non-zero volume, 23 indicator definitions, 4.12M snapshots |
-| BANKBEES 1m | **897** | 2023-01-02 | 99.7% non-zero volume, **17** definitions, 4.12M snapshots |
-| NIFTY50 1m | **155** | 2026-01-01 | — |
-| BANKNIFTY 1m | **153** | 2026-01-01 | — |
+| NIFTYBEES 1m | **902 stored / 893 study-eligible** | 2023-01-02 | 336,766 bars; 100% non-zero volume; 14 indicator definitions |
+| BANKBEES 1m | **902 stored / 890 study-eligible** | 2023-01-02 | 336,763 bars; 99.7% non-zero volume; 14 indicator definitions |
+| NIFTY50 1m | **158** | 2026-01-01 | 59,250 bars after D2 input refill |
+| BANKNIFTY 1m | **158** | 2026-01-01 | 59,250 bars after D2 input refill |
 
 Two consequences, and they reproduce the split that forced the A→B gate's existence:
 
-1. **D0/D1 must run on NIFTYBEES and BANKBEES.** 899 sessions is a real sample for a 50-cell label
-   study; 153 is not.
+1. **D0/D1 must run on NIFTYBEES and BANKBEES.** Roughly 890 eligible sessions is a real sample for
+   a 50-cell label study; 158 is not.
 2. **The index 1m block is already consumed three times** — A→B gate, stop sweep, horizon sweep. It
    is in-sample by construction, and any D0 result claimed on it is not out-of-sample. Treat it as a
    replication target under §2.2, never as a clean test.
@@ -172,12 +180,24 @@ protocol is frozen. State that plainly rather than spending the block and discov
 
 **Data-readiness gate before D0 begins**, per the standing pattern: audit the 1m series for missing
 sessions, duplicate timestamps, out-of-session bars and session misalignment; holidays and known
-short sessions are acceptable, unexplained intra-session gaps are a FAIL that aborts the run. Note
-the coverage asymmetry above — BANKBEES carries 17 indicator definitions against NIFTYBEES' 23. Any
-feature set for D1 must be the **intersection**, or the two arms are not comparable and a "BANKBEES
-does not replicate" verdict would be a coverage artefact rather than a finding. A NIFTYBEES 5m series
+short sessions are acceptable, unexplained intra-session gaps are a FAIL that aborts the run. Both
+ETF arms currently carry the same 14 audited indicator definitions. Any indicator-based feature set
+for D1 must still use the **intersection**, or the two arms are not comparable and a "BANKBEES does
+not replicate" verdict would be a coverage artefact rather than a finding. A NIFTYBEES 5m series
 once sat at 47.1% indicator coverage and silently produced zero signals for a strategy that later
 fired 72,140 times on the same bars.
+
+Special sessions are not silently treated as regular days. A versioned, circular-referenced
+allowlist retains them in the candle store but excludes them from this regular-session study and
+reports the excluded session and candle counts. Migration `072-historical-nse-holidays` seeds the
+2023-2025 cash-market holiday calendar, and migration `073-january-2026-election-holiday` records the
+15 January 2026 Maharashtra election closure, so exchange closures are not reported as missing data.
+Five sessions containing irreparable invalid FYERS minutes are excluded in full; two isolated 15:30
+closing prints are excluded exactly. No synthetic candles are introduced.
+
+The frozen D1 implementation satisfies that constraint by deriving its seven minimal features only
+from audited OHLCV fields present on both arms; it does not consume `indicator_snapshots` at all.
+Stored indicator-definition counts remain an audit diagnostic, not a D1 input.
 
 ---
 
@@ -187,7 +207,7 @@ fired 72,140 times on the same bars.
 all six label families on the ETF pair. Produce the §6 label-quality report: class balance by year,
 time-of-day and vol regime; label-transition and cross-horizon-transition matrices; and the
 **overlap-adjusted sample count with average uniqueness**, which is the number that matters — a 5m
-grid over 899 sessions is ~67k raw decisions but far fewer independent ones at a 60m horizon.
+grid over roughly 890 sessions is ~66k raw decisions but far fewer independent ones at a 60m horizon.
 *Gate:* a family whose overlap-adjusted count is too small to support D1, or whose class balance is
 unstable across years, is dropped here and not carried forward.
 
@@ -196,9 +216,71 @@ blueprint's baseline learners, purged OOF only, Holm across the frozen family, d
 CIs, residual IC against the time-of-day prior, decile monotonicity — then the §2.4 placebo pass.
 *Gate:* survives every placebo, beats the time-of-day prior on residual IC, and holds on both ETFs.
 
+**Frozen D0/D1 result (2026-08-22).** Manifest
+`4862abb38ba241dc0a81a2cbb9fc993eefd20b4330fb3e8a909c058a57745a79` produced one cross-instrument
+replication: `D0-D Quantile Median` at 30 minutes. Purged-OOF Spearman IC was 0.0441 on NIFTYBEES
+(residual IC 0.0441) and 0.0437 on BANKBEES (residual IC 0.0361); both Holm-adjusted p-values were
+0.0479 and the hard leakage/placebo checks passed. The negative-lag statistic is diagnostic for this
+D1 feature set because its causal price/return features deliberately overlap past resolved returns;
+feature-as-of, purging, OOF-only scoring and the remaining placebos remain hard gates. This is a D2
+candidate, not evidence that the signal clears execution costs or is ready for live trading.
+
 **D2 — cost gate (§2.1).** The surviving families only, on both indices independently, costed in
 premium space, with DSR/PBO reported.
 *Gate:* non-negative net expectancy on both, day-level CI excluding zero.
+
+**Frozen D2 implementation and first run (2026-08-22).** Manifest
+`36960366c89a02adc06c03656d76ccd489d02ac1e42e8e6915fd8f1dff10d964` fits the selected 30-minute
+median-quantile architecture separately on each index using history strictly before the first stored
+premium session. Its lower/upper signal tails are fixed from the pre-evaluation training-score
+distribution. It buys the nearest-expiry ATM call/put at the first observed ask after `decisionAt`,
+sells the identical provider contract at the first observed bid after 30 minutes, permits at most
+60 seconds of quote lag, and prevents overlapping positions. The primary scenario adds one adverse
+₹0.05 tick to each leg beyond the observed spread and charges the itemized options fee calculator.
+Zero- and two-extra-tick scenarios are diagnostics, not selection alternatives.
+
+The first run has only **8** dense premium sessions, below the frozen 60-session minimum. NIFTY50
+resolved 40 trades with provisional primary net P&L of **−₹6,618.79** and mean daily premium return
+of **−5.2631%** (normal-approximation CI [−9.0549%, −1.4712%]). BANKNIFTY resolved 31 trades with
+provisional net P&L of **−₹8,405.79** and mean daily premium return of **−3.2927%** (CI [−6.7306%,
+0.1453%]). The formal cross-instrument verdict is therefore `INSUFFICIENT_DATA`, not PASS or FAIL.
+No threshold or execution parameter may be retuned while the premium series accumulates. DSR is
+reported diagnostically; PBO is explicitly unavailable because Holm advanced only one fully costed
+candidate and CSCV requires at least two strategy return series.
+
+### 4.1 D2 accumulation plan and data-source rule
+
+The D2 evidence requirement is **60 distinct NSE premium sessions**, not 60 calendar days and not a
+target number of option ticks. As of the close on 2026-08-21, 8 qualifying sessions exist, so **52
+additional trading sessions** must be collected. At a normal five-session week this is approximately
+10–12 calendar weeks, but exchange holidays and any failed collection day can extend it. This is an
+evidence count, not a promised completion date.
+
+The default path is prospective collection on each upcoming NSE session. The existing FYERS
+collectors record the index candles, option-chain contract identity and dense ATM bid/ask ticks. A
+day counts only when both index features and executable premium quotes pass audit; a market day with
+missing or irreparable premium coverage is reported and does not count. While accumulation runs:
+
+1. Keep manifest `36960366c89a02adc06c03656d76ccd489d02ac1e42e8e6915fd8f1dff10d964`, the
+   model, tail thresholds, 30-minute holding period, quote-lag rule, costs and lot policy unchanged.
+2. Monitor `OPTION_PREMIUM_TICKS` and option-chain collection every trading day. Repair index candles
+   from FYERS when possible; never fabricate or interpolate an option quote.
+3. Do not treat intermediate P&L, confidence intervals or DSR as a selection result. They are
+   provisional diagnostics until both the 60-session and 30-resolved-trade minimums are met.
+4. At 60 valid sessions, rerun `npm run research:directional:d2` once under the frozen manifest. PASS
+   requires both indices independently to have non-negative primary net expectancy and a day-level
+   95% CI whose lower bound is above zero. Otherwise record the pre-registered terminal failure.
+5. Start D3 evaluation only after that cross-instrument D2 PASS. No live or paper-trade promotion is
+   permitted while D2 is `INSUFFICIENT_DATA`.
+
+There is no source from which *future* sessions can be downloaded in advance. Waiting can be shortened
+only by acquiring sufficiently granular historical F&O order-book data. The acceptable paid route is
+[NSE Data & Analytics historical F&O order data](https://www.nseindia.com/static/market-data/eod-historical-data-subscription)
+or an auditable NSE-authorized equivalent capable of reconstructing point-in-time best bid/ask for the
+exact strike and expiry. EOD bhavcopy, OHLC candles and trade prints alone are insufficient because
+they cannot reproduce the executable spread or verify contract continuity. Introducing a historical
+order-book provider requires a new source-specific importer, provenance audit and manifest revision;
+it must not be silently mixed into the FYERS series.
 
 **D3 — forward out-of-sample.** Freeze everything and evaluate forward on untouched index data. There
 is no untouched historical index block left, so this is the only honest OOS available.
@@ -208,13 +290,18 @@ is no untouched historical index block left, so this is the only honest OOS avai
 ## 5. Pre-registered kill conditions
 
 - **D0:** no label family has a usable overlap-adjusted sample → `NO_LEARNABLE_LABEL_GEOMETRY`, stop.
-- **D1:** any placebo matches the real IC, or the negative-lag probe breaches its threshold →
-  `HARNESS_OR_PIPELINE_FAULT`. Fix it; do not report the IC.
+- **D1:** any hard placebo matches the real IC → `HARNESS_OR_PIPELINE_FAULT`. Fix it; do not report
+  the IC. The negative-lag probe is reported diagnostically for causal price-derived features and is
+  hard only for feature sets whose construction should make past resolved returns independent.
 - **D1:** no family beats the time-of-day prior on residual IC after Holm →
   `DIRECTION_NOT_LEARNABLE_BEYOND_SEASONALITY`, stop. This is the most likely outcome.
-- **D2:** negative net expectancy on either index → `DIRECTION_DOES_NOT_CLEAR_COSTS`, stop. Do not
-  re-tune `k` to force it. This is the condition that has ended every previous directional attempt,
-  and repeating it under a new label is still a stop.
+- **D2 evidence minimum:** fewer than 60 valid premium sessions or 30 resolved trades on either index
+  → `INSUFFICIENT_DATA`. Continue frozen forward collection; do not infer PASS or FAIL from the partial
+  sample.
+- **D2 after the evidence minimum:** negative net expectancy on either index, or a day-level 95% CI
+  whose lower bound does not exceed zero → `DIRECTION_DOES_NOT_CLEAR_COSTS`, stop. Do not re-tune `k`
+  or execution thresholds to force it. This is the condition that has ended every previous
+  directional attempt, and repeating it under a new label is still a stop.
 - **Any stage:** a result on one instrument and not the other is drift. Record and stop.
 - **Any stage:** if the surviving family's implied trade frequency is so low that the overlap-adjusted
   sample cannot reach significance within a season, record `UNTESTABLE_IN_REASONABLE_TIME` rather

@@ -3,6 +3,7 @@ import {
   classifySessionCoverage,
   type SessionCoverage,
 } from "../domain/candle-gap-detection.js";
+import { KNOWN_NSE_NON_REGULAR_SESSIONS_V1 } from "../domain/nse-non-regular-sessions.js";
 
 /**
  * Scans recently completed sessions of a live-collected series and classifies each one's coverage.
@@ -82,8 +83,9 @@ export async function scanCandleCoverage(database: DatabasePool, input: ScanInpu
       AND NOT EXISTS (
         SELECT 1 FROM nse_holidays holiday WHERE holiday.holiday_date = session_day::date
       )
+      AND session_day::date <> ALL($2::date[])
     ORDER BY session_day ASC
-  `, [input.lookbackDays]);
+  `, [input.lookbackDays, KNOWN_NSE_NON_REGULAR_SESSIONS_V1.map((session) => session.sessionDate)]);
   const expectedSessions = expectedResult.rows.map((row) => row.session);
 
   const confirmed: ScannedSession[] = [];

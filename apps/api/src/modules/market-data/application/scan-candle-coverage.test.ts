@@ -30,6 +30,7 @@ describe("scanCandleCoverage", () => {
       coverage: { kind: "CONFIRMED_GAP", barsPresent: 0, openMissing: true },
     });
     expect(queries[0]).toContain("nse_holidays");
+    expect(queries[0]).toContain("<> ALL");
     expect(queries[0]).toContain("TIME '15:30'");
   });
 });

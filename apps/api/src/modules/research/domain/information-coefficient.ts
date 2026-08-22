@@ -126,6 +126,8 @@ export interface InformationCoefficient {
   readonly sampleSize: number;
   /** Percentile bootstrap interval for `ic`, or null when it could not be formed. */
   readonly confidenceInterval: { readonly lower: number; readonly upper: number } | null;
+  /** Two-sided, bootstrap-under-the-null p-value. Null when no stable bootstrap can be formed. */
+  readonly pValue: number | null;
 }
 
 export interface InformationCoefficientOptions {
@@ -133,21 +135,16 @@ export interface InformationCoefficientOptions {
   readonly seed?: number;
   /** Two-sided coverage, default 0.95. */
   readonly coverage?: number;
+  /** Optional day-block identifiers (e.g. session dates) aligned with feature/forwardReturn to resample by trading-day blocks rather than IID pairs. */
+  readonly dayKeys?: readonly (string | number)[];
 }
 
 /**
  * IC with a percentile bootstrap interval.
  *
- * Pairs are resampled together, so the interval reflects uncertainty about the relationship rather
- * than about either series alone. It is deliberately *not* a p-value: nothing here corrects for the
- * number of features, lags or placebos a caller has tried, and reporting a bare p-value invites
- * exactly that mistake. Multiplicity belongs to the caller, and `expectancy-statistics.ts` already
- * owns Holm adjustment for the comparisons this project runs.
- *
- * The interval is also not a substitute for the placebo band in `falsification-harness.ts`. An
- * interval excluding zero says the relationship is stable under resampling; it says nothing about
- * whether an identical relationship appears when the labels are shuffled, which is the question
- * that actually catches leakage.
+ * When `dayKeys` is provided, resampling is performed at the day-block level to account for
+ * within-session serial dependence and overlapping forward labels (Phase 29 requirement).
+ * Otherwise, pairs are resampled together.
  */
 export function informationCoefficient(
   feature: readonly number[],
@@ -159,11 +156,22 @@ export function informationCoefficient(
 
   const cleanFeature: number[] = [];
   const cleanReturn: number[] = [];
-  const shared = Math.min(feature.length, forwardReturn.length);
+  const cleanDayKeys: (string | number)[] = [];
+  const hasDayKeys = Boolean(options.dayKeys && options.dayKeys.length > 0);
+
+  const shared = Math.min(
+    feature.length,
+    forwardReturn.length,
+    hasDayKeys ? options.dayKeys!.length : Number.POSITIVE_INFINITY,
+  );
+
   for (let index = 0; index < shared; index += 1) {
     if (!isFinitePair(feature[index]!, forwardReturn[index]!)) continue;
     cleanFeature.push(feature[index]!);
     cleanReturn.push(forwardReturn[index]!);
+    if (hasDayKeys) {
+      cleanDayKeys.push(options.dayKeys![index]!);
+    }
   }
 
   const ic = spearman(cleanFeature, cleanReturn);
@@ -171,22 +179,84 @@ export function informationCoefficient(
   const sampleSize = cleanFeature.length;
 
   let confidenceInterval: { lower: number; upper: number } | null = null;
+  let pValue: number | null = null;
   if (ic !== null && sampleSize >= 8 && bootstrapSamples > 0) {
     const random = createSeededRandom(options.seed ?? 1);
     const draws: number[] = [];
-    const resampledFeature = new Array<number>(sampleSize);
-    const resampledReturn = new Array<number>(sampleSize);
 
-    for (let sample = 0; sample < bootstrapSamples; sample += 1) {
-      for (let slot = 0; slot < sampleSize; slot += 1) {
-        const pick = Math.min(sampleSize - 1, Math.floor(random() * sampleSize));
-        resampledFeature[slot] = cleanFeature[pick]!;
-        resampledReturn[slot] = cleanReturn[pick]!;
+    if (hasDayKeys && cleanDayKeys.length > 0) {
+      // Group indices by day
+      const dayMap = new Map<string | number, number[]>();
+      for (let index = 0; index < cleanDayKeys.length; index += 1) {
+        const key = cleanDayKeys[index]!;
+        let list = dayMap.get(key);
+        if (!list) {
+          list = [];
+          dayMap.set(key, list);
+        }
+        list.push(index);
       }
-      // A resample can be degenerate (every draw identical), which has no defined correlation.
-      // Those are skipped rather than counted as zero, for the same reason `ic` returns null.
-      const drawn = spearman(resampledFeature, resampledReturn);
-      if (drawn !== null) draws.push(drawn);
+      const uniqueDays = Array.from(dayMap.keys());
+
+      if (uniqueDays.length >= 2) {
+        // Rank once, then cluster-bootstrap rank-moment sufficient statistics.
+        // Re-sorting tens of thousands of intraday rows for every bootstrap draw makes
+        // the full pre-registered grid needlessly quadratic in practice.
+        const rankedFeature = averagedRanks(cleanFeature);
+        const rankedReturn = averagedRanks(cleanReturn);
+        const momentsByDay = new Map<string | number, {
+          n: number; sumX: number; sumY: number; sumXX: number; sumYY: number; sumXY: number;
+        }>();
+        for (const dayKey of uniqueDays) {
+          const moments = { n: 0, sumX: 0, sumY: 0, sumXX: 0, sumYY: 0, sumXY: 0 };
+          for (const index of dayMap.get(dayKey)!) {
+            const x = rankedFeature[index]!;
+            const y = rankedReturn[index]!;
+            moments.n += 1;
+            moments.sumX += x;
+            moments.sumY += y;
+            moments.sumXX += x * x;
+            moments.sumYY += y * y;
+            moments.sumXY += x * y;
+          }
+          momentsByDay.set(dayKey, moments);
+        }
+        for (let sample = 0; sample < bootstrapSamples; sample += 1) {
+          let n = 0;
+          let sumX = 0;
+          let sumY = 0;
+          let sumXX = 0;
+          let sumYY = 0;
+          let sumXY = 0;
+          for (let dayIdx = 0; dayIdx < uniqueDays.length; dayIdx += 1) {
+            const pick = Math.min(uniqueDays.length - 1, Math.floor(random() * uniqueDays.length));
+            const moments = momentsByDay.get(uniqueDays[pick]!)!;
+            n += moments.n;
+            sumX += moments.sumX;
+            sumY += moments.sumY;
+            sumXX += moments.sumXX;
+            sumYY += moments.sumYY;
+            sumXY += moments.sumXY;
+          }
+          const covariance = sumXY - (sumX * sumY) / n;
+          const varianceX = sumXX - (sumX * sumX) / n;
+          const varianceY = sumYY - (sumY * sumY) / n;
+          if (varianceX > 0 && varianceY > 0) draws.push(covariance / Math.sqrt(varianceX * varianceY));
+        }
+      }
+    } else {
+      const resampledFeature = new Array<number>(sampleSize);
+      const resampledReturn = new Array<number>(sampleSize);
+
+      for (let sample = 0; sample < bootstrapSamples; sample += 1) {
+        for (let slot = 0; slot < sampleSize; slot += 1) {
+          const pick = Math.min(sampleSize - 1, Math.floor(random() * sampleSize));
+          resampledFeature[slot] = cleanFeature[pick]!;
+          resampledReturn[slot] = cleanReturn[pick]!;
+        }
+        const drawn = spearman(resampledFeature, resampledReturn);
+        if (drawn !== null) draws.push(drawn);
+      }
     }
 
     if (draws.length >= 20) {
@@ -195,8 +265,18 @@ export function informationCoefficient(
       const lowerIndex = Math.max(0, Math.floor(tail * (draws.length - 1)));
       const upperIndex = Math.min(draws.length - 1, Math.ceil((1 - tail) * (draws.length - 1)));
       confidenceInterval = { lower: draws[lowerIndex]!, upper: draws[upperIndex]! };
+
+      // Centre the bootstrap distribution at the null before measuring a two-sided tail.
+      // This supplies callers with an actual resampling p-value for multiplicity control;
+      // inferring a p-value from whether a percentile CI crosses zero is not valid.
+      const observedMagnitude = Math.abs(ic);
+      const extreme = draws.reduce(
+        (count, draw) => count + (Math.abs(draw - ic) >= observedMagnitude ? 1 : 0),
+        0,
+      );
+      pValue = (extreme + 1) / (draws.length + 1);
     }
   }
 
-  return { ic, pearsonIc, sampleSize, confidenceInterval };
+  return { ic, pearsonIc, sampleSize, confidenceInterval, pValue };
 }

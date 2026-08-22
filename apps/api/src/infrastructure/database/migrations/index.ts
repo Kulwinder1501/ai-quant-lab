@@ -69,6 +69,8 @@ import { candidateLedgerMigration } from "./068-candidate-ledger.js";
 import { optionTickRejectedVolumeMigration } from "./069-option-tick-rejected-volume.js";
 import { depthFramesMigration } from "./070-depth-frames.js";
 import { depthFrameCaptureSessionMigration } from "./071-depth-frame-capture-session.js";
+import { historicalNseHolidaysMigration } from "./072-historical-nse-holidays.js";
+import { january2026ElectionHolidayMigration } from "./073-january-2026-election-holiday.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -142,4 +144,6 @@ export const migrations = [
   optionTickRejectedVolumeMigration,
   depthFramesMigration,
   depthFrameCaptureSessionMigration,
+  historicalNseHolidaysMigration,
+  january2026ElectionHolidayMigration,
 ];
