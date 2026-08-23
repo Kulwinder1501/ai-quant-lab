@@ -71,6 +71,10 @@ import { depthFramesMigration } from "./070-depth-frames.js";
 import { depthFrameCaptureSessionMigration } from "./071-depth-frame-capture-session.js";
 import { historicalNseHolidaysMigration } from "./072-historical-nse-holidays.js";
 import { january2026ElectionHolidayMigration } from "./073-january-2026-election-holiday.js";
+import { scalpResearchHarnessMigration } from "./074-scalp-research-harness.js";
+import { scalpResearchSessionCloseBoundaryMigration } from "./075-scalp-research-session-close-boundary.js";
+import { scalpResearchLeastPrivilegeRoleMigration } from "./076-scalp-research-least-privilege-role.js";
+import { scalpResearchSettlementDefinitionHashMigration } from "./077-scalp-research-settlement-definition-hash.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -146,4 +150,8 @@ export const migrations = [
   depthFrameCaptureSessionMigration,
   historicalNseHolidaysMigration,
   january2026ElectionHolidayMigration,
+  scalpResearchHarnessMigration,
+  scalpResearchSessionCloseBoundaryMigration,
+  scalpResearchLeastPrivilegeRoleMigration,
+  scalpResearchSettlementDefinitionHashMigration,
 ];

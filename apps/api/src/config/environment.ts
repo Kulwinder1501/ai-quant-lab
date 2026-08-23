@@ -55,6 +55,8 @@ const environmentSchema = httpConfigurationSchema.extend({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   API_PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().url(),
+  /** Separate least-privilege role: SELECT operational data, write only research_scalp. */
+  SCALP_RESEARCH_DATABASE_URL: z.string().url().optional(),
 
   /** Optional, read-only historical collection through Kite Connect v3. */
   KITE_API_KEY: z.string().optional(),

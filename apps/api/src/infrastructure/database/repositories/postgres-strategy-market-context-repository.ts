@@ -120,6 +120,27 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     return this.assembleContext(input, candle);
   }
 
+  /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
+  async findCompletedAt(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time = $3
+        AND candles.close_time <= CURRENT_TIMESTAMP
+      ORDER BY candles.open_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.closeTime]);
+    const candle = candleResult.rows[0];
+    return candle ? this.assembleContext(input, candle) : null;
+  }
+
   async listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]> {
     // A defensive floor: a non-positive limit would otherwise become `LIMIT 0`
     // and silently scan nothing, which reads as "no setups found".

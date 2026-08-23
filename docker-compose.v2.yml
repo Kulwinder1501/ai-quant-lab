@@ -113,6 +113,31 @@ services:
       api-v2:
         condition: service_healthy
 
+  scalp-research-scheduler-v2:
+    image: aiquantlab-api-v2:latest
+    container_name: ai-quant-lab-scalp-research-scheduler-v2
+    restart: unless-stopped
+    profiles: ["research"]
+    command: ["node", "apps/api/dist/interfaces/scheduler/scalp-research-scheduler.js"]
+    environment:
+      NODE_ENV: production
+      # loadEnvironment requires DATABASE_URL, but the research process must not receive
+      # operational credentials. This URL exists only for the username isolation check and
+      # deliberately cannot connect; every query uses SCALP_RESEARCH_DATABASE_URL instead.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:not_used@invalid/${POSTGRES_DB:-ai_quant_lab}
+      SCALP_RESEARCH_DATABASE_URL: postgresql://${POSTGRES_RESEARCH_USER:-ai_quant_scalp_research}:${POSTGRES_RESEARCH_PASSWORD:-change_research_password}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
+      NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    depends_on:
+      database-v2:
+        condition: service_healthy
+      api-v2:
+        condition: service_healthy
+
   live-collector-v2:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-live-collector-v2
