@@ -260,25 +260,79 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
   ),
 ];
 
-function canonicalAtrAvailable(context: StrategyMarketContext): boolean {
+/**
+ * The 1m indicator set the three research strategies actually read, as (code, parameters) pairs.
+ *
+ * Eligibility used to be "canonical ATR exists", which is the narrowest possible reading of "this
+ * decision point had features". ATR is computed by the same pass as the rest, so it was standing in
+ * for all of them -- but it is also the *first* of them to warm up, so it says yes earliest, and
+ * every one of 2026-08-24's 750 decision points was marked eligible while 46% of the session's
+ * evaluations were reading a context with no pattern layer at all.
+ *
+ * Naming each consumed indicator makes the flag mean what a reader assumes it means. Anything a
+ * strategy would `findIndicator` and get `null` for now marks the point ineligible instead of
+ * silently producing a decision that could not have fired.
+ */
+const canonicalIndicatorRequirements: readonly { code: string; parameters: Record<string, unknown> }[] = [
+  { code: "ATR", parameters: { period: 14, smoothing: "WILDER" } },
+  { code: "EMA", parameters: { period: 3 } },
+  { code: "EMA", parameters: { period: 8 } },
+  { code: "RSI", parameters: { period: 14, smoothing: "WILDER" } },
+  { code: "VWAP", parameters: { reset: "NSE_SESSION" } },
+  { code: "SUPERTREND", parameters: { atrPeriod: 10, multiplier: 3 } },
+];
+
+/**
+ * Whether the layers that produce rows-only-when-they-find-something had run for this bar.
+ *
+ * Candlestick and price-action features cannot be checked by presence: a bar with no pattern and a
+ * bar the engine has not reached are both zero rows. The caller resolves this from
+ * `candle_feature_coverage` and passes the answer in, because it is a fact about the pipeline rather
+ * than about the context.
+ */
+export type ResearchFeatureCoverage = "COMPLETE" | "INCOMPLETE";
+
+function indicatorPresent(
+  context: StrategyMarketContext,
+  requirement: { code: string; parameters: Record<string, unknown> },
+): boolean {
   return context.indicators.some((item) => (
-    item.code === "ATR"
+    item.code === requirement.code
     && item.algorithmVersion === "ta-v1"
-    && item.parameters.period === 14
-    && item.parameters.smoothing === "WILDER"
+    && Object.entries(requirement.parameters).every(([key, value]) => item.parameters[key] === value)
     && typeof item.values.value === "number"
     && Number.isFinite(item.values.value)
-    && item.values.value > 0
+    // ATR is the one whose zero is meaningless rather than merely unusual: CANONICAL_GEOMETRY_V1
+    // divides by it. The others may legitimately be zero-valued.
+    && (requirement.code !== "ATR" || item.values.value > 0)
   ));
 }
 
+/** The first reason this point is not a usable sample, or null when it is. */
+export function controlIneligibleReason(
+  context: StrategyMarketContext,
+  featureCoverage: ResearchFeatureCoverage,
+): string | null {
+  const missing = canonicalIndicatorRequirements.filter((requirement) => !indicatorPresent(context, requirement));
+  // Ordered deliberately: warmup is a property of the bar and cannot be repaired by waiting for a
+  // job, so it is the more specific answer when both are true.
+  if (missing.length > 0) {
+    return `FEATURE_WARMUP:${missing.map((item) => item.code).sort().join(",")}`;
+  }
+  return featureCoverage === "COMPLETE" ? null : "FEATURE_LAYER_NOT_COMPUTED";
+}
+
 /** Every eligible 1m grid point creates both LONG and SHORT outcome-blind controls. */
-export function buildControlPoints(context: StrategyMarketContext, sessionCloseAt: Date): ResearchControlPoint[] {
+export function buildControlPoints(
+  context: StrategyMarketContext,
+  sessionCloseAt: Date,
+  featureCoverage: ResearchFeatureCoverage,
+): ResearchControlPoint[] {
   if (context.candle.timeframe !== "1m") throw new Error("GRID_POLICY_V1 controls require a 1m context.");
   const decisionAt = context.candle.closeTime;
   assertOnGridDecision(decisionAt);
   const dataThrough = new Date(decisionAt.getTime() - 1);
-  const available = canonicalAtrAvailable(context);
+  const ineligibleReason = controlIneligibleReason(context, featureCoverage);
   const frozenControlPolicyVersion = `${controlPolicyVersion}:${gridPolicyVersion}`;
   return (["LONG", "SHORT"] as const).map((evaluationDirection) => {
     const controlPointKey = logicalKey("control-point", [
@@ -300,8 +354,8 @@ export function buildControlPoints(context: StrategyMarketContext, sessionCloseA
       referencePrice: context.candle.close,
       minuteOfDay: istMinuteOfDay(decisionAt),
       volatilityRegime: context.regime?.regime ?? null,
-      sampleEligible: available,
-      ineligibleReason: available ? null : "FEATURE_WARMUP",
+      sampleEligible: ineligibleReason === null,
+      ineligibleReason,
       controlPolicyVersion: frozenControlPolicyVersion,
     };
     return { ...payload, payloadHash: sha256Canonical(payload) };

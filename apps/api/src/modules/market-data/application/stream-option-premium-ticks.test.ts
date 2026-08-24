@@ -23,6 +23,10 @@ function buffered(overrides: Partial<BufferedTick> = {}): Map<string, BufferedTi
     lastPrice: 61.5,
     volume: 12_000,
     observedAt: NOW,
+    // A second behind our receipt clock, which is the shape the live feed sends: the exchange
+    // clocks are second-granularity while `observedAt` is milliseconds.
+    exchangeFeedTime: new Date(NOW.getTime() - 1_000),
+    lastTradeTime: new Date(NOW.getTime() - 2_000),
     ...overrides,
   }]]);
 }
@@ -36,9 +40,40 @@ function input(overrides: Partial<Parameters<typeof selectFlushableTicks>[0]> = 
     provider: "fyers-api-v3",
     now: NOW,
     maximumTickAgeMs: 15_000,
+    collectorRegime: "STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION",
     ...overrides,
   };
 }
+
+describe("selectFlushableTicks source clocks", () => {
+  it("writes the feed's clocks alongside our own, not instead of it", () => {
+    // All three are kept deliberately. `observedAt` is our millisecond receipt clock; the other two
+    // are the exchange's second-granularity ones. A reader can only tell transport latency from
+    // clock coarseness while both are visible.
+    const [row] = selectFlushableTicks(input());
+
+    expect(row).toMatchObject({
+      observedAt: NOW,
+      exchangeFeedTime: new Date(NOW.getTime() - 1_000),
+      lastTradeTime: new Date(NOW.getTime() - 2_000),
+      collectorRegime: "STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION",
+    });
+  });
+
+  it("keeps a missing exchange clock missing", () => {
+    // The poller has no such field, and a quote whose clock the feed omitted must not acquire one.
+    // Migration 078: a reconstructed exchange time is worse than an absent one, because it looks
+    // authoritative in exactly the analysis that most needs to know it is absent.
+    const [row] = selectFlushableTicks(input({
+      buffered: buffered({ exchangeFeedTime: null, lastTradeTime: null }),
+    }));
+
+    expect(row!.exchangeFeedTime).toBeNull();
+    expect(row!.lastTradeTime).toBeNull();
+    // The row is still written; an absent clock is a provenance fact, not a reason to drop a quote.
+    expect(row!.bid).toBe(61.2);
+  });
+});
 
 describe("selectFlushableTicks", () => {
   it("writes a fresh quote with its contract identity and the underlying spot", () => {

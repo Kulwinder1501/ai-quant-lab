@@ -15,6 +15,15 @@ export interface BufferedTick {
   lastPrice: number | null;
   volume: number | null;
   observedAt: Date;
+  /**
+   * The feed's own clocks, carried alongside `observedAt` rather than replacing it.
+   *
+   * Keeping all three is the point: `observedAt` is our millisecond receipt clock, these two are
+   * the exchange's second-granularity ones, and a reader can only tell transport latency from
+   * clock coarseness while both are visible. Null when the feed omitted them.
+   */
+  exchangeFeedTime: Date | null;
+  lastTradeTime: Date | null;
 }
 
 export interface SelectFlushableTicksInput {
@@ -30,6 +39,11 @@ export interface SelectFlushableTicksInput {
   now: Date;
   /** A quote older than this is not written at all. */
   maximumTickAgeMs: number;
+  /**
+   * Stamped on every row so the capture regime is a property of the data rather than something a
+   * reader infers from a date. Boundaries are set by implementation changes, never by performance.
+   */
+  collectorRegime: string;
 }
 
 /**
@@ -81,6 +95,9 @@ export function selectFlushableTicks(input: SelectFlushableTicksInput): OptionPr
       volume: tradedVolume.volume,
       volumeRaw: tradedVolume.rejectedRaw,
       underlyingValue: input.underlyingValues.get(contract.underlyingSymbol) ?? null,
+      exchangeFeedTime: buffered.exchangeFeedTime,
+      lastTradeTime: buffered.lastTradeTime,
+      collectorRegime: input.collectorRegime,
     });
   }
   return rows;

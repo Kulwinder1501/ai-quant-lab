@@ -210,6 +210,9 @@ async function main(): Promise<void> {
     VOLATILITY_STRADDLE: 10 * 60 * 1000,
     // Full-series recompute over both engines; slower than the other intraday jobs by nature.
     PATTERN_DETECTION_INTRADAY: 20 * 60 * 1000,
+    // Reads one session of ticks and classifies them; the shortest horizon here on purpose, because
+    // a stalled health check is itself a loss of the signal it exists to provide.
+    COLLECTOR_HEALTH: 5 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
     // Research only, and deliberately the most patient claim here: a candidate cannot be settled
     // before its horizon elapses, so a stalled claimant costs nothing but a later sweep.
@@ -446,6 +449,21 @@ async function main(): Promise<void> {
    */
   cron.schedule("*/15 9-15 * * 1-5", () => {
     void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
+  }, { timezone: IST });
+
+  /*
+   * Collector health, in-session and every ten minutes.
+   *
+   * Operational monitoring only: it warns, and nothing in the research path may read it. The point
+   * of running it during the session rather than after the close is that a silence is actionable
+   * while the session is still open -- the daily 11:00-12:45 outage was only ever discovered
+   * afterwards, by which time the session's premium coverage was already unrecoverable.
+   *
+   * Runs to hour 15 inclusive so it spans the 15:40 derivatives close, which the cash-session
+   * schedule of the jobs above does not reach.
+   */
+  cron.schedule("3,13,23,33,43,53 9-15 * * 1-5", () => {
+    void schedule("COLLECTOR_HEALTH", () => runCommand("npm", ["run", "ops:collector-health"]));
   }, { timezone: IST });
 
   // Higher-timeframe models consume completed 30m/60m candles. Refreshing their
@@ -709,6 +727,13 @@ async function main(): Promise<void> {
       // does not. A strike that drifts out of the band is exactly the one whose stop still has
       // to resolve, and its tick series would go quiet at the moment it matters most.
       requiredContracts: new PostgresOpenPositionContractRepository(database),
+      // The pin above covers open *paper trades*. A research strategy's opportunity is not a paper
+      // trade, so nothing pinned it, and Phase 29 D2 lost exits to precisely the drift that comment
+      // describes: on NIFTY50 2026-08-18 the strikes it was holding stopped being quoted at
+      // 15:12:36 for an exit due at 15:15. Retention covers any hold opened while a contract was
+      // ATM, without collection needing to know which studies are running. Sized for D2's
+      // 30-minute hold plus its 60-second quote-lag allowance; a longer study must raise it.
+      contractRetentionMs: 35 * 60_000,
       onTicksWritten: async () => {
         const result = await sweepOpenPaperTradeExits.execute();
         // Silent on the common case. This runs every few seconds all session, so logging every
@@ -888,6 +913,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
+      "COLLECTOR_HEALTH",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
       "CANDLE_GAP_CHECK",

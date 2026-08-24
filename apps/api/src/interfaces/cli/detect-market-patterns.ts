@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { PostgresCandleFeatureCoverageRepository } from "../../infrastructure/database/repositories/postgres-candle-feature-coverage-repository.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresPatternDefinitionRepository } from "../../infrastructure/database/repositories/postgres-pattern-definition-repository.js";
@@ -51,6 +52,10 @@ async function main(): Promise<void> {
       new PostgresPriceActionEventRepository(database),
       new CandlestickPatternEngine(),
       variant.engine(),
+      undefined,
+      // Records that this window was processed, which is what lets the scalp research harness
+      // tell "no pattern here" from "not detected yet" and stop capturing half-built contexts.
+      new PostgresCandleFeatureCoverageRepository(database),
     ).execute({
       instrumentId: instrument.id,
       timeframe,

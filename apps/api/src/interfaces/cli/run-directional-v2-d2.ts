@@ -11,6 +11,15 @@ import {
   type SessionCandle,
 } from "../../modules/research/directional-v2/domain/session-calendar.js";
 import { phase29ExcludedSpecialSessionMap } from "../../modules/research/directional-v2/domain/excluded-special-sessions.js";
+import {
+  D2_REQUIRED_QUALIFIED_SESSIONS,
+  resolveD2CrossInstrumentVerdict,
+  type D2CrossInstrumentDecision,
+} from "../../modules/research/directional-v2/domain/d2-cross-instrument-verdict.js";
+import {
+  captureRunProvenance,
+  describeRunProvenance,
+} from "../../modules/research/directional-v2/domain/run-provenance.js";
 import { auditDirectionalCandles } from "../../modules/research/directional-v2/application/audit-directional-candles.js";
 import { generateDirectionalDataset } from "../../modules/research/directional-v2/application/generate-directional-dataset.js";
 import {
@@ -157,10 +166,20 @@ async function loadLotSize(database: DatabasePool, symbol: string): Promise<numb
   return lotSize;
 }
 
-function overallVerdict(results: readonly D2CostStudyResult[]): "PASS" | "FAIL" | "INSUFFICIENT_DATA" {
-  if (results.some((result) => result.costGate.verdict === "FAIL")) return "FAIL";
-  if (results.every((result) => result.costGate.verdict === "PASS")) return "PASS";
-  return "INSUFFICIENT_DATA";
+/**
+ * The four-branch verdict tree of phase-29 §8.2.
+ *
+ * The rule this replaces was `if (some FAIL) return "FAIL"`, which reported one-passes-one-fails as
+ * a plain failure. That is the `CROSS_INSTRUMENT_DRIFT` case, and collapsing it discarded the
+ * obligation drift carries -- record, stop, and require a new hypothesis, rather than trade the
+ * index that worked. It also had no branch for never having obtained a valid test at all.
+ */
+function overallVerdict(results: readonly D2CostStudyResult[]): D2CrossInstrumentDecision {
+  return resolveD2CrossInstrumentVerdict(results.map((result) => ({
+    underlyingSymbol: result.underlyingSymbol,
+    verdict: result.costGate.verdict,
+    qualifiedSessionCount: result.costGate.qualifiedSessionCount,
+  })));
 }
 
 function printResult(result: D2CostStudyResult): void {
@@ -173,6 +192,11 @@ function printResult(result: D2CostStudyResult): void {
   console.info(`Training: ${result.model.trainingFirstSession}..${result.model.trainingLastSession} (${result.model.trainingSampleCount} rows)`);
   console.info(`Premium sessions: ${gate.premiumSessionDates.length}; decisions: ${result.evaluatedDecisionCount}; tail signals: ${gate.signalCount}`);
   console.info(`Resolved trades: ${gate.resolvedQuotePairCount}; skips=${JSON.stringify(gate.skips)}`);
+  console.info(
+    `Qualified sessions (§8.3): ${gate.qualifiedSessionCount}/${D2_REQUIRED_QUALIFIED_SESSIONS}`
+    + ` — uncovered ${gate.sessionCoverage.filter((s) => s.status === "UNCOVERED").length},`
+    + ` no-opportunity ${gate.sessionCoverage.filter((s) => s.status === "NOT_TESTABLE_NO_OPPORTUNITIES").length}`,
+  );
   console.info(`Primary net P&L: ₹${primary.netPnl.toFixed(2)}; fees: ₹${primary.fees.toFixed(2)}`);
   console.info(`Mean daily net premium return: ${(primary.expectancy.meanDailyR * 100).toFixed(4)}%`);
   console.info(`Day-level 95% CI: ${ci ? `[${(ci[0] * 100).toFixed(4)}%, ${(ci[1] * 100).toFixed(4)}%]` : "unavailable"}`);
@@ -211,6 +235,11 @@ async function main(): Promise<void> {
   } as const;
   const manifestHash = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
   console.info(`Frozen D2 manifest SHA-256: ${manifestHash}`);
+  // The manifest hashes declared policy only, so an identical hash does not establish that the
+  // implementation was unchanged. Recording the commit alongside it is what makes "same experiment"
+  // a checkable claim rather than a convention.
+  const provenance = captureRunProvenance();
+  console.info(`Run provenance: ${describeRunProvenance(provenance)}`);
   const database = createDatabasePool(loadEnvironment().DATABASE_URL);
   try {
     const results: D2CostStudyResult[] = [];
@@ -238,7 +267,7 @@ async function main(): Promise<void> {
       printResult(result);
     }
 
-    const verdict = overallVerdict(results);
+    const decision = overallVerdict(results);
     const outputDir = resolve(options.outputDir);
     await mkdir(outputDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -246,11 +275,16 @@ async function main(): Promise<void> {
     await writeFile(outputPath, JSON.stringify({
       manifest,
       manifestHash,
+      provenance,
       generatedAt: new Date().toISOString(),
-      verdict,
+      verdict: decision.verdict,
+      verdictReasons: decision.reasons,
+      mayProgress: decision.mayProgress,
+      requiredQualifiedSessions: D2_REQUIRED_QUALIFIED_SESSIONS,
       results,
     }, null, 2), "utf8");
-    console.info(`Cross-instrument D2 verdict: ${verdict}`);
+    console.info(`Cross-instrument D2 verdict: ${decision.verdict}`);
+    for (const reason of decision.reasons) console.info(`  - ${reason}`);
     console.info(`D2 artifact written to ${outputPath}`);
   } finally {
     await database.end();

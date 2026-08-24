@@ -116,6 +116,31 @@ export interface PriceActionEventRepository {
   }): Promise<void>;
 }
 
+/**
+ * The feature layers a consumer can ask to have been computed before it reads a candle.
+ *
+ * These name the two engines whose output is stored as rows-if-found, which is why coverage has to
+ * be recorded separately: zero detections and zero runs are the same absence in
+ * `pattern_detections` / `price_action_events`.
+ */
+export const candlestickPatternLayer = "CANDLESTICK_PATTERN";
+export const priceActionLayer = "PRICE_ACTION";
+
+/**
+ * Marks a candle as *processed* by a feature layer, whatever the layer found.
+ *
+ * Written for every candle in a detection pass's write window, including the ones that produced
+ * nothing. Without it a reader cannot tell a quiet bar from an unprocessed one, and the scalp
+ * research harness spent 2026-08-24 freezing unprocessed bars as though they were quiet.
+ */
+export interface CandleFeatureCoverageRepository {
+  record(input: {
+    candleIds: readonly string[];
+    featureLayer: string;
+    algorithmVersion: string;
+  }): Promise<void>;
+}
+
 export const candlestickPatternDescriptions: Record<CandlestickPatternCode, string> = {
   DOJI: "Small real body relative to the full candle range.",
   DRAGONFLY_DOJI: "Doji with a long lower shadow and virtually no upper shadow.",

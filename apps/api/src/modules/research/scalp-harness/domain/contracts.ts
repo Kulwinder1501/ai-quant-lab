@@ -9,7 +9,15 @@ export const canonicalGeometryPolicyVersion = "CANONICAL_GEOMETRY_V1";
 export const fillPolicyVersion = "FILL_POLICY_V1";
 export const settlementPolicyVersion = "SCALP_SETTLEMENT_V1";
 export const gridPolicyVersion = "GRID_POLICY_V1";
-export const controlPolicyVersion = "MATCHED_CONTROL_POPULATION_V1";
+/**
+ * V2 widened what `sampleEligible` asserts, so it must not share a version string with V1.
+ *
+ * V1 read "canonical ATR exists". V2 reads "every 1m indicator the research strategies consume
+ * exists, and the candlestick and price-action layers have been computed for this bar". Points
+ * stamped V1 are not comparable with points stamped V2 -- a V1-eligible point may have had no
+ * pattern layer at all -- and this string is what lets an estimator refuse to pool them.
+ */
+export const controlPolicyVersion = "MATCHED_CONTROL_POPULATION_V2";
 export const matchingPolicyVersion = "MATCHED_CONTROL_N5_V1";
 export const riskSnapshotPolicyVersion = "RISK_SNAPSHOT_PIT_V1";
 export const researchRiskPolicyVersion = "RESEARCH_RISK_V1";

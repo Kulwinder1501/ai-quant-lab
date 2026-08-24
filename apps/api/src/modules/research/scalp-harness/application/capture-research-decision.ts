@@ -12,7 +12,11 @@ import type {
 import { buildCanonicalGeometry, canonicalAtrAlgorithmVersion, canonicalAtrParameters } from "../domain/policies.js";
 import { resolveOpportunities, type PersistedProposal } from "../domain/opportunity-resolver.js";
 import { buildRiskSnapshot, buildRiskSubject, evaluateResearchRisk } from "../domain/research-risk.js";
-import { buildControlPoints, researchScalpStrategies } from "../domain/research-strategies.js";
+import {
+  buildControlPoints,
+  researchScalpStrategies,
+  type ResearchFeatureCoverage,
+} from "../domain/research-strategies.js";
 
 export interface ScalpResearchWritePort {
   saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string>;
@@ -57,6 +61,14 @@ export class CaptureScalpResearchDecision {
     tickSize: number;
     lotSize: number;
     accountSnapshots: readonly { accountId: string; state: ResearchRiskSnapshotState }[];
+    /**
+     * Whether the candlestick and price-action layers had been computed for this bar.
+     *
+     * The caller normally defers a minute until this is COMPLETE. INCOMPLETE reaches here only past
+     * the runner's deadline, when waiting longer would lose the grid point altogether -- so the
+     * control is still written, and marked ineligible, while proposal generation is skipped.
+     */
+    featureCoverage: ResearchFeatureCoverage;
   }): Promise<CaptureResearchDecisionResult> {
     if (input.reference1mContext.candle.timeframe !== "1m") throw new Error("Capture requires a canonical 1m reference context.");
     const decisionAt = input.reference1mContext.candle.closeTime;
@@ -67,9 +79,16 @@ export class CaptureScalpResearchDecision {
     }
 
     for (const strategy of researchScalpStrategies) await this.writes.saveStrategyDefinition(strategy.definition);
-    const generated = researchScalpStrategies.flatMap((strategy) => input.strategyContexts
-      .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
-      .flatMap((context) => strategy.evaluate(context, input.reference1mContext)));
+    // A context whose pattern layer has not been computed cannot produce a pattern-triggered
+    // proposal, and the absence is indistinguishable from a quiet bar once stored. Minting proposals
+    // from it would record a false negative as a real decision -- which is what happened on
+    // 2026-08-24, when 46% of evaluations read a bar with no patterns yet and the pattern strategy's
+    // firing rate fell 93% with no trace of why. Skipping is recoverable; a wrong row is not.
+    const generated = input.featureCoverage === "INCOMPLETE"
+      ? []
+      : researchScalpStrategies.flatMap((strategy) => input.strategyContexts
+        .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
+        .flatMap((context) => strategy.evaluate(context, input.reference1mContext)));
     const proposals = await Promise.all(generated.map((proposal) => this.writes.saveProposal(proposal)));
     const opportunities = await Promise.all(resolveOpportunities(proposals, input.sessionCloseAt).map((opportunity) => this.writes.saveOpportunity(opportunity)));
 
@@ -119,8 +138,10 @@ export class CaptureScalpResearchDecision {
     }
     // Controls are the decision-completion marker for catch-up. Writing them last means a crash
     // anywhere above leaves this minute discoverable; every preceding retry is immutable/idempotent.
-    const controls = await Promise.all(buildControlPoints(input.reference1mContext, input.sessionCloseAt)
-      .map((control) => this.writes.saveControlPoint(control)));
+    const controls = await Promise.all(
+      buildControlPoints(input.reference1mContext, input.sessionCloseAt, input.featureCoverage)
+        .map((control) => this.writes.saveControlPoint(control)),
+    );
     return {
       strategyDefinitions: researchScalpStrategies.length,
       controls: controls.length,

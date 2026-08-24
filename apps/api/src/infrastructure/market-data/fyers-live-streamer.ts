@@ -28,6 +28,19 @@ export interface Tick {
   bid: number | null;
   ask: number | null;
   volume: number | null;
+  /**
+   * The feed's own clocks for this quote, in epoch seconds, when it supplies them.
+   *
+   * Verified live on 2026-08-24: the socket sends `exch_feed_time` and `last_traded_time` on every
+   * message, never null, both carrying session times. They were previously dropped here, which is
+   * why every stored quote could only be timed by our own receipt clock.
+   *
+   * Second-granularity, like the depth feed's equivalents — adequate for a 60-second eligibility
+   * window, and not evidence for any sub-second latency claim. Null when absent rather than
+   * defaulted: a missing exchange clock is a fact worth keeping, and zero is a real epoch value.
+   */
+  exchangeFeedTimeSeconds: number | null;
+  lastTradeTimeSeconds: number | null;
 }
 
 export interface FyersLiveStreamerOptions {
@@ -85,6 +98,10 @@ export function parseTick(message: unknown): Tick | null {
 
   const bid = finiteOrNull(record.bid_price ?? record.bid ?? record.best_bid);
   const ask = finiteOrNull(record.ask_price ?? record.ask ?? record.best_ask);
+  // Zero is refused for the clocks too, and for the same reason as the prices: the feed uses it as
+  // "no value", and epoch zero would date every such quote to 1970.
+  const exchangeFeedTimeSeconds = finiteOrNull(record.exch_feed_time ?? record.fdtm);
+  const lastTradeTimeSeconds = finiteOrNull(record.last_traded_time ?? record.ltt);
   return {
     symbol,
     ltp,
@@ -92,6 +109,8 @@ export function parseTick(message: unknown): Tick | null {
     bid: bid !== null && bid > 0 ? bid : null,
     ask: ask !== null && ask > 0 ? ask : null,
     volume: finiteOrNull(record.vol_traded_today ?? record.volume ?? record.v),
+    exchangeFeedTimeSeconds: exchangeFeedTimeSeconds !== null && exchangeFeedTimeSeconds > 0 ? exchangeFeedTimeSeconds : null,
+    lastTradeTimeSeconds: lastTradeTimeSeconds !== null && lastTradeTimeSeconds > 0 ? lastTradeTimeSeconds : null,
   };
 }
 

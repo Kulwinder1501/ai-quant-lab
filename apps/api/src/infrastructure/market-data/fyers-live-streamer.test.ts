@@ -14,7 +14,30 @@ describe("parseTick", () => {
       vol_traded_today: 1_200,
     })).toEqual({
       symbol: "NSE:NIFTYBANK-INDEX", ltp: 57_739.95, bid: 57_739, ask: 57_741, volume: 1_200,
+      exchangeFeedTimeSeconds: null, lastTradeTimeSeconds: null,
     });
+  });
+
+  it("keeps the feed's clocks, which were previously dropped at this boundary", () => {
+    // Sampled live on 2026-08-24: the socket sends `exch_feed_time` and `last_traded_time` on every
+    // message, never null, both carrying session times. This function narrowed the payload to five
+    // fields, which is why every stored quote could only be timed by our own receipt clock.
+    const tick = parseTick({
+      symbol: "NSE:NIFTY26AUG24200PE", ltp: 61.5, bid_price: 61.2, ask_price: 61.8,
+      vol_traded_today: 12_000, exch_feed_time: 1_787_564_384, last_traded_time: 1_787_564_380,
+    });
+
+    expect(tick?.exchangeFeedTimeSeconds).toBe(1_787_564_384);
+    expect(tick?.lastTradeTimeSeconds).toBe(1_787_564_380);
+  });
+
+  it("treats a zero clock as absent, the same way it treats a zero price", () => {
+    // The provider uses 0 for "no value". Epoch zero would date the quote to 1970 and would look
+    // like a real timestamp to anything reading the column.
+    const tick = parseTick({ symbol: "NSE:SBIN-EQ", ltp: 812, exch_feed_time: 0, last_traded_time: 0 });
+
+    expect(tick?.exchangeFeedTimeSeconds).toBeNull();
+    expect(tick?.lastTradeTimeSeconds).toBeNull();
   });
 
   it("accepts the provider's alternative field names", () => {

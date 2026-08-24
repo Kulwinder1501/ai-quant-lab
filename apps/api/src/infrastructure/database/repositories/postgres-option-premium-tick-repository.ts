@@ -20,6 +20,17 @@ export interface OptionPremiumTickRow {
    */
   volumeRaw: number | null;
   underlyingValue: number | null;
+  /**
+   * The feed's own clocks, when it supplied them.
+   *
+   * Optional so the HTTP poller — which has no such fields — keeps compiling and keeps writing
+   * nulls. Null for every row captured before collector regime 3, and those must stay null:
+   * migration 078 records why a reconstructed exchange time is worse than an absent one.
+   */
+  exchangeFeedTime?: Date | null;
+  lastTradeTime?: Date | null;
+  /** Which capture implementation produced this row. */
+  collectorRegime?: string | null;
 }
 
 export interface OptionPremiumContractKey {
@@ -60,8 +71,9 @@ export class PostgresOptionPremiumTickRepository {
         `
         INSERT INTO option_premium_ticks (
           underlying_symbol, provider, observed_at, expiry_date, strike_price, option_type,
-          provider_symbol, last_price, bid, ask, volume, underlying_value, volume_raw
-        ) VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          provider_symbol, last_price, bid, ask, volume, underlying_value, volume_raw,
+          exchange_feed_time, last_trade_time, collector_regime
+        ) VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         ON CONFLICT (underlying_symbol, observed_at, expiry_date, strike_price, option_type)
         DO NOTHING
         `,
@@ -79,6 +91,9 @@ export class PostgresOptionPremiumTickRepository {
           tick.volume,
           tick.underlyingValue,
           tick.volumeRaw,
+          tick.exchangeFeedTime ?? null,
+          tick.lastTradeTime ?? null,
+          tick.collectorRegime ?? null,
         ],
       );
       if ((result.rowCount ?? 0) > 0) inserted += 1;

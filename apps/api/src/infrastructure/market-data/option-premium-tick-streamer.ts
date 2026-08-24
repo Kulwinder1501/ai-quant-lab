@@ -31,6 +31,21 @@ export interface OptionPremiumTickStreamerOptions {
   resubscribeIntervalMs?: number;
   /** A quote older than this is dropped rather than written. */
   maximumTickAgeMs?: number;
+  /**
+   * How long a contract keeps its subscription after the ATM band stops wanting it.
+   *
+   * The band tracks spot; a hold does not. `requiredContracts` covers open *paper-trading*
+   * positions, but a research strategy's opportunity is not a paper trade and nothing else pins
+   * its contract, so on a trending day the strike entered at 14:45 could stop being quoted before
+   * its 15:15 exit was due. Measured on NIFTY50 2026-08-18: strikes 24200/24250 quoted from 14:30
+   * to 15:12:36 and then dropped, two and a half minutes before an exit needed one of them.
+   *
+   * Retention fixes that without the streamer having to know what a research opportunity is. Any
+   * contract that was ATM recently enough for a hold to have been opened against it stays
+   * subscribed until that hold could have resolved. Set it to the longest research holding period
+   * plus that study's quote-lag allowance.
+   */
+  contractRetentionMs?: number;
   strikeBand?: number;
   now?: () => Date;
   /**
@@ -57,6 +72,25 @@ const DEFAULT_RESUBSCRIBE_INTERVAL_MS = 5 * 60_000;
 // Three flushes. Long enough that one dropped message is not a gap, short enough that a dead
 // socket stops writing well inside the five-minute bot cycle that reads this series.
 const DEFAULT_MAXIMUM_TICK_AGE_MS = 15_000;
+/**
+ * Thirty-five minutes: the 30-minute Phase 29 D2 holding period, plus its 60-second quote-lag
+ * allowance, plus four minutes of margin so a band recomputed on the 5-minute timer cannot drop a
+ * contract in the interval between the exit becoming due and the retention expiring.
+ *
+ * Deliberately a number here rather than an import of the research constants -- market-data
+ * collection does not depend on a research module, and a study with a longer hold should pass its
+ * own value instead of this file learning about it.
+ */
+const DEFAULT_CONTRACT_RETENTION_MS = 35 * 60_000;
+/**
+ * Stamped on every row this collector writes.
+ *
+ * Regime boundaries are set by implementation changes, never by performance — that rule is what
+ * stops a later analysis from splitting the series wherever the results look better. This value
+ * covers both changes landing together: source clocks persisted, and contracts retained past band
+ * exit. Change it whenever what this collector captures changes, and record the boundary.
+ */
+const COLLECTOR_REGIME = "STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION";
 
 /**
  * Fills `option_premium_ticks` from the Fyers data socket instead of the HTTP quotes endpoint.
@@ -83,6 +117,16 @@ export class OptionPremiumTickStreamer {
   private readonly underlyingValues = new Map<string, number>();
   private readonly subscribed = new Set<string>();
   private readonly underlyingByProviderSymbol = new Map<string, string>();
+  /**
+   * Every contract the band has wanted recently, and when it was last wanted.
+   *
+   * Keyed on the upper-cased provider symbol, the same key the buffer and subscription set use.
+   * The contract itself is kept, not just the timestamp, because a retained contract has to stay
+   * in `this.contracts` as well as in the subscription: `selectFlushableTicks` persists nothing
+   * outside that list, so a retained subscription without a retained contract would receive quotes
+   * and silently discard them -- which is the same gap, one layer further down.
+   */
+  private readonly recentlyWanted = new Map<string, { contract: AtmPremiumContract; lastWantedAtMs: number }>();
   private contracts: AtmPremiumContract[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
@@ -156,6 +200,14 @@ export class OptionPremiumTickStreamer {
       lastPrice: tick.ltp,
       volume: tick.volume,
       observedAt: this.now(),
+      // Seconds on the wire, milliseconds in the column. Kept beside `observedAt`, never in place
+      // of it: the two answer different questions and only one of them is ours.
+      exchangeFeedTime: tick.exchangeFeedTimeSeconds === null
+        ? null
+        : new Date(tick.exchangeFeedTimeSeconds * 1000),
+      lastTradeTime: tick.lastTradeTimeSeconds === null
+        ? null
+        : new Date(tick.lastTradeTimeSeconds * 1000),
     });
   }
 
@@ -176,9 +228,23 @@ export class OptionPremiumTickStreamer {
       contracts.push(...required);
     }
 
-    this.contracts = [...new Map(
-      contracts.map((contract) => [contract.providerSymbol.toUpperCase(), contract]),
-    ).values()];
+    /*
+     * The band and the required set are what is wanted *now*; retention decides what stays.
+     *
+     * Stamping happens before eviction so a contract re-entering the band refreshes its own
+     * deadline, and a contract an open position still needs is stamped every cycle and therefore
+     * never expires while the position is open.
+     */
+    const nowMs = this.now().getTime();
+    const retentionMs = this.options.contractRetentionMs ?? DEFAULT_CONTRACT_RETENTION_MS;
+    for (const contract of contracts) {
+      this.recentlyWanted.set(contract.providerSymbol.toUpperCase(), { contract, lastWantedAtMs: nowMs });
+    }
+    for (const [symbol, entry] of this.recentlyWanted) {
+      if (nowMs - entry.lastWantedAtMs > retentionMs) this.recentlyWanted.delete(symbol);
+    }
+
+    this.contracts = [...this.recentlyWanted.values()].map((entry) => entry.contract);
 
     const underlyingSymbols = this.options.underlyingSymbols.map((symbol) => {
       const providerSymbol = resolveFyersSymbol(symbol);
@@ -214,6 +280,7 @@ export class OptionPremiumTickStreamer {
       provider: FYERS_PROVIDER_ID,
       now: this.now(),
       maximumTickAgeMs: this.options.maximumTickAgeMs ?? DEFAULT_MAXIMUM_TICK_AGE_MS,
+      collectorRegime: COLLECTOR_REGIME,
     });
     if (rows.length === 0) return { inserted: 0, skipped: 0 };
 

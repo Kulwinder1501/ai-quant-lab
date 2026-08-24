@@ -104,12 +104,38 @@ export interface D2SkipCounts {
 
 export type D2InstrumentVerdict = "PASS" | "FAIL" | "INSUFFICIENT_DATA";
 
+/**
+ * Per-session coverage of the frozen opportunity set, for the §8.3 qualification rule.
+ *
+ * Purely observational: it counts what the unchanged resolution loop already decided, and feeds no
+ * threshold, selection or execution rule here. It exists because §4.1's "a day counts only when both
+ * index features and executable premium quotes pass audit" was never implemented, and because the
+ * aggregate `D2SkipCounts` cannot answer it -- qualification is per session, and totals across
+ * sessions cannot be un-summed.
+ *
+ * `overlappingPosition` is deliberately **not** a coverage failure. The no-overlap rule declines
+ * those signals as policy; their outcomes are not unobserved, they were never opened. Counting them
+ * would fail sessions for behaving exactly as the protocol specifies.
+ */
+export interface D2SessionCoverage {
+  readonly sessionDate: string;
+  /** Signals the policy actually attempted to open, i.e. excluding overlap declines. */
+  readonly attempted: number;
+  readonly resolved: number;
+  readonly missingEntryQuote: number;
+  readonly missingExitQuote: number;
+  readonly status: "QUALIFIED" | "UNCOVERED" | "NOT_TESTABLE_NO_OPPORTUNITIES";
+}
+
 export interface D2PremiumCostGateResult {
   readonly underlyingSymbol: string;
   readonly premiumSessionDates: readonly string[];
   readonly signalCount: number;
   readonly resolvedQuotePairCount: number;
   readonly skips: D2SkipCounts;
+  /** One row per stored premium session, ordered by date. See `D2SessionCoverage`. */
+  readonly sessionCoverage: readonly D2SessionCoverage[];
+  readonly qualifiedSessionCount: number;
   readonly scenarios: readonly D2ScenarioSummary[];
   readonly primaryScenario: D2ExecutionScenario["name"];
   readonly verdict: D2InstrumentVerdict;
@@ -145,7 +171,12 @@ function lowerBoundByTime(ticks: readonly D2PremiumTick[], targetMs: number): nu
   return low;
 }
 
-function chooseEntryTick(
+/**
+ * Exported so the D2 opportunity-coverage audit can check premium availability with the exact
+ * frozen contract-selection rule instead of a reimplementation that could silently drift from it.
+ * Adding this export changes no computation in this file.
+ */
+export function chooseEntryTick(
   ticks: readonly D2PremiumTick[],
   signal: D2Signal,
 ): D2PremiumTick | null {
@@ -185,7 +216,8 @@ function chooseEntryTick(
   return null;
 }
 
-function chooseExitTick(
+/** Exported for the same reason as {@link chooseEntryTick}; behaviour is unchanged. */
+export function chooseExitTick(
   contractTicks: readonly D2PremiumTick[],
   scheduledExitAt: Date,
 ): D2PremiumTick | null {
@@ -342,6 +374,20 @@ export function evaluateD2PremiumCostGate(input: D2PremiumCostGateInput): D2Prem
   let missingEntryQuote = 0;
   let missingExitQuote = 0;
 
+  // Seeded from the stored session list, not from the signals, so a session that produced no
+  // opportunity still gets a row. Otherwise it would silently vanish from the qualification
+  // denominator instead of being recorded as untestable.
+  const coverage = new Map<string, { attempted: number; resolved: number; missingEntry: number; missingExit: number }>(
+    premiumSessionDates.map((sessionDate) => [sessionDate, { attempted: 0, resolved: 0, missingEntry: 0, missingExit: 0 }]),
+  );
+  const coverageFor = (sessionDate: string) => {
+    const existing = coverage.get(sessionDate);
+    if (existing) return existing;
+    const created = { attempted: 0, resolved: 0, missingEntry: 0, missingExit: 0 };
+    coverage.set(sessionDate, created);
+    return created;
+  };
+
   for (const signal of signals) {
     if (signal.dataThrough.getTime() >= signal.decisionAt.getTime()) {
       throw new Error("D2 feature dataThrough must be strictly earlier than decisionAt.");
@@ -350,9 +396,12 @@ export function evaluateD2PremiumCostGate(input: D2PremiumCostGateInput): D2Prem
       overlappingPosition += 1;
       continue;
     }
+    const sessionCoverage = coverageFor(signal.sessionDate);
+    sessionCoverage.attempted += 1;
     const entry = chooseEntryTick(ticks, signal);
     if (!entry) {
       missingEntryQuote += 1;
+      sessionCoverage.missingEntry += 1;
       continue;
     }
     const scheduledExitAt = new Date(signal.decisionAt.getTime() + D2_HORIZON_MINUTES * 60_000);
@@ -360,9 +409,11 @@ export function evaluateD2PremiumCostGate(input: D2PremiumCostGateInput): D2Prem
     const exit = chooseExitTick(contractTicks.get(entry.providerSymbol) ?? [], scheduledExitAt);
     if (!exit) {
       missingExitQuote += 1;
+      sessionCoverage.missingExit += 1;
       continue;
     }
     blockedUntilMs = exit.observedAt.getTime();
+    sessionCoverage.resolved += 1;
     pairs.push({
       sessionDate: signal.sessionDate,
       decisionAt: signal.decisionAt,
@@ -380,6 +431,23 @@ export function evaluateD2PremiumCostGate(input: D2PremiumCostGateInput): D2Prem
       quantity: input.quantity,
     });
   }
+
+  const sessionCoverage: D2SessionCoverage[] = [...coverage.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([sessionDate, counts]) => ({
+      sessionDate,
+      attempted: counts.attempted,
+      resolved: counts.resolved,
+      missingEntryQuote: counts.missingEntry,
+      missingExitQuote: counts.missingExit,
+      // A session with nothing attempted is untestable rather than qualified: there is no outcome
+      // to have observed, so admitting it toward the 60 would pad the denominator with days the
+      // experiment never tested.
+      status: counts.attempted === 0
+        ? "NOT_TESTABLE_NO_OPPORTUNITIES"
+        : counts.resolved === counts.attempted ? "QUALIFIED" : "UNCOVERED",
+    }));
+  const qualifiedSessionCount = sessionCoverage.filter((session) => session.status === "QUALIFIED").length;
 
   const scenarios = D2_EXECUTION_SCENARIOS.map((scenario) => (
     summariseScenario(pairs, scenario, premiumSessionDates)
@@ -414,6 +482,8 @@ export function evaluateD2PremiumCostGate(input: D2PremiumCostGateInput): D2Prem
     signalCount: signals.length,
     resolvedQuotePairCount: pairs.length,
     skips: { overlappingPosition, missingEntryQuote, missingExitQuote },
+    sessionCoverage,
+    qualifiedSessionCount,
     scenarios,
     primaryScenario: primary.scenario.name,
     verdict,

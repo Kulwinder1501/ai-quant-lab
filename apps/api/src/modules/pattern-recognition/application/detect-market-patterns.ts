@@ -3,6 +3,9 @@ import { CandlestickPatternEngine } from "../domain/candlestick-pattern-engine.j
 import { ChartPatternEngine } from "../domain/chart-pattern-engine.js";
 import {
   candlestickPatternDescriptions,
+  candlestickPatternLayer,
+  priceActionLayer,
+  type CandleFeatureCoverageRepository,
   type PatternCandle,
   type PatternDefinitionRepository,
   type PatternDetectionRepository,
@@ -36,6 +39,14 @@ export interface DetectMarketPatternsResult {
   priceActionEventsWritten: number;
   /** The write boundary applied, or null for the whole series. */
   writesFrom: string | null;
+  /**
+   * Candles marked as processed by both engines.
+   *
+   * Distinct from the written counts on purpose: this counts bars the pass *covered*, most of which
+   * legitimately produce no detection at all. It is the number a reader needs to tell a quiet bar
+   * from one this pass has not reached yet.
+   */
+  candlesCovered: number;
 }
 
 function decimalToNumber(value: string, field: string): number {
@@ -87,6 +98,16 @@ export class DetectMarketPatterns {
     private readonly candlestickEngine = new CandlestickPatternEngine(),
     private readonly priceActionEngine = new PriceActionEngine(),
     private readonly chartPatternEngine = new ChartPatternEngine(),
+    /**
+     * Last, and optional, so the existing call sites that pass engines positionally keep compiling
+     * and behaving identically.
+     *
+     * The scalp research harness is the one consumer that must know whether a bar was *processed*,
+     * and it refuses to capture a minute whose coverage is absent. A caller that omits this
+     * therefore leaves that gate closed rather than opening it falsely, which is the safe direction:
+     * the harness waits for a pass that does record coverage instead of reading a half-built bar.
+     */
+    private readonly coverageRepository: CandleFeatureCoverageRepository | null = null,
   ) {}
 
   async execute(input: DetectMarketPatternsInput): Promise<DetectMarketPatternsResult> {
@@ -151,6 +172,26 @@ export class DetectMarketPatterns {
       priceActionEventsWritten += 1;
     }
 
+    // Stamped over the write window, not the detection window, and stamped for every candle in it
+    // rather than only the ones that produced a row. A bar with no pattern is the common case and is
+    // exactly the case a reader cannot otherwise distinguish from a bar this pass has not reached.
+    // Written last: a crash above must leave the window looking unprocessed, because it is.
+    const coveredCandleIds = candles
+      .filter((candle) => candle.openTime.getTime() >= fromTime)
+      .map((candle) => candle.id);
+    if (this.coverageRepository && coveredCandleIds.length > 0) {
+      await this.coverageRepository.record({
+        candleIds: coveredCandleIds,
+        featureLayer: candlestickPatternLayer,
+        algorithmVersion: candlestickAlgorithmVersion,
+      });
+      await this.coverageRepository.record({
+        candleIds: coveredCandleIds,
+        featureLayer: priceActionLayer,
+        algorithmVersion: priceActionAlgorithmVersion,
+      });
+    }
+
     return {
       candlesRead: candles.length,
       candlestickDetections: patterns.length,
@@ -158,6 +199,7 @@ export class DetectMarketPatterns {
       candlestickDetectionsWritten,
       priceActionEventsWritten,
       writesFrom: input.since?.toISOString() ?? null,
+      candlesCovered: this.coverageRepository ? coveredCandleIds.length : 0,
     };
   }
 }
