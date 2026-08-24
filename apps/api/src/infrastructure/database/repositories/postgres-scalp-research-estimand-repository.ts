@@ -24,6 +24,24 @@ import type {
 /** Terminal outcomes that carry no economic reading; mirrors `canonicalOutcomeR` in the domain. */
 const ungradeableOutcomes = "('AMBIGUOUS', 'DATA_INCOMPLETE', 'POLICY_INVALID', 'ENTRY_NOT_TRIGGERED')";
 
+/** One settled subject's level, carrying both units and its cohort provenance. */
+export interface AbsoluteExpectancyRow {
+  readonly subjectId: string;
+  readonly subjectType: string;
+  readonly sessionId: string;
+  readonly strategyDefinitionHashes: readonly string[];
+  readonly outcome: string;
+  readonly grossR: number | null;
+  readonly grossBps: number | null;
+}
+
+/** Terminal outcome counts, for the ambiguous-share audit that accompanies every estimate. */
+export interface OutcomeCountRow {
+  readonly subjectType: string;
+  readonly outcome: string;
+  readonly subjects: number;
+}
+
 function numberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = Number(value);
@@ -132,6 +150,110 @@ export class PostgresScalpResearchEstimandRepository {
         ? 0
         : gradeable(row.native_outcome) ? numberOrNull(row.native_r) : null,
       canonicalOutcomeR: gradeable(row.canonical_outcome) ? numberOrNull(row.canonical_r) : null,
+    }));
+  }
+
+  /**
+   * Every settled subject as a bare outcome, for the absolute-expectancy gate.
+   *
+   * Returns gross R and gross basis points side by side because they are not interchangeable: an R
+   * multiple is denominated in that subject's own stop distance, so a NIFTY50 R and a BANKNIFTY R are
+   * different quantities of money. Basis points are comparable across instruments, and are also the
+   * unit the friction ladder is denominated in.
+   *
+   * Control cohorts are assigned through `control_matches`, so each cohort's baseline is drawn from
+   * the controls actually matched to *its* opportunities. A control matched into two cohorts is
+   * emitted once per cohort rather than arbitrarily assigned to one — each cohort's question is "what
+   * did the market pay at the moments matched to mine", and that is answered separately.
+   */
+  async listAbsoluteExpectancyUnits(
+    input: { from: Date; through: Date },
+  ): Promise<AbsoluteExpectancyRow[]> {
+    const result = await this.database.query<{
+      subject_id: string; subject_type: string; session_id: string;
+      strategy_definition_hashes: string[] | null;
+      outcome: string; r_multiple: string | null; return_bps: string | null;
+    }>(`
+      WITH opportunity_cohort AS (
+        SELECT membership.opportunity_id,
+               array_agg(DISTINCT proposal.strategy_definition_hash) AS hashes
+        FROM research_scalp.opportunity_memberships membership
+        JOIN research_scalp.proposals proposal ON proposal.id = membership.proposal_id
+        GROUP BY membership.opportunity_id
+      )
+      SELECT native.subject_id, native.subject_type, opportunity.session_id,
+             ARRAY[proposal.strategy_definition_hash] AS strategy_definition_hashes,
+             native.outcome, native.r_multiple, native.return_bps
+      FROM research_scalp.terminal_settlements native
+      JOIN research_scalp.proposals proposal ON proposal.id = native.subject_id
+      JOIN research_scalp.opportunity_memberships membership ON membership.proposal_id = proposal.id
+      JOIN research_scalp.opportunities opportunity ON opportunity.id = membership.opportunity_id
+      WHERE native.subject_type = 'NATIVE_PROPOSAL'
+        AND native.settlement_policy_version = $3
+        AND opportunity.canonical_decision_at >= $1 AND opportunity.canonical_decision_at < $2
+
+      UNION ALL
+
+      SELECT canonical.subject_id, canonical.subject_type, opportunity.session_id,
+             cohort.hashes, canonical.outcome, canonical.r_multiple, canonical.return_bps
+      FROM research_scalp.terminal_settlements canonical
+      JOIN research_scalp.opportunities opportunity ON opportunity.id = canonical.subject_id
+      JOIN opportunity_cohort cohort ON cohort.opportunity_id = opportunity.id
+      WHERE canonical.subject_type = 'CANONICAL_OPPORTUNITY'
+        AND canonical.settlement_policy_version = $3
+        AND opportunity.canonical_decision_at >= $1 AND opportunity.canonical_decision_at < $2
+
+      UNION ALL
+
+      SELECT control.subject_id, control.subject_type, control_point.session_id,
+             cohort.hashes, control.outcome, control.r_multiple, control.return_bps
+      FROM research_scalp.terminal_settlements control
+      JOIN research_scalp.control_points control_point ON control_point.id = control.subject_id
+      JOIN research_scalp.control_matches match ON match.control_point_id = control_point.id
+       AND match.matching_policy_version = $4
+      JOIN opportunity_cohort cohort ON cohort.opportunity_id = match.opportunity_id
+      WHERE control.subject_type = 'CONTROL_POINT'
+        AND control.settlement_policy_version = $3
+        AND control_point.sample_eligible
+        AND control_point.decision_at >= $1 AND control_point.decision_at < $2
+    `, [input.from, input.through, settlementPolicyVersion, matchingPolicyVersion]);
+
+    return result.rows.map((row) => ({
+      subjectId: row.subject_id,
+      subjectType: row.subject_type,
+      sessionId: row.session_id,
+      strategyDefinitionHashes: row.strategy_definition_hashes ?? [],
+      outcome: row.outcome,
+      grossR: gradeable(row.outcome) ? numberOrNull(row.r_multiple) : null,
+      grossBps: gradeable(row.outcome) ? numberOrNull(row.return_bps) : null,
+    }));
+  }
+
+  /**
+   * Terminal outcome counts per subject type, for the ambiguity audit.
+   *
+   * Travels with every estimate rather than being measured once globally: the ambiguous share is the
+   * fraction of the population the settlement policy could not resolve, and it rises as brackets
+   * tighten — so a single global figure would understate it in exactly the tight cells where it
+   * matters most.
+   */
+  async countOutcomesBySubjectType(
+    input: { from: Date; through: Date },
+  ): Promise<OutcomeCountRow[]> {
+    const result = await this.database.query<{
+      subject_type: string; outcome: string; subjects: string;
+    }>(`
+      SELECT settlement.subject_type, settlement.outcome, count(*)::text AS subjects
+      FROM research_scalp.terminal_settlements settlement
+      WHERE settlement.settlement_policy_version = $3
+        AND settlement.created_at >= $1 AND settlement.created_at < $2
+      GROUP BY 1, 2
+    `, [input.from, input.through, settlementPolicyVersion]);
+
+    return result.rows.map((row) => ({
+      subjectType: row.subject_type,
+      outcome: row.outcome,
+      subjects: Number(row.subjects),
     }));
   }
 

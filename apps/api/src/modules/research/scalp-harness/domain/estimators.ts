@@ -93,6 +93,22 @@ export interface PolicyEdgeUnit extends CohortTagged {
   readonly canonicalOutcomeR: number | null;
 }
 
+/**
+ * One settled subject's outcome, for the absolute-expectancy gate.
+ *
+ * Distinct from `SignalEdgeUnit` in what it answers. Signal Edge is a *contrast* — selected against
+ * matched controls — and friction largely cancels inside it. This is the level: what one subject of
+ * this type actually returned. Both are needed and neither substitutes for the other. A strategy can
+ * post a positive Signal Edge while its absolute expectancy is negative (it picks better-than-random
+ * moments in a market that pays nothing), and that combination is not tradeable however good the
+ * contrast looks.
+ */
+export interface AbsoluteExpectancyUnit extends CohortTagged {
+  readonly subjectId: string;
+  readonly sessionId: string;
+  readonly outcomeR: number | null;
+}
+
 /** A settled outcome tagged with the observational risk verdict that was recorded for it. */
 export interface GateValueUnit extends CohortTagged {
   readonly subjectId: string;
@@ -235,6 +251,40 @@ export function estimateSignalEdge(
     contributions.push({ sessionId: unit.sessionId, value: unit.selectedOutcomeR - mean(controls)! });
   }
   return summariseByDayBootstrap(contributions, excluded, { seed: "signal-edge-v1", ...options });
+}
+
+/**
+ * ABSOLUTE EXPECTANCY — the mean outcome of one subject type, with no contrast.
+ *
+ * This is the early-stopping gate. Before any TP/SL/timeout search is worth running, the population
+ * being searched has to have somewhere to go: if the mean gross outcome of the proposals is
+ * indistinguishable from zero, no choice of exit policy recovers it, and a wide enough sweep will
+ * nonetheless return a profitable-looking cell by chance. Sweeping first and gating afterwards gets
+ * that ordering exactly backwards, which is how parameter mining happens.
+ *
+ * Read against the same estimate computed for `CONTROL_POINT` subjects. Controls are outcome-blind
+ * draws from the same sessions, so they measure what the market paid anyone who showed up; the
+ * proposals have to beat that, not merely beat zero.
+ *
+ * Deliberately not a difference. `estimateSignalEdge` already provides the paired contrast with its
+ * variance advantage — this reports the *level*, which the contrast cannot, and the level is what
+ * decides tradeability.
+ */
+export function estimateAbsoluteExpectancy(
+  units: readonly AbsoluteExpectancyUnit[],
+  options: BootstrapOptions = {},
+): EstimateSummary {
+  assertSingleCohort(units);
+  const contributions: { sessionId: string; value: number }[] = [];
+  let excluded = 0;
+  for (const unit of units) {
+    if (unit.outcomeR === null || !Number.isFinite(unit.outcomeR)) {
+      excluded += 1;
+      continue;
+    }
+    contributions.push({ sessionId: unit.sessionId, value: unit.outcomeR });
+  }
+  return summariseByDayBootstrap(contributions, excluded, { seed: "absolute-expectancy-v1", ...options });
 }
 
 /**

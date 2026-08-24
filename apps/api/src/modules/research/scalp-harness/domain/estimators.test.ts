@@ -1,13 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
   cohortKeyOf,
+  estimateAbsoluteExpectancy,
   estimateGateValue,
   estimateNativePolicyEdge,
   estimateSignalEdge,
   partitionByCohort,
   summariseByDayBootstrap,
+  type AbsoluteExpectancyUnit,
   type SignalEdgeUnit,
 } from "./estimators.js";
+
+function expectancyUnit(
+  overrides: Partial<AbsoluteExpectancyUnit> & { sessionId: string },
+): AbsoluteExpectancyUnit {
+  return {
+    subjectId: `subject-${overrides.sessionId}`,
+    strategyDefinitionHashes: ["cohort-a"],
+    outcomeR: 0,
+    ...overrides,
+  };
+}
 
 function signalUnit(overrides: Partial<SignalEdgeUnit> & { sessionId: string }): SignalEdgeUnit {
   return {
@@ -73,6 +86,58 @@ describe("signal edge", () => {
 
     const strong = estimateSignalEdge(days.map((sessionId) => signalUnit({ sessionId, selectedOutcomeR: 1 })));
     expect(strong.ci95!.lower).toBeGreaterThan(0);
+  });
+});
+
+describe("absolute expectancy", () => {
+  it("reports the level, not a contrast", () => {
+    const result = estimateAbsoluteExpectancy([
+      expectancyUnit({ sessionId: "2026-08-21", outcomeR: 1 }),
+      expectancyUnit({ sessionId: "2026-08-24", outcomeR: -1 }),
+    ]);
+    expect(result.meanPerUnit).toBeCloseTo(0, 9);
+    expect(result.units).toBe(2);
+    expect(result.days).toBe(2);
+  });
+
+  it("excludes ungradeable outcomes without letting them count as zero", () => {
+    // Counting a null as a zero would drag any estimate toward zero in proportion to how much of the
+    // population failed to settle — a data-quality problem silently becoming a result.
+    const result = estimateAbsoluteExpectancy([
+      expectancyUnit({ sessionId: "2026-08-21", outcomeR: 2 }),
+      expectancyUnit({ sessionId: "2026-08-21", outcomeR: null }),
+    ]);
+    expect(result.units).toBe(1);
+    expect(result.excludedUnits).toBe(1);
+    expect(result.meanPerUnit).toBeCloseTo(2, 9);
+  });
+
+  it("refuses an interval below two trading days", () => {
+    // The gate this feeds is the one that stops a sweep from running on noise, so it must not report
+    // precision it does not have. One busy session is one cluster, whatever its unit count.
+    const oneDay = estimateAbsoluteExpectancy(
+      Array.from({ length: 200 }, () => expectancyUnit({ sessionId: "2026-08-24", outcomeR: 0.5 })),
+    );
+    expect(oneDay.units).toBe(200);
+    expect(oneDay.days).toBe(1);
+    expect(oneDay.ci95).toBeNull();
+  });
+
+  it("separates a genuinely positive population from a zero-mean one", () => {
+    const days = ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"];
+    const flat = estimateAbsoluteExpectancy(days.map((sessionId, index) =>
+      expectancyUnit({ sessionId, outcomeR: index % 2 === 0 ? 1 : -1 })));
+    const positive = estimateAbsoluteExpectancy(days.map((sessionId) =>
+      expectancyUnit({ sessionId, outcomeR: 1 })));
+    expect(flat.ci95!.lower).toBeLessThan(0);
+    expect(positive.ci95!.lower).toBeGreaterThan(0);
+  });
+
+  it("throws on a mixed cohort rather than averaging two populations", () => {
+    expect(() => estimateAbsoluteExpectancy([
+      expectancyUnit({ sessionId: "2026-08-21", strategyDefinitionHashes: ["momentum-v4"] }),
+      expectancyUnit({ sessionId: "2026-08-21", strategyDefinitionHashes: ["momentum-v5"] }),
+    ])).toThrow();
   });
 });
 
