@@ -278,7 +278,9 @@ missing or irreparable premium coverage is reported and does not count. While ac
 1. Keep manifest `36960366c89a02adc06c03656d76ccd489d02ac1e42e8e6915fd8f1dff10d964`, the
    model, tail thresholds, 30-minute holding period, quote-lag rule, costs and lot policy unchanged.
 2. Monitor `OPTION_PREMIUM_TICKS` and option-chain collection every trading day. Repair index candles
-   from FYERS when possible; never fabricate or interpolate an option quote.
+   from FYERS when possible; never fabricate or interpolate an option quote. `COLLECTOR_HEALTH` runs
+   this check in-session every ten minutes (§8.12) and is an operational alert only — it can never
+   qualify or disqualify a session.
 3. Do not treat intermediate P&L, confidence intervals or DSR as a selection result. They are
    provisional diagnostics until both the 60-session and 30-resolved-trade minimums are met.
 4. At 60 valid sessions, rerun `npm run research:directional:d2` once under the frozen manifest. PASS
@@ -578,9 +580,20 @@ never by performance:
 | regime | window | notes |
 |---|---|---|
 | 1 — legacy poller | 2026-08-12 → 2026-08-14 | HTTP polling, ~33 s cadence; truncated the F&O session at the 15:30 cash close |
-| 2 — streamer-v1 | 2026-08-17 → | socket streaming, `observed_at` only |
-| 3 — streamer + source timestamps | not yet started | pending the socket-payload inspection in §8.9 |
-| 4 — contract retention | not yet deployed | holds a contract past band exit for one holding period |
+| 2 — `STREAMER_V1_RECEIPT_CLOCK_ONLY` | 2026-08-17 → 2026-08-24 | socket streaming, `observed_at` only |
+| 3+4 — `STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION` | deployed 2026-08-24, first full session 2026-08-25 | source clocks and contract retention shipped together |
+
+Regimes 3 and 4 are one boundary, not two, because they were deployed in the same image and no tick
+exists that carries one without the other. Splitting them in the table would imply a window that can
+be selected for and does not exist. Ticks before the deploy are `(unstamped)`: migration 078 is
+deliberately not backfilled, so an absent regime is itself the regime-1/2 marker rather than missing
+data.
+
+The first session under regime 3+4 is falsifiable rather than assumed. If the source clocks are
+reaching the write path, `ops:collector-health` (§8.12) reports a **measurable** exchange-feed domain
+from 2026-08-25; on 2026-08-24 it correctly reported `only 0/28250 in-session rows carry an exchange
+clock`. A continued 0/N after the deploy means the columns are not being written, and any timing
+analysis resting on them would be unfounded.
 
 At the final report, all qualified sessions are the primary frozen verdict; a regime split is a
 **pre-declared diagnostic only**. It must never rescue a result: "overall FAIL, post-streamer PASS"
@@ -619,9 +632,10 @@ collector conflated.
   distinct leak shapes; against the frozen generator it reports **no leakage**.
 - **Calendar hardening — implemented.** `NseSegment` splits the 15:30 cash close from the 15:40
   equity-derivatives close, effective 2026-08-03, defaulting to `CASH` so no existing caller silently
-  gains ten minutes. Historical sessions are not widened retroactively. **The 15:40 date is the
-  planner's, not independently verified against an NSE circular here** — correct the constant in
-  `nse-market-session.ts` rather than at a call site.
+  gains ten minutes. Historical sessions are not widened retroactively. The 15:40 close has since been
+  **independently verified** against NSE for equity derivatives from 2026-08-03; the source comment in
+  `nse-market-session.ts` carries the reference, and any correction belongs on that constant rather
+  than at a call site.
 - **`RunProvenance` — implemented.** The D2 artifact now records the commit and whether the tree was
   dirty, closing the gap that a manifest hashes declared policy only, so an identical hash never
   established that the implementation was unchanged.
@@ -672,3 +686,68 @@ Run against 2026-08-24 as a negative control, it correctly reports `NO_PARITY`: 
 coverage ordering (median lag −20 min, since coverage was stamped after the fact) and 470 strategy-bar
 combinations proposed in reconstruction but not live. That is the defect, reproduced independently of
 the original diagnosis.
+
+### 8.12 `CollectorHealth` — operational monitoring, with no research authority
+
+The §8.7 downtime was discovered by hand, after the fact, from missing quotes. That is the wrong way
+round: a session lost at 11:30 IST is only recoverable while it is still happening. `collector-health.ts`
+and `ops:collector-health` answer "is the collector running", in-session, every ten minutes from 09:03
+to 15:53 IST.
+
+**It cannot qualify or disqualify a D2 session.** The separation is physical, not conventional:
+
+| | question | authority |
+|---|---|---|
+| `CollectorHealth` | is the collector running? | operational warning only |
+| `D2SessionCoverage` | is this session admissible? | the sole research gate (§8.3) |
+
+`collector-health-isolation.test.ts` fails the build if anything under `modules/research` imports the
+health module, if the health module imports research, or if the cost gate grows a health concept. The
+reason is specific and worth stating: a health threshold is an operations judgement that *will* be
+retuned as the deployment changes, and letting a retuned number decide which sessions count would let
+a frozen experiment's admission criteria drift without anyone re-registering them. D2 qualification
+stays exactly what §8.3 declares — frozen opportunity, correct frozen contract, entry ask within 60 s,
+same-contract exit bid within 60 s.
+
+**No new quality bar was invented.** `STRUCTURAL_SILENCE_MS = 300_000` is *derived*: the streamer's
+`reconnectDelayMs` backs off exponentially and caps at 300 s, so a healthy collector that lost its
+socket should have recovered inside one cap. Silence beyond it means recovery is not happening on its
+own. It is a structural-failure detector, not a tunable quality score.
+
+**Findings are named, never scored** — `COLLECTOR_STARTED_LATE`, `COLLECTOR_STOPPED_EARLY`,
+`RECEIPT_SILENCE_<n>S`, `EXCHANGE_FEED_SILENCE_<n>S`, `UNEXPECTED_REGIME_CHANGE`,
+`COLLECTOR_PRODUCED_NOTHING` — so an alert says what broke. `INCOMPLETE` means "cannot judge yet" and
+stays distinct from `DEGRADED`, which is a positive finding; collapsing them is the same conflation
+that made the 2026-08-24 pattern loss invisible.
+
+**Three clocks, reported separately**, because one uptime number conflates three different faults:
+receipt gap → our collector stopped receiving; exchange-feed gap → the vendor stopped sending;
+persistence lag → the database stopped writing. A receipt gap with no feed gap is our process. The
+feed domain **refuses to measure** under partial clock coverage rather than reporting gaps computed
+across only the stamped rows, so absent is never read as clean.
+
+**Gaps are clipped to the trading window.** The collector legitimately goes quiet after the bell and
+the streamer holds contracts past it, so raw same-date ticks contain long post-close silences. On
+2026-08-24 those dominated the findings — three gaps of 10–26 minutes, all after 15:40 IST. Reporting
+them would mark every ordinary session `DEGRADED` until the alert became noise and stopped being read.
+Session-edge coverage is checked separately, and the raw first/last observations are still reported.
+
+**What it measured, and what that corrects.** Every session 2026-08-17 → 2026-08-24 is `DEGRADED`,
+with a gap beginning reliably between 11:26 and 11:49 IST — the daily shutdown is real. But the
+durations are 16–62 minutes, **not** a flat 11:00–12:45 window, and 2026-08-24 lost only 16 minutes.
+§8.7's figures are the measured ones and supersede any 105-minute framing. Persistence lag is healthy
+throughout (median ~320–335 ms), which confirms the silences are ours rather than the database's.
+2026-08-19 additionally reports `COLLECTOR_STARTED_LATE`, a second failure the shutdown story does not
+explain.
+
+One consequence should not be lost in the relief that the outage is smaller than believed: §8.3
+requires **100%** opportunity coverage per session, so a 16-minute hole disqualifies a day exactly as
+a 62-minute one does. Shortening the outage does not help; only eliminating it across the full
+09:15–15:40 IST session does.
+
+**Tomorrow's acceptance test is parity, not firing rate.** A pattern-firing percentage cannot validate
+the §8.11 fix in either direction — a high rate with failing parity means the defect survived, and a
+low rate with `PARITY` means a quiet market. Run the first clean gated session in this order: collector
+health → eligibility and coverage timing → `LIVE_BACKFILL_FEATURE_PARITY_V1` → firing rate last, as a
+description rather than a verdict. 2026-08-24 is **not** repaired or regenerated; it is kept as the
+negative control.

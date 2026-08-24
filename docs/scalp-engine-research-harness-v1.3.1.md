@@ -32,6 +32,46 @@ Research records are stored under the `research_scalp` PostgreSQL schema. Every 
 - Horizons 5m, 15m, 30m and 60m are independently eligible.
 - The 15:30 close decision is retained, but every forward horizon and terminal is session-ineligible.
 
+## Feature-availability gate
+
+A completed candle is not the same thing as a *computed* candle. Indicator, candlestick-pattern and
+price-action detection run on their own schedules; capture runs every minute. Before 2026-08-24 the
+harness read whatever was present at that instant, so a live capture could be taken mid-computation
+and record a partial feature layer as though it were the real one. Measured on 2026-08-24, the live
+cohort saw an incomplete layer on 45.9% of evaluations and was missing 69% of pattern content, against
+0/473 for the backfilled cohort — which inverts the usual assumption, since the *backfilled* session
+is the trustworthy one.
+
+The defect was invisible because absence was ambiguous: "detection ran and found nothing" and
+"detection has not run yet" both look like zero rows, and neither `calculated_at` nor `detected_at` can
+date availability because both are batch-rewritten on recomputation.
+
+Coverage is therefore recorded explicitly. Migration `079` adds `candle_feature_coverage`
+(`candle_id`, `feature_layer`, `algorithm_version`, `computed_at`), written by the detection jobs with
+`ON CONFLICT DO NOTHING` so `computed_at` is a stable **first-cover** time. It is deliberately **not
+backfilled**: an absent row means "unknown", and fabricating one would destroy the only evidence that
+distinguishes a covered bar from an uncovered one.
+
+Capture then gates on it:
+
+- A candidate minute requires both `CANDLESTICK_PATTERN@candlestick-v1` and `PRICE_ACTION@price-action-v2`
+  on all three sibling timeframes (1m/3m/5m). Both layers are matched at **exact** `algorithm_version`,
+  so a variant cannot open the gate for a consumer expecting the canonical one.
+- An uncovered minute younger than 25 minutes is **deferred**, not captured. Past that it is captured
+  and counted, so a stalled detection job cannot silently drain the grid.
+- `controlIneligibleReason` gains `FEATURE_LAYER_NOT_COMPUTED`, alongside the existing
+  `FEATURE_WARMUP:<codes>` for missing canonical indicators. An ungated capture is refused rather than
+  quietly taken on partial state.
+
+The sibling join matches on `open_time = close_time - span` to hit the unique index; the earlier
+predicate bitmap-scanned ~73k rows per candidate minute (455 ms, worsening with history) against 52 ms
+now, flat.
+
+`LIVE_BACKFILL_FEATURE_PARITY_V1` (`npm run research:parity:live-backfill`) is the acceptance test for
+this gate — see §8.11 of [phase-29](phase-29-directional-intelligence-v2.md). It is read-only, stops
+before outcomes, and never compares P&L. 2026-08-24 is kept unrepaired as the negative control, where
+it correctly reports `NO_PARITY`.
+
 ## Canonical and native settlement
 
 `CANONICAL_GEOMETRY_V1` uses completed `ta-v1` Wilder ATR(14), one ATR stop, 1.5 ATR target and a 60-minute timeout. Tick rounding is frozen:

@@ -127,6 +127,12 @@ all (NIFTY50 15m detections stopped six days short of its candles; BANKNIFTY had
 the gate effectively requires a pattern, stale patterns move the gated population and can invert
 the result. `PATTERN_DETECTION_INTRADAY` now refreshes them every 15 minutes during the session.
 
+Refreshing on a schedule created a second, subtler version of the same problem: a consumer reading
+between refreshes sees a partially computed layer and cannot tell it from a genuinely empty one.
+Detection now records what it covered in `candle_feature_coverage`, and the scalp research harness
+waits for that marker before capturing a decision. The table is deliberately never backfilled — an
+absent row means "unknown", which is the fact worth keeping.
+
 ## Safety boundary
 
 This project is for analysis, backtesting, and simulated paper trades. It contains no broker authentication, order-routing, or real-order execution capability.
