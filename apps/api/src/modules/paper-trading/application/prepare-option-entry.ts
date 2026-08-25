@@ -300,7 +300,12 @@ export class PrepareOptionEntry {
       return {
         approved: false,
         reason: "NO_FRESH_EXECUTABLE_QUOTE",
-        explanation: `No executable ${underlyingSymbol} ${intendedStrike} ${intendedOptionType} ask `
+        // The expiry is named because omitting it hid a two-day outage: the message read as though
+        // a quoted contract had gone stale, while the real cause was the bot rolling past
+        // MINIMUM_DAYS_TO_EXPIRY onto a contract nothing was collecting. Strike and type alone
+        // matched the quoted book, so the refusals looked inexplicable.
+        explanation: `No executable ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
+          + `${intendedStrike} ${intendedOptionType} ask `
           + `at or before ${now.toISOString()} was available inside the `
           + `${MAXIMUM_EXECUTABLE_QUOTE_AGE_MS / 1000}-second freshness window. `
           + "The position was not opened; theoretical premiums are not executable fills.",

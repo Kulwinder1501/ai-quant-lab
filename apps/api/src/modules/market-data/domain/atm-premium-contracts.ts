@@ -1,5 +1,46 @@
 import { nearestStrike } from "@ai-quant-lab/pricing";
 import type { OptionChainSnapshot } from "./option-chain.js";
+import { selectNearestListedExpiry, type OptionExpiryCalendar } from "./option-expiry-calendar.js";
+
+/**
+ * Which expiries the dense premium feed must cover, as `YYYY-MM-DD` keys.
+ *
+ * Two, not one, and for two independent reasons:
+ *
+ * - **The front expiry** is what D2 prices. Its protocol is frozen on the *nearest* expiry, so this
+ *   series must keep flowing whatever else changes. It is always first in the returned list.
+ * - **The tradable expiry** is what `PrepareOptionEntry` will actually choose, since it refuses a
+ *   contract inside `MINIMUM_DAYS_TO_EXPIRY`. Collecting only the front one is what silently stopped
+ *   the paper bots on 2026-08-24: 186 of 189 candidates refused `NO_FRESH_EXECUTABLE_QUOTE` for a
+ *   contract nobody was quoting, while the front book streamed continuously.
+ *
+ * On most days these are the same expiry and the list has one entry. They diverge for the last two
+ * days of each cycle, which is exactly when the bots went quiet.
+ */
+export function premiumCoverageExpiries(
+  calendar: OptionExpiryCalendar | null,
+  now: Date,
+  minimumTradableDays: number,
+): string[] {
+  if (calendar === null || calendar.expiries.length === 0) return [];
+  const key = (value: Date): string => value.toISOString().slice(0, 10);
+  const sorted = [...calendar.expiries]
+    .filter((entry) => !Number.isNaN(entry.expiryDate.getTime()))
+    .sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime());
+
+  // The front expiry is the nearest that has not already settled. An expiry whose settlement has
+  // passed is not a contract anyone can quote, so it is not coverage.
+  const front = sorted.find((entry) => entry.expiryDate.getTime() > now.getTime());
+  const tradable = selectNearestListedExpiry(calendar, now, minimumTradableDays);
+
+  const keys: string[] = [];
+  if (front) keys.push(key(front.expiryDate));
+  if (tradable.usable) {
+    const tradableKey = key(tradable.expiryDate);
+    if (!keys.includes(tradableKey)) keys.push(tradableKey);
+  }
+  return keys;
+}
 
 export interface AtmPremiumContract {
   underlyingSymbol: string;

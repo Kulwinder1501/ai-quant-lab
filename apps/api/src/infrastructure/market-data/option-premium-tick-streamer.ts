@@ -1,7 +1,10 @@
 import { FYERS_PROVIDER_ID } from "./fyers-token-service.js";
 import type { FyersLiveStreamer, Tick } from "./fyers-live-streamer.js";
 import type { AtmPremiumContract } from "../../modules/market-data/domain/atm-premium-contracts.js";
-import { selectAtmPremiumContracts } from "../../modules/market-data/domain/atm-premium-contracts.js";
+import {
+  premiumCoverageExpiries,
+  selectAtmPremiumContracts,
+} from "../../modules/market-data/domain/atm-premium-contracts.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import {
   resolveSubscriptionDelta,
@@ -47,6 +50,11 @@ export interface OptionPremiumTickStreamerOptions {
    */
   contractRetentionMs?: number;
   strikeBand?: number;
+  /**
+   * Mirrors `MINIMUM_DAYS_TO_EXPIRY` in the trading path, so the feed covers the contract the bot
+   * will choose. Lowering it below the trading floor re-opens the gap this closed.
+   */
+  minimumTradableDaysToExpiry?: number;
   now?: () => Date;
   /**
    * Called after a flush that wrote rows, with what it wrote.
@@ -215,12 +223,34 @@ export class OptionPremiumTickStreamer {
   async refreshSubscriptions(): Promise<void> {
     const contracts: AtmPremiumContract[] = [];
     for (const symbol of this.options.underlyingSymbols) {
-      const snapshot = await this.options.chainRepository.latestSnapshot({ underlyingSymbol: symbol });
-      if (snapshot) {
-        contracts.push(...selectAtmPremiumContracts(snapshot, {
-          strikeBand: this.options.strikeBand ?? 1,
-          now: this.now(),
-        }));
+      /*
+       * One band per covered expiry, and the expiry is always named.
+       *
+       * `latestSnapshot` without an expiry takes `max(observed_at)` across every stored expiry.
+       * Since 2026-08-25 the chain collector also stores the rolled book, written moments after the
+       * front one -- so an unqualified read would have silently moved this feed off the front expiry
+       * and taken D2's frozen nearest-expiry series with it. Naming the expiry keeps both.
+       */
+      const calendar = await this.options.chainRepository
+        .latestExpiryCalendar(symbol, this.now())
+        .catch(() => null);
+      const expiryKeys = premiumCoverageExpiries(
+        calendar, this.now(), this.options.minimumTradableDaysToExpiry ?? 2,
+      );
+      // No calendar is not the same as no contracts: fall back to the previous behaviour rather
+      // than silently subscribing nothing and reporting a healthy run.
+      const wantedExpiries: Array<string | undefined> = expiryKeys.length > 0 ? expiryKeys : [undefined];
+      for (const expiryDate of wantedExpiries) {
+        const snapshot = await this.options.chainRepository.latestSnapshot({
+          underlyingSymbol: symbol,
+          ...(expiryDate === undefined ? {} : { expiryDate }),
+        });
+        if (snapshot) {
+          contracts.push(...selectAtmPremiumContracts(snapshot, {
+            strikeBand: this.options.strikeBand ?? 1,
+            now: this.now(),
+          }));
+        }
       }
       // Open positions are quoted whether or not the band still covers them. A position whose
       // strike drifted out of the band is exactly the one whose stop still has to resolve.

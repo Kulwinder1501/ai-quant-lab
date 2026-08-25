@@ -76,7 +76,9 @@ export class FyersOptionChainClient {
    * the ATM strike. Kept modest by default: the far wings are where quotes thin out to
    * nothing, and an unquotable strike contributes a row that cannot be costed.
    */
-  async fetchChain(input: { underlyingSymbol: string; strikeCount?: number }): Promise<OptionChainSnapshot> {
+  async fetchChain(
+    input: { underlyingSymbol: string; strikeCount?: number; expiryToken?: string | null },
+  ): Promise<OptionChainSnapshot> {
     const providerSymbol = resolveFyersSymbol(input.underlyingSymbol);
     const strikeCount = input.strikeCount ?? 10;
     if (!Number.isInteger(strikeCount) || strikeCount < 1 || strikeCount > 50) {
@@ -87,6 +89,9 @@ export class FyersOptionChainClient {
     const endpoint = new URL("/data/options-chain-v3", this.baseUrl);
     endpoint.searchParams.set("symbol", providerSymbol);
     endpoint.searchParams.set("strikecount", String(strikeCount));
+    // Absent, the provider returns whichever expiry it considers current -- in practice the front
+    // one. Naming the expiry is the only way to reach any other listed contract's book.
+    if (input.expiryToken) endpoint.searchParams.set("timestamp", input.expiryToken);
 
     const response = await this.fetch(endpoint, {
       headers: { Authorization: `${this.options.appId}:${accessToken}` },
@@ -104,6 +109,7 @@ export class FyersOptionChainClient {
 
     const expiryKindByDate = new Map<string, ExpiryKind>();
     const expiryByEpoch = new Map<string, Date>();
+    const epochByExpiryKey = new Map<string, string>();
     for (const entry of payload.data.expiryData ?? []) {
       const parsed = parseExpiryDate(entry.date);
       if (parsed === null) continue;
@@ -112,7 +118,12 @@ export class FyersOptionChainClient {
       // weekday: NSE moved weeklies to a single index and to Tuesday, so any weekday
       // rule is already stale.
       expiryKindByDate.set(key, entry.expiry_flag === "W" ? "WEEKLY" : "MONTHLY");
-      if (entry.expiry) expiryByEpoch.set(entry.expiry, parsed);
+      if (entry.expiry) {
+        expiryByEpoch.set(entry.expiry, parsed);
+        // Kept so a caller can ask for this expiry's book. Without it, only whichever expiry the
+        // provider defaults to is reachable, and every other listed contract is unquotable.
+        epochByExpiryKey.set(key, entry.expiry);
+      }
     }
 
     const rows = payload.data.optionsChain ?? [];
@@ -166,6 +177,7 @@ export class FyersOptionChainClient {
         .map(([date, expiryKind]) => ({
           expiryDate: new Date(`${date}T10:00:00.000Z`),
           expiryKind,
+          providerExpiryToken: epochByExpiryKey.get(date) ?? null,
         }))
         .sort((left, right) => left.expiryDate.getTime() - right.expiryDate.getTime()),
     };

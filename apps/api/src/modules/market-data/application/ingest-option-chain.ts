@@ -7,11 +7,23 @@ import {
 } from "../domain/option-chain.js";
 import {
   assertCalendarStorable,
+  selectNearestListedExpiry,
   type OptionExpiryCalendar,
 } from "../domain/option-expiry-calendar.js";
 
+/**
+ * Mirrors `MINIMUM_DAYS_TO_EXPIRY` in `prepare-option-entry.ts`.
+ *
+ * Declared here rather than imported to keep market-data collection from depending on
+ * paper-trading. `ingest-option-chain.test.ts` asserts the two stay equal, so a change to the
+ * trading floor cannot silently stop the data that serves it from being collected.
+ */
+export const MINIMUM_TRADABLE_DAYS_TO_EXPIRY = 2;
+
 export interface OptionChainSource {
-  fetchChain(input: { underlyingSymbol: string; strikeCount?: number }): Promise<OptionChainSnapshot>;
+  fetchChain(
+    input: { underlyingSymbol: string; strikeCount?: number; expiryToken?: string | null },
+  ): Promise<OptionChainSnapshot>;
 }
 
 export interface OptionChainStore {
@@ -37,6 +49,15 @@ export interface IngestedChain {
 export interface IngestOptionChainResult {
   chains: IngestedChain[];
   failures: Array<{ underlyingSymbol: string; reason: string }>;
+  /**
+   * Secondary books stored because the trading path would roll to them.
+   *
+   * Empty on an ordinary day, when the front expiry is itself tradable. Reported rather than
+   * silent so "the bot has a quotable contract" is observable without reading the tick table.
+   */
+  tradableExpiries: Array<{
+    underlyingSymbol: string; expiryDate: string; contracts: number; inserted: number;
+  }>;
 }
 
 /**
@@ -56,17 +77,37 @@ export class IngestOptionChain {
     private readonly store: OptionChainStore,
   ) {}
 
+  /**
+   * Also stores the expiry the trading path will actually choose.
+   *
+   * One chain request returns the front expiry's book, and that was the only one stored. But
+   * `PrepareOptionEntry` will not trade a contract inside `MINIMUM_DAYS_TO_EXPIRY`, so within two
+   * days of expiry it rolls to the next listed one -- and nothing was collecting that contract.
+   * Measured 2026-08-24/25: 186 of 189 candidates were refused `NO_FRESH_EXECUTABLE_QUOTE` while
+   * the front expiry was quoted continuously. The bot was asking for a book nobody was fetching.
+   *
+   * The front expiry is still fetched first and stored unchanged. D2's frozen protocol prices the
+   * *nearest* expiry, so that series must not move; this only adds a second one beside it.
+   */
   async execute(input: {
     underlyingSymbols: readonly string[];
     strikeCount?: number;
     costBudgetPercent?: number;
+    /** Evaluation instant for the roll rule. Injected so the behaviour is testable. */
+    now?: Date;
+    /** Set false to restore front-expiry-only collection. */
+    includeTradableExpiry?: boolean;
   }): Promise<IngestOptionChainResult> {
     if (input.underlyingSymbols.length === 0) {
       throw new Error("At least one underlying symbol is required.");
     }
 
+    const now = input.now ?? new Date();
     const chains: IngestedChain[] = [];
     const failures: Array<{ underlyingSymbol: string; reason: string }> = [];
+    const tradableExpiries: Array<{
+      underlyingSymbol: string; expiryDate: string; contracts: number; inserted: number;
+    }> = [];
 
     for (const underlyingSymbol of input.underlyingSymbols) {
       try {
@@ -88,6 +129,50 @@ export class IngestOptionChain {
         };
         assertCalendarStorable(calendar);
         await this.store.saveExpiryCalendar(calendar);
+
+        /*
+         * Fetch the tradable expiry too, when it is not the one just stored.
+         *
+         * `selectNearestListedExpiry` is the same selector `PrepareOptionEntry` uses, so the two
+         * agree by construction rather than by coincidence. If it ever diverges again, it diverges
+         * in one place.
+         *
+         * Failure here is deliberately non-fatal: the front expiry is already saved, and losing the
+         * secondary book must not cost the primary observation or fail the run.
+         */
+        if (input.includeTradableExpiry !== false) {
+          const tradable = selectNearestListedExpiry(calendar, now, MINIMUM_TRADABLE_DAYS_TO_EXPIRY);
+          const frontKey = expiriesOf(snapshot)[0]?.expiryDate.toISOString().slice(0, 10) ?? null;
+          const tradableKey = tradable.usable ? tradable.expiryDate.toISOString().slice(0, 10) : null;
+          const token = tradable.usable
+            ? snapshot.listedExpiries.find(
+              (entry) => entry.expiryDate.toISOString().slice(0, 10) === tradableKey,
+            )?.providerExpiryToken ?? null
+            : null;
+          if (tradableKey !== null && tradableKey !== frontKey && token !== null) {
+            try {
+              const rolled = await this.source.fetchChain({
+                underlyingSymbol,
+                strikeCount: input.strikeCount,
+                expiryToken: token,
+              });
+              assertSnapshotStorable(rolled);
+              const savedRolled = await this.store.saveSnapshot(rolled);
+              tradableExpiries.push({
+                underlyingSymbol,
+                expiryDate: tradableKey,
+                contracts: rolled.quotes.length,
+                inserted: savedRolled.inserted,
+              });
+            } catch (error) {
+              failures.push({
+                underlyingSymbol: `${underlyingSymbol} (tradable expiry ${tradableKey})`,
+                reason: error instanceof Error ? error.message : String(error),
+              });
+            }
+          }
+        }
+
         const ratios = putCallRatios(snapshot.quotes);
         const liquidity = summariseLiquidity(snapshot.quotes, input.costBudgetPercent);
 
@@ -117,6 +202,6 @@ export class IngestOptionChain {
       }
     }
 
-    return { chains, failures };
+    return { chains, failures, tradableExpiries };
   }
 }

@@ -20,6 +20,14 @@ function chainRepository() {
         { expiryDate: new Date("2026-08-25T10:00:00.000Z"), strikePrice: 57_300, optionType: "CE", providerSymbol: "SYM-57300CE" },
       ],
     })),
+    // The streamer names the expiry it wants, so it needs the calendar to know which. A single
+    // listed expiry keeps these cases on one book, as before.
+    latestExpiryCalendar: vi.fn(async () => ({
+      underlyingSymbol: "BANKNIFTY",
+      provider: "fyers",
+      observedAt: OBSERVED_AT,
+      expiries: [{ expiryDate: new Date("2026-08-25T10:00:00.000Z"), expiryKind: "MONTHLY" as const }],
+    })),
   } as unknown as PostgresOptionChainRepository;
 }
 
@@ -72,6 +80,12 @@ function movableChain(state: { spot: number; observedAt: Date }) {
         optionType,
         providerSymbol: `SYM-${strikePrice}${optionType}`,
       }))),
+    })),
+    latestExpiryCalendar: vi.fn(async () => ({
+      underlyingSymbol: "BANKNIFTY",
+      provider: "fyers",
+      observedAt: state.observedAt,
+      expiries: [{ expiryDate: new Date("2026-08-25T10:00:00.000Z"), expiryKind: "MONTHLY" as const }],
     })),
   } as unknown as PostgresOptionChainRepository;
 }

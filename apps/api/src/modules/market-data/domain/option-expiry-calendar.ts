@@ -18,6 +18,14 @@ export interface ListedExpiry {
   /** 10:00 UTC = 15:30 IST, the session close on which an NSE contract settles. */
   expiryDate: Date;
   expiryKind: ExpiryKind;
+  /**
+   * The provider's own handle for this expiry, needed to request its book.
+   *
+   * One chain request returns one expiry's quotes; asking for a different one means passing the
+   * provider's token back. Optional because it is provider detail: nothing in the domain reads it,
+   * and a calendar assembled from storage will not have it.
+   */
+  providerExpiryToken?: string | null;
 }
 
 export interface OptionExpiryCalendar {

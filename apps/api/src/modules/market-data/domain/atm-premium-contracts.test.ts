@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { selectAtmPremiumContracts } from "./atm-premium-contracts.js";
+import { premiumCoverageExpiries, selectAtmPremiumContracts } from "./atm-premium-contracts.js";
+import type { OptionExpiryCalendar } from "./option-expiry-calendar.js";
 import type { OptionChainSnapshot } from "./option-chain.js";
 
 function snapshot(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnapshot {
@@ -80,5 +81,56 @@ describe("selectAtmPremiumContracts", () => {
     expect(new Set(contracts.map((contract) => contract.strikePrice))).toEqual(
       new Set([24_600, 24_650, 24_700]),
     );
+  });
+});
+
+describe("premiumCoverageExpiries", () => {
+  const calendar = (dates: readonly string[]): OptionExpiryCalendar => ({
+    underlyingSymbol: "BANKNIFTY",
+    provider: "fyers",
+    observedAt: new Date("2026-08-24T04:00:00.000Z"),
+    // BANKNIFTY is monthly-only, which is why the roll is a 35-day jump rather than a week.
+    expiries: dates.map((date) => ({ expiryDate: new Date(`${date}T10:00:00.000Z`), expiryKind: "MONTHLY" })),
+  });
+
+  it("returns one expiry when the front contract is itself tradable", () => {
+    // 2026-08-21: the front expiry was 4 days out, and the bots traded normally.
+    const keys = premiumCoverageExpiries(
+      calendar(["2026-08-25", "2026-09-29"]), new Date("2026-08-21T04:00:00.000Z"), 2,
+    );
+
+    expect(keys).toEqual(["2026-08-25"]);
+  });
+
+  it("adds the rolled expiry once the front one is inside the trading floor", () => {
+    // 2026-08-24: the front expiry is 1.25 days out, so the bot rolls to September and nothing was
+    // collecting it. Both are needed -- the front for D2, the rolled one for the bots.
+    const keys = premiumCoverageExpiries(
+      calendar(["2026-08-25", "2026-09-29"]), new Date("2026-08-24T04:00:00.000Z"), 2,
+    );
+
+    expect(keys).toEqual(["2026-08-25", "2026-09-29"]);
+  });
+
+  it("keeps the front expiry first, so D2's nearest-expiry series is never displaced", () => {
+    const keys = premiumCoverageExpiries(
+      calendar(["2026-08-25", "2026-09-29"]), new Date("2026-08-25T04:00:00.000Z"), 2,
+    );
+
+    expect(keys[0]).toBe("2026-08-25");
+    expect(keys).toContain("2026-09-29");
+  });
+
+  it("ignores an expiry that has already settled", () => {
+    // Past 15:30 IST on expiry day the contract is gone; quoting it is not coverage.
+    const keys = premiumCoverageExpiries(
+      calendar(["2026-08-25", "2026-09-29"]), new Date("2026-08-25T10:30:00.000Z"), 2,
+    );
+
+    expect(keys).toEqual(["2026-09-29"]);
+  });
+
+  it("returns nothing rather than guessing when there is no calendar", () => {
+    expect(premiumCoverageExpiries(null, new Date("2026-08-24T04:00:00.000Z"), 2)).toEqual([]);
   });
 });
