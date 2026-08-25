@@ -133,6 +133,16 @@ Detection now records what it covered in `candle_feature_coverage`, and the scal
 waits for that marker before capturing a decision. The table is deliberately never backfilled — an
 absent row means "unknown", which is the fact worth keeping.
 
+Scalp stop-loss and target geometry is being decided the same way, one gate at a time, in the
+[Exit Geometry Falsification Program](docs/exit-geometry-falsification-program-v1.md). Every study is
+registered with a content hash before it produces a figure, and every configuration examined is
+recorded — because the corrections for having searched take the number of configurations as an input,
+and reconstructed after the fact that number is always too small. Two inference defects were measured
+and closed along the way: a day-clustered interval at two clusters is simply the minimum day mean, and
+reading per-horizon intervals across a ten-horizon ladder fires at 8–17% under the null rather than 5%.
+Current verdict after two sessions is that nothing is established — which is what the harness should
+be saying.
+
 ## Safety boundary
 
 This project is for analysis, backtesting, and simulated paper trades. It contains no broker authentication, order-routing, or real-order execution capability.

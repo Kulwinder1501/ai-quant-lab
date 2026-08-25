@@ -92,6 +92,21 @@ Controls match the same instrument, session, evaluation direction and volatility
 - Gate Value segments shadow outcomes by ALLOW/REJECT and is observational, not causal.
 - Inference uses trading-day block bootstrap/day clustering.
 
+Estimates are reported per strategy-definition cohort and never pooled; `assertSingleCohort` throws rather than warning, because a pooled estimate looks entirely normal in a report.
+
+Outcomes carry friction in two units. Basis points are exact for every stored row (`grossBps - 2 x rung`); risk units need the row's stop distance, which `impliedRiskPerUnit` recovers from the stored `returnBps` and `rMultiple` under `RISK_BASIS_DERIVATION_V1` — `terminal_settlements` is append-only, so a new column could never be populated for rows already captured. The R view is the one that discriminates, since cost in R scales as the inverse of the stop distance while the bps charge is constant. Every net figure must be quoted with `costModel`; it is a sensitivity instrument on underlying notional, not option economics.
+
+Reports also carry an evidence state derived from the cohort's distinct session count, so a gate reading at two sessions cannot be mistaken for a decision.
+
+## Exit geometry program
+
+The harness supplies the inputs; it does not decide stop/target geometry. That is a separate staged program with its own pre-registered studies, execution ledger and gates — see [Exit Geometry Falsification Program V1](exit-geometry-falsification-program-v1.md).
+
+Two facts from it matter when reading harness output directly:
+
+- **The stored 5/15/30/60-minute observations are bracket-truncated.** `walkPath` returns the instant a barrier is touched, so they answer "what did this bracket do by horizon H", not "where did price go". Use `BARRIER_FREE_PATH_V1` for the latter; using these rows to choose a bracket is circular.
+- **Reading a pointwise interval as a claim overfires when more than one was inspected.** Measured at 8–17% under the null against a 5% nominal across a ten-horizon ladder, and at two clusters the percentile lower bound is simply the minimum day mean. `PATH_STUDY_V2` moves the verdict to a simultaneous band and demotes pointwise intervals to descriptive.
+
 ## Database isolation
 
 Apply migrations using the database owner, then apply [scalp-research-role.sql](../infra/postgres/scalp-research-role.sql). Create a distinct login role, grant it `scalp_research_writer`, and expose its URL only as `SCALP_RESEARCH_DATABASE_URL`. The CLI refuses to start if the operational and research URLs use the same database username.
@@ -111,6 +126,7 @@ npm run research:scalp:capture -- --instruments NIFTY50,BANKNIFTY
 npm run research:scalp:match-controls
 npm run research:scalp:settle -- --limit 500
 npm run research:scalp:audit -- --from 2026-08-24T03:45:00.000Z --through 2026-08-28T10:31:00.000Z
+npm run research:scalp:estimate -- --replicates 2000
 ```
 
 Capture runs on completed bars and has no execution dependency. Matching should run after the +/-15-minute control window has matured. Settlement should run after the maximum eligible horizon/native expiry plus the normal market-data ingestion grace.
