@@ -72,6 +72,49 @@ export interface FrictionGeometry {
 }
 
 /**
+ * Recovers a settled row's risk denominator from the figures the row already carries.
+ *
+ * ## Why this is derived rather than stored
+ *
+ * Cost in risk units is `2 x (bps/10000) x entryPrice / riskPerUnit`, so charging friction in R needs
+ * the stop distance the R multiple was denominated in. `terminal_settlements` does not have a column
+ * for it, and cannot acquire one retroactively: the table carries a `BEFORE UPDATE OR DELETE` trigger
+ * that raises, so a new column could only ever be populated for rows settled after it was added, and
+ * every row already captured would stay null forever. Deriving works on the whole history.
+ *
+ * ## The algebra, and why it is exact
+ *
+ *   returnBps = signedMove / entryFillPrice x 10000   =>   signedMove = returnBps x entryFillPrice / 10000
+ *   rMultiple = signedMove / riskPerUnit              =>   riskPerUnit = signedMove / rMultiple
+ *
+ * Both stored figures come from the *same* `signedMove` in the same settlement, so the quotient returns
+ * the risk distance that row was actually graded against — not a re-derivation from geometry, which
+ * would have to re-read an ATR snapshot that later recompute passes may have rewritten. Where the two
+ * would disagree, this one is the number that makes `netR` consistent with the `grossR` beside it.
+ *
+ * ## When it returns null
+ *
+ * A row that resolved exactly at its entry price has `rMultiple = 0` and `returnBps = 0`, and 0/0
+ * carries no risk distance. That is a real settlement (a timeout landing on the entry), not an error, so
+ * it yields null and the caller reports it as uncovered rather than substituting a guess. A negative or
+ * non-finite quotient is impossible from consistent inputs — both figures share the sign of the move —
+ * so it is treated as a data inconsistency and also refused.
+ */
+export function impliedRiskPerUnit(input: {
+  readonly entryFillPrice: number | null;
+  readonly returnBps: number | null;
+  readonly rMultiple: number | null;
+}): number | null {
+  const { entryFillPrice, returnBps, rMultiple } = input;
+  if (entryFillPrice === null || returnBps === null || rMultiple === null) return null;
+  if (!Number.isFinite(entryFillPrice) || entryFillPrice <= 0) return null;
+  if (!Number.isFinite(returnBps) || !Number.isFinite(rMultiple)) return null;
+  if (returnBps === 0 || rMultiple === 0) return null;
+  const risk = (entryFillPrice * returnBps) / (10_000 * rMultiple);
+  return Number.isFinite(risk) && risk > 0 ? risk : null;
+}
+
+/**
  * Round-trip friction expressed in risk units, for one rung.
  *
  * Returns null rather than throwing when the geometry cannot support the conversion — a settled row

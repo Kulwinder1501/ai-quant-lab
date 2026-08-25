@@ -4,9 +4,12 @@ import {
   canonicalFrictionPolicyVersion,
   canonicalFrictionRungsBps,
   frictionR,
+  impliedRiskPerUnit,
   netBps,
   netR,
 } from "./canonical-friction.js";
+import { settleResearchPath } from "./settlement.js";
+import type { ResearchGeometry, ResearchPriceCandle } from "./contracts.js";
 
 // NIFTY50 at roughly the observed level, with the observed mean stop distance.
 const nifty = { entryFillPrice: 24_243, plannedRiskPerUnit: 7.56 };
@@ -60,5 +63,108 @@ describe("canonical friction", () => {
     // The failure mode is silent: a net figure quoted without this reads as native trading cost.
     expect(canonicalFrictionModel).toContain("NOT option execution economics");
     expect(canonicalFrictionPolicyVersion).toBe("SCALP_CANONICAL_FRICTION_V1");
+  });
+});
+
+describe("implied risk per unit", () => {
+  const decisionAt = new Date("2026-08-21T04:30:00.000Z");
+  const sessionCloseAt = new Date(decisionAt.getTime() + 120 * 60_000);
+
+  function settleOnce(
+    geometry: Pick<ResearchGeometry, "entryPrice" | "stopLoss" | "targetPrice" | "direction">,
+    bar: Pick<ResearchPriceCandle, "open" | "high" | "low" | "close">,
+  ) {
+    return settleResearchPath({
+      subjectType: "CANONICAL_OPPORTUNITY",
+      subjectId: "subject",
+      geometry: {
+        ...geometry,
+        entryOrderType: "MARKET_AT_REFERENCE",
+        expiresAt: new Date(decisionAt.getTime() + 60 * 60_000),
+        geometryPolicyVersion: "TEST_GEOMETRY_V1",
+      },
+      decisionAt,
+      sessionCloseAt,
+      forwardCandles: [{
+        openTime: decisionAt,
+        closeTime: new Date(decisionAt.getTime() + 60_000),
+        ...bar,
+      }],
+    }).terminal!;
+  }
+
+  /*
+   * The load-bearing test.
+   *
+   * The derivation is only worth anything if it returns the same stop distance the settlement actually
+   * divided by. Recovering it from a real settled row -- rather than from hand-built numbers that assume
+   * the algebra -- is what would catch an inverted quotient or a factor of 10000 in the wrong place.
+   */
+  it("recovers the stop distance a real settlement was graded against", () => {
+    const long = { direction: "LONG" as const, entryPrice: 24_243, stopLoss: 24_235.44, targetPrice: 24_254.34 };
+    const terminal = settleOnce(long, { open: 24_243, high: 24_260, low: 24_240, close: 24_255 });
+
+    expect(terminal.outcome).toBe("TARGET");
+    expect(impliedRiskPerUnit(terminal)).toBeCloseTo(long.entryPrice - long.stopLoss, 6);
+  });
+
+  it("recovers it on a short, where the signs of both stored figures flip together", () => {
+    // Both returnBps and rMultiple carry the sign of the same move, so the quotient stays positive.
+    // A sign error in either would surface here as a negative risk distance and a null.
+    const short = { direction: "SHORT" as const, entryPrice: 57_500, stopLoss: 57_564, targetPrice: 57_404 };
+    const terminal = settleOnce(short, { open: 57_500, high: 57_520, low: 57_400, close: 57_410 });
+
+    expect(terminal.outcome).toBe("TARGET");
+    /*
+     * Relative, not absolute — and the distinction is a real property rather than a loose assertion.
+     *
+     * The algebra is exact, but `returnBps` and `rMultiple` are each stored to six decimals, so the
+     * quotient inherits roughly 1e-8 of relative error. On a BANKNIFTY-sized 64-point stop that is
+     * about 1e-6 in absolute points, which an absolute six-decimal tolerance would reject. It is far
+     * below anything that matters for a cost figure: at the 1 bps rung it moves friction in R by
+     * around 1e-8 R. Asserting it relatively is what keeps this test sensitive to a genuine algebra
+     * error on any instrument, instead of only on the ones whose stops happen to be small.
+     */
+    const recovered = impliedRiskPerUnit(terminal)!;
+    const expected = short.stopLoss - short.entryPrice;
+    expect(Math.abs(recovered - expected) / expected).toBeLessThan(1e-7);
+  });
+
+  it("recovers it from a loss as well as a win", () => {
+    const long = { direction: "LONG" as const, entryPrice: 100, stopLoss: 99, targetPrice: 101.5 };
+    const terminal = settleOnce(long, { open: 100, high: 100.2, low: 98.9, close: 99 });
+
+    expect(terminal.outcome).toBe("STOP");
+    expect(terminal.rMultiple).toBeLessThan(0);
+    expect(impliedRiskPerUnit(terminal)).toBeCloseTo(1, 6);
+  });
+
+  it("returns null for a settlement that resolved exactly at its entry price", () => {
+    // A timeout landing on the entry is a real outcome with no recoverable risk distance: 0/0. Null is
+    // the honest answer, and the caller reports it as uncovered rather than substituting a guess.
+    expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: 0, rMultiple: 0 })).toBeNull();
+  });
+
+  it("refuses null, non-finite and inconsistent inputs", () => {
+    expect(impliedRiskPerUnit({ entryFillPrice: null, returnBps: 10, rMultiple: 1 })).toBeNull();
+    expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: null, rMultiple: 1 })).toBeNull();
+    expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: 10, rMultiple: null })).toBeNull();
+    expect(impliedRiskPerUnit({ entryFillPrice: 0, returnBps: 10, rMultiple: 1 })).toBeNull();
+    expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: Number.NaN, rMultiple: 1 })).toBeNull();
+    // Opposite signs cannot come from one settlement; treated as inconsistency rather than a distance.
+    expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: -10, rMultiple: 1 })).toBeNull();
+  });
+
+  it("composes with the friction ladder to give net R on a stored row", () => {
+    const long = { direction: "LONG" as const, entryPrice: 24_243, stopLoss: 24_235.44, targetPrice: 24_254.34 };
+    const terminal = settleOnce(long, { open: 24_243, high: 24_260, low: 24_240, close: 24_255 });
+    const plannedRiskPerUnit = impliedRiskPerUnit(terminal)!;
+    const geometry = { entryFillPrice: terminal.entryFillPrice!, plannedRiskPerUnit };
+
+    // The point of reporting R rather than only bps: at this stop distance one basis point costs most
+    // of a risk unit, which a constant "minus 2 bps" cannot show.
+    expect(frictionR(geometry, 1)!).toBeGreaterThan(0.6);
+    expect(netR(terminal.rMultiple, geometry, 1)!)
+      .toBeCloseTo(terminal.rMultiple! - frictionR(geometry, 1)!, 9);
   });
 });

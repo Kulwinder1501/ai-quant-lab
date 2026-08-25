@@ -33,6 +33,14 @@ export interface AbsoluteExpectancyRow {
   readonly outcome: string;
   readonly grossR: number | null;
   readonly grossBps: number | null;
+  /**
+   * The fill the round trip is charged against, for friction in risk units.
+   *
+   * Returned raw rather than pre-converted because cost in R needs the row's stop distance too, and
+   * that is recovered in the domain (`impliedRiskPerUnit`) from these same three figures. Keeping the
+   * arithmetic out of SQL means one definition of the risk denominator rather than one per query.
+   */
+  readonly entryFillPrice: number | null;
 }
 
 /** Terminal outcome counts, for the ambiguous-share audit that accompanies every estimate. */
@@ -173,6 +181,7 @@ export class PostgresScalpResearchEstimandRepository {
       subject_id: string; subject_type: string; session_id: string;
       strategy_definition_hashes: string[] | null;
       outcome: string; r_multiple: string | null; return_bps: string | null;
+      entry_fill_price: string | null;
     }>(`
       WITH opportunity_cohort AS (
         SELECT membership.opportunity_id,
@@ -183,7 +192,7 @@ export class PostgresScalpResearchEstimandRepository {
       )
       SELECT native.subject_id, native.subject_type, opportunity.session_id,
              ARRAY[proposal.strategy_definition_hash] AS strategy_definition_hashes,
-             native.outcome, native.r_multiple, native.return_bps
+             native.outcome, native.r_multiple, native.return_bps, native.entry_fill_price
       FROM research_scalp.terminal_settlements native
       JOIN research_scalp.proposals proposal ON proposal.id = native.subject_id
       JOIN research_scalp.opportunity_memberships membership ON membership.proposal_id = proposal.id
@@ -195,7 +204,8 @@ export class PostgresScalpResearchEstimandRepository {
       UNION ALL
 
       SELECT canonical.subject_id, canonical.subject_type, opportunity.session_id,
-             cohort.hashes, canonical.outcome, canonical.r_multiple, canonical.return_bps
+             cohort.hashes, canonical.outcome, canonical.r_multiple, canonical.return_bps,
+             canonical.entry_fill_price
       FROM research_scalp.terminal_settlements canonical
       JOIN research_scalp.opportunities opportunity ON opportunity.id = canonical.subject_id
       JOIN opportunity_cohort cohort ON cohort.opportunity_id = opportunity.id
@@ -206,7 +216,8 @@ export class PostgresScalpResearchEstimandRepository {
       UNION ALL
 
       SELECT control.subject_id, control.subject_type, control_point.session_id,
-             cohort.hashes, control.outcome, control.r_multiple, control.return_bps
+             cohort.hashes, control.outcome, control.r_multiple, control.return_bps,
+             control.entry_fill_price
       FROM research_scalp.terminal_settlements control
       JOIN research_scalp.control_points control_point ON control_point.id = control.subject_id
       JOIN research_scalp.control_matches match ON match.control_point_id = control_point.id
@@ -226,6 +237,7 @@ export class PostgresScalpResearchEstimandRepository {
       outcome: row.outcome,
       grossR: gradeable(row.outcome) ? numberOrNull(row.r_multiple) : null,
       grossBps: gradeable(row.outcome) ? numberOrNull(row.return_bps) : null,
+      entryFillPrice: gradeable(row.outcome) ? numberOrNull(row.entry_fill_price) : null,
     }));
   }
 

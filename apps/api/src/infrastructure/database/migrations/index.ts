@@ -77,6 +77,7 @@ import { scalpResearchLeastPrivilegeRoleMigration } from "./076-scalp-research-l
 import { scalpResearchSettlementDefinitionHashMigration } from "./077-scalp-research-settlement-definition-hash.js";
 import { optionPremiumTickSourceClocksMigration } from "./078-option-premium-tick-source-clocks.js";
 import { candleFeatureCoverageMigration } from "./079-candle-feature-coverage.js";
+import { scalpResearchStudyRegistrationsMigration } from "./080-scalp-research-study-registrations.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -158,4 +159,5 @@ export const migrations = [
   scalpResearchSettlementDefinitionHashMigration,
   optionPremiumTickSourceClocksMigration,
   candleFeatureCoverageMigration,
+  scalpResearchStudyRegistrationsMigration,
 ];

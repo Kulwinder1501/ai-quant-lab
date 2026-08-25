@@ -46,6 +46,7 @@
     "measure:strategy-tier": "tsx src/interfaces/cli/measure-strategy-tier.ts",
     "verify:cap-concurrency": "tsx src/interfaces/cli/verify-cap-concurrency.ts",
     "research:scalp:estimate": "tsx src/interfaces/cli/estimate-scalp-research.ts",
+    "research:studies:register": "tsx src/interfaces/cli/register-research-studies.ts",
     "research:directional:audit": "tsx src/interfaces/cli/audit-directional-data.ts",
     "research:directional:study": "tsx src/interfaces/cli/run-directional-v2-study.ts",
     "research:directional:d2": "tsx src/interfaces/cli/run-directional-v2-d2.ts",

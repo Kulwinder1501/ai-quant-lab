@@ -14,8 +14,16 @@ import {
   canonicalFrictionModel,
   canonicalFrictionPolicyVersion,
   canonicalFrictionRungsBps,
+  frictionR,
+  impliedRiskPerUnit,
   netBps,
+  netR,
 } from "../../modules/research/scalp-harness/domain/canonical-friction.js";
+import {
+  decisionGrade,
+  decisionGradeSessionMinimum,
+  evidenceState,
+} from "../../modules/research/scalp-harness/domain/study-registry.js";
 import type {
   AbsoluteExpectancyRow,
 } from "../../infrastructure/database/repositories/postgres-scalp-research-estimand-repository.js";
@@ -64,6 +72,24 @@ function unitsFrom(
     strategyDefinitionHashes: row.strategyDefinitionHashes,
     outcomeR: value(row),
   }));
+}
+
+/**
+ * The row's risk denominator, recovered from the figures it already stores.
+ *
+ * Needed because friction in risk units scales as the inverse of the stop distance, and that is the
+ * whole reason a tight bracket can look attractive gross and die net. In basis points the charge is a
+ * constant `2 x rung` and carries no information about geometry at all, so the R view is the one that
+ * discriminates between architectures.
+ */
+function frictionGeometryOf(row: AbsoluteExpectancyRow): { entryFillPrice: number; plannedRiskPerUnit: number } | null {
+  const plannedRiskPerUnit = impliedRiskPerUnit({
+    entryFillPrice: row.entryFillPrice,
+    returnBps: row.grossBps,
+    rMultiple: row.grossR,
+  });
+  if (plannedRiskPerUnit === null || row.entryFillPrice === null) return null;
+  return { entryFillPrice: row.entryFillPrice, plannedRiskPerUnit };
 }
 
 async function main(): Promise<void> {
@@ -129,17 +155,78 @@ async function main(): Promise<void> {
        */
       const absoluteExpectancy = Object.fromEntries(subjectTypes.map((subjectType) => {
         const rows = cohortRows.filter((row) => row.subjectType === subjectType);
+        /*
+         * Coverage, stated rather than implied.
+         *
+         * A settlement that resolved exactly at its entry price has no recoverable risk distance, so
+         * its net-R contribution is null. That is a handful of rows, but "the mean over the rows we
+         * could convert" and "the mean over the population" are different quantities, and a reader
+         * cannot tell them apart from a bare number. The bps figures below have no such gap — the
+         * charge there is exact for every row — which is why both units are reported.
+         */
+        const riskBasisRecovered = rows.filter((row) => frictionGeometryOf(row) !== null).length;
+        const gradeable = rows.filter((row) => row.grossR !== null).length;
         return [subjectType, {
           grossR: estimateAbsoluteExpectancy(unitsFrom(rows, (row) => row.grossR), options),
           grossBps: estimateAbsoluteExpectancy(unitsFrom(rows, (row) => row.grossBps), options),
-          // Friction is applied in basis points because that is exact for every stored row and is
+          /*
+           * Friction in risk units, per rung — what the round trip costs as a share of what was risked.
+           *
+           * Reported as its own estimate rather than folded into the net figure, because the level
+           * matters on its own: at the observed stop distances a single basis point already consumes a
+           * large fraction of a risk unit, and that is the fact that decides whether any bracket this
+           * tight can work. A net number alone hides how much of it was paid away.
+           */
+          frictionRByRung: Object.fromEntries(canonicalFrictionRungsBps.map((rung) => [
+            String(rung),
+            estimateAbsoluteExpectancy(
+              unitsFrom(rows, (row) => {
+                const geometry = frictionGeometryOf(row);
+                return geometry === null ? null : frictionR(geometry, rung);
+              }),
+              options,
+            ),
+          ])),
+          netRByRung: Object.fromEntries(canonicalFrictionRungsBps.map((rung) => [
+            String(rung),
+            estimateAbsoluteExpectancy(
+              unitsFrom(rows, (row) => {
+                const geometry = frictionGeometryOf(row);
+                return geometry === null ? null : netR(row.grossR, geometry, rung);
+              }),
+              options,
+            ),
+          ])),
+          // Friction is also applied in basis points because that is exact for every stored row and is
           // comparable across instruments; an R multiple is denominated in its own stop distance.
           netBpsByRung: Object.fromEntries(canonicalFrictionRungsBps.map((rung) => [
             String(rung),
             estimateAbsoluteExpectancy(unitsFrom(rows, (row) => netBps(row.grossBps, rung)), options),
           ])),
+          riskBasisCoverage: {
+            gradeableRows: gradeable,
+            riskBasisRecovered,
+            unrecoverable: gradeable - riskBasisRecovered,
+            note: "A row resolving exactly at its entry price yields 0/0 for the risk distance and is "
+              + "excluded from the R-space friction figures only. The bps figures cover every row.",
+          },
         }];
       }));
+
+      /*
+       * How much independent evidence this cohort's numbers rest on.
+       *
+       * Trade count is not sample size: outcomes inside one session share a regime, a trend and
+       * overlapping forward windows, so the independent unit is the trading day. Two days clear the
+       * bootstrap's mechanical floor and are nowhere near enough to kill or advance a hypothesis, and
+       * every gate string below is qualified by this rather than reading as final.
+       */
+      const sessions = new Set(cohortRows.map((row) => row.sessionId)).size;
+      const evidence = {
+        sessions,
+        state: evidenceState(sessions),
+        decisionGrade: decisionGrade(sessions),
+      };
 
       const nativeGross = absoluteExpectancy.NATIVE_PROPOSAL!.grossBps;
       /*
@@ -159,6 +246,7 @@ async function main(): Promise<void> {
 
       return {
         strategyDefinitionCohort: cohort,
+        evidence,
         signalEdge: {
           definition: "selectedCanonicalOutcome_i - mean(matchedControlOutcomes_i)",
           ...signalEdge,
@@ -170,6 +258,9 @@ async function main(): Promise<void> {
         gateValue,
         absoluteExpectancy,
         grossEdgeGate,
+        // The gate reads an interval; whether that reading may be acted on is a separate question, and
+        // conflating the two is how a four-session result becomes a decision.
+        grossEdgeGateStanding: evidence.decisionGrade ? "DECISION_GRADE" : `PROVISIONAL — ${evidence.state}`,
         // Stated rather than implied: an interval spanning zero is not a small edge, it is no evidence.
         verdict: signalEdge.ci95 === null
           ? "INSUFFICIENT_DAYS — at least two trading days are needed before an interval is even mechanically possible"
@@ -221,6 +312,7 @@ async function main(): Promise<void> {
       // research verdict additionally needs many independent days, stability across regimes, agreement
       // between instruments, and untouched out-of-sample evidence.
       sufficiencyNote: "MINIMUM_DAYS enables an interval; SUFFICIENT_EVIDENCE is a separate judgement.",
+      decisionGradeSessionMinimum,
       reports,
     }, null, 2));
   } finally {
