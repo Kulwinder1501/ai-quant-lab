@@ -751,3 +751,35 @@ low rate with `PARITY` means a quiet market. Run the first clean gated session i
 health → eligibility and coverage timing → `LIVE_BACKFILL_FEATURE_PARITY_V1` → firing rate last, as a
 description rather than a verdict. 2026-08-24 is **not** repaired or regenerated; it is kept as the
 negative control.
+
+### 8.13 The premium collector now stores two expiries — D2 still prices the nearest
+
+From 2026-08-25 `IngestOptionChain` stores a second book per underlying: the expiry the *trading*
+path will choose, because `PrepareOptionEntry` refuses a contract inside two days of expiry and
+nothing was collecting the contract it rolled to. See §6 of
+[phase-27](phase-27-option-premium-scalping.md) for the defect and its measurement.
+
+**D2's input is unchanged, and that is enforced rather than assumed.** The frozen manifest prices the
+**nearest-expiry** ATM call/put. Three properties keep that true:
+
+- the front expiry is fetched first and stored unchanged, before any secondary request;
+- `premiumCoverageExpiries` returns it first, always;
+- the dense streamer **names the expiry** on every `latestSnapshot` read.
+
+That third point is the one that could have silently corrupted this experiment. `latestSnapshot`
+without an expiry takes `max(observed_at)` across every stored expiry. Since the rolled book is
+written moments after the front one, an unqualified read would have moved the dense feed off the
+nearest expiry — D2's ticks would have quietly become a different contract's, with no error and no
+gap, and the manifest hash would not have changed — it covers declared policy only, not the
+implementation (§8.10, `RunProvenance`).
+
+**No D2 session already collected is affected.** Sessions to 2026-08-25 carry front-expiry ticks only;
+the change is additive from that date. A regime marker is not warranted — the contract D2 prices is
+identical before and after — but the tick table now contains rows D2 must not read, and it selects by
+frozen contract identity rather than by "whatever is in the table", which is why it does not.
+
+**One thing to watch when reading the eventual verdict.** Subscriptions roughly double for the last
+two days of each expiry cycle (about 12 to 24 concurrent contracts). If a subscription cap is ever
+hit, the front-expiry band is what must survive; a silent eviction there would degrade D2 coverage
+while `COLLECTOR_HEALTH` still reported ticks flowing. Nothing has hit that cap — but the failure mode
+would look like coverage loss with no error, which is the class of defect §8.7 already records twice.

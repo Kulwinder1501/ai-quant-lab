@@ -222,3 +222,60 @@ That is an argument for measuring it properly, not for refusing. And **step 1 is
 regardless of the outcome**: a 15-minute chain also limits stop and target enforcement on
 positions the bot already holds, so a faster premium series improves the existing path even
 if the scalp never ships.
+
+---
+
+## 6. Two expiries, not one (2026-08-25)
+
+Premium collection covers **two** expiries per underlying, and the reason is a two-day outage that
+looked like nothing at all.
+
+`PrepareOptionEntry` refuses a contract inside `MINIMUM_DAYS_TO_EXPIRY = 2`, so two days before
+expiry the trading path rolls to the next listed contract. Collection did not: `IngestOptionChain`
+fetched only the front expiry, and `selectAtmPremiumContracts` subscribed only `expiries[0]`. The bot
+was asking for a book nothing was fetching.
+
+Measured on 2026-08-24 and 2026-08-25: **111 and 107 ideas generated, zero trades taken.** Every
+candidate refused `NO_FRESH_EXECUTABLE_QUOTE` — 186 of 189, with only 3 genuinely stale quotes.
+Replaying the real decision path isolates it to the calendar rather than to any change:
+
+| session | front expiry | outcome |
+|---|---|---|
+| 2026-08-21 | 4.26 days out | approved |
+| 2026-08-24 | 1.25 days out | `NO_FRESH_EXECUTABLE_QUOTE` |
+| 2026-08-25 | 0.25 days out | `NO_FRESH_EXECUTABLE_QUOTE` |
+
+Nothing was committed to the trading path in that window. The calendar aged into the floor over a
+weekend, and the same thing would have happened on that date whatever the code said.
+
+**The two floors are now one rule.** `ingest-option-chain` selects the tradable expiry with the same
+`selectNearestListedExpiry` the trading path uses, and `ingest-option-chain.test.ts` asserts
+`MINIMUM_TRADABLE_DAYS_TO_EXPIRY === MINIMUM_DAYS_TO_EXPIRY`. The two constants are declared
+separately only so `market-data` does not depend on `paper-trading`; divergence between them *is* the
+defect, so it is a test rather than a convention.
+
+**The front expiry is protected, deliberately.** D2's protocol is frozen on the *nearest* expiry
+(§4.1 of [phase-29](phase-29-directional-intelligence-v2.md)), so it is fetched first, stored
+unchanged, and returned first by `premiumCoverageExpiries`. One consequence is easy to miss and was
+nearly shipped: `latestSnapshot` without an expiry takes `max(observed_at)` across every stored
+expiry, and now that a second book is written moments after the first, an unqualified read would have
+silently moved the dense feed **off** the front expiry and taken D2's series with it. The streamer
+therefore names the expiry on every read.
+
+A failed secondary fetch is non-fatal and reported in `tradableExpiries`/`failures`: losing the rolled
+book must not cost the primary observation.
+
+**Expect an asymmetry between the indices.** NIFTY50 lists weeklies, so it rolls about a week;
+BANKNIFTY is monthly-only — the same fact that once booked a whole option history on a phantom weekly
+contract — so it rolls roughly 35 days. For the last two days of each cycle the paper bots therefore trade a
+materially different tenor on BANKNIFTY — different theta, delta and liquidity — and a
+Classic-vs-Sniper comparison spanning those days spans two tenors. That is a property of the
+instrument, not a bug, but it must not be averaged over silently.
+
+Verified live on 2026-08-25: BANKNIFTY front `2026-08-25` plus rolled `2026-09-29`, NIFTY50 front plus
+`2026-09-01`, 62 contracts each, zero failures. Replaying six real ideas afterwards approved five; the
+remaining refusal is a confidence gate, not plumbing.
+
+**The refusal message now names the expiry.** Printing strike and option type alone is what hid this
+for two sessions: the refused contract *was* quoted, on a different expiry, so cross-checking strike
+and type against the tick table made the refusals look inexplicable.
