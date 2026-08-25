@@ -301,8 +301,130 @@ const fixedPointsV1: StudyDefinition = {
   },
 };
 
+/**
+ * STAGE G1, second inference design — the same measurement, read through a simultaneous band.
+ *
+ * ## Why this is a new study and not a correction to V1
+ *
+ * Ten pointwise 95% intervals do not give 95% coverage across ten inspected horizons. Choosing the
+ * horizon that looks best and quoting its interval is a search, and V1's verdict did exactly that. The
+ * fix — one simultaneous band over the whole curve — changes *how evidence becomes a claim*, which is
+ * part of the research definition rather than a presentation detail.
+ *
+ * It would be easy to argue the change needs no version, since a simultaneous band is strictly more
+ * conservative and so cannot manufacture a finding. That argument is true and still the wrong one to
+ * make: the registry exists precisely so inferential semantics are not renegotiated after results have
+ * been looked at, and "it can only be stricter" is the shape of reasoning that erodes it. V1 has already
+ * run.
+ *
+ * The timing is deliberate. V1 produced 36 cells, 360 interval examinations and zero valid information
+ * claims, every cell at `INSUFFICIENT_DAYS` or `DEGENERATE_INTERVAL`. Versioning now means the
+ * inferential design is being corrected while everything is still early-diagnostic — not after a
+ * 20-session result someone disliked.
+ *
+ * ## What is identical to V1, on purpose
+ *
+ * Horizons, cell identity, the barrier-free path definition and the matching policy. The two studies
+ * therefore differ in exactly one dimension, and a V1-versus-V2 comparison isolates the inference.
+ *
+ * ## Scope of the band
+ *
+ * It controls the ten-horizon search *within* one cell. It says nothing about the 36 cells examined
+ * across the study; that is the trial ledger's job and remains open. Claiming otherwise would be a
+ * familywise guarantee this does not provide.
+ */
+const pathStudyV2: StudyDefinition = {
+  studyKey: "PATH_STUDY_V2",
+  question:
+    "Across the registered horizon ladder as a whole, is there simultaneous evidence of positive "
+    + "control-adjusted directional information in this cell?",
+  provenance: "PRE_SPECIFIED",
+  provenanceNote:
+    "Identical measurement to PATH_STUDY_V1 — same horizons, cells, path definition and matching "
+    + "policy. Registered as a new version because the inference changes: the verdict moves from ten "
+    + "pointwise intervals to one simultaneous band. Registered before the band was implemented, and "
+    + "while every V1 cell was still EARLY_DIAGNOSTIC or DEGENERATE_INTERVAL.",
+  specification: {
+    horizonsMinutes: [1, 2, 3, 5, 10, 15, 20, 30, 45, 60],
+    returnUnits: ["POINTS", "BPS", "ATR"],
+    statistics: [
+      "MEAN_DIRECTIONAL_RETURN", "MEDIAN_DIRECTIONAL_RETURN", "P_RETURN_POSITIVE",
+      "MEAN_MFE", "MEDIAN_MFE", "MEAN_MAE", "MEDIAN_MAE",
+      "MEDIAN_TIME_TO_MFE", "MEDIAN_TIME_TO_MAE", "GIVE_BACK_RATIO",
+    ],
+    giveBackRatioDefinition: "(mfe_h - directionalReturn_h) / mfe_h, undefined when mfe_h <= 0",
+    eligibilityReporting: ["PER_HORIZON_ELIGIBLE_DECISIONS", "PER_HORIZON_ELIGIBLE_SESSIONS"],
+    secondaryCurve: "COMMON_ELIGIBLE_SUBSET — decisions eligible at every horizon in the ladder",
+    /*
+     * The eligibility diagnostic is promoted from a reported curve to a stated verdict.
+     *
+     * If the available-case curve shows a sharp early peak decaying by +60m while the common-eligible
+     * curve is flat, the decay is a statement about session composition rather than about information.
+     * Both readings are useful; conflating them is not.
+     */
+    eligibilitySensitivity: ["STABLE", "COMPOSITION_SENSITIVE"],
+    groupBy: ["STRATEGY_DEFINITION_HASH", "INSTRUMENT", "TIMEFRAME", "DIRECTION"],
+    controlPolicy: {
+      matchedControlCount,
+      matchedControlMinuteCaliper,
+      note: "Existing matched-control policy, unchanged from PATH_STUDY_V1.",
+    },
+    barrierPolicy: "NONE — the walker ignores stop, target and timeout entirely",
+    /*
+     * The inference, pinned to the point where two implementations cannot quietly differ.
+     *
+     * Each field is here because leaving it to the implementer would change the answer. The two that
+     * matter most are the last: whether a thin horizon is dropped or the whole cell refused, and whether
+     * a replicate missing one horizon drops the horizon or the replicate. Dropping a horizon from a
+     * maximum *lowers* the critical value and makes the test less conservative — the opposite of the
+     * intent — so the resolution is stated rather than discovered.
+     */
+    inferencePolicy: "SIMULTANEOUS_DAY_MAXT_V1",
+    inference: {
+      resamplingUnit: "TRADING_DAY",
+      statistic: "STUDENTIZED_CONTROL_ADJUSTED_EDGE — per-horizon day-mean edge divided by its "
+        + "day-level standard error",
+      aggregationAcrossHorizons: "MAX",
+      claimDirection: "ONE_SIDED_POSITIVE",
+      nullHypothesis: "edge_h <= 0 for every registered horizon",
+      alternative: "edge_h > 0 for at least one registered horizon",
+      confidenceLevel: 0.95,
+      replicateCount: 4_000,
+      bootstrapSeedPolicy: "DETERMINISTIC — seeded from namespace, studyKey, cellKey and metric. No "
+        + "wall clock, and no PRNG state carried between cells.",
+      pointwiseIntervals: "DESCRIPTIVE_ONLY — reported per horizon, never the source of a verdict",
+      gateVerdictSource: "SIMULTANEOUS_LOWER_BAND",
+      /*
+       * One resampled day set serves every horizon, which is what preserves the dependence between
+       * horizons that the maximum is taken over. That forces the day set to be those days with
+       * contributions everywhere; the alternative — per-horizon day sets — would make the maximum a
+       * statistic over incomparable quantities.
+       */
+      resampledDaySet: "COMMON_SUPPORT_DAYS — trading days with contributions at every retained horizon",
+      horizonExclusionRule: "A horizon with fewer than two common-support days, or a zero day-level "
+        + "standard error, is excluded from the cell BEFORE resampling and reported by name. Horizons "
+        + "are never dropped during resampling, because removing one from the maximum lowers the "
+        + "critical value and weakens the test.",
+      dayExclusionRule: "A trading day without contributions at every retained horizon is excluded "
+        + "BEFORE resampling and reported by count. No replicate is discarded mid-run.",
+      scopeLimit: "Controls the horizon search WITHIN one cell only. The 36 registered cells remain a "
+        + "separate multiplicity problem for the trial ledger; this is not a familywise guarantee over "
+        + "the study.",
+    },
+    cellGate: "PER_CELL — a cell advances on its own independent-session support; sparse cells stay "
+      + "unresolved, never pooled to reach a threshold",
+    degenerateAtOrBelowSessions: 4,
+    provisionalFromSessions: 5,
+    decisionEligibleFromSessions: decisionGradeSessionMinimum,
+    gatedBehind: null,
+    supersedes: "PATH_STUDY_V1",
+    decisionGradeSessionMinimum,
+  },
+};
+
 export const registeredStudies: readonly StudyDefinition[] = [
   pathStudyV1,
+  pathStudyV2,
   geometryMatrixV1,
   fixedPointsV1,
 ];

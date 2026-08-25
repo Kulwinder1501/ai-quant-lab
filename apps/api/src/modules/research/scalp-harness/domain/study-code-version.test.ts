@@ -22,6 +22,9 @@ describe("study code version", () => {
       "directional-information-curve.ts",
       "estimators.ts",
       "matched-controls.ts",
+      // Forward-window slicing and unit assembly. They were in the CLI, which the hash cannot reach —
+      // so result-affecting logic sat outside the guarantee until they moved here.
+      "path-study-inputs.ts",
       "policies.ts",
       "study-registry.ts",
     ]);

@@ -4,22 +4,21 @@ import { createDatabasePool } from "../../infrastructure/database/database.js";
 import {
   PostgresPathStudyRepository,
   type PathStudyBar,
-  type PathStudyDecision,
   type PathStudySubject,
   type TrialDeclaration,
 } from "../../infrastructure/database/repositories/postgres-path-study-repository.js";
-import {
-  isCommonEligible,
-  walkBarrierFreePath,
-  type BarrierFreePathResult,
-} from "../../modules/research/scalp-harness/domain/barrier-free-path.js";
+import { isCommonEligible } from "../../modules/research/scalp-harness/domain/barrier-free-path.js";
 import {
   degenerateIntervalSessionCeiling,
   directionalInformationCurve,
   pathStudyVerdict,
-  type PathContrastUnit,
   type PathMetric,
 } from "../../modules/research/scalp-harness/domain/directional-information-curve.js";
+import {
+  buildPathContrastUnits,
+  inputSnapshotHash,
+  sessionSetHash,
+} from "../../modules/research/scalp-harness/domain/path-study-inputs.js";
 import { cohortKeyOf } from "../../modules/research/scalp-harness/domain/estimators.js";
 import { logicalKey } from "../../modules/research/scalp-harness/domain/identity.js";
 import { studyCodeVersion } from "../../modules/research/scalp-harness/domain/study-code-version.js";
@@ -60,7 +59,6 @@ import { requireIsolatedResearchDatabaseUrl } from "./scalp-research-database.js
  * Usage: run-path-study [--from ISO] [--through ISO] [--metric DIRECTIONAL_RETURN_BPS] [--replicates 2000]
  */
 
-const STUDY_KEY = "PATH_STUDY_V1";
 const PARAMETER_FAMILY = "HORIZON_LADDER";
 
 function dateOption(args: string[], name: string, fallback: Date): Date {
@@ -79,30 +77,15 @@ function cellKeyOf(subject: PathStudySubject): string {
   ].join("|");
 }
 
-function walkDecision(
-  decision: PathStudyDecision,
-  direction: "LONG" | "SHORT",
-  horizons: readonly number[],
-  series: readonly PathStudyBar[],
-  furthestMinutes: number,
-): BarrierFreePathResult {
-  // Slice rather than query: the whole instrument series is already in memory, and a bounded window
-  // keeps the walker's map small.
-  const from = decision.decisionAt.getTime();
-  const to = from + furthestMinutes * 60_000;
-  const forwardCandles = series.filter(
-    (bar) => bar.closeTime.getTime() > from && bar.closeTime.getTime() <= to,
-  );
-  return walkBarrierFreePath({
-    direction,
-    decisionAt: decision.decisionAt,
-    referencePrice: decision.referencePrice,
-    sessionCloseAt: decision.sessionCloseAt,
-    horizonsMinutes: horizons,
-    atr: decision.atr,
-    forwardCandles,
-  });
-}
+/**
+ * The inference this runner actually implements.
+ *
+ * Checked against the registered study before anything runs. `PATH_STUDY_V2` declares
+ * `SIMULTANEOUS_DAY_MAXT_V1`, which is registered but not yet built — and running it through this
+ * pointwise runner would file V1 semantics under a V2 key, which is precisely the drift the registry
+ * exists to prevent. A study absent this field predates the distinction and is read as pointwise.
+ */
+const IMPLEMENTED_INFERENCE_POLICY = "POINTWISE_INTERVAL_V1";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -115,6 +98,7 @@ async function main(): Promise<void> {
     throw new Error("--replicates must be an integer of at least 200 for a stable 95% interval.");
   }
 
+  const STUDY_KEY = getOption(args, "study") ?? "PATH_STUDY_V1";
   const definition = registeredStudies.find((study) => study.studyKey === STUDY_KEY);
   if (!definition) throw new Error(`${STUDY_KEY} is not declared in the study registry.`);
   const horizons = definition.specification.horizonsMinutes as number[];
@@ -153,6 +137,24 @@ async function main(): Promise<void> {
       );
     }
 
+    /*
+     * A registered inference this runner does not implement is refused, not approximated.
+     *
+     * PATH_STUDY_V2 declares SIMULTANEOUS_DAY_MAXT_V1 — registered ahead of its implementation, on
+     * purpose. Producing pointwise verdicts under that key would file one methodology's results against
+     * another's declaration, which is the exact substitution the registry exists to make impossible.
+     */
+    const registeredPolicy = (registered.specification.inferencePolicy as string | undefined)
+      ?? IMPLEMENTED_INFERENCE_POLICY;
+    if (registeredPolicy !== IMPLEMENTED_INFERENCE_POLICY) {
+      throw new Error(
+        `${STUDY_KEY} declares inferencePolicy ${registeredPolicy}, and this runner implements `
+        + `${IMPLEMENTED_INFERENCE_POLICY}. Running it here would record one methodology's numbers `
+        + "against another's registration. Build the declared inference, or run a study whose "
+        + "registration matches this runner.",
+      );
+    }
+
     const subjects = await repository.listSubjects({ from, through });
     if (subjects.length === 0) {
       console.info(JSON.stringify({
@@ -173,6 +175,22 @@ async function main(): Promise<void> {
       else cells.set(key, [subject]);
     }
 
+    /*
+     * Source data is loaded before any trial is declared, because the declaration has to carry the
+     * dataset's identity. Loading rows is a read, not a computation — the study still has not started
+     * until a path is walked, so the fail-closed ordering is intact.
+     */
+    const seriesByInstrument = new Map<string, PathStudyBar[]>();
+    for (const instrumentId of new Set(subjects.map((subject) => subject.instrumentId))) {
+      seriesByInstrument.set(instrumentId, await repository.listOneMinuteSeries({
+        instrumentId,
+        from,
+        // The window has to reach past the last decision by the furthest horizon, or the tail of the
+        // curve would read as missing data rather than as the path it actually was.
+        through: new Date(through.getTime() + furthestMinutes * 60_000),
+      }));
+    }
+
     const runKey = logicalKey("path-study-run", [
       STUDY_KEY, declaredHash, codeVersion, metric, from, through,
     ]);
@@ -182,28 +200,43 @@ async function main(): Promise<void> {
       .map(([cellKey, cellSubjects]) => {
         const sessions = [...new Set(cellSubjects.map((subject) => subject.sessionId))].sort();
         const [cohortKey, instrumentSymbol, timeframe, direction] = cellKey.split("|");
+        const cellSessionSetHash = sessionSetHash(sessions);
+        /*
+         * Dataset identity, at the precision the inputs actually vary at.
+         *
+         * The bars are restricted to the instruments this cell reads, so an unrelated instrument's
+         * repair does not invalidate it.
+         */
+        const cellInputSnapshotHash = inputSnapshotHash({
+          subjects: cellSubjects,
+          bars: [...new Set(cellSubjects.map((subject) => subject.instrumentId))]
+            .sort()
+            .flatMap((instrumentId) => seriesByInstrument.get(instrumentId) ?? []),
+        });
         return {
           /*
-           * Trial identity is the research facts, deliberately *not* the run.
+           * Trial identity is the research facts, deliberately *not* the run and *not* the clock.
            *
            * An interrupted run must be recoverable: 36 declared, 27 recorded, re-run fills the missing
-           * nine rather than declaring 36 fresh trials that are logically the same configuration. That
-           * requires identity to be reproducible, which rules out anything wall-clock — and
-           * `--through` defaults to now, so including the cutoff here would make every retry a new set
-           * of trials and the recovery path unreachable.
+           * nine rather than declaring 36 fresh trials for the same configuration. That needs identity
+           * to be reproducible, which rules out `--through`, since it defaults to now.
            *
-           * The session range replaces it, and is the better bound anyway: it names the data actually
-           * used rather than the instant the query happened to run. Two runs over the same complete
-           * sessions are the same trial; the arrival of a new session changes the range and correctly
-           * yields a new one. `dataset_cutoff` is still recorded on the row as an audit fact, with the
-           * first declaration's value standing.
+           * Three things replace it. The session *set* rather than its range, because first/last/count
+           * agree across genuinely different collections. The input snapshot, because the healer
+           * appends repaired bars and `indicator_snapshots` is rewritten by recompute passes — so the
+           * same sessions can hold different observations, and that must read as a new dataset rather
+           * than as a determinism violation. And the code version, for the implementation. Policy,
+           * implementation and dataset are then each frozen separately, and `dataset_cutoff` stays on
+           * the row as audit metadata with the first declaration's value standing.
            */
           trialKey: logicalKey("path-study-trial", [
             STUDY_KEY, declaredHash, codeVersion, metric,
             cohortKey!, instrumentSymbol!, timeframe!, direction!,
-            sessions[0]!, sessions[sessions.length - 1]!, sessions.length,
+            cellSessionSetHash, cellInputSnapshotHash,
           ]),
           runKey,
+          sessionSetHash: cellSessionSetHash,
+          inputSnapshotHash: cellInputSnapshotHash,
           studyKey: STUDY_KEY,
           studyDefinitionHash: declaredHash,
           codeVersion,
@@ -226,17 +259,6 @@ async function main(): Promise<void> {
     // Fail closed. Nothing is computed until every cell of this run is accountable.
     await repository.declareTrials(database, declarations);
 
-    const seriesByInstrument = new Map<string, PathStudyBar[]>();
-    for (const instrumentId of new Set(subjects.map((subject) => subject.instrumentId))) {
-      seriesByInstrument.set(instrumentId, await repository.listOneMinuteSeries({
-        instrumentId,
-        from,
-        // The window has to reach past the last decision by the furthest horizon, or the tail of the
-        // curve would read as missing data rather than as the path it actually was.
-        through: new Date(through.getTime() + furthestMinutes * 60_000),
-      }));
-    }
-
     const reports = [];
     const determinismViolations: string[] = [];
     for (const declaration of declarations) {
@@ -245,16 +267,12 @@ async function main(): Promise<void> {
       ].join("|");
       const cellSubjects = cells.get(cellKey)!;
 
-      const units: PathContrastUnit[] = cellSubjects.map((subject) => {
-        const series = seriesByInstrument.get(subject.instrumentId) ?? [];
-        return {
-          subjectId: subject.opportunityId,
-          sessionId: subject.sessionId,
-          strategyDefinitionHashes: subject.strategyDefinitionHashes,
-          selected: walkDecision(subject.selected, subject.direction, horizons, series, furthestMinutes),
-          controls: subject.controls.map((control) =>
-            walkDecision(control, subject.direction, horizons, series, furthestMinutes)),
-        };
+      // Assembly lives in the domain so `studyCodeVersion` covers it; a runner that computed here would
+      // sit outside the hash that certifies the implementation.
+      const units = buildPathContrastUnits({
+        subjects: cellSubjects,
+        seriesByInstrument,
+        horizonsMinutes: horizons,
       });
 
       /*

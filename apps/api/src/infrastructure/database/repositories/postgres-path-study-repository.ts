@@ -55,10 +55,15 @@ export interface TrialDeclaration {
   readonly direction: "LONG" | "SHORT";
   readonly parameterFamily: string;
   readonly parameterValues: Readonly<Record<string, unknown>>;
+  /** Audit metadata: when the query ran. Deliberately absent from trial identity. */
   readonly datasetCutoff: Date;
   readonly sessionRangeStart: string;
   readonly sessionRangeEnd: string;
   readonly sessionCount: number;
+  /** Which sessions participated, exactly — part of identity, unlike the range above. */
+  readonly sessionSetHash: string;
+  /** Which observations were visible, exactly. Moves when the healer or a recompute pass touches them. */
+  readonly inputSnapshotHash: string;
   readonly evidenceState: string;
   readonly subjectsDeclared: number;
 }
@@ -98,13 +103,19 @@ export class PostgresPathStudyRepository {
    * The stored row is the authority: it is what was predeclared, and a code-side edit is a new study
    * rather than a correction to this one.
    */
-  async findRegisteredStudy(studyKey: string): Promise<{ studyDefinitionHash: string } | null> {
-    const result = await this.database.query<{ study_definition_hash: string }>(
-      "SELECT study_definition_hash FROM research_scalp.study_registrations WHERE study_key = $1",
+  async findRegisteredStudy(
+    studyKey: string,
+  ): Promise<{ studyDefinitionHash: string; specification: Record<string, unknown> } | null> {
+    const result = await this.database.query<{
+      study_definition_hash: string; specification: Record<string, unknown>;
+    }>(
+      "SELECT study_definition_hash, specification FROM research_scalp.study_registrations WHERE study_key = $1",
       [studyKey],
     );
     const row = result.rows[0];
-    return row ? { studyDefinitionHash: row.study_definition_hash } : null;
+    return row
+      ? { studyDefinitionHash: row.study_definition_hash, specification: row.specification }
+      : null;
   }
 
   /**
@@ -233,8 +244,8 @@ export class PostgresPathStudyRepository {
             trial_key, run_key, study_key, study_definition_hash, code_version, cohort_key,
             instrument_symbol, timeframe, direction, parameter_family, parameter_values,
             dataset_cutoff, session_range_start, session_range_end, session_count, evidence_state,
-            subjects_declared
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17)
+            subjects_declared, session_set_hash, input_snapshot_hash
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19)
           ON CONFLICT (trial_key) DO NOTHING
         `, [
           declaration.trialKey, declaration.runKey, declaration.studyKey,
@@ -243,6 +254,7 @@ export class PostgresPathStudyRepository {
           declaration.parameterFamily, JSON.stringify(declaration.parameterValues),
           declaration.datasetCutoff, declaration.sessionRangeStart, declaration.sessionRangeEnd,
           declaration.sessionCount, declaration.evidenceState, declaration.subjectsDeclared,
+          declaration.sessionSetHash, declaration.inputSnapshotHash,
         ]);
       }
       await client.query("COMMIT");

@@ -36,10 +36,75 @@ describe("study registry", () => {
   it("pins each frozen definition to its content hash", () => {
     expect(studyDefinitionHash(byKey("PATH_STUDY_V1")))
       .toBe("ffc7a1c96a6259fb772b4b83a3129e68caba1134fc51cad77f335c8538e5dc1d");
+    expect(studyDefinitionHash(byKey("PATH_STUDY_V2")))
+      .toBe("6c9a6cdf9c585d687c4b151be793d5c911a6bf5aa5e91ecf7a64f1813d8e5ddc");
     expect(studyDefinitionHash(byKey("GEOMETRY_MATRIX_V1")))
       .toBe("16524723204bdfe7ed9e0bd3bdbc616b1abc231584143f8e011d6e4d2be67ef9");
     expect(studyDefinitionHash(byKey("FIXED_POINTS_V1")))
       .toBe("55a68330b10ae2b9ceddb4415b92cc5933ea95d731c02ec920f8abcd6b23ae4b");
+  });
+
+  describe("PATH_STUDY_V2", () => {
+    const v1 = byKey("PATH_STUDY_V1").specification;
+    const v2 = byKey("PATH_STUDY_V2").specification;
+
+    it("differs from V1 in inference only", () => {
+      // The point of versioning rather than mutating: V1 and V2 must be comparable, which requires the
+      // measurement to be identical and only the inference to move.
+      expect(v2.horizonsMinutes).toEqual(v1.horizonsMinutes);
+      expect(v2.groupBy).toEqual(v1.groupBy);
+      expect(v2.barrierPolicy).toEqual(v1.barrierPolicy);
+      expect(v2.controlPolicy).toEqual({
+        ...(v1.controlPolicy as Record<string, unknown>),
+        note: "Existing matched-control policy, unchanged from PATH_STUDY_V1.",
+      });
+      expect(v2.giveBackRatioDefinition).toEqual(v1.giveBackRatioDefinition);
+      expect(v2.statistics).toEqual(v1.statistics);
+    });
+
+    it("leaves V1 without an inference policy, so it still reads as pointwise", () => {
+      // V1 predates the distinction. Adding the field to it would move its hash and break the
+      // registration it has already run under.
+      expect(v1.inferencePolicy).toBeUndefined();
+      expect(v2.inferencePolicy).toBe("SIMULTANEOUS_DAY_MAXT_V1");
+      expect(v2.supersedes).toBe("PATH_STUDY_V1");
+    });
+
+    it("makes pointwise intervals descriptive and the band authoritative", () => {
+      const inference = v2.inference as Record<string, unknown>;
+      expect(inference.pointwiseIntervals).toContain("DESCRIPTIVE_ONLY");
+      expect(inference.gateVerdictSource).toBe("SIMULTANEOUS_LOWER_BAND");
+      expect(inference.claimDirection).toBe("ONE_SIDED_POSITIVE");
+      expect(inference.aggregationAcrossHorizons).toBe("MAX");
+      expect(inference.resamplingUnit).toBe("TRADING_DAY");
+      expect(inference.confidenceLevel).toBe(0.95);
+    });
+
+    it("pins the exclusion rules two implementations would otherwise resolve differently", () => {
+      // Dropping a horizon from a maximum lowers the critical value and weakens the test, so "drop the
+      // horizon" and "drop the replicate" are not interchangeable. Both are resolved before resampling.
+      const inference = v2.inference as Record<string, unknown>;
+      expect(inference.resampledDaySet).toContain("COMMON_SUPPORT_DAYS");
+      expect(inference.horizonExclusionRule).toContain("BEFORE resampling");
+      expect(inference.dayExclusionRule).toContain("BEFORE resampling");
+      expect(inference.replicateCount).toBe(4_000);
+      expect(inference.bootstrapSeedPolicy).toContain("DETERMINISTIC");
+    });
+
+    it("declares the band's scope as within-cell, not familywise over the study", () => {
+      // 36 cells remain a separate multiplicity problem; claiming otherwise would be a guarantee the
+      // max-statistic does not provide.
+      expect((v2.inference as Record<string, unknown>).scopeLimit).toContain("WITHIN one cell");
+    });
+
+    it("states the session bands as inclusive bounds", () => {
+      // "degenerate ceiling 4" and "degenerate below 5" are the same rule stated two ways, and the
+      // off-by-one is exactly the kind of thing two implementations resolve differently.
+      expect(v2.degenerateAtOrBelowSessions).toBe(4);
+      expect(v2.provisionalFromSessions).toBe(5);
+      expect(v2.decisionEligibleFromSessions).toBe(decisionGradeSessionMinimum);
+      expect(v2.provisionalFromSessions).toBe(degenerateIntervalSessionCeiling);
+    });
   });
 
   it("moves the hash when the specification changes, and not when key order does", () => {
