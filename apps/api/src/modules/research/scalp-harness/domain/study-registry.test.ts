@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertStudyRegistrable,
+  cellGateStanding,
   decisionGrade,
   decisionGradeSessionMinimum,
   evidenceState,
@@ -9,6 +10,7 @@ import {
   type StudyDefinition,
 } from "./study-registry.js";
 import { canonicalFrictionRungsBps } from "./canonical-friction.js";
+import { degenerateIntervalSessionCeiling } from "./directional-information-curve.js";
 
 const byKey = (key: string): StudyDefinition => {
   const found = registeredStudies.find((study) => study.studyKey === key);
@@ -136,6 +138,38 @@ describe("evidence state", () => {
   it("rejects a session count that cannot be a count", () => {
     expect(() => evidenceState(-1)).toThrow(/non-negative/);
     expect(() => evidenceState(2.5)).toThrow(/whole number/);
+  });
+});
+
+describe("cell gate standing", () => {
+  it("bands a cell by its own session support", () => {
+    expect(cellGateStanding(0)).toBe("INSUFFICIENT_DAYS");
+    expect(cellGateStanding(1)).toBe("INSUFFICIENT_DAYS");
+    expect(cellGateStanding(2)).toBe("DEGENERATE_INTERVAL");
+    expect(cellGateStanding(4)).toBe("DEGENERATE_INTERVAL");
+    expect(cellGateStanding(5)).toBe("PROVISIONAL");
+    expect(cellGateStanding(19)).toBe("PROVISIONAL");
+    expect(cellGateStanding(20)).toBe("DECISION_ELIGIBLE");
+  });
+
+  it("lets a dense cell advance while a sparse one stays unresolved", () => {
+    // The whole point of a cell-local gate. Requiring the universe to advance together would either
+    // hold a well-supported cell hostage or invite merging cells to reach a threshold -- and timeframe
+    // is exactly the distinction the 1m-versus-5m question turns on.
+    expect(cellGateStanding(24)).toBe("DECISION_ELIGIBLE");
+    expect(cellGateStanding(2)).toBe("DEGENERATE_INTERVAL");
+  });
+
+  it("agrees with the degenerate-interval ceiling used by the verdict", () => {
+    // Two modules, one boundary. If these drift, a cell can be called PROVISIONAL while its interval is
+    // still the minimum day mean.
+    expect(cellGateStanding(degenerateIntervalSessionCeiling)).toBe("PROVISIONAL");
+    expect(cellGateStanding(degenerateIntervalSessionCeiling - 1)).toBe("DEGENERATE_INTERVAL");
+  });
+
+  it("rejects a session count that cannot be a count", () => {
+    expect(() => cellGateStanding(-1)).toThrow(/non-negative/);
+    expect(() => cellGateStanding(1.5)).toThrow(/whole number/);
   });
 });
 

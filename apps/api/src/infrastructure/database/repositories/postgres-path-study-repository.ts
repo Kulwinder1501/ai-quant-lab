@@ -254,8 +254,30 @@ export class PostgresPathStudyRepository {
     }
   }
 
-  /** Writes one trial's result. A trial whose result never arrives stays visible as unfinished. */
-  async recordResult(result: TrialResult): Promise<void> {
+  /**
+   * Writes one trial's result, or reconciles it against a result already stored.
+   *
+   * ## Three outcomes, because a retry has to be able to finish an interrupted run
+   *
+   *   RECORDED     — no result existed; this one is now the trial's result.
+   *   IDEMPOTENT   — a result existed and its payload hash matches. Nothing written.
+   *   DETERMINISM_VIOLATION — a result existed and its payload hash differs.
+   *
+   * The third is the one worth having. A trial's identity is the research facts it declares — study
+   * version, code version, cohort, cell, session range — so two results under the same identity must be
+   * the same numbers. When they are not, something outside that identity changed the answer: a mutated
+   * candle series, a recomputed indicator snapshot, a nondeterminism in the estimator. Silently keeping
+   * the first result would hide it, and overwriting is impossible anyway on an append-only table. So it
+   * is reported, loudly, as its own failure mode.
+   *
+   * This is the same guarantee the settlement policy registry gives with `POLICY_DETERMINISM_VIOLATION`,
+   * applied one layer up.
+   */
+  async recordResult(result: TrialResult): Promise<{
+    outcome: "RECORDED" | "IDEMPOTENT" | "DETERMINISM_VIOLATION";
+    storedPayloadHash: string;
+    incomingPayloadHash: string;
+  }> {
     const payloadHash = sha256Canonical({
       trialKey: result.trialKey,
       subjectsExamined: result.subjectsExamined,
@@ -263,11 +285,12 @@ export class PostgresPathStudyRepository {
       commonEligibleCurve: result.commonEligibleCurve,
       verdict: result.verdict,
     });
-    await this.database.query(`
+    const inserted = await this.database.query<{ payload_hash: string }>(`
       INSERT INTO research_scalp.study_trial_results (
         result_key, trial_key, payload_hash, subjects_examined, curve, common_eligible_curve, verdict
       ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)
       ON CONFLICT (trial_key) DO NOTHING
+      RETURNING payload_hash
     `, [
       sha256Canonical({ namespace: "study-trial-result", trialKey: result.trialKey }),
       result.trialKey,
@@ -277,6 +300,20 @@ export class PostgresPathStudyRepository {
       JSON.stringify(result.commonEligibleCurve),
       result.verdict,
     ]);
+    if (inserted.rows[0]) {
+      return { outcome: "RECORDED", storedPayloadHash: payloadHash, incomingPayloadHash: payloadHash };
+    }
+
+    const existing = await this.database.query<{ payload_hash: string }>(
+      "SELECT payload_hash FROM research_scalp.study_trial_results WHERE trial_key = $1",
+      [result.trialKey],
+    );
+    const stored = existing.rows[0]?.payload_hash ?? "";
+    return {
+      outcome: stored === payloadHash ? "IDEMPOTENT" : "DETERMINISM_VIOLATION",
+      storedPayloadHash: stored,
+      incomingPayloadHash: payloadHash,
+    };
   }
 
   /**

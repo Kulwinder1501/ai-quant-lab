@@ -93,6 +93,44 @@ export function decisionGrade(sessionCount: number): boolean {
 }
 
 /**
+ * How far one grouping cell has come, evaluated for that cell alone.
+ *
+ * ## Why the gate is cell-local
+ *
+ * A study spans many cells — cohort x instrument x timeframe x direction — and they accrue evidence at
+ * wildly different rates: a dense 1m cell can carry sixty opportunities a session while a rare
+ * cross-timeframe one carries a single opportunity a week. Requiring the whole universe to advance
+ * together would hold a well-supported cell hostage to a sparse one, and the obvious way to "fix" that
+ * — merging cells to reach a threshold faster — is worse than waiting, because timeframe is exactly the
+ * distinction the 1m-versus-5m question turns on. Pooling a 1m cell peaking at +3m with a 5m cell
+ * peaking at +20m manufactures a smooth curve describing neither.
+ *
+ * So a sparse cell stays unresolved indefinitely, and that is a legitimate outcome rather than a
+ * failure: "this setup is too rare to support a standalone claim from the data available" is a finding.
+ * It does not block the cells beside it, and it is never merged to reach a sample threshold.
+ *
+ * `DECISION_ELIGIBLE` deliberately does not mean proven. It means the cell has enough independent-session
+ * information for a Gate-1 reading to be taken seriously; effect size, interval width, stability across
+ * instruments, opportunity count and the multiplicity of the horizon search all remain separate
+ * questions.
+ */
+export type CellGateStanding =
+  | "INSUFFICIENT_DAYS"
+  | "DEGENERATE_INTERVAL"
+  | "PROVISIONAL"
+  | "DECISION_ELIGIBLE";
+
+export function cellGateStanding(sessionCount: number): CellGateStanding {
+  if (!Number.isInteger(sessionCount) || sessionCount < 0) {
+    throw new Error("Cell gate standing needs a non-negative whole number of sessions.");
+  }
+  if (sessionCount < 2) return "INSUFFICIENT_DAYS";
+  if (sessionCount < 5) return "DEGENERATE_INTERVAL";
+  if (sessionCount < decisionGradeSessionMinimum) return "PROVISIONAL";
+  return "DECISION_ELIGIBLE";
+}
+
+/**
  * STAGE G1 — does the entry carry information at all, with no bracket attached?
  *
  * The point of a barrier-free study is that it cannot be steered by the exit policy it is meant to

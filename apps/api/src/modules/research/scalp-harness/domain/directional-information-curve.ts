@@ -240,11 +240,14 @@ function decayShape(rows: readonly HorizonRow[]): {
  * so the probability that every draw lands on the minimum is `d^-d`. At two days that is 25% and at
  * three it is 3.7% — both above the 2.5% percentile being read — so the reported lower bound *is* the
  * minimum day mean, and `lower > 0` degrades to "every day happened to be positive". A null simulation
- * confirms it fires 24% of the time at two days rather than 2.5%. At four days `d^-d` falls to 0.39%
- * and the percentile finally moves off the minimum, so five is the first count with any margin.
+ * confirms it fires 24% of the time at two days rather than 2.5%.
  *
- * This is deliberately the same boundary as `EARLY_DIAGNOSTIC` in the study registry: that band means
- * "the interval cannot be trusted at all", and this is what that costs in practice.
+ * The mechanism stops binding at **four** days, where `d^-d` is 0.390625% and the percentile moves
+ * strictly above the minimum. This ceiling is nonetheless five, and the extra day is governance rather
+ * than arithmetic: escaping one discrete-bootstrap pathology does not make a four-cluster percentile
+ * interval trustworthy, and the boundary is deliberately aligned with the registry's
+ * `EARLY_DIAGNOSTIC` band so one number does not drift from the other. Stated explicitly because a
+ * threshold that looks derived but is actually chosen is worse than one that admits it.
  */
 export const degenerateIntervalSessionCeiling = 5;
 

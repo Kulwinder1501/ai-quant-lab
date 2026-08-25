@@ -24,6 +24,7 @@ import { cohortKeyOf } from "../../modules/research/scalp-harness/domain/estimat
 import { logicalKey } from "../../modules/research/scalp-harness/domain/identity.js";
 import { studyCodeVersion } from "../../modules/research/scalp-harness/domain/study-code-version.js";
 import {
+  cellGateStanding,
   decisionGradeSessionMinimum,
   evidenceState,
   registeredStudies,
@@ -182,7 +183,26 @@ async function main(): Promise<void> {
         const sessions = [...new Set(cellSubjects.map((subject) => subject.sessionId))].sort();
         const [cohortKey, instrumentSymbol, timeframe, direction] = cellKey.split("|");
         return {
-          trialKey: logicalKey("path-study-trial", [runKey, cellKey, metric]),
+          /*
+           * Trial identity is the research facts, deliberately *not* the run.
+           *
+           * An interrupted run must be recoverable: 36 declared, 27 recorded, re-run fills the missing
+           * nine rather than declaring 36 fresh trials that are logically the same configuration. That
+           * requires identity to be reproducible, which rules out anything wall-clock — and
+           * `--through` defaults to now, so including the cutoff here would make every retry a new set
+           * of trials and the recovery path unreachable.
+           *
+           * The session range replaces it, and is the better bound anyway: it names the data actually
+           * used rather than the instant the query happened to run. Two runs over the same complete
+           * sessions are the same trial; the arrival of a new session changes the range and correctly
+           * yields a new one. `dataset_cutoff` is still recorded on the row as an audit fact, with the
+           * first declaration's value standing.
+           */
+          trialKey: logicalKey("path-study-trial", [
+            STUDY_KEY, declaredHash, codeVersion, metric,
+            cohortKey!, instrumentSymbol!, timeframe!, direction!,
+            sessions[0]!, sessions[sessions.length - 1]!, sessions.length,
+          ]),
           runKey,
           studyKey: STUDY_KEY,
           studyDefinitionHash: declaredHash,
@@ -218,6 +238,7 @@ async function main(): Promise<void> {
     }
 
     const reports = [];
+    const determinismViolations: string[] = [];
     for (const declaration of declarations) {
       const cellKey = [
         declaration.cohortKey, declaration.instrumentSymbol, declaration.timeframe, declaration.direction,
@@ -254,13 +275,14 @@ async function main(): Promise<void> {
         available, declaration.sessionCount, decisionGradeSessionMinimum,
       );
 
-      await repository.recordResult({
+      const recorded = await repository.recordResult({
         trialKey: declaration.trialKey,
         subjectsExamined: units.length,
         curve: available.rows as unknown[],
         commonEligibleCurve: commonEligible.rows as unknown[],
         verdict,
       });
+      if (recorded.outcome === "DETERMINISM_VIOLATION") determinismViolations.push(declaration.trialKey);
 
       reports.push({
         trialKey: declaration.trialKey.slice(0, 12),
@@ -270,7 +292,11 @@ async function main(): Promise<void> {
         direction: declaration.direction,
         sessions: declaration.sessionCount,
         evidenceState: declaration.evidenceState,
+        // Gate 1 is read per cell: a sparse cell stays unresolved without holding back a dense one, and
+        // is never merged into a neighbouring timeframe to reach a threshold.
+        gateStanding: cellGateStanding(declaration.sessionCount),
         subjects: units.length,
+        resultOutcome: recorded.outcome,
         available: {
           peakHorizonMinutes: available.peakHorizonMinutes,
           halfDecayHorizonMinutes: available.halfDecayHorizonMinutes,
@@ -325,6 +351,16 @@ async function main(): Promise<void> {
       // unfinished trial still counts as a configuration examined.
       unfinishedTrials: unfinished.length,
       unfinished: unfinished.slice(0, 10),
+      /*
+       * A trial identity that produced two different results. Something outside the identity — a mutated
+       * candle series, a recomputed indicator snapshot, a nondeterminism in the estimator — changed the
+       * answer, and the run is not trustworthy until it is explained.
+       */
+      determinismViolations: determinismViolations.length,
+      determinismViolationTrials: determinismViolations.slice(0, 10),
+      gateSemantics: "PER_CELL — a cell advances on its own independent-session support; sparse cells "
+        + "stay unresolved, do not block dense cells, and are never pooled to reach a threshold. "
+        + "DECISION_ELIGIBLE means a Gate-1 reading can be taken seriously, not that anything is proven.",
       inference: "TRADING_DAY_BLOCK_BOOTSTRAP — days are the resampling cluster; ci95 is a percentile "
         + "interval on the mean of per-day means.",
       barrierPolicy: "NONE — stops, targets and expiries are absent from the walker's input",
