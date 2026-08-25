@@ -101,10 +101,38 @@ export interface ParitySampleResult {
  * parity failure and bury the real ones.
  */
 export function canonicalEventSetHash(entries: readonly Record<string, unknown>[]): string {
-  const canonical = entries
-    .map((entry) => JSON.stringify(Object.keys(entry).sort().map((key) => [key, entry[key]])))
-    .sort();
+  const canonical = entries.map((entry) => canonicalJson(entry)).sort();
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/**
+ * Serialises a value with object keys sorted, recursively.
+ *
+ * `JSON.stringify` preserves insertion order, and the two sides of this comparison build their
+ * objects by different routes: the live side reloads a row that Postgres serialised, while the
+ * reconstruction builds the object literal in source order. Comparing the raw strings therefore
+ * reports a difference whenever the key order differs, even though every value is identical.
+ *
+ * Measured on 2026-08-25 that was not a nuisance but the dominant signal: **483 of 748 reported
+ * mismatches were pure key-order artefacts**, which pushed the run to NO_PARITY and buried the 265
+ * genuine ones. An acceptance test whose false positives outnumber its findings two to one is worse
+ * than no acceptance test, because it gets read as evidence.
+ *
+ * Arrays keep their order here -- element order can be meaningful. Sets whose order is an
+ * implementation detail go through `canonicalEventSetHash`, which sorts them explicitly.
+ */
+export function canonicalJson(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const body = Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function indicatorKey(indicator: ParityIndicator): string {
@@ -127,7 +155,7 @@ function numericallyEqual(left: unknown, right: unknown): boolean {
     const scale = Math.max(1, Math.abs(left), Math.abs(right));
     return Math.abs(left - right) <= 1e-9 * scale;
   }
-  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
 }
 
 /**
@@ -208,8 +236,8 @@ export function compareConsumedState(
         mismatches.push({
           field: "indicator",
           detail: `${key}.${valueKey} differs`,
-          live: JSON.stringify(liveValue.values[valueKey] ?? null),
-          reconstructed: JSON.stringify(rebuiltValue.values[valueKey] ?? null),
+          live: canonicalJson(liveValue.values[valueKey] ?? null),
+          reconstructed: canonicalJson(rebuiltValue.values[valueKey] ?? null),
         });
       }
     }
@@ -259,8 +287,8 @@ export function compareConsumedState(
     ...Object.keys(reconstructed.legacyScoreGateByStrategy),
   ]);
   for (const strategy of gateStrategies) {
-    const liveGate = JSON.stringify(live.legacyScoreGateByStrategy[strategy] ?? null);
-    const rebuiltGate = JSON.stringify(reconstructed.legacyScoreGateByStrategy[strategy] ?? null);
+    const liveGate = canonicalJson(live.legacyScoreGateByStrategy[strategy] ?? null);
+    const rebuiltGate = canonicalJson(reconstructed.legacyScoreGateByStrategy[strategy] ?? null);
     if (liveGate !== rebuiltGate) {
       mismatches.push({
         field: "legacyScoreGate",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalEventSetHash,
+  canonicalJson,
   checkCoverageOrdering,
   compareConsumedState,
   summariseParity,
@@ -37,6 +38,42 @@ function state(overrides: Partial<ParityConsumedState> = {}): ParityConsumedStat
 describe("LIVE_BACKFILL_FEATURE_PARITY_V1 comparison", () => {
   it("reports no mismatch when the live state matches the reconstruction", () => {
     expect(compareConsumedState(state(), state())).toEqual([]);
+  });
+
+  it("does not report a legacy score gate that differs only in key order", () => {
+    // The live side reloads an object Postgres serialised; the reconstruction builds a literal in
+    // source order. Comparing raw JSON strings made every gate look different: on 2026-08-25 that
+    // produced 483 of 748 reported mismatches and pushed a run to NO_PARITY on nothing at all.
+    const live = state({
+      legacyScoreGateByStrategy: {
+        "pattern-v4-research:1m": { value: 7, passed: true, maximum: 11, parameter: "scoreThreshold", threshold: 5 },
+      },
+    });
+    const rebuilt = state({
+      legacyScoreGateByStrategy: {
+        "pattern-v4-research:1m": { parameter: "scoreThreshold", threshold: 5, value: 7, maximum: 11, passed: true },
+      },
+    });
+
+    expect(compareConsumedState(live, rebuilt)).toEqual([]);
+  });
+
+  it("still reports a legacy score gate whose values genuinely differ", () => {
+    // The guard above must not be bought by making the comparison blind.
+    const live = state({
+      legacyScoreGateByStrategy: {
+        "pattern-v4-research:1m": { value: 7, passed: true, maximum: 11, parameter: "scoreThreshold", threshold: 5 },
+      },
+    });
+    const rebuilt = state({
+      legacyScoreGateByStrategy: {
+        "pattern-v4-research:1m": { parameter: "scoreThreshold", threshold: 5, value: 3, maximum: 11, passed: false },
+      },
+    });
+
+    const mismatches = compareConsumedState(live, rebuilt);
+    expect(mismatches).toHaveLength(1);
+    expect(mismatches[0]!.field).toBe("legacyScoreGate");
   });
 
   it("ignores event ordering, which is a query detail rather than a difference", () => {
@@ -173,6 +210,27 @@ describe("canonicalEventSetHash", () => {
 
   it("changes when content changes", () => {
     expect(canonicalEventSetHash([{ code: "A" }])).not.toBe(canonicalEventSetHash([{ code: "B" }]));
+  });
+});
+
+describe("canonicalJson", () => {
+  it("is insensitive to key order at every depth", () => {
+    expect(canonicalJson({ b: 1, a: { d: 2, c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
+  });
+
+  it("keeps array order, which can carry meaning", () => {
+    expect(canonicalJson([1, 2])).not.toBe(canonicalJson([2, 1]));
+  });
+
+  it("separates null from absent-but-present values", () => {
+    expect(canonicalJson(null)).toBe("null");
+    expect(canonicalJson({ a: null })).not.toBe(canonicalJson(null));
+  });
+
+  it("does not collapse distinct values", () => {
+    expect(canonicalJson({ a: 1 })).not.toBe(canonicalJson({ a: 2 }));
+    expect(canonicalJson({ a: 1 })).not.toBe(canonicalJson({ b: 1 }));
+    expect(canonicalJson("1")).not.toBe(canonicalJson(1));
   });
 });
 

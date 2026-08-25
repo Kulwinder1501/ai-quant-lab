@@ -77,31 +77,50 @@ async function main(): Promise<void> {
           -- index; the close_time form is unindexed and measured 455ms against 52ms here, because it
           -- bitmap-scanned ~73k rows per candidate minute and got worse as history grew.
           --
-          -- A timeframe with no candle at this minute contributes no row and bool_and ignores it,
-          -- which matches the loop below: it captures whatever contexts exist. The 1m sibling is
-          -- this candle itself, so the result is never NULL.
-          -- Both layers, at the exact algorithm versions the research strategies read. An ANY
-          -- test would pass on either layer alone, and ignoring the version would let the ATR
-          -- price-action variant open the gate for strategies that consume the percent-mode events.
+          -- A missing sibling must FAIL this check, not vanish from it.
+          --
+          -- This was an inner join until 2026-08-25, which meant an absent or not-yet-complete
+          -- sibling contributed no row and bool_and simply ignored it -- a missing requirement
+          -- silently became no requirement. Measured by LIVE_BACKFILL_FEATURE_PARITY_V1 on
+          -- 2026-08-25: 259 of 268 mismatches were 5m, every one of them live-null against a
+          -- reconstructed value. The 5m candle finalises after the capture runs, so its row dropped
+          -- out, the gate passed on the 1m sibling alone, and the minute was captured blind to its
+          -- 5m context. That is the same defect the coverage table exists to prevent, one level
+          -- down: at candle level rather than feature level.
+          --
+          -- 3m is deliberately not required. No 3m series exists in this system, so requiring it was
+          -- vacuous under the inner join and would block every minute under the left join. Listing a
+          -- requirement the data cannot satisfy is worse than not listing it.
+          --
+          -- 5m is required only at a 5m boundary. Off-boundary there is legitimately no 5m context
+          -- and none is read, so demanding one would defer every minute forever.
+          --
+          -- Both layers are matched at exact algorithm versions. An ANY test would pass on either
+          -- layer alone, and ignoring the version would let the ATR price-action variant open the
+          -- gate for strategies that consume the percent-mode events.
           (
-            SELECT bool_and((
-              SELECT count(*) FROM candle_feature_coverage coverage
-              WHERE coverage.candle_id = sibling.id
-                AND (coverage.feature_layer, coverage.algorithm_version) IN (
-                  ('CANDLESTICK_PATTERN', 'candlestick-v1'),
-                  ('PRICE_ACTION', 'price-action-v2')
-                )
-            ) = 2)
+            SELECT bool_and(
+              sibling.id IS NOT NULL
+              AND (
+                SELECT count(*) FROM candle_feature_coverage coverage
+                WHERE coverage.candle_id = sibling.id
+                  AND (coverage.feature_layer, coverage.algorithm_version) IN (
+                    ('CANDLESTICK_PATTERN', 'candlestick-v1'),
+                    ('PRICE_ACTION', 'price-action-v2')
+                  )
+              ) = 2
+            )
             FROM (VALUES
               ('1m', INTERVAL '1 minute'),
-              ('3m', INTERVAL '3 minutes'),
               ('5m', INTERVAL '5 minutes')
             ) AS wanted(timeframe, span)
-            JOIN candles sibling
+            LEFT JOIN candles sibling
               ON sibling.instrument_id = candle.instrument_id
              AND sibling.timeframe = wanted.timeframe
              AND sibling.open_time = candle.close_time - wanted.span
              AND sibling.is_complete = TRUE
+            WHERE wanted.timeframe = '1m'
+               OR EXTRACT(MINUTE FROM candle.close_time AT TIME ZONE 'Asia/Kolkata')::int % 5 = 0
           ) AS features_covered
         FROM candles candle
         WHERE candle.instrument_id = $1 AND candle.timeframe = '1m' AND candle.is_complete = TRUE
