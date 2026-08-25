@@ -7,8 +7,9 @@ import {
   impliedRiskPerUnit,
   netBps,
   netR,
+  riskBasisDerivationVersion,
 } from "./canonical-friction.js";
-import { settleResearchPath } from "./settlement.js";
+import { canonicalOutcomeR, settleResearchPath } from "./settlement.js";
 import type { ResearchGeometry, ResearchPriceCandle } from "./contracts.js";
 
 // NIFTY50 at roughly the observed level, with the observed mean stop distance.
@@ -153,6 +154,48 @@ describe("implied risk per unit", () => {
     expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: Number.NaN, rMultiple: 1 })).toBeNull();
     // Opposite signs cannot come from one settlement; treated as inconsistency rather than a distance.
     expect(impliedRiskPerUnit({ entryFillPrice: 100, returnBps: -10, rMultiple: 1 })).toBeNull();
+  });
+
+  /*
+   * The semantic assumptions, pinned separately from the numerical recovery.
+   *
+   * `impliedRiskPerUnit` is arithmetic over two stored figures, so it keeps returning a plausible
+   * number if either figure is redefined -- a cost-adjusted `rMultiple` being the obvious candidate.
+   * Nothing about the quotient would fail; it would simply stop being a risk distance. These assertions
+   * are what turn that into a test failure instead of a silently wrong cost report.
+   */
+  it("pins rMultiple as gross signed move over planned risk", () => {
+    const long = { direction: "LONG" as const, entryPrice: 100, stopLoss: 99, targetPrice: 101.5 };
+    const terminal = settleOnce(long, { open: 100, high: 102, low: 99.5, close: 101.5 });
+
+    // Target hit: move is 1.5 points over a 1-point planned risk. Exactly 1.5, with no cost deducted.
+    expect(terminal.rMultiple).toBe(1.5);
+    expect(canonicalOutcomeR(terminal)).toBe(terminal.rMultiple);
+  });
+
+  it("pins returnBps as gross signed move over entry fill, in basis points", () => {
+    const long = { direction: "LONG" as const, entryPrice: 100, stopLoss: 99, targetPrice: 101.5 };
+    const terminal = settleOnce(long, { open: 100, high: 102, low: 99.5, close: 101.5 });
+
+    // 1.5 / 100 x 10000 = 150 bps.
+    expect(terminal.returnBps).toBe(150);
+  });
+
+  it("keeps the two stored definitions consistent with each other", () => {
+    // returnBps / rMultiple must equal plannedRisk / entryFillPrice x 10000 for the derivation to be a
+    // risk distance at all. If one figure ever becomes net of cost and the other stays gross, this
+    // ratio breaks and the recovery is meaningless.
+    const long = { direction: "LONG" as const, entryPrice: 24_243, stopLoss: 24_235.44, targetPrice: 24_254.34 };
+    const terminal = settleOnce(long, { open: 24_243, high: 24_260, low: 24_240, close: 24_255 });
+    const plannedRisk = long.entryPrice - long.stopLoss;
+
+    const storedRatio = terminal.returnBps! / terminal.rMultiple!;
+    const definitionalRatio = (plannedRisk / terminal.entryFillPrice!) * 10_000;
+    expect(Math.abs(storedRatio - definitionalRatio) / definitionalRatio).toBeLessThan(1e-7);
+  });
+
+  it("carries an explicit derivation version", () => {
+    expect(riskBasisDerivationVersion).toBe("RISK_BASIS_DERIVATION_V1");
   });
 
   it("composes with the friction ladder to give net R on a stored row", () => {

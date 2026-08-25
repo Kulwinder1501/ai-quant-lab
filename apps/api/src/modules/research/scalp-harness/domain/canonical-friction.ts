@@ -72,6 +72,19 @@ export interface FrictionGeometry {
 }
 
 /**
+ * Stamped onto every figure derived through `impliedRiskPerUnit`, so the derivation is versioned rather
+ * than implicit.
+ *
+ * The version exists because the derivation rests on *semantics*, not only arithmetic. It is valid only
+ * while `rMultiple` means gross signed move over planned risk and `returnBps` means gross signed move
+ * over entry fill. If either is ever redefined — the obvious candidate being a cost-adjusted
+ * `rMultiple` — the algebra silently starts returning a number that is not a risk distance, with no
+ * error and no failed test unless the assumption itself is pinned. `canonical-friction.test.ts` asserts
+ * the two definitions directly for that reason.
+ */
+export const riskBasisDerivationVersion = "RISK_BASIS_DERIVATION_V1";
+
+/**
  * Recovers a settled row's risk denominator from the figures the row already carries.
  *
  * ## Why this is derived rather than stored
