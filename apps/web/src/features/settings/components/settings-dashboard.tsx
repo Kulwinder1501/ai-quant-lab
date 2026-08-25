@@ -325,7 +325,7 @@ export function SettingsDashboard() {
             <div className="space-y-2 text-sm text-slate-300">
               {fyersHealth.accessTokenExpiresAt && (
                 <p className="font-mono text-xs text-slate-400">
-                  Access token expires: {fyersHealth.accessTokenExpiresAt}
+                  Access token expires: {new Date(fyersHealth.accessTokenExpiresAt).toLocaleString()}
                 </p>
               )}
               {Array.isArray(fyersHealth.reasons) && fyersHealth.reasons.length > 0 && (
