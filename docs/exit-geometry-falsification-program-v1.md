@@ -296,6 +296,8 @@ That refusal is what made registering V2 ahead of its implementation safe. A stu
 
 Nothing further is buildable until sessions accumulate. The dense cells (`BANKNIFTY 1m`, `NIFTY50 1m`, the 5m pairs) carry 12–59 opportunities per session and will reach `PROVISIONAL` first; the thin cross-timeframe cells may never resolve, which is an acceptable outcome.
 
+Accumulation is unattended — see [The scheduled run](#the-scheduled-run). At one session per trading day the dense cells reach `PROVISIONAL` (5 sessions) inside a week and `DECISION_ELIGIBLE` (20 sessions) in roughly a month, assuming no collector outages.
+
 ## Commands
 
 ```powershell
@@ -308,6 +310,20 @@ npm run research:scalp:estimate -- --replicates 2000
 ```
 
 Registration is idempotent and safe on every deploy. The path study needs `SCALP_RESEARCH_DATABASE_URL` pointed at the research login role; it reads operational tables and writes only `research_scalp`.
+
+### The scheduled run
+
+`scalp-research-scheduler-v2` runs registration followed by `PATH_STUDY_V2` every **Saturday 07:00 IST** — after Friday's 15:31 drain and after the overnight candle heal, so the week's data is final. A path study reads settled rows and adds nothing to them, so it gains information only when a session completes; an intraday slot would re-examine an unchanged dataset.
+
+Re-registering weekly is deliberate. Registration refuses a changed specification, so a deploy that edits one fails loudly on the next scheduled run rather than at whatever future moment someone next looks.
+
+Only V2 is scheduled. V1's pointwise verdict is superseded, and it would emit a weekly stream of readings already shown to overfire. It also halves the number of looks, which matters for a reason worth stating plainly:
+
+> **Repeatedly examining a growing dataset is itself a form of multiple testing.** Each weekly run over a dataset with a new session declares a fresh set of trials — correctly, since the dataset genuinely differs — so by the time a cell reaches twenty sessions the ledger will hold on the order of twenty looks at nested data. That is the classic optional-stopping problem, and it is why the decision gate sits at a predeclared session count rather than at "whenever a cell first looks good". Intermediate looks are diagnostics; the ledger records every one so the eventual correction can account for them, and a `PROVISIONAL` reading is never grounds to open G3.
+
+A run over a week with no new sessions is a no-op: the trial key derives from the session set and input snapshot, so it returns `IDEMPOTENT` for every cell rather than declaring duplicates. Verified — 36 of 36 idempotent on a repeat run.
+
+A V1-versus-V2 comparison stays available on demand; the runner is deterministic, so it reproduces any past window exactly.
 
 ## Reading the output
 
