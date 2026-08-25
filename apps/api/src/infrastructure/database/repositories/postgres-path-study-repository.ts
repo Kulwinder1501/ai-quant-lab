@@ -73,6 +73,13 @@ export interface TrialResult {
   readonly subjectsExamined: number;
   readonly curve: unknown[];
   readonly commonEligibleCurve: unknown[];
+  /**
+   * The object the verdict was read from, when that is not the per-horizon curve.
+   *
+   * Null marks a pointwise verdict. A simultaneous band goes here because its critical value — the one
+   * number the claim rests on — has no place in an array of horizon rows.
+   */
+  readonly inference: Record<string, unknown> | null;
   readonly verdict: string;
 }
 
@@ -295,12 +302,16 @@ export class PostgresPathStudyRepository {
       subjectsExamined: result.subjectsExamined,
       curve: result.curve,
       commonEligibleCurve: result.commonEligibleCurve,
+      // Inside the hash: a band with a different critical value is a different result, and the
+      // determinism check has to see that even when the horizon rows are unchanged.
+      inference: result.inference,
       verdict: result.verdict,
     });
     const inserted = await this.database.query<{ payload_hash: string }>(`
       INSERT INTO research_scalp.study_trial_results (
-        result_key, trial_key, payload_hash, subjects_examined, curve, common_eligible_curve, verdict
-      ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)
+        result_key, trial_key, payload_hash, subjects_examined, curve, common_eligible_curve,
+        inference, verdict
+      ) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8)
       ON CONFLICT (trial_key) DO NOTHING
       RETURNING payload_hash
     `, [
@@ -310,6 +321,7 @@ export class PostgresPathStudyRepository {
       result.subjectsExamined,
       JSON.stringify(result.curve),
       JSON.stringify(result.commonEligibleCurve),
+      result.inference === null ? null : JSON.stringify(result.inference),
       result.verdict,
     ]);
     if (inserted.rows[0]) {

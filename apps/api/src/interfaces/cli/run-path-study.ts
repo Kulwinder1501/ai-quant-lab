@@ -19,6 +19,11 @@ import {
   inputSnapshotHash,
   sessionSetHash,
 } from "../../modules/research/scalp-harness/domain/path-study-inputs.js";
+import {
+  simultaneousBandPolicyVersion,
+  simultaneousBandVerdict,
+  simultaneousHorizonBand,
+} from "../../modules/research/scalp-harness/domain/simultaneous-horizon-band.js";
 import { cohortKeyOf } from "../../modules/research/scalp-harness/domain/estimators.js";
 import { logicalKey } from "../../modules/research/scalp-harness/domain/identity.js";
 import { studyCodeVersion } from "../../modules/research/scalp-harness/domain/study-code-version.js";
@@ -78,14 +83,15 @@ function cellKeyOf(subject: PathStudySubject): string {
 }
 
 /**
- * The inference this runner actually implements.
+ * The inferences this runner implements, checked against the registration before anything runs.
  *
- * Checked against the registered study before anything runs. `PATH_STUDY_V2` declares
- * `SIMULTANEOUS_DAY_MAXT_V1`, which is registered but not yet built — and running it through this
- * pointwise runner would file V1 semantics under a V2 key, which is precisely the drift the registry
- * exists to prevent. A study absent this field predates the distinction and is read as pointwise.
+ * A study whose declared policy is absent from this set is refused rather than approximated — producing
+ * one methodology's numbers under another's registration is precisely the substitution the registry
+ * exists to make impossible. A study with no `inferencePolicy` at all predates the distinction and reads
+ * as pointwise.
  */
-const IMPLEMENTED_INFERENCE_POLICY = "POINTWISE_INTERVAL_V1";
+const POINTWISE_POLICY = "POINTWISE_INTERVAL_V1";
+const IMPLEMENTED_INFERENCE_POLICIES = new Set([POINTWISE_POLICY, simultaneousBandPolicyVersion]);
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -145,15 +151,21 @@ async function main(): Promise<void> {
      * another's declaration, which is the exact substitution the registry exists to make impossible.
      */
     const registeredPolicy = (registered.specification.inferencePolicy as string | undefined)
-      ?? IMPLEMENTED_INFERENCE_POLICY;
-    if (registeredPolicy !== IMPLEMENTED_INFERENCE_POLICY) {
+      ?? POINTWISE_POLICY;
+    if (!IMPLEMENTED_INFERENCE_POLICIES.has(registeredPolicy)) {
       throw new Error(
-        `${STUDY_KEY} declares inferencePolicy ${registeredPolicy}, and this runner implements `
-        + `${IMPLEMENTED_INFERENCE_POLICY}. Running it here would record one methodology's numbers `
-        + "against another's registration. Build the declared inference, or run a study whose "
-        + "registration matches this runner.",
+        `${STUDY_KEY} declares inferencePolicy ${registeredPolicy}, which this runner does not `
+        + `implement (it has ${[...IMPLEMENTED_INFERENCE_POLICIES].join(", ")}). Running it here would `
+        + "record one methodology's numbers against another's registration. Build the declared "
+        + "inference, or run a study whose registration matches this runner.",
       );
     }
+    const usesBand = registeredPolicy === simultaneousBandPolicyVersion;
+    // Registered per study rather than taken from the flag, so the band's replicate count is the one
+    // that was predeclared and `--replicates` cannot quietly retune the critical value.
+    const bandReplicates = usesBand
+      ? ((registered.specification.inference as Record<string, unknown>).replicateCount as number)
+      : null;
 
     const subjects = await repository.listSubjects({ from, through });
     if (subjects.length === 0) {
@@ -289,15 +301,29 @@ async function main(): Promise<void> {
           && item.controls.every((control) => isCommonEligible(control))),
         horizons, metric, { replicates },
       );
-      const verdict = pathStudyVerdict(
-        available, declaration.sessionCount, decisionGradeSessionMinimum,
-      );
+      /*
+       * Under the band policy the pointwise intervals stay in the stored curve as diagnostics, and the
+       * verdict comes from the band alone. That split is the whole difference between V1 and V2.
+       */
+      const band = usesBand
+        ? simultaneousHorizonBand({
+            units,
+            horizonsMinutes: horizons,
+            metric,
+            seed: [STUDY_KEY, cellKey, metric].join("|"),
+            replicates: bandReplicates ?? undefined,
+          })
+        : null;
+      const verdict = band === null
+        ? pathStudyVerdict(available, declaration.sessionCount, decisionGradeSessionMinimum)
+        : simultaneousBandVerdict(band, declaration.sessionCount, decisionGradeSessionMinimum);
 
       const recorded = await repository.recordResult({
         trialKey: declaration.trialKey,
         subjectsExamined: units.length,
         curve: available.rows as unknown[],
         commonEligibleCurve: commonEligible.rows as unknown[],
+        inference: band === null ? null : (band as unknown as Record<string, unknown>),
         verdict,
       });
       if (recorded.outcome === "DETERMINISM_VIOLATION") determinismViolations.push(declaration.trialKey);
@@ -337,6 +363,17 @@ async function main(): Promise<void> {
             eligibleSubjects: row.eligibility.eligibleSubjects,
           })),
         },
+        band: band === null ? null : {
+          status: band.status,
+          statusReason: band.statusReason,
+          commonSupportDays: band.commonSupportDays,
+          daysExcluded: band.daysExcluded,
+          retainedHorizons: band.retainedHorizons,
+          excludedHorizons: band.excludedHorizons,
+          criticalValue: band.criticalValue,
+          replicatesWithSubstitutedScale: band.replicatesWithSubstitutedScale,
+          rows: band.rows,
+        },
         verdict,
       });
     }
@@ -350,6 +387,7 @@ async function main(): Promise<void> {
       codeVersion,
       runKey,
       metric,
+      inferencePolicy: registeredPolicy,
       horizonsMinutes: horizons,
       window: { from, through },
       datasetCutoff: through,

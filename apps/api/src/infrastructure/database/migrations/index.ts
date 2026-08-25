@@ -80,6 +80,7 @@ import { candleFeatureCoverageMigration } from "./079-candle-feature-coverage.js
 import { scalpResearchStudyRegistrationsMigration } from "./080-scalp-research-study-registrations.js";
 import { scalpResearchStudyTrialsMigration } from "./081-scalp-research-study-trials.js";
 import { scalpResearchTrialDatasetIdentityMigration } from "./082-scalp-research-trial-dataset-identity.js";
+import { scalpResearchTrialInferenceMigration } from "./083-scalp-research-trial-inference.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -164,4 +165,5 @@ export const migrations = [
   scalpResearchStudyRegistrationsMigration,
   scalpResearchStudyTrialsMigration,
   scalpResearchTrialDatasetIdentityMigration,
+  scalpResearchTrialInferenceMigration,
 ];

@@ -107,6 +107,87 @@ function mean(values: readonly number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
+/** One subject's contribution at one horizon, tagged with its bootstrap cluster. */
+export interface HorizonContribution {
+  readonly sessionId: string;
+  readonly selected: number;
+  readonly controls: number;
+  /** selected − mean(controls). The quantity every downstream estimate is built from. */
+  readonly incremental: number;
+}
+
+export interface HorizonContributions {
+  readonly horizonMinutes: number;
+  readonly contributions: readonly HorizonContribution[];
+  readonly eligibility: HorizonEligibility;
+}
+
+/**
+ * Turns units into per-horizon contributions — the single place the contrast is formed.
+ *
+ * Extracted so the pointwise curve and the simultaneous band read the *same* numbers. Two functions each
+ * deriving "selected minus mean of controls" from units would be two chances to disagree about which
+ * subjects qualify, and the disagreement would surface as a band that contradicts the curve beside it
+ * with no way to tell which was right.
+ *
+ * A subject contributes at a horizon only when its own observation is complete *and* every one of its
+ * controls resolves there. Requiring the full control set rather than averaging whichever survived keeps
+ * the comparison like-for-like: a subject whose controls partly failed would otherwise be measured
+ * against a smaller, different baseline than its peers, and that difference in baselines would enter the
+ * estimate as though it were signal.
+ */
+export function horizonContributions(
+  units: readonly PathContrastUnit[],
+  horizonsMinutes: readonly number[],
+  metric: PathMetric,
+): HorizonContributions[] {
+  const horizons = [...horizonsMinutes].sort((left, right) => left - right);
+  return horizons.map((horizonMinutes) => {
+    const contributions: HorizonContribution[] = [];
+    const sessions = new Set<string>();
+    let excludedByHorizon = 0;
+    let excludedByControls = 0;
+
+    for (const unit of units) {
+      const treated = observationAt(unit.selected, horizonMinutes);
+      const treatedValue = treated === undefined ? null : metricOf(treated, metric);
+      if (treatedValue === null) {
+        excludedByHorizon += 1;
+        continue;
+      }
+      const controlValues: number[] = [];
+      for (const control of unit.controls) {
+        const observation = observationAt(control, horizonMinutes);
+        const value = observation === undefined ? null : metricOf(observation, metric);
+        if (value !== null) controlValues.push(value);
+      }
+      if (unit.controls.length === 0 || controlValues.length !== unit.controls.length) {
+        excludedByControls += 1;
+        continue;
+      }
+      const controls = mean(controlValues);
+      sessions.add(unit.sessionId);
+      contributions.push({
+        sessionId: unit.sessionId,
+        selected: treatedValue,
+        controls,
+        incremental: treatedValue - controls,
+      });
+    }
+
+    return {
+      horizonMinutes,
+      contributions,
+      eligibility: {
+        eligibleSubjects: contributions.length,
+        eligibleSessions: sessions.size,
+        subjectsExcludedByHorizon: excludedByHorizon,
+        subjectsExcludedByControls: excludedByControls,
+      },
+    };
+  });
+}
+
 /**
  * Builds one metric's curve across the horizon ladder.
  *
@@ -129,63 +210,26 @@ export function directionalInformationCurve(
   assertSingleCohort(units);
   const horizons = [...horizonsMinutes].sort((left, right) => left - right);
 
-  const rows = horizons.map((horizonMinutes): HorizonRow => {
-    const selectedContributions: { sessionId: string; value: number }[] = [];
-    const controlContributions: { sessionId: string; value: number }[] = [];
-    const incrementalContributions: { sessionId: string; value: number }[] = [];
-    const sessions = new Set<string>();
-    let excludedByHorizon = 0;
-    let excludedByControls = 0;
-
-    for (const unit of units) {
-      const treated = observationAt(unit.selected, horizonMinutes);
-      const treatedValue = treated === undefined ? null : metricOf(treated, metric);
-      if (treatedValue === null) {
-        excludedByHorizon += 1;
-        continue;
-      }
-
-      const controlValues: number[] = [];
-      for (const control of unit.controls) {
-        const observation = observationAt(control, horizonMinutes);
-        const value = observation === undefined ? null : metricOf(observation, metric);
-        if (value !== null) controlValues.push(value);
-      }
-      if (unit.controls.length === 0 || controlValues.length !== unit.controls.length) {
-        excludedByControls += 1;
-        continue;
-      }
-
-      sessions.add(unit.sessionId);
-      selectedContributions.push({ sessionId: unit.sessionId, value: treatedValue });
-      controlContributions.push({ sessionId: unit.sessionId, value: mean(controlValues) });
-      incrementalContributions.push({
-        sessionId: unit.sessionId,
-        value: treatedValue - mean(controlValues),
-      });
-    }
+  const rows = horizonContributions(units, horizons, metric).map((horizon): HorizonRow => {
+    const { horizonMinutes, contributions, eligibility } = horizon;
+    const excluded = eligibility.subjectsExcludedByHorizon + eligibility.subjectsExcludedByControls;
+    const project = (pick: (item: HorizonContribution) => number) =>
+      contributions.map((item) => ({ sessionId: item.sessionId, value: pick(item) }));
 
     const seed = `path-study-v1-${metric}-${horizonMinutes}`;
     return {
       horizonMinutes,
       metric,
-      selected: summariseByDayBootstrap(selectedContributions, excludedByHorizon + excludedByControls, {
+      selected: summariseByDayBootstrap(project((item) => item.selected), excluded, {
         seed: `${seed}-selected`, ...options,
       }),
-      controls: summariseByDayBootstrap(controlContributions, excludedByHorizon + excludedByControls, {
+      controls: summariseByDayBootstrap(project((item) => item.controls), excluded, {
         seed: `${seed}-controls`, ...options,
       }),
-      incremental: summariseByDayBootstrap(
-        incrementalContributions,
-        excludedByHorizon + excludedByControls,
-        { seed: `${seed}-incremental`, ...options },
-      ),
-      eligibility: {
-        eligibleSubjects: incrementalContributions.length,
-        eligibleSessions: sessions.size,
-        subjectsExcludedByHorizon: excludedByHorizon,
-        subjectsExcludedByControls: excludedByControls,
-      },
+      incremental: summariseByDayBootstrap(project((item) => item.incremental), excluded, {
+        seed: `${seed}-incremental`, ...options,
+      }),
+      eligibility,
     };
   });
 

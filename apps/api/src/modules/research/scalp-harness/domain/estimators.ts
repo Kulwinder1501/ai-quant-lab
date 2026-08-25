@@ -149,7 +149,7 @@ const defaultReplicates = 2000;
  * A research estimate must be reproducible from its inputs — `Math.random` would make two runs over
  * identical rows disagree, which is indistinguishable from a data change when reading a report.
  */
-function seededUniform(seed: string): () => number {
+export function seededUniform(seed: string): () => number {
   let hash = 0x811c9dc5;
   for (let index = 0; index < seed.length; index += 1) {
     hash ^= seed.charCodeAt(index);

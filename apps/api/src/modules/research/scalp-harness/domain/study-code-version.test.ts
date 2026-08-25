@@ -26,6 +26,7 @@ describe("study code version", () => {
       // so result-affecting logic sat outside the guarantee until they moved here.
       "path-study-inputs.ts",
       "policies.ts",
+      "simultaneous-horizon-band.ts",
       "study-registry.ts",
     ]);
   });
