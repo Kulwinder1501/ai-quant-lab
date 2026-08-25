@@ -273,7 +273,7 @@ describe("coverage ordering", () => {
 describe("parity verdict", () => {
   const clean: ParitySampleResult = {
     sessionDate: "2026-08-25", instrumentSymbol: "NIFTY50",
-    decisionAt: "2026-08-25T04:00:00.000Z", comparable: true, mismatches: [],
+    decisionAt: "2026-08-25T04:00:00.000Z", comparable: true, mismatches: [], coverageLagMs: 40_000,
   };
 
   it("passes only when something was compared and nothing differed", () => {
@@ -282,6 +282,49 @@ describe("parity verdict", () => {
     expect(report.passed).toBe(true);
     expect(report.comparableSampleCount).toBe(2);
     expect(report.coverageLagMs).toEqual({ min: 1_000, median: 2_000, max: 2_000 });
+  });
+
+  it("separates captures recovered after an outage from live ones", () => {
+    // A 15-minute midday shutdown is recovered by the harness's catch-up, and those minutes are
+    // captured once every feature job has finished -- so they pass by construction. Blending them
+    // into one figure would let a long outage read as a clean session.
+    const recovered: ParitySampleResult = { ...clean, coverageLagMs: 45 * 60_000 };
+    const report = summariseParity({
+      sessionDate: "2026-08-25",
+      samples: [clean, clean, recovered],
+      coverageLags: [40_000, 40_000, 45 * 60_000],
+    });
+
+    expect(report.liveCohort.sampleCount).toBe(2);
+    expect(report.recoveredCohort.sampleCount).toBe(1);
+  });
+
+  it("does not let the recovered cohort launder a failure", () => {
+    // The split is reporting only. A recovered sample that mismatches is a real finding -- the
+    // reconstruction disagrees with a capture that had every chance to be right -- so excusing it
+    // would be exactly the rescue this protocol forbids elsewhere.
+    const recoveredDirty: ParitySampleResult = {
+      ...clean,
+      coverageLagMs: 45 * 60_000,
+      mismatches: [{ field: "proposalPresence", detail: "d", live: "a", reconstructed: "b" }],
+    };
+    const report = summariseParity({
+      sessionDate: "2026-08-25", samples: [clean, recoveredDirty], coverageLags: [40_000, 45 * 60_000],
+    });
+
+    expect(report.passed).toBe(false);
+    expect(report.liveCohort.cleanSampleCount).toBe(1);
+    expect(report.recoveredCohort.cleanSampleCount).toBe(0);
+  });
+
+  it("counts an unmeasurable lag as live rather than recovered", () => {
+    // Absent evidence of recovery is not evidence of it. Putting unknowns in the cohort that passes
+    // by construction would flatter the result.
+    const unknown: ParitySampleResult = { ...clean, coverageLagMs: null };
+    const report = summariseParity({ sessionDate: "2026-08-25", samples: [unknown], coverageLags: [] });
+
+    expect(report.liveCohort.sampleCount).toBe(1);
+    expect(report.recoveredCohort.sampleCount).toBe(0);
   });
 
   it("refuses to pass vacuously when nothing was comparable", () => {

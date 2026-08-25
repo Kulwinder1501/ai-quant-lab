@@ -91,6 +91,47 @@ export interface ParitySampleResult {
   readonly decisionAt: string;
   readonly comparable: boolean;
   readonly mismatches: readonly ParityMismatch[];
+  /** Retained per sample so the verdict can be split by capture regime; see `RECOVERED_CAPTURE_LAG_MS`. */
+  readonly coverageLagMs: number | null;
+}
+
+/**
+ * Above this lag, a capture was not racing anything.
+ *
+ * The harness performs bounded same-session recovery, so minutes missed during an outage are
+ * captured later — by which time every feature job has long finished. Those samples are effectively
+ * backfilled, and **a backfilled sample passes parity by construction**: it is the trustworthy
+ * cohort precisely because nothing could have mutated under it. Counting them alongside live
+ * captures inflates the pass rate with free passes and hides what the live path actually did.
+ *
+ * The threshold is the harness's own `featureWaitMs` deferral window (25 minutes). Inside it a
+ * capture was taken while the pipeline was still plausibly working; beyond it the minute was
+ * recovered after the fact. It is a reporting split only — it changes no verdict on any sample, and
+ * `passed` still requires every sample to match.
+ *
+ * Measured 2026-08-25 on an uninterrupted session: live captures ran a median lag of 40s against a
+ * 14.7-minute maximum, so an ordinary day sits entirely on the live side of this line.
+ */
+export const RECOVERED_CAPTURE_LAG_MS = 25 * 60 * 1000;
+
+export interface ParityCohort {
+  readonly sampleCount: number;
+  readonly cleanSampleCount: number;
+  readonly mismatchCountsByField: Readonly<Record<string, number>>;
+}
+
+function cohortOf(samples: readonly ParitySampleResult[]): ParityCohort {
+  const mismatchCountsByField: Record<string, number> = {};
+  for (const sample of samples) {
+    for (const mismatch of sample.mismatches) {
+      mismatchCountsByField[mismatch.field] = (mismatchCountsByField[mismatch.field] ?? 0) + 1;
+    }
+  }
+  return {
+    sampleCount: samples.length,
+    cleanSampleCount: samples.filter((sample) => sample.mismatches.length === 0).length,
+    mismatchCountsByField,
+  };
 }
 
 /**
@@ -390,6 +431,15 @@ export interface ParityReport {
   readonly comparableSampleCount: number;
   readonly mismatchCountsByField: Readonly<Record<string, number>>;
   readonly coverageLagMs: { readonly min: number; readonly median: number; readonly max: number } | null;
+  /**
+   * The same samples split by capture regime.
+   *
+   * `live` is the cohort that actually tests the pipeline; `recovered` was captured after an outage,
+   * when nothing could still have been mutating, and passes by construction. Reporting one blended
+   * number would let a long outage read as a clean session.
+   */
+  readonly liveCohort: ParityCohort;
+  readonly recoveredCohort: ParityCohort;
   readonly passed: boolean;
   readonly samples: readonly ParitySampleResult[];
 }
@@ -400,6 +450,11 @@ export interface ParityReport {
  * Fails on zero comparable samples as well as on any mismatch: a parity run that compared nothing
  * proves nothing, and a vacuous pass on an acceptance test is worse than a failure because it is
  * mistaken for evidence.
+ *
+ * The live/recovered split is reported but deliberately does **not** relax `passed`. A recovered
+ * sample that mismatches is a real finding — it means the reconstruction disagrees with a capture
+ * that had every chance to be correct — so excusing it would be exactly the rescue this protocol
+ * forbids elsewhere.
  */
 export function summariseParity(input: {
   sessionDate: string;
@@ -414,6 +469,10 @@ export function summariseParity(input: {
     }
   }
   const lags = [...input.coverageLags].sort((left, right) => left - right);
+  // A sample with no measurable lag counts as live: absent evidence of recovery is not evidence of
+  // it, and putting the unknowns in the cohort that passes by construction would flatter the result.
+  const isRecovered = (sample: ParitySampleResult): boolean =>
+    sample.coverageLagMs !== null && sample.coverageLagMs > RECOVERED_CAPTURE_LAG_MS;
   return {
     version: LIVE_BACKFILL_PARITY_VERSION,
     sessionDate: input.sessionDate,
@@ -425,6 +484,8 @@ export function summariseParity(input: {
       median: lags[Math.floor(lags.length / 2)]!,
       max: lags[lags.length - 1]!,
     },
+    liveCohort: cohortOf(input.samples.filter((sample) => !isRecovered(sample))),
+    recoveredCohort: cohortOf(input.samples.filter(isRecovered)),
     passed: comparable.length > 0 && Object.keys(mismatchCountsByField).length === 0,
     samples: input.samples,
   };

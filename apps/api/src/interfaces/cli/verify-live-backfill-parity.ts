@@ -266,6 +266,7 @@ async function main(): Promise<void> {
           samples.push({
             sessionDate, instrumentSymbol: symbol,
             decisionAt: control.decision_at.toISOString(), comparable: false, mismatches,
+            coverageLagMs: ordering.coverageLagMs,
           });
           continue;
         }
@@ -305,6 +306,7 @@ async function main(): Promise<void> {
         samples.push({
           sessionDate, instrumentSymbol: symbol,
           decisionAt: control.decision_at.toISOString(), comparable: true, mismatches,
+          coverageLagMs: ordering.coverageLagMs,
         });
       }
     }
@@ -322,6 +324,19 @@ async function main(): Promise<void> {
     console.info(`With a feature vector     : ${featureVectorComparedCount} (a non-firing bar stores none)`);
     console.info(`Coverage lag ms           : ${report.coverageLagMs ? `min ${report.coverageLagMs.min}, median ${report.coverageLagMs.median}, max ${report.coverageLagMs.max}` : "unavailable"}`);
     console.info(`Mismatches by field       : ${Object.keys(report.mismatchCountsByField).length === 0 ? "none" : JSON.stringify(report.mismatchCountsByField)}`);
+    // Split by capture regime. A recovered sample was captured after an outage, once every feature
+    // job had finished, so it passes by construction; blending it into one number lets a long outage
+    // read as a clean session. The live cohort is the one that tests anything.
+    const share = (cohort: { sampleCount: number; cleanSampleCount: number }): string => (
+      cohort.sampleCount === 0 ? "n/a"
+        : `${cohort.cleanSampleCount}/${cohort.sampleCount} clean (${((100 * cohort.cleanSampleCount) / cohort.sampleCount).toFixed(1)}%)`
+    );
+    console.info(`  live captures           : ${share(report.liveCohort)}  <- the cohort under test`);
+    console.info(`  recovered after outage  : ${share(report.recoveredCohort)}  (passes by construction; not evidence)`);
+    if (report.recoveredCohort.sampleCount > 0) {
+      const recoveredShare = (100 * report.recoveredCohort.sampleCount) / Math.max(1, report.eligibleSampleCount);
+      console.info(`  NOTE: ${recoveredShare.toFixed(1)}% of this session was recovered rather than captured live.`);
+    }
     console.info(`VERDICT                   : ${report.passed ? "PARITY" : "NO_PARITY"}`);
     for (const sample of report.samples.filter((item) => item.mismatches.length > 0).slice(0, 20)) {
       for (const mismatch of sample.mismatches) {
