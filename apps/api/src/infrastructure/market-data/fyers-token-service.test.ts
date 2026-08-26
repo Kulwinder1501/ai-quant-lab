@@ -4,6 +4,7 @@ import {
   FyersRefreshError,
   FyersTokenService,
   isRetryableRefreshFailure,
+  peerRefreshWaitMs,
   refreshRetryDelayMs,
 } from "./fyers-token-service.js";
 
@@ -34,7 +35,7 @@ describe("isRetryableRefreshFailure", () => {
 });
 
 describe("refreshRetryDelayMs", () => {
-  it("waits seconds, growing, because the row stays locked throughout", () => {
+  it("waits seconds, growing, because a caller needing a token waits this out", () => {
     expect(refreshRetryDelayMs(1)).toBe(2_000);
     expect(refreshRetryDelayMs(2)).toBe(6_000);
   });
@@ -44,23 +45,92 @@ describe("refreshRetryDelayMs", () => {
   });
 });
 
+describe("peerRefreshWaitMs", () => {
+  it("covers every attempt the winner may take plus every gap between them", () => {
+    // 3 x 5s of HTTP allowance, plus the 2s and 6s backoffs.
+    expect(peerRefreshWaitMs(3)).toBe(23_000);
+    expect(peerRefreshWaitMs(1)).toBe(5_000);
+  });
+});
+
 /**
- * A pool stub that answers the credential query and records writes.
+ * A pool stub that models the two locks that matter: `FOR UPDATE` on the credential row, and
+ * the session advisory lock the refresh path uses instead.
  *
- * The real transaction takes `FOR UPDATE`; nothing here models locking, so these tests cover
- * the retry decision rather than the concurrency it is bounded for.
+ * It exists so a test can ask what was held at a given moment. `rowLockHeld()` is the
+ * regression surface -- the shape this file replaced took `FOR UPDATE` and then slept inside
+ * it, and nothing short of modelling the lock catches that coming back.
  */
-function fakePool(row: Record<string, unknown>) {
+function lockingPool(row: Record<string, unknown>) {
   const queries: string[] = [];
-  const client = {
-    query: async (sql: string) => {
-      queries.push(sql.trim().split("\n")[0]!.trim());
-      if (sql.includes("SELECT access_token")) return { rows: [row] };
-      return { rows: [] };
-    },
-    release: () => undefined,
+  let nextClientId = 1;
+  let rowLockOwner: number | null = null;
+  let advisoryOwner: number | null = null;
+  const openTransactions = new Set<number>();
+
+  const connect = async () => {
+    const id = nextClientId;
+    nextClientId += 1;
+    return {
+      query: async (sql: string, parameters?: unknown[]) => {
+        queries.push(sql.trim().split("\n")[0]!.trim());
+        if (sql.startsWith("BEGIN")) { openTransactions.add(id); return { rows: [] }; }
+        if (sql.startsWith("COMMIT") || sql.startsWith("ROLLBACK")) {
+          openTransactions.delete(id);
+          if (rowLockOwner === id) rowLockOwner = null;
+          return { rows: [] };
+        }
+        if (sql.includes("pg_try_advisory_lock")) {
+          if (advisoryOwner !== null) return { rows: [{ locked: false }] };
+          advisoryOwner = id;
+          return { rows: [{ locked: true }] };
+        }
+        if (sql.includes("pg_advisory_unlock")) {
+          if (advisoryOwner === id) advisoryOwner = null;
+          return { rows: [] };
+        }
+        if (sql.includes("SELECT access_token")) {
+          if (sql.includes("FOR UPDATE")) {
+            if (rowLockOwner !== null && rowLockOwner !== id) {
+              // A real `FOR UPDATE` waits here. A test that reaches this never finishes,
+              // which is precisely the production symptom.
+              await new Promise(() => undefined);
+            }
+            rowLockOwner = id;
+          }
+          return { rows: [{ ...row }] };
+        }
+        if (sql.startsWith("UPDATE provider_credentials") && sql.includes("access_token = $2")) {
+          row.access_token = parameters?.[1];
+          row.access_token_expires_at = parameters?.[2];
+          row.last_error = null;
+        }
+        if (sql.includes("last_error = $2")) row.last_error = parameters?.[1];
+        return { rows: [] };
+      },
+      release: () => undefined,
+    };
   };
-  return { pool: { connect: async () => client } as never, queries };
+
+  const pool = {
+    connect,
+    query: async (sql: string, parameters?: unknown[]) => {
+      const client = await connect();
+      return client.query(sql, parameters);
+    },
+  };
+
+  return {
+    pool: pool as never,
+    queries,
+    row,
+    /** True while any client holds `FOR UPDATE` on the credential row. */
+    rowLockHeld: () => rowLockOwner !== null,
+    /** True while any client has an uncommitted transaction open. */
+    transactionOpen: () => openTransactions.size > 0,
+    /** Pretend a different process already holds the refresh advisory lock. */
+    holdRefreshLock: () => { advisoryOwner = -1; },
+  };
 }
 
 function expiredCredential() {
@@ -76,12 +146,12 @@ function refusal(code: number, message: string) {
   return new Response(JSON.stringify({ s: "error", code, message }), { status: 400 });
 }
 
-function success() {
-  return new Response(JSON.stringify({ s: "ok", access_token: "fresh-token" }), { status: 200 });
+function success(token = "fresh-token") {
+  return new Response(JSON.stringify({ s: "ok", access_token: token }), { status: 200 });
 }
 
 function build(fetchImpl: typeof fetch, sleeps: number[], attempts = 3) {
-  const { pool } = fakePool(expiredCredential());
+  const { pool } = lockingPool(expiredCredential());
   return new FyersTokenService({
     pool,
     appId: "APPID-100",
@@ -119,7 +189,7 @@ describe("FyersTokenService refresh retry", () => {
 
     await expect(service.getAccessToken()).rejects.toThrow(/Retried 3 times without success/);
     expect(calls).toBe(3);
-    // Bounded: ~8 seconds total, because the credential row is locked while this runs.
+    // Bounded: ~8 seconds total, because a caller that needs a token waits this out.
     expect(sleeps).toEqual([2_000, 6_000]);
   });
 
@@ -171,7 +241,7 @@ describe("FyersTokenService refresh retry", () => {
   });
 
   it("does not refresh at all while the access token is still good", async () => {
-    const { pool } = fakePool({
+    const { pool } = lockingPool({
       access_token: "still-valid",
       access_token_expires_at: new Date(Date.now() + 60 * 60_000),
       refresh_token: "refresh-me",
@@ -185,6 +255,130 @@ describe("FyersTokenService refresh retry", () => {
 
     await expect(service.getAccessToken()).resolves.toBe("still-valid");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The 2026-08-25 incident: the access token expired overnight, every refresh came back code
+ * -16, and the retry backed off while still holding `FOR UPDATE` on the credential row. The
+ * scheduler container logged 206 missed cron executions, stalled ~22 minutes, and its
+ * hour-restricted schedules never fired again until it was restarted.
+ */
+describe("FyersTokenService refresh concurrency", () => {
+  const credentials = { appId: "APPID-100", appSecret: "secret", pin: "1234" };
+
+  it("holds no row lock and no open transaction while a retry sleeps", async () => {
+    const shared = lockingPool(expiredCredential());
+    const observed: { rowLocked: boolean; transactionOpen: boolean }[] = [];
+    let calls = 0;
+    const service = new FyersTokenService({
+      ...credentials,
+      pool: shared.pool,
+      refreshAttempts: 3,
+      fetch: (async () => {
+        calls += 1;
+        return calls === 1 ? refusal(-16, "Refresh token API is currently disabled.") : success();
+      }) as never,
+      sleep: async () => {
+        observed.push({
+          rowLocked: shared.rowLockHeld(),
+          transactionOpen: shared.transactionOpen(),
+        });
+      },
+    });
+
+    await expect(service.getAccessToken()).resolves.toBe("fresh-token");
+
+    expect(observed).toEqual([{ rowLocked: false, transactionOpen: false }]);
+    // Belt and braces: the refresh path must not reach for the row lock at all.
+    expect(shared.queries.some((sql) => sql.includes("FOR UPDATE"))).toBe(false);
+  });
+
+  it("collapses two concurrent callers in one process onto a single refresh", async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const service = build(async () => { calls += 1; return success(); }, sleeps);
+
+    const tokens = await Promise.all([service.getAccessToken(), service.getAccessToken()]);
+
+    expect(calls).toBe(1);
+    expect(tokens).toEqual(["fresh-token", "fresh-token"]);
+  });
+
+  it("does not cache the failure: a later caller gets its own attempt", async () => {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const service = build(async () => { calls += 1; return refusal(-16, "disabled"); }, sleeps, 1);
+
+    await expect(service.getAccessToken()).rejects.toThrow(/code -16/);
+    await expect(service.getAccessToken()).rejects.toThrow(/code -16/);
+    expect(calls).toBe(2);
+  });
+
+  it("lets a second process through while the first is backing off, without refreshing twice", async () => {
+    const shared = lockingPool(expiredCredential());
+    let winnerCalls = 0;
+    let loserCalls = 0;
+    let winnerReachedBackoff!: () => void;
+    let releaseWinner!: () => void;
+    const reachedBackoff = new Promise<void>((resolve) => { winnerReachedBackoff = resolve; });
+    const mayResume = new Promise<void>((resolve) => { releaseWinner = resolve; });
+
+    const winner = new FyersTokenService({
+      ...credentials,
+      pool: shared.pool,
+      refreshAttempts: 3,
+      fetch: (async () => {
+        winnerCalls += 1;
+        return winnerCalls === 1 ? refusal(-16, "disabled") : success();
+      }) as never,
+      sleep: async () => { winnerReachedBackoff(); await mayResume; },
+    });
+    const loser = new FyersTokenService({
+      ...credentials,
+      pool: shared.pool,
+      refreshAttempts: 3,
+      fetch: (async () => { loserCalls += 1; return success("loser-token"); }) as never,
+      // Each poll unblocks the winner and yields a macrotask, so the winner's second attempt
+      // lands within the poll budget rather than the test depending on one exact turn.
+      sleep: async () => {
+        releaseWinner();
+        await new Promise((resolve) => { setTimeout(resolve, 0); });
+      },
+    });
+
+    const winnerToken = winner.getAccessToken();
+    await reachedBackoff;
+
+    // The winner is asleep mid-retry. Nothing it holds may stop the second process.
+    expect(shared.rowLockHeld()).toBe(false);
+    expect(shared.transactionOpen()).toBe(false);
+
+    await expect(loser.getAccessToken()).resolves.toBe("fresh-token");
+    await expect(winnerToken).resolves.toBe("fresh-token");
+    expect(winnerCalls).toBe(2);
+    // The second process waited for the winner's token instead of burning a refresh of its own.
+    expect(loserCalls).toBe(0);
+  });
+
+  it("gives up rather than waiting forever on a peer that never publishes a token", async () => {
+    const shared = lockingPool(expiredCredential());
+    shared.holdRefreshLock();
+    const sleeps: number[] = [];
+    const fetchSpy = vi.fn();
+    const service = new FyersTokenService({
+      ...credentials,
+      pool: shared.pool,
+      refreshAttempts: 3,
+      fetch: fetchSpy as never,
+      sleep: async (ms) => { sleeps.push(ms); },
+    });
+
+    await expect(service.getAccessToken()).rejects.toThrow(/without publishing a token/);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Polls only as long as the winner's own budget, then reports rather than hanging.
+    expect(sleeps).toHaveLength(peerRefreshWaitMs(3) / 1_000);
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import {
   buildFyersAuthorizeUrl,
   FYERS_ACCESS_TOKEN_TTL_MS,
@@ -56,7 +56,8 @@ export function isRetryableRefreshFailure(input: {
  * Backoff between refresh attempts: 2s, then 6s.
  *
  * Seconds rather than milliseconds because a provider that just refused needs time to stop
- * refusing, and bounded to a few seconds because the credential row stays locked throughout.
+ * refusing, and bounded to a few seconds because a second caller that wants a token waits
+ * out exactly this window before it gets one.
  */
 export function refreshRetryDelayMs(attempt: number): number {
   return 2_000 * 3 ** Math.max(0, attempt - 1);
@@ -66,7 +67,45 @@ export function refreshRetryDelayMs(attempt: number): number {
 const REFRESH_SKEW_MS = 5 * 60_000;
 const DEFAULT_BASE_URL = "https://api-t1.fyers.in";
 
+/**
+ * Advisory-lock key for "a refresh against the Fyers credential is in flight".
+ *
+ * Session-scoped rather than transaction-scoped, and *tried* rather than waited on. Both
+ * matter: the lock has to outlive the short statements that read and write the row, and a
+ * caller that cannot have it must be told so in one round trip instead of queueing behind
+ * somebody else's backoff. Unlike `FOR UPDATE` on the row, holding it blocks no reader.
+ *
+ * The namespace is ASCII "FYER" so the key is recognisable in `pg_locks`.
+ */
+const REFRESH_LOCK_NAMESPACE = 0x46594552;
+const REFRESH_LOCK_ID = 1;
+
+/** How often a caller that lost the refresh lock re-reads the row waiting for the winner. */
+const PEER_REFRESH_POLL_MS = 1_000;
+
+/** Allowance per refresh HTTP attempt when sizing how long to wait for the winner. */
+const PEER_REFRESH_HTTP_ALLOWANCE_MS = 5_000;
+
+/**
+ * How long to wait for whoever holds the refresh lock: every attempt they are allowed plus
+ * every gap between those attempts.
+ *
+ * Bounded rather than open-ended on purpose. A waiter that never returns is the shape of the
+ * failure this whole path exists to avoid — it just moves the stall from Postgres into Node.
+ */
+export function peerRefreshWaitMs(attempts: number): number {
+  const budget = Math.max(1, Math.floor(attempts));
+  let total = budget * PEER_REFRESH_HTTP_ALLOWANCE_MS;
+  for (let attempt = 1; attempt < budget; attempt += 1) {
+    total += refreshRetryDelayMs(attempt);
+  }
+  return total;
+}
+
 type FetchFunction = typeof fetch;
+
+/** Anything that can run a query: the pool itself, or one checked-out client. */
+type QueryExecutor = { query: Pool["query"] };
 
 export interface FyersCredentialRow {
   accessToken: string | null;
@@ -89,10 +128,10 @@ export interface FyersTokenServiceOptions {
   /**
    * Total refresh attempts, including the first. Defaults to 3.
    *
-   * Deliberately small. The retry runs while `getAccessToken` holds `FOR UPDATE` on the
-   * credential row, which is correct -- that lock is what stops two callers each burning a
-   * refresh, and a caller that waits then gets the fresh token instead of failing -- but it
-   * means the budget is also how long every other Fyers caller is blocked.
+   * Deliberately small. Nothing in `provider_credentials` is locked while the retry backs off,
+   * so the budget no longer blocks callers that only want to read the stored token -- but a
+   * caller that needs a *new* token still waits out this window before it gets one, so this
+   * is the latency every Fyers job pays while the provider is refusing.
    */
   refreshAttempts?: number;
 }
@@ -117,6 +156,8 @@ export class FyersTokenService {
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly refreshAttempts: number;
+  /** The one refresh this process has in flight, shared by every caller that arrives during it. */
+  private refreshInFlight: Promise<string> | null = null;
 
   constructor(private readonly options: FyersTokenServiceOptions) {
     if (!options.appId.trim() || !options.appSecret.trim()) {
@@ -272,64 +313,187 @@ export class FyersTokenService {
   }
 
   /**
-   * Returns a usable access token, refreshing under a row lock so two concurrent
-   * backfills cannot both burn a refresh against the same credential.
+   * Returns a usable access token, refreshing at most once across the deployment.
+   *
+   * Nothing is locked while a refresh backs off. The previous shape held `FOR UPDATE` on the
+   * credential row across `refreshWithRetry`'s sleeps, which is exactly the sequence that
+   * broke on 2026-08-25: the access token expired overnight, every refresh came back
+   * "Refresh token API is currently disabled" (code -16, retryable), and the scheduler
+   * container spent the backoff window holding the row while every other Fyers caller queued
+   * on it. That process logged 206 missed cron executions, stalled for ~22 minutes, and its
+   * hour-restricted schedules never fired again until it was restarted.
+   *
+   * Mutual exclusion is still real, it just no longer runs through a lock anyone can queue
+   * on: an in-process single flight collapses concurrent callers onto one refresh, and a
+   * session advisory lock keeps a second *process* from burning one too. A caller that loses
+   * either race waits for the winner's token instead of failing, which is the property the
+   * row lock was there to provide.
    */
   async getAccessToken(): Promise<string> {
-    const client = await this.options.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await client.query(
-        `SELECT access_token, access_token_expires_at, refresh_token, refresh_token_expires_at
-         FROM provider_credentials WHERE provider = $1 FOR UPDATE`,
-        [FYERS_PROVIDER_ID],
+    const credential = await this.readCredential();
+    if (!credential) {
+      throw new Error(
+        "No Fyers credential is stored. Run `npm run data:auth:fyers` to authorize once.",
       );
-      const row = result.rows[0];
-      if (!row) {
-        throw new Error(
-          "No Fyers credential is stored. Run `npm run data:auth:fyers` to authorize once.",
-        );
-      }
-
-      const now = this.now();
-      const accessExpiry = row.access_token_expires_at as Date | null;
-      if (row.access_token && accessExpiry && accessExpiry.getTime() - now.getTime() > REFRESH_SKEW_MS) {
-        await client.query("COMMIT");
-        return String(row.access_token);
-      }
-
-      const refreshExpiry = row.refresh_token_expires_at as Date | null;
-      if (!row.refresh_token || (refreshExpiry && refreshExpiry.getTime() <= now.getTime())) {
-        const message = "Fyers refresh token expired; re-run `npm run data:auth:fyers`.";
-        await this.recordError(client, message);
-        await client.query("COMMIT");
-        throw new Error(message);
-      }
-
-      let refreshed: { accessToken: string; expiresAt: Date };
-      try {
-        refreshed = await this.refreshWithRetry(String(row.refresh_token));
-      } catch (error) {
-        await this.recordError(client, error instanceof Error ? error.message : String(error));
-        await client.query("COMMIT");
-        throw error;
-      }
-
-      await client.query(
-        `UPDATE provider_credentials
-         SET access_token = $2, access_token_expires_at = $3,
-             last_refreshed_at = $4, last_error = NULL, updated_at = NOW()
-         WHERE provider = $1`,
-        [FYERS_PROVIDER_ID, refreshed.accessToken, refreshed.expiresAt, now],
-      );
-      await client.query("COMMIT");
-      return refreshed.accessToken;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
     }
+
+    const usable = this.usableAccessToken(credential);
+    if (usable) return usable;
+
+    const refreshExpiry = credential.refreshTokenExpiresAt;
+    if (
+      !credential.refreshToken
+      || (refreshExpiry && refreshExpiry.getTime() <= this.now().getTime())
+    ) {
+      const message = "Fyers refresh token expired; re-run `npm run data:auth:fyers`.";
+      await this.recordError(this.options.pool, message);
+      throw new Error(message);
+    }
+
+    return this.refreshSingleFlight(credential.refreshToken);
+  }
+
+  /**
+   * One refresh per process at a time; concurrent callers share the winner's outcome.
+   *
+   * Cheaper than the advisory lock and it covers the case that actually occurs -- a scheduler
+   * tick firing several Fyers jobs at once -- without a round trip each. Sharing the *failure*
+   * as well as the success is deliberate: a caller that struck out on the lock has nothing to
+   * gain from immediately hammering a provider that just refused three times.
+   */
+  private refreshSingleFlight(refreshToken: string): Promise<string> {
+    const inFlight = this.refreshInFlight;
+    if (inFlight) return inFlight;
+    // Assigned before any caller can await it, so a racer sees the promise rather than
+    // starting a second refresh; cleared once it settles so the next caller starts a real one.
+    const started = this.refreshExclusively(refreshToken);
+    this.refreshInFlight = started.finally(() => { this.refreshInFlight = null; });
+    return this.refreshInFlight;
+  }
+
+  /**
+   * Refresh while holding the advisory lock, or wait for whoever does.
+   *
+   * The lock is held across the retry window, but it is neither a row lock nor an open
+   * transaction: readers of `provider_credentials` never touch it, and a second process that
+   * wants to refresh is refused in one round trip rather than parked on it.
+   */
+  private async refreshExclusively(refreshToken: string): Promise<string> {
+    const client = await this.options.pool.connect();
+    let holdsLock = false;
+    try {
+      holdsLock = await this.tryAcquireRefreshLock(client);
+      if (holdsLock) return await this.refreshAndStore(client, refreshToken);
+    } finally {
+      await this.releaseRefreshLock(client, holdsLock);
+    }
+    // Lock refused, and the connection is already back in the pool: wait holding nothing.
+    return this.awaitPeerRefresh();
+  }
+
+  private async tryAcquireRefreshLock(client: PoolClient): Promise<boolean> {
+    const result = await client.query(
+      "SELECT pg_try_advisory_lock($1, $2) AS locked",
+      [REFRESH_LOCK_NAMESPACE, REFRESH_LOCK_ID],
+    );
+    return result.rows[0]?.locked === true;
+  }
+
+  /**
+   * A connection that might still hold the lock must never go back into the pool: the next
+   * borrower would silently inherit it and no caller could ever refresh again. If the unlock
+   * itself fails, destroy the connection so Postgres drops the lock with the session.
+   */
+  private async releaseRefreshLock(client: PoolClient, holdsLock: boolean): Promise<void> {
+    if (!holdsLock) {
+      client.release();
+      return;
+    }
+    try {
+      await client.query(
+        "SELECT pg_advisory_unlock($1, $2)",
+        [REFRESH_LOCK_NAMESPACE, REFRESH_LOCK_ID],
+      );
+      client.release();
+    } catch (error) {
+      client.release(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  /** Refresh and publish the result, under the advisory lock and under no other lock. */
+  private async refreshAndStore(client: PoolClient, refreshToken: string): Promise<string> {
+    // Re-read now the lock is ours: a peer may have refreshed between our unlocked read and
+    // here, and its token is as good as one we would spend an attempt to fetch.
+    const current = await this.readCredential(client);
+    const alreadyFresh = current && this.usableAccessToken(current);
+    if (alreadyFresh) return alreadyFresh;
+
+    let refreshed: { accessToken: string; expiresAt: Date };
+    try {
+      refreshed = await this.refreshWithRetry(refreshToken);
+    } catch (error) {
+      await this.recordError(client, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+
+    await client.query(
+      `UPDATE provider_credentials
+       SET access_token = $2, access_token_expires_at = $3,
+           last_refreshed_at = $4, last_error = NULL, updated_at = NOW()
+       WHERE provider = $1`,
+      [FYERS_PROVIDER_ID, refreshed.accessToken, refreshed.expiresAt, this.now()],
+    );
+    return refreshed.accessToken;
+  }
+
+  /**
+   * Wait for the process that holds the refresh lock, holding nothing ourselves.
+   *
+   * Polling rather than blocking on the lock is the point. A waiter that queued on the lock
+   * would be asleep inside somebody else's backoff again, which is the defect one layer down;
+   * a waiter that polls costs one cheap `SELECT` a second and can be abandoned.
+   */
+  private async awaitPeerRefresh(): Promise<string> {
+    const budgetMs = peerRefreshWaitMs(this.refreshAttempts);
+    const polls = Math.max(1, Math.ceil(budgetMs / PEER_REFRESH_POLL_MS));
+    for (let poll = 0; poll < polls; poll += 1) {
+      await this.sleep(PEER_REFRESH_POLL_MS);
+      const credential = await this.readCredential();
+      const fresh = credential && this.usableAccessToken(credential);
+      if (fresh) return fresh;
+    }
+    throw new Error(
+      "Another caller has been refreshing the Fyers credential for over "
+      + `${Math.round(budgetMs / 1_000)}s without publishing a token.`
+      + " Check provider_credentials.last_error.",
+    );
+  }
+
+  /** Reads the stored credential. Takes no lock — the fast path must not serialise callers. */
+  private async readCredential(
+    executor: QueryExecutor = this.options.pool,
+  ): Promise<FyersCredentialRow | null> {
+    const result = await executor.query(
+      `SELECT access_token, access_token_expires_at, refresh_token, refresh_token_expires_at
+       FROM provider_credentials WHERE provider = $1`,
+      [FYERS_PROVIDER_ID],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      accessToken: row.access_token ? String(row.access_token) : null,
+      accessTokenExpiresAt: (row.access_token_expires_at as Date | null) ?? null,
+      refreshToken: row.refresh_token ? String(row.refresh_token) : null,
+      refreshTokenExpiresAt: (row.refresh_token_expires_at as Date | null) ?? null,
+    };
+  }
+
+  /** The stored token, but only while it is further from expiry than the refresh skew. */
+  private usableAccessToken(credential: FyersCredentialRow): string | null {
+    const expiry = credential.accessTokenExpiresAt;
+    if (!credential.accessToken || !expiry) return null;
+    const remainingMs = expiry.getTime() - this.now().getTime();
+    return remainingMs > REFRESH_SKEW_MS ? credential.accessToken : null;
   }
 
   /**
@@ -395,10 +559,14 @@ export class FyersTokenService {
    * Refresh, retrying only failures that could plausibly clear on their own.
    *
    * Bounded on purpose. The observed outage lasted **19 minutes**, which this does not and
-   * should not cover: waiting that long would hold the credential row locked and stall every
-   * other caller behind it. This is for a refusal measured in seconds. A longer one still
-   * needs `assessFyersAuthHealth` to raise it and a human to run `data:auth:fyers` -- the
-   * retry narrows the window, it does not remove the failure mode.
+   * should not cover: every caller that needs a new token waits out this window before it
+   * gets one, so a budget that long turns a provider refusal into an outage of its own. This
+   * is for a refusal measured in seconds. A longer one still needs `assessFyersAuthHealth` to
+   * raise it and a human to run `data:auth:fyers` -- the retry narrows the window, it does not
+   * remove the failure mode.
+   *
+   * Runs with no row lock and no open transaction. Only the refresh advisory lock is held,
+   * and that one blocks nobody who merely wants to read the stored token.
    *
    * The final error names the attempt count, so a `last_error` row says whether one refusal
    * or a sustained outage was seen.
@@ -486,8 +654,8 @@ export class FyersTokenService {
     };
   }
 
-  private async recordError(client: { query: Pool["query"] }, message: string): Promise<void> {
-    await client.query(
+  private async recordError(executor: QueryExecutor, message: string): Promise<void> {
+    await executor.query(
       "UPDATE provider_credentials SET last_error = $2, updated_at = NOW() WHERE provider = $1",
       [FYERS_PROVIDER_ID, redactTokens(message)],
     );
