@@ -224,12 +224,19 @@ export class PostgresPatternCoverageRecorder implements PatternCoverageRecorder 
   constructor(private readonly database: DatabaseQueryable, private readonly instrumentId: string) {}
 
   /**
-   * First-cover stable: `DO NOTHING`, never `DO UPDATE`.
+   * `recorded_at` is first-cover stable; the counts describe the most recent pass.
    *
-   * `recorded_at` answers "when did this window first become covered", which is what a reader needs
-   * to know whether its read raced the detector. An upsert would turn it into "when did the detector
-   * last run", which is the exact degradation that made `pattern_detections.detected_at` unable to
-   * date anything.
+   * These are two different facts and only one of them may be frozen. `recorded_at` answers "when did
+   * this window first become covered", which is what a reader needs to know whether its read raced
+   * the detector -- advancing it on every re-run would degrade it into the most-recent-write field
+   * that made `pattern_detections.detected_at` unable to date anything. So it is explicitly excluded
+   * from the update below.
+   *
+   * `candles_evaluated` and `patterns_found` are the opposite: they are a *denominator*, and a stale
+   * one silently understates. Not hypothetical -- healing 11 confirmed 5m collection gaps on
+   * 2026-08-26 added three whole missing sessions inside an already-covered window, so `DO NOTHING`
+   * would have left the row claiming 1,079 evaluated bars over a window that now holds more.
+   * Comparing a sparse pattern family against that figure would divide by the wrong number.
    */
   async recordCoverage(record: PatternCoverageRecord): Promise<void> {
     await this.database.query(
@@ -237,7 +244,9 @@ export class PostgresPatternCoverageRecorder implements PatternCoverageRecorder 
          coverage_id, instrument_id, timeframe, from_time, to_time,
          candles_evaluated, patterns_found, engine_version, recorded_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (instrument_id, timeframe, from_time, to_time, engine_version) DO NOTHING`,
+       ON CONFLICT (instrument_id, timeframe, from_time, to_time, engine_version) DO UPDATE
+         SET candles_evaluated = EXCLUDED.candles_evaluated,
+             patterns_found = EXCLUDED.patterns_found`,
       [
         record.coverageId, this.instrumentId, record.source.timeframe,
         record.fromTime, record.toTime, record.candlesEvaluated, record.patternsFound,
