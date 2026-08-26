@@ -23,8 +23,11 @@ describe("research strategy ungating", () => {
 
   it("registers the ungated research versions, distinct from the gated historical ones", () => {
     // A version string must mean one definition forever; the gated captures live under the old keys.
+    // `pattern-v4-research-v2` is the Pattern Intelligence sibling cohort: a separate key running in
+    // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
+    // meaning.
     expect(Object.keys(byKey).sort()).toEqual([
-      "index-v3-research", "momentum-v5-research", "pattern-v4-research",
+      "index-v3-research", "momentum-v5-research", "pattern-v4-research", "pattern-v4-research-v2",
     ]);
   });
 
@@ -49,7 +52,9 @@ describe("research strategy ungating", () => {
   it("changes the definition hash, so ungated captures can never merge with gated ones", () => {
     // The hash covers the configuration, so this is structural rather than a naming convention.
     const hashes = researchScalpStrategies.map((s) => s.definition.strategyDefinitionHash);
-    expect(new Set(hashes).size).toBe(3);
+    // Tied to the registry length rather than a literal: the invariant is that every registered
+    // strategy has its own hash, which must hold as cohorts are added, not just at a count of three.
+    expect(new Set(hashes).size).toBe(researchScalpStrategies.length);
     for (const hash of hashes) expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 

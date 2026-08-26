@@ -210,6 +210,9 @@ async function main(): Promise<void> {
     VOLATILITY_STRADDLE: 10 * 60 * 1000,
     // Full-series recompute over both engines; slower than the other intraday jobs by nature.
     PATTERN_DETECTION_INTRADAY: 20 * 60 * 1000,
+    // Same shape of work as above -- a full-series rescan per instrument and timeframe -- so it
+    // carries the same patience.
+    PATTERN_INTELLIGENCE_INTRADAY: 20 * 60 * 1000,
     // Reads one session of ticks and classifies them; the shortest horizon here on purpose, because
     // a stalled health check is itself a loss of the signal it exists to provide.
     COLLECTOR_HEALTH: 5 * 60 * 1000,
@@ -451,6 +454,55 @@ async function main(): Promise<void> {
     void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
   }, { timezone: IST });
 
+  /**
+   * Pattern Intelligence V1.0.1 detection, which is what feeds `pattern-v4-research-v2`.
+   *
+   * Separate from `detectPatternsIntraday` because the two write different stores and neither reads
+   * the other: the incumbent writes `pattern_detections`, this writes the `*_v2` namespace. Folding
+   * them together would only produce a run where half the flags do nothing.
+   *
+   * ## `--mode backfill` is deliberate, and `live` would silently break the cohort
+   *
+   * Backfill takes the data vintage from the first bar of the window, so `knownAt` collapses to
+   * `detectedAt` -- the bar's own open. The harness reads observations POINT_IN_TIME at the decision
+   * instant, which is that bar's *close*, so `knownAt <= decisionAt` holds and the observations are
+   * visible to the decision they belong to.
+   *
+   * Under `--mode live`, `knownAt` would be this run's wall clock. A bar closing at 09:46 whose
+   * patterns are computed at 10:00 would carry `knownAt = 10:00`, the point-in-time filter would
+   * exclude it from its own decision, and the cohort would capture nothing -- permanently, and
+   * silently, looking exactly like a market with no patterns in it. Live mode would also derive
+   * Bar 0 from the run time rather than the next bar, which is the defect the store was rebuilt to
+   * fix. Anyone "correcting" this to `live` should read that note first.
+   *
+   * The claim backfill makes is *computability*, not that something actually computed it at the bar:
+   * every engine reads indices at or before its detection bar, and the one that inspects a forward
+   * window stamps the pivot at its confirmation bar, so a pattern on a closed bar was derivable the
+   * moment that bar closed. Whether the pipeline was fast enough is a separate operational question,
+   * and `pattern_coverage_v2` is what answers it.
+   *
+   * Offset seven minutes from the incumbent's quarter-hour so two full-series rescans of the same
+   * candles do not start together.
+   */
+  const detectPatternIntelligenceIntraday = async (timeframes: readonly string[]): Promise<void> => {
+    const from = istDateKey(new Date(Date.now() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
+    for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+      for (const timeframe of timeframes) {
+        await runCommand("npm", [
+          "run", "analysis:detect-pattern-intelligence", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", from,
+          "--mode", "backfill",
+        ]);
+      }
+    }
+  };
+
+  cron.schedule("7,22,37,52 9-15 * * 1-5", () => {
+    void schedule("PATTERN_INTELLIGENCE_INTRADAY", () => detectPatternIntelligenceIntraday(["1m", "5m"]));
+  }, { timezone: IST });
+
   /*
    * Collector health, in-session and every ten minutes.
    *
@@ -555,6 +607,23 @@ async function main(): Promise<void> {
   }, { timezone: IST });
 
   /**
+/**
+   * The timeframes the nightly gap check and heal actually scan.
+   *
+   * Both jobs previously passed no `--timeframe`, and the CLIs default to `1m` — so for as long as
+   * they have run, only the 1m series was ever checked or healed. Measured 2026-08-26: a scan of 5m
+   * over the same 25-day window found **11 confirmed collection gaps** across NIFTY50 and BANKNIFTY,
+   * including three whole missing sessions, while 1m was complete for every one of those dates and
+   * the nightly job passed clean every night.
+   *
+   * That is the failure this list exists to close, and it is the same lesson as
+   * `candle_feature_coverage`: a check that silently covers less than a reader assumes is worse than
+   * no check, because it produces a green signal over unexamined ground. 5m is here because the
+   * scalp research harness and `pattern-v4-research-v2` both read it.
+   */
+  const GAP_SCANNED_TIMEFRAMES = ["1m", "5m"] as const;
+
+  /**
    * End-of-day append-only backfill of any confirmed collection gap.
    *
    * Runs at 16:18 IST, a hair before the detector below, so a recoverable gap is repaired before it
@@ -569,7 +638,9 @@ async function main(): Promise<void> {
   cron.schedule("18 16 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("CANDLE_GAP_HEAL", async () => {
-      await runCommand("npm", ["run", "data:heal-gaps", "--", "--apply", "--lookback-days", "5"]);
+      for (const timeframe of GAP_SCANNED_TIMEFRAMES) {
+        await runCommand("npm", ["run", "data:heal-gaps", "--", "--apply", "--timeframe", timeframe, "--lookback-days", "5"]);
+      }
     });
   }, { timezone: IST });
 
@@ -589,7 +660,9 @@ async function main(): Promise<void> {
    */
   cron.schedule("20 16 * * 1-5", () => {
     void schedule("CANDLE_GAP_CHECK", async () => {
-      await runCommand("npm", ["run", "data:detect-gaps", "--", "--lookback-days", "5"]);
+      for (const timeframe of GAP_SCANNED_TIMEFRAMES) {
+        await runCommand("npm", ["run", "data:detect-gaps", "--", "--timeframe", timeframe, "--lookback-days", "5"]);
+      }
     });
   }, { timezone: IST });
 

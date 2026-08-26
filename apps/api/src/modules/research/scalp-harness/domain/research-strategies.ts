@@ -24,6 +24,7 @@ import {
   type ResearchStrategyDefinition,
 } from "./contracts.js";
 import { logicalKey, sha256Canonical } from "./identity.js";
+import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
 
 export interface ResearchStrategyAdapter {
   readonly definition: ResearchStrategyDefinition;
@@ -242,7 +243,17 @@ const patternDefinition = buildStrategyDefinition({
   configuration: { ...defaultMomentumScalpPatternStrategyConfiguration, scoreThreshold: 0 } as Record<string, unknown>,
 });
 
-/** Separate registry. Operational `strategy-registry.ts` never imports this module. */
+/**
+ * Separate registry. Operational `strategy-registry.ts` never imports this module.
+ *
+ * `pattern-v4-research-v2` is appended as a *sibling* of `pattern-v4-research`, not a replacement:
+ * both evaluate every eligible bar, under their own definition hashes, and the harness decides
+ * between them. Generation 1's definition, configuration and captured rows are untouched, so its
+ * accumulating cohort keeps meaning what it meant.
+ *
+ * The V2 adapter emits nothing unless a caller has loaded `patternObservations` into the context, so
+ * adding it here is inert until the detection pass runs alongside capture.
+ */
 export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
   new FrozenResearchAdapter(
     momentumDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
@@ -258,6 +269,7 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
     // legacy value rather than a copy that can drift away from it.
     confluenceScoreGate(defaultMomentumScalpPatternStrategyConfiguration.scoreThreshold),
   ),
+  new PatternIntelligenceResearchAdapter(),
 ];
 
 /**
