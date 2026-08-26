@@ -1,5 +1,6 @@
 import { addDecimals, compareDecimals, nonNegativeDifference } from "../domain/decimal.js";
 import type { CandleRepository, PersistedCandle, UpsertCandleInput } from "../domain/candle.js";
+import { CompletedCandleImmutableError } from "../domain/candle.js";
 import type { HistoricalTimeframe } from "../domain/historical-data-provider.js";
 import type { Instrument } from "../domain/instrument.js";
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../domain/live-market-data-provider.js";
@@ -211,9 +212,10 @@ export class CollectLiveMarketData {
 
     let finalized = 0;
     if (window.openTime > active.candle.openTime) {
-      active.candle = { ...active.candle, isComplete: true };
-      await this.candleRepository.upsert(toUpsertInput(active.candle));
-      finalized = 1;
+      // Not counted as finalized if the authoritative writer already sealed it -- it did the
+      // sealing, and reporting it here would double-count the same bar.
+      const sealed = await this.sealUnlessSettled({ ...active.candle, isComplete: true });
+      finalized = sealed ? 1 : 0;
       active = {
         subscription,
         candle: {
@@ -252,9 +254,43 @@ export class CollectLiveMarketData {
       active.lastCumulativeVolume = quote.cumulativeVolume;
       this.lastCumulativeVolumes.set(key, quote.cumulativeVolume);
     }
-    active.candle = await this.candleRepository.upsert(toUpsertInput(active.candle));
+    const stored = await this.sealUnlessSettled(active.candle);
+    if (!stored) {
+      // The settled series overtook the window we were still building. Drop our copy rather
+      // than keep re-offering it: the next quote takes the `!active` path above, reads the
+      // completed bar, and skips the window for good.
+      this.activeCandles.delete(key);
+      return { applied: false, finalized };
+    }
+    active.candle = stored;
     this.activeCandles.set(key, active);
     return { applied: true, finalized };
+  }
+
+  /**
+   * Writes a candle, treating "a settled bar already owns this window" as an ordinary outcome.
+   *
+   * This collector and `ImportHistoricalMarketData` write the same bars on purpose:
+   * INDICES_INTRADAY re-fetches NIFTY50 and BANKNIFTY every minute, so an index window this
+   * process is mid-way through building is routinely sealed underneath it. Treating that as
+   * fatal is what crash-looped `live-collector-v2` on 2026-08-26 -- 19 restarts, while the
+   * ETF collector running the same CLI never restarted once, because nothing else writes
+   * NIFTYBEES or BANKBEES intraday.
+   *
+   * Yielding is also the better bar. The settled fetch is on-grid with real traded volume;
+   * this one is aggregated from at most two quote samples a minute.
+   *
+   * Narrow by construction: the repository refuses only when the stored bar is complete *and*
+   * carries no `quoteObservedAt`, so this can never swallow a rejection of one of our own
+   * candles. Anything else still propagates and still stops the process.
+   */
+  private async sealUnlessSettled(candle: PersistedCandle): Promise<PersistedCandle | null> {
+    try {
+      return await this.candleRepository.upsert(toUpsertInput(candle));
+    } catch (error) {
+      if (error instanceof CompletedCandleImmutableError) return null;
+      throw error;
+    }
   }
 
   private async finalizeStaleCandles(
@@ -277,9 +313,10 @@ export class CollectLiveMarketData {
       if (candle.openTime.getTime() < this.observationStartedAt.getTime()) {
         continue;
       }
-      await this.candleRepository.upsert(toUpsertInput({ ...candle, isComplete: true }));
+      const sealed = await this.sealUnlessSettled({ ...candle, isComplete: true });
+      // Dropped either way: whoever sealed the window, our cached copy of it is now stale.
       this.activeCandles.delete(activeCandleKey(candle.instrumentId, timeframe));
-      finalized += 1;
+      if (sealed) finalized += 1;
     }
     return finalized;
   }

@@ -1,6 +1,7 @@
 import type { QueryResultRow } from "pg";
 import type { DatabaseQueryable } from "../database.js";
 import type { CandleRepository, PersistedCandle, UpsertCandleInput } from "../../../modules/market-data/domain/candle.js";
+import { CompletedCandleImmutableError } from "../../../modules/market-data/domain/candle.js";
 
 interface CandleRow extends QueryResultRow {
   id: string;
@@ -110,7 +111,11 @@ export class PostgresCandleRepository implements CandleRepository {
       throw new Error("Candle upsert did not return a row.");
     }
     if (!hasSameValues(existing, input)) {
-      throw new Error("Completed candles are immutable; record a provider correction as a new data revision.");
+      throw new CompletedCandleImmutableError({
+        instrumentId: input.instrumentId,
+        timeframe: input.timeframe,
+        openTime: input.openTime,
+      });
     }
     return existing;
   }
