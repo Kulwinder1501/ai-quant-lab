@@ -52,6 +52,7 @@
     "research:directional:study": "tsx src/interfaces/cli/run-directional-v2-study.ts",
     "research:directional:d2": "tsx src/interfaces/cli/run-directional-v2-d2.ts",
     "ops:collector-health": "tsx src/interfaces/cli/check-collector-health.ts",
+    "ops:depth-staleness": "tsx src/interfaces/cli/check-depth-frame-staleness.ts",
     "research:parity:live-backfill": "tsx src/interfaces/cli/verify-live-backfill-parity.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
     "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",

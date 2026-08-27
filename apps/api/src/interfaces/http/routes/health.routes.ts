@@ -6,7 +6,15 @@ import { assessFyersAuthHealth } from "../../../modules/market-data/domain/fyers
 import type { HttpDependencies } from "../dependencies.js";
 
 /** Jobs that stop data arriving, rather than merely delaying a report. */
-const CRITICAL_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS", "EOD_PIPELINE"];
+const CRITICAL_JOB_TYPES = [
+  "OPTION_CHAIN",
+  "OPTION_PREMIUM_TICKS",
+  "EOD_PIPELINE",
+  // Critical by the same test as OPTION_CHAIN, and more so: depth_frames is forward-accumulating and
+  // has no heal path at all. Candles have `data:heal-gaps`; an L2 update missed when it happened is
+  // simply gone. CANDLE_GAP_CHECK is deliberately not here because its subject is repairable.
+  "DEPTH_FRAME_STALENESS",
+];
 const MAX_CRITICAL_SUCCESS_AGE_HOURS = 72;
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
 

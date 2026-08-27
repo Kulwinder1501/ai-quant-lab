@@ -216,6 +216,10 @@ async function main(): Promise<void> {
     // Reads one session of ticks and classifies them; the shortest horizon here on purpose, because
     // a stalled health check is itself a loss of the signal it exists to provide.
     COLLECTOR_HEALTH: 5 * 60 * 1000,
+    // Same reasoning as COLLECTOR_HEALTH, and the shortest horizon here for a sharper reason: what it
+    // watches cannot be repaired. depth_frames has no heal path, so a stalled claim on this check is a
+    // window in which unbackfillable data is being lost without anyone knowing.
+    DEPTH_FRAME_STALENESS: 5 * 60 * 1000,
     RSS_NEWS_INGESTION: 10 * 60 * 1000,
     // Research only, and deliberately the most patient claim here: a candidate cannot be settled
     // before its horizon elapses, so a stalled claimant costs nothing but a later sweep.
@@ -516,6 +520,25 @@ async function main(): Promise<void> {
    */
   cron.schedule("3,13,23,33,43,53 9-15 * * 1-5", () => {
     void schedule("COLLECTOR_HEALTH", () => runCommand("npm", ["run", "ops:collector-health"]));
+  }, { timezone: IST });
+
+  /**
+   * Is the raw L2 depth capture actually producing rows? Asked from outside the collector.
+   *
+   * The collector has its own in-process staleness guard and it fired correctly for two full sessions
+   * on 2026-08-26/27, into a container's stderr, where nothing was watching. That guard also cannot
+   * report the cases that matter most -- a crashed, OOM-killed or never-started collector has no
+   * process left to log with. This runs in the scheduler instead, so a silent depth outage becomes a
+   * FAILED row in `scheduled_job_runs` and shows up in `GET /api/v1/health/jobs`.
+   *
+   * Offset from COLLECTOR_HEALTH by four minutes so the two monitoring jobs do not contend for the
+   * same claim window, and run to hour 15 inclusive to span the 15:40 derivatives close.
+   *
+   * It passes no --symbols on purpose. A checker naming the front-month contract would roll into the
+   * exact bug it detects; see `depth-frame-staleness.ts`.
+   */
+  cron.schedule("7,17,27,37,47,57 9-15 * * 1-5", () => {
+    void schedule("DEPTH_FRAME_STALENESS", () => runCommand("npm", ["run", "ops:depth-staleness"]));
   }, { timezone: IST });
 
   // Higher-timeframe models consume completed 30m/60m candles. Refreshing their
@@ -990,6 +1013,9 @@ async function main(): Promise<void> {
       // stop a job running, it just makes the inventory lie about what is scheduled.
       "PATTERN_INTELLIGENCE_INTRADAY",
       "COLLECTOR_HEALTH",
+      // Reads depth_frames, not the feed, so it runs ungated -- and must, since the outage it detects
+      // includes "the collector never started".
+      "DEPTH_FRAME_STALENESS",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
       "CANDLE_GAP_CHECK",
