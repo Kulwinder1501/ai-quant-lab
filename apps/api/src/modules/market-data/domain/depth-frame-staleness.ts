@@ -216,6 +216,57 @@ export function parseFuturesSymbol(symbol: string): ParsedFuturesSymbol | null {
 }
 
 /**
+ * Builds the front-month futures ticker for an underlying, from the listed expiries.
+ *
+ * The inverse of `parseFuturesSymbol`, and the reason the roll stops being a manual edit. Until now
+ * the depth collector's contract was hardcoded in `docker-compose.v2.yml`; BANKNIFTY26AUGFUT expired
+ * on 2026-08-25, nobody edited it, and two unbackfillable sessions of L2 were lost to a feed that
+ * answers a dead subscription with silence. `describeContractRoll` above turns that into a visible
+ * alarm; this removes the need for the alarm to fire at all.
+ *
+ * ## Front month is the nearest unexpired expiry, inclusive of today
+ *
+ * A contract trades through its own expiry session: the August contract produced 42,704 frames on
+ * 2026-08-25, its expiry date. So `>=` is correct and `>` would roll a day early, abandoning a live
+ * and maximally liquid contract for one that is still thin.
+ *
+ * ## Expiries come from the calendar, never from a rule
+ *
+ * Deliberately not "last Thursday of the month". BANKNIFTY is monthly-only and NSE shifts expiries
+ * around holidays, so a computed date is wrong precisely when it matters. This session's own
+ * misdiagnosis came from applying the last-Thursday rule instead of reading the table: it put the
+ * August expiry on the 27th when the calendar says the 25th, which is why a rolled contract was
+ * misread as a vendor outage.
+ *
+ * Returns null when no unexpired expiry is listed, rather than guessing. A caller with no front
+ * month must refuse to start, not subscribe to something invented.
+ */
+export function frontMonthFuturesSymbol(input: {
+  readonly underlying: string;
+  readonly now: Date;
+  /** Expiry dates for the underlying, as `YYYY-MM-DD`. Order does not matter. */
+  readonly expiries: readonly string[];
+  readonly exchange?: string;
+}): string | null {
+  const underlying = input.underlying.trim().toUpperCase();
+  if (underlying === "") return null;
+
+  const todayIst = new Date(input.now.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+  const upcoming = [...input.expiries]
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date >= todayIst)
+    .sort();
+  const front = upcoming[0];
+  if (front === undefined) return null;
+
+  const year = front.slice(2, 4);
+  const monthIndex = Number(front.slice(5, 7)) - 1;
+  const month = MONTHS[monthIndex];
+  if (month === undefined) return null;
+
+  return `${input.exchange ?? "NSE"}:${underlying}${year}${month}FUT`;
+}
+
+/**
  * Explains a silent capture when the cause is a contract that has rolled.
  *
  * This is the `repairHint` of `detect-candle-gaps`: the alarm is worth little if the operator still

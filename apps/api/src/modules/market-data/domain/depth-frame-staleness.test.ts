@@ -3,6 +3,7 @@ import {
   DEPTH_STRUCTURAL_SILENCE_MS,
   describeContractRoll,
   evaluateDepthCaptureStaleness,
+  frontMonthFuturesSymbol,
   parseFuturesSymbol,
   type DepthSymbolObservation,
 } from "./depth-frame-staleness.js";
@@ -170,6 +171,96 @@ describe("describeContractRoll", () => {
       lastCapturedSymbol: "NSE:BANKNIFTY26JANFUT",
       now: midSession,
       expiries,
+    })).toBeNull();
+  });
+});
+
+describe("frontMonthFuturesSymbol", () => {
+  const SEPT = "2026-09-29";
+  const AUG = "2026-08-25";
+  const OCT = "2026-10-27";
+
+  it("builds the front-month ticker from the listed expiries", () => {
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-27T04:00:00.000Z"),
+      expiries: [AUG, SEPT, OCT],
+    })).toBe("NSE:BANKNIFTY26SEPFUT");
+  });
+
+  it("keeps the contract through its own expiry session, not until the day before", () => {
+    /*
+     * A contract trades on its expiry date: BANKNIFTY26AUGFUT produced 42,704 frames on 2026-08-25,
+     * its expiry day. Rolling on `>` instead of `>=` would abandon a live, maximally liquid contract
+     * for one that is still thin.
+     */
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-25T04:00:00.000Z"),
+      expiries: [AUG, SEPT],
+    })).toBe("NSE:BANKNIFTY26AUGFUT");
+  });
+
+  it("rolls from the session after expiry", () => {
+    // 2026-08-26 IST: the August contract is spent and capture in fact went to zero on this date.
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-26T04:00:00.000Z"),
+      expiries: [AUG, SEPT],
+    })).toBe("NSE:BANKNIFTY26SEPFUT");
+  });
+
+  it("uses the IST session date, not UTC", () => {
+    // 2026-08-25T19:00Z is 2026-08-26 00:30 IST -- already the next session, so already rolled.
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-25T19:00:00.000Z"),
+      expiries: [AUG, SEPT],
+    })).toBe("NSE:BANKNIFTY26SEPFUT");
+  });
+
+  it("returns null rather than inventing a contract when nothing is listed", () => {
+    /*
+     * Refusing beats guessing. A computed last-Thursday fallback is wrong exactly when it matters --
+     * that rule put the August expiry on the 27th when the calendar says the 25th -- and this feed
+     * accepts an invalid symbol and then delivers silence, so a wrong guess is undetectable.
+     */
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-27T04:00:00.000Z"),
+      expiries: [AUG],
+    })).toBeNull();
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-27T04:00:00.000Z"),
+      expiries: [],
+    })).toBeNull();
+  });
+
+  it("ignores malformed expiry rows instead of trusting them", () => {
+    expect(frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-27T04:00:00.000Z"),
+      expiries: ["not-a-date", "2026-9-29", SEPT],
+    })).toBe("NSE:BANKNIFTY26SEPFUT");
+  });
+
+  it("round-trips through parseFuturesSymbol", () => {
+    // The two are inverses; a divergence would make the staleness detector disagree with the thing
+    // that chose the symbol, which is worse than either being wrong alone.
+    const symbol = frontMonthFuturesSymbol({
+      underlying: "BANKNIFTY",
+      now: new Date("2026-08-27T04:00:00.000Z"),
+      expiries: [SEPT],
+    })!;
+    expect(parseFuturesSymbol(symbol)).toEqual({
+      exchange: "NSE", underlying: "BANKNIFTY", year: 26, month: 9,
+    });
+  });
+
+  it("refuses a blank underlying", () => {
+    expect(frontMonthFuturesSymbol({
+      underlying: "   ", now: new Date("2026-08-27T04:00:00.000Z"), expiries: [SEPT],
     })).toBeNull();
   });
 });

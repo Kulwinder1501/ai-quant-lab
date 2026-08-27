@@ -11,6 +11,7 @@ import {
 } from "../../modules/market-data/application/capture-depth-frames.js";
 import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-frame-sequencing.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
+import { frontMonthFuturesSymbol } from "../../modules/market-data/domain/depth-frame-staleness.js";
 
 /**
  * Captures raw order-book depth for a set of contracts and reports the feed's integrity (Phase 28
@@ -38,9 +39,13 @@ import { NseMarketSession } from "../../modules/market-data/domain/nse-market-se
  * rather than merely quiet.
  *
  * Usage:
- *   collect-depth-frames --symbols=NSE:BANKNIFTY26AUGFUT[,...] [--levels=10]
+ *   collect-depth-frames --underlying=BANKNIFTY[,...] [--levels=10]
  *                        [--flush-seconds=2] [--minutes=N] [--min-pairs=500]
  *                        [--progress-seconds=30]
+ *
+ * `--underlying` resolves the front-month futures contract from `option_expiry_calendar` at startup.
+ * `--symbols=NSE:BANKNIFTY26SEPFUT` still pins an exact contract, for a one-off capture of a specific
+ * expiry or to reproduce a past session. Passing both is refused.
  *
  * ## The staleness guard, and the failure it exists for
  *
@@ -55,14 +60,19 @@ import { NseMarketSession } from "../../modules/market-data/domain/nse-market-se
  * crash-restart loop (85 restarts on 2026-08-18), and a self-killing daemon under
  * `restart: unless-stopped` would reproduce that shape. Loud and running beats dead and restarting.
  *
- * The guard is a mitigation, not a fix. The real fix is resolving the front-month and ATM symbols at
- * subscribe time instead of hardcoding them, which is not built yet.
+ * The guard remains, but the front-month half of the underlying problem is now fixed rather than
+ * merely alarmed: `--underlying` resolves the contract from the calendar at every startup, so a roll
+ * takes a container restart instead of someone remembering to edit compose. ATM *option* symbols are
+ * still pinned by the caller and still drift, so the guard is what covers that half.
  *
  * Ctrl+C (or SIGTERM) stops it and prints the integrity report.
  */
 
 interface Options {
+  /** Explicitly pinned contracts. Empty when `--underlying` is used instead. */
   symbols: string[];
+  /** Underlyings whose front month is resolved at startup. Empty when `--symbols` is used. */
+  underlyings: string[];
   levels: number;
   flushSeconds: number;
   /** Stop after this many minutes. Omitted means run until interrupted. */
@@ -84,8 +94,29 @@ function parseOptions(argv: readonly string[]): Options {
     .split(",")
     .map((symbol) => symbol.trim())
     .filter((symbol) => symbol !== "");
-  if (symbols.length === 0) {
-    throw new Error("--symbols is required, for example --symbols=NSE:BANKNIFTY26AUGFUT");
+  const underlyings = (values.get("underlying") ?? "")
+    .split(",")
+    .map((underlying) => underlying.trim().toUpperCase())
+    .filter((underlying) => underlying !== "");
+
+  /*
+   * Exactly one of the two, and `--underlying` is the one to use.
+   *
+   * `--symbols` pins a contract for the life of the container, which is how BANKNIFTY26AUGFUT stayed
+   * subscribed after its 2026-08-25 expiry and cost two unbackfillable sessions of L2 to a feed that
+   * answers a dead subscription with silence. `--underlying` resolves the front month from
+   * `option_expiry_calendar` at startup, so the roll happens by restarting rather than by someone
+   * remembering to edit compose.
+   *
+   * `--symbols` is kept, not deprecated: pinning an exact contract is the right thing for a one-off
+   * capture of a specific expiry, and for reproducing a past session. Refusing both together rather
+   * than silently preferring one keeps a half-migrated compose file from looking like it works.
+   */
+  if (symbols.length > 0 && underlyings.length > 0) {
+    throw new Error("Pass --underlying or --symbols, not both. --underlying resolves the front month; --symbols pins an exact contract.");
+  }
+  if (symbols.length === 0 && underlyings.length === 0) {
+    throw new Error("--underlying is required, for example --underlying=BANKNIFTY (or --symbols=NSE:BANKNIFTY26SEPFUT to pin one contract).");
   }
 
   const positive = (key: string, fallback: number): number => {
@@ -98,6 +129,7 @@ function parseOptions(argv: readonly string[]): Options {
 
   return {
     symbols,
+    underlyings,
     levels: Math.floor(positive("levels", 10)),
     flushSeconds: positive("flush-seconds", 2),
     minutes: values.has("minutes") ? positive("minutes", 1) : null,
@@ -113,6 +145,44 @@ async function main(): Promise<void> {
   const database = createDatabasePool(environment.DATABASE_URL);
   const appId = environment.FYERS_APP_ID ?? "";
   if (!appId) throw new Error("FYERS_APP_ID is not set.");
+
+  /*
+   * Resolve the front month before anything else opens a socket.
+   *
+   * Refuses to start when the calendar lists no unexpired expiry, rather than falling back to a
+   * computed last-Thursday date. A wrong symbol here is the worst outcome available: the feed accepts
+   * it and delivers silence, which is what cost two sessions of L2 in August.
+   */
+  const resolvedSymbols = options.symbols.length > 0 ? options.symbols : [];
+  for (const underlying of options.underlyings) {
+    const expiries = await database.query<{ expiry_date: string }>(
+      `SELECT DISTINCT to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date
+       FROM option_expiry_calendar
+       WHERE underlying_symbol = $1
+       ORDER BY expiry_date`,
+      [underlying],
+    );
+    const symbol = frontMonthFuturesSymbol({
+      underlying,
+      now: new Date(),
+      expiries: expiries.rows.map((row) => row.expiry_date),
+    });
+    if (symbol === null) {
+      throw new Error(
+        `No unexpired ${underlying} expiry is listed in option_expiry_calendar, so the front-month `
+        + "contract cannot be resolved. Refusing to start: this feed accepts an invalid symbol and "
+        + "then delivers nothing. Check the OPTION_CHAIN job is populating the calendar.",
+      );
+    }
+    console.info(JSON.stringify({
+      level: "info",
+      message: "Resolved front-month futures contract",
+      underlying,
+      symbol,
+      source: "option_expiry_calendar",
+    }));
+    resolvedSymbols.push(symbol);
+  }
 
   const repository = new PostgresDepthFrameRepository(database);
   const buffer = new DepthFrameBuffer("fyers-tbt", DEFAULT_MAX_BUFFERED_FRAMES);
@@ -175,7 +245,7 @@ async function main(): Promise<void> {
           level: "error",
           message: "No depth frames during market hours; the subscription may be dead.",
           silentForSeconds,
-          symbols: options.symbols,
+          symbols: resolvedSymbols,
           hint: "A rolled or mistyped contract is accepted by this feed and then delivers nothing. "
             + "Check the expiry and strike are still live.",
           framesReceived: streamStats.framesReceived,
@@ -210,7 +280,7 @@ async function main(): Promise<void> {
     const streamStats = streamer.stats();
 
     const perSymbol = [];
-    for (const symbol of options.symbols) {
+    for (const symbol of resolvedSymbols) {
       const classified = await repository.listClassifiedFrames({
         providerSymbol: symbol,
         captureSessionId,
@@ -268,7 +338,7 @@ async function main(): Promise<void> {
     level: "info",
     message: "Starting depth frame capture",
     captureSessionId,
-    symbols: options.symbols,
+    symbols: resolvedSymbols,
     levels: options.levels,
     flushSeconds: options.flushSeconds,
     minutes: options.minutes,
@@ -277,7 +347,7 @@ async function main(): Promise<void> {
       : `Stopping after ${options.minutes} minute(s).`,
   }));
 
-  streamer.subscribe(options.symbols);
+  streamer.subscribe(resolvedSymbols);
   await streamer.connect();
 }
 

@@ -244,8 +244,11 @@ services:
     command:
       - "node"
       - "apps/api/dist/interfaces/cli/collect-depth-frames.js"
-      # Rolled 2026-08-27 after the August expiry on 2026-08-25. Next roll: 2026-09-29.
-      - "--symbols=NSE:BANKNIFTY26SEPFUT"
+      # No longer a hardcoded contract, and therefore no longer a scheduled manual edit. The
+      # front month is resolved from option_expiry_calendar at every startup, so a roll costs a
+      # container restart rather than someone remembering the date. Use --symbols to pin an exact
+      # expiry for a one-off capture; passing both is refused.
+      - "--underlying=BANKNIFTY"
       - "--levels=10"
       - "--flush-seconds=2"
       - "--progress-seconds=300"
