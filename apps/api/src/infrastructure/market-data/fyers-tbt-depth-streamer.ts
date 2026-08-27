@@ -75,6 +75,9 @@ export class FyersTbtDepthStreamer extends EventEmitter {
   private framesReceived = 0;
   private droppedMessages = 0;
   private lastFrameAt: Date | null = null;
+  /** Set on transport open, cleared by the first frame, so "streaming" is logged once per socket. */
+  private awaitingFirstFrame = false;
+  private socketOpenedAt: Date | null = null;
 
   private readonly levelsToStore: number;
   private readonly channel: string;
@@ -110,8 +113,17 @@ export class FyersTbtDepthStreamer extends EventEmitter {
 
       socket.on("open", () => {
         this.reconnectAttempts = 0;
-        log("info", "Connected to the Fyers TBT depth socket", {
-          resubscribing: this.subscriptions.size,
+        // Deliberately not "connected". This fires on the WebSocket transport opening, which says
+        // nothing about whether the subscription is live: the feed accepts a subscription to an
+        // expired contract and then delivers nothing at all, with no error on any channel. The
+        // earlier wording ("Connected to the Fyers TBT depth socket") read as a success line and hid
+        // exactly that -- BANKNIFTY26AUGFUT expired on 2026-08-25 and this logged "Connected" every
+        // restart for two sessions while capturing zero frames. Confirmation of a live subscription
+        // is the first frame, logged once below, not this.
+        this.socketOpenedAt = (this.options.now ?? (() => new Date()))();
+        this.awaitingFirstFrame = true;
+        log("info", "Fyers TBT depth socket transport opened; awaiting first frame", {
+          subscribing: this.subscriptions.size,
           channel: this.channel,
         });
         if (this.subscriptions.size > 0) this.activate([...this.subscriptions]);
@@ -135,6 +147,19 @@ export class FyersTbtDepthStreamer extends EventEmitter {
         }
         this.framesReceived += 1;
         this.lastFrameAt = frame.receivedAt;
+        if (this.awaitingFirstFrame) {
+          // The real "connected" line, and the only one that proves the subscription resolved to a
+          // live contract. Logged once per socket, so a reconnect that silently fails to resubscribe
+          // is visible as an "opened" with no matching "streaming".
+          this.awaitingFirstFrame = false;
+          log("info", "Fyers TBT depth subscription is streaming", {
+            providerSymbol: frame.providerSymbol,
+            channel: this.channel,
+            msFromOpenToFirstFrame: this.socketOpenedAt === null
+              ? null
+              : frame.receivedAt.getTime() - this.socketOpenedAt.getTime(),
+          });
+        }
         this.emit("frame", frame);
       });
 

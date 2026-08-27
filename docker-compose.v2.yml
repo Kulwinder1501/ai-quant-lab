@@ -226,12 +226,16 @@ services:
     #
     # ## Two known limitations, both deliberate rather than overlooked
     #
-    # **The symbol is hardcoded and rolls.** NSE:BANKNIFTY26AUGFUT stops existing after the August
-    # expiry. This feed accepts a subscription to a dead contract and then delivers nothing, with no
-    # error -- indistinguishable from a quiet book. The collector's --stale-after-seconds guard logs
-    # a loud ERROR during market hours when no frames arrive, which converts a silent months-long
-    # failure into a visible one, but it does NOT fix the roll. Update this symbol each expiry until
-    # front-month resolution is built.
+    # **The symbol is hardcoded and rolls.** This feed accepts a subscription to a dead contract and
+    # then delivers nothing, with no error -- indistinguishable from a quiet book. Update this symbol
+    # each expiry until front-month resolution is built.
+    #
+    # This happened, on schedule: BANKNIFTY26AUGFUT expired 2026-08-25 and capture went to zero from
+    # the next session. The --stale-after-seconds guard fired correctly and was still not enough --
+    # it logs to this container's stderr, and nothing polls a container's stderr, so two full sessions
+    # of unbackfillable L2 were lost before a human noticed the row count had stopped moving. The
+    # DEPTH_FRAME_STALENESS scheduler job now asks the same question from outside, against the table,
+    # and a silence becomes a FAILED row in scheduled_job_runs visible at /api/v1/health/jobs.
     #
     # **There is no retention policy.** At the observed ~240 frames/minute/symbol, a full session is
     # roughly 90k rows per symbol per day. depth_frames is append-only with six numeric arrays per
@@ -240,7 +244,8 @@ services:
     command:
       - "node"
       - "apps/api/dist/interfaces/cli/collect-depth-frames.js"
-      - "--symbols=NSE:BANKNIFTY26AUGFUT"
+      # Rolled 2026-08-27 after the August expiry on 2026-08-25. Next roll: 2026-09-29.
+      - "--symbols=NSE:BANKNIFTY26SEPFUT"
       - "--levels=10"
       - "--flush-seconds=2"
       - "--progress-seconds=300"

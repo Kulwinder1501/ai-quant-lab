@@ -42,7 +42,12 @@ describe("collector health isolation", () => {
         const source = readFileSync(file, "utf8");
         return source.includes("collector-health")
           || source.includes("evaluateCollectorHealth")
-          || source.includes("STRUCTURAL_SILENCE_MS");
+          || source.includes("STRUCTURAL_SILENCE_MS")
+          // Depth staleness is the same kind of thing about a different feed -- an operations
+          // judgement about whether the collector is running -- so it is fenced off identically.
+          // Its thresholds must never decide whether a session qualifies for an experiment.
+          || source.includes("depth-frame-staleness")
+          || source.includes("evaluateDepthCaptureStaleness");
       });
 
     expect(offenders).toEqual([]);
