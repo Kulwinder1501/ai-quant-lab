@@ -202,7 +202,10 @@ export function registerStrategyRoutes(
     ];
 
     let pollInFlight = false;
-    const intervalId = setInterval(async () => {
+    let consecutiveFailures = 0;
+    let lastFailureLogAt = 0;
+
+    const poll = async (): Promise<void> => {
       // Without this a slow provider round-trip lets 2.5s ticks stack up on one connection.
       if (pollInFlight) return;
       pollInFlight = true;
@@ -220,13 +223,58 @@ export function registerStrategyRoutes(
           }];
         });
 
+        if (consecutiveFailures > 0) {
+          console.info(JSON.stringify({
+            level: "info",
+            message: "Market watch stream recovered",
+            source: "market-watch",
+            afterConsecutiveFailures: consecutiveFailures,
+          }));
+          consecutiveFailures = 0;
+        }
         response.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch {
-        // Transient stream failures are retried on the next interval.
+      } catch (error) {
+        /*
+         * Logged, not swallowed.
+         *
+         * This `catch` used to be empty. Combined with the stream writing nothing before its first
+         * success, that made a provider outage indistinguishable from a healthy connection that had
+         * simply not ticked yet: the panel sat on "Connecting to live feed..." for the whole outage
+         * with no server-side trace. Diagnosing one such episode needed a hand-rolled request
+         * against the provider to discover it was answering 429.
+         *
+         * Throttled, because this polls every 2.5s *per connected tab* and an outage measured in
+         * minutes would otherwise bury the log in thousands of identical lines.
+         */
+        consecutiveFailures += 1;
+        const now = Date.now();
+        if (consecutiveFailures === 1 || now - lastFailureLogAt >= 30_000) {
+          lastFailureLogAt = now;
+          console.error(JSON.stringify({
+            level: "error",
+            message: "Market watch stream could not fetch quotes",
+            source: "market-watch",
+            consecutiveFailures,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        /*
+         * An SSE comment, not a `data:` frame. It keeps the connection provably alive for idle
+         * proxies and for the client's reconnect logic, and `EventSource` ignores comment lines, so
+         * the payload contract is unchanged. Writing `data: []` here would be worse than silence:
+         * the panel would render an empty market, which is a different claim from "quotes are
+         * unavailable" and the UI has no way to tell them apart.
+         */
+        response.write(`: quote-unavailable ${consecutiveFailures}\n\n`);
       } finally {
         pollInFlight = false;
       }
-    }, 2500);
+    };
+
+    // Immediately, then on the interval. Waiting for the first tick meant 2.5s of
+    // "Connecting to live feed..." on every page load even with a perfectly healthy provider.
+    void poll();
+    const intervalId = setInterval(() => void poll(), 2500);
 
     request.on("close", () => clearInterval(intervalId));
   });

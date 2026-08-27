@@ -125,4 +125,71 @@ describe("FyersQuoteClient", () => {
     await expect(client.quoteSymbol("NIFTY50")).rejects.toThrow(/HTTP 429/);
     expect(sleep).toHaveBeenCalledTimes(2);
   });
+
+  it("caps a multi-minute retry-after instead of sleeping through it", async () => {
+    /*
+     * Measured 2026-08-27: the provider rate-limits at its Cloudflare edge and answers 429 with
+     * `retry-after: 2374` -- 39.6 minutes. Honouring that literally blocked one quote call for up
+     * to `maxRetries` sleeps of that length inside an HTTP handler, and because the market-watch
+     * SSE poll is guarded by an in-flight flag, the sleeping call suppressed every later tick on
+     * that connection. A 40-minute provider penalty became a multi-hour dead dashboard.
+     *
+     * The caller has to fail fast and let the next poll try, so the header is clamped.
+     */
+    const sleep = vi.fn(async () => {});
+    const client = new FyersQuoteClient({
+      appId: "APP-100",
+      tokenService: { getAccessToken: async () => "token" },
+      maxRetries: 1,
+      sleep,
+      fetch: async () => new Response(
+        JSON.stringify({ s: "error", code: 429, message: "request limit reached" }),
+        { status: 429, headers: { "Retry-After": "2374" } },
+      ),
+    });
+
+    await expect(client.quoteSymbol("NIFTY50")).rejects.toThrow(/HTTP 429/);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(10_000);
+    expect(sleep).not.toHaveBeenCalledWith(2_374_000);
+  });
+
+  it("names the requested cooldown in the failure, since the caller cannot see the response", async () => {
+    // Without this the thrown message read "HTTP 429, code 429. request limit reached", which does
+    // not distinguish a brief overage from a 40-minute penalty -- the one thing worth knowing.
+    const client = new FyersQuoteClient({
+      appId: "APP-100",
+      tokenService: { getAccessToken: async () => "token" },
+      maxRetries: 0,
+      sleep: async () => {},
+      fetch: async () => new Response(
+        JSON.stringify({ s: "error", code: 429, message: "request limit reached" }),
+        { status: 429, headers: { "Retry-After": "2374" } },
+      ),
+    });
+
+    await expect(client.quoteSymbol("NIFTY50")).rejects.toThrow(/2374s cooldown/);
+  });
+
+  it("bounds every quote round-trip with an abort signal", async () => {
+    // A response that never arrives is the other way this wedges a stream poll, and nothing here
+    // bounded it. Asserting the signal is passed rather than timing a real hang.
+    const seen: Array<RequestInit | undefined> = [];
+    const client = new FyersQuoteClient({
+      appId: "APP-100",
+      tokenService: { getAccessToken: async () => "token" },
+      fetch: async (_url, init) => {
+        seen.push(init);
+        return new Response(JSON.stringify({
+          s: "ok",
+          d: [{ n: "NSE:NIFTY50-INDEX", s: "ok", v: { lp: 24650, prev_close_price: 24500 } }],
+        }), { status: 200 });
+      },
+    });
+
+    await client.quoteSymbol("NIFTY50");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(seen[0]?.signal?.aborted).toBe(false);
+  });
 });
