@@ -19,6 +19,20 @@ export interface MarketWatchRow {
 
 export type MarketWatchListener = (rows: readonly MarketWatchRow[]) => void;
 
+/**
+ * Told when a poll fails, so a transport can keep its connection provably alive.
+ *
+ * Separate from the row listener on purpose: there is no row payload to deliver, and inventing one
+ * (`[]`) would claim an empty market rather than unavailable quotes -- distinct facts the UI cannot
+ * tell apart.
+ */
+export type MarketWatchUnavailableListener = (consecutiveFailures: number) => void;
+
+interface Subscriber {
+  readonly onRows: MarketWatchListener;
+  readonly onUnavailable: MarketWatchUnavailableListener | undefined;
+}
+
 export interface MarketWatchBroadcasterOptions {
   readonly quotes: MarketQuoteReader;
   readonly tiles: readonly MarketWatchTile[];
@@ -57,7 +71,7 @@ const FAILURE_LOG_THROTTLE_MS = 30_000;
  *   spending the quote budget with nobody watching.
  */
 export class MarketWatchBroadcaster {
-  private readonly listeners = new Set<MarketWatchListener>();
+  private readonly subscribers = new Set<Subscriber>();
   private readonly intervalMs: number;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
@@ -85,7 +99,7 @@ export class MarketWatchBroadcaster {
   /** Provider round-trips made. Exposed so a test can prove N subscribers cost one call. */
   get stats(): { subscribers: number; consecutiveFailures: number; providerCalls: number } {
     return {
-      subscribers: this.listeners.size,
+      subscribers: this.subscribers.size,
       consecutiveFailures: this.consecutiveFailures,
       providerCalls: this.providerCalls,
     };
@@ -97,8 +111,12 @@ export class MarketWatchBroadcaster {
    * The first subscriber starts the poll loop and triggers an immediate poll, so the first tab on
    * a cold process does not wait one interval for data that could already be on the wire.
    */
-  subscribe(listener: MarketWatchListener): () => void {
-    this.listeners.add(listener);
+  subscribe(
+    listener: MarketWatchListener,
+    onUnavailable?: MarketWatchUnavailableListener,
+  ): () => void {
+    const subscriber: Subscriber = { onRows: listener, onUnavailable };
+    this.subscribers.add(subscriber);
     if (this.latest !== null) listener(this.latest);
 
     if (this.timer === null) {
@@ -114,8 +132,8 @@ export class MarketWatchBroadcaster {
       // decrement past the real subscriber count and stop a loop others still need.
       if (released) return;
       released = true;
-      this.listeners.delete(listener);
-      if (this.listeners.size === 0) this.stop();
+      this.subscribers.delete(subscriber);
+      if (this.subscribers.size === 0) this.stop();
     };
   }
 
@@ -157,7 +175,7 @@ export class MarketWatchBroadcaster {
       }
 
       this.latest = rows;
-      for (const listener of this.listeners) listener(rows);
+      for (const subscriber of this.subscribers) subscriber.onRows(rows);
     } catch (error) {
       /*
        * Logged, not swallowed. The route's `catch` used to be empty, and because the stream wrote
@@ -177,11 +195,18 @@ export class MarketWatchBroadcaster {
           message: "Market watch stream could not fetch quotes",
           source: "market-watch",
           consecutiveFailures: this.consecutiveFailures,
-          subscribers: this.listeners.size,
+          subscribers: this.subscribers.size,
           error: error instanceof Error ? error.message : String(error),
         }));
       }
       // `latest` is deliberately left alone -- see the class comment.
+      /*
+       * Tell every transport the poll failed. Without this a failing stream sends zero bytes, which
+       * is the state that made the original outage undiagnosable: an open socket delivering nothing
+       * looks exactly like a healthy connection that has not ticked yet, and idle proxies are free
+       * to drop it.
+       */
+      for (const subscriber of this.subscribers) subscriber.onUnavailable?.(this.consecutiveFailures);
     } finally {
       this.pollInFlight = false;
     }

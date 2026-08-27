@@ -143,6 +143,35 @@ describe("MarketWatchBroadcaster", () => {
     broadcaster.stop();
   });
 
+  it("tells every subscriber when a poll fails, so no stream sends zero bytes", async () => {
+    /*
+     * Regression guard. An earlier version of this refactor moved polling out of the route and lost
+     * the failure notification with it, so a failing stream went back to sending nothing at all --
+     * the exact state that made the original outage undiagnosable, since an open socket delivering
+     * nothing is indistinguishable from a healthy connection that has not ticked yet.
+     */
+    const reader: MarketQuoteReader = {
+      quoteSymbol: async () => null,
+      quoteSymbols: async () => { throw new Error("HTTP 429"); },
+    };
+    const broadcaster = new MarketWatchBroadcaster({ quotes: reader, tiles: TILES, ...silent() });
+    const unavailable: number[] = [];
+    const rows: MarketWatchRow[][] = [];
+
+    const release = broadcaster.subscribe(
+      (received) => rows.push([...received]),
+      (failures) => unavailable.push(failures),
+    );
+    await broadcaster.pollOnce();
+
+    expect(rows).toHaveLength(0);
+    expect(unavailable.length).toBeGreaterThan(0);
+    // Counts up, so a transport can report how long it has been dark.
+    expect(unavailable[unavailable.length - 1]).toBeGreaterThanOrEqual(1);
+    release();
+    broadcaster.stop();
+  });
+
   it("stops polling once the last subscriber leaves, and tolerates double release", async () => {
     /*
      * A shared poller outlives any one request, so unlike the per-connection interval it must be

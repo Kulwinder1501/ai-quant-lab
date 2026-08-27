@@ -219,9 +219,21 @@ export function registerStrategyRoutes(
      * cached snapshot to each new subscriber immediately, so opening a second tab now costs
      * nothing and shows data at once instead of waiting a full interval.
      */
-    const unsubscribe = marketWatchBroadcaster.subscribe((rows) => {
-      response.write(`data: ${JSON.stringify(rows)}\n\n`);
-    });
+    const unsubscribe = marketWatchBroadcaster.subscribe(
+      (rows) => {
+        response.write(`data: ${JSON.stringify(rows)}\n\n`);
+      },
+      (consecutiveFailures) => {
+        /*
+         * An SSE comment, not a `data:` frame. It keeps the connection provably alive for idle
+         * proxies and for the client's reconnect logic, and `EventSource` ignores comment lines, so
+         * the payload contract is unchanged. `data: []` would be worse than silence: the panel would
+         * render an empty market, a different claim from "quotes are unavailable", and the UI has no
+         * way to tell them apart.
+         */
+        response.write(`: quote-unavailable ${consecutiveFailures}\n\n`);
+      },
+    );
 
     request.on("close", () => unsubscribe());
   });
