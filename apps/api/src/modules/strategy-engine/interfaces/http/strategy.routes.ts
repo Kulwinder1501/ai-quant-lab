@@ -34,12 +34,17 @@ export function registerStrategyRoutes(
   app: Express,
   dependencies: Pick<HttpDependencies,
     "database" | "dashboardRepository" | "generateTradeIdeas" | "aiAutonomousAgent"
-    | "marketQuoteClient"
+    | "marketQuoteClient" | "streamingQuoteClient"
   >,
 ): void {
-  // One per app, so subscriber count does not scale provider traffic. See the class comment.
+  /*
+   * One per app, so subscriber count does not scale provider traffic. See the class comment.
+   *
+   * Uses `streamingQuoteClient` -- the no-retry reader -- because the next tick is the retry. With
+   * the retrying client a single rate-limited poll held this loop for ~30s, measured live.
+   */
   const marketWatchBroadcaster = new MarketWatchBroadcaster({
-    quotes: dependencies.marketQuoteClient,
+    quotes: dependencies.streamingQuoteClient,
     tiles: MARKET_WATCH_TILES,
   });
 

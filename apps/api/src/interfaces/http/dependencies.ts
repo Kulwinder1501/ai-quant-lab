@@ -80,6 +80,23 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       : null,
   );
 
+  /**
+   * Quote reader for the streaming panels, with retries turned off.
+   *
+   * In-call retries make sense for a one-shot request whose caller has nothing else to try. They
+   * are waste on a poll loop that will ask again in 2.5 seconds regardless: with the default three
+   * retries and the 10s backoff cap, one rate-limited poll occupied the shared poller for ~30s --
+   * measured on the live stack -- so the panel got one status update per 30s instead of per tick,
+   * and every retry spent more of the quote budget that caused the rate limit in the first place.
+   *
+   * Failing immediately is strictly better here: the next tick is the retry.
+   */
+  const streamingQuoteClient = new ProviderRoutedQuoteClient(
+    fyersTokenService && appId
+      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0 })
+      : null,
+  );
+
   const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(
     paperTradeRepository,
     candleRepository,
@@ -123,6 +140,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     paperTradeNotificationRepository,
     optionPremiumTickRepository,
     marketQuoteClient,
+    streamingQuoteClient,
     instrumentRepository,
     createPaperAccount: new CreatePaperAccount(paperAccountRepository),
     getPaperAccountSummary: new GetPaperAccountSummary(paperTradeRepository),
