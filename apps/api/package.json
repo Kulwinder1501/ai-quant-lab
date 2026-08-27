@@ -55,6 +55,7 @@
     "research:parity:live-backfill": "tsx src/interfaces/cli/verify-live-backfill-parity.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",
     "analysis:detect-patterns": "tsx src/interfaces/cli/detect-market-patterns.ts",
+    "analysis:detect-pattern-intelligence": "tsx src/interfaces/cli/detect-pattern-intelligence.ts",
     "analysis:generate-trade-ideas": "tsx src/interfaces/cli/generate-trade-ideas.ts",
     "analysis:compare-scalp-profiles": "tsx src/interfaces/cli/compare-momentum-scalp-profiles.ts",
     "paper:accounts:create": "tsx src/interfaces/cli/create-paper-account.ts",

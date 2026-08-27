@@ -2,6 +2,7 @@ import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
+import { PostgresPatternObservationReader } from "../../infrastructure/database/repositories/postgres-pattern-intelligence-repository.js";
 import { PostgresResearchRiskSnapshotProvider } from "../../infrastructure/database/repositories/postgres-research-risk-snapshot-provider.js";
 import { PostgresScalpResearchRepository } from "../../infrastructure/database/repositories/postgres-scalp-research-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
       "SELECT id FROM paper_accounts WHERE is_active = TRUE ORDER BY id",
     );
     const contextRepository = new PostgresStrategyMarketContextRepository(database);
+    const observationReader = new PostgresPatternObservationReader(database);
     const riskProvider = new PostgresResearchRiskSnapshotProvider(database);
     const capture = new CaptureScalpResearchDecision(new PostgresScalpResearchRepository(database));
     const reports: Record<string, unknown>[] = [];
@@ -155,12 +157,51 @@ async function main(): Promise<void> {
               instrumentId: instrument.id, timeframe: "1m", closeTime: row.close_time,
             });
         if (!reference) throw new Error(`Completed 1m context disappeared at ${row.close_time.toISOString()}.`);
-        const contexts = [reference];
+
+        /*
+         * Attach Pattern Intelligence observations, for `pattern-v4-research-v2`.
+         *
+         * POINT_IN_TIME keyed on the decision instant is the only defensible visibility here. This is
+         * a live capture, so an observation the detector had not yet computed was not available to
+         * the decision; RETROSPECTIVE would backdate anything a later backfill produced and turn the
+         * capture into a look-ahead. Measured on this store the two readings differ by 1,398 control
+         * points versus 0, so the choice is not academic.
+         *
+         * Coverage travels separately because an empty list has two meanings. `NOT_COVERED` says the
+         * detection pass has not reached this bar — the same race that made 46% of live scalp
+         * evaluations read an empty feature layer and look like a quiet market. The V2 adapter emits
+         * nothing in that state, and the flag records why rather than leaving a silent zero.
+         */
+        const decisionAt = reference.candle.closeTime;
+        const attachObservations = async (context: typeof reference): Promise<typeof reference> => {
+          const visibility = { mode: "POINT_IN_TIME" as const, knownBy: decisionAt };
+          const covered = await observationReader.isBarCovered({
+            instrumentId: instrument.id,
+            timeframe: context.candle.timeframe,
+            barOpenTime: context.candle.openTime,
+            visibility,
+          });
+          return {
+            ...context,
+            patternObservations: covered
+              ? await observationReader.findForBar({
+                  instrumentId: instrument.id,
+                  timeframe: context.candle.timeframe,
+                  detectedAt: context.candle.openTime,
+                  visibility,
+                })
+              : [],
+            patternObservationCoverage: covered ? "COMPLETE" : "NOT_COVERED",
+          };
+        };
+
+        const enrichedReference = await attachObservations(reference);
+        const contexts = [enrichedReference];
         for (const timeframe of ["3m", "5m"] as const) {
           const context = await contextRepository.findCompletedAt({
             instrumentId: instrument.id, timeframe, closeTime: reference.candle.closeTime,
           });
-          if (context) contexts.push(context);
+          if (context) contexts.push(await attachObservations(context));
         }
         const session = new NseMarketSession().getSession(reference.candle.closeTime);
         if (!session) throw new Error(`No NSE session for completed candle ${reference.candle.id}.`);
@@ -176,7 +217,10 @@ async function main(): Promise<void> {
           });
         }
         const result = await capture.execute({
-          reference1mContext: reference,
+          // The enriched one, so the reference and the 1m entry of `contexts` are the same object.
+          // Passing the bare `reference` here would give an adapter two views of one bar that
+          // disagree about whether observations were loaded.
+          reference1mContext: enrichedReference,
           strategyContexts: contexts,
           sessionCloseAt: session.closesAt,
           tickSize: Number(instrument.tickSize),

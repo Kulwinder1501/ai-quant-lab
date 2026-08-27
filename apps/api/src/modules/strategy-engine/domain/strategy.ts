@@ -5,6 +5,10 @@ import type {
   PriceActionEventCode,
 } from "../../pattern-recognition/domain/market-pattern.js";
 
+import type {
+  PatternObservationCoverageState,
+  PatternObservationSummary,
+} from "../../pattern-intelligence/domain/observation-summary.js";
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
 
@@ -73,6 +77,16 @@ export interface StrategyMarketContext {
     confidence: number;
     details: Record<string, unknown>;
   }>;
+  /**
+   * Pattern Intelligence V1.0.1 observations for this bar, when a caller has loaded them.
+   *
+   * Optional and additive: the incumbent strategies never read it, so their behaviour and their
+   * captured `rawContext` are unchanged and their frozen definition hashes do not move. `undefined`
+   * means "not loaded", which `patternObservationCoverage` distinguishes from "loaded and empty" —
+   * absence of observations is only information when the detector is known to have run.
+   */
+  patternObservations?: readonly PatternObservationSummary[];
+  patternObservationCoverage?: PatternObservationCoverageState;
   regime?: RegimeContext;
   /**
    * Trend and level context from slower timeframes, for confluence scoring.

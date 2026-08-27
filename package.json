@@ -28,6 +28,7 @@
     "db:purge:yahoo-scalp": "npm run db:purge:yahoo-scalp --workspace @ai-quant-lab/api --",
     "analysis:calculate-indicators": "npm run analysis:calculate-indicators --workspace @ai-quant-lab/api --",
     "analysis:detect-patterns": "npm run analysis:detect-patterns --workspace @ai-quant-lab/api --",
+    "analysis:detect-pattern-intelligence": "npm run analysis:detect-pattern-intelligence --workspace @ai-quant-lab/api --",
     "analysis:generate-trade-ideas": "npm run analysis:generate-trade-ideas --workspace @ai-quant-lab/api --",
     "analysis:compare-scalp-profiles": "npm run analysis:compare-scalp-profiles --workspace @ai-quant-lab/api --",
     "paper:accounts:create": "npm run paper:accounts:create --workspace @ai-quant-lab/api --",
