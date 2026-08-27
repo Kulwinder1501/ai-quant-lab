@@ -986,6 +986,9 @@ async function main(): Promise<void> {
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
+      // Hand-maintained for the startup log only -- it gates nothing, so an omission here does not
+      // stop a job running, it just makes the inventory lie about what is scheduled.
+      "PATTERN_INTELLIGENCE_INTRADAY",
       "COLLECTOR_HEALTH",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
