@@ -6,6 +6,29 @@ import {
   resolveIndexDriverUniverse,
   SUPPORTED_DRIVER_INDEX_KEYS,
 } from "../../../market-data/domain/nifty50-driver-weights.js";
+import {
+  MarketWatchBroadcaster,
+  type MarketWatchTile,
+} from "../../application/market-watch-broadcaster.js";
+
+/**
+ * Tiles, by the label the UI shows and the symbol the resolver understands.
+ *
+ * The Indian rows go through `resolveYahooSymbol`; the foreign indices are already
+ * Yahoo-qualified and pass through it untouched. This used to be an inline map that
+ * spelled Fin Nifty `FINNIFTY.NS` -- not a ticker -- so its quote rejected, the row was
+ * dropped by the tile filter, and the panel rendered one tile short with nothing logged.
+ * The resolver now owns every spelling in one place.
+ */
+const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [
+  { label: "NIFTY50", symbol: "NIFTY50" },
+  { label: "BANKNIFTY", symbol: "BANKNIFTY" },
+  { label: "FINNIFTY", symbol: "FINNIFTY" },
+  { label: "SENSEX", symbol: "SENSEX" },
+  { label: "HANG SENG", symbol: "^HSI" },
+  { label: "NIKKEI 225", symbol: "^N225" },
+  { label: "S&P 500", symbol: "^GSPC" },
+];
 
 export function registerStrategyRoutes(
   app: Express,
@@ -14,6 +37,11 @@ export function registerStrategyRoutes(
     | "marketQuoteClient"
   >,
 ): void {
+  // One per app, so subscriber count does not scale provider traffic. See the class comment.
+  const marketWatchBroadcaster = new MarketWatchBroadcaster({
+    quotes: dependencies.marketQuoteClient,
+    tiles: MARKET_WATCH_TILES,
+  });
 
   app.get("/api/v1/trade-ideas", async (request, response, next) => {
     try {
@@ -182,102 +210,22 @@ export function registerStrategyRoutes(
     response.setHeader("Connection", "keep-alive");
     response.flushHeaders();
 
-    /**
-     * Tiles, by the label the UI shows and the symbol the resolver understands.
+    /*
+     * Subscribes to the process-wide poller rather than starting its own.
      *
-     * The Indian rows go through `resolveYahooSymbol`; the foreign indices are already
-     * Yahoo-qualified and pass through it untouched. This used to be an inline map that
-     * spelled Fin Nifty `FINNIFTY.NS` -- not a ticker -- so its quote rejected, the row was
-     * dropped by the `.filter(Boolean)` below, and the panel rendered one tile short with
-     * nothing logged. The resolver now owns every spelling in one place.
+     * The interval used to live here, which meant one provider round-trip every 2.5s *per
+     * connected tab* for identical data, all of it drawn from a quote budget shared with the
+     * collectors and the agent. `MarketWatchBroadcaster` polls once for everyone and replays its
+     * cached snapshot to each new subscriber immediately, so opening a second tab now costs
+     * nothing and shows data at once instead of waiting a full interval.
      */
-    const tiles: ReadonlyArray<{ label: string; symbol: string }> = [
-      { label: "NIFTY50", symbol: "NIFTY50" },
-      { label: "BANKNIFTY", symbol: "BANKNIFTY" },
-      { label: "FINNIFTY", symbol: "FINNIFTY" },
-      { label: "SENSEX", symbol: "SENSEX" },
-      { label: "HANG SENG", symbol: "^HSI" },
-      { label: "NIKKEI 225", symbol: "^N225" },
-      { label: "S&P 500", symbol: "^GSPC" },
-    ];
+    const unsubscribe = marketWatchBroadcaster.subscribe((rows) => {
+      response.write(`data: ${JSON.stringify(rows)}\n\n`);
+    });
 
-    let pollInFlight = false;
-    let consecutiveFailures = 0;
-    let lastFailureLogAt = 0;
-
-    const poll = async (): Promise<void> => {
-      // Without this a slow provider round-trip lets 2.5s ticks stack up on one connection.
-      if (pollInFlight) return;
-      pollInFlight = true;
-      try {
-        // One batched request per tick rather than seven concurrent ones per connected tab.
-        const quotes = await dependencies.marketQuoteClient.quoteSymbols(tiles.map((tile) => tile.symbol));
-        const data = tiles.flatMap((tile) => {
-          const quote = quotes.get(tile.symbol);
-          if (quote === undefined) return [];
-          return [{
-            symbol: tile.label,
-            price: quote.regularMarketPrice,
-            changePercent: quote.regularMarketChangePercent,
-            aiStance: "NEUT", // Kept for UI compatibility, could be dynamic later
-          }];
-        });
-
-        if (consecutiveFailures > 0) {
-          console.info(JSON.stringify({
-            level: "info",
-            message: "Market watch stream recovered",
-            source: "market-watch",
-            afterConsecutiveFailures: consecutiveFailures,
-          }));
-          consecutiveFailures = 0;
-        }
-        response.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch (error) {
-        /*
-         * Logged, not swallowed.
-         *
-         * This `catch` used to be empty. Combined with the stream writing nothing before its first
-         * success, that made a provider outage indistinguishable from a healthy connection that had
-         * simply not ticked yet: the panel sat on "Connecting to live feed..." for the whole outage
-         * with no server-side trace. Diagnosing one such episode needed a hand-rolled request
-         * against the provider to discover it was answering 429.
-         *
-         * Throttled, because this polls every 2.5s *per connected tab* and an outage measured in
-         * minutes would otherwise bury the log in thousands of identical lines.
-         */
-        consecutiveFailures += 1;
-        const now = Date.now();
-        if (consecutiveFailures === 1 || now - lastFailureLogAt >= 30_000) {
-          lastFailureLogAt = now;
-          console.error(JSON.stringify({
-            level: "error",
-            message: "Market watch stream could not fetch quotes",
-            source: "market-watch",
-            consecutiveFailures,
-            error: error instanceof Error ? error.message : String(error),
-          }));
-        }
-        /*
-         * An SSE comment, not a `data:` frame. It keeps the connection provably alive for idle
-         * proxies and for the client's reconnect logic, and `EventSource` ignores comment lines, so
-         * the payload contract is unchanged. Writing `data: []` here would be worse than silence:
-         * the panel would render an empty market, which is a different claim from "quotes are
-         * unavailable" and the UI has no way to tell them apart.
-         */
-        response.write(`: quote-unavailable ${consecutiveFailures}\n\n`);
-      } finally {
-        pollInFlight = false;
-      }
-    };
-
-    // Immediately, then on the interval. Waiting for the first tick meant 2.5s of
-    // "Connecting to live feed..." on every page load even with a perfectly healthy provider.
-    void poll();
-    const intervalId = setInterval(() => void poll(), 2500);
-
-    request.on("close", () => clearInterval(intervalId));
+    request.on("close", () => unsubscribe());
   });
+
 
   /**
    * Index contribution heatmap tiles + tape metrics (breadth / concentration).
