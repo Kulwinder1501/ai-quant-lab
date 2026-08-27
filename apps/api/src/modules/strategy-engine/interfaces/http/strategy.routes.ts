@@ -10,6 +10,7 @@ import {
   MarketWatchBroadcaster,
   type MarketWatchTile,
 } from "../../application/market-watch-broadcaster.js";
+import { SharedStreamPollerRegistry } from "../../application/shared-stream-poller.js";
 
 /**
  * Tiles, by the label the UI shows and the symbol the resolver understands.
@@ -46,6 +47,110 @@ export function registerStrategyRoutes(
   const marketWatchBroadcaster = new MarketWatchBroadcaster({
     quotes: dependencies.streamingQuoteClient,
     tiles: MARKET_WATCH_TILES,
+  });
+
+  const liveAgentKey = (symbol: string, timeframe: string): string => `${symbol}|${timeframe}`;
+
+  /*
+   * Shared poller for /stream/live-agent, keyed by symbol+timeframe.
+   *
+   * Keyed rather than single because the route is parameterised: two tabs on NIFTY50 1d share one
+   * poll, two tabs on different symbols do not, which is correct -- they need different data.
+   *
+   * 2500ms, up from the 1000ms this handler ran at per connection. Nothing downstream produces data
+   * faster than 1m bars, so a per-second provider quote bought no freshness while making the browser
+   * the single largest consumer of the quote budget.
+   */
+  const liveAgentPollers = new SharedStreamPollerRegistry<Record<string, unknown>>({
+    name: "live-agent",
+    intervalMs: 2_500,
+    produce: async (key: string) => {
+      const separator = key.indexOf("|");
+      const symbol = key.slice(0, separator);
+      const timeframe = key.slice(separator + 1);
+
+      const candles = await dependencies.dashboardRepository.listCandlesWithOverlays(symbol, timeframe, 5);
+      // Null means "nothing to publish yet", which is distinct from a failure: the registry neither
+      // notifies nor caches, and the next tick tries again.
+      if (candles.length < 2) return null;
+
+      // The repository returns chart-ready chronological rows. The last row is therefore the newest
+      // one; reading index zero served the oldest of the requested bars as "live" data.
+      const latest = candles.at(-1)!;
+      const previous = candles.at(-2)!;
+
+      let livePrice = Number(latest.close);
+      let previousClose = Number(previous.close);
+      let change = livePrice - previousClose;
+      let changePercent = previousClose === 0 ? 0 : (change / previousClose) * 100;
+      let liveVolume = Number(latest.volume);
+      let liveOpen = Number(latest.open);
+      let liveHigh = Number(latest.high);
+      let liveLow = Number(latest.low);
+      let lastUpdated = latest.closeTime.toISOString();
+      let priceSource = "STORED_CANDLE";
+
+      // A provider failure must not be disguised as a synthetic market tick, so a null quote leaves
+      // every field on the stored bar and says so through `priceSource`.
+      const quote = await dependencies.streamingQuoteClient.quoteSymbol(symbol);
+      if (quote !== null) {
+        livePrice = quote.regularMarketPrice!;
+        previousClose = quote.regularMarketPreviousClose ?? previousClose;
+        change = quote.regularMarketChange ?? (livePrice - previousClose);
+        changePercent = quote.regularMarketChangePercent
+          ?? (previousClose === 0 ? 0 : (change / previousClose) * 100);
+        liveVolume = quote.regularMarketVolume ?? liveVolume;
+        liveOpen = quote.regularMarketOpen ?? liveOpen;
+        liveHigh = quote.regularMarketDayHigh ?? liveHigh;
+        liveLow = quote.regularMarketDayLow ?? liveLow;
+        lastUpdated = quote.regularMarketTime?.toISOString() ?? lastUpdated;
+        priceSource = quote.provider === "fyers-api-v3" ? "FYERS_QUOTE" : "YAHOO_QUOTE";
+      }
+
+      // This stream is read-only. The agent tick that used to run here now belongs to the scheduler
+      // (`AI_AGENT_TICK` -> `run-agent-tick.ts`): it mutates paper trades, and a GET is exempt from
+      // the mutation rate limiter, ran only while a tab was open, and blocked this payload behind
+      // itself. See that file's header for the full reasoning.
+
+      const rsi = latest.indicators?.["RSI"] as Record<string, unknown> | undefined;
+      const sma = latest.indicators?.["SMA"] as Record<string, unknown> | undefined;
+      const bollinger = latest.indicators?.["BOLLINGER_BANDS"] as Record<string, unknown> | undefined;
+      const rsiValue = Number.isFinite(Number(rsi?.value)) ? Number(rsi?.value) : null;
+      const smaValue = Number.isFinite(Number(sma?.value)) ? Number(sma?.value) : null;
+      const bollingerValues = bollinger
+        && Number.isFinite(Number(bollinger.upper))
+        && Number.isFinite(Number(bollinger.middle))
+        && Number.isFinite(Number(bollinger.lower))
+        ? {
+            upper: Number(bollinger.upper),
+            middle: Number(bollinger.middle),
+            lower: Number(bollinger.lower),
+          }
+        : null;
+
+      return {
+        symbol,
+        livePrice,
+        change,
+        changePercent,
+        open: liveOpen,
+        high: liveHigh,
+        low: liveLow,
+        volume: liveVolume,
+        lastUpdated,
+        priceSource,
+        indicators: {
+          rsi: rsiValue,
+          sma20: smaValue,
+          bollinger: bollingerValues,
+        },
+        latestPattern: latest.patterns?.[0] || null,
+        // Read from the journal, not this process's memory: the tick runs in the scheduler, so the
+        // API's in-memory ring is always empty. Scoped to the watched symbol.
+        thoughts: await dependencies.aiAutonomousAgent.listRecentThoughts(8, symbol),
+        reflections: await dependencies.aiAutonomousAgent.getReflections(6),
+      };
+    },
   });
 
   app.get("/api/v1/trade-ideas", async (request, response, next) => {
@@ -112,101 +217,37 @@ export function registerStrategyRoutes(
     response.setHeader("Connection", "keep-alive");
     response.flushHeaders();
 
+    /*
+     * Subscribes to the shared poller keyed by symbol+timeframe.
+     *
+     * This handler used to own a 1-second `setInterval` running three database queries and a provider
+     * quote, *per connected tab* -- 60 provider requests a minute for one open dashboard, 240 for
+     * four. Measured against roughly 20/min from the collectors, the browser was the dominant
+     * consumer, and on 2026-08-27 it tripped the provider's edge rate limiter for forty minutes.
+     * Tab count no longer affects upstream load, and the interval is 2.5s rather than 1s: nothing
+     * downstream writes faster than 1m bars, so a per-second quote was finer than the data justifies.
+     */
     const symbol = queryString(request, "symbol") || "NIFTY50";
     const timeframe = queryString(request, "timeframe") || "1d";
-    let pollInFlight = false;
 
-    const intervalId = setInterval(async () => {
-      if (pollInFlight) return;
-      pollInFlight = true;
-      try {
-        const candles = await dependencies.dashboardRepository.listCandlesWithOverlays(symbol, timeframe, 5);
-        if (candles.length < 2) return;
-        // The repository returns chart-ready chronological rows. The last row is
-        // therefore the newest one; reading index zero served the oldest of the
-        // requested bars as "live" data.
-        const latest = candles.at(-1)!;
-        const previous = candles.at(-2)!;
+    const unsubscribe = liveAgentPollers.subscribe(
+      liveAgentKey(symbol, timeframe),
+      (payload) => {
+        response.write(`data: ${JSON.stringify(payload)}
 
-        let livePrice = Number(latest.close);
-        let previousClose = Number(previous.close);
-        let change = livePrice - previousClose;
-        let changePercent = previousClose === 0 ? 0 : (change / previousClose) * 100;
-        let liveVolume = Number(latest.volume);
-        let liveOpen = Number(latest.open);
-        let liveHigh = Number(latest.high);
-        let liveLow = Number(latest.low);
-        let lastUpdated = latest.closeTime.toISOString();
-        let priceSource = "STORED_CANDLE";
+`);
+      },
+      (consecutiveFailures) => {
+        // An SSE comment: keeps the connection provably alive for idle proxies and the client's
+        // reconnect logic, and `EventSource` ignores comment lines, so the payload contract is
+        // unchanged. Silence here is what made the original outage undiagnosable.
+        response.write(`: live-agent-unavailable ${consecutiveFailures}
 
-        // A provider failure must not be disguised as a synthetic market tick, so a null
-        // quote leaves every field on the stored bar and says so through `priceSource`.
-        const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
-        if (quote !== null) {
-          livePrice = quote.regularMarketPrice!;
-          previousClose = quote.regularMarketPreviousClose ?? previousClose;
-          change = quote.regularMarketChange ?? (livePrice - previousClose);
-          changePercent = quote.regularMarketChangePercent
-            ?? (previousClose === 0 ? 0 : (change / previousClose) * 100);
-          liveVolume = quote.regularMarketVolume ?? liveVolume;
-          liveOpen = quote.regularMarketOpen ?? liveOpen;
-          liveHigh = quote.regularMarketDayHigh ?? liveHigh;
-          liveLow = quote.regularMarketDayLow ?? liveLow;
-          lastUpdated = quote.regularMarketTime?.toISOString() ?? lastUpdated;
-          priceSource = quote.provider === "fyers-api-v3" ? "FYERS_QUOTE" : "YAHOO_QUOTE";
-        }
+`);
+      },
+    );
 
-        // This stream is read-only. The agent tick that used to run here now belongs to the
-        // scheduler (`AI_AGENT_TICK` -> `run-agent-tick.ts`): it mutates paper trades, and a
-        // GET is exempt from the mutation rate limiter, ran only while a tab was open, and
-        // blocked this payload behind itself. See that file's header for the full reasoning.
-
-        const rsi = latest.indicators?.["RSI"] as Record<string, unknown> | undefined;
-        const sma = latest.indicators?.["SMA"] as Record<string, unknown> | undefined;
-        const bollinger = latest.indicators?.["BOLLINGER_BANDS"] as Record<string, unknown> | undefined;
-        const rsiValue = Number.isFinite(Number(rsi?.value)) ? Number(rsi?.value) : null;
-        const smaValue = Number.isFinite(Number(sma?.value)) ? Number(sma?.value) : null;
-        const bollingerValues = bollinger
-          && Number.isFinite(Number(bollinger.upper))
-          && Number.isFinite(Number(bollinger.middle))
-          && Number.isFinite(Number(bollinger.lower))
-          ? {
-              upper: Number(bollinger.upper),
-              middle: Number(bollinger.middle),
-              lower: Number(bollinger.lower),
-            }
-          : null;
-
-        response.write(`data: ${JSON.stringify({
-          symbol,
-          livePrice,
-          change,
-          changePercent,
-          open: liveOpen,
-          high: liveHigh,
-          low: liveLow,
-          volume: liveVolume,
-          lastUpdated,
-          priceSource,
-          indicators: {
-            rsi: rsiValue,
-            sma20: smaValue,
-            bollinger: bollingerValues,
-          },
-          latestPattern: latest.patterns?.[0] || null,
-          // Read from the journal, not this process's memory: the tick runs in the scheduler, so
-          // the API's in-memory ring is always empty. Scoped to the watched symbol.
-          thoughts: await dependencies.aiAutonomousAgent.listRecentThoughts(8, symbol),
-          reflections: await dependencies.aiAutonomousAgent.getReflections(6),
-        })}\n\n`);
-      } catch {
-        // Transient stream failures are retried on the next interval.
-      } finally {
-        pollInFlight = false;
-      }
-    }, 1000);
-
-    request.on("close", () => clearInterval(intervalId));
+    request.on("close", () => unsubscribe());
   });
 
   app.get("/api/v1/stream/market-watch", async (request, response) => {
