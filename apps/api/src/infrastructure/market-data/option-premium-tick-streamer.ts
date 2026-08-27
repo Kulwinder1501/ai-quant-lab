@@ -16,6 +16,7 @@ import type {
   PostgresOptionPremiumTickRepository,
 } from "../database/repositories/postgres-option-premium-tick-repository.js";
 import type { PostgresOptionChainRepository } from "../database/repositories/postgres-option-chain-repository.js";
+import { STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION } from "../../modules/market-data/domain/collector-regimes.js";
 
 /** Contracts an open position needs quoted regardless of where the ATM band has moved. */
 export interface RequiredContractReader {
@@ -98,7 +99,10 @@ const DEFAULT_CONTRACT_RETENTION_MS = 35 * 60_000;
  * covers both changes landing together: source clocks persisted, and contracts retained past band
  * exit. Change it whenever what this collector captures changes, and record the boundary.
  */
-const COLLECTOR_REGIME = "STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION";
+// Imported rather than restated: the poller writing this same table declared no regime at all for
+// three sessions, and a vocabulary the health check also reads is what makes that impossible to
+// repeat silently. See `collector-regimes.ts`.
+const COLLECTOR_REGIME = STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION;
 
 /**
  * Fills `option_premium_ticks` from the Fyers data socket instead of the HTTP quotes endpoint.

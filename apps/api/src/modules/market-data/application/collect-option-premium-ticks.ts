@@ -5,6 +5,7 @@ import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
 import { selectAtmPremiumContracts } from "../domain/atm-premium-contracts.js";
 import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
 import { normaliseTradedVolume } from "../domain/traded-volume.js";
+import { POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY } from "../domain/collector-regimes.js";
 
 export interface CollectOptionPremiumTicksInput {
   underlyingSymbols: readonly string[];
@@ -112,6 +113,18 @@ export class CollectOptionPremiumTicks {
           // Same HTTP observation as the option bid/ask. Reusing the 15-minute chain spot here
           // made the dense series look fresh while trap detection was anchored to a stale index.
           underlyingValue: liveUnderlying !== null && liveUnderlying > 0 ? liveUnderlying : null,
+          /*
+           * Declare the regime. This path wrote NULL from migration 078 until now -- roughly 6-7% of
+           * every session's ticks, unattributable to any capture code. Migration 078 gave the column
+           * no DEFAULT precisely so that omission would surface rather than be silently labelled, and
+           * it did: `COLLECTOR_HEALTH` reported DEGRADED the first session it was able to run.
+           *
+           * `POLLER_V2_FLOOR_...` and not `LEGACY_POLLER_V1`: that name belongs to the pre-streamer
+           * sessions this is not a continuation of. This is the deliberate once-a-minute floor under
+           * the socket, and its rows carry a receipt clock only, since the HTTP quotes endpoint
+           * publishes no exchange time.
+           */
+          collectorRegime: POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY,
         }];
       });
 

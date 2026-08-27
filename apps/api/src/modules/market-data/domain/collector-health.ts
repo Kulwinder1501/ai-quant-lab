@@ -1,3 +1,5 @@
+import { classifySessionRegimes, UNSTAMPED_REGIME } from "./collector-regimes.js";
+
 /**
  * Operational health of the option-premium collector. **Monitoring only.**
  *
@@ -152,7 +154,7 @@ export function evaluateCollectorHealth(input: {
     item.observedAt.getTime() >= input.expectedOpenAt.getTime()
     && item.observedAt.getTime() <= input.expectedCloseAt.getTime()
   ));
-  const regimes = [...new Set(inWindow.map((item) => item.collectorRegime ?? "(unstamped)"))].sort();
+  const regimes = [...new Set(inWindow.map((item) => item.collectorRegime ?? UNSTAMPED_REGIME))].sort();
   const findings: string[] = [];
 
   if (observations.length === 0) {
@@ -218,7 +220,22 @@ export function evaluateCollectorHealth(input: {
   if (exchangeFeed.available) {
     for (const gap of exchangeFeed.gaps) findings.push(`EXCHANGE_FEED_SILENCE_${Math.round(gap.durationMs / 1000)}S`);
   }
-  if (regimes.length > 1) findings.push(`UNEXPECTED_REGIME_CHANGE:${regimes.join(",")}`);
+  /*
+   * Report undeclared regimes, not plural ones.
+   *
+   * This used to fire on `regimes.length > 1`, whose premise -- one collector per session -- stopped
+   * being true when the HTTP poller became a concurrent floor under the socket rather than the source
+   * it replaced. Two *declared* regimes is now the designed steady state, so the old rule reported
+   * DEGRADED on a healthy session and would have gone on doing so every day.
+   *
+   * What is still worth reporting is a regime nobody declared: an unstamped row, meaning a collector
+   * wrote without saying what it was, or a superseded regime resurfacing, meaning something is
+   * running that was supposed to have been replaced. Both are the failure `collector_regime` exists
+   * to expose, and both stay findings.
+   */
+  const { declared, unstamped, unexpectedChange } = classifySessionRegimes(regimes);
+  if (unstamped.length > 0) findings.push("UNSTAMPED_COLLECTOR_REGIME");
+  if (unexpectedChange) findings.push(`UNEXPECTED_REGIME_CHANGE:${declared.join(",")}`);
 
   // A live session is INCOMPLETE unless something already failed -- a partial day is not yet a
   // healthy day, but a gap that has already happened is a finding now, not at the close.
