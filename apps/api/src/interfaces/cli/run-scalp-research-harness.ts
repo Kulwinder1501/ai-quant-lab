@@ -7,6 +7,8 @@ import { PostgresResearchRiskSnapshotProvider } from "../../infrastructure/datab
 import { PostgresScalpResearchRepository } from "../../infrastructure/database/repositories/postgres-scalp-research-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
+import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
+import { tapeLivenessPolicyVersion } from "../../modules/research/scalp-harness/domain/tape-liveness.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { getOption } from "./arguments.js";
 import { requireIsolatedResearchDatabaseUrl } from "./scalp-research-database.js";
@@ -141,6 +143,7 @@ async function main(): Promise<void> {
       const capturedDecisionTimes: Date[] = [];
       let deferredForFeatures = 0;
       let capturedWithoutFeatures = 0;
+      let frozenTapeDecisions = 0;
       for (const row of pending.rows) {
         const featuresCovered = row.features_covered === true;
         const ageMs = Date.now() - row.close_time.getTime();
@@ -203,6 +206,23 @@ async function main(): Promise<void> {
           });
           if (context) contexts.push(await attachObservations(context));
         }
+        /*
+         * Was the feed publishing new prices at this bar, or republishing the previous one?
+         *
+         * Resolved from the store rather than from the context, which carries only this bar. The
+         * index feed freezes daily from 15:16 to the close -- 14 bars, two distinct closes -- and
+         * every existing gate passes it, because the bars are present, complete and correctly
+         * stamped. Same resolver as the backfill-parity path, so the two cannot disagree.
+         */
+        const tape = await resolveTapeLiveness({
+          reader: contextRepository,
+          instrumentId: instrument.id,
+          timeframe: "1m",
+          referenceBar: reference.candle,
+          referenceCloseTime: reference.candle.closeTime,
+          intervalMs: 60_000,
+        });
+
         const session = new NseMarketSession().getSession(reference.candle.closeTime);
         if (!session) throw new Error(`No NSE session for completed candle ${reference.candle.id}.`);
         const accountSnapshots = [];
@@ -227,7 +247,9 @@ async function main(): Promise<void> {
           lotSize: instrument.lotSize,
           accountSnapshots,
           featureCoverage: featuresCovered ? "COMPLETE" : "INCOMPLETE",
+          tapeLiveness: tape.liveness,
         });
+        if (tape.liveness === "FROZEN") frozenTapeDecisions += 1;
         for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += result[key];
         capturedDecisionTimes.push(reference.candle.closeTime);
       }
@@ -242,6 +264,11 @@ async function main(): Promise<void> {
         // rather than that the market was quiet.
         deferredForFeatures,
         capturedWithoutFeatures,
+        // Grid points whose bar repeated the previous print. Expect ~14 per instrument per session
+        // from the 15:16 close freeze; a count materially above that means the feed stalled
+        // intraday, which is a different and more serious condition.
+        frozenTapeDecisions,
+        tapeLivenessPolicyVersion,
         ...totals,
       });
     }

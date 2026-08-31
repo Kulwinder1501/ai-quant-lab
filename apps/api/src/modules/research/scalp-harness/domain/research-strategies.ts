@@ -25,6 +25,7 @@ import {
 } from "./contracts.js";
 import { logicalKey, sha256Canonical } from "./identity.js";
 import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
+import type { ResearchTapeLiveness } from "./tape-liveness.js";
 
 export interface ResearchStrategyAdapter {
   readonly definition: ResearchStrategyDefinition;
@@ -324,7 +325,26 @@ function indicatorPresent(
 export function controlIneligibleReason(
   context: StrategyMarketContext,
   featureCoverage: ResearchFeatureCoverage,
+  tapeLiveness: ResearchTapeLiveness,
 ): string | null {
+  /*
+   * A frozen tape outranks everything below it.
+   *
+   * The others say a feature was not ready for this bar. This one says the bar is not an observation
+   * of anything: the feed republished the previous print, so there was no market event at this grid
+   * slot to have features about. Reporting a warmup gap on a bar that never moved would name the
+   * less fundamental of two problems.
+   *
+   * The two do not overlap in the data that motivated this -- the freeze runs 15:16 to the close,
+   * six hours after every indicator has warmed up -- so the order is a statement of principle rather
+   * than a decision with an observed effect. It still has to be fixed and documented, because the
+   * function returns one reason and the choice must be deterministic.
+   *
+   * The reason string carries no bar count. `identicalBars` is bounded by how many bars the caller
+   * supplied, which makes it a property of the query window rather than of the bar, and a value like
+   * that has no business in a string that estimators group on and live/backfill parity compares.
+   */
+  if (tapeLiveness === "FROZEN") return "TAPE_FROZEN";
   const missing = canonicalIndicatorRequirements.filter((requirement) => !indicatorPresent(context, requirement));
   // Ordered deliberately: warmup is a property of the bar and cannot be repaired by waiting for a
   // job, so it is the more specific answer when both are true.
@@ -339,12 +359,13 @@ export function buildControlPoints(
   context: StrategyMarketContext,
   sessionCloseAt: Date,
   featureCoverage: ResearchFeatureCoverage,
+  tapeLiveness: ResearchTapeLiveness,
 ): ResearchControlPoint[] {
   if (context.candle.timeframe !== "1m") throw new Error("GRID_POLICY_V1 controls require a 1m context.");
   const decisionAt = context.candle.closeTime;
   assertOnGridDecision(decisionAt);
   const dataThrough = new Date(decisionAt.getTime() - 1);
-  const ineligibleReason = controlIneligibleReason(context, featureCoverage);
+  const ineligibleReason = controlIneligibleReason(context, featureCoverage, tapeLiveness);
   const frozenControlPolicyVersion = `${controlPolicyVersion}:${gridPolicyVersion}`;
   return (["LONG", "SHORT"] as const).map((evaluationDirection) => {
     const controlPointKey = logicalKey("control-point", [

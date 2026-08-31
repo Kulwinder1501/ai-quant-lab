@@ -17,6 +17,7 @@ import {
   researchScalpStrategies,
   type ResearchFeatureCoverage,
 } from "../domain/research-strategies.js";
+import type { ResearchTapeLiveness } from "../domain/tape-liveness.js";
 
 export interface ScalpResearchWritePort {
   saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string>;
@@ -69,6 +70,14 @@ export class CaptureScalpResearchDecision {
      * control is still written, and marked ineligible, while proposal generation is skipped.
      */
     featureCoverage: ResearchFeatureCoverage;
+    /**
+     * Whether the feed was publishing new prices at this bar, or republishing the previous one.
+     *
+     * Resolved by the caller from the preceding bars for the same reason `featureCoverage` is: it is
+     * a fact about the bar series, which `StrategyMarketContext` does not carry. See
+     * `resolve-tape-liveness.ts`.
+     */
+    tapeLiveness: ResearchTapeLiveness;
   }): Promise<CaptureResearchDecisionResult> {
     if (input.reference1mContext.candle.timeframe !== "1m") throw new Error("Capture requires a canonical 1m reference context.");
     const decisionAt = input.reference1mContext.candle.closeTime;
@@ -84,7 +93,16 @@ export class CaptureScalpResearchDecision {
     // from it would record a false negative as a real decision -- which is what happened on
     // 2026-08-24, when 46% of evaluations read a bar with no patterns yet and the pattern strategy's
     // firing rate fell 93% with no trace of why. Skipping is recoverable; a wrong row is not.
-    const generated = input.featureCoverage === "INCOMPLETE"
+    /*
+     * A frozen tape is disqualifying for the same reason, one layer earlier.
+     *
+     * The feed republishes the last print from the 15:16 bar to the close, so a proposal minted there
+     * records an entry at a price no longer being quoted, and its forward settlement reads the same
+     * repeated bars. 41 such proposals were already stored before this gate existed. As with an
+     * uncomputed feature layer: skipping is recoverable, a wrong row is not.
+     */
+    const tapeFrozen = input.tapeLiveness === "FROZEN";
+    const generated = input.featureCoverage === "INCOMPLETE" || tapeFrozen
       ? []
       : researchScalpStrategies.flatMap((strategy) => input.strategyContexts
         .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
@@ -139,7 +157,7 @@ export class CaptureScalpResearchDecision {
     // Controls are the decision-completion marker for catch-up. Writing them last means a crash
     // anywhere above leaves this minute discoverable; every preceding retry is immutable/idempotent.
     const controls = await Promise.all(
-      buildControlPoints(input.reference1mContext, input.sessionCloseAt, input.featureCoverage)
+      buildControlPoints(input.reference1mContext, input.sessionCloseAt, input.featureCoverage, input.tapeLiveness)
         .map((control) => this.writes.saveControlPoint(control)),
     );
     return {

@@ -10,6 +10,7 @@ import {
   controlIneligibleReason,
   researchScalpStrategies,
 } from "../../modules/research/scalp-harness/domain/research-strategies.js";
+import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
 import {
   checkCoverageOrdering,
   compareConsumedState,
@@ -286,7 +287,24 @@ async function main(): Promise<void> {
             direction: row.direction, rawContext: row.raw_context,
           })),
         });
-        const rebuiltReason = controlIneligibleReason(reference, "COMPLETE");
+        /*
+         * Liveness is recomputed, not assumed.
+         *
+         * Coverage is COMPLETE by construction here -- the session is closed and every feature job
+         * has finished -- but the tape test has no such shortcut: it is a fact about the stored bars,
+         * and those are unchanged by the session ending. Passing "LIVE" would make reconstruction
+         * disagree with the live capture on every bar in the 15:16 close freeze, roughly 28 a session
+         * across the two indices, and report each as a mismatch. Same resolver as the capture path.
+         */
+        const rebuiltTape = await resolveTapeLiveness({
+          reader: contextRepository,
+          instrumentId: instrument.id,
+          timeframe: "1m",
+          referenceBar: reference.candle,
+          referenceCloseTime: reference.candle.closeTime,
+          intervalMs: 60_000,
+        });
+        const rebuiltReason = controlIneligibleReason(reference, "COMPLETE", rebuiltTape.liveness);
         const rebuiltState = consumedStateFrom({
           sampleEligible: rebuiltReason === null,
           ineligibleReason: rebuiltReason,
