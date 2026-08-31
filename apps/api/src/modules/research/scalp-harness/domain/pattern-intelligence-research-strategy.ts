@@ -7,7 +7,7 @@ import {
   type ImmutableStrategyProposal,
   type ResearchStrategyDefinition,
 } from "./contracts.js";
-import { sha256Canonical } from "../../../platform/identity/identity.js";
+import { sha256CanonicalJson } from "../../../platform/identity/identity.js";
 import type { ResearchStrategyAdapter } from "./research-strategies.js";
 
 /**
@@ -144,7 +144,7 @@ function findAtr(context: StrategyMarketContext): number | null {
  * detection threshold moves, and not when a comment in this file changes.
  */
 export function patternIntelligenceImplementationChecksum(): string {
-  return sha256Canonical({
+  return sha256CanonicalJson({
     encoding: "PATTERN_INTELLIGENCE_RESEARCH_V1",
     definitions: registeredPatternDefinitions
       .filter((definition) => proposalFamilies.includes(definition.family))

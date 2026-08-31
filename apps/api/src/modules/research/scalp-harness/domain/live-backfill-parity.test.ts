@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalEventSetHash,
-  canonicalJson,
+  canonicalJsonForParity,
   checkCoverageOrdering,
   compareConsumedState,
   summariseParity,
@@ -213,24 +213,24 @@ describe("canonicalEventSetHash", () => {
   });
 });
 
-describe("canonicalJson", () => {
+describe("canonicalJsonForParity", () => {
   it("is insensitive to key order at every depth", () => {
-    expect(canonicalJson({ b: 1, a: { d: 2, c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: 2 }, b: 1 }));
+    expect(canonicalJsonForParity({ b: 1, a: { d: 2, c: 3 } })).toBe(canonicalJsonForParity({ a: { c: 3, d: 2 }, b: 1 }));
   });
 
   it("keeps array order, which can carry meaning", () => {
-    expect(canonicalJson([1, 2])).not.toBe(canonicalJson([2, 1]));
+    expect(canonicalJsonForParity([1, 2])).not.toBe(canonicalJsonForParity([2, 1]));
   });
 
   it("separates null from absent-but-present values", () => {
-    expect(canonicalJson(null)).toBe("null");
-    expect(canonicalJson({ a: null })).not.toBe(canonicalJson(null));
+    expect(canonicalJsonForParity(null)).toBe("null");
+    expect(canonicalJsonForParity({ a: null })).not.toBe(canonicalJsonForParity(null));
   });
 
   it("does not collapse distinct values", () => {
-    expect(canonicalJson({ a: 1 })).not.toBe(canonicalJson({ a: 2 }));
-    expect(canonicalJson({ a: 1 })).not.toBe(canonicalJson({ b: 1 }));
-    expect(canonicalJson("1")).not.toBe(canonicalJson(1));
+    expect(canonicalJsonForParity({ a: 1 })).not.toBe(canonicalJsonForParity({ a: 2 }));
+    expect(canonicalJsonForParity({ a: 1 })).not.toBe(canonicalJsonForParity({ b: 1 }));
+    expect(canonicalJsonForParity("1")).not.toBe(canonicalJsonForParity(1));
   });
 });
 

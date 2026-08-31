@@ -3,7 +3,7 @@ import {
   canonicalJson,
   logicalKey,
   researchIdentityEncodingVersion,
-  sha256Canonical,
+  sha256CanonicalJson,
 } from "./identity.js";
 
 /**
@@ -124,7 +124,7 @@ describe("canonical-json-sha256-v1 golden pins (pre-relocation)", () => {
   });
 
   it("produces the recorded digest for the probe value", () => {
-    expect(sha256Canonical(PROBE)).toBe("5cf2a2a75f71b1e9f0adf904f11865978b7c8f05eba7434ce4abc2df0b8932bb");
+    expect(sha256CanonicalJson(PROBE)).toBe("5cf2a2a75f71b1e9f0adf904f11865978b7c8f05eba7434ce4abc2df0b8932bb");
   });
 
   it("keeps the scalar encodings that a rewrite would most plausibly change", () => {

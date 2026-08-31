@@ -142,7 +142,7 @@ function cohortOf(samples: readonly ParitySampleResult[]): ParityCohort {
  * parity failure and bury the real ones.
  */
 export function canonicalEventSetHash(entries: readonly Record<string, unknown>[]): string {
-  const canonical = entries.map((entry) => canonicalJson(entry)).sort();
+  const canonical = entries.map((entry) => canonicalJsonForParity(entry)).sort();
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -162,14 +162,14 @@ export function canonicalEventSetHash(entries: readonly Record<string, unknown>[
  * Arrays keep their order here -- element order can be meaningful. Sets whose order is an
  * implementation detail go through `canonicalEventSetHash`, which sorts them explicitly.
  */
-export function canonicalJson(value: unknown): string {
+export function canonicalJsonForParity(value: unknown): string {
   if (value === null || value === undefined) return "null";
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJsonForParity(item)).join(",")}]`;
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
     const body = Object.keys(record)
       .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJsonForParity(record[key])}`)
       .join(",");
     return `{${body}}`;
   }
@@ -196,7 +196,7 @@ function numericallyEqual(left: unknown, right: unknown): boolean {
     const scale = Math.max(1, Math.abs(left), Math.abs(right));
     return Math.abs(left - right) <= 1e-9 * scale;
   }
-  return canonicalJson(left ?? null) === canonicalJson(right ?? null);
+  return canonicalJsonForParity(left ?? null) === canonicalJsonForParity(right ?? null);
 }
 
 /**
@@ -277,8 +277,8 @@ export function compareConsumedState(
         mismatches.push({
           field: "indicator",
           detail: `${key}.${valueKey} differs`,
-          live: canonicalJson(liveValue.values[valueKey] ?? null),
-          reconstructed: canonicalJson(rebuiltValue.values[valueKey] ?? null),
+          live: canonicalJsonForParity(liveValue.values[valueKey] ?? null),
+          reconstructed: canonicalJsonForParity(rebuiltValue.values[valueKey] ?? null),
         });
       }
     }
@@ -328,8 +328,8 @@ export function compareConsumedState(
     ...Object.keys(reconstructed.legacyScoreGateByStrategy),
   ]);
   for (const strategy of gateStrategies) {
-    const liveGate = canonicalJson(live.legacyScoreGateByStrategy[strategy] ?? null);
-    const rebuiltGate = canonicalJson(reconstructed.legacyScoreGateByStrategy[strategy] ?? null);
+    const liveGate = canonicalJsonForParity(live.legacyScoreGateByStrategy[strategy] ?? null);
+    const rebuiltGate = canonicalJsonForParity(reconstructed.legacyScoreGateByStrategy[strategy] ?? null);
     if (liveGate !== rebuiltGate) {
       mismatches.push({
         field: "legacyScoreGate",

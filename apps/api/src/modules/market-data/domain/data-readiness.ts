@@ -232,15 +232,15 @@ export function assessSeries(
  * not depend on object-property insertion order, or two identical audits would
  * disagree about their own identity.
  */
-export function canonicalJson(value: unknown): string {
+export function canonicalJsonForReportHash(value: unknown): string {
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
+    return `[${value.map(canonicalJsonForReportHash).join(",")}]`;
   }
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, entryValue]) => entryValue !== undefined)
       .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJson(entryValue)}`).join(",")}}`;
+    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJsonForReportHash(entryValue)}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }

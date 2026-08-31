@@ -6,7 +6,7 @@ import {
   SEQUENCE_READINESS_REPORT_VERSION,
   assessSequenceCandidate,
   candidateKindForTimeframe,
-  canonicalJson,
+  canonicalJsonForReportHash,
   instrumentSemanticsFor,
   type SequenceCandidateAssessment,
   type SequenceCandidateKind,
@@ -136,7 +136,7 @@ export class AuditSequenceReadiness {
       anyResearchAuthorized: summary.PASS > 0,
     };
 
-    const reportHash = createHash("sha256").update(canonicalJson(report)).digest("hex");
+    const reportHash = createHash("sha256").update(canonicalJsonForReportHash(report)).digest("hex");
     const saved = await this.repository.saveReport(reportHash, report);
     return {
       reportId: saved.id,

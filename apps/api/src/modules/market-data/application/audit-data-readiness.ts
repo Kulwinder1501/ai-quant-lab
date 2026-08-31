@@ -11,7 +11,7 @@ import {
   DATA_READINESS_THRESHOLDS,
   REQUIRED_INDICATOR_CODES,
   assessSeries,
-  canonicalJson,
+  canonicalJsonForReportHash,
   longestSessionGapWeekdays,
   modalValue,
   weekdaysBetween,
@@ -151,7 +151,7 @@ export class AuditDataReadiness {
       summary,
     };
 
-    const reportHash = createHash("sha256").update(canonicalJson(report)).digest("hex");
+    const reportHash = createHash("sha256").update(canonicalJsonForReportHash(report)).digest("hex");
     const persisted = await this.repository.saveReport(reportHash, report);
     return { reportId: persisted.id, reportHash, createdAt: persisted.createdAt, report };
   }

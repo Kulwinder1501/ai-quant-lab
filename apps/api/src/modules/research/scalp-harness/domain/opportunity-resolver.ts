@@ -5,7 +5,7 @@ import {
   type ImmutableStrategyProposal,
   type MarketOpportunity,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 
 export interface PersistedProposal extends ImmutableStrategyProposal { readonly id: string }
 
@@ -53,7 +53,7 @@ export function resolveOpportunities(proposals: readonly PersistedProposal[], se
       groupingPolicyVersion,
       referencePolicyVersion,
     };
-    return { ...payload, payloadHash: sha256Canonical(payload) };
+    return { ...payload, payloadHash: sha256CanonicalJson(payload) };
   }).sort((left, right) => left.opportunityKey.localeCompare(right.opportunityKey));
 }
 

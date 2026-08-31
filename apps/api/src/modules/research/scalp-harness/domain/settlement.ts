@@ -12,7 +12,7 @@ import {
   type ResearchTerminalSettlement,
   type TerminalOutcome,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 import { horizonEligibility } from "./policies.js";
 
 /**
@@ -305,7 +305,7 @@ function observation(input: {
     input.subjectType, input.subjectId, settlementPolicyVersion, input.horizonMinutes,
   ]);
   const payload = { observationKey, ...base, ...values };
-  return { ...payload, payloadHash: sha256Canonical(payload) };
+  return { ...payload, payloadHash: sha256CanonicalJson(payload) };
 }
 
 export function settleResearchPath(input: {
@@ -351,7 +351,7 @@ export function settleResearchPath(input: {
           settlementPolicyVersion,
           settlementDefinitionHash,
         };
-        return { ...payload, payloadHash: sha256Canonical(payload) };
+        return { ...payload, payloadHash: sha256CanonicalJson(payload) };
       });
   if (!geometryIsValid) {
     const terminalSettlementKey = logicalKey("terminal-settlement", [
@@ -376,7 +376,7 @@ export function settleResearchPath(input: {
       settlementPolicyVersion,
       settlementDefinitionHash,
     };
-    return { observations, terminal: { ...payload, payloadHash: sha256Canonical(payload) } };
+    return { observations, terminal: { ...payload, payloadHash: sha256CanonicalJson(payload) } };
   }
   if (input.geometry.expiresAt.getTime() > input.sessionCloseAt.getTime()) {
     return { observations, terminal: null };
@@ -419,7 +419,7 @@ export function settleResearchPath(input: {
     settlementPolicyVersion,
     settlementDefinitionHash,
   };
-  return { observations, terminal: { ...payload, payloadHash: sha256Canonical(payload) } };
+  return { observations, terminal: { ...payload, payloadHash: sha256CanonicalJson(payload) } };
 }
 
 /** Primary scalar for Signal Edge. Ambiguous and engineering outcomes stay outside the estimate. */

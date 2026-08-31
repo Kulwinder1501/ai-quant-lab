@@ -1,6 +1,6 @@
 import type { DatabasePool, DatabaseQueryable } from "../database.js";
 import { matchingPolicyVersion } from "../../../modules/research/scalp-harness/domain/contracts.js";
-import { sha256Canonical } from "../../../modules/platform/identity/identity.js";
+import { sha256CanonicalJson } from "../../../modules/platform/identity/identity.js";
 
 /**
  * Reads the subjects a path study walks, and writes its two-phase execution ledger.
@@ -297,7 +297,7 @@ export class PostgresPathStudyRepository {
     storedPayloadHash: string;
     incomingPayloadHash: string;
   }> {
-    const payloadHash = sha256Canonical({
+    const payloadHash = sha256CanonicalJson({
       trialKey: result.trialKey,
       subjectsExamined: result.subjectsExamined,
       curve: result.curve,
@@ -315,7 +315,7 @@ export class PostgresPathStudyRepository {
       ON CONFLICT (trial_key) DO NOTHING
       RETURNING payload_hash
     `, [
-      sha256Canonical({ namespace: "study-trial-result", trialKey: result.trialKey }),
+      sha256CanonicalJson({ namespace: "study-trial-result", trialKey: result.trialKey }),
       result.trialKey,
       payloadHash,
       result.subjectsExamined,

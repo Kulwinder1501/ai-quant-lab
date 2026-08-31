@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DatabasePool } from "../database.js";
 import { buildStrategyDefinition } from "../../../modules/research/scalp-harness/domain/contracts.js";
-import { sha256Canonical } from "../../../modules/platform/identity/identity.js";
+import { sha256CanonicalJson } from "../../../modules/platform/identity/identity.js";
 import { IdempotencyPayloadConflictError, PostgresScalpResearchRepository } from "./postgres-scalp-research-repository.js";
 
 const definition = buildStrategyDefinition({
@@ -11,7 +11,7 @@ const definition = buildStrategyDefinition({
 
 describe("PostgresScalpResearchRepository idempotency", () => {
   it("returns the existing row for an identical retry", async () => {
-    const payloadHash = sha256Canonical(definition);
+    const payloadHash = sha256CanonicalJson(definition);
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: "existing", payload_hash: payloadHash }] });

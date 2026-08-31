@@ -4,7 +4,7 @@ import {
   calculateObservationHash,
   calculateObservationLogicalKey,
   encodeCanonical,
-  sha256Canonical,
+  sha256CanonicalBytes,
 } from "./canonical-hash.js";
 import type { AnyDetectedPattern, PatternDefinition, PatternLifecycleEvent } from "./contracts.js";
 import { lifecycleIdempotencyKey, validateInitialLifecycleEvent, validateNextLifecycleEvent } from "./lifecycle.js";
@@ -71,12 +71,12 @@ describe("Pattern Intelligence V1.0.1 foundation", () => {
     expect(Object.keys(nested).sort()).toEqual([
       "context", "definitionRef", "details", "geometry", "identity", "provenance", "source", "timing",
     ]);
-    expect(sealed.provenance.observationHash).toBe(sha256Canonical(nested));
+    expect(sealed.provenance.observationHash).toBe(sha256CanonicalBytes(nested));
 
     // The hoisted reading a second conforming implementation might have picked. It must differ -- if
     // these ever coincided the nesting choice would not be load-bearing and this pin would be empty.
     const { provenance: _dropped, ...withoutProvenance } = nested;
-    expect(sha256Canonical({ ...withoutProvenance, ...provenance })).not.toBe(sealed.provenance.observationHash);
+    expect(sha256CanonicalBytes({ ...withoutProvenance, ...provenance })).not.toBe(sealed.provenance.observationHash);
   });
 
   it("gives a storage key that survives a re-detection but separates genuinely different observations", () => {

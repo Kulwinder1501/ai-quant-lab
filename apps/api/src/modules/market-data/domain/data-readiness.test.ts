@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DATA_READINESS_THRESHOLDS,
   assessSeries,
-  canonicalJson,
+  canonicalJsonForReportHash,
   longestSessionGapWeekdays,
   modalValue,
   weekdaysBetween,
@@ -162,13 +162,13 @@ describe("assessSeries", () => {
   });
 });
 
-describe("canonicalJson", () => {
+describe("canonicalJsonForReportHash", () => {
   it("is insensitive to key insertion order", () => {
-    expect(canonicalJson({ b: 1, a: { d: 2, c: [3, { f: 4, e: 5 }] } }))
-      .toBe(canonicalJson({ a: { c: [3, { e: 5, f: 4 }], d: 2 }, b: 1 }));
+    expect(canonicalJsonForReportHash({ b: 1, a: { d: 2, c: [3, { f: 4, e: 5 }] } }))
+      .toBe(canonicalJsonForReportHash({ a: { c: [3, { e: 5, f: 4 }], d: 2 }, b: 1 }));
   });
 
   it("drops undefined properties like JSON.stringify does", () => {
-    expect(canonicalJson({ a: 1, b: undefined })).toBe("{\"a\":1}");
+    expect(canonicalJsonForReportHash({ a: 1, b: undefined })).toBe("{\"a\":1}");
   });
 });

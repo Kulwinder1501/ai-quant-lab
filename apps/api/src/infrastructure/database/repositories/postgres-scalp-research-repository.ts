@@ -14,7 +14,7 @@ import {
 } from "../../../modules/research/scalp-harness/domain/contracts.js";
 import { controlMatchKey } from "../../../modules/research/scalp-harness/domain/matched-controls.js";
 import { opportunityMembershipKey } from "../../../modules/research/scalp-harness/domain/opportunity-resolver.js";
-import { logicalKey, sha256Canonical } from "../../../modules/platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../modules/platform/identity/identity.js";
 
 interface ImmutableRow extends QueryResultRow { id: string; payload_hash: string }
 
@@ -61,7 +61,7 @@ export class PostgresScalpResearchRepository {
   }
 
   async saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string> {
-    const payloadHash = sha256Canonical(definition);
+    const payloadHash = sha256CanonicalJson(definition);
     return insertImmutable({
       client: this.database,
       insertSql: `
@@ -119,7 +119,7 @@ export class PostgresScalpResearchRepository {
       });
       for (const proposalId of opportunity.proposalIds) {
         const membershipKey = opportunityMembershipKey(id, proposalId);
-        const payloadHash = sha256Canonical({ membershipKey, opportunityId: id, proposalId });
+        const payloadHash = sha256CanonicalJson({ membershipKey, opportunityId: id, proposalId });
         await insertImmutable({
           client,
           insertSql: `INSERT INTO research_scalp.opportunity_memberships
@@ -163,7 +163,7 @@ export class PostgresScalpResearchRepository {
     await this.transaction(async (client) => {
       for (const controlPointId of input.controlPointIds) {
         const key = controlMatchKey(input.opportunityId, controlPointId);
-        const stablePayloadHash = sha256Canonical({
+        const stablePayloadHash = sha256CanonicalJson({
           controlMatchKey: key,
           opportunityId: input.opportunityId,
           controlPointId,
@@ -294,7 +294,7 @@ export class PostgresScalpResearchRepository {
   }): Promise<string> {
     const eventKey = logicalKey("event", [input.entityId, input.eventType, input.policyVersion,
       input.logicalEventAt, input.causationId]);
-    const payloadHash = sha256Canonical({ eventKey, ...input });
+    const payloadHash = sha256CanonicalJson({ eventKey, ...input });
     return insertImmutable({
       client: this.database,
       insertSql: `INSERT INTO research_scalp.events

@@ -1,6 +1,6 @@
 import type { RiskDecision, VolatilityRegimeEvidence } from "../../../risk-management/domain/risk.js";
 import type { StrategyMarketContext, TradeSide } from "../../../strategy-engine/domain/strategy.js";
-import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 
 export const scalpHarnessVersion = "scalp-research-harness-v1.3.1";
 export const referencePolicyVersion = "REFERENCE_1M_CLOSE_V1";
@@ -425,5 +425,5 @@ export function buildProposal(input: {
     nativeGeometry: input.nativeGeometry,
     rawContext: input.rawContext,
   };
-  return { ...payload, payloadHash: sha256Canonical(payload) };
+  return { ...payload, payloadHash: sha256CanonicalJson(payload) };
 }

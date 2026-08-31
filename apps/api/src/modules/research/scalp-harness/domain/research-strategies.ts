@@ -23,7 +23,7 @@ import {
   type ResearchControlPoint,
   type ResearchStrategyDefinition,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
 import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
 
@@ -391,6 +391,6 @@ export function buildControlPoints(
       ineligibleReason,
       controlPolicyVersion: frozenControlPolicyVersion,
     };
-    return { ...payload, payloadHash: sha256Canonical(payload) };
+    return { ...payload, payloadHash: sha256CanonicalJson(payload) };
   });
 }

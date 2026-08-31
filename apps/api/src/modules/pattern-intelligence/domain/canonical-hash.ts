@@ -8,7 +8,7 @@ import type { AnyDetectedPattern } from "./contracts.js";
  *
  * The repository already has three JSON-based canonicalizers —
  * `market-data/domain/data-readiness.ts`, `research/scalp-harness/domain/live-backfill-parity.ts`,
- * and `research/scalp-harness/domain/identity.ts`, the last exporting `sha256Canonical` and
+ * and `research/scalp-harness/domain/identity.ts`, the last exporting `sha256CanonicalBytes` and
  * `logicalKey` under `researchIdentityEncodingVersion = "canonical-json-sha256-v1"`. This is a
  * fourth, in a different format. That is deliberate, and stated here so a later reader does not
  * "consolidate" it as accidental duplication.
@@ -125,7 +125,7 @@ export function encodeCanonical(value: unknown): Buffer {
   throw new Error(`Unsupported canonical value type: ${typeof value}.`);
 }
 
-export function sha256Canonical(value: unknown): string {
+export function sha256CanonicalBytes(value: unknown): string {
   return createHash("sha256").update(encodeCanonical(value)).digest("hex");
 }
 
@@ -144,7 +144,7 @@ function observationHashPayload(observation: AnyDetectedPattern): Record<string,
 }
 
 export function calculateObservationHash(observation: AnyDetectedPattern): string {
-  return sha256Canonical(observationHashPayload(observation));
+  return sha256CanonicalBytes(observationHashPayload(observation));
 }
 
 /**
@@ -170,7 +170,7 @@ export function calculateObservationHash(observation: AnyDetectedPattern): strin
  * backfill pass and a live pass over the same bar must collide, which is the entire point.
  */
 export function calculateObservationLogicalKey(observation: AnyDetectedPattern): string {
-  return sha256Canonical({
+  return sha256CanonicalBytes({
     exchange: observation.source.exchange,
     underlying: observation.source.underlying,
     instrumentType: observation.source.instrumentType,
@@ -198,5 +198,5 @@ export function calculateConfigHash(profileCalculationConfig: object, tpoConfig:
 
 export function calculateDefinitionHash(definition: object): string {
   const { definitionHash: _definitionHash, ...payload } = definition as Record<string, unknown>;
-  return sha256Canonical(payload);
+  return sha256CanonicalBytes(payload);
 }

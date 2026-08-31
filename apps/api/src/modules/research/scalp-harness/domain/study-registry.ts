@@ -1,4 +1,4 @@
-import { sha256Canonical } from "../../../platform/identity/identity.js";
+import { sha256CanonicalJson } from "../../../platform/identity/identity.js";
 import { canonicalFrictionRungsBps } from "./canonical-friction.js";
 import { matchedControlCount, matchedControlMinuteCaliper } from "./matched-controls.js";
 
@@ -439,7 +439,7 @@ export const registeredStudies: readonly StudyDefinition[] = [
  * it produced.
  */
 export function studyDefinitionHash(definition: StudyDefinition): string {
-  return sha256Canonical({
+  return sha256CanonicalJson({
     encoding: studyRegistryEncodingVersion,
     studyKey: definition.studyKey,
     question: definition.question,

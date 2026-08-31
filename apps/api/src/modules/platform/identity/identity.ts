@@ -33,14 +33,14 @@ export function canonicalJson(value: unknown): string {
   return `{${entries.join(",")}}`;
 }
 
-export function sha256Canonical(value: unknown): string {
+export function sha256CanonicalJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
 }
 
 /** Object encoding is intentional: it cannot collide because one field contained a separator. */
 export function logicalKey(namespace: string, fields: readonly unknown[]): string {
   if (namespace.trim().length === 0) throw new Error("A logical-key namespace is required.");
-  return sha256Canonical({ encoding: researchIdentityEncodingVersion, namespace, fields });
+  return sha256CanonicalJson({ encoding: researchIdentityEncodingVersion, namespace, fields });
 }
 
 export function assertSha256(value: string, field: string): void {

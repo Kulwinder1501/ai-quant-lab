@@ -9,7 +9,7 @@ import {
   type ResearchRiskSubject,
   type RiskSubjectType,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
+import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 
 export function buildRiskSnapshot(input: {
   accountId: string;
@@ -35,7 +35,7 @@ export function buildRiskSnapshot(input: {
     state: input.state,
     riskSnapshotPolicyVersion,
   };
-  return { ...payload, payloadHash: sha256Canonical(payload) };
+  return { ...payload, payloadHash: sha256CanonicalJson(payload) };
 }
 
 export function buildRiskSubject(input: {
@@ -53,7 +53,7 @@ export function buildRiskSubject(input: {
   ]);
   if (input.sessionCloseAt.getTime() < input.decisionAt.getTime()) throw new Error("Risk subject session cannot close before decisionAt.");
   const payload = { riskSubjectKey, ...input };
-  return { ...payload, payloadHash: sha256Canonical(payload) };
+  return { ...payload, payloadHash: sha256CanonicalJson(payload) };
 }
 
 export function evaluateResearchRisk(input: {
@@ -90,5 +90,5 @@ export function evaluateResearchRisk(input: {
     riskPolicyVersion: researchRiskPolicyVersion,
     decision,
   };
-  return { ...payload, payloadHash: sha256Canonical(payload) };
+  return { ...payload, payloadHash: sha256CanonicalJson(payload) };
 }

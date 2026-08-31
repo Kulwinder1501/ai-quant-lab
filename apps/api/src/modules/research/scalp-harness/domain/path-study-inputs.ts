@@ -1,6 +1,6 @@
 import { walkBarrierFreePath, type BarrierFreePathResult } from "./barrier-free-path.js";
 import type { PathContrastUnit } from "./directional-information-curve.js";
-import { sha256Canonical } from "../../../platform/identity/identity.js";
+import { sha256CanonicalJson } from "../../../platform/identity/identity.js";
 
 /**
  * Dataset identity for a path-study trial, and the assembly of the units it walks.
@@ -61,7 +61,7 @@ export interface PathStudySubjectInput {
  * rather than a dataset.
  */
 export function sessionSetHash(sessionIds: readonly string[]): string {
-  return sha256Canonical({
+  return sha256CanonicalJson({
     namespace: "path-study-session-set",
     sessions: [...new Set(sessionIds)].sort(),
   });
@@ -75,7 +75,7 @@ export function sessionSetHash(sessionIds: readonly string[]): string {
  * a decision's volatility scale can change under a trial that has already run. Both now move the dataset
  * identity instead of moving the result silently.
  *
- * Prices are stringified through `sha256Canonical`'s number handling rather than rounded, so a repair
+ * Prices are stringified through `sha256CanonicalJson`'s number handling rather than rounded, so a repair
  * that alters a bar in the sixth decimal still registers. That is the right sensitivity: the point is to
  * detect that the input differs, not to judge whether the difference was material.
  */
@@ -89,7 +89,7 @@ export function inputSnapshotHash(input: {
     referencePrice: item.referencePrice,
     atr: item.atr,
   });
-  return sha256Canonical({
+  return sha256CanonicalJson({
     namespace: "path-study-input-snapshot",
     // Sorted by a stable key so the digest cannot move on row order out of the database.
     subjects: [...input.subjects]

@@ -9,7 +9,7 @@
  * a gate pass as a free lunch.
  */
 
-import { canonicalJson, type SeriesState } from "./data-readiness.js";
+import { canonicalJsonForReportHash, type SeriesState } from "./data-readiness.js";
 
 export const SEQUENCE_READINESS_REPORT_VERSION = "sequence-readiness-v1";
 
@@ -220,4 +220,4 @@ export function assessSequenceCandidate(
   return { verdict, findings, thresholds, measurements };
 }
 
-export { canonicalJson };
+export { canonicalJsonForReportHash };
