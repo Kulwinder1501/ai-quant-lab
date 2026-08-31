@@ -3,7 +3,7 @@ import {
   frozenTapeIdenticalBarThreshold,
   type TapeBar,
   type TapeLivenessAssessment,
-} from "../domain/tape-liveness.js";
+} from "../../../market-data/domain/tape-liveness.js";
 
 /**
  * Reads the bars preceding a decision so the tape test can be applied.

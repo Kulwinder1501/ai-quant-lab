@@ -64,7 +64,7 @@ export interface DetectPatternIntelligenceResult {
    */
   candidatesRefusedBeforeWarmup: number;
   candidatesRefusedOutsideSession: number;
-  /** Candidates anchored to a bar reporting neither price movement nor volume. See `isStaleBar`. */
+  /** Candidates anchored to a bar that republished the previous print, or reported nothing. See `isStaleBar`. */
   candidatesRefusedStaleBar: number;
   /** Candidates refused because no frozen PatternDefinition backs them — a registry misconfiguration. */
   candidatesRefusedUnregistered: number;
@@ -137,6 +137,10 @@ export class DetectPatternIntelligence {
     const configVersion = input.configVersion ?? "1.0.0";
     const configHash = input.configHash ?? "0".repeat(64);
 
+    // Nominal bar spacing, for the contiguity half of the frozen-tape test in `isStaleBar`. Hoisted
+    // because it is a constant of the whole run, not of a candidate.
+    const barIntervalMs = timeframeDurationMs(source.timeframe);
+
     const detectedObservations: { observation: AnyDetectedPattern; initialEvent: PatternLifecycleEvent }[] = [];
 
     // Helper to construct, validate, and queue an observation
@@ -178,15 +182,22 @@ export class DetectPatternIntelligence {
       }
 
       /*
-       * A bar that reports neither price movement nor participation is not an observation.
+       * A bar that republished the previous print, or reported nothing at all, is not an observation.
        *
        * The index feed freezes for 15:16-15:29 IST daily from 2026-08-03, emitting bars whose OHLC
-       * are one repeated constant at zero volume. The volume guard nulls the volume statistics on
-       * those, but the structural families kept emitting — chiefly COMPRESSION_EXPANSION, because a
-       * flat bar is trivially an inside bar, so a run of them manufactures inside-bar chains out of
-       * a stalled feed. See `bar-integrity.ts`.
+       * are one repeated constant. The volume guard nulls the volume statistics on those, but the
+       * structural families kept emitting — chiefly COMPRESSION_EXPANSION, because a flat bar is
+       * trivially an inside bar, so a run of them manufactures inside-bar chains out of a stalled
+       * feed.
+       *
+       * The predecessor is threaded in because the freeze no longer carries zero volume: the feed now
+       * stamps constituent volume on the pinned price, so only value repetition can detect it. See
+       * `bar-integrity.ts`.
        */
-      if (isStaleBar(detectedCandle)) {
+      if (isStaleBar(detectedCandle, {
+        previous: candles[detectedIndex - 1] ?? null,
+        intervalMs: barIntervalMs,
+      })) {
         candidatesRefusedStaleBar++;
         return;
       }
