@@ -3,7 +3,7 @@ import {
   type MarketOpportunity,
   type ResearchControlPoint,
 } from "./contracts.js";
-import { logicalKey } from "./identity.js";
+import { logicalKey } from "../../../platform/identity/identity.js";
 
 export const matchedControlCount = 5;
 export const matchedControlMinuteCaliper = 15;

@@ -25,7 +25,7 @@ import {
   simultaneousHorizonBand,
 } from "../../modules/research/scalp-harness/domain/simultaneous-horizon-band.js";
 import { cohortKeyOf } from "../../modules/research/scalp-harness/domain/estimators.js";
-import { logicalKey } from "../../modules/research/scalp-harness/domain/identity.js";
+import { logicalKey } from "../../modules/platform/identity/identity.js";
 import { studyCodeVersion } from "../../modules/research/scalp-harness/domain/study-code-version.js";
 import {
   cellGateStanding,

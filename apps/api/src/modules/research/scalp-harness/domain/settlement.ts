@@ -12,7 +12,7 @@ import {
   type ResearchTerminalSettlement,
   type TerminalOutcome,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "./identity.js";
+import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
 import { horizonEligibility } from "./policies.js";
 
 /**

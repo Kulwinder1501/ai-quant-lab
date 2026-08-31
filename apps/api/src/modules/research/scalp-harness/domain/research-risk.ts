@@ -9,7 +9,7 @@ import {
   type ResearchRiskSubject,
   type RiskSubjectType,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "./identity.js";
+import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
 
 export function buildRiskSnapshot(input: {
   accountId: string;

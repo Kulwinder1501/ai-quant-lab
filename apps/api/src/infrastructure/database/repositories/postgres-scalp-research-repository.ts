@@ -14,7 +14,7 @@ import {
 } from "../../../modules/research/scalp-harness/domain/contracts.js";
 import { controlMatchKey } from "../../../modules/research/scalp-harness/domain/matched-controls.js";
 import { opportunityMembershipKey } from "../../../modules/research/scalp-harness/domain/opportunity-resolver.js";
-import { logicalKey, sha256Canonical } from "../../../modules/research/scalp-harness/domain/identity.js";
+import { logicalKey, sha256Canonical } from "../../../modules/platform/identity/identity.js";
 
 interface ImmutableRow extends QueryResultRow { id: string; payload_hash: string }
 

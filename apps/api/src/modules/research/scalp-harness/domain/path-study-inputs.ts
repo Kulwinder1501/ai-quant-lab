@@ -1,6 +1,6 @@
 import { walkBarrierFreePath, type BarrierFreePathResult } from "./barrier-free-path.js";
 import type { PathContrastUnit } from "./directional-information-curve.js";
-import { sha256Canonical } from "./identity.js";
+import { sha256Canonical } from "../../../platform/identity/identity.js";
 
 /**
  * Dataset identity for a path-study trial, and the assembly of the units it walks.

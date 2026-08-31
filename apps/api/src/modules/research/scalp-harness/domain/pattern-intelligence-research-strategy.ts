@@ -7,7 +7,7 @@ import {
   type ImmutableStrategyProposal,
   type ResearchStrategyDefinition,
 } from "./contracts.js";
-import { sha256Canonical } from "./identity.js";
+import { sha256Canonical } from "../../../platform/identity/identity.js";
 import type { ResearchStrategyAdapter } from "./research-strategies.js";
 
 /**

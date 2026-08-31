@@ -28,6 +28,19 @@ import {
  * This file travels with the implementation. If it is ever separated from `identity.ts`, the pin is
  * worthless.
  *
+ * ## Relocation outcome
+ *
+ * The move out of `modules/research/scalp-harness/domain/` into `modules/platform/identity/` is done
+ * and these pins passed unchanged at the new location. Two further pieces of evidence were recorded
+ * for the D1 gate, because a passing fixture alone would not have settled it:
+ *
+ * - `git` reports the move as **R100** on all three files — byte-identical content, not merely a
+ *   test that happens to agree.
+ * - 1,500 keys already persisted by the pre-move code (500 each of `proposalKey`, `controlPointKey`
+ *   and `opportunityKey`) were recomputed through the relocated module with **zero mismatches**. That
+ *   covers every date, direction and policy-version string actually in use, which a fixture chosen
+ *   today cannot.
+ *
  * ## Known constraint: the digest depends on the runtime's collation, not only on this source
  *
  * `canonicalJson` sorts object keys with `String.prototype.localeCompare`, which is ICU-backed and

@@ -5,7 +5,7 @@ import {
   type ImmutableStrategyProposal,
   type MarketOpportunity,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "./identity.js";
+import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
 
 export interface PersistedProposal extends ImmutableStrategyProposal { readonly id: string }
 

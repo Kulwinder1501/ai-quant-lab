@@ -1,4 +1,4 @@
-import { sha256Canonical } from "./identity.js";
+import { sha256Canonical } from "../../../platform/identity/identity.js";
 import { canonicalFrictionRungsBps } from "./canonical-friction.js";
 import { matchedControlCount, matchedControlMinuteCaliper } from "./matched-controls.js";
 

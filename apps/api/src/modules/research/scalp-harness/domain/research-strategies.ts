@@ -23,7 +23,7 @@ import {
   type ResearchControlPoint,
   type ResearchStrategyDefinition,
 } from "./contracts.js";
-import { logicalKey, sha256Canonical } from "./identity.js";
+import { logicalKey, sha256Canonical } from "../../../platform/identity/identity.js";
 import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
 import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
 
