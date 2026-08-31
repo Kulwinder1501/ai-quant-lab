@@ -14,7 +14,7 @@ export const gridPolicyVersion = "GRID_POLICY_V1";
  *
  * V1 read "canonical ATR exists". V2 reads "every 1m indicator the research strategies consume
  * exists, and the candlestick and price-action layers have been computed for this bar". V3 adds
- * "and the tape was moving": see `tape-liveness.ts`, which measures that the index feed republishes
+ * "and the tape was moving": see `market-data/domain/tape-liveness.ts`, which measures that the index feed republishes
  * one price from the 15:16 bar to the close, so a V2-eligible point may sit on fourteen minutes of
  * repeated tape. Points stamped V1, V2 and V3 are not comparable with each other, and this string is
  * what lets an estimator refuse to pool them.

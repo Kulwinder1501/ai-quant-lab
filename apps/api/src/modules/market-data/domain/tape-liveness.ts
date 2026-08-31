@@ -43,9 +43,24 @@
  * The calibration is on index 1m bars. An illiquid single stock could legitimately print identical
  * consecutive minutes, so the threshold is exported rather than inlined: a caller extending this
  * beyond the indices must re-measure before trusting the default.
+ *
+ * ## Why this lives in `market-data/domain` rather than beside its first caller
+ *
+ * It was written for `research/scalp-harness`, which was its only consumer. `pattern-intelligence`
+ * then needed the identical test — its `bar-integrity.ts` had been guarding the same freeze with a
+ * `zero range AND zero volume` conjunction, which the feed silently defeated once it began stamping
+ * constituent volume on the pinned price. Research internals are not importable from a production
+ * module, so the choice was to duplicate the rule or to move it somewhere both may read.
+ *
+ * It moved. A duplicated staleness rule is the worst outcome available here: the two copies would be
+ * calibrated once, together, and then drift apart on the next feed change, leaving two modules
+ * disagreeing about whether the same bar was real. `market-data/domain` is the right home on the
+ * merits as well — "was this bar a genuine print" is a fact about the feed, not about either
+ * consumer, and this module imports nothing from any other, so neither consumer acquires a cycle.
  */
 
-export type ResearchTapeLiveness = "LIVE" | "FROZEN";
+/** Whether a bar series was moving, or republishing a price it had already printed. */
+export type TapeLiveness = "LIVE" | "FROZEN";
 
 /**
  * Versioned because it changes what a control point asserts, and reported so a capture run says
@@ -60,6 +75,13 @@ export type ResearchTapeLiveness = "LIVE" | "FROZEN";
  * > if this rule or `frozenTapeIdenticalBarThreshold` changes, `controlPolicyVersion` MUST change.
  *
  * -- so a control point's population version stays sufficient to say what its eligibility meant.
+ *
+ * This is scalp-research governance sitting in a market-data file, and it stays here on purpose. The
+ * obligation above is only useful to someone editing the rule, so it has to be readable from where
+ * the rule is; filed in the research module it would be an instruction nobody changing the threshold
+ * ever sees. `pattern-intelligence` reads `assessTapeLiveness` and does not import this constant, so
+ * the obligation above binds the research population only -- it is not a claim that every consumer
+ * of the rule is versioned by it.
  */
 export const tapeLivenessPolicyVersion = "TAPE_LIVENESS_V1";
 
@@ -75,7 +97,7 @@ export interface TapeBar {
 }
 
 export interface TapeLivenessAssessment {
-  readonly liveness: ResearchTapeLiveness;
+  readonly liveness: TapeLiveness;
   /**
    * Length of the trailing run of OHLC-identical, time-contiguous bars, counting the reference bar.
    *

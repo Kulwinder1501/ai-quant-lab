@@ -8,7 +8,7 @@ import { PostgresScalpResearchRepository } from "../../infrastructure/database/r
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
-import { tapeLivenessPolicyVersion } from "../../modules/research/scalp-harness/domain/tape-liveness.js";
+import { tapeLivenessPolicyVersion } from "../../modules/market-data/domain/tape-liveness.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { getOption } from "./arguments.js";
 import { requireIsolatedResearchDatabaseUrl } from "./scalp-research-database.js";

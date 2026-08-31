@@ -17,7 +17,7 @@ import {
   researchScalpStrategies,
   type ResearchFeatureCoverage,
 } from "../domain/research-strategies.js";
-import type { ResearchTapeLiveness } from "../domain/tape-liveness.js";
+import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
 
 export interface ScalpResearchWritePort {
   saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string>;
@@ -77,7 +77,7 @@ export class CaptureScalpResearchDecision {
      * a fact about the bar series, which `StrategyMarketContext` does not carry. See
      * `resolve-tape-liveness.ts`.
      */
-    tapeLiveness: ResearchTapeLiveness;
+    tapeLiveness: TapeLiveness;
   }): Promise<CaptureResearchDecisionResult> {
     if (input.reference1mContext.candle.timeframe !== "1m") throw new Error("Capture requires a canonical 1m reference context.");
     const decisionAt = input.reference1mContext.candle.closeTime;

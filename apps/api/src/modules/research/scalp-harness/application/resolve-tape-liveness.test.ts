@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveTapeLiveness, type TapeBarReader } from "./resolve-tape-liveness.js";
-import type { TapeBar } from "../domain/tape-liveness.js";
+import type { TapeBar } from "../../../market-data/domain/tape-liveness.js";
 
 const MINUTE = 60_000;
 const referenceCloseTime = new Date("2026-08-31T09:46:00.000Z");

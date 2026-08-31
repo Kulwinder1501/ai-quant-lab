@@ -175,10 +175,38 @@ describe("DetectPatternIntelligence Application Service", () => {
     }
   });
 
+  it("refuses to emit on a frozen bar even when the feed stamps volume on the pinned price", async () => {
+    const definitions = new StaticPatternDefinitionRegistry();
+    const ledger = new InMemoryPatternObservationLedger();
+    const service = new DetectPatternIntelligence({ definitions, ledger, coverage: new InMemoryPatternCoverageRecorder() });
+
+    // The same freeze as the test above, in the shape the feed actually emits since 2026-08-31: the
+    // pinned block carries large constituent volume rather than zeros. The `zero range AND zero
+    // volume` conjunction admitted all of these -- on NIFTY50 1m it refused 4 of 13 frozen bars and
+    // let 9 through, and they were recorded. Value repetition is volume-blind, so it catches them.
+    const candles: CandleLike[] = [];
+    for (let i = 0; i < 20; i++) {
+      candles.push(barAt(i, { open: 24500 + i, high: 24530 + i, low: 24480 + i, close: 24520 + i, volume: 1000 + i }));
+    }
+    for (let i = 20; i < 30; i++) {
+      candles.push(barAt(i, { open: 24540, high: 24540, low: 24540, close: 24540, volume: 125_958_451 }));
+    }
+
+    const result = await service.execute({ candles, source: makeSource() });
+
+    expect(result.candidatesRefusedStaleBar).toBeGreaterThan(0);
+    for (const o of result.observations) {
+      const index = candles.findIndex((c) => c.openTime.getTime() === o.timing.detectedAt.getTime());
+      // Index 20 is the freeze onset -- flat, but not yet a repeat of anything -- so it is admitted
+      // by design, exactly as the first bar of any run is. Everything after it must be refused.
+      expect(index).toBeLessThanOrEqual(20);
+    }
+  });
+
   it("keeps a zero-range bar that carries real volume, and a moving bar whose volume dropped out", async () => {
-    // Both are genuine observations and must survive: the staleness rule needs BOTH signals absent.
-    // A volume-only dropout (2026-07-23) has trustworthy prices; a zero-range bar on real volume is
-    // a real, if dull, print. Only the freeze -- flat AND zero volume -- reports nothing at all.
+    // Both are genuine observations and must survive. A volume-only dropout (2026-07-23) has
+    // trustworthy prices; an isolated zero-range bar on real volume is a real, if dull, print. The
+    // full matrix, including the frozen-with-volume case, is in `domain/bar-integrity.test.ts`.
     const { isStaleBar } = await import("../domain/bar-integrity.js");
     const at = new Date("2026-08-25T06:00:00.000Z");
     expect(isStaleBar({ openTime: at, open: 24540, high: 24540, low: 24540, close: 24540, volume: 5000 })).toBe(false);

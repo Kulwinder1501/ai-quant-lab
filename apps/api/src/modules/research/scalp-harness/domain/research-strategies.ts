@@ -25,7 +25,7 @@ import {
 } from "./contracts.js";
 import { logicalKey, sha256Canonical } from "./identity.js";
 import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
-import type { ResearchTapeLiveness } from "./tape-liveness.js";
+import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
 
 export interface ResearchStrategyAdapter {
   readonly definition: ResearchStrategyDefinition;
@@ -325,7 +325,7 @@ function indicatorPresent(
 export function controlIneligibleReason(
   context: StrategyMarketContext,
   featureCoverage: ResearchFeatureCoverage,
-  tapeLiveness: ResearchTapeLiveness,
+  tapeLiveness: TapeLiveness,
 ): string | null {
   /*
    * A frozen tape outranks everything below it.
@@ -359,7 +359,7 @@ export function buildControlPoints(
   context: StrategyMarketContext,
   sessionCloseAt: Date,
   featureCoverage: ResearchFeatureCoverage,
-  tapeLiveness: ResearchTapeLiveness,
+  tapeLiveness: TapeLiveness,
 ): ResearchControlPoint[] {
   if (context.candle.timeframe !== "1m") throw new Error("GRID_POLICY_V1 controls require a 1m context.");
   const decisionAt = context.candle.closeTime;
