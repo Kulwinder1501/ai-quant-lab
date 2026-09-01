@@ -141,6 +141,44 @@ describe("autonomous-v2 quarantine", () => {
     expect(violations, `quarantined patterns in autonomous-v2:\n  ${violations.join("\n  ")}`).toEqual([]);
   });
 
+  it("keeps outcomes out of the decision plane (I27)", () => {
+    /*
+     * I27: post-decision outcomes cannot flow into the originating or live decision plane. The rule is
+     * *directional* -- an outcome legitimately names the decision it measures, and the decision must
+     * never be able to read the outcome.
+     *
+     * That direction is the one that gets reversed by accident, because it always looks like an
+     * improvement: a thesis stage that could see how similar decisions turned out would obviously be
+     * better informed. It would also be reading the future, and V1 has the scar -- the migration map
+     * sends "post-outcome feedback into decision path" to DELETE FROM V2 rather than to an adapter.
+     *
+     * Checked by walking the import graph out of each decision-plane file, so an indirect path through
+     * a helper is caught too.
+     */
+    const decisionPlane = sourceFilesBelow(MODULE_ROOT)
+      .filter((file) => /decision-[a-z-]+\.ts$/.test(file.replace(/\\/g, "/")));
+    expect(decisionPlane.length, "expected decision-plane files to exist").toBeGreaterThanOrEqual(4);
+
+    const visited = new Set<string>();
+    const violations: string[] = [];
+    const walk = (file: string, trail: readonly string[]): void => {
+      if (visited.has(file)) return;
+      visited.add(file);
+      const relative = file.slice(SOURCE_ROOT.length + 1).replace(/\\/g, "/");
+      if (relative.includes("outcome-layers")) {
+        violations.push([...trail, `${relative}  <-- outcome reached from the decision plane`].join(" -> "));
+        return;
+      }
+      for (const next of importsOf(file)) walk(next, [...trail, relative]);
+    };
+    for (const seed of decisionPlane) walk(seed, []);
+
+    expect(
+      violations,
+      `the decision plane reaches an outcome module (I27): ${violations.join(" | ")}`,
+    ).toEqual([]);
+  });
+
   it("detects a violation when one is present, rather than passing by construction", () => {
     /*
      * The patterns are only worth anything if they match. Checked against V1 itself, which is the
