@@ -83,6 +83,7 @@ import { scalpResearchTrialDatasetIdentityMigration } from "./082-scalp-research
 import { scalpResearchTrialInferenceMigration } from "./083-scalp-research-trial-inference.js";
 import { patternIntelligenceObservationsMigration } from "./084-pattern-intelligence-observations.js";
 import { patternObservationFrozenTapeMigration } from "./085-pattern-observation-frozen-tape.js";
+import { decisionSnapshotsMigration } from "./086-decision-snapshots.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -170,4 +171,5 @@ export const migrations = [
   scalpResearchTrialInferenceMigration,
   patternIntelligenceObservationsMigration,
   patternObservationFrozenTapeMigration,
+  decisionSnapshotsMigration,
 ];
