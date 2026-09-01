@@ -19,13 +19,16 @@ export const gridPolicyVersion = "GRID_POLICY_V1";
  * repeated tape. Points stamped V1, V2 and V3 are not comparable with each other, and this string is
  * what lets an estimator refuse to pool them.
  *
- * > Nothing currently enforces that refusal. `matchControls` filters on `sampleEligible` and the
- * > within-session predicates, never on this string, so a matched set drawn across a bump is
- * > silently heterogeneous. That hole predates V3 -- `control_points` already holds both V1 and V2
- * > rows, and 404 of 1,881 opportunities are still unmatched as of 2026-08-31, so they would be
- * > matched under whatever rule is in force when the matcher next reaches them. Closing it means
- * > deciding which population to keep, which is a research call and not a refactor; it is recorded
- * > here rather than fixed silently.
+ * That refusal is now enforced. `matchControls` refuses a matched set whose eligible pool spans more
+ * than one declared version, with the reason `MIXED_CONTROL_POLICY_VERSION` -- it refuses rather than
+ * choosing, because the matcher has no basis for preferring a version and silently picking the larger
+ * group would produce a baseline nobody selected.
+ *
+ * It cost nothing, which is why homogeneity was the right rule rather than filtering to the current
+ * version. Measured 2026-09-01: no session mixes versions (V1 is 2026-08-24 alone, V2 every session
+ * after), matching is within-session, **0 of 1,822 stored matched sets are mixed**, and of the 468
+ * still-unmatched opportunities **0 would be refused** while all 468 keep a pool of at least five.
+ * Filtering to the current version, by contrast, would have starved every one of them.
  */
 export const controlPolicyVersion = "MATCHED_CONTROL_POPULATION_V3";
 export const matchingPolicyVersion = "MATCHED_CONTROL_N5_V1";

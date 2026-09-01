@@ -39,3 +39,83 @@ describe("outcome-blind matched controls", () => {
     expect(result).toMatchObject({ commonSupport: false, reason: "INSUFFICIENT_COMMON_SUPPORT", controlIds: [] });
   });
 });
+
+describe("matched-control population homogeneity (D4)", () => {
+  const homogeneous = () => Array.from({ length: 8 }, (_, index) => control(index));
+
+  it("is a no-op when every eligible control shares one population version", () => {
+    /*
+     * The claim this rule rests on. `controlPolicyVersion` was persisted on every control point and
+     * enforced by nothing; adding enforcement is only safe if it changes nothing on the population
+     * that exists.
+     *
+     * Measured before it was added: no session mixes versions (V1 is 2026-08-24 alone, V2 every session
+     * after), matching is within-session, and 0 of 1,822 stored matched sets are mixed. This asserts the
+     * same property at unit level, so a future change that quietly starts filtering by version -- rather
+     * than by homogeneity -- fails here.
+     */
+    const controls = homogeneous();
+    const result = matchControls({
+      opportunity, selectedVolatilityRegime: "LOW_VOL", controls, treatedDecisionKeys: new Set(),
+    });
+
+    expect(result.commonSupport).toBe(true);
+    expect(result.reason).toBe("MATCHED");
+    expect(result.controlIds).toHaveLength(5);
+  });
+
+  it("refuses a pool spanning two population versions rather than choosing one", () => {
+    /*
+     * Each version widened what `sampleEligible` asserts -- V1 read "canonical ATR exists", V2 "every
+     * consumed 1m indicator plus both feature layers", V3 adds "and the tape was moving" -- so a set
+     * drawn across a boundary compares points admitted under different rules and its baseline is not one
+     * population.
+     *
+     * Refusing rather than picking the larger group: the matcher has no basis for preferring a version,
+     * and silently choosing would produce a baseline nobody selected.
+     */
+    const controls = homogeneous().map((item, index) => (
+      index < 3 ? { ...item, controlPolicyVersion: "MATCHED_CONTROL_POPULATION_V2:GRID_POLICY_V1" } : item
+    ));
+
+    const result = matchControls({
+      opportunity, selectedVolatilityRegime: "LOW_VOL", controls, treatedDecisionKeys: new Set(),
+    });
+
+    expect(result.commonSupport).toBe(false);
+    expect(result.reason).toBe("MIXED_CONTROL_POLICY_VERSION");
+    expect(result.controlIds).toEqual([]);
+    expect(result.equalWeight).toBeNull();
+    // The caliper count is still reported, so a reader can see the pool was large enough and the
+    // refusal was about its composition rather than its size.
+    expect(result.candidatesInsideCaliper).toBeGreaterThanOrEqual(5);
+  });
+
+  it("keeps the mixed refusal distinct from insufficient support", () => {
+    // Two different problems: too few comparable points, versus enough points that are not comparable.
+    // Collapsing them would hide a mid-session version boundary inside a familiar reason code.
+    const tooFew = matchControls({
+      opportunity, selectedVolatilityRegime: "LOW_VOL",
+      controls: homogeneous().slice(0, 2), treatedDecisionKeys: new Set(),
+    });
+
+    expect(tooFew.reason).toBe("INSUFFICIENT_COMMON_SUPPORT");
+    expect(tooFew.reason).not.toBe("MIXED_CONTROL_POLICY_VERSION");
+  });
+
+  it("ignores the version of controls the caliper already excluded", () => {
+    /*
+     * Homogeneity is judged on the *eligible* pool, not on everything handed in. A control from another
+     * version outside the caliper, or in the wrong regime, was never a candidate -- refusing because of
+     * it would block matching on a control that could not have been selected.
+     */
+    const farAway = { ...control(60), controlPolicyVersion: "MATCHED_CONTROL_POPULATION_V1:GRID_POLICY_V1" };
+    const result = matchControls({
+      opportunity, selectedVolatilityRegime: "LOW_VOL",
+      controls: [...homogeneous(), farAway], treatedDecisionKeys: new Set(),
+    });
+
+    expect(result.reason).toBe("MATCHED");
+    expect(result.controlIds).toHaveLength(5);
+  });
+});
