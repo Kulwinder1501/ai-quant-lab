@@ -119,8 +119,33 @@ describe("excursions are upper bounds, and unmeasured is not zero", () => {
       underlying: { favourableExcursion: null, adverseExcursion: null, excursionTimeframe: null },
     }));
 
-    expect(unmeasured.underlying.adverseExcursion).toBeNull();
-    expect(unmeasured.underlying.adverseExcursion).not.toBe(0);
+    expect(unmeasured.underlying!.adverseExcursion).toBeNull();
+    expect(unmeasured.underlying!.adverseExcursion).not.toBe(0);
+  });
+
+  it("accepts a wholly unmeasured underlying layer, and then declines to attribute", () => {
+    /*
+     * The state the adoption audit found: `paper_trades` records `underlying_entry_price` and no
+     * underlying exit, and the holding-period candles belong to the option contract rather than the
+     * underlying. So for a closed option trade there is no observed underlying exit at all.
+     *
+     * Null rather than a fabricated level, because `attributeShortfall` reads `resolution` to decide
+     * whether the thesis was wrong -- a guessed reference would produce confident attribution out of
+     * nothing, which is worse than declining.
+     */
+    const loss = outcome({ instrument: { exitPrice: 150 }, execution: { realisedPnl: -800 } });
+    const withoutUnderlying = reconcileOutcome({
+      ...loss,
+      underlying: null,
+      execution: {
+        ...loss.execution,
+        theoreticalPnl: theoreticalPnlFor(loss.instrument),
+        erosion: theoreticalPnlFor(loss.instrument) - (-800),
+      },
+    });
+
+    expect(withoutUnderlying.underlying).toBeNull();
+    expect(attributeShortfall(withoutUnderlying)).toBeNull();
   });
 
   it("requires a timeframe whenever an excursion was measured", () => {
@@ -155,6 +180,7 @@ describe("captureRatio", () => {
     }));
 
     expect(flat.instrument.captureRatio).toBeNull();
+    expect(flat.underlying).not.toBeNull();
   });
 });
 

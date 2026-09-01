@@ -96,7 +96,21 @@ export interface ExecutionOutcome {
 export interface LayeredOutcome {
   readonly decisionId: string;
   readonly closed: boolean;
-  readonly underlying: UnderlyingOutcome;
+  /**
+   * Null when the underlying layer was not measured.
+   *
+   * Added after the adoption audit contradicted the first design, which required entry and exit
+   * references. `paper_trades` records `underlying_entry_price` and **no underlying exit**, and the
+   * holding-period candles a review reads belong to the option contract rather than the underlying --
+   * so for an option trade there is no observed underlying exit to record.
+   *
+   * Fabricating one to satisfy the type would be precisely the invented number this module exists to
+   * refuse, and it would be the most damaging kind: `attributeShortfall` reads `resolution` to decide
+   * whether the thesis was wrong, so a guessed level would produce confident attribution from nothing.
+   * Null instead, and `attributeShortfall` declines to attribute -- which is the honest answer while the
+   * data is missing.
+   */
+  readonly underlying: UnderlyingOutcome | null;
   readonly instrument: InstrumentOutcome;
   readonly execution: ExecutionOutcome;
 }
@@ -136,8 +150,10 @@ export function reconcileOutcome(outcome: LayeredOutcome): Readonly<LayeredOutco
     throw new OutcomeReconciliationError("An outcome must name the decision it measures.");
   }
   for (const [field, value] of [
-    ["underlying.entryReference", underlying.entryReference],
-    ["underlying.exitReference", underlying.exitReference],
+    ...(underlying === null ? [] : [
+      ["underlying.entryReference", underlying.entryReference] as const,
+      ["underlying.exitReference", underlying.exitReference] as const,
+    ]),
     ["instrument.entryPrice", instrument.entryPrice],
     ["instrument.exitPrice", instrument.exitPrice],
     ["execution.realisedPnl", execution.realisedPnl],
@@ -173,6 +189,15 @@ export function reconcileOutcome(outcome: LayeredOutcome): Readonly<LayeredOutco
     throw new OutcomeReconciliationError(
       `execution.erosion is ${execution.erosion} but theoreticalPnl - realisedPnl is ${expectedErosion}.`,
     );
+  }
+
+  if (underlying === null) {
+    return Object.freeze({
+      ...outcome,
+      underlying: null,
+      instrument: Object.freeze({ ...instrument }),
+      execution: Object.freeze({ ...execution }),
+    });
   }
 
   for (const [field, value] of [
@@ -220,13 +245,21 @@ export function reconcileOutcome(outcome: LayeredOutcome): Readonly<LayeredOutco
 export function attributeShortfall(outcome: Readonly<LayeredOutcome>): "UNDERLYING" | "INSTRUMENT" | "EXECUTION" | null {
   if (outcome.execution.realisedPnl >= 0) return null;
 
+  if (outcome.underlying === null) {
+    /*
+     * Without the underlying layer there is no way to tell a wrong thesis from a wrong expression: both
+     * present as an option that lost money. Declining is the honest answer -- guessing here would
+     * manufacture the confident attribution the split exists to remove, and it would do it silently.
+     */
+    return null;
+  }
   if (outcome.underlying.resolution === "INVALIDATED") return "UNDERLYING";
 
   // The underlying went the right way, so the loss came from the expression or the fill.
   if (outcome.execution.theoreticalPnl > 0 && outcome.execution.erosion >= outcome.execution.theoreticalPnl) {
     return "EXECUTION";
   }
-  if (outcome.execution.theoreticalPnl <= 0 && outcome.underlying.resolution === "TARGET_REACHED") {
+  if (outcome.execution.theoreticalPnl <= 0 && outcome.underlying?.resolution === "TARGET_REACHED") {
     // The target was reached and the instrument still lost: the expression failed to capture it.
     return "INSTRUMENT";
   }
