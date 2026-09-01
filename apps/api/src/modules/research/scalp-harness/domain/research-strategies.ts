@@ -26,6 +26,7 @@ import {
 import { logicalKey, sha256CanonicalJson } from "../../../platform/identity/identity.js";
 import { PatternIntelligenceResearchAdapter } from "./pattern-intelligence-research-strategy.js";
 import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
+import { parseDeferralReason } from "../../../platform/observability/decision-audit-record.js";
 
 export interface ResearchStrategyAdapter {
   readonly definition: ResearchStrategyDefinition;
@@ -344,14 +345,28 @@ export function controlIneligibleReason(
    * supplied, which makes it a property of the query window rather than of the bar, and a value like
    * that has no business in a string that estimators group on and live/backfill parity compares.
    */
-  if (tapeLiveness === "FROZEN") return "TAPE_FROZEN";
+  if (tapeLiveness === "FROZEN") return declared("TAPE_FROZEN");
   const missing = canonicalIndicatorRequirements.filter((requirement) => !indicatorPresent(context, requirement));
   // Ordered deliberately: warmup is a property of the bar and cannot be repaired by waiting for a
   // job, so it is the more specific answer when both are true.
   if (missing.length > 0) {
-    return `FEATURE_WARMUP:${missing.map((item) => item.code).sort().join(",")}`;
+    return declared(`FEATURE_WARMUP:${missing.map((item) => item.code).sort().join(",")}`);
   }
-  return featureCoverage === "COMPLETE" ? null : "FEATURE_LAYER_NOT_COMPUTED";
+  return featureCoverage === "COMPLETE" ? null : declared("FEATURE_LAYER_NOT_COMPUTED");
+}
+
+/**
+ * Passes a reason through the shared taxonomy on the way out.
+ *
+ * This is the producer, so it is the only place that can guarantee the strings reaching
+ * `control_points.ineligible_reason` are ones the rest of the system knows how to read.
+ * `parseDeferralReason` refuses an undeclared family, which turns drift between this function and the
+ * platform vocabulary into an immediate failure rather than a column full of codes no estimator can
+ * group on.
+ */
+function declared(reason: string): string {
+  parseDeferralReason(reason);
+  return reason;
 }
 
 /** Every eligible 1m grid point creates both LONG and SHORT outcome-blind controls. */

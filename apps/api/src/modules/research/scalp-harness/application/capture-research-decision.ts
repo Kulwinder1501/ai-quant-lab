@@ -18,6 +18,7 @@ import {
   type ResearchFeatureCoverage,
 } from "../domain/research-strategies.js";
 import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
+import { parseDeferralReason, type DeferralFamily } from "../../../platform/observability/decision-audit-record.js";
 
 export interface ScalpResearchWritePort {
   saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string>;
@@ -36,6 +37,14 @@ export interface CaptureResearchDecisionResult {
   readonly opportunities: number;
   readonly riskSubjects: number;
   readonly riskDecisions: number;
+  /**
+   * Why this grid point was not a usable sample, as a taxonomy family, or null when it was.
+   *
+   * Returned rather than only stored because the runner is where a session is judged, and it cannot
+   * otherwise see a warmup gap at all -- that is decided inside `controlIneligibleReason` from the
+   * context, not from anything the runner passes in.
+   */
+  readonly deferralFamily: DeferralFamily | null;
 }
 
 function canonicalAtr(context: StrategyMarketContext): number {
@@ -156,10 +165,12 @@ export class CaptureScalpResearchDecision {
     }
     // Controls are the decision-completion marker for catch-up. Writing them last means a crash
     // anywhere above leaves this minute discoverable; every preceding retry is immutable/idempotent.
-    const controls = await Promise.all(
-      buildControlPoints(input.reference1mContext, input.sessionCloseAt, input.featureCoverage, input.tapeLiveness)
-        .map((control) => this.writes.saveControlPoint(control)),
+    const builtControls = buildControlPoints(
+      input.reference1mContext, input.sessionCloseAt, input.featureCoverage, input.tapeLiveness,
     );
+    const controls = await Promise.all(builtControls.map((control) => this.writes.saveControlPoint(control)));
+    // Both directions of a grid point share one reason, so the first control carries the point's.
+    const firstReason = builtControls[0]?.ineligibleReason ?? null;
     return {
       strategyDefinitions: researchScalpStrategies.length,
       controls: controls.length,
@@ -167,6 +178,7 @@ export class CaptureScalpResearchDecision {
       opportunities: opportunities.length,
       riskSubjects: subjects.length,
       riskDecisions,
+      deferralFamily: firstReason === null ? null : parseDeferralReason(firstReason).family,
     };
   }
 }

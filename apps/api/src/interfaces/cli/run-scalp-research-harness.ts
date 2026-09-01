@@ -9,6 +9,8 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
 import { tapeLivenessPolicyVersion } from "../../modules/market-data/domain/tape-liveness.js";
+import { DEFERRAL_FAMILIES, type DeferralFamily } from "../../modules/platform/observability/decision-audit-record.js";
+import { evaluateThreshold, OBS_POLICY_V1 } from "../../modules/platform/observability/observability-policy.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { getOption } from "./arguments.js";
 import { requireIsolatedResearchDatabaseUrl } from "./scalp-research-database.js";
@@ -144,6 +146,16 @@ async function main(): Promise<void> {
       let deferredForFeatures = 0;
       let capturedWithoutFeatures = 0;
       let frozenTapeDecisions = 0;
+      /*
+       * Every declared family starts at zero so an absent reason reports 0 rather than vanishing.
+       *
+       * A family missing from the output is indistinguishable from a family that never occurred, and
+       * the second is the interesting reading -- `FEATURE_LAYER_NOT_COMPUTED` at zero says the
+       * detection jobs kept up, which is a claim worth being able to make.
+       */
+      const deferralsByFamily: Record<DeferralFamily, number> = Object.fromEntries(
+        DEFERRAL_FAMILIES.map((family) => [family, 0]),
+      ) as Record<DeferralFamily, number>;
       for (const row of pending.rows) {
         const featuresCovered = row.features_covered === true;
         const ageMs = Date.now() - row.close_time.getTime();
@@ -251,6 +263,7 @@ async function main(): Promise<void> {
         });
         if (tape.liveness === "FROZEN") frozenTapeDecisions += 1;
         for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += result[key];
+        if (result.deferralFamily !== null) deferralsByFamily[result.deferralFamily] += 1;
         capturedDecisionTimes.push(reference.candle.closeTime);
       }
       reports.push({
@@ -264,10 +277,25 @@ async function main(): Promise<void> {
         // rather than that the market was quiet.
         deferredForFeatures,
         capturedWithoutFeatures,
-        // Grid points whose bar repeated the previous print. Expect ~14 per instrument per session
-        // from the 15:16 close freeze; a count materially above that means the feed stalled
-        // intraday, which is a different and more serious condition.
+        // Grid points whose bar repeated the previous print. 13 per instrument per session is the
+        // measured floor from the 15:16 close freeze.
         frozenTapeDecisions,
+        /*
+         * The same count as a policy verdict rather than a number a reader has to know how to judge.
+         *
+         * `OBS_POLICY_V1` holds the threshold, so retuning it is a versioned change visible in the
+         * promotion record instead of an edit to this log line. BREACHED here means the feed stalled
+         * intraday, which is a different and more serious condition than the daily close freeze.
+         */
+        frozenTapeVerdict: evaluateThreshold({
+          policy: OBS_POLICY_V1,
+          metric: "tape_liveness.frozen_decisions_per_session",
+          observed: frozenTapeDecisions,
+        }),
+        observabilityPolicyVersion: OBS_POLICY_V1.policyVersion,
+        // Ineligibility by taxonomy family, using the same codes the control rows carry, so a session
+        // summary and a `WHERE ineligible_reason LIKE ...` cannot disagree.
+        deferralsByFamily,
         tapeLivenessPolicyVersion,
         ...totals,
       });

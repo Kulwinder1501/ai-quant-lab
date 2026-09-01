@@ -16,16 +16,23 @@ function ist(hour: number, minute: number): Date {
   return new Date(Date.UTC(2026, 7, 31, hour - 5, minute - 30));
 }
 
-function writePort(): ScalpResearchWritePort & { controls: ResearchControlPoint[]; proposals: number } {
+function writePort(): ScalpResearchWritePort & { controls: ResearchControlPoint[]; proposals: number; opportunities: number } {
   const state = {
     controls: [] as ResearchControlPoint[],
     proposals: 0,
+    opportunities: 0,
     async saveStrategyDefinition() { return "definition-1"; },
-    async saveProposal(proposal: never) {
+    async saveProposal(proposal: Record<string, unknown>) {
       state.proposals += 1;
-      return proposal;
+      // The id matters: `resolveOpportunities` hashes the persisted proposal, and the canonical
+      // encoder refuses `undefined` rather than skipping it -- so a stub that forgets the id fails
+      // inside identity.ts with no hint that the fixture is at fault.
+      return { ...proposal, id: `proposal-${state.proposals}` };
     },
-    async saveOpportunity(opportunity: never) { return opportunity; },
+    async saveOpportunity(opportunity: Record<string, unknown>) {
+      state.opportunities += 1;
+      return { ...opportunity, id: `opportunity-${state.opportunities}` };
+    },
     async saveControlPoint(control: ResearchControlPoint) {
       state.controls.push(control);
       return { ...control, id: `control-${state.controls.length}` };
@@ -34,7 +41,22 @@ function writePort(): ScalpResearchWritePort & { controls: ResearchControlPoint[
     async saveRiskSubject(subject: never) { return subject; },
     async saveRiskDecision() { return "risk-decision-1"; },
   };
-  return state as unknown as ScalpResearchWritePort & { controls: ResearchControlPoint[]; proposals: number };
+  return state as unknown as ScalpResearchWritePort & { controls: ResearchControlPoint[]; proposals: number; opportunities: number };
+}
+
+/** The full canonical 1m indicator set, so a point can be eligible rather than warmup-deferred. */
+function referenceWithIndicators(): StrategyMarketContext {
+  return {
+    ...reference(),
+    indicators: [
+      { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 6.2 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: 24_310 } },
+      { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: 24_305 } },
+      { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 61 } },
+      { code: "VWAP", algorithmVersion: "ta-v1", parameters: { reset: "NSE_SESSION" }, values: { value: 24_300 } },
+      { code: "SUPERTREND", algorithmVersion: "ta-v1", parameters: { atrPeriod: 10, multiplier: 3 }, values: { value: 24_280, trend: "UP" } },
+    ],
+  } as unknown as StrategyMarketContext;
 }
 
 function reference(): StrategyMarketContext {
@@ -81,6 +103,43 @@ describe("capture on a frozen tape", () => {
     expect(port.controls.map((item) => item.evaluationDirection)).toEqual(["LONG", "SHORT"]);
     expect(port.controls.every((item) => item.ineligibleReason === "TAPE_FROZEN")).toBe(true);
     expect(port.controls.every((item) => item.sampleEligible === false)).toBe(true);
+  });
+
+  it("reports the deferral family so the runner does not have to infer it", () => {
+    /*
+     * The runner judges a session but cannot see a warmup gap at all -- that is decided inside
+     * `controlIneligibleReason` from the context, not from anything the runner passes in. Returning
+     * the family is what lets a session summary and a `WHERE ineligible_reason LIKE ...` agree.
+     */
+    return new CaptureScalpResearchDecision(writePort()).execute({
+      reference1mContext: reference(),
+      strategyContexts: [reference()],
+      sessionCloseAt: ist(15, 30),
+      tickSize: 0.05,
+      lotSize: 15,
+      accountSnapshots: [],
+      featureCoverage: "COMPLETE",
+      tapeLiveness: "FROZEN",
+    }).then((result) => {
+      expect(result.deferralFamily).toBe("TAPE_FROZEN");
+    });
+  });
+
+  it("reports a null family when the grid point is a usable sample", () => {
+    // Null is "this was eligible", not "we did not look" -- the runner counts families and must not
+    // attribute an eligible point to one.
+    return new CaptureScalpResearchDecision(writePort()).execute({
+      reference1mContext: referenceWithIndicators(),
+      strategyContexts: [referenceWithIndicators()],
+      sessionCloseAt: ist(15, 30),
+      tickSize: 0.05,
+      lotSize: 15,
+      accountSnapshots: [],
+      featureCoverage: "COMPLETE",
+      tapeLiveness: "LIVE",
+    }).then((result) => {
+      expect(result.deferralFamily).toBeNull();
+    });
   });
 
   it("stamps the V3 control policy on a frozen point too", async () => {
