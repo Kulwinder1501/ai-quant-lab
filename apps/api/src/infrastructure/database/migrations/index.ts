@@ -84,6 +84,7 @@ import { scalpResearchTrialInferenceMigration } from "./083-scalp-research-trial
 import { patternIntelligenceObservationsMigration } from "./084-pattern-intelligence-observations.js";
 import { patternObservationFrozenTapeMigration } from "./085-pattern-observation-frozen-tape.js";
 import { decisionSnapshotsMigration } from "./086-decision-snapshots.js";
+import { decisionLedgerMigration } from "./087-decision-ledger.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -172,4 +173,5 @@ export const migrations = [
   patternIntelligenceObservationsMigration,
   patternObservationFrozenTapeMigration,
   decisionSnapshotsMigration,
+  decisionLedgerMigration,
 ];

@@ -45,6 +45,7 @@
     "data:collect:depth-frames": "tsx src/interfaces/cli/collect-depth-frames.ts",
     "measure:strategy-tier": "tsx src/interfaces/cli/measure-strategy-tier.ts",
     "verify:cap-concurrency": "tsx src/interfaces/cli/verify-cap-concurrency.ts",
+    "verify:ledger-concurrency": "tsx src/interfaces/cli/verify-ledger-concurrency.ts",
     "research:scalp:estimate": "tsx src/interfaces/cli/estimate-scalp-research.ts",
     "research:studies:register": "tsx src/interfaces/cli/register-research-studies.ts",
     "research:studies:path": "tsx src/interfaces/cli/run-path-study.ts",
