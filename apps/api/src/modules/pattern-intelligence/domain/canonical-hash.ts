@@ -46,8 +46,13 @@ import type { AnyDetectedPattern } from "./contracts.js";
  * irrelevant to the output — the encoder sorts — but the key *sets* above are load-bearing: adding or
  * removing a key at either level changes every hash and is a new encoding version, never an edit.
  *
- * `pattern-intelligence.test.ts` pins both key sets and a golden digest, so a change to either is a
- * test failure rather than a silent re-identification of history.
+ * `pattern-intelligence.test.ts` pins both key sets. The golden digests live in
+ * `canonical-hash-golden-digests.test.ts` -- separately, because this comment previously claimed a
+ * digest pin that did not exist: every observation-hash assertion in that file compares a
+ * recomputation against a value the same run produced, so an encoder change moved both sides together
+ * and passed. The pins now cover the scalar tag bytes, the probe's length and digest, the observation
+ * hash and the observation logical key, so a change to either the key sets or the encoding is a test
+ * failure rather than a silent re-identification of history.
  */
 
 const textEncoder = new TextEncoder();
