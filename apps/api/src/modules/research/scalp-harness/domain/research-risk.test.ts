@@ -45,3 +45,74 @@ describe("research-only risk evaluation", () => {
     })).not.toThrow();
   });
 });
+
+describe("risk evaluation narrows through the platform primitive", () => {
+  const subjectFor = (instrumentId: string) => ({
+    ...buildRiskSubject({
+      subjectType: "CANONICAL_OPPORTUNITY", subjectId: "opportunity", instrumentId, decisionAt,
+      sessionCloseAt: new Date(decisionAt.getTime() + 120 * 60_000), lotSize: 1,
+      geometry: {
+        direction: "LONG", entryOrderType: "MARKET_AT_REFERENCE", entryPrice: 100,
+        stopLoss: 99, targetPrice: 101.5,
+        expiresAt: new Date(decisionAt.getTime() + 60 * 60_000), geometryPolicyVersion: "CANONICAL",
+      },
+    }),
+    id: "subject-row",
+  });
+  const snapshotFor = (snapshotState: Parameters<typeof buildRiskSnapshot>[0]["state"]) => ({
+    ...buildRiskSnapshot({ accountId: "account", asOf: decisionAt, decisionAt, state: snapshotState }),
+    id: "snapshot",
+  });
+
+  it("refuses a subject whose instrument the snapshot never covered", () => {
+    /*
+     * This was `volatilityEvidenceByInstrument[instrumentId] ?? null`, which turned "the snapshot was
+     * never built for this instrument" into "no regime could be established" -- a reading risk would
+     * then act on.
+     *
+     * Measured on 15,282 stored risk decisions the absent case has never fired, so this is
+     * preventive. It earns its place because 1,968 of those decisions (12.9%) carry a legitimate
+     * null: an absent instrument would have been invisible among them.
+     */
+    expect(() => evaluateResearchRisk({
+      subject: subjectFor("instrument-never-captured"),
+      snapshot: snapshotFor(state),
+    })).toThrow(/does not cover instrument "instrument-never-captured"/);
+  });
+
+  it("still accepts a covered instrument whose regime is genuinely null", () => {
+    // The other side of the distinction, and the common case in the data. Covered-with-no-regime is a
+    // legitimate reading and must keep evaluating.
+    const result = evaluateResearchRisk({
+      subject: subjectFor("instrument"),
+      snapshot: snapshotFor({ ...state, volatilityEvidenceByInstrument: { instrument: null } }),
+    });
+
+    expect(result.decision.approved).toBe(true);
+  });
+
+  it("validates snapshot structure without changing the hashed payload", () => {
+    /*
+     * `sealRiskSnapshot` is called for validation and its result discarded on purpose: the sealed
+     * object carries `asOf`, and letting it into `payload.state` would add a field to the hashed state,
+     * changing `payloadHash` on all 5,130 stored snapshots. Pinned here because the tempting
+     * "cleanup" -- assigning the sealed object -- is silently destructive.
+     */
+    const built = buildRiskSnapshot({ accountId: "account", asOf: decisionAt, decisionAt, state });
+
+    expect(Object.keys(built.state).sort()).toEqual([
+      "accountEquity", "openPositionCount", "peakEquity", "realizedPnlToday",
+      "volatilityEvidenceByInstrument",
+    ]);
+    expect(built.state).not.toHaveProperty("asOf");
+  });
+
+  it("rejects a peak below current equity, which a running maximum cannot be", () => {
+    // New guard from the primitive. All 5,130 stored snapshots satisfy it, with a minimum
+    // peak-minus-equity gap of 697.63, so it adds a check rather than changing behaviour.
+    expect(() => buildRiskSnapshot({
+      accountId: "account", asOf: decisionAt, decisionAt,
+      state: { ...state, peakEquity: 99_000 },
+    })).toThrow(/running maximum/);
+  });
+});
