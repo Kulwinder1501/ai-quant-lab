@@ -96,6 +96,20 @@ export function knownNseNonRegularSessionMap(): ReadonlyMap<string, KnownNseNonR
  */
 export const NSE_REGULAR_SESSION_OPEN_IST_MINUTE = ist(9, 15);
 export const NSE_CASH_CLOSE_IST_MINUTE = ist(15, 30);
-/** Equity derivatives ring a later bell; see `nse-market-session.ts` for the dated provenance. */
+/**
+ * The equity-derivatives close, and the date it moved.
+ *
+ * NSE trades cash and equity derivatives to different closing bells, and everything here once assumed
+ * 15:30 -- so any option rule running past it was reasoning about a market it believed was shut. Phase
+ * 29 D2 exits 30 minutes after a decision, so a 15:15 signal schedules a 15:45 exit.
+ *
+ * **Provenance:** verified 2026-08-24 against NSE's published market timings, which list the normal
+ * market close for equity derivatives at 15:40, and against NSE's Closing Auction documentation, which
+ * separately states equity derivatives trade 09:15-15:40. Correct these constants if the regime
+ * changes again -- do not paper over it at a call site.
+ *
+ * Kept as a dated pair rather than folded into one number so a historical window is never widened
+ * retroactively, which would invent quotes that could not have existed.
+ */
 export const NSE_DERIVATIVES_CLOSE_IST_MINUTE = ist(15, 40);
 export const NSE_DERIVATIVES_CLOSE_EFFECTIVE_FROM = "2026-08-03";

@@ -1,8 +1,18 @@
+import {
+  istSessionDate,
+  resolveTradingSession,
+  type SessionKind,
+} from "../../platform/calendar/trading-session.js";
 import type { HistoricalTimeframe } from "./historical-data-provider.js";
+import {
+  knownNseNonRegularSessionMap,
+  NSE_CASH_CLOSE_IST_MINUTE,
+  NSE_DERIVATIVES_CLOSE_EFFECTIVE_FROM,
+  NSE_DERIVATIVES_CLOSE_IST_MINUTE,
+  NSE_REGULAR_SESSION_OPEN_IST_MINUTE,
+} from "./nse-non-regular-sessions.js";
 
 const istOffsetMs = 5.5 * 60 * 60_000;
-const sessionOpenMinutes = 9 * 60 + 15;
-const sessionCloseMinutes = 15 * 60 + 30;
 
 /**
  * NSE trades its cash and equity-derivatives segments to different closing bells.
@@ -25,14 +35,24 @@ export type NseSegment = "CASH" | "EQUITY_DERIVATIVES";
  * which separately states equity derivatives trade 09:15-15:40. Correct this constant if the regime
  * changes again -- do not paper over it at a call site.
  */
-const derivativesCloseMinutes = 15 * 60 + 40;
-const derivativesCloseEffectiveFrom = "2026-08-03";
+const derivativesCloseMinutes = NSE_DERIVATIVES_CLOSE_IST_MINUTE;
+const derivativesCloseEffectiveFrom = NSE_DERIVATIVES_CLOSE_EFFECTIVE_FROM;
 
 export interface NseSessionWindow {
   opensAt: Date;
   closesAt: Date;
   /** Which segment's bell `closesAt` refers to, so a stored window is self-describing. */
   segment: NseSegment;
+  /**
+   * `REGULAR` or `NON_REGULAR`. Added when this class adopted the platform calendar.
+   *
+   * A caller that only reads `opensAt`/`closesAt` is unaffected, but the distinction matters for
+   * anything that assumes a session runs 09:15 to the bell: on a `NON_REGULAR` session it does not,
+   * and `closesAt` is the exchange's announced close rather than the segment's.
+   */
+  kind: Exclude<SessionKind, "CLOSED">;
+  /** Why this session is non-regular, verbatim from the catalogue. Null for a regular session. */
+  reason: string | null;
 }
 
 export interface CandleWindow extends NseSessionWindow {
@@ -40,29 +60,48 @@ export interface CandleWindow extends NseSessionWindow {
   closeTime: Date;
 }
 
-function localDateKey(value: Date): string {
-  const ist = new Date(value.getTime() + istOffsetMs);
-  return ist.toISOString().slice(0, 10);
-}
-
 function closeMinutesFor(segment: NseSegment, dateKey: string): number {
-  if (segment === "CASH") return sessionCloseMinutes;
+  if (segment === "CASH") return NSE_CASH_CLOSE_IST_MINUTE;
   // Before the change the derivatives segment closed with cash, so a historical window must not be
   // widened retroactively -- that would invent quotes that could not have existed.
-  return dateKey >= derivativesCloseEffectiveFrom ? derivativesCloseMinutes : sessionCloseMinutes;
+  return dateKey >= derivativesCloseEffectiveFrom ? derivativesCloseMinutes : NSE_CASH_CLOSE_IST_MINUTE;
 }
 
-function sessionWindow(value: Date, segment: NseSegment): NseSessionWindow {
-  const ist = new Date(value.getTime() + istOffsetMs);
-  const year = ist.getUTCFullYear();
-  const month = ist.getUTCMonth();
-  const day = ist.getUTCDate();
-  const closeMinutes = closeMinutesFor(segment, localDateKey(value));
-  const startOfDayUtc = Date.UTC(year, month, day) - istOffsetMs;
+/**
+ * Resolves a session through the shared platform calendar.
+ *
+ * Before this, tradability was decided here from the weekday plus a holiday set, and the non-regular
+ * catalogue carried only dates. Measured against the stored tape, that was wrong on **six of the eight
+ * known non-regular sessions** in two opposite directions: four weekend sittings carrying 105-750 bars
+ * per instrument were reported closed, and two ordinary weekdays that had *no* regular trading
+ * (2024-11-01 and 2025-10-21, both Diwali) were reported as full 09:15-15:30 days.
+ *
+ * The concrete failure that made this worth adopting rather than leaving as an available primitive:
+ * `run-scalp-research-harness.ts` throws `No NSE session for completed candle` when `getSession`
+ * returns null. On the next weekend special session it would not have mis-priced anything -- it would
+ * have crashed, mid-capture, on a day holding 1,500 bars.
+ *
+ * The dated derivatives close stays here because it is an NSE fact, not a platform one. The platform
+ * takes the shape as input and never learns that a bell moved on 2026-08-03.
+ */
+function resolveNseSession(value: Date, segment: NseSegment, holidays: ReadonlySet<string>): NseSessionWindow | null {
+  const sessionDate = istSessionDate(value);
+  const resolved = resolveTradingSession({
+    sessionDate,
+    regularShape: {
+      opensAtIstMinute: NSE_REGULAR_SESSION_OPEN_IST_MINUTE,
+      closesAtIstMinute: closeMinutesFor(segment, sessionDate),
+    },
+    holidays,
+    nonRegularSessions: knownNseNonRegularSessionMap(),
+  });
+  if (resolved.kind === "CLOSED") return null;
   return {
-    opensAt: new Date(startOfDayUtc + sessionOpenMinutes * 60_000),
-    closesAt: new Date(startOfDayUtc + closeMinutes * 60_000),
+    opensAt: resolved.opensAt!,
+    closesAt: resolved.closesAt!,
     segment,
+    kind: resolved.kind,
+    reason: resolved.reason,
   };
 }
 
@@ -100,12 +139,7 @@ export class NseMarketSession {
     if (Number.isNaN(value.getTime())) {
       throw new Error("NseMarketSession requires a valid timestamp.");
     }
-    const ist = new Date(value.getTime() + istOffsetMs);
-    const weekday = ist.getUTCDay();
-    if (weekday === 0 || weekday === 6 || this.holidays.has(localDateKey(value))) {
-      return null;
-    }
-    return sessionWindow(value, segment);
+    return resolveNseSession(value, segment, this.holidays);
   }
 
   isOpen(value: Date, segment: NseSegment = this.segment): boolean {
