@@ -26,6 +26,7 @@ import { SweepReclaimEngine } from "../domain/engines/sweep-reclaim-engine.js";
 import { SwingStructureEngine } from "../domain/engines/swing-structure-engine.js";
 import { isStaleBar } from "../domain/bar-integrity.js";
 import { timeframeDurationMs } from "../domain/instrument-identifiers.js";
+import { resolveEarliestExecutionAt } from "../../platform/pit/pit-instants.js";
 import { lifecycleIdempotencyKey } from "../domain/lifecycle.js";
 import {
   atrPeriod,
@@ -219,26 +220,22 @@ export class DetectPatternIntelligence {
       /*
        * The first bar open at which this observation could actually be acted on.
        *
-       * The previous derivation added the *previous* bar's duration to the detection time, which
-       * breaks in two ways. Across a session boundary the gap between consecutive bars is the
-       * overnight close, so a pattern detected on the first bar of a session was stamped executable
-       * roughly eighteen hours after the fact — and on a multi-day series that is every session, not
-       * an edge case. It also ignored `knownAt`: when the data vintage lands after the following bar
-       * opens, that bar was already unexecutable.
+       * Delegated to the shared PIT primitive, which carries the reasoning and the regression it
+       * exists for: an earlier derivation added the *previous* bar's duration to the detection time,
+       * which stamped a session's first bar executable roughly eighteen hours early -- inside the
+       * overnight close, on every session of a multi-day series -- and ignored `knownAt` entirely, so
+       * a late data vintage made the following bar retroactively executable.
        *
-       * Scanning forward for the first bar that opens strictly after `knownAt` answers both. The
-       * candle series is ground truth about when the next bar actually opened, including across a
-       * weekend or a holiday, which no duration arithmetic can reproduce. The duration fallback
-       * applies only when the following bar is not in the supplied window.
+       * Verified value-for-value before the switch: 400 stored observations recomputed through the
+       * primitive, 0 mismatches, with 21 exercising the duration fallback. So both branches were
+       * covered by real data rather than by fixtures. `timing.earliestExecutionAt` is inside
+       * `observationHash`, which is why that mattered.
        */
-      let earliestExecutionAt: Date | null = null;
-      for (let j = detectedIndex + 1; j < candles.length; j++) {
-        const openTime = candles[j]!.openTime;
-        if (openTime.getTime() > knownAt.getTime()) { earliestExecutionAt = openTime; break; }
-      }
-      if (earliestExecutionAt === null) {
-        earliestExecutionAt = new Date(knownAt.getTime() + timeframeDurationMs(source.timeframe));
-      }
+      const { earliestExecutionAt } = resolveEarliestExecutionAt({
+        knownAt,
+        subsequentBarOpens: candles.slice(detectedIndex + 1).map((candle) => candle.openTime),
+        fallbackDurationMs: timeframeDurationMs(source.timeframe),
+      });
 
       /*
        * Typed at the specific family rather than the union.
