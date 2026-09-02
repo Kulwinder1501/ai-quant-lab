@@ -3,7 +3,8 @@
 **Purpose:** Close the program-level gaps before a single line of domain code is written.  
 **Scope:** Shared Platform · Promotion Gate Governance · Phasing & Parallelism · Observability · Data Integrity  
 **Status:** PLANNING — not a frozen architecture change  
-**Revision:** 2026-08-31, after a code-and-database verification pass against the live system
+**Revision:** 2026-09-02. Originally revised 2026-08-31 after a code-and-database verification pass
+against the live system; Gaps 13-16 and the Gate A statuses were added after that.
 
 > [!IMPORTANT]
 > **What this revision changed, and why.** Every factual claim in the original was checked against the
@@ -16,6 +17,11 @@
 > | **D2** 12-item checklist | Contained a circular dependency and could not be completed. Split into two gates. |
 > | **D3** Frozen-tape decisions | Live defect; 41 proposals already recorded on a republished price. Harness half **fixed and shipped**; two surfaces remain open (Gap 8). |
 > | **D4** Matched-control pooling | Pre-existing; needs a research decision about 404 unmatched opportunities (Gap 9). |
+>
+> The four rows above are **as found on 2026-08-31**, not current status. D1-D4 have since all closed
+> — see **Blocking gates summary** under Readiness Gates for where each stands and what closed it. D3
+> in particular is now closed on both code surfaces plus the per-instrument threshold, with no
+> sub-items remaining.
 >
 > Sequencing changed substantially — see **The Tiered Programme**. The architecture did not.
 
@@ -1200,7 +1206,7 @@ decision rests on it.
 No edge is claimed for either short side. Pattern Confluence's +₹424 over 32 trades is barely
 distinguishable from zero and is the first review candidate.
 
-### Open decision: `momentum-scalp-pattern-v2`
+### Resolved decision: `momentum-scalp-pattern-v2` (2026-09-02)
 
 Disabled both sides (`7f6ef16`) on asymmetric evidence: a TERMINAL verdict measured over 13.7k–18.6k
 trades per cell against **3 closed trades totalling +₹1,335**. Three trades cannot overturn that
