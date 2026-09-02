@@ -56,7 +56,18 @@ export type ThesisRefusal =
   | "FEATURE_LAYER_NOT_COMPUTED"
   | "SIDE_NOT_EXECUTABLE"
   | "OUTSIDE_EXECUTABLE_WINDOW"
-  | "NO_ESTABLISHED_ENTRY_RULE";
+  | "NO_ESTABLISHED_ENTRY_RULE"
+  /**
+   * Two or more candidate theses and nothing entitled to choose between them.
+   *
+   * A V2.2 gap, not a legacy one: I3's Opportunity Resolver is what selects, and it does not exist.
+   * Any producer that yields two candidates hits this wall, so the name carries no "legacy" prefix.
+   *
+   * Refusing is the whole point. Ranking candidates by a score is `scoreDirectionalSetup` rebuilt, and
+   * taking the first is `patterns[0]` -- both quarantined by name. A producer that quietly picked one
+   * would be inventing the decision logic §6 forbids adapters from holding.
+   */
+  | "AMBIGUOUS_PROPOSALS";
 
 export type ThesisSide = "LONG" | "SHORT";
 
@@ -93,6 +104,52 @@ export interface ThesisGateInput {
 }
 
 export type ThesisProducer = (input: ThesisGateInput) => ThesisResult;
+
+/**
+ * Whether a producer may ever hold live authority.
+ *
+ * §6 licenses `ThesisAdapter` for "differential analysis only, **not live decisions**". A producer
+ * built on V1's rules is legal evidence and illegal authority, and the difference cannot live in a
+ * comment: the shadow path executes nothing today, but P19 will grant paper authority to *some*
+ * producer, and at that moment the distinction has to be machine-checkable.
+ *
+ * `NATIVE` means the rule was re-derived and proved under V2.2's own tests -- §6's KEEP AS PRINCIPLE
+ * route. `DIFFERENTIAL_ONLY` means it reaches legacy decision logic and may only ever be compared.
+ */
+export type ThesisAuthority = "NATIVE" | "DIFFERENTIAL_ONLY";
+
+export interface AuthorizedThesisProducer {
+  readonly producerId: string;
+  readonly authority: ThesisAuthority;
+  readonly produce: ThesisProducer;
+}
+
+export class ThesisAuthorityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ThesisAuthorityError";
+  }
+}
+
+/**
+ * The gate P19 must call before letting a producer's theses reach an execution path.
+ *
+ * Throws rather than returning false. A boolean would be checked in one caller and forgotten in the
+ * next, and the failure mode is a legacy-derived thesis trading under V2.2's name -- which would make
+ * V1's losses read as V2.2's architecture failing. The shadow path needs no such guard because it
+ * holds no execution port at all; this exists for the path that will.
+ */
+export function assertMayHoldAuthority(producer: AuthorizedThesisProducer): void {
+  if (producer.authority === "DIFFERENTIAL_ONLY") {
+    throw new ThesisAuthorityError(
+      `Producer ${producer.producerId} is DIFFERENTIAL_ONLY and cannot hold live authority. Brain `
+      + "V2.2 Section 6 licenses a legacy-derived thesis for differential analysis only, not live "
+      + "decisions. To trade this rule, re-derive it as a native producer and prove it under V2.2 "
+      + "tests -- that is the KEEP AS PRINCIPLE route, and it is deliberately not a flag.",
+    );
+  }
+}
+
 
 /**
  * The gate order is not cosmetic.
@@ -152,3 +209,10 @@ export const structuralGateThesisProducer: ThesisProducer = (input) => {
 export function isAbstention(result: ThesisResult): boolean {
   return result.outcome === "NO_ACTION" && result.reason === "NO_ESTABLISHED_ENTRY_RULE";
 }
+
+/** V2.2's own producer. Native because it re-derives every gate it applies and claims no edge. */
+export const nativeStructuralProducer: AuthorizedThesisProducer = Object.freeze({
+  producerId: "structural-gate-v1",
+  authority: "NATIVE",
+  produce: structuralGateThesisProducer,
+});

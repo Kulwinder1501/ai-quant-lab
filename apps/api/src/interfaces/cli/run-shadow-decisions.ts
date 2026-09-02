@@ -15,8 +15,9 @@ import {
   runShadowDecision,
 } from "../../modules/autonomous-v2/application/shadow-decision.js";
 import { evaluateDifferentialRun } from "../../modules/autonomous-v2/domain/differential-testing.js";
+import { portedV1ThesisProducer } from "../../modules/strategy-engine/application/v22-thesis-bridge.js";
+import { assertMayHoldAuthority, nativeStructuralProducer } from "../../modules/autonomous-v2/domain/thesis-producer.js";
 import {
-  structuralGateThesisProducer,
   type ThesisSide,
 } from "../../modules/autonomous-v2/domain/thesis-producer.js";
 import {
@@ -94,6 +95,25 @@ const DEFAULT_MAX_BAR_AGE_MS = 3 * 60_000;
  * It does not weaken any gate. A stale bar still passes through the frozen-tape and coverage checks,
  * and the decision is still recorded as what it is.
  */
+/**
+ * Which producer V2.2 decides with this pass.
+ *
+ * Defaults to native, so nothing changes unless the flag is passed. `--producer=ported-v1` runs V1's
+ * entry rule through V2.2's port for the platform-equivalence comparison, and is legal only because
+ * this path holds no execution port -- `assertMayHoldAuthority` would refuse it anywhere that did.
+ *
+ * The choice is a flag rather than a default because the two answer different questions. Native
+ * measures what V2.2 decides on its own evidence, which is "nothing" today; ported measures whether
+ * the platform reproduces V1's decisions, which is what P13 grades. Silently defaulting to ported
+ * would make the abstention record disappear from the run that established it.
+ */
+function producerChoice(args: string[]): "native" | "ported-v1" {
+  const raw = getOption(args, "--producer");
+  if (raw === null || raw === "native") return "native";
+  if (raw === "ported-v1") return "ported-v1";
+  throw new Error(`Unknown --producer "${raw}". Use "native" or "ported-v1".`);
+}
+
 function maxBarAgeMs(args: string[]): number {
   const raw = getOption(args, "max-bar-age-seconds");
   if (raw === undefined) return DEFAULT_MAX_BAR_AGE_MS;
@@ -216,6 +236,7 @@ async function main(): Promise<void> {
     .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
   if (symbols.length === 0) throw new Error("--instruments must contain at least one NSE symbol.");
   const barAgeCeilingMs = maxBarAgeMs(args);
+  const chosenProducer = producerChoice(args);
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
@@ -361,6 +382,15 @@ async function main(): Promise<void> {
         );
       }
 
+      /*
+       * The ported producer is built per bar, closing over `latest` -- the same in-memory context the
+       * snapshot was sealed from. It refuses if those disagree, which is what makes citing one
+       * snapshot ref for both sides of the comparison a fact rather than an assumption.
+       */
+      const producer = chosenProducer === "ported-v1"
+        ? portedV1ThesisProducer({ context: latest, instrumentSymbol: symbol })
+        : nativeStructuralProducer;
+
       const record = await runShadowDecision({
         decisionId: randomUUID(),
         gate: {
@@ -370,9 +400,18 @@ async function main(): Promise<void> {
           insideExecutableWindow: session.isOpen(latest.candle.closeTime),
           instrumentSymbol: symbol,
         },
-        produce: structuralGateThesisProducer,
+        produce: producer.produce,
         ledger,
-        additionalPolicyVersions: { tapeLiveness: tapeLivenessPolicyVersion },
+        additionalPolicyVersions: {
+          tapeLiveness: tapeLivenessPolicyVersion,
+          /*
+           * Which producer decided, on every record including refusals. Without it a stored decision
+           * cannot be attributed: native and ported both emit "no trade" outcomes, and a later reader
+           * comparing two sessions would have no way to tell which rule was in force.
+           */
+          producer: producer.producerId,
+          producerAuthority: producer.authority,
+        },
       });
 
       /*
@@ -458,6 +497,7 @@ async function main(): Promise<void> {
       level: "info",
       message: "V2.2 shadow decision pass completed",
       executesNothing: true,
+      producer: chosenProducer,
       records,
       p13: {
         comparisonVersion: thesisComparisonVersion,
