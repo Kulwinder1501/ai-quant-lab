@@ -87,6 +87,17 @@ async function main(): Promise<void> {
      * underlying exit level and every non-tick close still has none, so those decline by design.
      */
     const attribution = { UNDERLYING: 0, INSTRUMENT: 0, EXECUTION: 0, unattributed: 0 };
+    /*
+     * Counted separately from `unattributed`, because the two reasons a trade goes unattributed need
+     * different responses and the first version of this report conflated them: it printed "no
+     * reviewed trade carries an observed underlying exit level" while trade 554481f7 carried one.
+     *
+     * No layer  -> missing data. Wait for closes under 089/090, or nothing will ever attribute.
+     * Layer, no blame -> the thesis did not resolve at the exit instant, or the layers do not single
+     * a cause out. That is the endpoint classification declining rather than guessing, and no amount
+     * of waiting changes it for that trade.
+     */
+    let withUnderlyingLayer = 0;
     const journal = new PostgresAiJournalRepository(database);
     for (const row of trades.rows) {
       /*
@@ -170,6 +181,7 @@ async function main(): Promise<void> {
        */
       const blamed = attributeShortfall(adapted.outcome);
       attribution[blamed ?? "unattributed"] += 1;
+      if (adapted.outcome.underlying !== null) withUnderlyingLayer += 1;
       residualsChecked += 1;
       // A paisa: the prices carry six decimals, so anything larger is a real disagreement rather than
       // rounding.
@@ -198,9 +210,19 @@ async function main(): Promise<void> {
       `shortfall attribution: UNDERLYING ${attribution.UNDERLYING}  INSTRUMENT ${attribution.INSTRUMENT}  `
       + `EXECUTION ${attribution.EXECUTION}  unattributed ${attribution.unattributed}`,
     );
-    if (attribution.unattributed === residualsChecked && residualsChecked > 0) {
-      console.log("  Nothing attributed: no reviewed trade carries an observed underlying exit level.");
-      console.log("  Expected until trades close under migration 089 via the observed-tick path.");
+    console.log(
+      `underlying layer present on ${withUnderlyingLayer}/${residualsChecked} `
+      + `(needs an observed underlying exit and the idea's thesis levels)`,
+    );
+    if (withUnderlyingLayer === 0 && residualsChecked > 0) {
+      console.log("  Nothing attributable yet: no reviewed trade has an observed underlying exit level.");
+      console.log("  Expected until trades close under migrations 089/090.");
+    } else if (attribution.unattributed === residualsChecked && residualsChecked > 0) {
+      console.log(
+        `  ${withUnderlyingLayer} trade(s) have a layer but none singled out a cause: the underlying `
+        + "finished between its stop and target,",
+      );
+      console.log("  so the endpoint classification declines rather than guessing. Not a data gap.");
     }
     for (const flag of residualFlags) console.log(`  RESIDUAL  ${flag}`);
     if (residualFlags.length > 0) {
