@@ -8,7 +8,10 @@ import { PostgresScalpResearchRepository } from "../../infrastructure/database/r
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
-import { tapeLivenessPolicyVersion } from "../../modules/market-data/domain/tape-liveness.js";
+import {
+  frozenTapeThresholdFor,
+  tapeLivenessPolicyVersion,
+} from "../../modules/market-data/domain/tape-liveness.js";
 import { researchScalpStrategies } from "../../modules/research/scalp-harness/domain/research-strategies.js";
 import {
   selectCaptureStrategies,
@@ -234,6 +237,10 @@ async function main(): Promise<void> {
         const tape = await resolveTapeLiveness({
           reader: contextRepository,
           instrumentId: instrument.id,
+          // Declared per instrument rather than inherited from the index default. Throws for an
+          // undeclared symbol, which is the point: silently applying an index-calibrated threshold to
+          // an illiquid instrument would refuse its thinnest bars and drop them with no record.
+          threshold: frozenTapeThresholdFor(instrument.symbol),
           timeframe: "1m",
           referenceBar: reference.candle,
           referenceCloseTime: reference.candle.closeTime,

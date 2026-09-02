@@ -85,8 +85,81 @@ export type TapeLiveness = "LIVE" | "FROZEN";
  */
 export const tapeLivenessPolicyVersion = "TAPE_LIVENESS_V1";
 
-/** Consecutive OHLC-identical bars, inclusive of the reference bar, that mean the tape is frozen. */
+/**
+ * Consecutive OHLC-identical bars, inclusive of the reference bar, that mean the tape is frozen.
+ *
+ * Calibrated on **index 1m bars**. Retained as the default for callers that cannot name an
+ * instrument -- `isStaleBar` in `pattern-intelligence` takes a candle and its predecessor and has no
+ * instrument identity in scope -- and as the value every declared instrument currently shares, which
+ * `tape-liveness.test.ts` enforces so the two paths cannot silently diverge.
+ */
 export const frozenTapeIdenticalBarThreshold = 2;
+
+export class TapeThresholdPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TapeThresholdPolicyError";
+  }
+}
+
+/**
+ * The declared per-instrument frozen-tape threshold, keyed by instrument symbol.
+ *
+ * ## Why a declared table rather than one constant
+ *
+ * The threshold answers "how many identical consecutive bars mean the feed stopped publishing", and
+ * that is a property of the instrument, not of the system. Two identical consecutive minutes on
+ * NIFTY50 mean the feed froze; on an illiquid single stock they can mean nobody traded, which is a
+ * dull but genuine print. A global constant calibrated on indices would refuse those bars as a
+ * frozen tape and quietly delete the thinnest part of an equity's session from the sample.
+ *
+ * Keyed by symbol rather than instrument id so the policy is declarable in source and reviewable by
+ * a person; instrument UUIDs are neither.
+ *
+ * ## Undeclared instruments are refused, not defaulted
+ *
+ * An instrument absent from this table throws. Silently inheriting the index value is exactly the
+ * failure above, and it would be invisible -- the bars would simply stop appearing in the sample. A
+ * throw is recoverable and names the decision that has to be made; a mis-refused population is not
+ * recoverable, because nothing records what was dropped.
+ *
+ * Both current consumers cover NIFTY50 and BANKNIFTY only (17,805 and 15,698 pattern observations;
+ * the scalp harness captures the same two), so this refuses nothing that runs today.
+ *
+ * ## This does not bump `controlPolicyVersion`, deliberately
+ *
+ * The obligation recorded on `tapeLivenessPolicyVersion` binds on a change to the rule or to a
+ * threshold *value*. Neither changed here: both declared values are 2, identical to the previous
+ * global default, so no bar's verdict moves and every stored control point still means what it meant.
+ * What changed is where the number comes from.
+ *
+ * Bumping anyway would be actively harmful now that D4 refuses matched sets spanning policy
+ * versions: it would fragment the control population and cost matching power for no behavioural
+ * difference. `tape-liveness.test.ts` pins that every declared value equals the historical default,
+ * so the first time a value genuinely changes the pin fails and the version obligation lands on
+ * whoever changed it.
+ */
+export const frozenTapeThresholdPolicy: Readonly<Record<string, number>> = Object.freeze({
+  NIFTY50: 2,
+  BANKNIFTY: 2,
+});
+
+export function frozenTapeThresholdFor(instrumentSymbol: string): number {
+  const declared = Object.prototype.hasOwnProperty.call(frozenTapeThresholdPolicy, instrumentSymbol)
+    ? frozenTapeThresholdPolicy[instrumentSymbol]
+    : undefined;
+  if (declared === undefined) {
+    throw new TapeThresholdPolicyError(
+      `No frozen-tape threshold is declared for ${instrumentSymbol}. The index value of `
+      + `${frozenTapeIdenticalBarThreshold} is calibrated on index 1m bars, and an illiquid symbol `
+      + "can legitimately print identical consecutive bars -- inheriting it would refuse that "
+      + "instrument's thinnest bars as a frozen tape and drop them from the sample with no record. "
+      + "Declare a threshold in frozenTapeThresholdPolicy, and if it differs from the default, bump "
+      + "controlPolicyVersion with it.",
+    );
+  }
+  return declared;
+}
 
 export interface TapeBar {
   readonly openTime: Date;

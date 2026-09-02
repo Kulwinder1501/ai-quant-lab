@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   assessTapeLiveness,
   frozenTapeIdenticalBarThreshold,
+  frozenTapeThresholdFor,
+  frozenTapeThresholdPolicy,
+  TapeThresholdPolicyError,
   type TapeBar,
 } from "./tape-liveness.js";
 
@@ -117,5 +120,56 @@ describe("assessTapeLiveness", () => {
     // first value with no observed false positive; lowering it is impossible, raising it delays
     // detection by a minute per step.
     expect(frozenTapeIdenticalBarThreshold).toBe(2);
+  });
+});
+
+describe("the per-instrument threshold policy", () => {
+  it("declares both instruments the two consumers actually cover", () => {
+    // NIFTY50 and BANKNIFTY are the whole of it today: 17,805 and 15,698 pattern observations, and
+    // the scalp harness captures the same two. So nothing that runs is refused.
+    expect(Object.keys(frozenTapeThresholdPolicy).sort()).toEqual(["BANKNIFTY", "NIFTY50"]);
+    expect(frozenTapeThresholdFor("NIFTY50")).toBe(2);
+    expect(frozenTapeThresholdFor("BANKNIFTY")).toBe(2);
+  });
+
+  it("refuses an undeclared instrument instead of lending it the index value", () => {
+    /*
+     * The hazard the policy exists for. Two identical consecutive minutes on an index mean the feed
+     * froze; on an illiquid single stock they can mean nobody traded. Inheriting the index threshold
+     * would refuse those bars as a frozen tape and drop the thinnest part of that instrument's
+     * session from the sample, with nothing recording what went missing.
+     */
+    expect(() => frozenTapeThresholdFor("SOMEILLIQUIDCO")).toThrow(TapeThresholdPolicyError);
+    expect(() => frozenTapeThresholdFor("SOMEILLIQUIDCO"))
+      .toThrow(/No frozen-tape threshold is declared/);
+    // Says what to do, including the version obligation a differing value carries.
+    expect(() => frozenTapeThresholdFor("SOMEILLIQUIDCO")).toThrow(/bump/);
+  });
+
+  it("is not fooled by inherited object properties", () => {
+    // `in` would answer true for "toString" and hand back a function as a threshold.
+    expect(() => frozenTapeThresholdFor("toString")).toThrow(TapeThresholdPolicyError);
+    expect(() => frozenTapeThresholdFor("constructor")).toThrow(TapeThresholdPolicyError);
+  });
+
+  it("keeps every declared value equal to the default, so the two code paths cannot diverge", () => {
+    /*
+     * The tripwire, and the reason this change does not bump `controlPolicyVersion`.
+     *
+     * `isStaleBar` in `pattern-intelligence` takes a candle and its predecessor with no instrument in
+     * scope, so it cannot consult this table and uses the default. While every declared value equals
+     * the default the two paths agree on every bar, and no stored verdict changes.
+     *
+     * The first time a declared value genuinely differs this fails -- which is exactly when the
+     * controlPolicyVersion obligation and the need to thread an instrument into isStaleBar both
+     * become real. Failing here puts that in front of whoever changed the number.
+     */
+    for (const [symbol, threshold] of Object.entries(frozenTapeThresholdPolicy)) {
+      expect(
+        threshold,
+        symbol + " now differs from the default: bump controlPolicyVersion and thread an instrument "
+        + "into isStaleBar, which cannot read this table",
+      ).toBe(frozenTapeIdenticalBarThreshold);
+    }
   });
 });
