@@ -67,6 +67,7 @@ interface PaperTradeRow extends QueryResultRow {
   option_type: "CE" | "PE" | null;
   underlying_symbol: string | null;
   underlying_entry_price: string | null;
+  underlying_exit_price: string | null;
   entry_iv: string | null;
   regime_observation_id: string | null;
 }
@@ -125,6 +126,7 @@ const tradeColumns = `
   paper_trades.option_type,
   paper_trades.underlying_symbol,
   paper_trades.underlying_entry_price,
+  paper_trades.underlying_exit_price,
   paper_trades.entry_iv,
   paper_trades.regime_observation_id
 `;
@@ -183,6 +185,9 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     underlyingEntryPrice: row.underlying_entry_price === null || row.underlying_entry_price === undefined
       ? null
       : toNumber(row.underlying_entry_price, "underlying entry price"),
+    underlyingExitPrice: row.underlying_exit_price === null || row.underlying_exit_price === undefined
+      ? null
+      : toNumber(row.underlying_exit_price, "underlying exit price"),
     entryIv: row.entry_iv === null || row.entry_iv === undefined
       ? null
       : toNumber(row.entry_iv, "entry IV"),
@@ -912,6 +917,10 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
               'exit',
               COALESCE($7::jsonb, jsonb_build_object('total', $5))
             ),
+          -- Migration 089. Assigned before realized_pnl deliberately: the convention test extracts
+          -- the realized_pnl expression up to this UPDATE's WHERE and requires it to be identical to
+          -- executeExitSlice's, so nothing may be appended after it.
+          underlying_exit_price = $8,
           realized_pnl = (
             SELECT COALESCE(SUM(realized_pnl), 0)
             FROM paper_trade_partial_exits
@@ -927,6 +936,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         input.exitFees,
         input.exitSlippage,
         JSON.stringify(input.feeBreakdown ?? { total: input.exitFees }),
+        input.underlyingExitPrice ?? null,
       ]);
       if (!closed.rows[0]) {
         throw new Error("Paper trade could not be closed because it is no longer open.");

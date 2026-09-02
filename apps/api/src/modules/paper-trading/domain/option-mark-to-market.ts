@@ -131,6 +131,15 @@ export interface ObservedPremiumSample {
   observedAt: Date;
   /** The bid. A long option is exited by selling into it, so it is the executable price. */
   bid: number | null;
+  /**
+   * The underlying's level as published alongside this quote, or null when the provider sent none.
+   *
+   * Carried so an exit can record where the underlying stood at the instant the barrier was crossed
+   * -- the counterpart to `underlying_entry_price`, which had none. Reading it from the crossing
+   * sample is what makes it point-in-time correct: the alternative, the underlying's 1m candle close
+   * around the exit, is a future value mid-bar.
+   */
+  underlyingValue?: number | null;
 }
 
 export interface ObservedPremiumExitDecision {
@@ -140,6 +149,14 @@ export interface ObservedPremiumExitDecision {
   exitPrice: number;
   fillRule: Extract<ExitFillRule, "OBSERVED_TICK_STOP" | "OBSERVED_TICK_TARGET">;
   observedAt: Date;
+  /**
+   * The underlying's level on the crossing sample, or null when the provider published none.
+   *
+   * Returned rather than looked up again by the caller, because "the sample that crossed" is decided
+   * here and re-finding it by timestamp would be a second, separately-fallible answer to a question
+   * this function has already settled.
+   */
+  underlyingValue: number | null;
 }
 
 /**
@@ -197,6 +214,7 @@ export function decideOptionBuyerObservedExit(
         exitPrice: bid,
         fillRule: "OBSERVED_TICK_STOP",
         observedAt: sample.observedAt,
+        underlyingValue: sample.underlyingValue ?? null,
       };
     }
     if (bid >= trade.targetPrice) {
@@ -206,6 +224,7 @@ export function decideOptionBuyerObservedExit(
         exitPrice: bid,
         fillRule: "OBSERVED_TICK_TARGET",
         observedAt: sample.observedAt,
+        underlyingValue: sample.underlyingValue ?? null,
       };
     }
   }

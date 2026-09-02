@@ -4,6 +4,7 @@ import {
   type InstrumentOutcome,
   type LayeredOutcome,
   type TradeDirection,
+  type UnderlyingOutcome,
 } from "../domain/outcome-layers.js";
 
 /**
@@ -21,17 +22,25 @@ import {
  * convenient would be the first crack in it. The caller -- an interface, which may see both -- builds the
  * input from rows.
  *
- * ## The underlying layer is null, and that is a data fact rather than a shortcut
+ * ## The underlying layer, and how it stopped being permanently null
  *
- * Found by audit: `paper_trades` records `underlying_entry_price` and **no underlying exit**, and the
- * holding-period candles a review reads belong to the option contract rather than the underlying. So
- * there is no observed underlying exit for a closed option trade, and no underlying path either.
+ * An audit found `paper_trades` recording `underlying_entry_price` and **no underlying exit**, so the
+ * underlying layer was absent on every trade and `attributeShortfall` declined on all of them --
+ * meaning the one question the three-layer split exists to answer, "was the thesis wrong or did the
+ * fill erase a correct one?", was unanswerable for the whole book.
  *
- * Deriving one from the underlying's candles at the exit instant was considered and rejected: it would
- * be a reconstruction presented alongside observed fills, and `attributeShortfall` reads `resolution`
- * to decide whether the *thesis* was wrong. A reconstructed level would produce confident attribution
- * from an inference. Recording `underlying_exit_price` at close is the fix; until then this layer is
- * honestly absent and attribution declines.
+ * Deriving the exit level from the underlying's candles was considered and rejected: mid-bar, that
+ * bar's close is a future value relative to the exit instant, and a reconstruction standing beside
+ * observed fills is exactly what produces confident attribution from an inference.
+ *
+ * Migration 089 supplies it properly instead. Production exits resolve from the option's own quoted
+ * bid series, and `option_premium_ticks.underlying_value` was already populated on 100% of 606,244
+ * ticks -- so the underlying level is read from **the same tick that crossed the barrier**, observed
+ * at the exit instant rather than reconstructed around it.
+ *
+ * The layer is still null whenever the data does not support one: a close with no such sample, a
+ * trade closed before 089, or a trade with no originating idea to read thesis levels from. Null keeps
+ * meaning "not observed", and attribution still declines there.
  *
  * ## Partial exits were going to be excluded, and the data said not to
  *
@@ -66,8 +75,26 @@ export interface LegacyClosedTrade {
   readonly exitPrice: number;
   readonly realisedPnl: number;
   readonly fees: number | null;
-  /** Recorded on the trade, but with no exit counterpart. Carried for provenance only. */
   readonly underlyingEntryPrice: number | null;
+  /**
+   * The underlying's observed level at the exit instant (migration 089), or null when none was.
+   *
+   * Null for every trade closed before that migration, and for closes resolved without a sample
+   * pairing an option quote to an underlying level.
+   */
+  readonly underlyingExitPrice: number | null;
+  /**
+   * The underlying levels the trade was taken on, from the originating trade idea.
+   *
+   * Required to say whether the *thesis* resolved, which is a different question from whether the
+   * option's barrier was hit -- and the question `attributeShortfall` reads. Null when the trade has
+   * no idea to read them from, in which case the underlying layer stays absent rather than guessed.
+   */
+  readonly underlyingThesis: {
+    readonly direction: TradeDirection;
+    readonly stop: number;
+    readonly target: number;
+  } | null;
   /**
    * True when a `paper_trade_partial_exits` row exists -- which to date means one slice for the whole
    * position, not a position exited in pieces. It does not make the P&L identity inapplicable; see the
@@ -102,6 +129,62 @@ export interface AdaptedOutcome {
   readonly unexplainedResidual: number;
 }
 
+/**
+ * The underlying layer, when the data supports one, and null when it does not.
+ *
+ * ## This is an endpoint classification, not a path one
+ *
+ * `resolution` is decided by where the underlying stood **at the exit instant**, because that is the
+ * one underlying observation a closed trade carries. It cannot see a target that was touched and
+ * given back, or a stop brushed intrabar and recovered from -- those are what
+ * `favourableExcursion` / `adverseExcursion` exist to report, and they are left null here precisely
+ * because the underlying's path is not read.
+ *
+ * The asymmetry to hold in mind when reading an attribution: an endpoint `INVALIDATED` is a strong
+ * reading (the underlying finished through the stop), while `UNRESOLVED_AT_HORIZON` is weak -- it
+ * means "not resolved *at the end*", not "never reached a barrier". `attributeShortfall` only blames
+ * the underlying on `INVALIDATED`, so the weak case declines rather than misattributing, which is
+ * the correct direction for the uncertainty to fall.
+ *
+ * `excursionTimeframe` must stay null alongside null excursions: `reconcileOutcome` refuses a
+ * timeframe with no measurement behind it, which is what keeps this honest rather than decorative.
+ */
+function underlyingLayerFor(trade: LegacyClosedTrade): UnderlyingOutcome | null {
+  const entry = trade.underlyingEntryPrice ?? null;
+  const exit = trade.underlyingExitPrice ?? null;
+  const thesis = trade.underlyingThesis ?? null;
+  /*
+   * `?? null` rather than `=== null`, because these arrive from database rows through a caller that
+   * maps columns by hand. A missing property is the same fact as a null one -- "not observed" -- and
+   * treating undefined as present would read `thesis.direction` off nothing.
+   */
+  if (entry === null || exit === null || thesis === null) return null;
+
+  const reachedTarget = thesis.direction === "LONG" ? exit >= thesis.target : exit <= thesis.target;
+  const throughStop = thesis.direction === "LONG" ? exit <= thesis.stop : exit >= thesis.stop;
+  /*
+   * Target is checked first, and only one can be true for coherent geometry: a LONG thesis has
+   * stop < target, so `exit >= target` and `exit <= stop` cannot both hold. Ordering it this way
+   * means malformed geometry reports the favourable reading rather than throwing inside an outcome
+   * adapter, and `reconcileOutcome` is where structural refusals belong.
+   */
+  const resolution = reachedTarget
+    ? "TARGET_REACHED"
+    : throughStop ? "INVALIDATED" : "UNRESOLVED_AT_HORIZON";
+
+  return {
+    resolution,
+    entryReference: entry,
+    exitReference: exit,
+    // The underlying's path between entry and exit is not read here. Null, never zero: zero would
+    // claim the position never moved against the thesis, which is the claim most likely to make a
+    // bad stop look safe.
+    favourableExcursion: null,
+    adverseExcursion: null,
+    excursionTimeframe: null,
+  };
+}
+
 export function layeredOutcomeFromClosedTrade(trade: LegacyClosedTrade): AdaptedOutcome {
   const instrument: InstrumentOutcome = {
     contractSymbol: trade.contractSymbol,
@@ -124,7 +207,7 @@ export function layeredOutcomeFromClosedTrade(trade: LegacyClosedTrade): Adapted
   const outcome = reconcileOutcome({
     decisionId: trade.tradeId,
     closed: true,
-    underlying: null,
+    underlying: underlyingLayerFor(trade),
     instrument,
     execution: {
       theoreticalPnl,

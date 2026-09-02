@@ -77,6 +77,14 @@ export interface PaperTrade {
   optionType?: OptionContractType | null;
   underlyingSymbol?: string | null;
   underlyingEntryPrice?: number | null;
+  /**
+   * The underlying's level observed at the exit instant, and null on an open position.
+   *
+   * Populated only by the observed-tick exit path, from the crossing sample itself. Null on a close
+   * resolved without such a sample, and on every trade closed before migration 089 -- so null means
+   * "not observed", never zero, and the two references must be read as a pair or not at all.
+   */
+  underlyingExitPrice?: number | null;
   entryIv?: number | null;
   /**
    * The regime observed when this trade was opened, for research and audit only.
@@ -156,6 +164,14 @@ export interface ClosePaperTradeInput {
   details: Record<string, unknown>;
   /** Optional itemised exit fee ledger merged into fee_breakdown.exit. */
   feeBreakdown?: Record<string, unknown>;
+  /**
+   * The underlying's observed level at the exit instant, or null when this path observed none.
+   *
+   * Optional because most close paths cannot supply it honestly: only the observed-tick barrier scan
+   * has a sample pairing an option quote to an underlying level at one instant. Omitting it stores
+   * null, which reads as "not observed" rather than zero -- see migration 089.
+   */
+  underlyingExitPrice?: number | null;
 }
 
 export interface PaperTradePartialExit {

@@ -394,6 +394,15 @@ export class EvaluateOpenPaperTrades {
       closedAt: Date;
       details: Record<string, unknown>;
       exercisedIntrinsic?: number;
+      /**
+       * The underlying's observed level at the exit instant, where the exit path has one.
+       *
+       * Only the observed-tick barrier scan does: its crossing sample carries the level the provider
+       * published alongside that quote. The intrinsic-expiry and latest-quote paths below resolve a
+       * price without a sample that pairs an option quote to an underlying level, so they leave this
+       * undefined and the column stays null rather than being filled from a reconstruction.
+       */
+      underlyingExitPrice?: number | null;
     }): Promise<string> => {
       let exitBreakdown = null;
       if (explicitExitFees === undefined) {
@@ -414,6 +423,7 @@ export class EvaluateOpenPaperTrades {
         exitSlippage,
         feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
         details: args.details,
+        underlyingExitPrice: args.underlyingExitPrice ?? null,
       });
       return closed.id;
     };
@@ -483,6 +493,8 @@ export class EvaluateOpenPaperTrades {
         exitReason: observedExit.reason,
         // The moment the barrier was actually crossed, not the moment this noticed.
         closedAt: observedExit.observedAt,
+        // From the crossing sample itself, so entry and exit references bracket the same event.
+        underlyingExitPrice: observedExit.underlyingValue,
         details: {
           source: "OPTION_PREMIUM_TICK_SERIES",
           quoteObservedAt: observedExit.observedAt.toISOString(),
@@ -495,6 +507,7 @@ export class EvaluateOpenPaperTrades {
           samplesScanned: observedSamples.length,
           fillRule: observedExit.fillRule,
           eventType: observedExit.eventType,
+          underlyingValue: observedExit.underlyingValue,
         },
       });
     }

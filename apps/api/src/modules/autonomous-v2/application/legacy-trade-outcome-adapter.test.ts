@@ -16,6 +16,9 @@ function trade(overrides: Partial<LegacyClosedTrade> = {}): LegacyClosedTrade {
     realisedPnl: 870,
     fees: 30,
     underlyingEntryPrice: 57_400,
+    // Absent by default, so every residual assertion below keeps exercising the pre-089 shape.
+    underlyingExitPrice: null,
+    underlyingThesis: null,
     hasPartialExits: false,
     ...overrides,
   };
@@ -48,17 +51,104 @@ describe("adapting a legacy closed trade", () => {
     expect(unexplainedResidual).toBe(1_521);
   });
 
-  it("leaves the underlying layer absent and therefore declines to attribute", () => {
+  it("leaves the underlying layer absent when no exit level was observed", () => {
     /*
-     * `paper_trades` records `underlying_entry_price` and no underlying exit, and the holding-period
-     * candles belong to the option contract. Deriving an underlying exit from candles was rejected: it
-     * would be a reconstruction standing beside observed fills, and `attributeShortfall` reads
-     * `resolution` to decide whether the *thesis* was wrong.
+     * The pre-089 shape, still reached by a close with no tick sample pairing an option quote to an
+     * underlying level, and by every trade closed before that migration. Null rather than a level
+     * read off the underlying's candles: mid-bar, that close is a future value relative to the exit.
      */
     const { outcome } = layeredOutcomeFromClosedTrade(trade({ realisedPnl: -800, exitPrice: 150 }));
 
     expect(outcome.underlying).toBeNull();
     expect(attributeShortfall(outcome)).toBeNull();
+  });
+
+  it("treats a missing property the same as an explicit null", () => {
+    // These arrive from database rows mapped by hand, so absent and null are one fact.
+    const { underlyingExitPrice: _e, underlyingThesis: _t, ...withoutUnderlying } = trade();
+
+    expect(layeredOutcomeFromClosedTrade(withoutUnderlying as never).outcome.underlying).toBeNull();
+  });
+
+  it("stays absent when an exit level exists but the thesis levels do not", () => {
+    // Both halves are required: with no stop or target there is nothing to resolve the thesis
+    // against, and inventing a resolution is what makes an attribution confident and wrong.
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      underlyingExitPrice: 57_200, underlyingThesis: null,
+    }));
+
+    expect(outcome.underlying).toBeNull();
+  });
+
+  it("builds the layer once 089 supplies an exit level, and then attributes", () => {
+    /*
+     * The case the three-layer split exists for: the underlying finished through its stop, so the
+     * thesis was wrong -- and a single P&L number cannot say that.
+     */
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      realisedPnl: -800,
+      exitPrice: 150,
+      underlyingExitPrice: 57_180,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+    }));
+
+    expect(outcome.underlying).not.toBeNull();
+    expect(outcome.underlying!.resolution).toBe("INVALIDATED");
+    expect(outcome.underlying!.entryReference).toBe(57_400);
+    expect(outcome.underlying!.exitReference).toBe(57_180);
+    expect(attributeShortfall(outcome)).toBe("UNDERLYING");
+  });
+
+  it("reports a reached target, and blames the instrument when the option still lost", () => {
+    // Thesis right, expression wrong: a strike or expiry that could not capture a correct call.
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      realisedPnl: -320,
+      exitPrice: 180,
+      underlyingExitPrice: 57_850,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+    }));
+
+    expect(outcome.underlying!.resolution).toBe("TARGET_REACHED");
+    expect(attributeShortfall(outcome)).toBe("INSTRUMENT");
+  });
+
+  it("resolves a SHORT thesis from the other side", () => {
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      underlyingExitPrice: 57_100,
+      underlyingThesis: { direction: "SHORT", stop: 57_600, target: 57_150 },
+    }));
+
+    expect(outcome.underlying!.resolution).toBe("TARGET_REACHED");
+  });
+
+  it("says UNRESOLVED_AT_HORIZON between the barriers, and then declines to attribute", () => {
+    /*
+     * The deliberately weak reading. Endpoint-only: the underlying may have touched a barrier and
+     * given it back, which this cannot see. `attributeShortfall` blames the underlying only on
+     * INVALIDATED, so the uncertainty falls towards declining rather than misattributing.
+     */
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      realisedPnl: -100,
+      exitPrice: 195,
+      underlyingExitPrice: 57_500,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+    }));
+
+    expect(outcome.underlying!.resolution).toBe("UNRESOLVED_AT_HORIZON");
+    expect(attributeShortfall(outcome)).toBeNull();
+  });
+
+  it("keeps the underlying excursions null, because the path is not read", () => {
+    // Zero would claim the underlying never moved against the thesis, and `reconcileOutcome` refuses
+    // a timeframe with no measurement behind it -- which is what stops this decorating.
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      underlyingExitPrice: 57_500,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+    }));
+
+    expect(outcome.underlying!.favourableExcursion).toBeNull();
+    expect(outcome.underlying!.adverseExcursion).toBeNull();
+    expect(outcome.underlying!.excursionTimeframe).toBeNull();
   });
 
   it("marks the price source as the observed book, so a regression to marks throws", () => {
