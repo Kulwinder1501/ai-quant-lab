@@ -199,6 +199,43 @@ LEGACY V1
 
 Each adapter is temporary and is deleted once the real V2.2 subsystem replaces it. This prevents V1 assumptions from hardening into permanent V2.2 assumptions.
 
+#### How that rule was satisfied for the thesis (implemented 2026-09-02)
+
+The ladder above is the design; this is what satisfying it actually required, because the thesis is the
+one adapter where the rule and the need collide.
+
+P13 grades whether V2.2 can **substitute** for V1. A V2.2 carrying a *different* entry rule cannot
+answer that -- every bar differs, every difference is expected, and the gate measures two strategies
+instead of one platform. So V1's entry rule has to run through V2.2's thesis port unchanged. But the
+rule above forbids reproducing V1 decision logic inside V2.2, and the QUARANTINE bucket adds "zero
+import path into `autonomous-v2/`", which a guard enforces by walking the real import graph.
+
+Both hold at once by **inverting the dependency**. `portedV1ThesisProducer` lives in
+`strategy-engine/application/v22-thesis-bridge.ts` -- inside the legacy module, not inside
+`autonomous-v2/`. V2.2 defines the port and knows nothing about V1; the legacy module adapts *itself*
+to the new contract and hands the result in. The arrow points from the system being replaced toward
+the system replacing it, which is also what lets V1 be deleted later without touching V2.2.
+
+Two further consequences of the rule, both now enforced rather than documented:
+
+- **"Differential analysis only, not live decisions" is typed.** Producers carry
+  `NATIVE | DIFFERENTIAL_ONLY`, and `assertMayHoldAuthority` throws on the latter. As prose this was
+  unenforceable the moment P19 grants paper authority to *some* producer. Trading a ported rule
+  requires re-deriving it natively under V2.2's tests -- deliberately not a flag.
+- **The bridge refuses to select.** V1's evaluators return lists and three strategies own the 5m
+  timeframe. Ranking candidates by confidence would be `scoreDirectionalSetup` rebuilt; taking the
+  first would be `patterns[0]`. Both are quarantined *by name*, so two distinct candidates yield
+  `AMBIGUOUS_PROPOSALS` and no thesis. I3's Opportunity Resolver is the component entitled to choose,
+  and it does not exist yet. Identical geometry from two strategies is one decision, not an ambiguity.
+
+V2.2's own measured gates still run first, unchanged, by delegating to the native producer rather than
+restating it. V1 has none of them, so on a frozen-tape bar V1 proposes and the ported producer refuses.
+That divergence is the finding, not a fault: it classifies as `EXPECTED_ARCHITECTURAL_CHANGE` with the
+D3 measurement attached. **Porting the entry rule is not porting V1 wholesale** -- the rule comes
+across, the defects stay behind.
+
+See Readiness Plan Gap 15 for the track's state and the four defects found by running it.
+
 ### Executable Side Restrictions: Structural vs Research-Approved
 
 V1's `AGENT_EXECUTABLE_SIDES = ["LONG"]` is an empirical research finding, not a structural rule. These must remain separate in V2.2:
