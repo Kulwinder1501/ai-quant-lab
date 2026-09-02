@@ -149,14 +149,26 @@ export function buildTradeReview(input: TradeReviewInput): TradeReview {
     riskPerUnit,
     candles: input.candles,
   });
-  if (excursions === null) {
-    observations.push("No holding-period candles were available, so excursions could not be measured.");
+  if (excursions.status === "NO_SERIES") {
+    observations.push("No holding-period prices were available, so excursions could not be measured.");
     proposedResearchTags.push("NO_HOLDING_PERIOD_DATA");
+  } else if (excursions.status === "SERIES_INSTRUMENT_MISMATCH") {
+    /*
+     * A separate tag from NO_HOLDING_PERIOD_DATA on purpose. Missing data is a gap in collection;
+     * this is a wiring fault, and it silently produced 339 reviews claiming excursions up to 10,697R
+     * with an adverse excursion of exactly zero. Conflating the two would let the fault read as a
+     * data gap and go unfixed again.
+     */
+    observations.push(
+      `Holding-period prices did not belong to the traded instrument, so excursions are unmeasured: `
+      + `${excursions.detail}.`,
+    );
+    proposedResearchTags.push("EXCURSION_SERIES_MISMATCH");
   } else {
-    maximumAdverseExcursion = excursions.maximumAdverse;
-    maximumFavourableExcursion = excursions.maximumFavourable;
-    maximumAdverseExcursionR = excursions.maximumAdverseR;
-    maximumFavourableExcursionR = excursions.maximumFavourableR;
+    maximumAdverseExcursion = excursions.excursions.maximumAdverse;
+    maximumFavourableExcursion = excursions.excursions.maximumFavourable;
+    maximumAdverseExcursionR = excursions.excursions.maximumAdverseR;
+    maximumFavourableExcursionR = excursions.excursions.maximumFavourableR;
 
     observations.push(
       `Ran ${maximumFavourableExcursionR}R in favour and ${maximumAdverseExcursionR}R against `

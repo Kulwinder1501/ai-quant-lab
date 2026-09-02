@@ -131,8 +131,11 @@ export function settleCandidate(input: SettleCandidateInput): CandidateSettlemen
     outcome: resolution.outcome,
     rMultiple: resolution.rMultiple,
     barsToResolution: resolution.barsToResolution,
-    maeR: excursions?.maximumAdverseR ?? null,
-    mfeR: excursions?.maximumFavourableR ?? null,
+    // Both non-measurements collapse to null here: a settled candidate row records the number or
+    // nothing, and a mismatch cannot arise on this path because the candles and the entry price are
+    // the same instrument's. The sentinel is defence in depth, not an expected branch.
+    maeR: excursions.status === "MEASURED" ? excursions.excursions.maximumAdverseR : null,
+    mfeR: excursions.status === "MEASURED" ? excursions.excursions.maximumFavourableR : null,
     horizonEnd: input.horizonEnd,
     resolvedTimeframe: input.resolvedTimeframe,
     barsAvailable: withinHorizon.length,

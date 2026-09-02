@@ -1126,11 +1126,17 @@ export class AiAutonomousAgent {
         opened_at: Date;
         closed_at: Date | null;
         timeframe: string | null;
+        option_strike: string | null;
+        option_expiry: Date | null;
+        option_type: "CE" | "PE" | null;
+        underlying_symbol: string | null;
       }>(`
         SELECT paper_trades.id, paper_trades.instrument_id, paper_trades.side, paper_trades.quantity,
                paper_trades.realized_pnl, paper_trades.exit_reason, paper_trades.entry_price,
                paper_trades.exit_price, paper_trades.stop_loss, paper_trades.target_price,
-               paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe
+               paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe,
+               paper_trades.option_strike, paper_trades.option_expiry, paper_trades.option_type,
+               paper_trades.underlying_symbol
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
@@ -1145,12 +1151,29 @@ export class AiAutonomousAgent {
 
       const pnl = Number(row.realized_pnl ?? 0);
       const reviewRepository = new PostgresTradeReviewRepository(client);
-      const holdingPeriod = await reviewRepository.findHoldingPeriodCandles({
-        instrumentId: row.instrument_id,
-        openedAt: row.opened_at,
-        closedAt: row.closed_at,
-        preferredTimeframe: row.timeframe,
-      });
+      /*
+       * An option trade's excursions belong to the option's price history, not the index's.
+       * `instrument_id` is the index while entry and stop are premiums, and measuring one against the
+       * other produced 339 reviews claiming up to 10,697R favourable and exactly zero adverse. There
+       * are no candles for an option contract, so its premium tick series is the only history it has.
+       */
+      const isOption = row.option_strike !== null && row.option_expiry !== null
+        && row.option_type !== null && row.underlying_symbol !== null;
+      const holdingPeriod = isOption
+        ? await reviewRepository.findOptionPremiumSeries({
+            underlyingSymbol: row.underlying_symbol!,
+            expiryDate: row.option_expiry!,
+            strikePrice: Number(row.option_strike),
+            optionType: row.option_type!,
+            openedAt: row.opened_at,
+            closedAt: row.closed_at,
+          })
+        : await reviewRepository.findHoldingPeriodCandles({
+            instrumentId: row.instrument_id,
+            openedAt: row.opened_at,
+            closedAt: row.closed_at,
+            preferredTimeframe: row.timeframe,
+          });
 
       const review = buildTradeReview({
         tradeId: row.id,

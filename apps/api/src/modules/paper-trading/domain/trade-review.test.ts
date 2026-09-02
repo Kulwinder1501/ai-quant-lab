@@ -161,6 +161,49 @@ describe("buildTradeReview", () => {
     expect(review.proposedResearchTags).not.toContain("NO_FOLLOW_THROUGH");
   });
 
+  it("refuses excursions from a series that is not the traded instrument's", () => {
+    /*
+     * The regression. `paper_trades.instrument_id` points at the index while entry and stop are
+     * option premiums, so this review used to measure index levels against option prices: all 339
+     * stored reviews reported a favourable excursion above 100R (up to 10,697R) and an adverse
+     * excursion of exactly zero -- the latter asserting "never moved against us" on every trade.
+     *
+     * Reported under its own tag rather than NO_HOLDING_PERIOD_DATA: missing data is a collection
+     * gap, this is a wiring fault, and conflating them is how it would go unfixed again.
+     */
+    const review = buildTradeReview(longTrade({
+      entryPrice: 108.75,
+      stopLoss: 100.7,
+      candles: [{ openTime: new Date("2026-09-01T04:00:00.000Z"), high: 23_980.55, low: 23_980.55 }],
+      observedTimeframe: "5m",
+    }));
+
+    expect(review.maximumAdverseExcursion).toBeNull();
+    expect(review.maximumFavourableExcursionR).toBeNull();
+    expect(review.proposedResearchTags).toContain("EXCURSION_SERIES_MISMATCH");
+    expect(review.proposedResearchTags).not.toContain("NO_HOLDING_PERIOD_DATA");
+    // The two tags the corrupt MFE used to manufacture must not appear.
+    expect(review.proposedResearchTags).not.toContain("GAVE_BACK_FAVOURABLE_MOVE");
+    expect(review.proposedResearchTags).not.toContain("EXITED_BELOW_PEAK");
+  });
+
+  it("measures an option trade against its own premium series", () => {
+    // The corrected path: a tick series for the contract, in the same units as entry and stop.
+    const review = buildTradeReview(longTrade({
+      entryPrice: 108.75,
+      stopLoss: 100.7,
+      candles: [
+        { openTime: new Date("2026-09-01T04:00:00.000Z"), high: 104.2, low: 104.2 },
+        { openTime: new Date("2026-09-01T04:01:00.000Z"), high: 121.05, low: 121.05 },
+      ],
+      observedTimeframe: "tick",
+    }));
+
+    expect(review.maximumAdverseExcursion).toBeCloseTo(4.55, 6);
+    expect(review.maximumFavourableExcursion).toBeCloseTo(12.3, 6);
+    expect(review.observedTimeframe).toBe("tick");
+  });
+
   it("records the timeframe the excursions were read at, since it sets their precision", () => {
     const daily = buildTradeReview(longTrade({ observedTimeframe: "1d" }));
     const minute = buildTradeReview(longTrade({ observedTimeframe: "1m" }));

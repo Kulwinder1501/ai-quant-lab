@@ -34,26 +34,66 @@ function rounded(value: number): number {
  * never survived to see, which reads as "the target was nearly reached" about a trade that was
  * already closed.
  *
- * Returns null for an empty window rather than zeroes: no bars means the excursions are unknown, and
- * zero would claim the price never moved.
+ * Returns an outcome rather than a number-or-null, because there are three distinct answers and two of
+ * them are not measurements. No bars means the excursions are unknown, and zero would claim the price
+ * never moved.
+ *
+ * ## The series must belong to the same instrument as the entry, and that used to go unchecked
+ *
+ * Measured 2026-09-02: every one of 339 stored trade reviews reported a favourable excursion above
+ * 100R (up to 10,697R) and an adverse excursion of **exactly zero**. The cause was that
+ * `paper_trades.instrument_id` points at the *index* while `entry_price` and `stop_loss` are *option
+ * premiums*, so the review compared index levels against option prices: for one trade,
+ * (23,980.55 - 108.75) / 8.05 = 2,965R. The adverse figure was zero on all 339 because an index low is
+ * never below an option premium, and the clamp turned that into "this position never moved against
+ * us" -- the single most dangerous thing a review can say wrongly, because it makes a bad stop look
+ * safe.
+ *
+ * `SERIES_INSTRUMENT_MISMATCH` is therefore a first-class outcome. The test is that the series range
+ * must not sit *entirely* on one side of the entry by more than `mismatchFactor`: the window starts at
+ * the entry instant, so a series for the same instrument must either contain the entry price or come
+ * close to it. A factor rather than strict containment tolerates a slightly misaligned first bar,
+ * while still catching a 220x scale difference decisively.
  */
+/** How far the whole series may sit off the entry before it cannot be the same instrument. */
+export const excursionSeriesMismatchFactor = 5;
+
+export type ExcursionMeasurement =
+  | { readonly status: "MEASURED"; readonly excursions: Excursions }
+  | { readonly status: "NO_SERIES" }
+  | { readonly status: "SERIES_INSTRUMENT_MISMATCH"; readonly detail: string };
+
 export function measureExcursions(input: {
   side: TradeSide;
   entryPrice: number;
   /** The risked distance, entry to stop. Must be positive. */
   riskPerUnit: number;
   candles: readonly ExcursionCandle[];
-}): Excursions | null {
+  /** Overridable for tests; production uses the exported default. */
+  mismatchFactor?: number;
+}): ExcursionMeasurement {
   if (!Number.isFinite(input.riskPerUnit) || input.riskPerUnit <= 0) {
     throw new Error("Excursion risk per unit must be a positive finite number.");
   }
   if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0) {
     throw new Error("Excursion entry price must be a positive finite number.");
   }
-  if (input.candles.length === 0) return null;
+  if (input.candles.length === 0) return { status: "NO_SERIES" };
 
   const highest = Math.max(...input.candles.map((candle) => candle.high));
   const lowest = Math.min(...input.candles.map((candle) => candle.low));
+
+  const factor = input.mismatchFactor ?? excursionSeriesMismatchFactor;
+  const entirelyAbove = lowest > input.entryPrice * factor;
+  const entirelyBelow = highest * factor < input.entryPrice;
+  if (entirelyAbove || entirelyBelow) {
+    return {
+      status: "SERIES_INSTRUMENT_MISMATCH",
+      detail: `series range [${rounded(lowest)}, ${rounded(highest)}] sits entirely `
+        + `${entirelyAbove ? "above" : "below"} an entry of ${rounded(input.entryPrice)} by more than `
+        + `${factor}x, so it cannot be the same instrument's holding-period series`,
+    };
+  }
   const worstPrice = input.side === "LONG" ? lowest : highest;
   const bestPrice = input.side === "LONG" ? highest : lowest;
 
@@ -67,9 +107,12 @@ export function measureExcursions(input: {
     : input.entryPrice - bestPrice));
 
   return {
-    maximumAdverse,
-    maximumFavourable,
-    maximumAdverseR: rounded(maximumAdverse / input.riskPerUnit),
-    maximumFavourableR: rounded(maximumFavourable / input.riskPerUnit),
+    status: "MEASURED",
+    excursions: {
+      maximumAdverse,
+      maximumFavourable,
+      maximumAdverseR: rounded(maximumAdverse / input.riskPerUnit),
+      maximumFavourableR: rounded(maximumFavourable / input.riskPerUnit),
+    },
   };
 }

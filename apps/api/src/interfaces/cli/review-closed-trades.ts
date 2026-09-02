@@ -27,6 +27,8 @@ async function main(): Promise<void> {
       fees: string | null; underlying_entry_price: string | null; partial_exits: string;
       underlying_exit_price: string | null; idea_side: TradeSide | null;
       idea_stop: string | null; idea_target: string | null;
+      option_expiry: Date | null; option_type: "CE" | "PE" | null; underlying_symbol: string | null;
+      option_strike: string | null;
     }>(`
       SELECT paper_trades.id, paper_trades.instrument_id, paper_trades.side, paper_trades.quantity,
              paper_trades.realized_pnl, paper_trades.exit_reason, paper_trades.entry_price,
@@ -39,6 +41,8 @@ async function main(): Promise<void> {
              -- resolved, which is a different question from whether the option's barrier was hit.
              trade_ideas.side AS idea_side, trade_ideas.stop_loss AS idea_stop,
              trade_ideas.target_price AS idea_target,
+             paper_trades.option_expiry, paper_trades.option_type, paper_trades.underlying_symbol,
+             paper_trades.option_strike,
              (SELECT count(*) FROM paper_trade_partial_exits pe
                WHERE pe.paper_trade_id = paper_trades.id) AS partial_exits
       FROM paper_trades
@@ -85,12 +89,31 @@ async function main(): Promise<void> {
     const attribution = { UNDERLYING: 0, INSTRUMENT: 0, EXECUTION: 0, unattributed: 0 };
     const journal = new PostgresAiJournalRepository(database);
     for (const row of trades.rows) {
-      const holdingPeriod = await repository.findHoldingPeriodCandles({
-        instrumentId: row.instrument_id,
-        openedAt: row.opened_at,
-        closedAt: row.closed_at,
-        preferredTimeframe: row.timeframe,
-      });
+      /*
+       * An option trade's excursions must be measured on the *option's* price history, not the
+       * index's. `instrument_id` points at the index while entry and stop are premiums, and using it
+       * for both is what produced 339 reviews with excursions up to 10,697R and an adverse excursion
+       * of exactly zero. There are no candles for an option contract, so the premium tick series is
+       * the only price history it has; `measureExcursions` now refuses the mismatch outright, so this
+       * choosing wrongly would report unmeasured rather than a fabricated number.
+       */
+      const isOption = row.option_strike !== null && row.option_expiry !== null
+        && row.option_type !== null && row.underlying_symbol !== null;
+      const holdingPeriod = isOption
+        ? await repository.findOptionPremiumSeries({
+            underlyingSymbol: row.underlying_symbol!,
+            expiryDate: row.option_expiry!,
+            strikePrice: Number(row.option_strike),
+            optionType: row.option_type!,
+            openedAt: row.opened_at,
+            closedAt: row.closed_at,
+          })
+        : await repository.findHoldingPeriodCandles({
+            instrumentId: row.instrument_id,
+            openedAt: row.opened_at,
+            closedAt: row.closed_at,
+            preferredTimeframe: row.timeframe,
+          });
       const review = buildTradeReview({
         tradeId: row.id,
         side: row.side,

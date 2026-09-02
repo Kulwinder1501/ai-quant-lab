@@ -71,6 +71,72 @@ export class PostgresTradeReviewRepository {
     return { candles: [], timeframe: null };
   }
 
+  /**
+   * The traded option's own observed bid series over the holding period.
+   *
+   * This exists because `findHoldingPeriodCandles` is the wrong source for an option trade and was
+   * being used for one. `paper_trades.instrument_id` points at the *index*, while `entry_price` and
+   * `stop_loss` are *option premiums*, so excursions were comparing index levels to option prices --
+   * 339 reviews reporting up to 10,697R favourable and exactly zero adverse. There are no candles for
+   * an option contract; the premium tick series is the only price history it has.
+   *
+   * ## Direction of the bound flips, and that matters when reading the number
+   *
+   * Candle-derived excursions are an **upper** bound: a bar's full range is attributed to the
+   * position even though the intrabar path is unknown. Tick-derived excursions are a **lower** bound:
+   * the extremes between two samples are simply not observed, and this book is sampled roughly twice
+   * a minute. So a tick-derived MAE of 0.4R means "at least 0.4R", where a candle-derived one meant
+   * "at most". `observedTimeframe` is recorded as `tick` so a reader can tell which they hold.
+   *
+   * Only the bid is read, and non-positive bids are skipped -- the same rule the exit scan uses. A
+   * long option is exited by selling into the bid, so it is the executable price, and a missing bid
+   * means no buyer was quoted rather than a premium of zero.
+   *
+   * Empty for any trade closed before 2026-08-12, when premium tick collection began. That returns
+   * `NO_SERIES` and the review states its excursions are unmeasured, which is the honest answer.
+   */
+  async findOptionPremiumSeries(input: {
+    underlyingSymbol: string;
+    expiryDate: Date;
+    strikePrice: number;
+    optionType: "CE" | "PE";
+    openedAt: Date;
+    closedAt: Date;
+  }): Promise<HoldingPeriodCandles> {
+    const result = await this.client.query<{ observed_at: Date; bid: string }>(`
+      SELECT observed_at, bid
+      FROM option_premium_ticks
+      WHERE underlying_symbol = $1
+        AND expiry_date = $2::date
+        AND strike_price = $3
+        AND option_type = $4
+        AND observed_at >= $5
+        AND observed_at <= $6
+        AND bid IS NOT NULL
+        AND bid > 0
+      ORDER BY observed_at ASC
+    `, [
+      input.underlyingSymbol.toUpperCase(),
+      input.expiryDate.toISOString().slice(0, 10),
+      input.strikePrice,
+      input.optionType,
+      input.openedAt,
+      input.closedAt,
+    ]);
+
+    if (result.rows.length === 0) return { candles: [], timeframe: null };
+    return {
+      timeframe: "tick",
+      // A quote is an instant, not a range, so high and low are the same number. Writing it this way
+      // reuses one excursion implementation rather than adding a parallel one for point series.
+      candles: result.rows.map((row) => ({
+        openTime: row.observed_at,
+        high: Number(row.bid),
+        low: Number(row.bid),
+      })),
+    };
+  }
+
   async save(review: TradeReview): Promise<void> {
     await this.client.query(`
       INSERT INTO trade_reviews (
