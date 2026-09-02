@@ -85,6 +85,7 @@ import { patternIntelligenceObservationsMigration } from "./084-pattern-intellig
 import { patternObservationFrozenTapeMigration } from "./085-pattern-observation-frozen-tape.js";
 import { decisionSnapshotsMigration } from "./086-decision-snapshots.js";
 import { decisionLedgerMigration } from "./087-decision-ledger.js";
+import { paperTradePnlConventionMigration } from "./088-paper-trade-pnl-convention.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -174,4 +175,5 @@ export const migrations = [
   patternObservationFrozenTapeMigration,
   decisionSnapshotsMigration,
   decisionLedgerMigration,
+  paperTradePnlConventionMigration,
 ];
