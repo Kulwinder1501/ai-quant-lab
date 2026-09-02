@@ -22,6 +22,7 @@ function entry(overrides: Partial<RegisteredResearchStrategy> = {}): RegisteredR
     closureReason: null,
     pinnedDefinitionHash: "a".repeat(64),
     lineage: { parentStrategyKey: null, parentResearchVersion: null, parentTerminalReason: null },
+    operationalStrategyKey: null,
     ...overrides,
   };
 }

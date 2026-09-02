@@ -106,6 +106,27 @@ export interface RegisteredResearchStrategy {
    */
   readonly pinnedDefinitionHash: string;
   readonly lineage: StrategyLineage;
+  /**
+   * The operational `strategyKey` this research artifact is a frozen copy of, or null.
+   *
+   * Declared here so a TERMINAL verdict can be *propagated* rather than merely recorded. Without it,
+   * a research line of inquiry can be closed as never-eligible while its production twin keeps
+   * trading, which is exactly the state found on 2026-09-02: both TERMINAL entries had live
+   * operational twins and nothing connected the two.
+   *
+   * It cannot be an import. `scalp-research-isolation.test.ts` forbids execution code from reaching
+   * into research internals, and that severance is the harness's whole guarantee -- so the link is a
+   * declared key, checked by a test that is allowed to see both sides.
+   *
+   * Derived from which class each research adapter wraps, not from name similarity. Note that
+   * `pattern-v4-research` wraps `MomentumScalpPatternStrategyV2`, so its twin is the operational
+   * *v2* key despite the research key reading as generation 1.
+   *
+   * Null for the three SUPERSEDED entries: their implementations are no longer in the codebase, so a
+   * twin cannot be verified from current code, and guessing one would assert an unverifiable link.
+   * They are also never eligible under any key, so nothing turns on it.
+   */
+  readonly operationalStrategyKey: string | null;
 }
 
 export class StrategyRegistryError extends Error {
@@ -136,6 +157,7 @@ const V1_SCHEMA_SUPERSEDED_REASON =
 export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   {
     strategyKey: "momentum-v5-research",
+    operationalStrategyKey: "momentum-scalp",
     researchVersion: 5,
     researchStatus: "RESEARCH",
     productionEligibility: "NOT_YET_ELIGIBLE",
@@ -149,6 +171,7 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     strategyKey: "index-v3-research",
+    operationalStrategyKey: "momentum-scalp-index",
     researchVersion: 3,
     researchStatus: "TERMINAL",
     productionEligibility: "NEVER_ELIGIBLE",
@@ -162,6 +185,8 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     strategyKey: "pattern-v4-research",
+    // Wraps MomentumScalpPatternStrategyV2, so the twin is the v2 operational key.
+    operationalStrategyKey: "momentum-scalp-pattern-v2",
     researchVersion: 4,
     researchStatus: "TERMINAL",
     productionEligibility: "NEVER_ELIGIBLE",
@@ -180,6 +205,8 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
      * carried parent reason rather than by staying silent.
      */
     strategyKey: "pattern-v4-research-v2",
+    // Its own PatternIntelligenceResearchAdapter; no operational strategy implements it.
+    operationalStrategyKey: null,
     researchVersion: 2,
     researchStatus: "RESEARCH",
     productionEligibility: "NOT_YET_ELIGIBLE",
@@ -193,6 +220,7 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     strategyKey: "momentum-v4-research",
+    operationalStrategyKey: null,
     researchVersion: 4,
     researchStatus: "SUPERSEDED",
     productionEligibility: "NEVER_ELIGIBLE",
@@ -202,6 +230,7 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     strategyKey: "index-v2-research",
+    operationalStrategyKey: null,
     researchVersion: 2,
     researchStatus: "SUPERSEDED",
     productionEligibility: "NEVER_ELIGIBLE",
@@ -211,6 +240,7 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     strategyKey: "pattern-v3-research",
+    operationalStrategyKey: null,
     researchVersion: 3,
     researchStatus: "SUPERSEDED",
     productionEligibility: "NEVER_ELIGIBLE",

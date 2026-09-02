@@ -47,6 +47,29 @@ export interface RegisteredStrategy {
    * generation instead of having to record a refusal per idea.
    */
   executableSides?: readonly TradeSide[];
+  /**
+   * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.
+   *
+   * The governance gap this closes, found 2026-09-02: the research harness had recorded
+   * `index-v3-research` and `pattern-v4-research` as TERMINAL / NEVER_ELIGIBLE, and both of their
+   * operational twins were live and trading, with nothing connecting the two records. The verdict
+   * was written down and propagated nowhere.
+   *
+   * It is an acknowledgement rather than an automatic disable, deliberately. A research TERMINAL is a
+   * verdict on a measured line of inquiry under the harness's canonical geometry; whether the live
+   * strategy should keep trading is a separate decision with its own evidence, and having a research
+   * conclusion silently close a production strategy would be as wrong in the other direction. What
+   * must not happen is the verdict going unnoticed -- so the guard converts silence into a recorded,
+   * reviewable statement, and `whyStillEnabled` has to say something.
+   *
+   * `closureReason` is checked verbatim against the research registry, so the reason cannot drift
+   * into a softer paraphrase on this side of the boundary.
+   */
+  terminalResearchAcknowledgement?: {
+    readonly researchStrategyKey: string;
+    readonly closureReason: string;
+    readonly whyStillEnabled: string;
+  };
 }
 
 /** Both sides unless the registration narrows them. */
@@ -100,6 +123,17 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * No edge is claimed for short. This narrows a measured loser; it does not promote the remainder.
      */
     executableSides: ["SHORT"],
+    terminalResearchAcknowledgement: {
+      researchStrategyKey: "index-v3-research",
+      closureReason: "horizon sweep returned NO_VIABLE_HORIZON; both width and holding period exhausted",
+      whyStillEnabled:
+        "The research verdict closes this architecture under the harness's canonical geometry, where "
+        + "both bracket width and holding horizon were swept. It is not a measurement of the live 5m "
+        + "short cell, which is separately positive over 93 trades (+Rs 1,384, 47.3% win). The long "
+        + "side, which the research verdict fits, was disabled on 2026-09-02 (-Rs 13,414 over 62). "
+        + "Short is retained on its own live record with no edge claimed, and is the first thing to "
+        + "drop if that record turns.",
+    },
   },
   {
     registration: momentumScalpPatternStrategyRegistration,
@@ -110,6 +144,16 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: momentumScalpPatternStrategyV2Registration,
     StrategyClass: MomentumScalpPatternStrategyV2,
     supportedTimeframes: ["1m", "3m", "5m"],
+    terminalResearchAcknowledgement: {
+      researchStrategyKey: "pattern-v4-research",
+      closureReason: "degrades the base strategy monotonically on both deep ETFs",
+      whyStillEnabled:
+        "Nothing yet justifies it on live evidence: 1 closed trade (+Rs 188) is no record at all, "
+        + "while the research verdict against it is strong -- monotonic degradation across "
+        + "13.7k-18.6k trades per cell on both deep ETFs. Recorded as an open decision rather than "
+        + "an endorsement. On the evidence available the defensible action is to disable it, and that "
+        + "is a trading decision awaiting an owner, not something this registry should take silently.",
+    },
   },
 ];
 
