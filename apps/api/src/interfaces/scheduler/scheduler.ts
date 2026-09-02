@@ -13,6 +13,10 @@ import {
   findOverdueScheduledJobs,
   type ScheduledJobExpectation,
 } from "../../modules/scheduling/domain/scheduled-job-liveness.js";
+import {
+  assessCronStall,
+  canaryCronExpression,
+} from "../../modules/scheduling/domain/cron-liveness.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresScheduledJobClaimRepository } from "../../infrastructure/database/repositories/postgres-scheduled-job-claim-repository.js";
@@ -286,9 +290,31 @@ async function main(): Promise<void> {
     }
   }
 
-  cron.schedule("5 16 * * 1-5", () => {
+  /**
+   * Every cron registration goes through here so the watchdog can see whether timers are firing.
+   *
+   * Wrapping the registration rather than `schedule()` is deliberate. Several crons decide not to run
+   * their job -- `PAPER_TRADE_EXIT_SWEEP` returns early without a Fyers token, for one -- so a
+   * `schedule()`-level hook would read "no claim" as "timer dead" and restart a healthy container.
+   * The timestamp is stamped before the handler, so a handler that throws still counts as a fire:
+   * the timer worked, and a broken job is a different problem with its own FAILED row.
+   *
+   * `timezone: IST` is applied here for all of them, which also removes the chance of a future
+   * registration forgetting it.
+   */
+  const cronLastFiredAt = new Map<string, Date>();
+  const registeredCronExpressions = new Set<string>();
+  function cronSchedule(expression: string, handler: () => void): void {
+    registeredCronExpressions.add(expression);
+    cron.schedule(expression, () => {
+      cronLastFiredAt.set(expression, new Date());
+      handler();
+    }, { timezone: IST });
+  }
+
+  cronSchedule("5 16 * * 1-5", () => {
     void schedule("EOD_PIPELINE", () => runCommand("npm", ["run", "pipeline:eod"]));
-  }, { timezone: IST });
+  });
 
   // Intraday shadow predictions for the volatility competition pool. Labels are
   // session-partitioned (a bar near the close has no same-session forward bars),
@@ -297,7 +323,7 @@ async function main(): Promise<void> {
   // session's completed 15m bars so far, then predicts once per pool model on
   // the latest one — idempotent per (model, candle), so overlapping runs and
   // out-of-hours no-ops are harmless.
-  cron.schedule("*/15 9-15 * * 1-5", () => {
+  cronSchedule("*/15 9-15 * * 1-5", () => {
     void schedule("INTRADAY_MODEL_PREDICTIONS", async () => {
       const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: IST }).format(new Date());
       for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
@@ -322,17 +348,17 @@ async function main(): Promise<void> {
       ]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
     });
-  }, { timezone: IST });
+  });
 
-  cron.schedule("30 18 * * 1-5", () => {
+  cronSchedule("30 18 * * 1-5", () => {
     void schedule("INSTITUTIONAL_FLOWS", () => runCommand("npm", ["run", "data:collect:institutional"]));
-  }, { timezone: IST });
+  });
 
   // NSE sometimes publishes the provisional cash print late. These idempotent
   // retries close the gap the original one-shot 18:30 schedule left overnight.
-  cron.schedule("15 19,20 * * 1-5", () => {
+  cronSchedule("15 19,20 * * 1-5", () => {
     void schedule("INSTITUTIONAL_FLOWS_RETRY", () => runCommand("npm", ["run", "data:collect:institutional"]));
-  }, { timezone: IST });
+  });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
     const now = new Date();
@@ -354,18 +380,18 @@ async function main(): Promise<void> {
     }
   };
 
-  cron.schedule("30 16 * * 1-5", () => {
+  cronSchedule("30 16 * * 1-5", () => {
     void schedule("INDIA_VIX_EOD", () => collectIndiaVix(["1d"], 10));
-  }, { timezone: IST });
-  cron.schedule("15 17,18 * * 1-5", () => {
+  });
+  cronSchedule("15 17,18 * * 1-5", () => {
     void schedule("INDIA_VIX_EOD_RETRY", () => collectIndiaVix(["1d"], 10));
-  }, { timezone: IST });
+  });
 
   // Exact-timeframe VIX bars keep the existing point-in-time feature contract
   // valid for intraday and scalp models; no daily value is silently borrowed.
-  cron.schedule("*/5 9-15 * * 1-5", () => {
+  cronSchedule("*/5 9-15 * * 1-5", () => {
     void schedule("INDIA_VIX_INTRADAY", () => collectIndiaVix(["1m", "5m", "15m"], 2));
-  }, { timezone: IST });
+  });
 
   /**
    * How far back an intraday indicator recompute writes.
@@ -458,9 +484,9 @@ async function main(): Promise<void> {
    * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. Four passes at a
    * fifteen-minute cadence is well inside the 20-minute abandoned-claim horizon for this job.
    */
-  cron.schedule("*/15 9-15 * * 1-5", () => {
+  cronSchedule("*/15 9-15 * * 1-5", () => {
     void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
-  }, { timezone: IST });
+  });
 
   /**
    * Pattern Intelligence V1.0.1 detection, which is what feeds `pattern-v4-research-v2`.
@@ -507,9 +533,9 @@ async function main(): Promise<void> {
     }
   };
 
-  cron.schedule("7,22,37,52 9-15 * * 1-5", () => {
+  cronSchedule("7,22,37,52 9-15 * * 1-5", () => {
     void schedule("PATTERN_INTELLIGENCE_INTRADAY", () => detectPatternIntelligenceIntraday(["1m", "5m"]));
-  }, { timezone: IST });
+  });
 
   /*
    * Collector health, in-session and every ten minutes.
@@ -522,9 +548,9 @@ async function main(): Promise<void> {
    * Runs to hour 15 inclusive so it spans the 15:40 derivatives close, which the cash-session
    * schedule of the jobs above does not reach.
    */
-  cron.schedule("3,13,23,33,43,53 9-15 * * 1-5", () => {
+  cronSchedule("3,13,23,33,43,53 9-15 * * 1-5", () => {
     void schedule("COLLECTOR_HEALTH", () => runCommand("npm", ["run", "ops:collector-health"]));
-  }, { timezone: IST });
+  });
 
   /**
    * Is the raw L2 depth capture actually producing rows? Asked from outside the collector.
@@ -541,9 +567,9 @@ async function main(): Promise<void> {
    * It passes no --symbols on purpose. A checker naming the front-month contract would roll into the
    * exact bug it detects; see `depth-frame-staleness.ts`.
    */
-  cron.schedule("7,17,27,37,47,57 9-15 * * 1-5", () => {
+  cronSchedule("7,17,27,37,47,57 9-15 * * 1-5", () => {
     void schedule("DEPTH_FRAME_STALENESS", () => runCommand("npm", ["run", "ops:depth-staleness"]));
-  }, { timezone: IST });
+  });
 
   // Higher-timeframe models consume completed 30m/60m candles. Refreshing their
   // derived features every minute would repeatedly traverse the same history with
@@ -551,7 +577,7 @@ async function main(): Promise<void> {
   // are idempotent and the five-day write window heals missed runs after restarts.
   // Offset from the quarter-hour jobs so prediction, 15m pattern detection, and
   // these heavier full-history calculations do not contend at the same second.
-  cron.schedule("7,22,37,52 9-15 * * 1-5", () => {
+  cronSchedule("7,22,37,52 9-15 * * 1-5", () => {
     if (fyersTokenService) {
       void schedule("HIGHER_TIMEFRAME_ANALYSIS", async () => {
         // live-collector-v2 supplies these candles; EOD owns gap healing.
@@ -559,9 +585,9 @@ async function main(): Promise<void> {
         await detectPatternsIntraday(["30m", "60m"]);
       });
     }
-  }, { timezone: IST });
+  });
 
-  cron.schedule("*/1 9-15 * * 1-5", () => {
+  cronSchedule("*/1 9-15 * * 1-5", () => {
     // Requires a healthy Fyers token, which FYERS_AUTH_HEALTH_CHECK ensures is available
     if (fyersTokenService) {
       // 15m is here for its **indicators**, not its bars. The history endpoint publishes no
@@ -572,9 +598,9 @@ async function main(): Promise<void> {
       // indicators.
       void schedule("INDICES_INTRADAY", () => collectIndicesIntraday(["1m", "5m", "15m"]));
     }
-  }, { timezone: IST });
+  });
 
-  cron.schedule("*/5 9-15 * * 1-5", () => {
+  cronSchedule("*/5 9-15 * * 1-5", () => {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
@@ -590,7 +616,7 @@ async function main(): Promise<void> {
      * differential record on exactly the days the token lapses, which are the days worth comparing.
      */
     void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
-  }, { timezone: IST });
+  });
 
   /**
    * The floor under tick-driven exit evaluation, not the primary path.
@@ -633,17 +659,17 @@ async function main(): Promise<void> {
    * Deliberately not gated on `fyersTokenService`: this reads stored bars, so it works on a day the
    * feed never authenticated -- which is exactly a day worth measuring.
    */
-  cron.schedule("15,45 9-15 * * 1-5", () => {
+  cronSchedule("15,45 9-15 * * 1-5", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "1000"]);
     });
-  }, { timezone: IST });
+  });
 
-  cron.schedule("10 16 * * 1-5", () => {
+  cronSchedule("10 16 * * 1-5", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "5000"]);
     });
-  }, { timezone: IST });
+  });
 
   /**
 /**
@@ -674,14 +700,14 @@ async function main(): Promise<void> {
    * Needs the Fyers credential, so it is gated like the other collecting jobs; when there is no token
    * the detector below still runs and still alarms, it simply cannot self-heal.
    */
-  cron.schedule("18 16 * * 1-5", () => {
+  cronSchedule("18 16 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("CANDLE_GAP_HEAL", async () => {
       for (const timeframe of GAP_SCANNED_TIMEFRAMES) {
         await runCommand("npm", ["run", "data:heal-gaps", "--", "--apply", "--timeframe", timeframe, "--lookback-days", "5"]);
       }
     });
-  }, { timezone: IST });
+  });
 
   /**
    * End-of-day check that the day's index bars actually all arrived.
@@ -697,15 +723,15 @@ async function main(): Promise<void> {
    * was not configured to reach), which is exactly what deserves attention. It is also the independent
    * no-write safety net: if the healer has a fault, this still catches the gap.
    */
-  cron.schedule("20 16 * * 1-5", () => {
+  cronSchedule("20 16 * * 1-5", () => {
     void schedule("CANDLE_GAP_CHECK", async () => {
       for (const timeframe of GAP_SCANNED_TIMEFRAMES) {
         await runCommand("npm", ["run", "data:detect-gaps", "--", "--timeframe", timeframe, "--lookback-days", "5"]);
       }
     });
-  }, { timezone: IST });
+  });
 
-  cron.schedule("* 9-15 * * 1-5", () => {
+  cronSchedule("* 9-15 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("PAPER_TRADE_EXIT_SWEEP", async () => {
       const accounts = await database.query<{ name: string }>(
@@ -718,7 +744,7 @@ async function main(): Promise<void> {
         await runCommand("npm", ["run", "paper:trades:evaluate", "--", "--account", account.name]);
       }
     });
-  }, { timezone: IST });
+  });
 
   /**
    * The autonomous agent's evaluation pass.
@@ -734,22 +760,22 @@ async function main(): Promise<void> {
    * the size of the journal. Stop and target evaluation still runs on every pass, which is the
    * part that wants to be prompt.
    */
-  cron.schedule("*/2 9-15 * * 1-5", () => {
+  cronSchedule("*/2 9-15 * * 1-5", () => {
     void schedule("AI_AGENT_TICK", () => runCommand("npm", [
       "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=5m",
     ]));
-  }, { timezone: IST });
+  });
 
   // Before open and throughout the session: a credential can become unusable after 08:00.
   // `getAccessToken` is a database-only read while the token remains comfortably valid, so
   // this cadence does not add provider traffic in the healthy case.
   if (fyersTokenService) {
-    cron.schedule("0 8 * * 1-5", () => {
+    cronSchedule("0 8 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
-    }, { timezone: IST });
-    cron.schedule("*/15 9-15 * * 1-5", () => {
+    });
+    cronSchedule("*/15 9-15 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
-    }, { timezone: IST });
+    });
   }
 
   // Option chain, every 15 minutes through the session.
@@ -786,13 +812,13 @@ async function main(): Promise<void> {
   // all-odd set can be evenly spaced. The widest gap is 18 minutes, still less than half the
   // forty-minute guard, so a single missed run cannot starve the tick collector the way a
   // failed `*/15` run could once the next one was 30 minutes out.
-  cron.schedule("11,23,41,53 9-15 * * 1-5", () => {
+  cronSchedule("11,23,41,53 9-15 * * 1-5", () => {
     void schedule("OPTION_CHAIN", () => runCommand("npm", [
       "run", "data:collect:option-chain", "--",
       "--underlyings", "NIFTY50,BANKNIFTY,SBIN,RELIANCE",
       "--strike-count", "15",
     ]));
-  }, { timezone: IST });
+  });
 
   /**
    * The socket-fed premium tick writer, which owns this series while it is connected.
@@ -920,7 +946,7 @@ async function main(): Promise<void> {
   };
   // Exactly 09:15-15:30 IST; do not fill the research table with pre-open/post-close repeats.
   for (const expression of ["15-59 9 * * 1-5", "* 10-14 * * 1-5", "0-30 15 * * 1-5"]) {
-    cron.schedule(expression, schedulePremiumTicks, { timezone: IST });
+    cronSchedule(expression, schedulePremiumTicks);
   }
 
   // Vol-expansion long-straddle path: propose + gated open attempt. Refusals dominate.
@@ -941,11 +967,11 @@ async function main(): Promise<void> {
   //
   // The `:05` offset is kept deliberately. Matching `*/15` exactly would race the prediction
   // writer on the same minute and read the grid slot before it was filled.
-  cron.schedule("5,20,35,50 9-15 * * 1-5", () => {
+  cronSchedule("5,20,35,50 9-15 * * 1-5", () => {
     void schedule("VOLATILITY_STRADDLE", () => runCommand("npm", [
       "run", "paper:volatility-straddle",
     ]));
-  }, { timezone: IST });
+  });
 
   /**
    * Reports a job that has stopped completing, which nothing else notices.
@@ -981,7 +1007,7 @@ async function main(): Promise<void> {
   ];
   const processStartedAt = new Date();
 
-  cron.schedule("*/5 9-15 * * 1-5", () => {
+  cronSchedule("*/5 9-15 * * 1-5", () => {
     void (async () => {
       try {
         const overdue = findOverdueScheduledJobs({
@@ -1010,14 +1036,30 @@ async function main(): Promise<void> {
         }));
       }
     })();
-  }, { timezone: IST });
+  });
 
   // Every three minutes, matching the interval this replaced. It claims its due minute
   // like everything else, so replicas share the work rather than each ingesting the same
   // feeds and racing on the same article rows.
-  cron.schedule("*/3 * * * *", () => {
+  cronSchedule("*/3 * * * *", () => {
     void schedule("RSS_NEWS_INGESTION", async () => { await ingestNews.execute(); });
   });
+
+  /*
+   * The watchdog watches one expression, so its existence is asserted rather than assumed.
+   *
+   * Without this, editing or removing that cron would leave the watchdog silently watching an
+   * expression nobody registers -- it would never see a fire, and either restart the container
+   * forever or (with the window guard) never fire at all. Failing at startup is the only honest
+   * option: a watchdog that cannot see its subject must not pretend to.
+   */
+  if (!registeredCronExpressions.has(canaryCronExpression)) {
+    throw new Error(
+      `The cron-stall watchdog watches "${canaryCronExpression}", which is not registered. Point `
+      + "`canaryCronExpression` at the densest surviving hour-restricted schedule, or the scheduler "
+      + "runs with no protection against the timer stall of 2026-08-28.",
+    );
+  }
 
   log("Scheduler started", {
     jobs: [
@@ -1057,7 +1099,7 @@ async function main(): Promise<void> {
     timezone: IST,
   });
 
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     log("Scheduler shutting down", { signal, inFlightRuns: inFlightRuns.size });
     // Child processes die with this one, so these runs are ending whether or not they
     // finished. Recording that here is what lets the next container start work
@@ -1093,8 +1135,63 @@ async function main(): Promise<void> {
     // reconnects, and the reconnect asks the closed pool for a token.
     premiumTickSocket?.close();
     await database.end();
-    process.exit(0);
+    process.exit(exitCode);
   };
+  /**
+   * The cron-stall watchdog.
+   *
+   * Three things make it survive what it detects, and each is a correction of the previous attempt:
+   *
+   * 1. **A plain interval, not a cron.** `findOverdueScheduledJobs` sits on `*\/5 9-15 * * 1-5` in
+   *    this same process, so on 2026-08-28 it died of the exact condition it existed to report.
+   * 2. **Wall-clock decisions.** `assessCronStall` compares timestamps, so a timer that fires late
+   *    after a VM suspend still reaches the right conclusion. Nothing here trusts the timer.
+   * 3. **An exit, not a log.** The previous check logged an error into container logs that were gone
+   *    as soon as the container was recreated. With `restart: unless-stopped`, exiting is what
+   *    actually re-arms the timers -- and it is the only action that can help, since the process
+   *    cannot repair its own schedules.
+   *
+   * The stall needs no separate audit table: a restart is visible as a new `claimed_by` process
+   * identity in `scheduled_job_runs`, with the silence before it in the same rows.
+   */
+  const CRON_STALL_TOLERANCE_MS = 10 * 60_000;
+  /** Distinct from 0 (clean) and 1 (crash), so `docker inspect` says which of the three happened. */
+  const CRON_STALL_EXIT_CODE = 75;
+  const cronWatchdog = setInterval(() => {
+    let verdict;
+    try {
+      verdict = assessCronStall({
+        lastFiredAt: cronLastFiredAt.get(canaryCronExpression) ?? null,
+        now: new Date(),
+        processStartedAt: processStartedAt,
+        toleranceMs: CRON_STALL_TOLERANCE_MS,
+      });
+    } catch (error) {
+      // A throw here must not take the scheduler down: the watchdog failing is not a stall.
+      console.error(JSON.stringify({
+        level: "error",
+        message: "Could not assess cron liveness",
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      return;
+    }
+    if (!verdict.stalled) return;
+
+    logError("Cron timers have stalled; exiting so the container restarts", {
+      canary: canaryCronExpression,
+      reason: verdict.reason,
+      silentForMinutes: verdict.silentForMs === null ? null : Math.round(verdict.silentForMs / 60_000),
+      // What still fires is the diagnostic half: on 2026-08-28 only the hour-unrestricted schedule
+      // did, which is the signature of a suspend-resume rather than of a dead process.
+      stillFiring: [...cronLastFiredAt.entries()]
+        .filter(([, at]) => Date.now() - at.getTime() < CRON_STALL_TOLERANCE_MS)
+        .map(([expression]) => expression),
+      exitCode: CRON_STALL_EXIT_CODE,
+    });
+    clearInterval(cronWatchdog);
+    void shutdown("CRON_STALL", CRON_STALL_EXIT_CODE);
+  }, 60_000);
+
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
