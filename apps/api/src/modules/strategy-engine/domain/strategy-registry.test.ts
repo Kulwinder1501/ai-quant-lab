@@ -56,12 +56,28 @@ describe("strategy registry", () => {
     expect(strategyExecutableSides(patternScalp)).toEqual(["SHORT"]);
   });
 
-  it("leaves the v2 pattern scalp unrestricted, because 1 trade is not a record", () => {
-    // Its long side has a single closed trade (+Rs 188). Restricting on that would be inventing
-    // evidence; its open question is recorded in terminalResearchAcknowledgement instead.
+  it("disables the v2 pattern scalp entirely, on asymmetric evidence", () => {
+    /*
+     * Both sides, not a restriction. Against it: a TERMINAL research verdict measured over
+     * 13.7k-18.6k trades per cell. For it: one closed trade, +Rs 188. One trade cannot overturn that
+     * prior, and leaving it enabled is how a single trade quietly becomes a positive result.
+     *
+     * Registered rather than deleted, so its lineage and the reasoning survive and the research twin
+     * keeps measuring the population ungated -- disabled operationally, preserved scientifically.
+     */
     const v2 = requireRegisteredStrategy("momentum-scalp-pattern-v2");
 
-    expect(strategyExecutableSides(v2)).toEqual(["LONG", "SHORT"]);
+    expect(strategyExecutableSides(v2)).toEqual([]);
+    expect(v2.terminalResearchAcknowledgement?.disposition).toMatch(/^DISABLED/);
+  });
+
+  it("keeps the disabled strategy's research twin RESEARCH, not TERMINAL", () => {
+    // Terminal means the line of inquiry is closed. The generation-2 pattern question is unanswered,
+    // not closed, so disabling the operational expression must not silently retire the research line.
+    const v2 = requireRegisteredStrategy("momentum-scalp-pattern-v2");
+
+    expect(strategyExecutableSides(v2)).toEqual([]);
+    expect(v2.registration.strategyKey).toBe("momentum-scalp-pattern-v2");
   });
 
   it("trades the index scalp short-only, because its long side is a measured loser", () => {
@@ -90,7 +106,9 @@ describe("strategy registry", () => {
       .map((strategy) => strategy.registration.strategyKey)
       .sort();
 
-    expect(restricted).toEqual(["momentum-scalp-index", "momentum-scalp-pattern"]);
+    expect(restricted).toEqual([
+      "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2",
+    ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
       expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)

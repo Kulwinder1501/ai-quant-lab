@@ -28,9 +28,10 @@ import { findRegisteredStrategy, registeredStrategies } from "../../strategy-eng
  * separate decision with its own evidence, and letting a research conclusion silently close a
  * production strategy would be the same failure pointing the other way.
  *
- * What it forbids is the verdict going unnoticed. An enabled twin must carry an explicit
- * acknowledgement naming the research key, repeating the closure reason verbatim, and saying why it
- * is still enabled. Silence fails.
+ * What it forbids is the verdict going unnoticed. A registered twin must carry an explicit
+ * acknowledgement naming the research key, repeating the closure reason verbatim, and stating its
+ * disposition -- which is required whether the strategy is enabled or disabled, so that turning one
+ * off cannot delete the reasoning that justified it. Silence fails.
  */
 
 describe("terminal research verdicts reach the operational registry", () => {
@@ -63,14 +64,15 @@ describe("terminal research verdicts reach the operational registry", () => {
       const acknowledgement = twin.terminalResearchAcknowledgement;
       expect(
         acknowledgement,
-        `${entry.operationalStrategyKey} is enabled while its research twin ${entry.strategyKey} is `
-        + "TERMINAL, and carries no acknowledgement. Either remove it from the operational registry "
-        + "or record terminalResearchAcknowledgement saying why it still trades.",
+        `${entry.operationalStrategyKey} is registered while its research twin ${entry.strategyKey} `
+        + "is TERMINAL, and carries no acknowledgement. Either remove it from the operational "
+        + "registry entirely, or record terminalResearchAcknowledgement stating its disposition -- "
+        + "required even when disabled, so the reasoning survives the disable.",
       ).toBeDefined();
       expect(acknowledgement!.researchStrategyKey).toBe(entry.strategyKey);
       // Verbatim, so the reason cannot soften into a paraphrase on the production side.
       expect(acknowledgement!.closureReason).toBe(entry.closureReason);
-      expect(acknowledgement!.whyStillEnabled.trim().length).toBeGreaterThan(40);
+      expect(acknowledgement!.disposition.trim().length).toBeGreaterThan(40);
     }
   });
 

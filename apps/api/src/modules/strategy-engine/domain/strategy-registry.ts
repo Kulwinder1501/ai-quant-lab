@@ -68,7 +68,14 @@ export interface RegisteredStrategy {
   terminalResearchAcknowledgement?: {
     readonly researchStrategyKey: string;
     readonly closureReason: string;
-    readonly whyStillEnabled: string;
+    /**
+     * What was decided about this strategy in light of that verdict, and why.
+     *
+     * Was `whyStillEnabled` until 2026-09-02, which could only describe one of the two valid
+     * dispositions. Renamed when `momentum-scalp-pattern-v2` was disabled: the record has to survive
+     * the disable, or turning a strategy off would delete the reasoning that justified it.
+     */
+    readonly disposition: string;
   };
 }
 
@@ -126,8 +133,9 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     terminalResearchAcknowledgement: {
       researchStrategyKey: "index-v3-research",
       closureReason: "horizon sweep returned NO_VIABLE_HORIZON; both width and holding period exhausted",
-      whyStillEnabled:
-        "The research verdict closes this architecture under the harness's canonical geometry, where "
+      disposition:
+        "ENABLED (short only). The research verdict closes this architecture under the harness's "
+        + "canonical geometry, where "
         + "both bracket width and holding horizon were swept. It is not a measurement of the live 5m "
         + "short cell, which is separately positive over 93 trades (+Rs 1,384, 47.3% win). The long "
         + "side, which the research verdict fits, was disabled on 2026-09-02 (-Rs 13,414 over 62). "
@@ -162,15 +170,33 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: momentumScalpPatternStrategyV2Registration,
     StrategyClass: MomentumScalpPatternStrategyV2,
     supportedTimeframes: ["1m", "3m", "5m"],
+    /*
+     * Disabled entirely 2026-09-02 -- both sides, not a side restriction.
+     *
+     * The evidence is asymmetric rather than balanced. Against it: a TERMINAL research verdict
+     * measured over 13.7k-18.6k trades per cell, monotonic degradation on both deep ETFs. For it: one
+     * closed trade, +Rs 188. One trade cannot overturn that prior, and leaving it enabled is how a
+     * single trade quietly becomes a positive result.
+     *
+     * Disabled operationally, preserved scientifically. It stays registered rather than deleted so
+     * its version, lineage and this reasoning survive, and the research harness keeps evaluating its
+     * frozen twin ungated on every bar -- so the population it would have traded remains measurable
+     * and the decision stays falsifiable.
+     *
+     * Deliberately NOT marked TERMINAL on the research side. Terminal means the line of inquiry is
+     * closed, and the generation-2 pattern question has not been answered -- it has barely been
+     * asked. `pattern-v4-research-v2` stays RESEARCH / NOT_YET_ELIGIBLE.
+     */
+    executableSides: [],
     terminalResearchAcknowledgement: {
       researchStrategyKey: "pattern-v4-research",
       closureReason: "degrades the base strategy monotonically on both deep ETFs",
-      whyStillEnabled:
-        "Nothing yet justifies it on live evidence: 1 closed trade (+Rs 188) is no record at all, "
-        + "while the research verdict against it is strong -- monotonic degradation across "
-        + "13.7k-18.6k trades per cell on both deep ETFs. Recorded as an open decision rather than "
-        + "an endorsement. On the evidence available the defensible action is to disable it, and that "
-        + "is a trading decision awaiting an owner, not something this registry should take silently.",
+      disposition:
+        "DISABLED (both sides) 2026-09-02. The evidence is asymmetric: a TERMINAL verdict measured "
+        + "over 13.7k-18.6k trades per cell against one closed trade of +Rs 188, which is nowhere "
+        + "near enough to overturn the prior. Registered but trading nothing, so its lineage and this "
+        + "reasoning survive and the research twin keeps measuring the population ungated. Not marked "
+        + "TERMINAL: the generation-2 question is unanswered, not closed.",
     },
   },
 ];
