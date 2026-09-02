@@ -236,13 +236,38 @@ export function reconcileOutcome(outcome: LayeredOutcome): Readonly<LayeredOutco
 }
 
 /**
- * Which layer a loss is attributable to, or null when the layers do not single one out.
+ * What a loss is attributable to, or null when the layers do not single anything out.
  *
  * Returns null rather than guessing. The whole value of the split is that it can say "the thesis was
  * right and the fill was wrong"; a function that always produced an answer would reintroduce the
  * confident-but-unfounded attribution the split exists to remove.
+ *
+ * ## `EXITED_UNRESOLVED` is not a layer, and that is the point
+ *
+ * The first three verdicts name a layer that failed. The fourth names a condition in which **none
+ * did**: the position was closed while its thesis was still live -- the underlying neither reached
+ * its target nor was invalidated -- and the option lost on its own prices in the meantime.
+ *
+ * Added because the original three left the dominant real case silent. Measured on the first three
+ * trades ever to carry an observed underlying exit (2026-09-02): all three were SHORT theses whose
+ * underlying moved against them and stopped **short of the thesis stop** -- 82%, 40% and 33% of the
+ * way there -- while the option position was closed first, twice by its own stop and once by the
+ * 20-minute stall timer. All three returned null, which read as "cannot tell" when the layers in
+ * fact agreed on something specific: the option-level exit is firing before the thesis resolves.
+ *
+ * Deliberately neutral about whether that exit was wrong. A stop that fires before the thesis
+ * resolves may be correct risk management on a cheap option, or a stop too tight for the geometry it
+ * expresses; this function cannot tell those apart and does not try. It records that the position
+ * never got the chance to be right or wrong, which is a different fact from any of the other three
+ * and is actionable in a different way -- it points at holding period and stop placement rather than
+ * at the thesis, the strike, or the fill.
+ *
+ * It cannot mask `EXECUTION`: that check runs first, so an instrument that gained while the fill
+ * erased the gain is still attributed to the fill even with an unresolved thesis.
  */
-export function attributeShortfall(outcome: Readonly<LayeredOutcome>): "UNDERLYING" | "INSTRUMENT" | "EXECUTION" | null {
+export function attributeShortfall(
+  outcome: Readonly<LayeredOutcome>,
+): "UNDERLYING" | "INSTRUMENT" | "EXECUTION" | "EXITED_UNRESOLVED" | null {
   if (outcome.execution.realisedPnl >= 0) return null;
 
   if (outcome.underlying === null) {
@@ -259,9 +284,16 @@ export function attributeShortfall(outcome: Readonly<LayeredOutcome>): "UNDERLYI
   if (outcome.execution.theoreticalPnl > 0 && outcome.execution.erosion >= outcome.execution.theoreticalPnl) {
     return "EXECUTION";
   }
-  if (outcome.execution.theoreticalPnl <= 0 && outcome.underlying?.resolution === "TARGET_REACHED") {
+  if (outcome.execution.theoreticalPnl <= 0 && outcome.underlying.resolution === "TARGET_REACHED") {
     // The target was reached and the instrument still lost: the expression failed to capture it.
     return "INSTRUMENT";
+  }
+  if (outcome.underlying.resolution === "UNRESOLVED_AT_HORIZON") {
+    /*
+     * The thesis was still live when the position was closed. Reached only after the EXECUTION check
+     * above, so a fill that erased a real gain is never reported as this instead.
+     */
+    return "EXITED_UNRESOLVED";
   }
   return null;
 }

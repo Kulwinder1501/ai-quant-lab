@@ -86,7 +86,9 @@ async function main(): Promise<void> {
      * `unattributed` is expected to dominate for a long while -- every trade closed before 089 has no
      * underlying exit level and every non-tick close still has none, so those decline by design.
      */
-    const attribution = { UNDERLYING: 0, INSTRUMENT: 0, EXECUTION: 0, unattributed: 0 };
+    const attribution = {
+      UNDERLYING: 0, INSTRUMENT: 0, EXECUTION: 0, EXITED_UNRESOLVED: 0, unattributed: 0,
+    };
     /*
      * Counted separately from `unattributed`, because the two reasons a trade goes unattributed need
      * different responses and the first version of this report conflated them: it printed "no
@@ -208,7 +210,8 @@ async function main(): Promise<void> {
     console.log(`three-layer reconciliation: ${residualsClean}/${residualsChecked} within a paisa`);
     console.log(
       `shortfall attribution: UNDERLYING ${attribution.UNDERLYING}  INSTRUMENT ${attribution.INSTRUMENT}  `
-      + `EXECUTION ${attribution.EXECUTION}  unattributed ${attribution.unattributed}`,
+      + `EXECUTION ${attribution.EXECUTION}  EXITED_UNRESOLVED ${attribution.EXITED_UNRESOLVED}  `
+      + `unattributed ${attribution.unattributed}`,
     );
     console.log(
       `underlying layer present on ${withUnderlyingLayer}/${residualsChecked} `

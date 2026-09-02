@@ -217,22 +217,67 @@ describe("attributing a shortfall", () => {
     expect(attributeShortfall(reconcileOutcome(fixed))).toBe("INSTRUMENT");
   });
 
-  it("returns null for a profitable outcome, and when the layers do not single one out", () => {
+  it("returns null for a profitable outcome", () => {
     /*
      * Deliberately refuses to guess. The value of the split is that it can say "the thesis was right
      * and the fill was wrong"; a function that always produced an answer would reintroduce the
      * confident-but-unfounded attribution it exists to remove.
      */
     expect(attributeShortfall(reconcileOutcome(outcome()))).toBeNull();
+  });
 
-    const ambiguous = outcome({
+  it("reports EXITED_UNRESOLVED when the position closed with its thesis still live", () => {
+    /*
+     * The fourth verdict, and the one the original three left silent. Measured on the first three
+     * trades ever to carry an observed underlying exit: all three SHORT theses whose underlying moved
+     * against them but stopped short of the thesis stop -- 82%, 40% and 33% of the way -- while the
+     * option was closed first. They all returned null, which read as "cannot tell" when the layers
+     * agreed on something specific.
+     *
+     * Not a layer verdict: nothing failed. The position never got to be right or wrong, which points
+     * at holding period and stop placement rather than at the thesis, the strike, or the fill.
+     */
+    const unresolved = outcome({
       underlying: { resolution: "UNRESOLVED_AT_HORIZON" },
       instrument: { exitPrice: 195 },
       execution: { realisedPnl: -100 },
     });
-    const fixed = { ...ambiguous, execution: { ...ambiguous.execution, theoreticalPnl: theoreticalPnlFor(ambiguous.instrument), erosion: theoreticalPnlFor(ambiguous.instrument) - (-100) } };
+    const fixed = { ...unresolved, execution: { ...unresolved.execution, theoreticalPnl: theoreticalPnlFor(unresolved.instrument), erosion: theoreticalPnlFor(unresolved.instrument) - (-100) } };
 
-    expect(attributeShortfall(reconcileOutcome(fixed))).toBeNull();
+    expect(attributeShortfall(reconcileOutcome(fixed))).toBe("EXITED_UNRESOLVED");
+  });
+
+  it("still blames EXECUTION when a real gain was erased, even with the thesis unresolved", () => {
+    /*
+     * Precedence, pinned. EXITED_UNRESOLVED must not absorb the fill-path case: the instrument
+     * gained, the fill took all of it, and that is a measured execution failure whatever the
+     * underlying was doing. This is the guard against the new verdict quietly swallowing the class
+     * of defect that booked a target as a stop-loss.
+     */
+    const gainErased = outcome({
+      underlying: { resolution: "UNRESOLVED_AT_HORIZON" },
+      execution: { realisedPnl: -50 },
+    });
+    const fixed = { ...gainErased, execution: { ...gainErased.execution, erosion: gainErased.execution.theoreticalPnl + 50 } };
+
+    expect(attributeShortfall(reconcileOutcome(fixed))).toBe("EXECUTION");
+  });
+
+  it("still declines when there is no underlying layer at all, unresolved or otherwise", () => {
+    // The genuine "cannot tell": without the underlying layer a wrong thesis and a wrong expression
+    // are indistinguishable, and EXITED_UNRESOLVED must not be reported for a missing measurement.
+    const loss = outcome({ instrument: { exitPrice: 150 }, execution: { realisedPnl: -800 } });
+    const withoutUnderlying = reconcileOutcome({
+      ...loss,
+      underlying: null,
+      execution: {
+        ...loss.execution,
+        theoreticalPnl: theoreticalPnlFor(loss.instrument),
+        erosion: theoreticalPnlFor(loss.instrument) - (-800),
+      },
+    });
+
+    expect(attributeShortfall(withoutUnderlying)).toBeNull();
   });
 });
 

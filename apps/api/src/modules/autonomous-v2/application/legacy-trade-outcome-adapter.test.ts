@@ -121,11 +121,12 @@ describe("adapting a legacy closed trade", () => {
     expect(outcome.underlying!.resolution).toBe("TARGET_REACHED");
   });
 
-  it("says UNRESOLVED_AT_HORIZON between the barriers, and then declines to attribute", () => {
+  it("says UNRESOLVED_AT_HORIZON between the barriers, and attributes the exit", () => {
     /*
-     * The deliberately weak reading. Endpoint-only: the underlying may have touched a barrier and
-     * given it back, which this cannot see. `attributeShortfall` blames the underlying only on
-     * INVALIDATED, so the uncertainty falls towards declining rather than misattributing.
+     * Endpoint-only: the underlying may have touched a barrier and given it back, which this cannot
+     * see. It is still not "cannot tell" -- the layers agree the position was closed while its thesis
+     * was live, which is what EXITED_UNRESOLVED records. The real shape: three of three trades with
+     * an observed underlying exit stopped short of their thesis stop while the option closed first.
      */
     const { outcome } = layeredOutcomeFromClosedTrade(trade({
       realisedPnl: -100,
@@ -135,7 +136,7 @@ describe("adapting a legacy closed trade", () => {
     }));
 
     expect(outcome.underlying!.resolution).toBe("UNRESOLVED_AT_HORIZON");
-    expect(attributeShortfall(outcome)).toBeNull();
+    expect(attributeShortfall(outcome)).toBe("EXITED_UNRESOLVED");
   });
 
   it("keeps the underlying excursions null, because the path is not read", () => {
