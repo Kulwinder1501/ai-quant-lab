@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { producerChoice } from "./shadow-decision-options.js";
+import { producerChoice, timeframeMs } from "./shadow-decision-options.js";
 
 /**
  * The producer flag decides which rule V2.2 applies, so a silent parse failure is not cosmetic.
@@ -50,5 +50,37 @@ describe("the producer flag", () => {
     // `--producer=` from a shell variable that did not expand. Defaulting is the safe reading, and the
     // default records everything rather than silently dropping a producer's population.
     expect(producerChoice(["--producer="])).toBe("both");
+  });
+});
+
+describe("bar length drives the staleness ceiling", () => {
+  it("reads minutes and hours, and refuses anything else", () => {
+    // A wrong interval mis-reads the tape, so guessing is worse than failing.
+    expect(timeframeMs("1m")).toBe(60_000);
+    expect(timeframeMs("5m")).toBe(300_000);
+    expect(timeframeMs("1h")).toBe(3_600_000);
+    expect(() => timeframeMs("1d")).toThrow(/Unsupported shadow timeframe/);
+    expect(() => timeframeMs("")).toThrow();
+  });
+
+  it("keeps the old 1m behaviour exactly", () => {
+    /*
+     * The ceiling used to be a flat three minutes, which was right while the pass only read 1m. One
+     * bar plus two minutes' grace reproduces that number, so widening coverage changes nothing about
+     * how 1m bars are judged.
+     */
+    expect(timeframeMs("1m") + 2 * 60_000).toBe(3 * 60_000);
+  });
+
+  it("gives a 5m bar room a flat three minutes would not have", () => {
+    /*
+     * The defect this replaces. A 5m bar is up to five minutes old before its successor exists, so a
+     * three-minute ceiling would have refused most 5m bars as stale -- and the wider coverage would
+     * have produced nothing while appearing to work.
+     */
+    const ceiling = timeframeMs("5m") + 2 * 60_000;
+
+    expect(ceiling).toBe(7 * 60_000);
+    expect(ceiling).toBeGreaterThan(timeframeMs("5m"));
   });
 });

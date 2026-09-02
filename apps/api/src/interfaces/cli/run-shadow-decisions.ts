@@ -43,7 +43,12 @@ import {
   thesisComparisonVersion,
 } from "../../modules/autonomous-v2/application/thesis-adapter.js";
 import { getOption } from "./arguments.js";
-import { producerChoice } from "./shadow-decision-options.js";
+import {
+  barAgeCeilingFor,
+  producerChoice,
+  SHADOW_TIMEFRAMES,
+  timeframeMs,
+} from "./shadow-decision-options.js";
 
 /**
  * Runs one pass of V2.2's shadow decision path. Records decisions; executes nothing.
@@ -86,8 +91,6 @@ const IST = "Asia/Kolkata";
  * would record a fresh decision on it -- duplicate rows in the record P13 counts as comparisons,
  * which is coverage that does not exist. Same failure on a weekend or a holiday, indefinitely.
  */
-const DEFAULT_MAX_BAR_AGE_MS = 3 * 60_000;
-
 /**
  * `--max-bar-age-seconds` raises that ceiling for one run.
  *
@@ -99,15 +102,16 @@ const DEFAULT_MAX_BAR_AGE_MS = 3 * 60_000;
  * It does not weaken any gate. A stale bar still passes through the frozen-tape and coverage checks,
  * and the decision is still recorded as what it is.
  */
-function maxBarAgeMs(args: string[]): number {
+function maxBarAgeMs(args: string[]): number | null {
   const raw = getOption(args, "max-bar-age-seconds");
-  if (raw === undefined) return DEFAULT_MAX_BAR_AGE_MS;
+  if (raw === undefined) return null;
   const seconds = Number(raw);
   if (!Number.isFinite(seconds) || seconds <= 0) {
     throw new Error("--max-bar-age-seconds must be a positive number of seconds.");
   }
   return seconds * 1_000;
 }
+
 
 /**
  * V1's canonical outcome for this bar, evaluated on the SAME context object V2.2 read.
@@ -220,8 +224,13 @@ async function main(): Promise<void> {
   const symbols = (getOption(args, "instruments") ?? "NIFTY50,BANKNIFTY")
     .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
   if (symbols.length === 0) throw new Error("--instruments must contain at least one NSE symbol.");
-  const barAgeCeilingMs = maxBarAgeMs(args);
+  const barAgeOverrideMs = maxBarAgeMs(args);
   const chosenProducer = producerChoice(args);
+  const timeframes = (getOption(args, "timeframes") ?? SHADOW_TIMEFRAMES.join(","))
+    .split(",").map((value) => value.trim()).filter(Boolean);
+  if (timeframes.length === 0) throw new Error("--timeframes must contain at least one timeframe.");
+  // Validated up front, so an unsupported timeframe fails before any decision is written.
+  for (const timeframe of timeframes) timeframeMs(timeframe);
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
@@ -242,217 +251,228 @@ async function main(): Promise<void> {
         records.push({ symbol, skipped: "INSTRUMENT_NOT_REGISTERED" });
         continue;
       }
-      const latest = await contextRepository.findLatestCompleted({
-        instrumentId: instrument.id, timeframe: "1m",
-      });
-      if (!latest) {
-        records.push({ symbol, skipped: "NO_COMPLETED_1M_CONTEXT" });
-        continue;
-      }
+      for (const timeframe of [...new Set(timeframes)]) {
+        const barIntervalMs = timeframeMs(timeframe);
+        const latest = await contextRepository.findLatestCompleted({
+          instrumentId: instrument.id, timeframe,
+        });
+        if (!latest) {
+          records.push({ symbol, timeframe, skipped: "NO_COMPLETED_CONTEXT" });
+          continue;
+        }
 
-      const barAgeMs = Date.now() - latest.candle.closeTime.getTime();
-      if (barAgeMs > barAgeCeilingMs) {
+        const barAgeMs = Date.now() - latest.candle.closeTime.getTime();
+        if (barAgeMs > barAgeCeilingFor(timeframe, barAgeOverrideMs)) {
+          /*
+           * Nothing new to decide. Reported rather than silent, because "no records" has two very
+           * different causes -- a closed market and a dead job -- and the liveness expectation on
+           * SHADOW_DECISION cannot tell them apart on its own.
+           */
+          records.push({
+            symbol,
+            timeframe,
+            skipped: "BAR_TOO_STALE",
+            latestBarCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+            barAgeSeconds: Math.round(barAgeMs / 1000),
+          });
+          continue;
+        }
+
         /*
-         * Nothing new to decide. Reported rather than silent, because "no records" has two very
-         * different causes -- a closed market and a dead job -- and the liveness expectation on
-         * SHADOW_DECISION cannot tell them apart on its own.
+         * The predecessor bar, for tape liveness. Read here rather than inside the producer because
+         * liveness is a fact about the bar *series*, which a single context cannot carry -- the same
+         * reason the scalp harness resolves it in its runner.
          */
-        records.push({
-          symbol,
-          skipped: "BAR_TOO_STALE",
-          latestBarCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
-          barAgeSeconds: Math.round(barAgeMs / 1000),
+        const threshold = frozenTapeThresholdFor(symbol);
+        const predecessors = [];
+        for (let step = 1; step < threshold; step += 1) {
+          /*
+           * Stepped by the bar's own length, not by a minute. Walking a 5m series in 60-second strides
+           * finds no predecessor at all, `assessTapeLiveness` then sees a single bar, and a frozen tape
+           * would read as LIVE -- the D3 gate silently disarmed on the timeframe that carries most of
+           * V1's decisions.
+           */
+          const closeTime = new Date(latest.candle.closeTime.getTime() - step * barIntervalMs);
+          const previous = await contextRepository.findCompletedAt({
+            instrumentId: instrument.id, timeframe, closeTime,
+          });
+          if (!previous) break;
+          predecessors.unshift(previous.candle);
+        }
+        const tape = assessTapeLiveness({
+          bars: [...predecessors, latest.candle],
+          intervalMs: barIntervalMs,
+          threshold,
         });
-        continue;
-      }
 
-      /*
-       * The predecessor bar, for tape liveness. Read here rather than inside the producer because
-       * liveness is a fact about the bar *series*, which a single context cannot carry -- the same
-       * reason the scalp harness resolves it in its runner.
-       */
-      const threshold = frozenTapeThresholdFor(symbol);
-      const predecessors = [];
-      for (let step = 1; step < threshold; step += 1) {
-        const closeTime = new Date(latest.candle.closeTime.getTime() - step * 60_000);
-        const previous = await contextRepository.findCompletedAt({
-          instrumentId: instrument.id, timeframe: "1m", closeTime,
-        });
-        if (!previous) break;
-        predecessors.unshift(previous.candle);
-      }
-      const tape = assessTapeLiveness({
-        bars: [...predecessors, latest.candle],
-        intervalMs: 60_000,
-        threshold,
-      });
-
-      const coverage = await featureCoverageFor(database, latest.candle.id);
-      const knownAt = new Date();
-      const snapshot = marketSnapshotFromLegacyContext({
-        context: {
-          candle: {
-            instrumentId: instrument.id,
-            timeframe: latest.candle.timeframe,
-            openTime: latest.candle.openTime,
-            closeTime: latest.candle.closeTime,
-            open: latest.candle.open,
-            high: latest.candle.high,
-            low: latest.candle.low,
-            close: latest.candle.close,
-            volume: latest.candle.volume,
-            tickSize: latest.candle.tickSize,
+        const coverage = await featureCoverageFor(database, latest.candle.id);
+        const knownAt = new Date();
+        const snapshot = marketSnapshotFromLegacyContext({
+          context: {
+            candle: {
+              instrumentId: instrument.id,
+              timeframe: latest.candle.timeframe,
+              openTime: latest.candle.openTime,
+              closeTime: latest.candle.closeTime,
+              open: latest.candle.open,
+              high: latest.candle.high,
+              low: latest.candle.low,
+              close: latest.candle.close,
+              volume: latest.candle.volume,
+              tickSize: latest.candle.tickSize,
+            },
+            indicators: latest.indicators.map((indicator) => ({
+              code: indicator.code,
+              algorithmVersion: indicator.algorithmVersion,
+              parameters: indicator.parameters,
+              values: indicator.values as Record<string, unknown>,
+            })),
+            patterns: latest.patterns.map((pattern) => ({
+              code: pattern.code,
+              algorithmVersion: pattern.algorithmVersion,
+              direction: pattern.direction,
+              confidence: pattern.confidence,
+            })),
+            priceActionEvents: latest.priceActionEvents.map((event) => ({
+              eventCode: event.eventCode,
+              algorithmVersion: event.algorithmVersion,
+              direction: event.direction,
+              level: event.level,
+            })),
+            // From `candle_feature_coverage`, per layer. See `featureCoverageFor` for the two wrong
+            // sources this replaced.
+            patternsComputed: coverage.patternsComputed,
+            priceActionComputed: coverage.priceActionComputed,
           },
-          indicators: latest.indicators.map((indicator) => ({
-            code: indicator.code,
-            algorithmVersion: indicator.algorithmVersion,
-            parameters: indicator.parameters,
-            values: indicator.values as Record<string, unknown>,
-          })),
-          patterns: latest.patterns.map((pattern) => ({
-            code: pattern.code,
-            algorithmVersion: pattern.algorithmVersion,
-            direction: pattern.direction,
-            confidence: pattern.confidence,
-          })),
-          priceActionEvents: latest.priceActionEvents.map((event) => ({
-            eventCode: event.eventCode,
-            algorithmVersion: event.algorithmVersion,
-            direction: event.direction,
-            level: event.level,
-          })),
-          // From `candle_feature_coverage`, per layer. See `featureCoverageFor` for the two wrong
-          // sources this replaced.
-          patternsComputed: coverage.patternsComputed,
-          priceActionComputed: coverage.priceActionComputed,
-        },
-        instants: {
-          eventAt: latest.candle.closeTime,
-          knownAt,
-          dataThrough: latest.candle.closeTime,
-          dataThroughConvention: "CLOSE_LABELLED",
-          // One second after knowing, which `sealPitInstants` requires: a decision acting at the
-          // instant it learned something acted on information it did not yet have.
-          earliestExecutionAt: new Date(knownAt.getTime() + 1_000),
-          referenceAt: new Date(knownAt.getTime() + 1_000),
-        },
-        labelConvention: "CLOSE_LABELLED",
-      });
-
-      /*
-       * Seal the *content* the ref was computed over, not the finished snapshot object.
-       *
-       * Found by running this: sealing `snapshot` hashes a different structure -- it contains its own
-       * `ref` -- so the two ids disagreed and `decision_ledger_context_resolvable` rejected the write
-       * with the snapshot id absent from `decision_snapshots`. The FK caught it, which is what it is
-       * for. `marketSnapshotContent` is now the single definition of what the address covers.
-       */
-      const sealed = await registry.seal(marketSnapshotContent({
-        bar: snapshot.bar,
-        labelConvention: snapshot.labelConvention,
-        indicators: snapshot.indicators,
-        patterns: snapshot.patterns,
-        patternCoverage: snapshot.patternCoverage,
-        priceActionEvents: snapshot.priceActionEvents,
-        priceActionCoverage: snapshot.priceActionCoverage,
-        higherTimeframeCoverage: snapshot.higherTimeframeCoverage,
-        instants: snapshot.instants,
-      }));
-      if (sealed.snapshotId !== snapshot.ref.snapshotId) {
-        // Belt and braces: the FK would catch it, but only after a partial write. Better to refuse
-        // before the ledger is touched than to leave an opening event with no terminal.
-        throw new Error(
-          `Sealed snapshot ${sealed.snapshotId} does not match the snapshot's own ref `
-          + `${snapshot.ref.snapshotId}. The content address and what was stored have diverged.`,
-        );
-      }
-
-      /*
-       * The ported producer is built per bar, closing over `latest` -- the same in-memory context the
-       * snapshot was sealed from. It refuses if those disagree, which is what makes citing one
-       * snapshot ref for both sides of the comparison a fact rather than an assumption.
-       */
-      const selected: AuthorizedThesisProducer[] = [];
-      if (chosenProducer !== "ported-v1") selected.push(nativeStructuralProducer);
-      if (chosenProducer !== "native") {
-        selected.push(portedV1ThesisProducer({ context: latest, instrumentSymbol: symbol }));
-      }
-
-      /*
-       * V1's side is evaluated once per bar, not once per producer.
-       *
-       * It does not depend on which V2.2 producer is under test, and re-deriving it would invite the
-       * two copies to disagree -- which would read as V1 being inconsistent with itself.
-       */
-      const legacyOutcome = legacyOutcomeFor({
-        context: latest,
-        instrumentSymbol: symbol,
-        decisionAt: latest.candle.closeTime,
-      });
-      const legacy = comparableAction(legacyOutcome);
-
-      for (const producer of selected) {
-        const record = await runShadowDecision({
-          decisionId: randomUUID(),
-          gate: {
-            snapshot,
-            tapeLiveness: tape.liveness,
-            executableSides: executableSidesFor(latest.candle.timeframe),
-            insideExecutableWindow: session.isOpen(latest.candle.closeTime),
-            instrumentSymbol: symbol,
+          instants: {
+            eventAt: latest.candle.closeTime,
+            knownAt,
+            dataThrough: latest.candle.closeTime,
+            dataThroughConvention: "CLOSE_LABELLED",
+            // One second after knowing, which `sealPitInstants` requires: a decision acting at the
+            // instant it learned something acted on information it did not yet have.
+            earliestExecutionAt: new Date(knownAt.getTime() + 1_000),
+            referenceAt: new Date(knownAt.getTime() + 1_000),
           },
-          produce: producer.produce,
-          ledger,
-          additionalPolicyVersions: {
-            tapeLiveness: tapeLivenessPolicyVersion,
-            /*
-             * Which producer decided, on every record including refusals. Without it a stored decision
-             * cannot be attributed: native and ported both emit "no trade" outcomes, and a later reader
-             * comparing two sessions would have no way to tell which rule was in force.
-             */
-            producer: producer.producerId,
-            producerAuthority: producer.authority,
-          },
+          labelConvention: "CLOSE_LABELLED",
         });
 
         /*
-         * P13's pair. V1's side came from the same `latest` context the snapshot was sealed from, so
-         * citing one snapshot ref for both is a fact rather than an assumption -- which is what
-         * `assertComparable` demands and what makes the stored row re-derivable.
+         * Seal the *content* the ref was computed over, not the finished snapshot object.
          *
-         * The action is compared; the reason is recorded beside it. One implementation for both sides,
-         * because a drift between two would read as the systems disagreeing rather than the formatters.
+         * Found by running this: sealing `snapshot` hashes a different structure -- it contains its own
+         * `ref` -- so the two ids disagreed and `decision_ledger_context_resolvable` rejected the write
+         * with the snapshot id absent from `decision_snapshots`. The FK caught it, which is what it is
+         * for. `marketSnapshotContent` is now the single definition of what the address covers.
          */
-        const v2 = comparableAction(record.v2Outcome);
-        const recorded = await observations.record({
-          observation: {
-            comparisonKey: record.comparisonKey,
-            legacySnapshotRef: record.contextSnapshotId,
-            v2SnapshotRef: record.contextSnapshotId,
-            legacyOutcome: legacy.action,
-            v2Outcome: v2.action,
-          },
-          comparisonVersion: thesisComparisonVersion,
-          producerId: producer.producerId,
-          legacyDetail: legacy.detail,
-          v2Detail: v2.detail,
-        });
+        const sealed = await registry.seal(marketSnapshotContent({
+          bar: snapshot.bar,
+          labelConvention: snapshot.labelConvention,
+          indicators: snapshot.indicators,
+          patterns: snapshot.patterns,
+          patternCoverage: snapshot.patternCoverage,
+          priceActionEvents: snapshot.priceActionEvents,
+          priceActionCoverage: snapshot.priceActionCoverage,
+          higherTimeframeCoverage: snapshot.higherTimeframeCoverage,
+          instants: snapshot.instants,
+        }));
+        if (sealed.snapshotId !== snapshot.ref.snapshotId) {
+          // Belt and braces: the FK would catch it, but only after a partial write. Better to refuse
+          // before the ledger is touched than to leave an opening event with no terminal.
+          throw new Error(
+            `Sealed snapshot ${sealed.snapshotId} does not match the snapshot's own ref `
+            + `${snapshot.ref.snapshotId}. The content address and what was stored have diverged.`,
+          );
+        }
 
-        records.push({
-          symbol,
-          producer: producer.producerId,
-          decisionId: record.decisionId,
-          legacyAction: legacy.action,
-          legacyReason: legacy.detail || null,
-          agreed: legacy.action === v2.action,
-          observationRecorded: recorded,
-          barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
-          outcome: record.v2Outcome,
-          abstained: record.abstained,
-          contextSnapshotId: record.contextSnapshotId.slice(0, 12),
-          sealedMatchesSnapshot: sealed.snapshotId === record.contextSnapshotId,
-          tapeLiveness: tape.liveness,
+        /*
+         * The ported producer is built per bar, closing over `latest` -- the same in-memory context the
+         * snapshot was sealed from. It refuses if those disagree, which is what makes citing one
+         * snapshot ref for both sides of the comparison a fact rather than an assumption.
+         */
+        const selected: AuthorizedThesisProducer[] = [];
+        if (chosenProducer !== "ported-v1") selected.push(nativeStructuralProducer);
+        if (chosenProducer !== "native") {
+          selected.push(portedV1ThesisProducer({ context: latest, instrumentSymbol: symbol }));
+        }
+
+        /*
+         * V1's side is evaluated once per bar, not once per producer.
+         *
+         * It does not depend on which V2.2 producer is under test, and re-deriving it would invite the
+         * two copies to disagree -- which would read as V1 being inconsistent with itself.
+         */
+        const legacyOutcome = legacyOutcomeFor({
+          context: latest,
+          instrumentSymbol: symbol,
+          decisionAt: latest.candle.closeTime,
         });
+        const legacy = comparableAction(legacyOutcome);
+
+        for (const producer of selected) {
+          const record = await runShadowDecision({
+            decisionId: randomUUID(),
+            gate: {
+              snapshot,
+              tapeLiveness: tape.liveness,
+              executableSides: executableSidesFor(latest.candle.timeframe),
+              insideExecutableWindow: session.isOpen(latest.candle.closeTime),
+              instrumentSymbol: symbol,
+            },
+            produce: producer.produce,
+            ledger,
+            additionalPolicyVersions: {
+              tapeLiveness: tapeLivenessPolicyVersion,
+              /*
+               * Which producer decided, on every record including refusals. Without it a stored decision
+               * cannot be attributed: native and ported both emit "no trade" outcomes, and a later reader
+               * comparing two sessions would have no way to tell which rule was in force.
+               */
+              producer: producer.producerId,
+              producerAuthority: producer.authority,
+            },
+          });
+
+          /*
+           * P13's pair. V1's side came from the same `latest` context the snapshot was sealed from, so
+           * citing one snapshot ref for both is a fact rather than an assumption -- which is what
+           * `assertComparable` demands and what makes the stored row re-derivable.
+           *
+           * The action is compared; the reason is recorded beside it. One implementation for both sides,
+           * because a drift between two would read as the systems disagreeing rather than the formatters.
+           */
+          const v2 = comparableAction(record.v2Outcome);
+          const recorded = await observations.record({
+            observation: {
+              comparisonKey: record.comparisonKey,
+              legacySnapshotRef: record.contextSnapshotId,
+              v2SnapshotRef: record.contextSnapshotId,
+              legacyOutcome: legacy.action,
+              v2Outcome: v2.action,
+            },
+            comparisonVersion: thesisComparisonVersion,
+            producerId: producer.producerId,
+            legacyDetail: legacy.detail,
+            v2Detail: v2.detail,
+          });
+
+          records.push({
+            symbol,
+            timeframe,
+            producer: producer.producerId,
+            decisionId: record.decisionId,
+            legacyAction: legacy.action,
+            legacyReason: legacy.detail || null,
+            agreed: legacy.action === v2.action,
+            observationRecorded: recorded,
+            barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+            outcome: record.v2Outcome,
+            abstained: record.abstained,
+            contextSnapshotId: record.contextSnapshotId.slice(0, 12),
+            sealedMatchesSnapshot: sealed.snapshotId === record.contextSnapshotId,
+            tapeLiveness: tape.liveness,
+          });
+        }
       }
     }
 

@@ -171,7 +171,17 @@ export async function runShadowDecision(input: {
 
   return Object.freeze({
     decisionId: input.decisionId,
-    comparisonKey: `${input.gate.instrumentSymbol}@${input.gate.snapshot.instants.eventAt.toISOString()}`,
+    /*
+     * instrument @ timeframe @ instant.
+     *
+     * The timeframe is part of the decision point, not decoration. Once the shadow pass covered 1m
+     * and 5m, a 1m bar and a 5m bar both closing at 09:25:00 produced the same key -- which happens
+     * every five minutes -- and the second was discarded by the observation store's ON CONFLICT. That
+     * is the same class of silent drop the producer id had to fix one commit earlier, and it would
+     * have swallowed exactly the 5m decisions the wider coverage was added to capture.
+     */
+    comparisonKey: `${input.gate.instrumentSymbol}@${input.gate.snapshot.bar.timeframe}`
+      + `@${input.gate.snapshot.instants.eventAt.toISOString()}`,
     v2Outcome,
     contextSnapshotId,
     abstained: isAbstention(result),
