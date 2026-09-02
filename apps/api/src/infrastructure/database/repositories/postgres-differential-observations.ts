@@ -42,13 +42,16 @@ export class PostgresDifferentialObservations {
   async record(input: {
     readonly observation: DifferentialObservation;
     readonly comparisonVersion: string;
+    /** Why each system acted. Recorded, never compared -- see migration 093. */
+    readonly legacyDetail: string;
+    readonly v2Detail: string;
   }): Promise<boolean> {
     assertComparable(input.observation);
     const result = await this.database.query<{ id: string }>(`
       INSERT INTO differential_observations (
         comparison_key, comparison_version, context_encoding_version, context_snapshot_id,
-        legacy_outcome, v2_outcome
-      ) VALUES ($1, $2, $3, $4, $5, $6)
+        legacy_outcome, v2_outcome, legacy_detail, v2_detail
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (comparison_key, comparison_version) DO NOTHING
       RETURNING id
     `, [
@@ -61,6 +64,8 @@ export class PostgresDifferentialObservations {
       input.observation.legacySnapshotRef,
       input.observation.legacyOutcome,
       input.observation.v2Outcome,
+      input.legacyDetail,
+      input.v2Detail,
     ]);
     return result.rows.length > 0;
   }

@@ -10,7 +10,10 @@ import {
   marketSnapshotContent,
   marketSnapshotFromLegacyContext,
 } from "../../modules/autonomous-v2/application/market-context-adapter.js";
-import { runShadowDecision } from "../../modules/autonomous-v2/application/shadow-decision.js";
+import {
+  comparableAction,
+  runShadowDecision,
+} from "../../modules/autonomous-v2/application/shadow-decision.js";
 import { evaluateDifferentialRun } from "../../modules/autonomous-v2/domain/differential-testing.js";
 import {
   structuralGateThesisProducer,
@@ -175,6 +178,38 @@ function executableSidesFor(timeframe: string): readonly ThesisSide[] {
   return [...sides];
 }
 
+/**
+ * Whether each feature layer was actually computed for this bar, from `candle_feature_coverage`.
+ *
+ * The right source, and the second one I tried. The first version read
+ * `patternObservationCoverage`, which belongs to **Pattern Intelligence V1.0.1** (`pattern_observations_v2`)
+ * -- a different subsystem from the legacy candlestick detections on `context.patterns`. Using one
+ * layer's coverage to describe another's is exactly the conflation the coverage distinction exists to
+ * prevent, and the adapter refused it rather than resolving it: *"1 row(s) supplied but the layer is
+ * declared not computed"*.
+ *
+ * Matched at exact algorithm versions for the reason the scalp harness's gate is: ignoring the
+ * version would let a different variant of a layer open the gate for consumers of this one.
+ */
+async function featureCoverageFor(
+  database: ReturnType<typeof createDatabasePool>,
+  candleId: string,
+): Promise<{ readonly patternsComputed: boolean; readonly priceActionComputed: boolean }> {
+  const result = await database.query<{ feature_layer: string }>(`
+    SELECT feature_layer FROM candle_feature_coverage
+    WHERE candle_id = $1
+      AND (feature_layer, algorithm_version) IN (
+        ('CANDLESTICK_PATTERN', 'candlestick-v1'),
+        ('PRICE_ACTION', 'price-action-v2')
+      )
+  `, [candleId]);
+  const layers = new Set(result.rows.map((row) => row.feature_layer));
+  return {
+    patternsComputed: layers.has("CANDLESTICK_PATTERN"),
+    priceActionComputed: layers.has("PRICE_ACTION"),
+  };
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const symbols = (getOption(args, "instruments") ?? "NIFTY50,BANKNIFTY")
@@ -246,6 +281,7 @@ async function main(): Promise<void> {
         threshold,
       });
 
+      const coverage = await featureCoverageFor(database, latest.candle.id);
       const knownAt = new Date();
       const snapshot = marketSnapshotFromLegacyContext({
         context: {
@@ -279,22 +315,10 @@ async function main(): Promise<void> {
             direction: event.direction,
             level: event.level,
           })),
-          /*
-           * `COMPLETE` and nothing else.
-           *
-           * The three states are three different facts, and only `COMPLETE` licenses treating absence
-           * as information: `NOT_COVERED` means the detector has not reached this bar, and `UNKNOWN`
-           * means the consumer did not check. Accepting either would report an unevaluated bar as
-           * evaluated-and-empty -- the distinction migration 079 exists to preserve, and the one that
-           * cost a 93% firing-rate drop on 2026-08-24 when it was lost.
-           *
-           * The first version of this line read `=== "LOADED" || patternObservations !== undefined`,
-           * which was wrong twice: that state does not exist, and the fallback would have counted
-           * `UNKNOWN` as computed. `tsc` refused the comparison, which is the only reason it was
-           * caught before this ran against live bars.
-           */
-          patternsComputed: latest.patternObservationCoverage === "COMPLETE",
-          priceActionComputed: true,
+          // From `candle_feature_coverage`, per layer. See `featureCoverageFor` for the two wrong
+          // sources this replaced.
+          patternsComputed: coverage.patternsComputed,
+          priceActionComputed: coverage.priceActionComputed,
         },
         instants: {
           eventAt: latest.candle.closeTime,
@@ -361,22 +385,31 @@ async function main(): Promise<void> {
         instrumentSymbol: symbol,
         decisionAt: latest.candle.closeTime,
       });
+      /*
+       * The action is compared; the reason is recorded beside it. One implementation for both sides,
+       * because a drift between two would read as the systems disagreeing rather than the formatters.
+       */
+      const legacy = comparableAction(legacyOutcome);
+      const v2 = comparableAction(record.v2Outcome);
       const recorded = await observations.record({
         observation: {
           comparisonKey: record.comparisonKey,
           legacySnapshotRef: record.contextSnapshotId,
           v2SnapshotRef: record.contextSnapshotId,
-          legacyOutcome,
-          v2Outcome: record.v2Outcome,
+          legacyOutcome: legacy.action,
+          v2Outcome: v2.action,
         },
         comparisonVersion: thesisComparisonVersion,
+        legacyDetail: legacy.detail,
+        v2Detail: v2.detail,
       });
 
       records.push({
         symbol,
         decisionId: record.decisionId,
-        legacyOutcome,
-        agreed: legacyOutcome === record.v2Outcome,
+        legacyAction: legacy.action,
+        legacyReason: legacy.detail || null,
+        agreed: legacy.action === v2.action,
         observationRecorded: recorded,
         barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
         outcome: record.v2Outcome,

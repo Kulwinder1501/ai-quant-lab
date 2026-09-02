@@ -100,6 +100,32 @@ export function canonicalV2Outcome(result: ThesisResult): string {
 }
 
 /**
+ * Splits an outcome into the part P13 compares and the part it only records.
+ *
+ * ## Why the action is compared and the reason is not
+ *
+ * P13 gates whether V2.2 may **substitute** for V1. If both systems declined to trade then V2.2 is
+ * behaviourally equivalent for that bar, whatever each called its refusal -- so `NO_TRADE` is the
+ * comparable fact and `TAPE_FROZEN` versus `NO_PROPOSAL` is colour.
+ *
+ * Learned by getting it wrong. The first stored observations compared whole strings, which made
+ * `NO_ACTION NO_PROPOSAL` diverge from `REJECTED OUTSIDE_EXECUTABLE_WINDOW` even though neither
+ * system traded. Every bar would have diverged for as long as V2.2 has no entry rule, all `UNKNOWN`,
+ * all blockers -- the exact "hundreds of expected divergences is noise" failure the thesis comparison
+ * already refuses for composite scores, reintroduced in the equality test. See migration 093.
+ *
+ * An approval keeps its geometry in the action, because *what* was traded is the substitution
+ * question: two approvals with different stops are genuinely different decisions.
+ *
+ * One implementation, used for both sides. Two would drift, and a drift here reads as disagreement
+ * between the systems rather than between the formatters.
+ */
+export function comparableAction(outcome: string): { readonly action: string; readonly detail: string } {
+  if (outcome.startsWith("APPROVED")) return { action: outcome, detail: "" };
+  return { action: "NO_TRADE", detail: outcome };
+}
+
+/**
  * Runs one shadow decision and records it.
  *
  * Returns the observation half a P13 comparison needs. The caller supplies V1's side and the shared

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   canonicalV2Outcome,
+  comparableAction,
   runShadowDecision,
   ShadowDecisionError,
   type ShadowLedgerPort,
@@ -274,5 +275,64 @@ describe("it produces P13 evidence, which is the point", () => {
 
     expect(record.v2Outcome).toBe("APPROVED SHORT entry=23860.00 stop=23890.00 target=23800.00");
     expect(record.abstained).toBe(false);
+  });
+});
+
+describe("P13 compares the action, not the reason", () => {
+  it("treats every refusal as one comparable action", () => {
+    /*
+     * The correction. The first stored observations compared whole strings, so
+     * `NO_ACTION NO_PROPOSAL` diverged from `REJECTED OUTSIDE_EXECUTABLE_WINDOW` even though neither
+     * system traded. Every bar would have diverged for as long as V2.2 has no entry rule -- all
+     * UNKNOWN, all blockers -- which is the "hundreds of expected divergences is noise" failure the
+     * thesis comparison already refuses for composite scores. See migration 093.
+     */
+    const legacy = comparableAction("NO_ACTION NO_PROPOSAL");
+    const v2 = comparableAction("REJECTED OUTSIDE_EXECUTABLE_WINDOW");
+
+    expect(legacy.action).toBe("NO_TRADE");
+    expect(v2.action).toBe("NO_TRADE");
+    expect(legacy.action).toBe(v2.action);
+  });
+
+  it("keeps each reason, because a blocker with nothing to diagnose is useless", () => {
+    // promotionBlocker prints both sides, and a reviewer classifying a divergence needs the why.
+    expect(comparableAction("REJECTED TAPE_FROZEN").detail).toBe("REJECTED TAPE_FROZEN");
+    expect(comparableAction("DEFERRED FEATURE_LAYER_NOT_COMPUTED").detail)
+      .toBe("DEFERRED FEATURE_LAYER_NOT_COMPUTED");
+  });
+
+  it("keeps an approval's geometry in the action, since that is the substitution question", () => {
+    // Two approvals with different stops are genuinely different decisions and must diverge.
+    const a = comparableAction("APPROVED SHORT entry=23860.00 stop=23890.00 target=23800.00");
+    const b = comparableAction("APPROVED SHORT entry=23860.00 stop=23895.00 target=23800.00");
+
+    expect(a.action).not.toBe(b.action);
+    expect(a.detail).toBe("");
+  });
+
+  it("diverges when one system trades and the other does not", () => {
+    // The case P13 exists for, and the one that must survive the normalisation above.
+    const traded = comparableAction("APPROVED SHORT entry=23860.00 stop=23890.00 target=23800.00");
+    const declined = comparableAction("NO_ACTION NO_ESTABLISHED_ENTRY_RULE");
+
+    expect(traded.action).not.toBe(declined.action);
+  });
+
+  it("uses one implementation for both sides", () => {
+    // Two would drift, and a drift here reads as the systems disagreeing rather than the formatters.
+    const fromV2 = comparableAction(canonicalV2Outcome(approved({
+      instrumentSymbol: "NIFTY50", side: "SHORT",
+      entryReference: 23_860, stopLoss: 23_890, targetPrice: 23_800,
+      ruleId: "r", policyVersion: thesisPolicyVersion,
+    })));
+    const fromLegacy = comparableAction(legacyThesisComparison({
+      instrumentSymbol: "NIFTY50",
+      decisionAt: closeTime,
+      verdict: "APPROVED",
+      geometry: { side: "SHORT", entryPrice: 23_860, stopLoss: 23_890, targetPrice: 23_800 },
+    }).canonicalOutcome);
+
+    expect(fromV2.action).toBe(fromLegacy.action);
   });
 });

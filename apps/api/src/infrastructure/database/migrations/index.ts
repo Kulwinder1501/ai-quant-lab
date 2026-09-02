@@ -90,6 +90,7 @@ import { paperTradeUnderlyingExitMigration } from "./089-paper-trade-underlying-
 import { underlyingExitCoverageMigration } from "./090-underlying-exit-coverage.js";
 import { studyTrialEvidencePolicyMigration } from "./091-study-trial-evidence-policy.js";
 import { differentialObservationsMigration } from "./092-differential-observations.js";
+import { differentialActionEqualityMigration } from "./093-differential-action-equality.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -184,4 +185,5 @@ export const migrations = [
   underlyingExitCoverageMigration,
   studyTrialEvidencePolicyMigration,
   differentialObservationsMigration,
+  differentialActionEqualityMigration,
 ];
