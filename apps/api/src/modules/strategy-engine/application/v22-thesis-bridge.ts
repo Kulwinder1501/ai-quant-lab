@@ -1,7 +1,6 @@
 import { approved, rejected } from "../../autonomous-v2/domain/decision-outcome.js";
 import {
   structuralGateThesisProducer,
-  thesisPolicyVersion,
   type AuthorizedThesisProducer,
   type NativeThesis,
   type ThesisGateInput,
@@ -238,7 +237,13 @@ export function portedV1ThesisProducer(input: {
   };
 
   return Object.freeze({
-    producerId: `ported-v1@${thesisPolicyVersion}`,
+    /*
+     * Named for its own policy, not V2.2's. The first version interpolated `thesisPolicyVersion` --
+     * `NATIVE_THESIS_POLICY_V1` -- so the ported producer's id advertised the native policy, which is
+     * the one claim it must never make. The id is stored on every observation and decision record, so
+     * a wrong one mislabels the evidence rather than just reading oddly.
+     */
+    producerId: `ported-v1@${portedV1PolicyVersion}`,
     authority: "DIFFERENTIAL_ONLY" as const,
     produce,
   });

@@ -91,6 +91,7 @@ import { underlyingExitCoverageMigration } from "./090-underlying-exit-coverage.
 import { studyTrialEvidencePolicyMigration } from "./091-study-trial-evidence-policy.js";
 import { differentialObservationsMigration } from "./092-differential-observations.js";
 import { differentialActionEqualityMigration } from "./093-differential-action-equality.js";
+import { differentialProducerIdentityMigration } from "./094-differential-producer-identity.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -186,4 +187,5 @@ export const migrations = [
   studyTrialEvidencePolicyMigration,
   differentialObservationsMigration,
   differentialActionEqualityMigration,
+  differentialProducerIdentityMigration,
 ];

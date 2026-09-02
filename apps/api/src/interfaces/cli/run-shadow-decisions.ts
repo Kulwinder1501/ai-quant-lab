@@ -16,7 +16,10 @@ import {
 } from "../../modules/autonomous-v2/application/shadow-decision.js";
 import { evaluateDifferentialRun } from "../../modules/autonomous-v2/domain/differential-testing.js";
 import { portedV1ThesisProducer } from "../../modules/strategy-engine/application/v22-thesis-bridge.js";
-import { assertMayHoldAuthority, nativeStructuralProducer } from "../../modules/autonomous-v2/domain/thesis-producer.js";
+import {
+  nativeStructuralProducer,
+  type AuthorizedThesisProducer,
+} from "../../modules/autonomous-v2/domain/thesis-producer.js";
 import {
   type ThesisSide,
 } from "../../modules/autonomous-v2/domain/thesis-producer.js";
@@ -369,76 +372,88 @@ async function main(): Promise<void> {
        * snapshot was sealed from. It refuses if those disagree, which is what makes citing one
        * snapshot ref for both sides of the comparison a fact rather than an assumption.
        */
-      const producer = chosenProducer === "ported-v1"
-        ? portedV1ThesisProducer({ context: latest, instrumentSymbol: symbol })
-        : nativeStructuralProducer;
-
-      const record = await runShadowDecision({
-        decisionId: randomUUID(),
-        gate: {
-          snapshot,
-          tapeLiveness: tape.liveness,
-          executableSides: executableSidesFor(latest.candle.timeframe),
-          insideExecutableWindow: session.isOpen(latest.candle.closeTime),
-          instrumentSymbol: symbol,
-        },
-        produce: producer.produce,
-        ledger,
-        additionalPolicyVersions: {
-          tapeLiveness: tapeLivenessPolicyVersion,
-          /*
-           * Which producer decided, on every record including refusals. Without it a stored decision
-           * cannot be attributed: native and ported both emit "no trade" outcomes, and a later reader
-           * comparing two sessions would have no way to tell which rule was in force.
-           */
-          producer: producer.producerId,
-          producerAuthority: producer.authority,
-        },
-      });
+      const selected: AuthorizedThesisProducer[] = [];
+      if (chosenProducer !== "ported-v1") selected.push(nativeStructuralProducer);
+      if (chosenProducer !== "native") {
+        selected.push(portedV1ThesisProducer({ context: latest, instrumentSymbol: symbol }));
+      }
 
       /*
-       * P13's pair. V1's side is evaluated on the same `latest` context the snapshot was sealed from,
-       * so citing one snapshot ref for both is a fact rather than an assumption -- which is what
-       * `assertComparable` demands and what makes the stored row re-derivable.
+       * V1's side is evaluated once per bar, not once per producer.
+       *
+       * It does not depend on which V2.2 producer is under test, and re-deriving it would invite the
+       * two copies to disagree -- which would read as V1 being inconsistent with itself.
        */
       const legacyOutcome = legacyOutcomeFor({
         context: latest,
         instrumentSymbol: symbol,
         decisionAt: latest.candle.closeTime,
       });
-      /*
-       * The action is compared; the reason is recorded beside it. One implementation for both sides,
-       * because a drift between two would read as the systems disagreeing rather than the formatters.
-       */
       const legacy = comparableAction(legacyOutcome);
-      const v2 = comparableAction(record.v2Outcome);
-      const recorded = await observations.record({
-        observation: {
-          comparisonKey: record.comparisonKey,
-          legacySnapshotRef: record.contextSnapshotId,
-          v2SnapshotRef: record.contextSnapshotId,
-          legacyOutcome: legacy.action,
-          v2Outcome: v2.action,
-        },
-        comparisonVersion: thesisComparisonVersion,
-        legacyDetail: legacy.detail,
-        v2Detail: v2.detail,
-      });
 
-      records.push({
-        symbol,
-        decisionId: record.decisionId,
-        legacyAction: legacy.action,
-        legacyReason: legacy.detail || null,
-        agreed: legacy.action === v2.action,
-        observationRecorded: recorded,
-        barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
-        outcome: record.v2Outcome,
-        abstained: record.abstained,
-        contextSnapshotId: record.contextSnapshotId.slice(0, 12),
-        sealedMatchesSnapshot: sealed.snapshotId === record.contextSnapshotId,
-        tapeLiveness: tape.liveness,
-      });
+      for (const producer of selected) {
+        const record = await runShadowDecision({
+          decisionId: randomUUID(),
+          gate: {
+            snapshot,
+            tapeLiveness: tape.liveness,
+            executableSides: executableSidesFor(latest.candle.timeframe),
+            insideExecutableWindow: session.isOpen(latest.candle.closeTime),
+            instrumentSymbol: symbol,
+          },
+          produce: producer.produce,
+          ledger,
+          additionalPolicyVersions: {
+            tapeLiveness: tapeLivenessPolicyVersion,
+            /*
+             * Which producer decided, on every record including refusals. Without it a stored decision
+             * cannot be attributed: native and ported both emit "no trade" outcomes, and a later reader
+             * comparing two sessions would have no way to tell which rule was in force.
+             */
+            producer: producer.producerId,
+            producerAuthority: producer.authority,
+          },
+        });
+
+        /*
+         * P13's pair. V1's side came from the same `latest` context the snapshot was sealed from, so
+         * citing one snapshot ref for both is a fact rather than an assumption -- which is what
+         * `assertComparable` demands and what makes the stored row re-derivable.
+         *
+         * The action is compared; the reason is recorded beside it. One implementation for both sides,
+         * because a drift between two would read as the systems disagreeing rather than the formatters.
+         */
+        const v2 = comparableAction(record.v2Outcome);
+        const recorded = await observations.record({
+          observation: {
+            comparisonKey: record.comparisonKey,
+            legacySnapshotRef: record.contextSnapshotId,
+            v2SnapshotRef: record.contextSnapshotId,
+            legacyOutcome: legacy.action,
+            v2Outcome: v2.action,
+          },
+          comparisonVersion: thesisComparisonVersion,
+          producerId: producer.producerId,
+          legacyDetail: legacy.detail,
+          v2Detail: v2.detail,
+        });
+
+        records.push({
+          symbol,
+          producer: producer.producerId,
+          decisionId: record.decisionId,
+          legacyAction: legacy.action,
+          legacyReason: legacy.detail || null,
+          agreed: legacy.action === v2.action,
+          observationRecorded: recorded,
+          barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+          outcome: record.v2Outcome,
+          abstained: record.abstained,
+          contextSnapshotId: record.contextSnapshotId.slice(0, 12),
+          sealedMatchesSnapshot: sealed.snapshotId === record.contextSnapshotId,
+          tapeLiveness: tape.liveness,
+        });
+      }
     }
 
     /*
@@ -453,36 +468,35 @@ async function main(): Promise<void> {
      * NO_TRADE is an agreement worth almost nothing, so a pass can report 100% agreement and still be
      * blocked -- see `isDecisive`.
      */
-    const stored = await observations.listForVersion(thesisComparisonVersion);
-    const verdict = evaluateDifferentialRun({
-      observations: stored.map((row) => ({
+    /*
+     * Graded per producer, never pooled.
+     *
+     * The native producer abstains on every bar and the ported one applies V1's rule and can approve.
+     * One verdict over both would average a rule that never trades with a rule that does, and
+     * `promotable` would then describe no system that exists.
+     */
+    const verdicts: Record<string, unknown> = {};
+    for (const producerId of [...new Set(records.map((row) => String(row.producer)))]) {
+      const stored = await observations.listFor({
+        comparisonVersion: thesisComparisonVersion,
+        producerId,
+      });
+      const asObservation = (row: typeof stored[number]) => ({
         comparisonKey: row.comparisonKey,
         legacySnapshotRef: row.contextSnapshotId,
         v2SnapshotRef: row.contextSnapshotId,
         legacyOutcome: row.legacyOutcome,
         v2Outcome: row.v2Outcome,
-      })),
-      // Unclassified until a human attaches evidence, so every divergence is a blocker today.
-      divergences: stored.filter((row) => !row.agreed).map((row) => ({
-        observation: {
-          comparisonKey: row.comparisonKey,
-          legacySnapshotRef: row.contextSnapshotId,
-          v2SnapshotRef: row.contextSnapshotId,
-          legacyOutcome: row.legacyOutcome,
-          v2Outcome: row.v2Outcome,
-        },
-        evidence: { kind: "UNKNOWN" as const },
-      })),
-    });
-
-    console.log(JSON.stringify({
-      level: "info",
-      message: "V2.2 shadow decision pass completed",
-      executesNothing: true,
-      producer: chosenProducer,
-      records,
-      p13: {
-        comparisonVersion: thesisComparisonVersion,
+      });
+      const verdict = evaluateDifferentialRun({
+        observations: stored.map(asObservation),
+        // Unclassified until a human attaches evidence, so every divergence is a blocker today.
+        divergences: stored.filter((row) => !row.agreed).map((row) => ({
+          observation: asObservation(row),
+          evidence: { kind: "UNKNOWN" as const },
+        })),
+      });
+      verdicts[producerId] = {
         comparisons: verdict.comparisons,
         agreements: verdict.agreements,
         divergences: verdict.divergences,
@@ -490,7 +504,16 @@ async function main(): Promise<void> {
         unclassified: verdict.byClassification.UNKNOWN,
         promotable: verdict.promotable,
         blockers: verdict.blockers.length,
-      },
+      };
+    }
+
+    console.log(JSON.stringify({
+      level: "info",
+      message: "V2.2 shadow decision pass completed",
+      executesNothing: true,
+      producer: chosenProducer,
+      records,
+      p13: { comparisonVersion: thesisComparisonVersion, byProducer: verdicts },
     }));
   } finally {
     await database.end();

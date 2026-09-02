@@ -9,19 +9,22 @@ import { getOption } from "./arguments.js";
  * it can be imported.
  */
 
-export type ProducerChoice = "native" | "ported-v1";
+export type ProducerChoice = "native" | "ported-v1" | "both";
 
 /**
  * Which producer V2.2 decides with this pass.
  *
- * Defaults to native, so nothing changes unless the flag is passed. `--producer=ported-v1` runs V1's
- * entry rule through V2.2's port for the platform-equivalence comparison, and is legal only because
- * the shadow path holds no execution port -- `assertMayHoldAuthority` refuses it anywhere that does.
+ * **Defaults to `both`**, because the two answer different questions and P13 needs both answers.
+ * Native measures what V2.2 decides on its own evidence, which is "nothing" today; ported measures
+ * whether the platform reproduces V1's decisions. Neither substitutes for the other, and running one
+ * would leave the other's population empty -- which is how the ported producer sat unused for a day
+ * while the scheduler ran native only.
  *
- * A flag rather than a default because the two answer different questions. Native measures what V2.2
- * decides on its own evidence, which is "nothing" today; ported measures whether the platform
- * reproduces V1's decisions, which is what P13 grades. Silently defaulting to ported would erase the
- * abstention record from the run that established it.
+ * Running both is safe because the shadow path holds no execution port at all. The ported producer can
+ * approve, and `assertMayHoldAuthority` refuses it anywhere that could act on the approval.
+ *
+ * Each producer's observations are keyed and graded separately (migration 094), so two producers on
+ * one bar are two records rather than a collision.
  *
  * ## Parsed wrong twice on the first attempt
  *
@@ -33,7 +36,8 @@ export type ProducerChoice = "native" | "ported-v1";
  */
 export function producerChoice(args: readonly string[]): ProducerChoice {
   const raw = getOption([...args], "producer")?.trim();
-  if (raw === undefined || raw === "" || raw === "native") return "native";
+  if (raw === undefined || raw === "" || raw === "both") return "both";
+  if (raw === "native") return "native";
   if (raw === "ported-v1") return "ported-v1";
-  throw new Error(`Unknown --producer "${raw}". Use "native" or "ported-v1".`);
+  throw new Error(`Unknown --producer "${raw}". Use "native", "ported-v1" or "both".`);
 }

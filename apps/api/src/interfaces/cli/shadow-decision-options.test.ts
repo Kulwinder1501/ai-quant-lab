@@ -11,9 +11,19 @@ import { producerChoice } from "./shadow-decision-options.js";
  * path that passes no flag. It took a live run against production to surface that.
  */
 describe("the producer flag", () => {
-  it("defaults to native when absent, so a pass never silently changes rule", () => {
-    expect(producerChoice([])).toBe("native");
-    expect(producerChoice(["--max-bar-age-seconds=90000"])).toBe("native");
+  it("defaults to running both, because P13 needs both populations", () => {
+    /*
+     * Native measures what V2.2 decides on its own evidence; ported measures whether the platform
+     * reproduces V1's. Defaulting to one leaves the other's population empty -- which is exactly how
+     * the ported producer sat unused for a day while the scheduler ran native only.
+     */
+    expect(producerChoice([])).toBe("both");
+    expect(producerChoice(["--max-bar-age-seconds=90000"])).toBe("both");
+  });
+
+  it("still allows isolating one producer", () => {
+    expect(producerChoice(["--producer=native"])).toBe("native");
+    expect(producerChoice(["--producer=ported-v1"])).toBe("ported-v1");
   });
 
   it("accepts both flag spellings", () => {
@@ -22,8 +32,8 @@ describe("the producer flag", () => {
     expect(producerChoice(["--producer", "ported-v1"])).toBe("ported-v1");
   });
 
-  it("accepts an explicit native", () => {
-    expect(producerChoice(["--producer=native"])).toBe("native");
+  it("accepts an explicit both", () => {
+    expect(producerChoice(["--producer=both"])).toBe("both");
   });
 
   it("refuses an unrecognised producer instead of falling back", () => {
@@ -37,8 +47,8 @@ describe("the producer flag", () => {
   });
 
   it("treats an empty value as absent rather than as an error", () => {
-    // `--producer=` from a shell variable that did not expand. Defaulting is the safe reading: it runs
-    // the producer that claims nothing.
-    expect(producerChoice(["--producer="])).toBe("native");
+    // `--producer=` from a shell variable that did not expand. Defaulting is the safe reading, and the
+    // default records everything rather than silently dropping a producer's population.
+    expect(producerChoice(["--producer="])).toBe("both");
   });
 });
