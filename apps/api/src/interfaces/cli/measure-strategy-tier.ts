@@ -38,6 +38,31 @@ interface Options {
   strategyKey: string | null;
   bars: number;
   horizonBars: number;
+  /** Shallow overrides merged over the registered configuration. */
+  configurationOverride: Record<string, unknown> | null;
+}
+
+/**
+ * Strategy configuration overrides, as JSON. Same flag and semantics as `run-backtest`.
+ *
+ * Needed to measure an arm that differs only in a setting: without it, comparing two
+ * configurations means editing the registration, which changes what every other run means. The
+ * merge is shallow and the override is echoed on the result, so an arm cannot later be mistaken for
+ * the registered default.
+ */
+function parseConfigurationOverride(values: Map<string, string>): Record<string, unknown> | null {
+  const raw = values.get("strategy-config")?.trim();
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`--strategy-config must be valid JSON, received "${raw}".`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("--strategy-config must be a JSON object of setting overrides.");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function parseOptions(argv: readonly string[]): Options {
@@ -56,6 +81,7 @@ function parseOptions(argv: readonly string[]): Options {
   const timeframe = (values.get("timeframe") ?? "").trim().toLowerCase();
   if (!timeframe) throw new Error("--timeframe is required, for example --timeframe=15m.");
   return {
+    configurationOverride: parseConfigurationOverride(values),
     symbol: (values.get("instrument") ?? "NIFTY50").trim().toUpperCase(),
     timeframe,
     strategyKey: values.get("strategy")?.trim() ?? null,
@@ -128,7 +154,10 @@ async function main(): Promise<void> {
     }
 
     const strategies = owners.map((owner) => {
-      const configuration = owner.registration.configuration as Record<string, unknown>;
+      const configuration = {
+        ...(owner.registration.configuration as Record<string, unknown>),
+        ...(options.configurationOverride ?? {}),
+      };
       const measurement = measureTier({
         contexts: history,
         strategy: new owner.StrategyClass(),
@@ -141,6 +170,8 @@ async function main(): Promise<void> {
       return {
         strategy: owner.registration.strategyKey,
         version: owner.registration.version,
+        // Echoed so a swept arm can never be read back as the registered default.
+        configurationOverride: options.configurationOverride,
         ...measurement,
       };
     });
