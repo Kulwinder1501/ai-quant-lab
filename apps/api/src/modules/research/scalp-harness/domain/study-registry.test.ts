@@ -4,7 +4,10 @@ import {
   cellGateStanding,
   decisionGrade,
   decisionGradeSessionMinimum,
+  evidencePolicyVersion,
   evidenceState,
+  provisionalSessionMinimum,
+  strongerValidationSessionMinimum,
   registeredStudies,
   studyDefinitionHash,
   type StudyDefinition,
@@ -255,5 +258,56 @@ describe("registration guards", () => {
 
   it("refuses a study that freezes nothing", () => {
     expect(() => assertStudyRegistrable({ ...base, specification: {} })).toThrow(/empty specification/);
+  });
+});
+
+describe("the evidence policy version", () => {
+  it("pins the boundaries and the version together, so one cannot move without the other", () => {
+    /*
+     * The tripwire, and the whole point of the version.
+     *
+     * `evidence_state` is frozen onto a study trial before its result is computed, and migration 091
+     * stores this version beside it. If a boundary changed without the version changing, every stored
+     * grade would silently become ambiguous -- two rows reading RESEARCH_USABLE would mean different
+     * things with nothing to distinguish them. This fails on either half moving alone.
+     *
+     * 5 / 20 / 60 are the values already in force when the version was introduced, which is why all
+     * 180 existing rows are truthfully EVIDENCE_POLICY_V1 and nothing re-graded.
+     */
+    expect({
+      version: evidencePolicyVersion,
+      provisional: provisionalSessionMinimum,
+      decisionGrade: decisionGradeSessionMinimum,
+      strongerValidation: strongerValidationSessionMinimum,
+    }).toEqual({
+      version: "EVIDENCE_POLICY_V1",
+      provisional: 5,
+      decisionGrade: 20,
+      strongerValidation: 60,
+    });
+  });
+
+  it("grades each boundary at its exact edge", () => {
+    // Every boundary is inclusive-below: the named number is the first session count in its band.
+    expect(evidenceState(provisionalSessionMinimum - 1)).toBe("EARLY_DIAGNOSTIC");
+    expect(evidenceState(provisionalSessionMinimum)).toBe("PROVISIONAL");
+    expect(evidenceState(decisionGradeSessionMinimum - 1)).toBe("PROVISIONAL");
+    expect(evidenceState(decisionGradeSessionMinimum)).toBe("RESEARCH_USABLE");
+    expect(evidenceState(strongerValidationSessionMinimum - 1)).toBe("RESEARCH_USABLE");
+    expect(evidenceState(strongerValidationSessionMinimum)).toBe("STRONGER_VALIDATION");
+  });
+
+  it("keeps the boundaries strictly ordered", () => {
+    // A reordering would make one band unreachable while every grade still typechecked.
+    expect(provisionalSessionMinimum).toBeLessThan(decisionGradeSessionMinimum);
+    expect(decisionGradeSessionMinimum).toBeLessThan(strongerValidationSessionMinimum);
+  });
+
+  it("reaches every band, so no grade is unreachable", () => {
+    const reached = new Set([0, 5, 20, 60, 500].map(evidenceState));
+
+    expect([...reached].sort()).toEqual([
+      "EARLY_DIAGNOSTIC", "PROVISIONAL", "RESEARCH_USABLE", "STRONGER_VALIDATION",
+    ]);
   });
 });

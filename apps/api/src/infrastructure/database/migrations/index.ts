@@ -88,6 +88,7 @@ import { decisionLedgerMigration } from "./087-decision-ledger.js";
 import { paperTradePnlConventionMigration } from "./088-paper-trade-pnl-convention.js";
 import { paperTradeUnderlyingExitMigration } from "./089-paper-trade-underlying-exit.js";
 import { underlyingExitCoverageMigration } from "./090-underlying-exit-coverage.js";
+import { studyTrialEvidencePolicyMigration } from "./091-study-trial-evidence-policy.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -180,4 +181,5 @@ export const migrations = [
   paperTradePnlConventionMigration,
   paperTradeUnderlyingExitMigration,
   underlyingExitCoverageMigration,
+  studyTrialEvidencePolicyMigration,
 ];

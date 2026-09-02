@@ -1,5 +1,6 @@
 import type { DatabasePool, DatabaseQueryable } from "../database.js";
 import { matchingPolicyVersion } from "../../../modules/research/scalp-harness/domain/contracts.js";
+import { evidencePolicyVersion } from "../../../modules/research/scalp-harness/domain/study-registry.js";
 import { sha256CanonicalJson } from "../../../modules/platform/identity/identity.js";
 
 /**
@@ -251,8 +252,11 @@ export class PostgresPathStudyRepository {
             trial_key, run_key, study_key, study_definition_hash, code_version, cohort_key,
             instrument_symbol, timeframe, direction, parameter_family, parameter_values,
             dataset_cutoff, session_range_start, session_range_end, session_count, evidence_state,
+            -- Supplied explicitly: migration 091 drops the column default so a trial cannot acquire
+            -- a policy version it never declared.
+            evidence_policy_version,
             subjects_declared, session_set_hash, input_snapshot_hash
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19)
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18,$19,$20)
           ON CONFLICT (trial_key) DO NOTHING
         `, [
           declaration.trialKey, declaration.runKey, declaration.studyKey,
@@ -260,7 +264,8 @@ export class PostgresPathStudyRepository {
           declaration.instrumentSymbol, declaration.timeframe, declaration.direction,
           declaration.parameterFamily, JSON.stringify(declaration.parameterValues),
           declaration.datasetCutoff, declaration.sessionRangeStart, declaration.sessionRangeEnd,
-          declaration.sessionCount, declaration.evidenceState, declaration.subjectsDeclared,
+          declaration.sessionCount, declaration.evidenceState, evidencePolicyVersion,
+          declaration.subjectsDeclared,
           declaration.sessionSetHash, declaration.inputSnapshotHash,
         ]);
       }

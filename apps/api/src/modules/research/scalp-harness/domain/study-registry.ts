@@ -69,6 +69,45 @@ export type StudyEvidenceState =
   | "STRONGER_VALIDATION";
 
 /**
+ * The version of the evidence boundaries below, recorded on every verdict that used them.
+ *
+ * ## What this fixes, and what it deliberately does not
+ *
+ * Gate A7 / Gap 6 asks for evidence thresholds to be "referenced, never copied", and describes the
+ * risk as duplication -- "the registry says 20, the plan says 20, and eventually a third service says
+ * 25". Measured 2026-09-02: in code there is no duplication. `evidenceState` below is the single
+ * implementation, and every consumer either calls it or takes `decisionGradeSessionMinimum` as a
+ * parameter. The property Gap 6 wants already held.
+ *
+ * What did not hold is provenance. Nothing recorded *which* boundaries produced a stored verdict, so
+ * the day these numbers change, all 180 stored `evidence_state` values silently become ambiguous --
+ * unreadable in the same way a control point would be if `controlPolicyVersion` were not stored
+ * beside it. That is what this version is for, and migration 091 stamps it on the row.
+ *
+ * A `StudyEvidencePolicy` object that every service reads -- which Gap 6 sketches -- was considered
+ * and not built. It would be an indirection layer over one function with one implementation, adding
+ * structure without removing a risk.
+ *
+ * > If any boundary below changes, `evidencePolicyVersion` MUST change with it.
+ *
+ * The stored version is then sufficient to say what a grade meant, and rows graded under different
+ * boundaries stay distinguishable rather than being silently comparable.
+ *
+ * No boundary changed when this was introduced: 5 / 20 / 60 are exactly the values that were already
+ * in force, so every existing row is truthfully `EVIDENCE_POLICY_V1` and nothing re-grades.
+ */
+export const evidencePolicyVersion = "EVIDENCE_POLICY_V1";
+
+/**
+ * Below this, a reading is a diagnostic and not evidence.
+ *
+ * Five sessions is where a cell stops being a handful of draws, and it was an unnamed inline literal
+ * until 2026-09-02 while the twenty below carried a documented rationale -- an odd asymmetry, since
+ * both decide what a report is allowed to claim.
+ */
+export const provisionalSessionMinimum = 5;
+
+/**
  * The session count below which a study may not kill or advance a hypothesis.
  *
  * Twenty independent sessions is a judgement, not a theorem: it is the point at which the day-clustered
@@ -77,13 +116,21 @@ export type StudyEvidenceState =
  */
 export const decisionGradeSessionMinimum = 20;
 
+/**
+ * The session count at which evidence is strong enough for the promotion ladder's upper rungs.
+ *
+ * Sixty is the `SHADOW -> PAPER` requirement in the promotion policy. Also an unnamed literal until
+ * 2026-09-02.
+ */
+export const strongerValidationSessionMinimum = 60;
+
 export function evidenceState(sessionCount: number): StudyEvidenceState {
   if (!Number.isInteger(sessionCount) || sessionCount < 0) {
     throw new Error("Evidence state needs a non-negative whole number of sessions.");
   }
-  if (sessionCount < 5) return "EARLY_DIAGNOSTIC";
+  if (sessionCount < provisionalSessionMinimum) return "EARLY_DIAGNOSTIC";
   if (sessionCount < decisionGradeSessionMinimum) return "PROVISIONAL";
-  if (sessionCount < 60) return "RESEARCH_USABLE";
+  if (sessionCount < strongerValidationSessionMinimum) return "RESEARCH_USABLE";
   return "STRONGER_VALIDATION";
 }
 
