@@ -75,6 +75,7 @@
     "paper:trades:review": "tsx src/interfaces/cli/review-closed-trades.ts",
     "shadow:decisions": "tsx src/interfaces/cli/run-shadow-decisions.ts",
     "classify:divergence": "tsx src/interfaces/cli/classify-divergence.ts",
+    "review:divergences": "tsx src/interfaces/cli/review-divergences.ts",
     "risk:evaluate": "tsx src/interfaces/cli/evaluate-trade-risk.ts",
     "scheduler": "tsx src/interfaces/scheduler/scheduler.ts"
   },
