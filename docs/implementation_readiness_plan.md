@@ -741,6 +741,77 @@ triple-barrier, 15m direction, the tier sweep, HTF confluence, pattern gating, a
 Volatility expansion is the one target with real signal and it fails the cost-aware straddle gate.
 That is a reason to pause directional *delivery*, not to abandon the decision architecture.
 
+### Tier 3 release criteria (defined 2026-09-02)
+
+Until now Tier 3's condition was the phrase "wait for a defensible target". Tier 2's condition is
+measurable — 20 sessions, currently 7 — and Tier 3's was not, which is how a tier stays held by
+default: nobody can say when it is met, so it never is.
+
+The three items in Tier 3 do **not** share a blocker, so they do not share a criterion.
+
+Every threshold below is **referenced, not copied**, per Gap 6: the session counts live in
+`EVIDENCE_POLICY_V1` as `provisionalSessionMinimum`, `decisionGradeSessionMinimum` and
+`strongerValidationSessionMinimum`. Quoting numbers here would create the second copy that gate exists
+to prevent.
+
+#### T3-A — Brain P14-P18 (Directional ML Edge)
+
+Requires a **defensible target**, which now means a registered study whose artifact clears all six of
+these. None is substitutable, and each one is here because it is what killed a previous candidate:
+
+| # | Requirement | The candidate it killed |
+| :--- | :--- | :--- |
+| 1 | Pre-registered: a `study_registrations` row with a pinned `study_definition_hash` written **before** any result is read | Both of 2026-09-02's sweeps needed this to mean anything; without it a sweep is a search for a pass |
+| 2 | Beats trivial on **accuracy as well as macro-F1** | Macro-F1 alone passed a directional target that accuracy then killed — class-spreading looks like skill |
+| 3 | Clears a noise floor at the observed n, via the day-clustered estimator, and not on a degenerate interval | `trend-breakout` 60m: four cells above break-even, every one inside the floor at n=12-25 |
+| 4 | Replicates cross-instrument on the same side | 15m LONG cleared on NIFTY50 and lost on BANKNIFTY, with SHORT flipping; HTF confluence won on 2 ETFs and made 14 of 20 equities worse |
+| 5 | Survives an era/holdout confirmation outside the fold that produced it | 15m direction passed the screen and died on era holdout; the daily gate hung on one noisy fold |
+| 6 | Clears the **cost-aware gate** on a tradable instrument at a real tenor | 60m volatility-expansion: precision 0.47 against a 0.24 base rate, then ~0.5 bps of spot against ~5 bps of fees |
+
+Plus an evidence state of at least `STRONGER_VALIDATION` as `EVIDENCE_POLICY_V1` defines it.
+
+Requirement 6 is the one to watch. It has killed the only target in this system's history with real
+statistical skill, so it is not a formality appended to a list — it is the criterion the others exist
+to earn the right to reach.
+
+#### T3-B — Brain P19 (paper authority)
+
+**Not gated on a target at all.** P19 sits *after* V1 retirement, so its criterion is the migration:
+
+1. P13 reports `promotable: true` for a `NATIVE` producer, with `decisiveComparisons > 0` — agreement
+   that nobody traded is not evidence of substitutability.
+2. Every divergence classified: no `UNKNOWN` remaining, and every `BUG` carrying a resolution.
+3. The producer receiving authority passes `assertMayHoldAuthority`, i.e. is `NATIVE`. A ported rule
+   can never be the vehicle, by §6 and by type.
+
+T3-B is therefore satisfiable **without** T3-A, and the consequence should be stated plainly: the only
+authority-eligible producer today is `structuralGateThesisProducer`, which can never return `APPROVED`.
+Meeting T3-B grants paper authority to a system that places no trades. That is coherent — "V1 retired"
+and "V2.2 trading" are separate milestones — and only the first is reachable on current evidence.
+
+#### T3-C — Scalp Phase 4-6 (strategy host, cutover)
+
+Gated on Tier 2's artifact, not on directional work — *"building the registry ahead of the artifact is
+reasonable, building the host is not"*:
+
+1. A scalp research strategy at evidence state `STRONGER_VALIDATION` per `EVIDENCE_POLICY_V1`.
+2. Shadow promotion actually granted. It has been refused twice, both times because no clean session
+   existed, so this is a real condition rather than a formality.
+3. That strategy's `productionEligibility` is not `NEVER_ELIGIBLE`.
+
+#### The valve: how Tier 3 closes rather than waits forever
+
+A held tier with no exit is a tier that misrepresents itself as open. So T3-A is reviewed on
+`RESEARCH_REVIEW_POLICY_V1`'s cadence, and **marking T3-A `NEVER_ELIGIBLE` is an available outcome** —
+a governed promotion decision with human sign-off, exactly like an advance. The directional record is
+already negative across triple-barrier, 15m direction, the tier sweep, HTF confluence, pattern gating,
+RAG retrieval, 30m/60m directional, and 60m/1d trend-breakout on adequate samples. If that record
+keeps accumulating without a candidate reaching requirement 6, the honest act is to close T3-A and say
+so, not to leave P14-P18 nominally pending for another year.
+
+Closing T3-A would not close T3-B or T3-C. They have their own criteria above, and neither needs a
+directional edge.
+
 ---
 
 ## Gap 10: The Bar-Label Convention (found while implementing B1)
