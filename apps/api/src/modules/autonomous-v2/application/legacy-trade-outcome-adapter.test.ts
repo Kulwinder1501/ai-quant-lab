@@ -19,6 +19,8 @@ function trade(overrides: Partial<LegacyClosedTrade> = {}): LegacyClosedTrade {
     // Absent by default, so every residual assertion below keeps exercising the pre-089 shape.
     underlyingExitPrice: null,
     underlyingThesis: null,
+    // Absent by default, so the existing tests keep exercising ENDPOINT resolution.
+    underlyingPath: null,
     hasPartialExits: false,
     ...overrides,
   };
@@ -139,7 +141,67 @@ describe("adapting a legacy closed trade", () => {
     expect(attributeShortfall(outcome)).toBe("EXITED_UNRESOLVED");
   });
 
-  it("keeps the underlying excursions null, because the path is not read", () => {
+  it("reaches INSTRUMENT once the path shows the target was touched", () => {
+    /*
+     * The verdict that was unreachable until the path was measured. Across 22 real trades with an
+     * observed underlying exit, not one finished at its thesis target -- so TARGET_REACHED never
+     * occurred and INSTRUMENT, the verdict meaning "the thesis was right and the expression was
+     * wrong", could never fire. That was an instrumentation gap, not an absence of instrument
+     * failures.
+     *
+     * Here the underlying touched its target during the hold and gave it back, while the option lost.
+     * Endpoint resolution would report UNRESOLVED_AT_HORIZON and attribute nothing.
+     */
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      realisedPnl: -320,
+      exitPrice: 180,
+      underlyingExitPrice: 57_500,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+      underlyingPath: {
+        favourableExcursion: 620,
+        adverseExcursion: 90,
+        excursionTimeframe: "1m",
+        firstTouch: "TARGET",
+      },
+    }));
+
+    expect(outcome.underlying!.resolution).toBe("TARGET_REACHED");
+    expect(outcome.underlying!.resolutionBasis).toBe("PATH_TOUCH");
+    expect(outcome.underlying!.favourableExcursion).toBe(620);
+    expect(outcome.underlying!.excursionTimeframe).toBe("1m");
+    expect(attributeShortfall(outcome)).toBe("INSTRUMENT");
+  });
+
+  it("blames the underlying when the path shows the stop was hit first", () => {
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      realisedPnl: -800,
+      exitPrice: 150,
+      underlyingExitPrice: 57_500,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+      underlyingPath: {
+        favourableExcursion: 300, adverseExcursion: 250, excursionTimeframe: "1m", firstTouch: "STOP",
+      },
+    }));
+
+    // Endpoint would say UNRESOLVED here -- 57,500 sits between the barriers -- so the path changes
+    // the verdict from "cannot tell" to "the thesis was invalidated".
+    expect(outcome.underlying!.resolution).toBe("INVALIDATED");
+    expect(attributeShortfall(outcome)).toBe("UNDERLYING");
+  });
+
+  it("marks endpoint-derived resolutions as such, so the two are never confused", () => {
+    // Without a path the basis is ENDPOINT, and UNRESOLVED then means "not resolved at the end",
+    // never "never reached a barrier". A reader has to be able to tell which claim they hold.
+    const { outcome } = layeredOutcomeFromClosedTrade(trade({
+      underlyingExitPrice: 57_500,
+      underlyingThesis: { direction: "LONG", stop: 57_200, target: 57_800 },
+    }));
+
+    expect(outcome.underlying!.resolutionBasis).toBe("ENDPOINT");
+    expect(outcome.underlying!.excursionTimeframe).toBeNull();
+  });
+
+  it("keeps the underlying excursions null when no path was read", () => {
     // Zero would claim the underlying never moved against the thesis, and `reconcileOutcome` refuses
     // a timeframe with no measurement behind it -- which is what stops this decorating.
     const { outcome } = layeredOutcomeFromClosedTrade(trade({

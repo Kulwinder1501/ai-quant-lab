@@ -37,6 +37,7 @@ function outcome(overrides: {
       favourableExcursion: 240,
       adverseExcursion: 60,
       excursionTimeframe: "1m",
+      resolutionBasis: "ENDPOINT" as const,
       ...overrides.underlying,
     },
     instrument,

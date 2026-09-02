@@ -63,6 +63,21 @@ export interface UnderlyingOutcome {
   readonly adverseExcursion: number | null;
   /** Which timeframe the bounds were read at. Null exactly when both excursions are null. */
   readonly excursionTimeframe: string | null;
+  /**
+   * How `resolution` was decided, because the two kinds are not equally strong claims.
+   *
+   * `ENDPOINT` reads only where the underlying stood at the exit instant. It cannot see a barrier
+   * touched mid-hold and given back, so `UNRESOLVED_AT_HORIZON` from an endpoint means "not resolved
+   * at the end", never "never reached a barrier".
+   *
+   * `PATH_TOUCH` reads the underlying's own bars across the hold, so it can see a barrier that was
+   * reached. It is a weaker claim in the other direction: candle extremes are an upper bound, so a
+   * target credited from a 1m high may have been a wick nobody could have exited on.
+   *
+   * Recorded rather than inferred, because `INSTRUMENT` attribution rests entirely on
+   * `TARGET_REACHED` and a reader has to know whether that meant "closed through" or "wicked".
+   */
+  readonly resolutionBasis: "ENDPOINT" | "PATH_TOUCH";
 }
 
 export interface InstrumentOutcome {

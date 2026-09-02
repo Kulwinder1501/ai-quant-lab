@@ -6,6 +6,7 @@ import { PostgresAiJournalRepository } from "../../infrastructure/database/repos
 import { buildTradeReview } from "../../modules/paper-trading/domain/trade-review.js";
 import { layeredOutcomeFromClosedTrade } from "../../modules/autonomous-v2/application/legacy-trade-outcome-adapter.js";
 import { attributeShortfall } from "../../modules/autonomous-v2/domain/outcome-layers.js";
+import { resolveUnderlyingPath } from "../../modules/paper-trading/domain/underlying-path.js";
 import type { TradeSide } from "../../modules/strategy-engine/domain/strategy.js";
 
 /**
@@ -159,6 +160,45 @@ async function main(): Promise<void> {
           ? `RESEARCH TAGS (aggregate before acting; these change nothing on their own): ${review.proposedResearchTags.join(", ")}.`
           : "No research tag triggered: geometry and outcome were unremarkable.",
       });
+      /*
+       * The underlying's own path over the hold, which is what makes INSTRUMENT reachable.
+       *
+       * `instrument_id` points at the *index*, so `findHoldingPeriodCandles` is the right source here
+       * -- the opposite of the option excursions above, where using it was the defect. 1m is requested
+       * because candle extremes are an upper bound and the bound tightens with the timeframe.
+       *
+       * Null when the trade has no thesis levels to measure against, or no candles were stored.
+       */
+      let underlyingPath = null;
+      if (row.idea_side !== null && row.idea_stop !== null && row.idea_target !== null
+        && row.underlying_entry_price !== null) {
+        const underlyingBars = await repository.findHoldingPeriodCandles({
+          instrumentId: row.instrument_id,
+          openedAt: row.opened_at,
+          closedAt: row.closed_at,
+          preferredTimeframe: "1m",
+        });
+        /*
+         * The timeframe comes from the result, never from the request. `findHoldingPeriodCandles`
+         * walks a precision ladder and returns the finest timeframe that actually has bars, so
+         * asking for 1m and labelling the answer 1m would report a 1d-derived excursion as
+         * minute-precise -- and the precision of these bounds *is* their timeframe. That mislabelling
+         * is what `excursionTimeframe` exists to make impossible.
+         */
+        underlyingPath = underlyingBars.timeframe === null
+          ? null
+          : resolveUnderlyingPath({
+              thesis: {
+                direction: row.idea_side,
+                entryReference: Number(row.underlying_entry_price),
+                stop: Number(row.idea_stop),
+                target: Number(row.idea_target),
+              },
+              bars: underlyingBars.candles,
+              timeframe: underlyingBars.timeframe,
+            });
+      }
+
       const adapted = layeredOutcomeFromClosedTrade({
         tradeId: row.id,
         contractSymbol: instrumentSymbols.get(row.instrument_id) ?? "UNKNOWN",
@@ -174,6 +214,7 @@ async function main(): Promise<void> {
         underlyingThesis: row.idea_side === null || row.idea_stop === null || row.idea_target === null
           ? null
           : { direction: row.idea_side, stop: Number(row.idea_stop), target: Number(row.idea_target) },
+        underlyingPath,
         hasPartialExits: Number(row.partial_exits) > 0,
       });
       /*

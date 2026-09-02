@@ -96,6 +96,23 @@ export interface LegacyClosedTrade {
     readonly target: number;
   } | null;
   /**
+   * The underlying's measured path over the hold, or null when it was not read.
+   *
+   * Supplied by the caller rather than fetched here, for the same reason every other input is: this
+   * adapter must not import V1 modules, and the quarantine guard enforces it. `resolveUnderlyingPath`
+   * in `paper-trading` does the measuring.
+   *
+   * Its presence is what makes `INSTRUMENT` reachable. Without it, resolution reads only the exit
+   * instant, and across 22 real trades that produced `TARGET_REACHED` exactly zero times -- so the
+   * verdict meaning "the thesis was right and the expression was wrong" could never fire.
+   */
+  readonly underlyingPath: {
+    readonly favourableExcursion: number;
+    readonly adverseExcursion: number;
+    readonly excursionTimeframe: string;
+    readonly firstTouch: "TARGET" | "STOP" | null;
+  } | null;
+  /**
    * True when a `paper_trade_partial_exits` row exists -- which to date means one slice for the whole
    * position, not a position exited in pieces. It does not make the P&L identity inapplicable; see the
    * correction above. A *false* value is the interesting one, because every close the application
@@ -160,6 +177,30 @@ function underlyingLayerFor(trade: LegacyClosedTrade): UnderlyingOutcome | null 
    */
   if (entry === null || exit === null || thesis === null) return null;
 
+  const path = trade.underlyingPath ?? null;
+  if (path !== null) {
+    /*
+     * Path resolution, which is what makes INSTRUMENT reachable. A barrier the underlying *touched*
+     * counts, so a target reached and given back is no longer invisible.
+     *
+     * `firstTouch` decides rather than the excursions, because both barriers can be exceeded over a
+     * hold and only the order says what happened: a thesis that hit its stop before its target was
+     * invalidated, whatever it did afterwards.
+     */
+    const resolution = path.firstTouch === "TARGET"
+      ? "TARGET_REACHED"
+      : path.firstTouch === "STOP" ? "INVALIDATED" : "UNRESOLVED_AT_HORIZON";
+    return {
+      resolution,
+      entryReference: entry,
+      exitReference: exit,
+      favourableExcursion: path.favourableExcursion,
+      adverseExcursion: path.adverseExcursion,
+      excursionTimeframe: path.excursionTimeframe,
+      resolutionBasis: "PATH_TOUCH",
+    };
+  }
+
   const reachedTarget = thesis.direction === "LONG" ? exit >= thesis.target : exit <= thesis.target;
   const throughStop = thesis.direction === "LONG" ? exit <= thesis.stop : exit >= thesis.stop;
   /*
@@ -176,12 +217,13 @@ function underlyingLayerFor(trade: LegacyClosedTrade): UnderlyingOutcome | null 
     resolution,
     entryReference: entry,
     exitReference: exit,
-    // The underlying's path between entry and exit is not read here. Null, never zero: zero would
-    // claim the position never moved against the thesis, which is the claim most likely to make a
-    // bad stop look safe.
+    // No path was supplied, so the underlying's travel between entry and exit is unmeasured. Null,
+    // never zero: zero would claim the position never moved against the thesis, which is the claim
+    // most likely to make a bad stop look safe.
     favourableExcursion: null,
     adverseExcursion: null,
     excursionTimeframe: null,
+    resolutionBasis: "ENDPOINT",
   };
 }
 
