@@ -17,6 +17,7 @@ import {
   researchScalpStrategies,
   type ResearchFeatureCoverage,
 } from "../domain/research-strategies.js";
+import { selectCaptureStrategies } from "../domain/terminal-strategy-registry.js";
 import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
 import { parseDeferralReason, type DeferralFamily } from "../../../platform/observability/decision-audit-record.js";
 
@@ -31,6 +32,14 @@ export interface ScalpResearchWritePort {
 }
 
 export interface CaptureResearchDecisionResult {
+  /**
+   * How many strategies ran at this decision instant.
+   *
+   * Deliberately not accompanied by benchmark/disabled counts. Every field on this result is summed
+   * across a session's minutes by the runner, and the registry selection is a session constant --
+   * summing it would report "2 disabled" as 750. The runner reports the selection once instead, by
+   * name; see `run-scalp-research-harness.ts`.
+   */
   readonly strategyDefinitions: number;
   readonly controls: number;
   readonly proposals: number;
@@ -96,7 +105,19 @@ export class CaptureScalpResearchDecision {
       }
     }
 
-    for (const strategy of researchScalpStrategies) await this.writes.saveStrategyDefinition(strategy.definition);
+    /*
+     * The Terminal Strategy Registry gate (Scalp Engine V2 §2). This is the single point every
+     * capture passes through, so validating here means an unregistered or in-place-edited strategy
+     * cannot write a row anywhere -- rather than only where someone remembered to check.
+     *
+     * `selectCaptureStrategies` also applies `TERMINAL -> default DISABLED`. Under the shipped
+     * benchmark opt-in both terminal strategies stay active, so this changes no behaviour today; see
+     * the registry for why the switch has to be thrown on a recorded session boundary.
+     */
+    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const activeStrategies = selection.active;
+
+    for (const strategy of activeStrategies) await this.writes.saveStrategyDefinition(strategy.definition);
     // A context whose pattern layer has not been computed cannot produce a pattern-triggered
     // proposal, and the absence is indistinguishable from a quiet bar once stored. Minting proposals
     // from it would record a false negative as a real decision -- which is what happened on
@@ -113,7 +134,7 @@ export class CaptureScalpResearchDecision {
     const tapeFrozen = input.tapeLiveness === "FROZEN";
     const generated = input.featureCoverage === "INCOMPLETE" || tapeFrozen
       ? []
-      : researchScalpStrategies.flatMap((strategy) => input.strategyContexts
+      : activeStrategies.flatMap((strategy) => input.strategyContexts
         .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
         .flatMap((context) => strategy.evaluate(context, input.reference1mContext)));
     const proposals = await Promise.all(generated.map((proposal) => this.writes.saveProposal(proposal)));
@@ -172,7 +193,7 @@ export class CaptureScalpResearchDecision {
     // Both directions of a grid point share one reason, so the first control carries the point's.
     const firstReason = builtControls[0]?.ineligibleReason ?? null;
     return {
-      strategyDefinitions: researchScalpStrategies.length,
+      strategyDefinitions: activeStrategies.length,
       controls: controls.length,
       proposals: proposals.length,
       opportunities: opportunities.length,

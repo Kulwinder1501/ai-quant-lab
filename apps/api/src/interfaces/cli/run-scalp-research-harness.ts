@@ -9,6 +9,11 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
 import { tapeLivenessPolicyVersion } from "../../modules/market-data/domain/tape-liveness.js";
+import { researchScalpStrategies } from "../../modules/research/scalp-harness/domain/research-strategies.js";
+import {
+  selectCaptureStrategies,
+  terminalStrategyRegistryVersion,
+} from "../../modules/research/scalp-harness/domain/terminal-strategy-registry.js";
 import { DEFERRAL_FAMILIES, type DeferralFamily } from "../../modules/platform/observability/decision-audit-record.js";
 import { evaluateThreshold, OBS_POLICY_V1 } from "../../modules/platform/observability/observability-policy.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
@@ -266,8 +271,22 @@ async function main(): Promise<void> {
         if (result.deferralFamily !== null) deferralsByFamily[result.deferralFamily] += 1;
         capturedDecisionTimes.push(reference.candle.closeTime);
       }
+      /*
+       * The Terminal Strategy Registry selection, reported by name once per session rather than
+       * summed per minute.
+       *
+       * "Proposals fell 60%" and "the terminal strategies were withheld" are indistinguishable in
+       * the counts above, and only the second is ever intended. Naming the withheld keys means the
+       * session log carries its own explanation instead of requiring a reader to go and diff the
+       * registry source against the day the numbers changed.
+       */
+      const registrySelection = selectCaptureStrategies(researchScalpStrategies);
+
       reports.push({
         symbol: instrument.symbol,
+        terminalStrategyRegistryVersion,
+        benchmarkStrategies: registrySelection.benchmarkActivated,
+        withheldTerminalStrategies: registrySelection.disabled,
         capturedDecisionCount: capturedDecisionTimes.length,
         oldestDecisionAt: capturedDecisionTimes[0] ?? null,
         newestDecisionAt: capturedDecisionTimes.at(-1) ?? null,
