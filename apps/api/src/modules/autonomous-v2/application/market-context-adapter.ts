@@ -178,6 +178,54 @@ function assertCoverageAgrees(
  * does not match what it holds — the failure `assertSnapshotRef` exists to catch, closed here by
  * construction rather than by validation.
  */
+/**
+ * The exact structure a snapshot's identity is computed over.
+ *
+ * Exported because a caller has to be able to seal **the same bytes** the ref was derived from.
+ * Found by running the shadow path against live bars: the first version hashed this internally and
+ * the caller sealed the finished `MarketSnapshot` object instead, which is a different structure --
+ * it contains its own `ref` -- so the two ids disagreed and `decision_ledger`'s FK to
+ * `decision_snapshots` rejected the write. A content address is only useful if exactly one structure
+ * defines it, and that structure has to be reachable by whoever stores it.
+ *
+ * Dates are rendered as ISO strings so the address does not depend on how a `Date` happens to
+ * serialise.
+ */
+export function marketSnapshotContent(input: {
+  readonly bar: MarketSnapshotBar;
+  readonly labelConvention: BarLabelConvention;
+  readonly indicators: readonly SnapshotIndicator[];
+  readonly patterns: readonly SnapshotPattern[];
+  readonly patternCoverage: SnapshotCoverage;
+  readonly priceActionEvents: readonly SnapshotPriceActionEvent[];
+  readonly priceActionCoverage: SnapshotCoverage;
+  readonly higherTimeframeCoverage: SnapshotCoverage;
+  readonly instants: PitInstants;
+}): unknown {
+  return {
+    bar: {
+      ...input.bar,
+      openTime: input.bar.openTime.toISOString(),
+      closeTime: input.bar.closeTime.toISOString(),
+    },
+    labelConvention: input.labelConvention,
+    indicators: input.indicators,
+    patterns: input.patterns,
+    patternCoverage: input.patternCoverage,
+    priceActionEvents: input.priceActionEvents,
+    priceActionCoverage: input.priceActionCoverage,
+    higherTimeframeCoverage: input.higherTimeframeCoverage,
+    instants: {
+      eventAt: input.instants.eventAt.toISOString(),
+      knownAt: input.instants.knownAt.toISOString(),
+      dataThrough: input.instants.dataThrough.toISOString(),
+      dataThroughConvention: input.instants.dataThroughConvention,
+      earliestExecutionAt: input.instants.earliestExecutionAt.toISOString(),
+      referenceAt: input.instants.referenceAt.toISOString(),
+    },
+  };
+}
+
 export function marketSnapshotFromLegacyContext(input: {
   readonly context: LegacyMarketContext;
   readonly instants: PitInstants;
@@ -209,12 +257,8 @@ export function marketSnapshotFromLegacyContext(input: {
     context.priceActionComputed, context.priceActionEvents, "priceActionEvents",
   );
 
-  const content = {
-    bar: {
-      ...candle,
-      openTime: candle.openTime.toISOString(),
-      closeTime: candle.closeTime.toISOString(),
-    },
+  const content = marketSnapshotContent({
+    bar: candle,
     labelConvention,
     indicators: context.indicators,
     patterns: context.patterns,
@@ -224,15 +268,8 @@ export function marketSnapshotFromLegacyContext(input: {
     // Fixed, so it participates in the identity: a snapshot built when HTF context exists will hash
     // differently from one built now, rather than silently comparing equal.
     higherTimeframeCoverage: "NOT_LOADED" as const,
-    instants: {
-      eventAt: input.instants.eventAt.toISOString(),
-      knownAt: input.instants.knownAt.toISOString(),
-      dataThrough: input.instants.dataThrough.toISOString(),
-      dataThroughConvention: input.instants.dataThroughConvention,
-      earliestExecutionAt: input.instants.earliestExecutionAt.toISOString(),
-      referenceAt: input.instants.referenceAt.toISOString(),
-    },
-  };
+    instants: input.instants,
+  });
 
   const ref = snapshotRefFor(content);
   assertSnapshotRef(ref);

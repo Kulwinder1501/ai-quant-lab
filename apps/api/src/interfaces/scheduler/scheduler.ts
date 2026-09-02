@@ -202,6 +202,10 @@ async function main(): Promise<void> {
     // Two collects + ~25s sleep fits under a minute; 90s recovers the next tick after a dead claimant.
     OPTION_PREMIUM_TICKS: 90 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
+    // Two instruments, one bar each, no execution. Short because a dead claimant should not hold
+    // the next tick: a missed shadow decision is a gap in the differential record, and P13 counts
+    // comparisons.
+    SHADOW_DECISION: 4 * 60 * 1000,
     // One spawn per account holding an open position, on a per-minute cron. Kept short on
     // purpose: this is the job that closes positions, so a dead claimant must not block the
     // next minute's sweep for anything like the ten minutes the other intraday jobs allow.
@@ -574,6 +578,18 @@ async function main(): Promise<void> {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
+    /*
+     * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
+     *
+     * On the same cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the same
+     * decision points, and a shadow run on a different rhythm would produce records V1 has no
+     * counterpart for -- unpairable rows that look like coverage.
+     *
+     * Not gated on `fyersTokenService`, unlike the bot above. It reads stored contexts and places no
+     * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
+     * differential record on exactly the days the token lapses, which are the days worth comparing.
+     */
+    void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
   }, { timezone: IST });
 
   /**
@@ -955,6 +971,12 @@ async function main(): Promise<void> {
     { jobType: "OPTION_PREMIUM_TICKS", intervalMs: 60_000, toleratedIntervals: 10 },
     { jobType: "PAPER_TRADE_EXIT_SWEEP", intervalMs: 60_000, toleratedIntervals: 10 },
     { jobType: "PAPER_TRADING_BOT", intervalMs: 5 * 60_000, toleratedIntervals: 4 },
+    /*
+     * Watched for the reason COLLECTOR_HEALTH had to be: a shadow job that dies silently produces an
+     * empty differential record, and "V2.2 made no decisions" is indistinguishable from "the job has
+     * not run" unless something says so. That job failed all 38 of its runs unnoticed.
+     */
+    { jobType: "SHADOW_DECISION", intervalMs: 5 * 60_000, toleratedIntervals: 4 },
     { jobType: "INDICES_INTRADAY", intervalMs: 60_000, toleratedIntervals: 10 },
   ];
   const processStartedAt = new Date();

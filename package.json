@@ -81,6 +81,7 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "paper:trades:review": "npm run paper:trades:review --workspace @ai-quant-lab/api --",
+    "shadow:decisions": "npm run shadow:decisions --workspace @ai-quant-lab/api --",
     "risk:evaluate": "npm run risk:evaluate --workspace @ai-quant-lab/api --",
     "scheduler": "npm run scheduler --workspace @ai-quant-lab/api"
   },
