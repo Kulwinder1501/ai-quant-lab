@@ -1041,6 +1041,10 @@ async function main(): Promise<void> {
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
       "CANDLE_GAP_CHECK",
+      // Ungated for the same reason as the two above: it reads stored contexts and places no orders,
+      // so it runs without a live feed. Listing it inside the Fyers-gated group below would
+      // misrepresent when it runs.
+      "SHADOW_DECISION",
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
            // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
