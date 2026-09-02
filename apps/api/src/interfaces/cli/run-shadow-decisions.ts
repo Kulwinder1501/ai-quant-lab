@@ -40,6 +40,7 @@ import {
   thesisComparisonVersion,
 } from "../../modules/autonomous-v2/application/thesis-adapter.js";
 import { getOption } from "./arguments.js";
+import { producerChoice } from "./shadow-decision-options.js";
 
 /**
  * Runs one pass of V2.2's shadow decision path. Records decisions; executes nothing.
@@ -95,25 +96,6 @@ const DEFAULT_MAX_BAR_AGE_MS = 3 * 60_000;
  * It does not weaken any gate. A stale bar still passes through the frozen-tape and coverage checks,
  * and the decision is still recorded as what it is.
  */
-/**
- * Which producer V2.2 decides with this pass.
- *
- * Defaults to native, so nothing changes unless the flag is passed. `--producer=ported-v1` runs V1's
- * entry rule through V2.2's port for the platform-equivalence comparison, and is legal only because
- * this path holds no execution port -- `assertMayHoldAuthority` would refuse it anywhere that did.
- *
- * The choice is a flag rather than a default because the two answer different questions. Native
- * measures what V2.2 decides on its own evidence, which is "nothing" today; ported measures whether
- * the platform reproduces V1's decisions, which is what P13 grades. Silently defaulting to ported
- * would make the abstention record disappear from the run that established it.
- */
-function producerChoice(args: string[]): "native" | "ported-v1" {
-  const raw = getOption(args, "--producer");
-  if (raw === null || raw === "native") return "native";
-  if (raw === "ported-v1") return "ported-v1";
-  throw new Error(`Unknown --producer "${raw}". Use "native" or "ported-v1".`);
-}
-
 function maxBarAgeMs(args: string[]): number {
   const raw = getOption(args, "max-bar-age-seconds");
   if (raw === undefined) return DEFAULT_MAX_BAR_AGE_MS;
