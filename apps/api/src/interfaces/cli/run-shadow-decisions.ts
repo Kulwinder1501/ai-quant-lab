@@ -38,6 +38,7 @@ import {
 // sides, and a structural shim here would only invite drift from the type it stands in for.
 import type { StrategyMarketContext } from "../../modules/strategy-engine/domain/strategy.js";
 import { PostgresDifferentialObservations } from "../../infrastructure/database/repositories/postgres-differential-observations.js";
+import { PostgresDifferentialClassifications } from "../../infrastructure/database/repositories/postgres-differential-classifications.js";
 import {
   legacyThesisComparison,
   thesisComparisonVersion,
@@ -242,6 +243,7 @@ async function main(): Promise<void> {
     const registry = new PostgresSnapshotRegistry(database);
     const ledger = new PostgresShadowLedger(database, instanceId);
     const observations = new PostgresDifferentialObservations(database);
+    const classifications = new PostgresDifferentialClassifications(database);
     const session = new NseMarketSession();
     const records: Record<string, unknown>[] = [];
 
@@ -508,12 +510,23 @@ async function main(): Promise<void> {
         legacyOutcome: row.legacyOutcome,
         v2Outcome: row.v2Outcome,
       });
+      /*
+       * Real classifications, no longer a hardcoded `UNKNOWN`.
+       *
+       * The default is still `UNKNOWN` when nothing has been attached, and that is not a placeholder:
+       * an unclassified divergence genuinely blocks promotion. What changed is that it can now stop
+       * being unclassified -- until migration 095 there was no table, no write path and no CLI, so
+       * P13 could never pass for want of a mechanism rather than for want of evidence.
+       */
+      const latest = await classifications.latestFor({
+        comparisonVersion: thesisComparisonVersion,
+        producerId,
+      });
       const verdict = evaluateDifferentialRun({
         observations: stored.map(asObservation),
-        // Unclassified until a human attaches evidence, so every divergence is a blocker today.
         divergences: stored.filter((row) => !row.agreed).map((row) => ({
           observation: asObservation(row),
-          evidence: { kind: "UNKNOWN" as const },
+          evidence: latest.get(row.comparisonKey)?.evidence ?? { kind: "UNKNOWN" as const },
         })),
       });
       verdicts[producerId] = {
@@ -524,6 +537,8 @@ async function main(): Promise<void> {
         unclassified: verdict.byClassification.UNKNOWN,
         promotable: verdict.promotable,
         blockers: verdict.blockers.length,
+        // Split out so "nobody has looked yet" is distinguishable from "looked and blocked anyway".
+        classified: stored.filter((row) => !row.agreed && latest.has(row.comparisonKey)).length,
       };
     }
 
