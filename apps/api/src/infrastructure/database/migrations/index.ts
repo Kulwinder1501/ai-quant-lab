@@ -89,6 +89,7 @@ import { paperTradePnlConventionMigration } from "./088-paper-trade-pnl-conventi
 import { paperTradeUnderlyingExitMigration } from "./089-paper-trade-underlying-exit.js";
 import { underlyingExitCoverageMigration } from "./090-underlying-exit-coverage.js";
 import { studyTrialEvidencePolicyMigration } from "./091-study-trial-evidence-policy.js";
+import { differentialObservationsMigration } from "./092-differential-observations.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -182,4 +183,5 @@ export const migrations = [
   paperTradeUnderlyingExitMigration,
   underlyingExitCoverageMigration,
   studyTrialEvidencePolicyMigration,
+  differentialObservationsMigration,
 ];

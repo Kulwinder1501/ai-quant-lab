@@ -11,6 +11,7 @@ import {
   marketSnapshotFromLegacyContext,
 } from "../../modules/autonomous-v2/application/market-context-adapter.js";
 import { runShadowDecision } from "../../modules/autonomous-v2/application/shadow-decision.js";
+import { evaluateDifferentialRun } from "../../modules/autonomous-v2/domain/differential-testing.js";
 import {
   structuralGateThesisProducer,
   type ThesisSide,
@@ -26,6 +27,14 @@ import {
   strategyExecutableSides,
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
+// V1's real context type, not an approximation of it. This CLI is the layer §6 allows to see both
+// sides, and a structural shim here would only invite drift from the type it stands in for.
+import type { StrategyMarketContext } from "../../modules/strategy-engine/domain/strategy.js";
+import { PostgresDifferentialObservations } from "../../infrastructure/database/repositories/postgres-differential-observations.js";
+import {
+  legacyThesisComparison,
+  thesisComparisonVersion,
+} from "../../modules/autonomous-v2/application/thesis-adapter.js";
 import { getOption } from "./arguments.js";
 
 /**
@@ -69,7 +78,82 @@ const IST = "Asia/Kolkata";
  * would record a fresh decision on it -- duplicate rows in the record P13 counts as comparisons,
  * which is coverage that does not exist. Same failure on a weekend or a holiday, indefinitely.
  */
-const MAX_BAR_AGE_MS = 3 * 60_000;
+const DEFAULT_MAX_BAR_AGE_MS = 3 * 60_000;
+
+/**
+ * `--max-bar-age-seconds` raises that ceiling for one run.
+ *
+ * A real operational need -- catching up after an outage means deciding on a bar older than three
+ * minutes -- and a footgun if it were implicit. So it is never defaulted upwards: an operator types a
+ * number, and every record carries `barAgeSeconds` so the resulting decisions can be found and judged
+ * by how stale their bar was.
+ *
+ * It does not weaken any gate. A stale bar still passes through the frozen-tape and coverage checks,
+ * and the decision is still recorded as what it is.
+ */
+function maxBarAgeMs(args: string[]): number {
+  const raw = getOption(args, "max-bar-age-seconds");
+  if (raw === undefined) return DEFAULT_MAX_BAR_AGE_MS;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error("--max-bar-age-seconds must be a positive number of seconds.");
+  }
+  return seconds * 1_000;
+}
+
+/**
+ * V1's canonical outcome for this bar, evaluated on the SAME context object V2.2 read.
+ *
+ * This is what makes P13's shared-snapshot requirement honest. V1 never reads a sealed snapshot, so
+ * pairing on "the same bar" would have been the weaker claim -- contexts are enriched over time as
+ * pattern layers backfill, and two reads of one bar are not always equal. Both outcomes here come
+ * from one in-memory context, read once, which the sealed ref then describes truthfully.
+ *
+ * `strategy.evaluate` is pure: it returns proposals and persists nothing, so running V1 here creates
+ * no trade idea and no trade. This is §6's sanctioned use of the thesis comparison -- differential
+ * analysis, never a live decision.
+ *
+ * ## Several strategies may propose, and none is picked
+ *
+ * The outcome is the **sorted set** of every proposal, not a winner. Choosing one would be
+ * `patterns[0]` in another costume, and the quarantine exists because that arbitrariness was never
+ * visible. Sorting makes the string order-independent, so two runs of the same proposals compare
+ * equal rather than diverging on evaluation order.
+ *
+ * A bar where V1 proposes nothing is `NO_ACTION NO_PROPOSAL` -- distinct from V2.2's
+ * `NO_ACTION NO_ESTABLISHED_ENTRY_RULE`, because "my rules did not fire" and "I have no rules" are
+ * different statements and P13 must not read them as agreement.
+ */
+function legacyOutcomeFor(input: {
+  readonly context: StrategyMarketContext;
+  readonly instrumentSymbol: string;
+  readonly decisionAt: Date;
+}): string {
+  const proposals: string[] = [];
+  for (const strategy of registeredStrategies) {
+    if (!strategySupportsTimeframe(strategy, input.context.candle.timeframe)) continue;
+    const executable = strategyExecutableSides(strategy);
+    const evaluator = new strategy.StrategyClass();
+    for (const proposal of evaluator.evaluate(input.context, strategy.registration.configuration)) {
+      // The measured side restrictions apply: a proposal V1 would not have traded must not appear as
+      // one V1 made, or the comparison reports a decision that could never have happened.
+      if (!executable.includes(proposal.side)) continue;
+      proposals.push(legacyThesisComparison({
+        instrumentSymbol: input.instrumentSymbol,
+        decisionAt: input.decisionAt,
+        verdict: "APPROVED",
+        geometry: {
+          side: proposal.side,
+          entryPrice: proposal.entryPrice,
+          stopLoss: proposal.stopLoss,
+          targetPrice: proposal.targetPrice,
+        },
+      }).canonicalOutcome);
+    }
+  }
+  if (proposals.length === 0) return "NO_ACTION NO_PROPOSAL";
+  return [...new Set(proposals)].sort().join(" | ");
+}
 
 /**
  * The sides V2.2 may consider for this instrument and timeframe.
@@ -96,6 +180,7 @@ async function main(): Promise<void> {
   const symbols = (getOption(args, "instruments") ?? "NIFTY50,BANKNIFTY")
     .split(",").map((value) => value.trim().toUpperCase()).filter(Boolean);
   if (symbols.length === 0) throw new Error("--instruments must contain at least one NSE symbol.");
+  const barAgeCeilingMs = maxBarAgeMs(args);
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
@@ -106,6 +191,7 @@ async function main(): Promise<void> {
     const contextRepository = new PostgresStrategyMarketContextRepository(database);
     const registry = new PostgresSnapshotRegistry(database);
     const ledger = new PostgresShadowLedger(database, instanceId);
+    const observations = new PostgresDifferentialObservations(database);
     const session = new NseMarketSession();
     const records: Record<string, unknown>[] = [];
 
@@ -124,7 +210,7 @@ async function main(): Promise<void> {
       }
 
       const barAgeMs = Date.now() - latest.candle.closeTime.getTime();
-      if (barAgeMs > MAX_BAR_AGE_MS) {
+      if (barAgeMs > barAgeCeilingMs) {
         /*
          * Nothing new to decide. Reported rather than silent, because "no records" has two very
          * different causes -- a closed market and a dead job -- and the liveness expectation on
@@ -265,9 +351,33 @@ async function main(): Promise<void> {
         additionalPolicyVersions: { tapeLiveness: tapeLivenessPolicyVersion },
       });
 
+      /*
+       * P13's pair. V1's side is evaluated on the same `latest` context the snapshot was sealed from,
+       * so citing one snapshot ref for both is a fact rather than an assumption -- which is what
+       * `assertComparable` demands and what makes the stored row re-derivable.
+       */
+      const legacyOutcome = legacyOutcomeFor({
+        context: latest,
+        instrumentSymbol: symbol,
+        decisionAt: latest.candle.closeTime,
+      });
+      const recorded = await observations.record({
+        observation: {
+          comparisonKey: record.comparisonKey,
+          legacySnapshotRef: record.contextSnapshotId,
+          v2SnapshotRef: record.contextSnapshotId,
+          legacyOutcome,
+          v2Outcome: record.v2Outcome,
+        },
+        comparisonVersion: thesisComparisonVersion,
+      });
+
       records.push({
         symbol,
         decisionId: record.decisionId,
+        legacyOutcome,
+        agreed: legacyOutcome === record.v2Outcome,
+        observationRecorded: recorded,
         barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
         outcome: record.v2Outcome,
         abstained: record.abstained,
@@ -277,11 +387,50 @@ async function main(): Promise<void> {
       });
     }
 
+    /*
+     * The accumulated P13 verdict, not just this pass's.
+     *
+     * `evaluateDifferentialRun` refuses to call an empty run promotable, and it will report
+     * `promotable: false` for a long time yet -- every divergence starts UNKNOWN until a human
+     * attaches evidence, and UNKNOWN blocks. That is the gate working, not a fault: V2.2 abstaining
+     * where V1 proposes is a real difference and must be explained before V1 can be retired.
+     */
+    const stored = await observations.listForVersion(thesisComparisonVersion);
+    const verdict = evaluateDifferentialRun({
+      observations: stored.map((row) => ({
+        comparisonKey: row.comparisonKey,
+        legacySnapshotRef: row.contextSnapshotId,
+        v2SnapshotRef: row.contextSnapshotId,
+        legacyOutcome: row.legacyOutcome,
+        v2Outcome: row.v2Outcome,
+      })),
+      // Unclassified until a human attaches evidence, so every divergence is a blocker today.
+      divergences: stored.filter((row) => !row.agreed).map((row) => ({
+        observation: {
+          comparisonKey: row.comparisonKey,
+          legacySnapshotRef: row.contextSnapshotId,
+          v2SnapshotRef: row.contextSnapshotId,
+          legacyOutcome: row.legacyOutcome,
+          v2Outcome: row.v2Outcome,
+        },
+        evidence: { kind: "UNKNOWN" as const },
+      })),
+    });
+
     console.log(JSON.stringify({
       level: "info",
       message: "V2.2 shadow decision pass completed",
       executesNothing: true,
       records,
+      p13: {
+        comparisonVersion: thesisComparisonVersion,
+        comparisons: verdict.comparisons,
+        agreements: verdict.agreements,
+        divergences: verdict.divergences,
+        unclassified: verdict.byClassification.UNKNOWN,
+        promotable: verdict.promotable,
+        blockers: verdict.blockers.length,
+      },
     }));
   } finally {
     await database.end();
