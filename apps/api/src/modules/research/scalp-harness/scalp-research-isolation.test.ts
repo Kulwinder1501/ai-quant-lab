@@ -31,6 +31,26 @@ describe("scalp research physical isolation", () => {
     join(sourceRoot, "infrastructure", "database", "repositories", "postgres-scalp-research-acceptance-repository.ts"),
   ];
 
+  it("does not inherit production's side restrictions, so a suppressed side stays measurable", () => {
+    /*
+     * Load-bearing for a production decision. `momentum-scalp-index` had its LONG side disabled on
+     * 2026-09-02 (62 trades, 35.5%, -Rs 13,414), and that was allowed to filter at *generation* --
+     * no trade idea is created at all -- specifically because the research harness evaluates its own
+     * frozen copy of the same strategy with its gates lifted and captures every eligible bar.
+     *
+     * So the suppressed population stays fully observable in `research_scalp` and the restriction
+     * can be re-measured against it later. If research ever started honouring `executableSides`,
+     * that counterfactual would vanish silently and the disable would become unfalsifiable.
+     */
+    const offenders = isolatedEntrypoints
+      .flatMap((path) => (statSync(path).isDirectory() ? filesBelow(path) : [path]))
+      .filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+      .filter((file) => /executableSides|AGENT_EXECUTABLE_SIDES/.test(readFileSync(file, "utf8")))
+      .map((file) => file.slice(sourceRoot.length + 1));
+
+    expect(offenders, `research code reads a production side gate: ${offenders.join(", ")}`).toEqual([]);
+  });
+
   it("is absent from the operational strategy registry", () => {
     const registry = readFileSync(join(sourceRoot, "modules", "strategy-engine", "domain", "strategy-registry.ts"), "utf8");
     expect(registry).not.toContain("scalp-harness");

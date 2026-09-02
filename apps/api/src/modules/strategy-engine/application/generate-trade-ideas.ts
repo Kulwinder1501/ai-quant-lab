@@ -5,7 +5,11 @@ import type {
   TradeSide,
 } from "../domain/strategy.js";
 import type { RegimeContext } from "../domain/regime.js";
-import { registeredStrategies, strategySupportsTimeframe } from "../domain/strategy-registry.js";
+import {
+  registeredStrategies,
+  strategyExecutableSides,
+  strategySupportsTimeframe,
+} from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
 
 export interface GenerateTradeIdeasInput {
@@ -121,6 +125,17 @@ export class GenerateTradeIdeas {
         const strategy = new StrategyClass();
         let proposals = strategy.evaluate(context, strategyVersion.configuration)
           .map((proposal) => applySmcConfluenceToProposal(context, proposal));
+        /*
+         * The strategy's own declared sides first, then the caller's optional narrowing.
+         *
+         * Per strategy rather than per run: the evidence for restricting a side is measured on one
+         * strategy, and a global `allowedSides` would silence that side across every strategy here.
+         * Filtering at generation is safe for measurement because the research harness evaluates its
+         * own frozen copies ungated and captures every bar, so the suppressed population stays
+         * observable in `research_scalp`.
+         */
+        proposals = proposals.filter((proposal) =>
+          strategyExecutableSides(strategyEntry).includes(proposal.side));
         if (input.allowedSides) {
           proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
         }
@@ -233,6 +248,10 @@ export class GenerateTradeIdeas {
         for (const context of contexts) {
           let proposals = strategy.evaluate(context, strategyVersion.configuration)
             .map((proposal) => applySmcConfluenceToProposal(context, proposal));
+          // Same rule as generation, so a scan cannot report candidates on a side production
+          // would refuse to trade.
+          proposals = proposals.filter((proposal) =>
+            strategyExecutableSides(strategyEntry).includes(proposal.side));
           if (input.allowedSides) {
             proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
           }

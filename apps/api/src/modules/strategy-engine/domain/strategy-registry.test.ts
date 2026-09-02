@@ -6,6 +6,7 @@ import {
   findRegisteredStrategy,
   registeredStrategies,
   requireRegisteredStrategy,
+  strategyExecutableSides,
   strategyKeys,
 } from "./strategy-registry.js";
 
@@ -37,5 +38,30 @@ describe("strategy registry", () => {
   it("hands back a fresh evaluator, since a replay must not inherit prior state", () => {
     const { StrategyClass } = requireRegisteredStrategy("momentum-scalp");
     expect(new StrategyClass()).not.toBe(new StrategyClass());
+  });
+
+  it("trades the index scalp short-only, because its long side is a measured loser", () => {
+    /*
+     * Measured 2026-09-02 over every closed paper trade on this strategy:
+     *
+     *   5m SHORT   93 trades   47.3% win   +Rs  1,384
+     *   5m LONG    62 trades   35.5% win   -Rs 13,414
+     *
+     * The long side accounts for the whole of the loss and is negative on almost every session in
+     * the record. No edge is claimed for short; this narrows a measured loser.
+     */
+    const indexScalp = requireRegisteredStrategy("momentum-scalp-index");
+
+    expect(strategyExecutableSides(indexScalp)).toEqual(["SHORT"]);
+  });
+
+  it("leaves every other strategy free to trade both sides", () => {
+    // The restriction is per strategy on purpose: the evidence is about one strategy, and a global
+    // side filter would silence that side everywhere.
+    for (const strategy of registeredStrategies) {
+      if (strategy.registration.strategyKey === "momentum-scalp-index") continue;
+      expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)
+        .toEqual(["LONG", "SHORT"]);
+    }
   });
 });
