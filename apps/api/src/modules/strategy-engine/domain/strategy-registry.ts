@@ -139,6 +139,24 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: momentumScalpPatternStrategyRegistration,
     StrategyClass: MomentumScalpPatternStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
+    /*
+     * LONG disabled 2026-09-02, on the same evidence and the same day as momentum-scalp-index.
+     * Measured over every closed 5m paper trade on this strategy:
+     *
+     *   5m SHORT   32 trades   50.0% win   +Rs    424
+     *   5m LONG    36 trades   36.1% win   -Rs  8,531
+     *
+     * The split is close to identical to the index scalp's (LONG 35.5% / -Rs 13,414, SHORT 47.9% /
+     * +Rs 2,899), which is suggestive rather than confirmatory: both strategies are built on the same
+     * momentum architecture, so this is plausibly one flaw observed twice rather than two independent
+     * findings. Either way the long cell is the loser on its own 36 trades and does not need the
+     * cross-strategy argument to justify disabling it.
+     *
+     * Short is left enabled at +Rs 424 over 32 trades, which is barely distinguishable from zero. No
+     * edge is claimed; it is retained because nothing measured argues against it, and it is a
+     * candidate for review well before the index short is.
+     */
+    executableSides: ["SHORT"],
   },
   {
     registration: momentumScalpPatternStrategyV2Registration,

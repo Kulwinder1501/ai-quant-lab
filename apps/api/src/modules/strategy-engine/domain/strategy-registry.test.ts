@@ -40,6 +40,30 @@ describe("strategy registry", () => {
     expect(new StrategyClass()).not.toBe(new StrategyClass());
   });
 
+  it("trades the pattern confluence scalp short-only, on its own 36-trade long record", () => {
+    /*
+     * Measured 2026-09-02 over every closed 5m paper trade on this strategy:
+     *
+     *   5m SHORT   32 trades   50.0% win   +Rs   424
+     *   5m LONG    36 trades   36.1% win   -Rs 8,531
+     *
+     * Close to identical to the index scalp's split, which is suggestive rather than confirmatory --
+     * both are built on the same momentum architecture, so it is plausibly one flaw seen twice. The
+     * long cell does not need that argument: it loses on its own 36 trades.
+     */
+    const patternScalp = requireRegisteredStrategy("momentum-scalp-pattern");
+
+    expect(strategyExecutableSides(patternScalp)).toEqual(["SHORT"]);
+  });
+
+  it("leaves the v2 pattern scalp unrestricted, because 1 trade is not a record", () => {
+    // Its long side has a single closed trade (+Rs 188). Restricting on that would be inventing
+    // evidence; its open question is recorded in terminalResearchAcknowledgement instead.
+    const v2 = requireRegisteredStrategy("momentum-scalp-pattern-v2");
+
+    expect(strategyExecutableSides(v2)).toEqual(["LONG", "SHORT"]);
+  });
+
   it("trades the index scalp short-only, because its long side is a measured loser", () => {
     /*
      * Measured 2026-09-02 over every closed paper trade on this strategy:
@@ -55,11 +79,20 @@ describe("strategy registry", () => {
     expect(strategyExecutableSides(indexScalp)).toEqual(["SHORT"]);
   });
 
-  it("leaves every other strategy free to trade both sides", () => {
-    // The restriction is per strategy on purpose: the evidence is about one strategy, and a global
-    // side filter would silence that side everywhere.
+  it("restricts exactly the two strategies with a measured losing long side, and no others", () => {
+    /*
+     * Pinned as an exact set rather than a per-strategy check. The restriction is per strategy on
+     * purpose -- a global side filter would silence that side everywhere -- so the risk worth
+     * guarding is a restriction spreading to a strategy whose evidence never justified one.
+     */
+    const restricted = registeredStrategies
+      .filter((strategy) => strategy.executableSides !== undefined)
+      .map((strategy) => strategy.registration.strategyKey)
+      .sort();
+
+    expect(restricted).toEqual(["momentum-scalp-index", "momentum-scalp-pattern"]);
     for (const strategy of registeredStrategies) {
-      if (strategy.registration.strategyKey === "momentum-scalp-index") continue;
+      if (restricted.includes(strategy.registration.strategyKey)) continue;
       expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)
         .toEqual(["LONG", "SHORT"]);
     }
