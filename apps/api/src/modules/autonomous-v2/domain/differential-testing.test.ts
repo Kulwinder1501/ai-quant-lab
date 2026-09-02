@@ -5,6 +5,7 @@ import {
   classificationOf,
   DifferentialTestingError,
   evaluateDifferentialRun,
+  isDecisive,
   promotionBlocker,
   type ClassifiedDivergence,
   type DifferentialObservation,
@@ -183,5 +184,74 @@ describe("the promotion rule", () => {
       observations: [observation({ v2SnapshotRef: "snap-other" })],
       divergences: [],
     })).toThrow(/read different snapshots/);
+  });
+});
+
+describe("agreement that nobody traded is not evidence", () => {
+  function declined(comparisonKey: string) {
+    return observation({ comparisonKey, legacyOutcome: "NO_TRADE", v2Outcome: "NO_TRADE" });
+  }
+
+  it("blocks a run in which neither system ever traded", () => {
+    /*
+     * Measured on the first corrected pass: 2 comparisons, 2 agreements, 0 divergences,
+     * promotable: true -- off a bar outside the executable window where neither system acted. A count
+     * above zero was the whole coverage test, so "nothing went wrong" was read off a run that asked
+     * nothing twice.
+     */
+    const verdict = evaluateDifferentialRun({
+      observations: [declined("NIFTY50@15:30"), declined("BANKNIFTY@15:30")],
+      divergences: [],
+    });
+
+    expect(verdict.comparisons).toBe(2);
+    expect(verdict.agreements).toBe(2);
+    expect(verdict.decisiveComparisons).toBe(0);
+    expect(verdict.promotable).toBe(false);
+    expect(verdict.blockers).toHaveLength(1);
+    expect(verdict.blockers[0]).toContain("NO_DECISIVE_COMPARISON");
+  });
+
+  it("does not improve as the agreeing population grows", () => {
+    // The failure mode if this were left alone: V2.2 can only refuse today, so every observation it
+    // produces agrees with a V1 that also declined, and 100% agreement accrues over a population
+    // containing no trading decisions at all.
+    const many = Array.from({ length: 500 }, (_, i) => declined(`NIFTY50@bar-${i}`));
+    const verdict = evaluateDifferentialRun({ observations: many, divergences: [] });
+
+    expect(verdict.agreements).toBe(500);
+    expect(verdict.promotable).toBe(false);
+  });
+
+  it("counts a comparison as decisive when either side traded", () => {
+    // One-sided is the case P13 exists for, so it must be decisive -- it is also a divergence.
+    const legacyTraded = observation({ legacyOutcome: "APPROVED SHORT entry=23860.00", v2Outcome: "NO_TRADE" });
+    const v2Traded = observation({ legacyOutcome: "NO_TRADE", v2Outcome: "APPROVED SHORT entry=23860.00" });
+
+    expect(isDecisive(legacyTraded)).toBe(true);
+    expect(isDecisive(v2Traded)).toBe(true);
+    expect(isDecisive(observation({ legacyOutcome: "NO_TRADE", v2Outcome: "NO_TRADE" }))).toBe(false);
+  });
+
+  it("still refuses an empty run, and says so separately", () => {
+    // Zero comparisons is not "no decisive comparisons": there is no population at all. Reporting one
+    // blocker for the other would misdescribe what is missing.
+    const verdict = evaluateDifferentialRun({ observations: [], divergences: [] });
+
+    expect(verdict.promotable).toBe(false);
+    expect(verdict.blockers).toHaveLength(0);
+    expect(verdict.decisiveComparisons).toBe(0);
+  });
+
+  it("lets a decisive run through when its divergences are explained", () => {
+    // The gate must not become unpassable: one real trading comparison is enough to clear this
+    // particular blocker, which is a coverage floor and not a sample-size test.
+    const verdict = evaluateDifferentialRun({
+      observations: [observation(), declined("BANKNIFTY@15:30")],
+      divergences: [],
+    });
+
+    expect(verdict.decisiveComparisons).toBe(1);
+    expect(verdict.promotable).toBe(true);
   });
 });

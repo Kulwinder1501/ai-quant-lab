@@ -170,9 +170,30 @@ export function promotionBlocker(divergence: ClassifiedDivergence): string | nul
   return null;
 }
 
+/**
+ * The action both sides record when they declined to trade.
+ *
+ * Owned here rather than by the caller that formats it, because this module's `isDecisive` reads it.
+ * Two spellings would make a run silently look decisive.
+ */
+export const noTradeAction = "NO_TRADE";
+
+/**
+ * Whether a comparison tests anything.
+ *
+ * Both sides recording `NO_TRADE` is a real agreement, and it is worth almost nothing: an observation
+ * where neither system acted is satisfied by a V2.2 that can only refuse -- which is precisely what
+ * V2.2 is today. A population of them is agreement by construction, not evidence of substitutability.
+ */
+export function isDecisive(observation: DifferentialObservation): boolean {
+  return observation.legacyOutcome !== noTradeAction || observation.v2Outcome !== noTradeAction;
+}
+
 export interface DifferentialVerdict {
   readonly comparisons: number;
   readonly agreements: number;
+  /** Comparisons in which at least one system traded. The only ones that test substitution. */
+  readonly decisiveComparisons: number;
   readonly divergences: number;
   readonly byClassification: Readonly<Record<DivergenceClassification, number>>;
   /** Empty means V1 may be retired on this evidence. */
@@ -200,6 +221,22 @@ const ALL_CLASSIFICATIONS: readonly DivergenceClassification[] = [
  * `promotable` on an empty run is **false**, and that is not an oversight. Zero comparisons is no
  * evidence, and the one thing this gate must never do is read "nothing went wrong" off a run that
  * asked nothing -- which is precisely the failure a cutover-by-absence-of-complaints would be.
+ *
+ * ## A run with no decisive comparison is the same failure wearing a count
+ *
+ * Measured, on the first corrected pass: two comparisons, two agreements, zero divergences,
+ * `promotable: true` -- off an evidence set in which neither system traded, because the bar was
+ * outside the executable window and V2.2 has no entry rule to apply anyway. A count above zero was
+ * the whole of the coverage test, so "nothing went wrong" was being read off a run that asked nothing
+ * *twice*.
+ *
+ * Left alone this gets worse rather than better: today V2.2 can only refuse, so every observation it
+ * produces agrees with a V1 that also declined, and the agreement rate climbs to 100% while V2.2 has
+ * never once approved a trade. The gate would then license retiring V1 on a population containing no
+ * trading decisions at all.
+ *
+ * So a run with zero decisive comparisons is a blocker, stated as one. Not an exception -- the
+ * evidence is well-formed and the arithmetic is right; what is missing is that it tests the question.
  */
 export function evaluateDifferentialRun(input: {
   readonly observations: readonly DifferentialObservation[];
@@ -216,13 +253,24 @@ export function evaluateDifferentialRun(input: {
   }
 
   const agreements = input.observations.filter((observation) => agrees(observation)).length;
+  const decisiveComparisons = input.observations.filter((observation) => isDecisive(observation)).length;
   const blockers = input.divergences
     .map((divergence) => promotionBlocker(divergence))
     .filter((blocker): blocker is string => blocker !== null);
 
+  if (input.observations.length > 0 && decisiveComparisons === 0) {
+    blockers.push(
+      `NO_DECISIVE_COMPARISON: all ${input.observations.length} comparison(s) have both systems at `
+      + `${noTradeAction}. Agreement that nobody traded does not show V2.2 can substitute for V1, and `
+      + "a V2.2 with no entry rule agrees this way on every bar. P13 needs comparisons in which at "
+      + "least one system acted.",
+    );
+  }
+
   return {
     comparisons: input.observations.length,
     agreements,
+    decisiveComparisons,
     divergences: input.divergences.length,
     byClassification: Object.freeze(byClassification),
     blockers,

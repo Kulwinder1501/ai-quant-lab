@@ -1,5 +1,6 @@
 import { isApproved } from "../domain/decision-outcome.js";
 import { legacyThesisComparison } from "./thesis-adapter.js";
+import { noTradeAction } from "../domain/differential-testing.js";
 import {
   isAbstention,
   thesisPolicyVersion,
@@ -122,7 +123,7 @@ export function canonicalV2Outcome(result: ThesisResult): string {
  */
 export function comparableAction(outcome: string): { readonly action: string; readonly detail: string } {
   if (outcome.startsWith("APPROVED")) return { action: outcome, detail: "" };
-  return { action: "NO_TRADE", detail: outcome };
+  return { action: noTradeAction, detail: outcome };
 }
 
 /**

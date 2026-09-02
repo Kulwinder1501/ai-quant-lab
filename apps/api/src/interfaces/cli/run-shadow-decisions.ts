@@ -427,6 +427,10 @@ async function main(): Promise<void> {
      * `promotable: false` for a long time yet -- every divergence starts UNKNOWN until a human
      * attaches evidence, and UNKNOWN blocks. That is the gate working, not a fault: V2.2 abstaining
      * where V1 proposes is a real difference and must be explained before V1 can be retired.
+     *
+     * `decisive` is the count that matters while V2.2 has no entry rule. Both systems recording
+     * NO_TRADE is an agreement worth almost nothing, so a pass can report 100% agreement and still be
+     * blocked -- see `isDecisive`.
      */
     const stored = await observations.listForVersion(thesisComparisonVersion);
     const verdict = evaluateDifferentialRun({
@@ -460,6 +464,7 @@ async function main(): Promise<void> {
         comparisons: verdict.comparisons,
         agreements: verdict.agreements,
         divergences: verdict.divergences,
+        decisive: verdict.decisiveComparisons,
         unclassified: verdict.byClassification.UNKNOWN,
         promotable: verdict.promotable,
         blockers: verdict.blockers.length,
