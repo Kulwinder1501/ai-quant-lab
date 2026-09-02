@@ -87,6 +87,7 @@ import { decisionSnapshotsMigration } from "./086-decision-snapshots.js";
 import { decisionLedgerMigration } from "./087-decision-ledger.js";
 import { paperTradePnlConventionMigration } from "./088-paper-trade-pnl-convention.js";
 import { paperTradeUnderlyingExitMigration } from "./089-paper-trade-underlying-exit.js";
+import { underlyingExitCoverageMigration } from "./090-underlying-exit-coverage.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -178,4 +179,5 @@ export const migrations = [
   decisionLedgerMigration,
   paperTradePnlConventionMigration,
   paperTradeUnderlyingExitMigration,
+  underlyingExitCoverageMigration,
 ];

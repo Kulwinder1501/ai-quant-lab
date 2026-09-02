@@ -539,6 +539,9 @@ export class EvaluateOpenPaperTrades {
           exitPrice: freshBid,
           exitReason: decision.reason,
           closedAt: asOf,
+          // denseSpot, not liveSpot: it comes from the same tick as freshBid, so the option and
+          // underlying levels describe one instant rather than two nearby ones.
+          underlyingExitPrice: denseSpot ?? null,
           details: {
             source: "OPTION_PREMIUM_TICK_BID",
             quoteObservedAt: denseQuote!.observedAt.toISOString(),
@@ -585,6 +588,7 @@ export class EvaluateOpenPaperTrades {
             exitPrice: freshBid,
             exitReason: "MOMENTUM_STALL",
             closedAt: asOf,
+            underlyingExitPrice: denseSpot ?? null,
             details: {
               source: "MOMENTUM_STALL_EVALUATOR",
               elapsedMinutes,
@@ -627,6 +631,14 @@ export class EvaluateOpenPaperTrades {
           exitPrice: decision.exitPrice,
           exitReason: decision.reason,
           closedAt: asOf,
+          /*
+           * Recorded even though the *option* price on this path is modelled rather than quoted.
+           * The two are independent: `liveSpot` is an observed underlying level, and it stays
+           * observed regardless of how the premium beside it was derived. The option leg's
+           * provenance is carried separately by `source` here and by `priceSource` on the outcome,
+           * so nothing reads a modelled premium as a fill because of this field.
+           */
+          underlyingExitPrice: liveSpot,
           details: {
             source: "OPTION_LIVE_MARK_EVALUATOR",
             spot: liveSpot,
