@@ -77,6 +77,27 @@ export interface RegisteredStrategy {
      */
     readonly disposition: string;
   };
+
+  /**
+   * For a strategy measured out rather than closed by a research twin.
+   *
+   * Distinct from `terminalResearchAcknowledgement` on purpose: that field propagates a *research*
+   * verdict and is enforced against `researchStrategyRegistry` -- the acknowledgement must name an
+   * entry that exists, is TERMINAL, and points back here. `trend-breakout` has no research twin and
+   * no pinned definition hash, so borrowing that field would have meant inventing a research strategy
+   * to justify a verdict. Two different facts need two different fields.
+   */
+  operationalDisposition?: {
+    readonly status: "TERMINAL_UNOWNED";
+    readonly since: string;
+    /** The measurement, with its sample sizes, so the verdict can be re-derived or overturned. */
+    readonly evidence: string;
+    /**
+     * Why it stays in the registry despite the verdict. Load-bearing, not courtesy: removing it
+     * breaks the paper bot at startup.
+     */
+    readonly whyStillRegistered: string;
+  };
 }
 
 /** Both sides unless the registration narrows them. */
@@ -98,6 +119,37 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: trendBreakoutStrategyRegistration,
     StrategyClass: TrendBreakoutStrategy,
     supportedTimeframes: ["15m", "30m", "60m", "1d"],
+    /*
+     * TERMINAL on measurement, and traded by nothing.
+     *
+     * `executableSides` is deliberately NOT narrowed to `[]`. `generateTradeIdeas` filters proposals
+     * by it, so emptying it would stop idea generation -- and the ideas are the point of keeping the
+     * strategy registered. Disabling here means "no bot owns it", which is already true, not
+     * "produce nothing".
+     */
+    operationalDisposition: {
+      status: "TERMINAL_UNOWNED",
+      since: "2026-09-02",
+      evidence:
+        "Tier replay over stored bars, break-even 0.3333, gated hit rate with resolved-signal counts "
+        + "in brackets. 15m does not replicate across instruments -- NIFTY50 LONG 0.4737 (19) but "
+        + "BANKNIFTY LONG 0.2727 (22), and SHORT flips the other way at 0.3158 (19) against 0.3514 "
+        + "(37). 60m clears break-even in all four cells (0.4167/19 resolved 12, 0.4000/25, "
+        + "0.4737/19, 0.3636/22) and every one of them fails a 2xSE noise floor, which at n=12-25 "
+        + "requires 0.53-0.61. 1d is below break-even throughout (0.2500, 0.1000, 0.3333 on 3 "
+        + "signals, 0.0000 on 3). The CLI's own verdict string calls 60m \"worth deploying\" because "
+        + "it tests break-even and baseline only -- no noise floor, no cross-instrument replication. "
+        + "It fires 0.05 signals per session at 15m.",
+      whyStillRegistered:
+        "Removing it would break the paper bot at startup: `assertScannableTimeframes` refuses a "
+        + "SCAN_TIMEFRAMES entry no registered strategy supports, and this is the only 15m-capable "
+        + "strategy. It is also traded by no bot already -- removed from Classic on 2026-08-17 as a "
+        + "15m-and-slower trend strategy outside the scalp band -- so the registration is what keeps "
+        + "its ideas available to research and backtesting (`run-backtest` still defaults to it). "
+        + "Nothing evaluates 30m, 60m or 1d at all: SCAN_TIMEFRAMES is 1m/5m/15m and the autonomous "
+        + "agent runs --timeframe=5m, so the intraday and swing work those comments assign to it was "
+        + "never wired.",
+    },
   },
   {
     registration: momentumScalpStrategyRegistration,

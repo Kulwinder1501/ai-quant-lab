@@ -8,6 +8,7 @@ import {
   requireRegisteredStrategy,
   strategyExecutableSides,
   strategyKeys,
+  strategySupportsTimeframe,
 } from "./strategy-registry.js";
 
 describe("strategy registry", () => {
@@ -113,6 +114,69 @@ describe("strategy registry", () => {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
       expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)
         .toEqual(["LONG", "SHORT"]);
+    }
+  });
+});
+
+describe("trend-breakout is marked out, and the marking is enforced not asserted", () => {
+  const trendBreakout = requireRegisteredStrategy("trend-breakout");
+
+  it("carries a TERMINAL_UNOWNED disposition with its sample sizes", () => {
+    /*
+     * Measured, not assumed: 15m fails cross-instrument replication (NIFTY50 LONG 0.4737 against
+     * BANKNIFTY LONG 0.2727, with SHORT flipping), 60m clears break-even in all four cells and every
+     * one fails a 2xSE floor at n=12-25, and 1d is below break-even throughout.
+     */
+    const disposition = trendBreakout.operationalDisposition;
+
+    expect(disposition?.status).toBe("TERMINAL_UNOWNED");
+    // The counts have to survive, or the verdict cannot be re-derived or overturned later.
+    expect(disposition?.evidence).toMatch(/0\.3333/);
+    expect(disposition?.evidence).toMatch(/2xSE/);
+    expect(disposition?.whyStillRegistered.trim().length).toBeGreaterThan(80);
+  });
+
+  it("keeps both sides executable, because emptying them would stop idea generation", () => {
+    /*
+     * The trap this guards. `[]` is how `momentum-scalp-pattern-v2` was disabled, and copying that
+     * here would be wrong: `generateTradeIdeas` filters proposals by `executableSides`, so emptying
+     * it stops the ideas that are the entire reason the registration is kept. "No bot owns it" and
+     * "produce nothing" are different dispositions.
+     */
+    expect(strategyExecutableSides(trendBreakout)).toEqual(["LONG", "SHORT"]);
+  });
+
+  it("does not borrow the research acknowledgement it has no twin for", () => {
+    /*
+     * `terminalResearchAcknowledgement` is enforced against `researchStrategyRegistry`: it must name
+     * an entry that exists, is TERMINAL, and points back at this strategy. Using it here would have
+     * required inventing a research strategy with a pinned definition hash to justify the verdict.
+     */
+    expect(trendBreakout.terminalResearchAcknowledgement).toBeUndefined();
+  });
+
+  it("stays registered, because 15m has no other strategy", () => {
+    /*
+     * The paper bot's `assertScannableTimeframes` throws on a SCAN_TIMEFRAMES entry no registered
+     * strategy supports, and 15m is in that list. So removing this entry -- the obvious reading of
+     * "terminal" -- would stop the bot from starting at all.
+     */
+    const fifteenMinute = registeredStrategies
+      .filter((strategy) => strategySupportsTimeframe(strategy, "15m"))
+      .map((strategy) => strategy.registration.strategyKey);
+
+    expect(fifteenMinute).toContain("trend-breakout");
+    expect(fifteenMinute).toHaveLength(1);
+  });
+
+  it("owns every timeframe above the scalp band, and nothing evaluates them", () => {
+    // Recorded so the claim in the disposition stays checkable: 30m/60m/1d have exactly one
+    // registered strategy, and it is this terminal one.
+    for (const timeframe of ["30m", "60m", "1d"]) {
+      const owners = registeredStrategies
+        .filter((strategy) => strategySupportsTimeframe(strategy, timeframe))
+        .map((strategy) => strategy.registration.strategyKey);
+      expect(owners, timeframe).toEqual(["trend-breakout"]);
     }
   });
 });
