@@ -119,3 +119,72 @@ falsifiable** — not a better threshold on this one. See also
 `2026-08-12-intraday-volatility-and-fyers-consolidation.md`, which closed 30m/60m directional and
 found 60m volatility-expansion had real skill (precision 0.47 against a 0.24 base rate) but no
 tradable edge once straddle costs were applied.
+
+---
+
+# Addendum — the looser trigger (same day)
+
+Section 5 ended by saying the open question was "a rule that fires often enough to be falsifiable",
+and named the obvious candidate: breakout **or** pattern rather than **and**. That was then tested,
+again pre-registered before any result was viewed. **H2 was refuted, and this time the refutation is
+decisive rather than inconclusive — because the sample-size problem is solved and the edge disappears
+anyway.**
+
+## H2 and the arms
+
+> The 60m signal is real; the scarcity is the `pattern AND trigger` conjunction. Relaxing it raises n
+> enough for the 2xSE floor to become attainable while the gated-minus-baseline advantage survives.
+> If H2 is false, the advantage decays toward zero as n grows.
+
+Arms: **A** control (both required), **B** trigger-only allowed, **C** pattern-only allowed, **D**
+either sufficient. Two instruments, 60m and 1d, at the registered `minimumConfidence` 0.7 and also at
+0.5 for C and D — a pattern-only signal tops out at exactly 0.70, so it would be all but excluded at
+the registered floor. 32 cells. Same four pass criteria, unchanged.
+
+Two flags were added to the configuration, `requirePattern` and `requireTrigger`, both defaulting to
+`true`. The control replay reproduced the morning's numbers exactly (0.4167 on 12 resolved LONG,
+0.4000 on 25 SHORT), which is what establishes that the rule itself did not change.
+
+## Result: zero passes in 32 cells, and the advantage decays with n
+
+The primary read was the trend of `gated - baseline` against n. It is monotone, and it goes negative:
+
+| arm | NIFTY50 60m LONG | BANKNIFTY 60m LONG |
+| :--- | :--- | :--- |
+| A control | +0.0661 (n=12) | +0.1308 (n=19) |
+| B trigger-only | +0.0383 (n=18) | +0.0395 (n=34) |
+| C pattern-only | -0.0306 (n=25) | +0.0000 (n=35) |
+| D either | -0.0280 (n=31) | -0.0229 (n=50) |
+| C @ conf 0.5 | -0.0336 (**n=265**) | -0.0347 (**n=279**) |
+| D @ conf 0.5 | -0.0374 (**n=348**) | -0.0289 (**n=363**) |
+
+That is the H2-false prediction exactly. As n grows 15-30x the control's apparent edge does not merely
+shrink — it inverts. The 60m LONG advantage that looked like +0.13 at n=19 is **-0.03 at n=363**.
+
+This is the decisive difference from the morning's finding. Then, the objection was "too few samples
+to tell". Now there are 250-363 resolved signals per cell, which is ample, and the answer is that
+there is nothing there.
+
+## The one thread that is not obviously zero, and why it still fails
+
+NIFTY50 60m SHORT, arm C at conf 0.5: gated 0.3750 against baseline 0.3345, advantage **+0.0405** on
+n=256. That clears break-even and beats its baseline. It fails criterion 3 narrowly (floor 0.392
+against 0.3750) — and it fails criterion 4 outright: the same arm on BANKNIFTY gives 0.3240, which is
+**below break-even**. It does not replicate, which is the same way the 15m cells died.
+
+## 1d: confirmed counterproductive
+
+Every 1d cell has a negative advantage except two that are indistinguishable from zero
+(D @ 0.5: -0.0020 and +0.0033). The SHORT side is negative in all twelve cells, between -0.07 and
+-0.29. Loosening does not rescue it; at conf 0.5 with n=102 the NIFTY50 SHORT advantage is -0.0018 and
+with n=49 the BANKNIFTY SHORT advantage is -0.1673. Taking every bar beats taking these signals.
+
+## Verdict
+
+The intraday and swing question is now closed on adequate samples rather than parked on thin ones.
+`trend-breakout`'s `TERMINAL_UNOWNED` disposition stands, and the reason is stronger than it was this
+morning: it is not that the rule fires too rarely to prove, it is that when made to fire 20x more
+often it has no edge to find.
+
+Nothing was wired. The two new flags default to the historical behaviour and exist so this measurement
+is repeatable; the sweep commands are in the commit message and reproduce from stored bars alone.
