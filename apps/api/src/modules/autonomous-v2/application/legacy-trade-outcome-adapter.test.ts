@@ -84,14 +84,16 @@ describe("adapting a legacy closed trade", () => {
 
   it("still computes a residual for a partially exited trade, and records that it was one", () => {
     /*
-     * Corrected by the data. The first version reported a partially exited trade as NOT_COMPARABLE,
-     * reasoning that `(exit - entry) x quantity` cannot hold when `exitPrice` is one tranche's price.
-     * Measured against the 322 real closed trades, the identity holds for every one of the 321 that
-     * exited in tranches -- so the exclusion would have discarded 99.7% of the population and the
-     * detector would have reported nothing at all.
+     * Corrected by the data, twice. The first version reported a partially exited trade as
+     * NOT_COMPARABLE, reasoning that `(exit - entry) x quantity` cannot hold when `exitPrice` is one
+     * slice's price. That exclusion would have discarded all but one of the real closed trades and the
+     * detector would have reported nothing at all, so the flag travels instead of filtering.
      *
-     * The flag travels instead, because a large residual on a partially exited trade has a benign
-     * explanation available that a full-exit trade does not.
+     * The second correction is why the identity holds. It is not that `exitPrice` reconciles across
+     * tranches -- migration 088's audit found that every close to date is a *single* slice covering
+     * the full quantity (338 of 339 as of 2026-09-01), so the identity holds trivially. A real
+     * multi-slice close has never occurred; when one does, the residual it produces will be a
+     * data-shape change rather than a defect.
      */
     const adapted = layeredOutcomeFromClosedTrade(trade({ hasPartialExits: true }));
 
@@ -101,11 +103,14 @@ describe("adapting a legacy closed trade", () => {
 
   it("reproduces the one real anomaly: P&L booked gross where fees were expected", () => {
     /*
-     * Trade 951a0ecb on 2026-08-31, the only closed trade of 322 whose `realized_pnl` is gross rather
-     * than net of fees -- and the only one with no partial exits. Its residual is exactly its fees.
+     * Trade 951a0ecb on 2026-08-31: the only closed trade whose `realized_pnl` is gross rather than
+     * net of fees, and the only one with no slice row. Its residual is exactly its fees.
      *
-     * Pinned as a regression: it is the shape the detector is for, and it was found by running the
-     * adapter over real data rather than by reasoning about it.
+     * Its cause is settled and is not a code path -- it was closed by a hand-written `UPDATE` at
+     * 19:18 IST, four hours after the close, at a price equal to its own stop loss. See migration 088.
+     *
+     * Pinned as a regression anyway: it is the shape the detector is for, and it was found by running
+     * the adapter over real data rather than by reasoning about it.
      */
     const adapted = layeredOutcomeFromClosedTrade(trade({
       quantity: 75, entryPrice: 212.95, exitPrice: 203.17, fees: 30.7,

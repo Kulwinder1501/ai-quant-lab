@@ -36,19 +36,25 @@ import {
  * ## Partial exits were going to be excluded, and the data said not to
  *
  * The first version reported a partially exited trade as `NOT_COMPARABLE`, reasoning that
- * `(exit - entry) x quantity` cannot hold when `exit_price` is one tranche's price and `realized_pnl`
- * covers all of them. Measured against the 322 closed trades, that reasoning was wrong here and the
- * exclusion would have discarded **321 of them**: the identity holds for every partially exited trade,
- * because `exit_price` reconciles across tranches.
+ * `(exit - entry) x quantity` cannot hold when `exit_price` is one slice's price and `realized_pnl`
+ * covers all of them. Measured against the closed book, the exclusion would have discarded all but
+ * one trade, so it is not applied and the residual is always computed. That is what turns this from a
+ * filter into a detector: with the exclusion in place it would have reported nothing at all on real
+ * data, while the residual finds the one trade whose P&L means something different from the rest.
  *
- * So partial exits are *recorded* rather than excluded, and the residual is always computed. That is
- * what turns this from a filter into a detector -- with the exclusion in place it would have reported
- * nothing at all on real data, while the residual finds the one trade whose P&L means something
- * different from the other 321.
+ * ## Why the identity holds, corrected
  *
- * `hasPartialExits` still travels on the result, because a large residual on a partially exited trade
- * has a benign explanation available that a full-exit trade does not, and a reader needs to know which
- * they are looking at.
+ * An earlier version of this note said the identity survives because `exit_price` reconciles across
+ * tranches. That was wrong, and migration 088's audit establishes the real reason: **every close to
+ * date has been a single slice covering the full quantity**. Measured 2026-09-01, 338 of 339 closed
+ * trades carry exactly one `paper_trade_partial_exits` row for the whole position; the remaining one
+ * is `951a0ecb`, which carries none because it was closed by a hand-written `UPDATE`.
+ *
+ * So the identity holds trivially rather than by reconciliation, and a genuine multi-slice close has
+ * never happened. When one does, `(exit_price - entry_price) x quantity` stops meaning anything for
+ * that trade and this adapter will report a residual it cannot explain. That is the correct
+ * behaviour -- it is a detector -- but the residual will be a data-shape change rather than a defect,
+ * and the flag below is how a reader tells the two apart.
  */
 
 export interface LegacyClosedTrade {
@@ -62,7 +68,12 @@ export interface LegacyClosedTrade {
   readonly fees: number | null;
   /** Recorded on the trade, but with no exit counterpart. Carried for provenance only. */
   readonly underlyingEntryPrice: number | null;
-  /** True when the position was closed in tranches, which makes the simple P&L identity inapplicable. */
+  /**
+   * True when a `paper_trade_partial_exits` row exists -- which to date means one slice for the whole
+   * position, not a position exited in pieces. It does not make the P&L identity inapplicable; see the
+   * correction above. A *false* value is the interesting one, because every close the application
+   * performs writes a slice.
+   */
   readonly hasPartialExits: boolean;
 }
 
@@ -73,13 +84,20 @@ export interface AdaptedOutcome {
   /**
    * `erosion - fees`: what the recorded prices and the booked P&L disagree about, beyond fees.
    *
-   * Zero is the expected state, and is what 321 of 322 real closed trades produce -- their
-   * `realized_pnl` is net of fees, so `(gross - net) - fees` cancels exactly.
+   * Zero is the expected state, and is what all but one closed trade produces (338 of 339 as of
+   * 2026-09-01) -- `realized_pnl` is net of fees by convention, now recorded in migration 088, so
+   * `(gross - net) - fees` cancels exactly.
    *
    * A non-zero residual means slippage nobody recorded, or a P&L that does not mean what the column
    * says. It is the class of fault that once reported +Rs 2,032 on a position down Rs 651, and on real
-   * data it currently finds exactly one trade -- whose residual is precisely its fees, because that
-   * trade booked P&L gross while every other booked it net.
+   * data it finds exactly one trade -- `951a0ecb`, whose residual is precisely its own fees because
+   * its `realized_pnl` is gross.
+   *
+   * That trade is *not* evidence of a code path booking gross, and an earlier version of this note
+   * left that open. Both writers of `status = 'CLOSED'` have shared one closing expression since
+   * `fe84dc6`, and `951a0ecb` carries none of the five artifacts either path writes. It was a manual
+   * `UPDATE` run at 19:18 IST, four hours after the close. See migration 088 and
+   * `postgres-paper-trade-repository.pnl-convention.test.ts`, which fails if the two paths diverge.
    */
   readonly unexplainedResidual: number;
 }

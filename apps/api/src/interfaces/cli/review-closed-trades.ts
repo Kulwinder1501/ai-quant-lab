@@ -54,7 +54,12 @@ async function main(): Promise<void> {
      *
      * Measured over 325 closed trades when this was wired in: 325 reconciled, 0 refused, 324 with a
      * residual inside a paisa, and exactly one flagged -- trade 951a0ecb, whose residual is precisely
-     * its own fees because it booked P&L gross where every other trade booked it net.
+     * its own fees because its `realized_pnl` is gross where every other trade's is net.
+     *
+     * That one flag has since been run down and is not a code defect: both close paths have shared one
+     * expression since `fe84dc6`, and that trade was closed by a hand-written `UPDATE`. So a *steady*
+     * count of one is the expected output here, and it is the count rising that means something. See
+     * migration 088.
      *
      * The underlying layer is absent, so no attribution is attempted. `paper_trades` has no underlying
      * exit price, and inventing one would let `attributeShortfall` blame the thesis on an inference.
@@ -142,7 +147,9 @@ async function main(): Promise<void> {
     for (const flag of residualFlags) console.log(`  RESIDUAL  ${flag}`);
     if (residualFlags.length > 0) {
       console.log("  A residual is the booked P&L disagreeing with the recorded fills beyond fees. It is a");
-      console.log("  finding, not a failure: check whether that trade's P&L was booked gross or net.");
+      console.log("  finding, not a failure. One known residual is expected: trade 951a0ecb, closed by hand");
+      console.log("  and therefore gross. For any other, check for a close that bypassed the application -- no");
+      console.log("  close event, no slice row, remaining_quantity not decremented. See migration 088.");
     }
     for (const { tag, tradeCount } of await repository.countResearchTags()) {
       console.log(`  ${tag}: ${tradeCount}`);
