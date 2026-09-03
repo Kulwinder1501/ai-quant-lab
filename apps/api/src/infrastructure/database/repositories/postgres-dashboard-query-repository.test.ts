@@ -91,3 +91,58 @@ describe("PostgresDashboardQueryRepository.listTradeIdeas strategy filter", () =
     expect(params[2]).toEqual(["momentum-scalp-index"]);
   });
 });
+
+describe("PostgresDashboardQueryRepository fee legs", () => {
+  it("splits entry and exit from the stored breakdown instead of reporting the total as entry", async () => {
+    const calls: { text: string; params: unknown[] }[] = [];
+    const database = {
+      query: async (text: string, params?: unknown[]) => {
+        calls.push({ text, params: params ?? [] });
+        if (text.includes("FROM paper_accounts")) {
+          return { rows: [{ id: "a1", name: "AutoBot", opening_balance: 100000, currency: "INR", is_active: true }] };
+        }
+        if (text.includes("FROM paper_trades")) {
+          return {
+            rows: [{
+              id: "t1", account_id: "a1", instrument_id: "i1", trade_idea_id: null, timeframe: "5m",
+              side: "LONG", status: "CLOSED", quantity: 75, entry_price: 89.4, stop_loss: 80, target_price: 110,
+              opened_at: new Date("2026-09-03T09:35:00Z"), closed_at: new Date("2026-09-03T09:44:27Z"),
+              exit_price: 81.6, exit_reason: "STOP_LOSS", realized_pnl: -643.84,
+              // The two legs of a real trade: 26.58 in, 32.26 out, 58.84 total.
+              fees: 58.84, entry_fees: 26.58, exit_fees: 32.26,
+              fee_breakdown: { entry: { total: 26.58 }, exit: { total: 32.26 } },
+              slippage: 0, notes: "", option_strike: 23900, option_expiry: null, option_type: "PE",
+              underlying_symbol: "NIFTY50", entry_iv: null,
+              instrument_symbol: "NIFTY50", instrument_name: "NIFTY 50",
+            }],
+          };
+        }
+        return { rows: [] };
+      },
+    } as unknown as DatabaseQueryable;
+
+    const summary = await new PostgresDashboardQueryRepository(database)
+      .getPaperAccountFullSummary("a1", {});
+    const trade = summary.closedTrades[0] as Record<string, number>;
+
+    expect(trade.entryFees).toBe(26.58);
+    // The regression: this was hardcoded 0, so the response asserted every exit was free.
+    expect(trade.exitFees).toBe(32.26);
+    expect(trade.totalFees).toBe(58.84);
+    // The invariant that makes the SQL fallback safe, and that the UI's gross figure relies on.
+    expect(trade.entryFees + trade.exitFees).toBeCloseTo(trade.totalFees, 2);
+  });
+
+  it("asks the database to split the legs rather than doing it in TypeScript", async () => {
+    const calls: string[] = [];
+    const database = {
+      query: async (text: string) => { calls.push(text); return { rows: [] }; },
+    } as unknown as DatabaseQueryable;
+
+    await new PostgresDashboardQueryRepository(database).getPaperAccountFullSummary("a1", {});
+    const tradeQuery = calls.find((text) => text.includes("FROM paper_trades"));
+
+    expect(tradeQuery).toContain("AS entry_fees");
+    expect(tradeQuery).toContain("AS exit_fees");
+  });
+});

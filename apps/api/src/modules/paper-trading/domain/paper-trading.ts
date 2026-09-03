@@ -11,7 +11,9 @@ export type PaperTradeExitReason =
   | "T1_TARGET"
   | "T2_TARGET"
   | "RUNNER_TRAIL"
-  | "MOMENTUM_STALL";
+  | "MOMENTUM_STALL"
+  /** The 15:15 IST intraday square-off. See `domain/session-close.ts`. */
+  | "SESSION_CLOSE";
 export type PaperTradeEventType =
   | "PENDING_PLACED"
   | "OPENED"

@@ -33,6 +33,8 @@ export interface PaperTradeRow {
   targetPrice?: number;
   openedAt: string;
   entryFees: number;
+  /** Entry plus exit. `entryFees` is the entry leg alone. */
+  totalFees?: number;
   entrySlippage: number;
   feeBreakdown?: Record<string, unknown>;
   exitPrice?: number | null;

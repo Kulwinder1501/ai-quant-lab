@@ -2,6 +2,7 @@ import { evaluateRisk } from "../../risk-management/domain/risk.js";
 import type { PaperTrade } from "../domain/paper-trading.js";
 import { PrepareOptionEntry, type PrepareOptionEntryResult } from "./prepare-option-entry.js";
 import type { OpenPaperTrade } from "./open-paper-trade.js";
+import { isAtOrAfterSessionEntryCutoff } from "../domain/session-close.js";
 
 /**
  * Turns a stored trade idea into an option position, through every gate, for any caller.
@@ -79,7 +80,9 @@ export type OpenOptionPositionResult =
   | {
     opened: false;
     /** Machine-readable. `RISK_CONTROL_VETO` is this service's; the rest come from the entry gate. */
-    reason: Extract<PrepareOptionEntryResult, { approved: false }>["reason"] | "RISK_CONTROL_VETO";
+    reason: Extract<PrepareOptionEntryResult, { approved: false }>["reason"]
+      | "RISK_CONTROL_VETO"
+      | "SESSION_ENTRY_CUTOFF";
     explanation: string;
     reasons?: string[];
     unchecked?: string[];
@@ -93,6 +96,17 @@ export class OpenOptionPositionFromIdea {
   ) {}
 
   async execute(input: OpenOptionPositionInput): Promise<OpenOptionPositionResult> {
+    // Refused before the entry gate, which calls the provider: there is no point pricing a
+    // contract for a position that must be squared off on the next sweep. This is the opening
+    // half of the session-boundary policy whose closing half lives in the exit evaluator.
+    if (isAtOrAfterSessionEntryCutoff(input.now)) {
+      return {
+        opened: false,
+        reason: "SESSION_ENTRY_CUTOFF",
+        explanation: "New entries are closed for the session: the square-off cutoff has passed.",
+      };
+    }
+
     // The entry gate picks the contract from the provider's listed calendar and fills at the
     // observed ask. It is what stops a derived expiry, a model-priced premium, or a skipped
     // pre-trade checklist -- each of which has already cost this project a wrong number once.

@@ -153,6 +153,7 @@ describe("summarizePaperTradeHistory", () => {
       T2_TARGET: 0,
       RUNNER_TRAIL: 0,
       MOMENTUM_STALL: 0,
+      SESSION_CLOSE: 0,
     });
   });
 

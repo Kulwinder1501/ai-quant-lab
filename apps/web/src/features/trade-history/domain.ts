@@ -14,7 +14,10 @@ export type TradeHistoryExitReason =
   | "T1_TARGET"
   | "T2_TARGET"
   | "TRAP_DETECTED"
-  | "EXPIRED";
+  | "EXPIRED"
+  // The 15:15 IST intraday square-off. Absent from this union, `member()` maps it to null and the
+  // ledger reports a closed trade with no exit reason at all.
+  | "SESSION_CLOSE";
 export type TradeOutcomeFilter = "WIN" | "LOSS" | "BREAK_EVEN";
 
 export interface TradeHistoryRecord {
@@ -207,6 +210,7 @@ export function summarizeTradeHistory(records: readonly TradeHistoryRecord[]): T
     MANUAL: 0,
     CANCELLED: 0,
     MOMENTUM_STALL: 0,
+    SESSION_CLOSE: 0,
     RUNNER_TRAIL: 0,
     T1_TARGET: 0,
     T2_TARGET: 0,
