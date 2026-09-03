@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   INTRADAY_FLATTEN_TIMEFRAMES,
   SESSION_CLOSE_FLATTEN_IST_MINUTES,
+  SESSION_ENTRY_CUTOFF_IST_MINUTES,
+  isAtOrAfterSessionEntryCutoff,
   isAtOrAfterSessionCloseCutoff,
   istMinutesSinceMidnight,
   shouldFlattenAtSessionClose,
@@ -68,5 +70,31 @@ describe("session close flatten", () => {
 
   it("pins the cutoff to 15:15 IST", () => {
     expect(SESSION_CLOSE_FLATTEN_IST_MINUTES).toBe(915);
+  });
+});
+
+describe("session entry cutoff", () => {
+  it("refuses a new entry from the cutoff onward", () => {
+    expect(isAtOrAfterSessionEntryCutoff(new Date("2026-09-03T09:45:00Z"))).toBe(true);  // 15:15
+    expect(isAtOrAfterSessionEntryCutoff(new Date("2026-09-03T09:50:00Z"))).toBe(true);  // 15:20
+  });
+
+  it("allows an entry a minute before it", () => {
+    expect(isAtOrAfterSessionEntryCutoff(new Date("2026-09-03T09:44:00Z"))).toBe(false); // 15:14
+  });
+
+  it("would have refused both positions that carried overnight", () => {
+    // Both were opened at 15:20 IST -- after the cutoff that now squares them off. Squaring off
+    // without refusing the entry leaves a round trip of brokerage on a one-minute position.
+    expect(isAtOrAfterSessionEntryCutoff(new Date("2026-08-20T09:50:00Z"))).toBe(true);
+  });
+
+  it("opens again next session", () => {
+    expect(isAtOrAfterSessionEntryCutoff(new Date("2026-09-04T03:45:00Z"))).toBe(false); // 09:15
+  });
+
+  it("shares one minute with the square-off, so the two cannot drift apart", () => {
+    // A gap between them is a window where the bot opens what the next sweep must close.
+    expect(SESSION_ENTRY_CUTOFF_IST_MINUTES).toBe(SESSION_CLOSE_FLATTEN_IST_MINUTES);
   });
 });

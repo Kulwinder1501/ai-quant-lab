@@ -88,3 +88,34 @@ export function shouldFlattenAtSessionClose(timeframe: string | null, asOf: Date
   if (!INTRADAY_FLATTEN_TIMEFRAMES.includes(timeframe)) return false;
   return isAtOrAfterSessionCloseCutoff(asOf);
 }
+
+/**
+ * No new position may be opened at or after this minute.
+ *
+ * The square-off bounded the overnight exposure but left the other half open: both of the
+ * positions that carried overnight were *opened at 15:20*, after the cutoff that now closes them.
+ * Squaring those off a minute later removes the gap risk and leaves a round trip of brokerage --
+ * about Rs 60 -- paid for a one-minute position. Refusing the entry is what makes the policy whole.
+ *
+ * Deliberately the same minute as the square-off rather than an independent knob. Two thresholds
+ * that must move together are one threshold, and a gap between them is a window in which the bot
+ * opens positions the very next sweep is obliged to close.
+ *
+ * The consequence to know: an entry approved at 15:14 is squared off at 15:15 and lives about a
+ * minute. Shortening that means moving *this* cutoff earlier than the flatten -- a runway rule,
+ * which is a different decision with its own evidence, and not one this constant should make
+ * silently.
+ */
+export const SESSION_ENTRY_CUTOFF_IST_MINUTES = SESSION_CLOSE_FLATTEN_IST_MINUTES;
+
+/**
+ * True once new entries are refused for the session.
+ *
+ * Kept separate from `isAtOrAfterSessionCloseCutoff` despite resolving identically today: one
+ * governs opening and the other closing, they are read by different callers, and a future runway
+ * rule separates them. A single shared predicate would make that change look like a behaviour
+ * change to the square-off as well.
+ */
+export function isAtOrAfterSessionEntryCutoff(asOf: Date): boolean {
+  return istMinutesSinceMidnight(asOf) >= SESSION_ENTRY_CUTOFF_IST_MINUTES;
+}
