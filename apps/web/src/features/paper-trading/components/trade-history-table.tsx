@@ -49,7 +49,11 @@ export function TradeHistoryTable({ closedTrades }: TradeHistoryTableProps) {
             <tbody className="divide-y divide-white/5 text-sm">
               {closedTrades.map((trade) => {
                 const pnl = trade.realizedPnl || 0;
-                const fees = trade.entryFees || 0;
+                // The "Total Fees" column and the gross figure below both need entry *plus* exit.
+                // This read `entryFees`, which was correct only while that field carried the
+                // running total; now that it is the entry leg alone, taking it here would drop the
+                // exit brokerage and overstate every gross P&L.
+                const fees = trade.totalFees ?? ((trade.entryFees || 0) + (trade.exitFees || 0));
                 const ret = trade.returnPercent || 0;
                 const gross = pnl + fees;
                 return (
