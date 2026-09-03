@@ -12,22 +12,25 @@ export async function seedMarketData(database: DatabasePool): Promise<void> {
   try {
     await client.query("BEGIN");
 
-    const strategy = await client.query<{ id: string }>(`
-      INSERT INTO strategies (strategy_key, name, description, is_archived)
-      VALUES ('trend-breakout', 'Trend Breakout Strategy', 'Momentum breakout trading strategy', FALSE)
-      ON CONFLICT (strategy_key) DO UPDATE SET name = EXCLUDED.name
-      RETURNING id
-    `);
-    const strategyId = strategy.rows[0]?.id;
-    if (!strategyId) throw new Error("Failed to insert/resolve strategy");
+    /*
+     * No strategy or strategy_version is seeded here, deliberately.
+     *
+     * This block used to insert `trend-breakout` version **1** with `is_active = TRUE` and
+     * `ON CONFLICT (strategy_id, version) DO UPDATE SET is_active = TRUE` -- so every API startup
+     * reasserted an obsolete version as active. The code declares version 2, which is why the
+     * database carried two active versions for that strategy, and why adding a unique index on the
+     * active row crash-looped the API on 2026-09-03: the seed's upsert violated it before the
+     * process could serve anything.
+     *
+     * `StrategyVersionRepository.ensure` already creates the strategy and the version the code
+     * declares, on every generation pass, and refuses to proceed if a stored configuration has
+     * drifted from the code's. A seed cannot improve on that and could only contradict it -- the
+     * configuration this one pinned (`lookback`, `stopLossPct`, `targetPct`) bears no resemblance to
+     * `defaultTrendBreakoutStrategyConfiguration` as it stands today.
+     *
+     * The version id it produced was used for nothing but its own existence check.
+     */
 
-    const version = await client.query<{ id: string }>(`
-      INSERT INTO strategy_versions (strategy_id, version, configuration, is_active)
-      VALUES ($1, 1, '{"lookback": 20, "stopLossPct": 1.5, "targetPct": 3.0}'::jsonb, TRUE)
-      ON CONFLICT (strategy_id, version) DO UPDATE SET is_active = TRUE
-      RETURNING id
-    `, [strategyId]);
-    if (!version.rows[0]?.id) throw new Error("Failed to insert/resolve strategy version");
 
     await client.query(`
       INSERT INTO indicator_definitions
