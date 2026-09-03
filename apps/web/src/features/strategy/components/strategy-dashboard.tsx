@@ -23,31 +23,51 @@ export interface PaperAccountOption {
 export type StrategyMode = "swing" | "scalp";
 
 const modeConfig: Record<StrategyMode, {
-  strategyKey: string;
+  /**
+   * The registered strategy keys whose proposals this tab shows.
+   *
+   * A list, because the scalp tab is four strategies rather than one. `momentum-scalp` is only the
+   * 1m base engine; the 5m proposals that actually trade are `momentum-scalp-index` and
+   * `momentum-scalp-pattern`, and filtering on the base key alone showed 184 ideas from the engine
+   * nothing trades while hiding 980 from the engines that do.
+   */
+  strategyKeys: readonly string[];
   defaultTimeframe: string;
   title: string;
   gridHeading: string;
   gridDescription: string;
 }> = {
   swing: {
-    strategyKey: "trend-breakout",
+    strategyKeys: ["trend-breakout"],
     defaultTimeframe: "1d",
     title: "Strategy Engine & Trade Ideas",
     gridHeading: "Quantitative Breakout Proposals",
     gridDescription: "Generated from Trend Breakout and Candlestick Pattern engines. These are research proposals, not automated orders.",
   },
   scalp: {
-    strategyKey: "momentum-scalp",
+    // Every registered scalp engine, including `momentum-scalp-pattern-v2`, which is disabled for
+    // trading (`executableSides: []`) but keeps generating ideas -- so its population stays visible
+    // here rather than silently vanishing from the dashboard along with its authority to trade.
+    strategyKeys: [
+      "momentum-scalp",
+      "momentum-scalp-index",
+      "momentum-scalp-pattern",
+      "momentum-scalp-pattern-v2",
+    ],
     defaultTimeframe: "1m",
     title: "Scalp Strategy & Ideas",
     gridHeading: "Momentum Scalp Proposals",
-    gridDescription: "Generated from the 1m Momentum Scalp engine (EMA separation, VWAP displacement, bounded RSI). These are research proposals, not automated orders.",
+    gridDescription: "Generated from every Momentum Scalp engine across 1m and 5m (base, index, pattern). Scalp proposals expire within minutes of their bar, so use Include Expired to see a session's population. These are research proposals, not automated orders.",
   },
 };
 
 export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: StrategyMode } = {}) {
   const [mode, setMode] = useState<StrategyMode>(initialMode);
-  const { strategyKey, title, gridHeading, gridDescription } = modeConfig[mode];
+  const { strategyKeys, title, gridHeading, gridDescription } = modeConfig[mode];
+  // Joined here rather than in `loadIdeas` so the callback depends on a string. Depending on the
+  // array would be stable today only because `modeConfig` is module-level; a string compares by
+  // value and cannot start a refetch loop if that ever stops being true.
+  const strategyQuery = strategyKeys.join(",");
   const isScalp = mode === "scalp";
 
   const [ideas, setIdeas] = useState<TradeIdeaRow[]>([]);
@@ -103,14 +123,14 @@ export function StrategyDashboard({ initialMode = "swing" }: { initialMode?: Str
   // Pure I/O: no state writes, so an effect can call it without cascading a render.
   const loadIdeas = useCallback(async (signal?: AbortSignal) => {
     const dateParam = dateFilter ? `&date=${encodeURIComponent(dateFilter)}` : "";
-    const strategyParam = strategyKey ? `&strategy=${encodeURIComponent(strategyKey)}` : "";
+    const strategyParam = strategyQuery ? `&strategy=${encodeURIComponent(strategyQuery)}` : "";
     const expiredParam = includeExpired ? "&includeExpired=true" : "";
     const res = await getResearchJson(
       `/trade-ideas?limit=100&_t=${Date.now()}${dateParam}${strategyParam}${expiredParam}`,
       signal,
     ) as { data: TradeIdeaRow[] };
     return res.data || [];
-  }, [dateFilter, strategyKey, includeExpired]);
+  }, [dateFilter, strategyQuery, includeExpired]);
 
   const applyIdeas = useCallback((rows: TradeIdeaRow[]) => {
     setIdeas(rows);

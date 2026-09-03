@@ -278,8 +278,22 @@ export class PostgresDashboardQueryRepository {
       // scalp rows used to stamp evidence.strategy = 'momentum-scalp'; real
       // proposals from GenerateTradeIdeas do not, so the evidence path silently
       // hid every genuine idea from the Strategy / Scalp dashboards.
-      params.push(strategyKey);
-      conditions.push(`s.strategy_key = $${params.length}`);
+      //
+      // One key or a comma-separated list, because the scalp tab is four registered
+      // strategies rather than one: `momentum-scalp` is the 1m engine, while the 5m
+      // ideas that actually trade carry `momentum-scalp-index` and
+      // `momentum-scalp-pattern`. A single-key filter therefore shows the wrong
+      // cohort. Equality against the joined value was worse -- no row can hold
+      // "a,b,c", so a dashboard sending the list rendered an empty tab rather than a
+      // partial one, which reads as "no scalp ideas exist" when 1,408 of them do.
+      //
+      // A list that parses to nothing (`strategy=,,`) falls through unfiltered, which
+      // is what the route already does with `strategy=` via `strategy || undefined`.
+      const strategyKeys = strategyKey.split(",").map((key) => key.trim()).filter((key) => key.length > 0);
+      if (strategyKeys.length > 0) {
+        params.push(strategyKeys);
+        conditions.push(`s.strategy_key = ANY($${params.length}::text[])`);
+      }
     }
     if (conditions.length > 0) {
       query += ` WHERE ${conditions.join(" AND ")} `;
