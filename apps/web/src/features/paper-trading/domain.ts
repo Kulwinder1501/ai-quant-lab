@@ -13,6 +13,16 @@ export interface PaperTradeRow {
   instrumentSymbol?: string;
   instrumentName?: string;
   timeframe?: string;
+  /**
+   * The strategy that produced this trade, from the data.
+   *
+   * Absent means the lineage could not be resolved, and must be rendered as unknown. The positions
+   * table used to derive this from the timeframe, so a 5m Sniper position from
+   * `momentum-scalp-pattern` was labelled `trend-breakout` -- a strategy that is TERMINAL_UNOWNED
+   * and traded by no bot. An invented attribution is worse than an absent one: nothing
+   * distinguishes it from a real one.
+   */
+  strategyKey?: string | null;
   tradeIdeaId?: string | null;
   side: "BUY" | "SELL" | "LONG" | "SHORT";
   status: "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";

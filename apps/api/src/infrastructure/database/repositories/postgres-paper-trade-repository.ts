@@ -44,6 +44,7 @@ interface PaperTradeRow extends QueryResultRow {
   trade_idea_id: string | null;
   instrument_id: string;
   timeframe: string | null;
+  strategy_key: string | null;
   side: TradeSide;
   status: PaperTrade["status"];
   quantity: string;
@@ -104,6 +105,14 @@ const tradeColumns = `
   paper_trades.trade_idea_id,
   paper_trades.instrument_id,
   source_candle.timeframe,
+  -- The strategy that actually produced this trade.
+  --
+  -- Selected because the dashboard was inventing it: active-positions-table.tsx rendered
+  -- trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout", so every non-1m position was
+  -- labelled trend-breakout -- a strategy that is TERMINAL_UNOWNED and traded by no bot. A live 5m
+  -- Sniper position from momentum-scalp-pattern displayed as trend-breakout, which is an
+  -- attribution the data never made.
+  strategies.strategy_key,
   paper_trades.side,
   paper_trades.status,
   paper_trades.quantity,
@@ -157,6 +166,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     instrumentId: row.instrument_id,
     instrumentSymbol: row.instrument_symbol,
     timeframe: row.timeframe,
+    strategyKey: row.strategy_key,
     side: row.side,
     status: row.status,
     quantity: toNumber(row.quantity, "trade quantity"),
@@ -246,6 +256,8 @@ async function findPaperTradeById(database: DatabaseClient, id: string): Promise
     FROM paper_trades
     LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
     LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+    LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+    LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
     WHERE paper_trades.id = $1
   `, [id]);
   return result.rows[0] ? toPaperTrade(result.rows[0]) : null;
@@ -573,6 +585,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       FROM paper_trades
       LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
       LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+      LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+      LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
       WHERE paper_trades.id = $1 AND paper_trades.status = 'OPEN'
     `, [id]);
     return result.rows[0] ? toPaperTrade(result.rows[0]) : null;
@@ -584,6 +598,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       FROM paper_trades
       LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
       LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+      LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+      LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
       LEFT JOIN instruments ON instruments.id = paper_trades.instrument_id
       WHERE paper_trades.account_id = $1 AND paper_trades.status = 'OPEN'
       ORDER BY paper_trades.opened_at DESC, paper_trades.id ASC
@@ -597,6 +613,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       FROM paper_trades
       LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
       LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+      LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+      LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
       LEFT JOIN instruments ON instruments.id = paper_trades.instrument_id
       WHERE paper_trades.account_id = $1 AND paper_trades.status = 'PENDING'
       ORDER BY paper_trades.opened_at DESC, paper_trades.id ASC
@@ -660,6 +678,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+        LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+        LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
         WHERE paper_trades.id = $1 AND paper_trades.status = 'OPEN'
         FOR UPDATE OF paper_trades
       `, [input.paperTradeId]);
@@ -843,6 +863,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+        LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+        LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
         WHERE paper_trades.id = $1 AND paper_trades.status IN ('OPEN', 'PENDING')
         FOR UPDATE OF paper_trades
       `, [input.paperTradeId]);
@@ -997,6 +1019,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
+        LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+        LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
         WHERE paper_trades.account_id = $1
           AND paper_trades.status IN ('OPEN', 'CLOSED')
           AND paper_trades.excluded_from_evidence = false

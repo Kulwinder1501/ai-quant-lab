@@ -50,6 +50,16 @@ export interface PaperTrade {
   instrumentId: string;
   instrumentSymbol?: string;
   timeframe: string | null;
+  /**
+   * The strategy key that produced this trade, or null when the lineage is absent.
+   *
+   * Null is meaningful and must be shown as unknown rather than filled in. The dashboard used to
+   * derive the label from the timeframe -- `timeframe === "1m" ? "momentum-scalp" :
+   * "trend-breakout"` -- so a `momentum-scalp-pattern` position on 5m was displayed as
+   * `trend-breakout`, a strategy marked TERMINAL_UNOWNED and traded by no bot. An invented
+   * attribution is worse than an absent one: it is indistinguishable from a real one.
+   */
+  strategyKey?: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: number;

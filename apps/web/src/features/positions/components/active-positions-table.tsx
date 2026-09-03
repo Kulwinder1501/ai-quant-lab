@@ -252,12 +252,24 @@ export const ActivePositionsTable = memo(function ActivePositionsTable({ summary
                 </td>
                 <td className="py-4 px-4 max-w-[200px] truncate text-slate-400 text-xs">
                   <div className="flex flex-col gap-1">
+                    {/*
+                      * The strategy comes from the trade, never from its timeframe.
+                      *
+                      * This used to read `timeframe === "1m" ? "momentum-scalp" : "trend-breakout"`,
+                      * so every non-1m position was labelled `trend-breakout` -- a strategy marked
+                      * TERMINAL_UNOWNED and traded by no bot. A live 5m Sniper position from
+                      * `momentum-scalp-pattern` displayed as `trend-breakout`, an attribution the
+                      * data never made and which sent a reader looking at the wrong strategy.
+                      *
+                      * Absent lineage is shown as unattributed rather than guessed: a wrong label is
+                      * indistinguishable from a right one, and a missing label is not.
+                      */}
                     <span className={`inline-flex self-start px-2 py-0.5 rounded text-[10px] font-bold ${
-                      trade.timeframe === "1m"
+                      trade.strategyKey
                         ? "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                        : "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                        : "bg-slate-500/20 text-slate-400 border border-slate-500/30"
                     }`}>
-                      {trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout"}
+                      {trade.strategyKey ?? "unattributed"}
                     </span>
                     <span title={trade.notes || "Opened via AI Agent"}>{trade.notes || "Opened via AI Agent"}</span>
                   </div>
