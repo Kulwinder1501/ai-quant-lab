@@ -482,3 +482,50 @@ describe("AiAutonomousAgent.tick", () => {
     expect(agent.getThoughts(10_000).length).toBeLessThanOrEqual(MAX_RETAINED_THOUGHTS);
   });
 });
+
+describe("a thought id cannot collide across symbols", () => {
+  /*
+   * `ai_brain_thoughts.id` is a TEXT PRIMARY KEY written with ON CONFLICT (id) DO NOTHING, so a
+   * colliding id is not an error -- it is a silently dropped thought. Twelve of the thirteen id
+   * literals were `th-${Date.now()}-<suffix>`: no symbol, no randomness.
+   *
+   * The consequence was visible on the dashboard on 2026-09-03 as ten consecutive NIFTY50
+   * stale-context thoughts and nothing for BANKNIFTY, which read as "the brain is not scanning
+   * BANKNIFTY" while the scheduler log showed it ticking on every pass. The one action whose id
+   * already carried a random suffix, ANALYZING, was also the only action that ever showed both
+   * instruments.
+   */
+  function ids(symbol: string, suffix: string, count: number): string[] {
+    // Reaches the private helper the way every call site does, without exporting it for a test.
+    const agent = Object.create(AiAutonomousAgent.prototype) as {
+      thoughtId(symbol: string, suffix: string): string;
+    };
+    return Array.from({ length: count }, () => agent.thoughtId(symbol, suffix));
+  }
+
+  it("puts the symbol first, so two instruments can never produce one id", () => {
+    const nifty = ids("NIFTY50", "stale-context", 1)[0]!;
+    const bank = ids("BANKNIFTY", "stale-context", 1)[0]!;
+
+    expect(nifty.startsWith("th-NIFTY50-")).toBe(true);
+    expect(bank.startsWith("th-BANKNIFTY-")).toBe(true);
+    expect(nifty).not.toBe(bank);
+  });
+
+  it("does not repeat within one symbol and millisecond either", () => {
+    /*
+     * The symbol alone is not enough: the same symbol legitimately records several thoughts in one
+     * tick, and two of the same kind in the same millisecond would still collide on a
+     * symbol-plus-clock id.
+     */
+    const generated = ids("NIFTY50", "stale-context", 200);
+
+    expect(new Set(generated).size).toBe(generated.length);
+  });
+
+  it("keeps the suffix, so the branch that produced a thought stays readable", () => {
+    // The suffix is how a row is traced back to its early return when reading the table directly.
+    expect(ids("NIFTY50", "no-context", 1)[0]).toMatch(/-no-context$/);
+    expect(ids("NIFTY50", "rate-limited", 1)[0]).toMatch(/-rate-limited$/);
+  });
+});

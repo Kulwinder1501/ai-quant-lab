@@ -341,6 +341,29 @@ export class AiAutonomousAgent {
   }
 
   /**
+   * A thought id that cannot collide with another symbol's thought in the same instant.
+   *
+   * `ai_brain_thoughts.id` is a TEXT PRIMARY KEY and `saveThought` uses `ON CONFLICT (id) DO
+   * NOTHING`, on the reasoning that "a colliding id means the same thought is being written twice,
+   * and keeping the first is correct". That premise held only while ids were unique per thought.
+   * Twelve of the thirteen id literals here were `th-${Date.now()}-<suffix>` -- no symbol, no
+   * randomness -- so two symbols taking the same branch in the same millisecond produced the *same*
+   * id and the second was dropped silently.
+   *
+   * The evidence was in the data: `ANALYZING`, the one action whose id already carried a random
+   * suffix, is also the only action that ever showed both instruments. Every action with a
+   * deterministic id showed one. On 2026-09-03 the dashboard displayed ten consecutive NIFTY50
+   * stale-context thoughts and nothing at all for BANKNIFTY, which read as "the brain is not
+   * scanning BANKNIFTY" when the scheduler log showed it ticking every time.
+   *
+   * The symbol comes first so a colliding id is impossible across instruments even if the clock and
+   * the random suffix both repeat.
+   */
+  private thoughtId(symbol: string, suffix: string): string {
+    return `th-${symbol}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${suffix}`;
+  }
+
+  /**
    * Appends a thought to the in-memory ring and persists it.
    *
    * Every site that used to call `this.thoughts.push` directly goes through here. The ring is
@@ -436,7 +459,26 @@ export class AiAutonomousAgent {
         client.release();
       }
     }
-    if (!account) return;
+    if (!account) {
+      /*
+       * Every early return below records a thought, so a symbol can never be evaluated and leave no
+       * trace. On 2026-09-03 the feed showed ten NIFTY50 thoughts and nothing for BANKNIFTY, which
+       * read as "the brain is not scanning BANKNIFTY" while the scheduler log showed it ticking
+       * every time. The CLI that drives this already states the rule for its own skips: "the agent
+       * evaluated and did nothing" and "the agent never ran" are the same empty output otherwise,
+       * and only one of them is a market observation.
+       */
+      this.recordThought({
+        id: this.thoughtId(symbol, "no-account"),
+        timestamp: ts,
+        symbol,
+        action: "MONITORING",
+        confidence: 0,
+        message: "Agent could not run: no active paper account (AutoBot or a default) was found.",
+        details: { reason: "NO_PAPER_ACCOUNT" },
+      });
+      return;
+    }
 
     // 2. Evaluate any open trades against current live market price
     try {
@@ -457,6 +499,17 @@ export class AiAutonomousAgent {
     // Rate limit trade proposals to once every 15 seconds per symbol
     const lastAttempt = this.lastTradeAttempt.get(symbol) ?? 0;
     if (Date.now() - lastAttempt < 15000) {
+      this.recordThought({
+        id: this.thoughtId(symbol, "rate-limited"),
+        timestamp: ts,
+        symbol,
+        action: "MONITORING",
+        confidence: 0,
+        message: `Agent skipped new proposals: last attempt for ${symbol} was `
+          + `${Math.round((Date.now() - lastAttempt) / 1000)}s ago, inside the 15s per-symbol limit.`,
+        details: { reason: "PROPOSAL_RATE_LIMITED",
+          secondsSinceLastAttempt: Math.round((Date.now() - lastAttempt) / 1000) },
+      });
       return;
     }
 
@@ -483,10 +536,38 @@ export class AiAutonomousAgent {
     } finally {
       client.release();
     }
-    if (!instId) return;
+    if (!instId) {
+      this.recordThought({
+        id: this.thoughtId(symbol, "no-instrument"),
+        timestamp: ts,
+        symbol,
+        action: "MONITORING",
+        confidence: 0,
+        message: `Agent could not run: ${symbol} is not a registered instrument, so there is nothing to read.`,
+        details: { reason: "INSTRUMENT_NOT_REGISTERED" },
+      });
+      return;
+    }
 
     const ctx = await this.marketContextRepo.findLatestCompleted({ instrumentId: instId, timeframe });
-    if (!ctx) return;
+    if (!ctx) {
+      /*
+       * Distinct from the staleness refusal below, and the distinction matters: that one means a bar
+       * exists and is too old, this one means no completed context exists at all. Reported as
+       * absence rather than staleness so a coverage gap is not read as a quiet market.
+       */
+      this.recordThought({
+        id: this.thoughtId(symbol, "no-context"),
+        timestamp: ts,
+        symbol,
+        action: "MONITORING",
+        confidence: 0,
+        message: `Agent could not run: no completed ${timeframe} market context exists for ${symbol}.`,
+        details: { reason: "NO_COMPLETED_CONTEXT",
+          timeframe },
+      });
+      return;
+    }
 
     // Stops above were still evaluated from live prices. New proposals, however, must not mix a
     // live quote with indicators and patterns from an old completed bar. The paper bot already
@@ -499,7 +580,7 @@ export class AiAutonomousAgent {
     });
     if (!contextFreshness.fresh) {
       this.recordThought({
-        id: `th-${Date.now()}-stale-context`,
+        id: this.thoughtId(symbol, "stale-context"),
         timestamp: ts,
         symbol,
         action: "MONITORING",
@@ -640,7 +721,7 @@ export class AiAutonomousAgent {
         const exit = await this.resolvePanicExitPremium(t);
         if (exit === null) {
           this.recordThought({
-            id: `th-${Date.now()}-panic-unpriced`,
+            id: this.thoughtId(symbol, "panic-unpriced"),
             timestamp: ts,
             symbol,
             action: "MONITORING",
@@ -672,7 +753,7 @@ export class AiAutonomousAgent {
           },
         });
         this.recordThought({
-          id: `th-${Date.now()}-panic`,
+          id: this.thoughtId(symbol, "panic"),
           timestamp: ts,
           symbol,
           action: "EXECUTING",
@@ -709,7 +790,7 @@ export class AiAutonomousAgent {
         if (!isTighter) continue;
         await this.paperTradeRepo.updateStopLoss(t.id, tightSl, `Circuit Breaker Rule 2 (Sentiment ${newsSentiment.toFixed(2)})`);
         this.recordThought({
-          id: `th-${Date.now()}-sl-tighten`,
+          id: this.thoughtId(symbol, "sl-tighten"),
           timestamp: ts,
           symbol,
           action: "MONITORING",
@@ -741,7 +822,7 @@ export class AiAutonomousAgent {
           if (isTighter) {
             await this.paperTradeRepo.updateStopLoss(t.id, tightSl, `Profit Trailing Stop (1% active, 0.5% trail)`);
             this.recordThought({
-              id: `th-${Date.now()}-sl-profit-trail`,
+              id: this.thoughtId(symbol, "sl-profit-trail"),
               timestamp: ts,
               symbol,
               action: "MONITORING",
@@ -819,7 +900,7 @@ export class AiAutonomousAgent {
 
     // Log AI Thought
     const thought: AiBrainThought = {
-      id: `th-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: this.thoughtId(symbol, "analyzing"),
       timestamp: ts,
       symbol,
       action: confidence >= 75 ? "PROPOSING" : "ANALYZING",
@@ -899,7 +980,7 @@ export class AiAutonomousAgent {
       // against it later.
       if (!AGENT_EXECUTABLE_SIDES.includes(setupScore.side)) {
         this.recordThought({
-          id: `th-${Date.now()}-side-gated`,
+          id: this.thoughtId(symbol, "side-gated"),
           timestamp: new Date().toISOString(),
           symbol,
           action: "MONITORING",
@@ -920,7 +1001,7 @@ export class AiAutonomousAgent {
 
       if (existingTrades.length > 0) {
         this.recordThought({
-          id: `th-${Date.now()}-skip`,
+          id: this.thoughtId(symbol, "skip"),
           timestamp: new Date().toISOString(),
           symbol,
           action: "MONITORING",
@@ -959,7 +1040,7 @@ export class AiAutonomousAgent {
       const atrValue = atrObj ? Number(atrObj.values["value"] ?? Number.NaN) : Number.NaN;
       if (!Number.isFinite(atrValue) || atrValue <= 0) {
         this.recordThought({
-          id: `th-${Date.now()}-noatr`,
+          id: this.thoughtId(symbol, "noatr"),
           timestamp: new Date().toISOString(),
           symbol,
           action: "MONITORING",
@@ -1051,7 +1132,7 @@ export class AiAutonomousAgent {
           // A refusal is reported, never silently dropped: "the gate refused" and "no setup
           // qualified" are different observations and must not read the same in the journal.
           this.recordThought({
-            id: `th-${Date.now()}-refused`,
+            id: this.thoughtId(symbol, "refused"),
             timestamp: new Date().toISOString(),
             symbol,
             action: "MONITORING",
@@ -1072,7 +1153,7 @@ export class AiAutonomousAgent {
           + `${placement.contract.optionExpiry.toISOString().slice(0, 10)} `
           + `${placement.contract.optionStrike} ${placement.contract.optionType}`;
         this.recordThought({
-          id: `th-${Date.now()}-exec`,
+          id: this.thoughtId(symbol, "exec"),
           timestamp: new Date().toISOString(),
           symbol,
           action: "EXECUTING",
@@ -1097,7 +1178,7 @@ export class AiAutonomousAgent {
         });
       } catch (err) {
         this.recordThought({
-          id: `th-${Date.now()}-err`,
+          id: this.thoughtId(symbol, "err"),
           timestamp: new Date().toISOString(),
           symbol,
           action: "MONITORING",
@@ -1224,7 +1305,7 @@ export class AiAutonomousAgent {
       await this.aiJournalRepo.saveReflection(reflection);
 
       this.recordThought({
-        id: `th-${Date.now()}-learn`,
+        id: this.thoughtId(symbol, "learn"),
         timestamp: row.closed_at ? new Date(row.closed_at).toISOString() : new Date().toISOString(),
         symbol,
         action: "LEARNING",

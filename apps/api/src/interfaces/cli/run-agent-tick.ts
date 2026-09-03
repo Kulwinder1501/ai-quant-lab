@@ -62,26 +62,62 @@ async function main(): Promise<void> {
     const coordinator = new AiAgentTickCoordinator();
     const outcomes: Array<Record<string, unknown>> = [];
 
+    /*
+     * Each symbol is isolated, because one symbol's failure used to end the pass.
+     *
+     * `quoteSymbol` **throws** on network failure -- "Fyers quote request failed after 4 network
+     * attempts" -- and only the `null` return was handled. The throw propagated out of this loop and
+     * out of `main`, so the process exited 1 and every symbol after the failing one never ran.
+     *
+     * That made the damage positional rather than random: `--symbols=NIFTY50,BANKNIFTY` always
+     * processes NIFTY50 first, so NIFTY50 had already ticked and recorded its thought while BANKNIFTY
+     * silently never did. On 2026-09-03 that presented as "the brain is only scanning NIFTY50".
+     * Reversing the order would simply have moved the symptom to the other instrument.
+     *
+     * A failure is now an outcome for that symbol and the loop continues -- the same treatment the
+     * null quote already had, which is the case that was thought about.
+     */
     for (const symbol of options.symbols) {
-      const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
-      if (quote === null) {
-        // Reported, not silently skipped: "the agent evaluated and did nothing" and "the
-        // agent never ran" are the same empty output otherwise, and only one is a market
-        // observation. This is the same reasoning `run-paper-trading-bot.ts` applies.
-        outcomes.push({ symbol, ticked: false, reason: "NO_LIVE_QUOTE" });
-        continue;
+      try {
+        const quote = await dependencies.marketQuoteClient.quoteSymbol(symbol);
+        if (quote === null) {
+          // Reported, not silently skipped: "the agent evaluated and did nothing" and "the
+          // agent never ran" are the same empty output otherwise, and only one is a market
+          // observation. This is the same reasoning `run-paper-trading-bot.ts` applies.
+          outcomes.push({ symbol, ticked: false, reason: "NO_LIVE_QUOTE" });
+          continue;
+        }
+        const ticked = await coordinator.run(
+          dependencies.aiAutonomousAgent,
+          symbol,
+          options.timeframe,
+          quote.regularMarketPrice!,
+        );
+        outcomes.push({
+          symbol,
+          ticked,
+          ...(ticked ? { livePrice: quote.regularMarketPrice } : { reason: "COALESCED" }),
+        });
+      } catch (error) {
+        outcomes.push({
+          symbol,
+          ticked: false,
+          reason: "TICK_FAILED",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const ticked = await coordinator.run(
-        dependencies.aiAutonomousAgent,
-        symbol,
-        options.timeframe,
-        quote.regularMarketPrice!,
+    }
+
+    /*
+     * The pass still fails if every symbol failed, so a total outage is not reported as a healthy
+     * run of nothing. A partial failure completes: the symbols that worked did real work, and
+     * marking the job FAILED would discard that and invite a retry of the whole pass.
+     */
+    const failures = outcomes.filter((outcome) => outcome.reason === "TICK_FAILED");
+    if (failures.length === options.symbols.length) {
+      throw new Error(
+        `Every symbol failed to tick: ${failures.map((f) => `${String(f.symbol)} (${String(f.error)})`).join("; ")}`,
       );
-      outcomes.push({
-        symbol,
-        ticked,
-        ...(ticked ? { livePrice: quote.regularMarketPrice } : { reason: "COALESCED" }),
-      });
     }
 
     console.info(JSON.stringify({
