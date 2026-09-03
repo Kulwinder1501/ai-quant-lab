@@ -9,6 +9,25 @@ export function parsePositiveNumber(value: string, option: string): number {
   return parsed;
 }
 
+/**
+ * A non-negative number that stays `undefined` when the flag is absent.
+ *
+ * `parseNonNegativeNumber` coerces a missing flag to 0, which is right for a value whose default
+ * genuinely is zero -- slippage -- and wrong for one the callee would otherwise compute. Exit fees
+ * are computed: `EvaluateOpenPaperTrades` does `explicitExitFees ?? calculateExitFees(...)`, and
+ * `??` only falls through on null/undefined, so an explicit 0 is a *supplied* value that suppresses
+ * the calculation entirely.
+ *
+ * That is not hypothetical. The scheduler runs `paper:trades:evaluate` every minute per account
+ * with no `--exit-fees`, so 56 of 383 closes -- every one this job won the race to close -- booked
+ * zero exit fees and reported a P&L better than the trade earned. Whether a position paid brokerage
+ * depended on which process closed it first.
+ */
+export function parseOptionalNonNegativeNumber(value: string | undefined, option: string): number | undefined {
+  if (value === undefined) return undefined;
+  return parseNonNegativeNumber(value, option);
+}
+
 export function parseNonNegativeNumber(value: string | undefined, option: string): number {
   const parsed = Number(value ?? "0");
   if (!Number.isFinite(parsed) || parsed < 0) {
