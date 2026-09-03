@@ -94,6 +94,7 @@ import { differentialActionEqualityMigration } from "./093-differential-action-e
 import { differentialProducerIdentityMigration } from "./094-differential-producer-identity.js";
 import { differentialClassificationsMigration } from "./095-differential-classifications.js";
 import { autonomousAgentStrategyIdentityMigration } from "./096-autonomous-agent-strategy-identity.js";
+import { oneActiveStrategyVersionMigration } from "./097-one-active-strategy-version.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -192,4 +193,5 @@ export const migrations = [
   differentialProducerIdentityMigration,
   differentialClassificationsMigration,
   autonomousAgentStrategyIdentityMigration,
+  oneActiveStrategyVersionMigration,
 ];
