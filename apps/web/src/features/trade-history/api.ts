@@ -107,6 +107,7 @@ export function parseTradeHistorySummary(value: unknown): TradeHistorySummary {
       MANUAL: numberOrZero(exitReasonCounts.MANUAL),
       CANCELLED: numberOrZero(exitReasonCounts.CANCELLED),
       MOMENTUM_STALL: numberOrZero(exitReasonCounts.MOMENTUM_STALL),
+      SESSION_CLOSE: numberOrZero(exitReasonCounts.SESSION_CLOSE),
       RUNNER_TRAIL: numberOrZero(exitReasonCounts.RUNNER_TRAIL),
       T1_TARGET: numberOrZero(exitReasonCounts.T1_TARGET),
       T2_TARGET: numberOrZero(exitReasonCounts.T2_TARGET),
