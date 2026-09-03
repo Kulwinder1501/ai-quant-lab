@@ -222,6 +222,14 @@ export interface ContractQuoteReader {
   }): Promise<{ mid: number; bid: number | null; ask: number | null } | null>;
 }
 
+/**
+ * The agent's own strategy key, created by migration 096.
+ *
+ * A constant rather than an inline literal because the migration, this lookup and the guard test all
+ * have to agree; three copies of a string is how they stop agreeing.
+ */
+export const AGENT_STRATEGY_KEY = "ai-autonomous-agent";
+
 export class AiAutonomousAgent {
   private readonly thoughts: AiBrainThought[] = [];
   private readonly evaluateTrades: EvaluateOpenPaperTrades;
@@ -1012,16 +1020,57 @@ export class AiAutonomousAgent {
         return;
       }
 
-      // Resolve active strategy version
+      /*
+       * The agent's own strategy version, resolved by key.
+       *
+       * This was `SELECT id FROM strategy_versions WHERE is_active = TRUE LIMIT 1` -- no ORDER BY,
+       * no filter to this engine, and seven versions are active. So every proposal the agent
+       * persisted was stamped with whatever row the planner returned. Measured 2026-09-03: all 8
+       * ideas ever attributed to `trend-breakout` were the agent's, and 3 of them became real
+       * trades, which made those trades unattributable to the thing that decided them.
+       *
+       * The agent is not a registered strategy -- it is in no bot roster and scores with the
+       * composite Section 6 quarantines -- so no existing row was ever the right answer. Migration
+       * 096 gives it its own identity, and this reads that identity rather than nominating one.
+       *
+       * Deliberately not filtered on `is_active`: that row is inactive on purpose, because two other
+       * callers ask the database to nominate "the" active version and a new active row would
+       * silently become their answer.
+       */
       let stratVerId = "";
       const client2 = await this.database.connect();
       try {
-        const verRes = await client2.query<{ id: string }>("SELECT id FROM strategy_versions WHERE is_active = TRUE LIMIT 1");
+        const verRes = await client2.query<{ id: string }>(
+          `SELECT sv.id
+             FROM strategy_versions sv
+             JOIN strategies s ON s.id = sv.strategy_id
+            WHERE s.strategy_key = $1
+            ORDER BY sv.version DESC
+            LIMIT 1`,
+          [AGENT_STRATEGY_KEY],
+        );
         stratVerId = verRes.rows[0]?.id ?? "";
       } finally {
         client2.release();
       }
-      if (!stratVerId) return;
+      if (!stratVerId) {
+        /*
+         * Reported rather than returned silently. Before this, a missing row produced a bare
+         * `return` and the proposal vanished -- the same "evaluated and did nothing looks identical
+         * to never ran" failure that hid BANKNIFTY from the feed earlier today.
+         */
+        this.recordThought({
+          id: this.thoughtId(symbol, "no-agent-strategy"),
+          timestamp: ts,
+          symbol,
+          action: "MONITORING",
+          confidence: 0,
+          message: `Agent could not record a proposal: no strategy version exists for `
+            + `${AGENT_STRATEGY_KEY}. Migration 096 creates it.`,
+          details: { reason: "AGENT_STRATEGY_MISSING", strategyKey: AGENT_STRATEGY_KEY },
+        });
+        return;
+      }
 
       /**
        * The side the score was computed for, not a direction chosen after the fact.

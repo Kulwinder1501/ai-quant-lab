@@ -93,6 +93,7 @@ import { differentialObservationsMigration } from "./092-differential-observatio
 import { differentialActionEqualityMigration } from "./093-differential-action-equality.js";
 import { differentialProducerIdentityMigration } from "./094-differential-producer-identity.js";
 import { differentialClassificationsMigration } from "./095-differential-classifications.js";
+import { autonomousAgentStrategyIdentityMigration } from "./096-autonomous-agent-strategy-identity.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -190,4 +191,5 @@ export const migrations = [
   differentialActionEqualityMigration,
   differentialProducerIdentityMigration,
   differentialClassificationsMigration,
+  autonomousAgentStrategyIdentityMigration,
 ];
