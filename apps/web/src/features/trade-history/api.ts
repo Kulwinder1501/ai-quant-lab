@@ -17,6 +17,7 @@ const exitReasons: readonly TradeHistoryExitReason[] = [
   "MANUAL",
   "CANCELLED",
   "MOMENTUM_STALL",
+  "SESSION_CLOSE",
   "RUNNER_TRAIL",
   "T1_TARGET",
   "T2_TARGET",

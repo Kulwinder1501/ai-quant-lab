@@ -14,6 +14,7 @@ import {
   priceOptionMarksAtOhlc,
 } from "../domain/option-mark-to-market.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
+import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -574,6 +575,34 @@ export class EvaluateOpenPaperTrades {
       // Nothing is lost by returning here. The barrier-crossing question the completed-candle
       // path was reaching for is answered above by `decideOptionBuyerObservedExit`, against
       // observed bids instead of estimated ones.
+      // The intraday square-off, ahead of the stall rule because it is unconditional: once the
+      // cutoff passes, the position closes whatever its unrealised P&L. It sits *below* the
+      // barrier decision above on purpose -- a stop or target reached at this instant is a real
+      // exit and must keep its own reason, or the ledger would attribute a genuine stop to the
+      // clock.
+      //
+      // Inside the fresh-bid branch by construction, so the flatten can only ever fill at a price
+      // the provider actually quoted. With no observable bid the position holds, which is the same
+      // refusal the rest of this evaluator makes: a modelled premium has been measured wrong by
+      // more than the barrier distances it is asked to resolve, and squaring off at an estimate
+      // would book a fictional exit at exactly the hour the book is thinnest.
+      if (shouldFlattenAtSessionClose(trade.timeframe, asOf)) {
+        return closeOption({
+          exitPrice: freshBid,
+          exitReason: "SESSION_CLOSE",
+          closedAt: asOf,
+          underlyingExitPrice: denseSpot ?? null,
+          details: {
+            source: "SESSION_CLOSE_FLATTEN",
+            cutoffIst: "15:15",
+            timeframe: trade.timeframe,
+            freshBid,
+            quoteObservedAt: denseQuote!.observedAt.toISOString(),
+            eventType: "MANUALLY_CLOSED",
+          },
+        });
+      }
+
       // Momentum Stall Stop (5m timeframe, elapsed market time >= 20 mins, gain < 0.5R)
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.

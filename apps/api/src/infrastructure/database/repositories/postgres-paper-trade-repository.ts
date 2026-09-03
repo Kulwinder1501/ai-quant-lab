@@ -240,6 +240,9 @@ function exitEventType(reason: PaperTradeExitReason): PaperTradeEventType {
     case "MANUAL":
     case "MOMENTUM_STALL":
     case "RUNNER_TRAIL":
+    // A rule closed it, not a barrier. Grouping it with the barrier hits would inflate the
+    // measured stop and target rates with exits the market never reached.
+    case "SESSION_CLOSE":
       return "MANUALLY_CLOSED";
     case "CANCELLED":
       return "CANCELLED";
