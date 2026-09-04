@@ -27,8 +27,25 @@ describe("research strategy ungating", () => {
     // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
     // meaning.
     expect(Object.keys(byKey).sort()).toEqual([
-      "index-v3-research", "momentum-v5-research", "pattern-v4-research", "pattern-v4-research-v2",
+      "index-v3-research", "momentum-v5-research", "momentum-v6-research",
+      "pattern-v4-research", "pattern-v4-research-v2",
     ]);
+  });
+
+  it("registers momentum-v6-research as an ungated 1m sibling of v5, same candidate logic", () => {
+    const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
+    const v5 = byKey["momentum-v5-research"]!;
+    const v6 = byKey["momentum-v6-research"]!;
+    // Ungated like v5, and runs on the same 1m timeframe.
+    expect(v6.definition.configuration.minimumConfidence).toBe(0);
+    expect(v6.supportedTimeframes).toEqual(["1m"]);
+    // Same candidate logic == same implementation checksum. This is the machine-checked proof, not
+    // an oversight: a different checksum would have to name a different source file, and there is none.
+    expect(v6.definition.implementationArtifactChecksum).toBe(v5.definition.implementationArtifactChecksum);
+    // The schema bump is what records the added HTF payload, and it is what keeps the two hashes apart.
+    expect(v6.definition.featureSchemaVersion).toBe("scalp-raw-context-v3");
+    expect(v5.definition.featureSchemaVersion).toBe("scalp-raw-context-v2");
+    expect(v6.definition.strategyDefinitionHash).not.toBe(v5.definition.strategyDefinitionHash);
   });
 
   it("lifts each strategy's own score gate, not a generically-named one", () => {

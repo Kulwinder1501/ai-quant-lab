@@ -62,6 +62,8 @@ interface Options {
   horizon: number;
   /** Score a thesis must reach to count as gated. Matches the agent's own threshold. */
   threshold: number;
+  /** Which Bollinger reading to score with. Defaults to the shipped mean-reversion behaviour. */
+  bandBias: "MEAN_REVERSION" | "MOMENTUM";
 }
 
 function parseOptions(argv: readonly string[]): Options {
@@ -85,6 +87,9 @@ function parseOptions(argv: readonly string[]): Options {
     bars: Math.floor(number("bars", 4_000)),
     horizon: Math.floor(number("horizon", 32)),
     threshold: number("threshold", 80),
+    bandBias: (values.get("band-bias") ?? "mean-reversion").trim().toLowerCase() === "momentum"
+      ? "MOMENTUM"
+      : "MEAN_REVERSION",
   };
 }
 
@@ -207,6 +212,7 @@ async function main(): Promise<void> {
         newsLabel: "HELD OUT",
         hasHeadlineHeat: false,
         headlineEventNames: [],
+        bandBias: options.bandBias,
       });
       scored += 1;
 
@@ -242,6 +248,7 @@ async function main(): Promise<void> {
         skippedNoProductionAtr: skippedNoAtr,
         horizonBars: options.horizon,
         gateThreshold: options.threshold,
+        bandBias: options.bandBias,
         atrStopMultiple: AGENT_ATR_STOP_MULTIPLE,
         rewardRiskMultiple: AGENT_REWARD_RISK_MULTIPLE,
         heldOut: ["newsSentiment", "institutionalFlow", "macroEvents"],

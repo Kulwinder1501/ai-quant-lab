@@ -8,7 +8,12 @@ import { PostgresOptionPremiumTickRepository } from "../../infrastructure/databa
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
 import { getOption } from "./arguments.js";
-import { parseNonNegativeNumber, parseOptionalTimestamp, requirePaperAccount } from "./paper-trading-arguments.js";
+import {
+  parseNonNegativeNumber,
+  parseOptionalNonNegativeNumber,
+  parseOptionalTimestamp,
+  requirePaperAccount,
+} from "./paper-trading-arguments.js";
 
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
@@ -24,7 +29,9 @@ async function main(): Promise<void> {
     ).execute({
       accountId: account.id,
       asOf: parseOptionalTimestamp(argumentsList, "as-of", new Date()),
-      exitFees: parseNonNegativeNumber(getOption(argumentsList, "exit-fees"), "exit-fees"),
+      // Omitted rather than zeroed when the flag is absent, so the evaluator prices the exit
+      // itself. The scheduler calls this with no --exit-fees.
+      exitFees: parseOptionalNonNegativeNumber(getOption(argumentsList, "exit-fees"), "exit-fees"),
       exitSlippage: parseNonNegativeNumber(getOption(argumentsList, "exit-slippage"), "exit-slippage"),
     });
     console.info(JSON.stringify({ level: "info", message: "Paper-trade candle evaluation complete", account: account.name, ...result }));

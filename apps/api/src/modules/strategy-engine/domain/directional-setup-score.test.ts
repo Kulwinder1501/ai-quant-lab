@@ -205,4 +205,38 @@ describe("scoreDirectionalSetup", () => {
     expect(contradicted.longConfidence).toBeGreaterThanOrEqual(15);
     expect(contradicted.shortConfidence).toBeLessThanOrEqual(96);
   });
+
+  describe("bandBias: MOMENTUM inverts only the Bollinger term", () => {
+    // A bar with price above the upper band. Mean-reversion reads this as a short opportunity
+    // (sell the rip); momentum reads it as a long opportunity (buy the breakout). Nothing else in
+    // the input favours either side, so the band term alone must drive the difference.
+    const aboveUpper = { rsi: 50, livePrice: 24_600, bollingerUpper: 24_500, bollingerLower: 23_500 };
+
+    it("defaults to mean-reversion when bandBias is absent", () => {
+      const withFlag = scoreDirectionalSetup(baseInput({ ...aboveUpper, bandBias: "MEAN_REVERSION" }));
+      const without = scoreDirectionalSetup(baseInput({ ...aboveUpper }));
+      expect(withFlag.longConfidence).toBe(without.longConfidence);
+      expect(withFlag.shortConfidence).toBe(without.shortConfidence);
+    });
+
+    it("above the upper band, mean-reversion favours the short and momentum favours the long", () => {
+      const meanRev = scoreDirectionalSetup(baseInput({ ...aboveUpper, bandBias: "MEAN_REVERSION" }));
+      const momentum = scoreDirectionalSetup(baseInput({ ...aboveUpper, bandBias: "MOMENTUM" }));
+      // Mean-reversion: price pierced the upper band -> adverse to a long, opportunity for a short.
+      expect(meanRev.shortConfidence).toBeGreaterThan(meanRev.longConfidence);
+      // Momentum: the same breakout is now the long's opportunity and the short's risk.
+      expect(momentum.longConfidence).toBeGreaterThan(momentum.shortConfidence);
+      // The flip is a genuine reassignment, not a rescale: the long gains exactly what it lost.
+      expect(momentum.longConfidence).toBe(meanRev.shortConfidence);
+      expect(momentum.shortConfidence).toBe(meanRev.longConfidence);
+    });
+
+    it("keeps the point budget identical, so the comparison isolates the sign", () => {
+      // Sum of both theses is invariant under the flip: the same magnitudes, reassigned.
+      const meanRev = scoreDirectionalSetup(baseInput({ ...aboveUpper, bandBias: "MEAN_REVERSION" }));
+      const momentum = scoreDirectionalSetup(baseInput({ ...aboveUpper, bandBias: "MOMENTUM" }));
+      expect(momentum.longConfidence + momentum.shortConfidence)
+        .toBe(meanRev.longConfidence + meanRev.shortConfidence);
+    });
+  });
 });

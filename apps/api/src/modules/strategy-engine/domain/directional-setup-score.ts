@@ -116,6 +116,18 @@ export interface DirectionalSetupInput {
    */
   hasHeadlineHeat: boolean;
   headlineEventNames: readonly string[];
+  /**
+   * How the Bollinger term reads a band touch. Optional; absent is `MEAN_REVERSION`, the shipped
+   * behaviour, so every existing caller and the pinned arithmetic are unchanged.
+   *
+   * `MOMENTUM` inverts the opportunity/risk assignment of that one term -- a long then reaches for
+   * an upper-band *breakout* and a short for a lower-band *breakdown*. It is a measured hypothesis,
+   * not a promotion: over an 8-bar (~2h) forward window on 15m, price beyond a band continued past
+   * it on both indices (lower-band bars fell a further 0.03-0.06%, upper-band bars rose
+   * 0.03-0.05%), so the mean-reversion assignment is the wrong sign for this market. Held behind
+   * this flag until `measure:directional-scorer --band-bias=momentum` justifies it.
+   */
+  bandBias?: "MEAN_REVERSION" | "MOMENTUM";
 }
 
 export interface DirectionalSetupScore {
@@ -169,33 +181,67 @@ function scoreThesis(
       + `${long ? "oversold value" : "overbought distribution"} zone.`);
   }
 
-  // --- Mean reversion against the bands -------------------------------------------------
-  // A long wants price at the lower band and dislikes it pierced through the upper; a short is
-  // the mirror. The band a thesis reaches for is its opportunity, the other its risk.
-  const opportunityBand = long ? bollingerLower : bollingerUpper;
-  const riskBand = long ? bollingerUpper : bollingerLower;
+  // --- Bollinger bands ------------------------------------------------------------------
+  // Two readings of the same band, selected by `bandBias`. The point budget is identical in both
+  // (a favourable extreme +15, an adverse pierce -10, range +10, an adverse edge -25), so a
+  // measurement of one against the other isolates the sign of the band term rather than a
+  // reweighting. MEAN_REVERSION is the shipped default and is left byte-for-byte unchanged.
+  if (input.bandBias !== "MOMENTUM") {
+    // A long wants price at the lower band and dislikes it pierced through the upper; a short is
+    // the mirror. The band a thesis reaches for is its opportunity, the other its risk.
+    const opportunityBand = long ? bollingerLower : bollingerUpper;
+    const riskBand = long ? bollingerUpper : bollingerLower;
 
-  if (long ? livePrice > bollingerUpper : livePrice < bollingerLower) {
-    add(-10, `Price pierced ${long ? "upper" : "lower"} Bollinger Band (₹${riskBand.toFixed(2)}), `
-      + "mean reversion risk elevated.");
-  } else if (long ? livePrice < bollingerLower : livePrice > bollingerUpper) {
-    add(15, `Price touched ${long ? "lower" : "upper"} Bollinger Band `
-      + `(₹${opportunityBand.toFixed(2)}), potential value opportunity.`);
-  }
+    if (long ? livePrice > bollingerUpper : livePrice < bollingerLower) {
+      add(-10, `Price pierced ${long ? "upper" : "lower"} Bollinger Band (₹${riskBand.toFixed(2)}), `
+        + "mean reversion risk elevated.");
+    } else if (long ? livePrice < bollingerLower : livePrice > bollingerUpper) {
+      add(15, `Price touched ${long ? "lower" : "upper"} Bollinger Band `
+        + `(₹${opportunityBand.toFixed(2)}), potential value opportunity.`);
+    }
 
-  // The false-breakout penalty. -25 for a long sitting on upper resistance; a short sitting on
-  // lower support is the same trap facing the other way.
-  const insideEnvelope = livePrice < bollingerUpper * 0.995 && livePrice > bollingerLower * 1.005;
-  const atRiskEdge = long
-    ? livePrice >= bollingerUpper * 0.995
-    : livePrice <= bollingerLower * 1.005;
-  if (insideEnvelope) {
-    add(10, `Price ₹${livePrice.toFixed(2)} is well-positioned within Bollinger Band envelope `
-      + `[₹${bollingerLower.toFixed(0)} - ₹${bollingerUpper.toFixed(0)}].`);
-  } else if (atRiskEdge) {
-    add(-25, `Penalty applied: price is near `
-      + `${long ? "upper Bollinger resistance" : "lower Bollinger support"} `
-      + `₹${riskBand.toFixed(2)}. Avoiding false breakout.`);
+    // The false-breakout penalty. -25 for a long sitting on upper resistance; a short sitting on
+    // lower support is the same trap facing the other way.
+    const insideEnvelope = livePrice < bollingerUpper * 0.995 && livePrice > bollingerLower * 1.005;
+    const atRiskEdge = long
+      ? livePrice >= bollingerUpper * 0.995
+      : livePrice <= bollingerLower * 1.005;
+    if (insideEnvelope) {
+      add(10, `Price ₹${livePrice.toFixed(2)} is well-positioned within Bollinger Band envelope `
+        + `[₹${bollingerLower.toFixed(0)} - ₹${bollingerUpper.toFixed(0)}].`);
+    } else if (atRiskEdge) {
+      add(-25, `Penalty applied: price is near `
+        + `${long ? "upper Bollinger resistance" : "lower Bollinger support"} `
+        + `₹${riskBand.toFixed(2)}. Avoiding false breakout.`);
+    }
+  } else {
+    // Momentum: price beyond a band continues past it, so the opportunity and risk bands are the
+    // reverse of the block above. A long reaches for an upper-band breakout; a short for a
+    // lower-band breakdown. The adverse extreme, the range reward and the edge penalty keep the
+    // same magnitudes as MEAN_REVERSION -- only which band is which has changed.
+    const breakoutBand = long ? bollingerUpper : bollingerLower;
+    const breakdownBand = long ? bollingerLower : bollingerUpper;
+
+    if (long ? livePrice < bollingerLower : livePrice > bollingerUpper) {
+      add(-10, `Price broke ${long ? "below lower" : "above upper"} Bollinger Band `
+        + `(₹${breakdownBand.toFixed(2)}), momentum against a ${side}.`);
+    } else if (long ? livePrice > bollingerUpper : livePrice < bollingerLower) {
+      add(15, `Price broke ${long ? "above upper" : "below lower"} Bollinger Band `
+        + `(₹${breakoutBand.toFixed(2)}), momentum continuation.`);
+    }
+
+    const insideEnvelope = livePrice < bollingerUpper * 0.995 && livePrice > bollingerLower * 1.005;
+    const atAdverseEdge = long
+      ? livePrice <= bollingerLower * 1.005
+      : livePrice >= bollingerUpper * 0.995;
+    if (insideEnvelope) {
+      add(10, `Price ₹${livePrice.toFixed(2)} is coiled within Bollinger Band envelope `
+        + `[₹${bollingerLower.toFixed(0)} - ₹${bollingerUpper.toFixed(0)}].`);
+    } else if (atAdverseEdge) {
+      add(-25, `Penalty applied: price is at `
+        + `${long ? "lower Bollinger support" : "upper Bollinger resistance"} `
+        + `₹${breakdownBand.toFixed(2)}, momentum against a ${side}.`);
+    }
   }
 
   // --- Pattern evidence -----------------------------------------------------------------

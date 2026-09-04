@@ -309,6 +309,108 @@ describe("EvaluateOpenPaperTrades", () => {
   });
 
 
+  it("squares off an intraday option at the 15:15 IST cutoff, at the quoted bid", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    // Bid 200 sits between the 150 stop and the 260 target: nothing else would close this.
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180, timeframe: "5m" });
+    const asOf = new Date("2026-08-06T09:45:00.000Z"); // 15:15 IST
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listCompleted: async () => [],
+      listIncomplete: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:44:45.000Z", 200, 24050));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitPrice: 200,
+      exitReason: "SESSION_CLOSE",
+      details: expect.objectContaining({ source: "SESSION_CLOSE_FLATTEN", cutoffIst: "15:15" }),
+    });
+  });
+
+  it("holds the same position a minute before the cutoff", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180, timeframe: "5m" });
+    const asOf = new Date("2026-08-06T09:44:00.000Z"); // 15:14 IST
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listCompleted: async () => [],
+      listIncomplete: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:43:45.000Z", 200, 24050));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("does not steal a genuine stop that triggers at the cutoff", async () => {
+    // The ledger has to keep attributing a real barrier hit to the barrier. If the clock won here,
+    // every stop taken in the last fifteen minutes of a session would be recorded as a square-off
+    // and the measured stop rate would quietly fall.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180, timeframe: "5m" });
+    const asOf = new Date("2026-08-06T09:45:00.000Z"); // 15:15 IST
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listCompleted: async () => [],
+      listIncomplete: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:44:45.000Z", 145, 24050));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({ exitPrice: 145, exitReason: "STOP_LOSS" });
+  });
+
+  it("holds past the cutoff when no bid is observable rather than squaring off at a model price", async () => {
+    // The failure this avoids: the thinnest book of the day is exactly where a modelled premium is
+    // least trustworthy, and a flatten is unconditional -- so an estimate here would book a
+    // fictional exit on every open position at once.
+    const closings: ClosePaperTradeInput[] = [];
+    const trade = optionBuyerTrade({ stopLoss: 150, entryPrice: 180, timeframe: "5m" });
+    const asOf = new Date("2026-08-06T09:50:00.000Z"); // 15:20 IST
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listCompleted: async () => [],
+      listIncomplete: async () => [],
+    };
+    const densePremiums = denseReader(null);
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+  });
+
   it("lets a fresh bid govern HOLD, so the model cannot close what the real book keeps open", async () => {
     // Same fixture as the "closes on live BS mark" case: at this spot/time the theoretical mark
     // has crushed below the 150 stop, so the model path *would* close. But a fresh executable bid

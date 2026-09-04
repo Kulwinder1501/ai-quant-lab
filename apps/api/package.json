@@ -29,6 +29,7 @@
     "data:migrate:yahoo-to-fyers": "tsx src/interfaces/cli/migrate-yahoo-series-to-fyers.ts",
     "data:rebuild:fyers-evidence": "tsx src/interfaces/cli/rebuild-fyers-migration-evidence.ts",
     "data:audit": "tsx src/interfaces/cli/audit-data-readiness.ts",
+    "data:repair:exit-fees": "tsx src/interfaces/cli/repair-zeroed-exit-fees.ts",
     "data:reconcile:provisional": "tsx src/interfaces/cli/reconcile-expired-provisional-candles.ts",
     "data:audit:sequence": "tsx src/interfaces/cli/audit-sequence-readiness.ts",
     "db:purge:yahoo-scalp": "tsx src/interfaces/cli/purge-yahoo-scalp-candles.ts",

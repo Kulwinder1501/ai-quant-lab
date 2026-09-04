@@ -140,6 +140,17 @@ export class PostgresDashboardQueryRepository {
         pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe, pt.side, pt.status,
         pt.quantity, pt.entry_price, pt.stop_loss, pt.target_price, pt.opened_at, pt.closed_at,
         pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.fee_breakdown, pt.slippage, pt.notes,
+        -- pt.fees is the running total, entry plus exit. Split it here from the breakdown the
+        -- close path already writes, so the two legs stop being indistinguishable. Verified over
+        -- all 384 stored trades: entry.total is present on every row, exit.total on all but one
+        -- (closed by hand), and fees minus entry.total minus exit.total is 0.00 on every row --
+        -- which is what makes the subtraction a safe fallback for that row rather than a guess.
+        COALESCE((pt.fee_breakdown->'entry'->>'total')::numeric, pt.fees, 0) AS entry_fees,
+        COALESCE(
+          (pt.fee_breakdown->'exit'->>'total')::numeric,
+          pt.fees - COALESCE((pt.fee_breakdown->'entry'->>'total')::numeric, pt.fees, 0),
+          0
+        ) AS exit_fees,
         pt.option_strike, pt.option_expiry, pt.option_type, pt.underlying_symbol, pt.entry_iv,
         COALESCE(i.symbol, 'NIFTY50') AS instrument_symbol,
         COALESCE(i.display_name, 'NIFTY 50 Index') AS instrument_name
@@ -177,12 +188,20 @@ export class PostgresDashboardQueryRepository {
         stopLoss: toNumber(row.stop_loss),
         targetPrice: toNumber(row.target_price),
         openedAt: row.opened_at instanceof Date ? row.opened_at.toISOString() : String(row.opened_at),
-        entryFees: toNumber(row.fees),
+        // Was `toNumber(row.fees)`, the running total, under a name that says entry. For a closed
+        // trade that reported the entry leg as entry+exit while `exitFees` below was hardcoded to
+        // 0 -- so the response asserted every exit was free.
+        entryFees: toNumber(row.entry_fees),
         entrySlippage: toNumber(row.slippage),
+        /** Entry plus exit. Named for what it is, so a consumer needing the total stops reaching for `entryFees`. */
+        totalFees: toNumber(row.fees),
         feeBreakdown: row.fee_breakdown && typeof row.fee_breakdown === "object" ? row.fee_breakdown : {},
         exitPrice,
         closedAt: row.closed_at instanceof Date ? row.closed_at.toISOString() : row.closed_at ? String(row.closed_at) : null,
-        exitFees: 0,
+        exitFees: toNumber(row.exit_fees),
+        // Not split in storage: `paper_trades.slippage` is a single running column with no
+        // per-leg breakdown, and it is 0 on all 384 rows. Left at 0 rather than reported as
+        // `slippage` minus a number that was never recorded.
         exitSlippage: 0,
         exitReason: row.exit_reason ? String(row.exit_reason) : null,
         realizedPnl,

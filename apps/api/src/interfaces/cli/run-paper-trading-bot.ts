@@ -39,6 +39,7 @@ import { buildRegimeObservation } from "../../modules/strategy-engine/domain/reg
 import type { RegimeContext } from "../../modules/strategy-engine/domain/regime.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
+import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domain/session-close.js";
 
 /**
  * Refuses to start on a timeframe nothing can trade.
@@ -345,6 +346,18 @@ async function main(): Promise<void> {
           });
 
           for (const tradeIdeaId of result.tradeIdeaIds) {
+            // Ahead of every other check, including the provider call in `prepareEntry`: a
+            // position opened now is one the exit sweep is obliged to square off, so the only
+            // thing the entry could still buy is a round trip of brokerage.
+            if (isAtOrAfterSessionEntryCutoff(now)) {
+              refused.push({
+                tradeIdeaId, symbol, timeframe,
+                reason: "SESSION_ENTRY_CUTOFF",
+                explanation: "New entries are closed for the session: the square-off cutoff has passed.",
+              });
+              continue;
+            }
+
             if (openPositions >= MAX_CONCURRENT_POSITIONS) {
               refused.push({
                 tradeIdeaId, symbol, reason: "POSITION_LIMIT",

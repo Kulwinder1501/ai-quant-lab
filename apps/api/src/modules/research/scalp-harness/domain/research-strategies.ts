@@ -10,6 +10,7 @@ import {
   defaultMomentumScalpStrategyConfiguration,
   MomentumScalpStrategy,
 } from "../../../strategy-engine/domain/momentum-scalp-strategy.js";
+import { extractHtfObservations } from "../../../strategy-engine/domain/momentum-scalp-research-htf.js";
 import type { ProposedTradeIdea, StrategyMarketContext } from "../../../strategy-engine/domain/strategy.js";
 import {
   assertOnGridDecision,
@@ -161,6 +162,16 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
     private readonly evaluator: BaseEvaluator,
     private readonly setupFamily: string,
     private readonly legacyGate: LegacyScoreGate,
+    /**
+     * Optional covariate producer, merged into each proposal's `rawContext`.
+     *
+     * How a research version records *more* about the same setup without touching the candidate
+     * logic. V5 passes nothing and captures exactly what it always did; V6 passes the HTF extractor.
+     * Because `rawContext` is part of the proposal's `payloadHash`, a version that supplies an
+     * extender is already a distinct captured cohort -- and its `featureSchemaVersion` records that
+     * the payload now carries the extra keys.
+     */
+    private readonly rawContextExtender?: (context: StrategyMarketContext) => Record<string, unknown>,
   ) {}
 
   evaluate(strategyContext: StrategyMarketContext, reference1mContext: StrategyMarketContext): ImmutableStrategyProposal[] {
@@ -192,7 +203,12 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
           expiresAt: proposal.expiresAt,
           geometryPolicyVersion: `${this.definition.strategyKey.toUpperCase().replaceAll("-", "_")}_NATIVE_V1`,
         },
-        rawContext: rawContext(strategyContext, proposal, this.legacyGate),
+        rawContext: {
+          ...rawContext(strategyContext, proposal, this.legacyGate),
+          // Additive covariates only. The extender is a separate producer, so its keys never
+          // overwrite the base rawContext -- and V5, which supplies none, is byte-identical.
+          ...(this.rawContextExtender?.(strategyContext) ?? {}),
+        },
       });
     });
   }
@@ -222,6 +238,29 @@ const momentumDefinition = buildStrategyDefinition({
   strategyKey: "momentum-v5-research",
   researchVersion: 5,
   featureSchemaVersion: "scalp-raw-context-v2",
+  implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
+  configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
+});
+
+/**
+ * `momentum-v5-research` with slower-timeframe context recorded, and nothing else changed.
+ *
+ * The candidate logic is byte-identical -- same `MomentumScalpStrategy`, same ungated configuration
+ * -- so this REUSES V5's `implementationArtifactChecksum`. That is not an oversight to be "fixed"
+ * with a new checksum: the checksum is the SHA-256 of `momentum-scalp-strategy.ts`, which V6 does
+ * not touch, and the isolation test refuses any checksum that is not the real file's hash. Reusing
+ * it is the machine-checked proof that `v6_candidate_logic == v5_candidate_logic`.
+ *
+ * The two versions do not collide: `buildStrategyDefinition` hashes the strategy key, research
+ * version, configuration and feature-schema version alongside the checksum, and V6 differs on the
+ * first three. `scalp-raw-context-v3` records that the payload now carries the `htf5m` covariate
+ * block the V5 schema did not. V6 is a *sibling* of V5, capturing the same setups with more recorded
+ * about each -- the same relationship `pattern-v4-research-v2` has to `pattern-v4-research`.
+ */
+const momentumHtfDefinition = buildStrategyDefinition({
+  strategyKey: "momentum-v6-research",
+  researchVersion: 6,
+  featureSchemaVersion: "scalp-raw-context-v3",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
 });
@@ -260,6 +299,13 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
   new FrozenResearchAdapter(
     momentumDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
+  ),
+  new FrozenResearchAdapter(
+    // Same evaluator, gate and setup family as V5 above; the only difference is the HTF extender, so
+    // V6 captures the same 1m setups with the most recent closed 5m context recorded alongside each.
+    momentumHtfDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
+    confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
+    extractHtfObservations,
   ),
   new FrozenResearchAdapter(
     indexDefinition, ["5m"], new MomentumScalpIndexStrategy(), "INDEX_MOMENTUM",

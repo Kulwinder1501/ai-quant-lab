@@ -1,4 +1,5 @@
 import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/domain/technical-indicator.js";
+import type { HistoricalTimeframe } from "../../market-data/domain/historical-data-provider.js";
 import type {
   CandlestickPatternCode,
   PatternDirection,
@@ -112,6 +113,21 @@ export interface StrategyMarketContext {
    * Populated per closed bar strictly causally without lookahead.
    */
   ictSnapshot?: IctStateCompositeSnapshot;
+  /**
+   * Raw higher-timeframe contexts keyed by timeframe, when a caller has loaded them.
+   *
+   * Distinct from `higherTimeframes` above, and additive on purpose. That field carries a
+   * pre-digested trend summary (`trendBias`, S/R levels) for the confluence scorers; this one
+   * carries the *full* `StrategyMarketContext` of a slower bar -- its candle, indicators, patterns
+   * -- with no information loss, so a research strategy can record slower-timeframe covariates
+   * without a digest deciding in advance which of them matter.
+   *
+   * Optional and additive: the incumbent strategies and every existing `rawContext` never read it,
+   * so their behaviour and their frozen definition hashes are unchanged. The producer must honour
+   * the same anti-lookahead rule as everything else -- an attached bar must have
+   * `closeTime <= decisionAt` -- which `findCompletedBefore` enforces in SQL.
+   */
+  higherTimeframeContexts?: Partial<Record<HistoricalTimeframe, StrategyMarketContext>>;
 }
 
 export interface StrategyMarketContextRepository {

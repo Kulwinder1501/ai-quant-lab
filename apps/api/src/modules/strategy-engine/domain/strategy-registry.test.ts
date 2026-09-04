@@ -50,20 +50,17 @@ describe("strategy registry", () => {
     expect(new StrategyClass()).not.toBe(new StrategyClass());
   });
 
-  it("trades the pattern confluence scalp short-only, on its own 36-trade long record", () => {
+  it("disables the pattern confluence scalp entirely, on its full losing record", () => {
     /*
-     * Measured 2026-09-02 over every closed 5m paper trade on this strategy:
-     *
-     *   5m SHORT   32 trades   50.0% win   +Rs   424
-     *   5m LONG    36 trades   36.1% win   -Rs 8,531
-     *
-     * Close to identical to the index scalp's split, which is suggestive rather than confirmatory --
-     * both are built on the same momentum architecture, so it is plausibly one flaw seen twice. The
-     * long cell does not need that argument: it loses on its own 36 trades.
+     * Short-only from 2026-09-02, then both sides disabled 2026-09-03. The short cell that "nothing
+     * measured argued against" (+Rs 424 over 32 trades) turned: over the full live record the
+     * strategy is -Rs 10,209 (78 trades, all in AutoBot-Sniper), 23% of the account's total loss.
+     * Its sibling `momentum-scalp-index` was disabled the same day for the same structural cost
+     * reason, so keeping this near-identical strategy running would re-learn a known loss.
      */
     const patternScalp = requireRegisteredStrategy("momentum-scalp-pattern");
 
-    expect(strategyExecutableSides(patternScalp)).toEqual(["SHORT"]);
+    expect(strategyExecutableSides(patternScalp)).toEqual([]);
   });
 
   it("disables the v2 pattern scalp entirely, on asymmetric evidence", () => {
@@ -90,19 +87,18 @@ describe("strategy registry", () => {
     expect(v2.registration.strategyKey).toBe("momentum-scalp-pattern-v2");
   });
 
-  it("trades the index scalp short-only, because its long side is a measured loser", () => {
+  it("disables the index scalp entirely, once its short side turned too", () => {
     /*
-     * Measured 2026-09-02 over every closed paper trade on this strategy:
-     *
-     *   5m SHORT   93 trades   47.3% win   +Rs  1,384
-     *   5m LONG    62 trades   35.5% win   -Rs 13,414
-     *
-     * The long side accounts for the whole of the loss and is negative on almost every session in
-     * the record. No edge is claimed for short; this narrows a measured loser.
+     * Short-only from 2026-09-02 (long was -Rs 13,414 over 62), then both sides disabled 2026-09-03.
+     * The short cell was retained on its own record (+Rs 1,384 over 93) until that record turned:
+     * over the full history the strategy is -Rs 33,449 across both indices, 74% of the account's
+     * total loss and the largest single source of the bleed, more than half of it fees. The research
+     * verdict had already closed the architecture; the live short has now failed on its own terms.
      */
     const indexScalp = requireRegisteredStrategy("momentum-scalp-index");
 
-    expect(strategyExecutableSides(indexScalp)).toEqual(["SHORT"]);
+    expect(strategyExecutableSides(indexScalp)).toEqual([]);
+    expect(indexScalp.terminalResearchAcknowledgement?.disposition).toMatch(/^DISABLED/);
   });
 
   it("restricts exactly the two strategies with a measured losing long side, and no others", () => {
