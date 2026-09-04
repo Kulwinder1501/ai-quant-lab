@@ -15,6 +15,8 @@ import {
   type HigherTimeframeResolverOptions,
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
+import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
+import { ICT_STRUCTURE_STRATEGY_KEY } from "../../modules/technical-analysis/domain/ict/config.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
 
@@ -65,6 +67,21 @@ class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository
   async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
     const contexts = await this.inner.listContexts(input);
     return attachHigherTimeframes(contexts, { ...defaultHigherTimeframeResolverOptions, buckets: this.buckets });
+  }
+}
+
+/**
+ * Wraps the market-data repository to attach the causal ICT composite snapshot
+ * to every context after loading, so the `ict-structure-v1` strategy can read
+ * its four-pillar state. The snapshot state lives here in the replay builder,
+ * never in the strategy instance, exactly as the live path will persist it per
+ * source bar and load it back into the context.
+ */
+class IctDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(private readonly inner: BacktestMarketDataRepository) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    return decorateContextsWithIct(await this.inner.listContexts(input));
   }
 }
 
@@ -139,12 +156,17 @@ async function main(): Promise<void> {
 
     const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
-    const marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
+    let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
       : new HigherTimeframeDecoratedMarketData(
         new PostgresBacktestMarketDataRepository(database),
         higherTimeframeBuckets,
       );
+    // The ICT strategy reads its four-pillar snapshot from the context; attach it
+    // in the replay builder. Incumbent strategies never see this decoration.
+    if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
+      marketData = new IctDecoratedMarketData(marketData);
+    }
 
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),

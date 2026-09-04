@@ -45,20 +45,29 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     const { structure, zones, sessionLevels, bias, liquidity, coverage } = ict;
 
-    // Pillar Gate 1: Check coverage states
+    // Pillar Gate 1: every coverage input must be COMPLETE. Both UNKNOWN
+    // (evidence absent/ambiguous) and NOT_COVERED (engine never ran) fail
+    // closed — missing or ambiguous state is never treated as permission.
     if (
       coverage.structure !== "COMPLETE" ||
       coverage.bias !== "COMPLETE" ||
       coverage.zones !== "COMPLETE" ||
-      coverage.sessionLevels === "NOT_COVERED"
+      coverage.sessionLevels !== "COMPLETE" ||
+      coverage.liquidity !== "COMPLETE" ||
+      coverage.htf !== "COMPLETE"
     ) {
       return [];
     }
 
-    // Pillar Gate 2: Directional Alignment
+    // Pillar Gate 2: Directional Alignment (bias + structure agree)
     const isBullish = bias.bias === "BULLISH" && structure.trend === "BULLISH";
     const isBearish = bias.bias === "BEARISH" && structure.trend === "BEARISH";
     if (!isBullish && !isBearish) return [];
+
+    // Pillar Gate 2b: Fractal alignment. The HTF bias is a required pillar; if
+    // it is present it must agree with the intended direction, otherwise the
+    // fractal objective and the local setup disagree and there is no trade.
+    if (ict.htfBias && ict.htfBias !== bias.bias) return [];
 
     // Pillar Gate 3: Liquidity Status
     if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];
