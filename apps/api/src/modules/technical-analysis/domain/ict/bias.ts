@@ -93,9 +93,16 @@ export class IctBiasTracker {
       } else if (structure.trend === "BEARISH") {
         bias = "BEARISH";
         reasons.push("Confirmed Bearish Market Structure (BOS/LH/LL)");
+      } else if (dailyTemplate === "UNKNOWN") {
+        // No sweep, no structural trend, and too little session history to
+        // resolve the intraday path: evidence is absent, not directionless.
+        bias = "UNKNOWN";
+        reasons.push("Insufficient session history to resolve path or structure -> bias unknown");
       } else {
+        // The session path has formed and structure is genuinely ranging: the
+        // engine ran on sufficient evidence and found no directional edge.
         bias = "NEUTRAL";
-        reasons.push("Market structure is chopping / unconfirmed");
+        reasons.push("Session path formed but structure is ranging -> no directional edge");
       }
     }
 
