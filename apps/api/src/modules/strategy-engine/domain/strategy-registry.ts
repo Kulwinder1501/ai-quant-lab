@@ -181,18 +181,26 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      *
      * No edge is claimed for short. This narrows a measured loser; it does not promote the remainder.
      */
-    executableSides: ["SHORT"],
+    // Disabled entirely 2026-09-03 -- both sides, not a side restriction. The short cell that
+    // justified keeping 5m enabled has turned: measured over the whole live record the strategy is
+    // -Rs 33,449 net across both indices (299 trades) and 74% of the account's entire loss, more
+    // than half of it fees against a gross of roughly -Rs 13k. The -Rs 6,189 adverse-trend morning
+    // noted below was the start of that turn, not an outlier. This is the largest single source of
+    // the bleed; disabling it idles AutoBot-Classic (its only strategy) and Sniper's residual index
+    // trades. Registered, so idea generation, the research twin and this reasoning survive.
+    executableSides: [],
     terminalResearchAcknowledgement: {
       researchStrategyKey: "index-v3-research",
       closureReason: "horizon sweep returned NO_VIABLE_HORIZON; both width and holding period exhausted",
       disposition:
-        "ENABLED (short only). The research verdict closes this architecture under the harness's "
-        + "canonical geometry, where "
-        + "both bracket width and holding horizon were swept. It is not a measurement of the live 5m "
-        + "short cell, which is separately positive over 93 trades (+Rs 1,384, 47.3% win). The long "
-        + "side, which the research verdict fits, was disabled on 2026-09-02 (-Rs 13,414 over 62). "
-        + "Short is retained on its own live record with no edge claimed, and is the first thing to "
-        + "drop if that record turns.",
+        "DISABLED (both sides) 2026-09-03. Short was retained on its own live record until that "
+        + "record turned. Measured over the full history the strategy is -Rs 33,449 across both "
+        + "indices, 74% of the account's total loss, more than half of it fees. The research verdict "
+        + "already closed this architecture under the harness's canonical geometry (both bracket "
+        + "width and holding horizon swept); the live short cell has now failed on its own terms too, "
+        + "so the last reason to keep it enabled is gone. Long was disabled 2026-09-02 (-Rs 13,414 "
+        + "over 62). The research twin keeps measuring the population ungated, so the decision stays "
+        + "falsifiable.",
     },
   },
   {
@@ -212,11 +220,16 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * findings. Either way the long cell is the loser on its own 36 trades and does not need the
      * cross-strategy argument to justify disabling it.
      *
-     * Short is left enabled at +Rs 424 over 32 trades, which is barely distinguishable from zero. No
-     * edge is claimed; it is retained because nothing measured argues against it, and it is a
-     * candidate for review well before the index short is.
+     * Short was left enabled at +Rs 424 over 32 trades, barely distinguishable from zero.
+     *
+     * Disabled entirely 2026-09-03 -- both sides. Measured over the full live record this strategy is
+     * -Rs 10,209 net (78 trades, all in AutoBot-Sniper), 23% of the account's total loss, and the
+     * short cell "nothing measured argued against" now has a losing record of its own. Its near-
+     * identical sibling `momentum-scalp-index` was disabled the same day for the same structural cost
+     * reason (74% of the loss); keeping this one running would be re-learning that loss on a second
+     * account. Registered, so idea generation, the research twin and this reasoning survive.
      */
-    executableSides: ["SHORT"],
+    executableSides: [],
   },
   {
     registration: momentumScalpPatternStrategyV2Registration,

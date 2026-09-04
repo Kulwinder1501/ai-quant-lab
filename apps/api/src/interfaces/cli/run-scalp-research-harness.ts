@@ -219,7 +219,27 @@ async function main(): Promise<void> {
         };
 
         const enrichedReference = await attachObservations(reference);
-        const contexts = [enrichedReference];
+        /*
+         * Attach the most recent *closed* 5m context, for `momentum-v6-research`.
+         *
+         * V6 runs on 1m and records slower-timeframe covariates. `findCompletedAt` (used just below
+         * for the 3m/5m strategy contexts) matches an exact close-time and so lands a 5m bar only on
+         * a 5m boundary; between boundaries a 1m decision still has a most-recent-closed 5m bar, and
+         * that is what V6 needs. `findCompletedBefore` returns it under `close_time <= decisionAt`,
+         * and the assert repeats that guard at the attach site so a query regression cannot leak an
+         * unclosed 5m bar into a 1m signal. Attached to the enriched reference so the 1m entry of
+         * `contexts` and `reference1mContext` stay the same object.
+         */
+        const htf5mContext = await contextRepository.findCompletedBefore({
+          instrumentId: instrument.id, timeframe: "5m", asOf: decisionAt,
+        });
+        if (htf5mContext && htf5mContext.candle.closeTime.getTime() > decisionAt.getTime()) {
+          throw new Error(`HTF_CONTEXT_LOOKAHEAD: 5m bar closed after the 1m decision at ${decisionAt.toISOString()}.`);
+        }
+        const referenceWithHtf = htf5mContext
+          ? { ...enrichedReference, higherTimeframeContexts: { "5m": htf5mContext } }
+          : enrichedReference;
+        const contexts = [referenceWithHtf];
         for (const timeframe of ["3m", "5m"] as const) {
           const context = await contextRepository.findCompletedAt({
             instrumentId: instrument.id, timeframe, closeTime: reference.candle.closeTime,
@@ -261,10 +281,10 @@ async function main(): Promise<void> {
           });
         }
         const result = await capture.execute({
-          // The enriched one, so the reference and the 1m entry of `contexts` are the same object.
-          // Passing the bare `reference` here would give an adapter two views of one bar that
-          // disagree about whether observations were loaded.
-          reference1mContext: enrichedReference,
+          // The enriched-and-HTF-attached one, so the reference and the 1m entry of `contexts` are
+          // the same object. Passing the bare `reference` here would give an adapter two views of
+          // one bar that disagree about whether observations and HTF context were loaded.
+          reference1mContext: referenceWithHtf,
           strategyContexts: contexts,
           sessionCloseAt: session.closesAt,
           tickSize: Number(instrument.tickSize),

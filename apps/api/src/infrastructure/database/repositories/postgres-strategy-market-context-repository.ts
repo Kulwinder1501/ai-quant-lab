@@ -141,6 +141,36 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     return candle ? this.assembleContext(input, candle) : null;
   }
 
+  /**
+   * The most recent completed context whose candle closed at or before `asOf`.
+   *
+   * The anti-lookahead fetch for higher-timeframe research covariates. At a 1m decision instant the
+   * relevant 5m context is the last 5m bar to have *closed*, which `findCompletedAt` (exact
+   * close-time match) returns only on a 5m boundary and misses at every 1m bar in between. The
+   * `close_time <= $3` guard is the same one `findRegime` uses, so a slower bar that has not closed
+   * by the decision instant can never be returned into a faster signal.
+   */
+  async findCompletedBefore(input: {
+    instrumentId: string;
+    timeframe: string;
+    asOf: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time <= $3
+      ORDER BY candles.close_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.asOf]);
+    const candle = candleResult.rows[0];
+    return candle
+      ? this.assembleContext({ instrumentId: input.instrumentId, timeframe: input.timeframe }, candle)
+      : null;
+  }
+
   async listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]> {
     // A defensive floor: a non-positive limit would otherwise become `LIMIT 0`
     // and silently scan nothing, which reads as "no setups found".
