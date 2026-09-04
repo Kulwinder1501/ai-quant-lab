@@ -157,4 +157,11 @@ describe("model prediction HTTP routes", () => {
     expect(mutationAttempt).toEqual({ status: 404, body: { error: "Route not found" } });
     expect(calls).toHaveLength(0);
   });
+
+  it("keeps Stock Intelligence HTTP off until the Gate 7 flag is enabled", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const { database } = predictionDatabase();
+    const response = await getJson(createApp({ database }), "/api/v1/stock-intelligence/outlook?query=RELIANCE");
+    expect(response).toEqual({ status: 404, body: { error: "Route not found" } });
+  });
 });

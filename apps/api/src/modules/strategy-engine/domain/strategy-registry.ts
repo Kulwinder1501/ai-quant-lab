@@ -13,6 +13,10 @@ import {
   momentumScalpPatternStrategyV2Registration,
 } from "./momentum-scalp-pattern-strategy.js";
 import { TrendBreakoutStrategy, trendBreakoutStrategyRegistration } from "./trend-breakout-strategy.js";
+import {
+  IctStructureStrategy,
+  ictStructureStrategyRegistration,
+} from "./ict-structure-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -250,6 +254,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "reasoning survive and the research twin keeps measuring the population ungated. Not marked "
         + "TERMINAL: the generation-2 question is unanswered, not closed.",
     },
+  },
+  {
+    registration: ictStructureStrategyRegistration,
+    StrategyClass: IctStructureStrategy,
+    supportedTimeframes: ["5m", "15m"],
   },
 ];
 

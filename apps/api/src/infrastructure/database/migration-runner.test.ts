@@ -62,6 +62,58 @@ describe("database migrations", () => {
     expect(second.queries).not.toContain("BEGIN");
   });
 
+  it("creates the stock intelligence append-only schema without replacing instruments.id", () => {
+    const migration = migrations.find((m) => m.id === "099-stock-intelligence-canonical-model");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("CREATE SCHEMA IF NOT EXISTS stock_intelligence");
+    expect(migration!.sql).toContain("stock_intelligence.signals");
+    expect(migration!.sql).toContain("fundamental_snapshots");
+    expect(migration!.sql).toContain("current_roster_snapshot");
+    expect(migration!.sql).not.toContain("IND_EQUITY_");
+  });
+
+  it("identifies corporate actions uniquely so ingest is idempotent", () => {
+    const migration = migrations.find((m) => m.id === "100-stock-intelligence-corporate-action-identity");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("stock_intelligence.corporate_actions");
+    expect(migration!.sql).toContain("instrument_id, action_type, ex_date");
+  });
+
+  it("adds a resumable replay cursor and idempotent yahoo daily-bar identity", () => {
+    const migration = migrations.find((m) => m.id === "101-stock-intelligence-replay-harness");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("replay_pair_results");
+    expect(migration!.sql).toContain("yahoo_daily_bar");
+    expect(migration!.sql).toContain("monthly_data_replay");
+    expect(migration!.sql).not.toContain("IND_EQUITY_");
+  });
+
+  it("identifies derived features so replay is idempotent", () => {
+    const migration = migrations.find((m) => m.id === "102-stock-intelligence-feature-identity");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("derived_features");
+    expect(migration!.sql).toContain("feature_name, effective_at, feature_version");
+    expect(migration!.sql).toContain("signal_name, effective_at, engine_version");
+  });
+
+  it("stores immutable prediction snapshots and decay marks without touching the scanner watchlist", () => {
+    const migration = migrations.find((m) => m.id === "103-stock-intelligence-prediction-snapshots");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("prediction_snapshots");
+    expect(migration!.sql).toContain("prediction_decay_marks");
+    expect(migration!.sql).toContain("investor_watchlist");
+    expect(migration!.sql).toContain("reject_mutation_prediction_snapshots");
+    expect(migration!.sql).not.toContain("CREATE TABLE watchlist");
+  });
+
+  it("stores append-only Gate 7 acceptance reports", () => {
+    const migration = migrations.find((m) => m.id === "104-stock-intelligence-gate7-reports");
+    expect(migration).toBeDefined();
+    expect(migration!.sql).toContain("gate7_reports");
+    expect(migration!.sql).toContain("reject_mutation_gate7_reports");
+    expect(migration!.sql).toContain("REFERENCES stock_intelligence.replay_jobs");
+  });
+
   it("verifies migration 065 expands check constraints additively for candlestick codes and chart patterns", () => {
     const migration065 = migrations.find((m) => m.id === "065-expand-additional-patterns");
     expect(migration065).toBeDefined();

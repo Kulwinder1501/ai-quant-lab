@@ -21,6 +21,7 @@ import {
 import { buildHttpDependencies } from "./dependencies.js";
 import { registerFyersAuthRoutes } from "./routes/fyers-auth.routes.js";
 import { registerHealthRoutes } from "./routes/health.routes.js";
+import { registerStockIntelligenceRoutes } from "../../modules/stock-intelligence/interfaces/http/stock-intelligence.routes.js";
 
 export interface ApplicationDependencies {
   database: DatabaseQueryable;
@@ -72,6 +73,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   registerBacktestingRoutes(app, dependencies);
   registerMarketDataRoutes(app, dependencies);
   registerNewsRoutes(app, dependencies);
+  registerStockIntelligenceRoutes(app, dependencies, configuration.STOCK_INTELLIGENCE_API_ENABLED);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

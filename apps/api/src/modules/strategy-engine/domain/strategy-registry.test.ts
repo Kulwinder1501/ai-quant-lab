@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MomentumScalpPatternStrategy, MomentumScalpPatternStrategyV2 } from "./momentum-scalp-pattern-strategy.js";
 import { MomentumScalpStrategy } from "./momentum-scalp-strategy.js";
 import { TrendBreakoutStrategy } from "./trend-breakout-strategy.js";
+import { IctStructureStrategy } from "./ict-structure-strategy.js";
 import {
   findRegisteredStrategy,
   registeredStrategies,
@@ -13,11 +14,19 @@ import {
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
-    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2"]);
+    expect(strategyKeys()).toEqual([
+      "trend-breakout",
+      "momentum-scalp",
+      "momentum-scalp-index",
+      "momentum-scalp-pattern",
+      "momentum-scalp-pattern-v2",
+      "ict-structure-v1",
+    ]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
+    expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {
@@ -166,7 +175,8 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
       .map((strategy) => strategy.registration.strategyKey);
 
     expect(fifteenMinute).toContain("trend-breakout");
-    expect(fifteenMinute).toHaveLength(1);
+    expect(fifteenMinute).toContain("ict-structure-v1");
+    expect(fifteenMinute).toHaveLength(2);
   });
 
   it("owns every timeframe above the scalp band, and nothing evaluates them", () => {

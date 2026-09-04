@@ -13,8 +13,10 @@ import {
   Activity, 
   Folder, 
   FileCode, 
+  LineChart,
   Shield 
 } from "lucide-react";
+import { isStockIntelligenceUiEnabled } from "../../features/stock-intelligence/enabled";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -77,6 +79,15 @@ export function CommandPalette() {
             >
               <FileCode className="h-4 w-4" /> Strategies
             </Command.Item>
+
+            {isStockIntelligenceUiEnabled() && (
+            <Command.Item 
+              onSelect={() => { router.push('/stock-intelligence'); close(); }}
+              className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
+            >
+              <LineChart className="h-4 w-4" /> Stock Intelligence
+            </Command.Item>
+            )}
 
             <Command.Item 
               onSelect={() => { router.push('/ai-models'); close(); }}

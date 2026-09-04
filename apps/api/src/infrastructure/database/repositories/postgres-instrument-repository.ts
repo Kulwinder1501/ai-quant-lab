@@ -120,6 +120,13 @@ export class PostgresInstrumentRepository implements InstrumentRepository {
     return result.rows[0] ? toInstrument(result.rows[0]) : null;
   }
 
+  async findByIsin(isin: string): Promise<Instrument[]> {
+    const result = await this.database.query<InstrumentRow>(`
+      SELECT ${returningColumns} FROM instruments WHERE upper(isin) = upper($1) ORDER BY exchange, symbol
+    `, [isin.trim()]);
+    return result.rows.map(toInstrument);
+  }
+
   async listActive(): Promise<Instrument[]> {
     const result = await this.database.query<InstrumentRow>(`
       SELECT ${returningColumns} FROM instruments WHERE is_active = TRUE ORDER BY exchange, symbol
