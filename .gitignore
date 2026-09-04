@@ -31,3 +31,4 @@ backups/
 # (SCHEDULER_LOG_FILE in docker-compose.v2.yml). Read after an incident, never committed --
 # machine output that can run to tens of megabytes.
 logs/
+video_info.json

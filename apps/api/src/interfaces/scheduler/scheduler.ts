@@ -347,6 +347,7 @@ async function main(): Promise<void> {
         "--from", todayIst,
       ]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
+      await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
     });
   });
 

@@ -43,6 +43,15 @@ const httpConfigurationSchema = z.object({
 
   /** Per-IP state-changing requests accepted per minute. */
   API_MUTATION_RATE_LIMIT: z.coerce.number().int().positive().default(120),
+
+  /**
+   * Stock Intelligence HTTP surface. Default off until Gate 7. The dashboard tab
+   * is gated by the matching NEXT_PUBLIC flag.
+   */
+  STOCK_INTELLIGENCE_API_ENABLED: z
+    .string()
+    .default("false")
+    .transform((value) => value.trim().toLowerCase() === "true" || value.trim() === "1"),
 });
 
 export type HttpConfiguration = z.infer<typeof httpConfigurationSchema>;
@@ -74,6 +83,15 @@ const environmentSchema = httpConfigurationSchema.extend({
   GIFT_NIFTY_YAHOO_SYMBOL: z.string().optional(),
   /** Optional override for the provenance-filtered historical FII/DII archive. */
   FII_DII_HISTORY_URL: z.string().url().optional().or(z.literal("").transform(() => undefined)),
+
+  /**
+   * Stock Intelligence Gate 1 configuration. Defaults keep the subsystem off the HTTP
+   * surface until Gate 7. Thresholds are parameters, not engine constants.
+   */
+  STOCK_INTELLIGENCE_STALE_DATA_6M_DAYS: z.coerce.number().int().positive().default(30),
+  STOCK_INTELLIGENCE_STALE_DATA_12M_DAYS: z.coerce.number().int().positive().default(60),
+  STOCK_INTELLIGENCE_FUNDAMENTAL_COMPLETENESS_MIN: z.coerce.number().min(0).max(1).default(0.7),
+  STOCK_INTELLIGENCE_MIN_EFFECTIVE_ANALOGUES: z.coerce.number().int().positive().default(50),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

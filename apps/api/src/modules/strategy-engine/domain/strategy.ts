@@ -12,6 +12,7 @@ import type {
 } from "../../pattern-intelligence/domain/observation-summary.js";
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
+import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
 export type TradeSide = "LONG" | "SHORT";
 export type TradeIdeaStatus = "PROPOSED" | "ACCEPTED" | "EXPIRED" | "REJECTED";
@@ -107,6 +108,11 @@ export interface StrategyMarketContext {
    * `closeTime <= asOf`, or a 60m bar that has not closed leaks the future into a 5m signal.
    */
   higherTimeframes?: readonly HigherTimeframeContext[];
+  /**
+   * Versioned ICT Composite Snapshot (Pillars 1-4: Structure, Bias, Zones, Liquidity).
+   * Populated per closed bar strictly causally without lookahead.
+   */
+  ictSnapshot?: IctStateCompositeSnapshot;
   /**
    * Raw higher-timeframe contexts keyed by timeframe, when a caller has loaded them.
    *

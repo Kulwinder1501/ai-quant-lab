@@ -123,8 +123,10 @@ export class GenerateTradeIdeas {
         }
 
         const strategy = new StrategyClass();
-        let proposals = strategy.evaluate(context, strategyVersion.configuration)
-          .map((proposal) => applySmcConfluenceToProposal(context, proposal));
+        const rawProposals = strategy.evaluate(context, strategyVersion.configuration);
+        let proposals = registration.strategyKey === "ict-structure-v1"
+          ? rawProposals
+          : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
         /*
          * The strategy's own declared sides first, then the caller's optional narrowing.
          *
@@ -246,8 +248,10 @@ export class GenerateTradeIdeas {
         let shortIdeas = 0;
 
         for (const context of contexts) {
-          let proposals = strategy.evaluate(context, strategyVersion.configuration)
-            .map((proposal) => applySmcConfluenceToProposal(context, proposal));
+          const rawProposals = strategy.evaluate(context, strategyVersion.configuration);
+          let proposals = registration.strategyKey === "ict-structure-v1"
+            ? rawProposals
+            : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
           // Same rule as generation, so a scan cannot report candidates on a side production
           // would refuse to trade.
           proposals = proposals.filter((proposal) =>
