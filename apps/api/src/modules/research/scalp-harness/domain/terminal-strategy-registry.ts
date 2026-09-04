@@ -170,6 +170,28 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     },
   },
   {
+    /*
+     * V5 with the most recent closed 5m context recorded alongside each 1m decision, and nothing
+     * else changed -- same operational twin, same candidate logic, so the same implementation
+     * checksum. A sibling cohort of V5 (as `pattern-v4-research-v2` is of `pattern-v4-research`),
+     * capturing identical setups with more recorded about each, to ask whether slower-timeframe
+     * information has discriminating power. RESEARCH: it has captured nothing yet, and no verdict
+     * exists for or against it.
+     */
+    strategyKey: "momentum-v6-research",
+    operationalStrategyKey: "momentum-scalp",
+    researchVersion: 6,
+    researchStatus: "RESEARCH",
+    productionEligibility: "NOT_YET_ELIGIBLE",
+    closureReason: null,
+    pinnedDefinitionHash: "be3163e853b89248eb7cad9a93530d9e1ad366b4a3a41e9ee645c6ab819ea658",
+    lineage: {
+      parentStrategyKey: "momentum-v5-research",
+      parentResearchVersion: 5,
+      parentTerminalReason: null,
+    },
+  },
+  {
     strategyKey: "index-v3-research",
     operationalStrategyKey: "momentum-scalp-index",
     researchVersion: 3,
