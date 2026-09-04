@@ -57,5 +57,12 @@ export interface IctStateCompositeSnapshot {
   readonly sessionLevels: import("./session-levels.js").SessionLevelsSnapshot;
   readonly bias: import("./bias.js").IctBiasSnapshot;
   readonly liquidity: import("./liquidity.js").IctLiquiditySnapshot;
+  /**
+   * Direction of the higher-timeframe (fractal) bias supplied to the engine, or
+   * null when no HTF projection was available. Carried separately from the local
+   * bias so the strategy can require fractal alignment without the HTF value
+   * silently overwriting the local one.
+   */
+  readonly htfBias: import("./bias.js").IctBiasDirection | null;
   readonly coverage: PillarCoverage;
 }

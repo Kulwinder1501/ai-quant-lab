@@ -52,4 +52,29 @@ describe("IctCompositeEngine", () => {
     expect(snap.coverage.sessionLevels).toBe("COMPLETE");
     expect(snap.coverage.bias).toBe("COMPLETE");
   });
+
+  it("reports UNKNOWN (not NEUTRAL) coverage before there is sufficient evidence", () => {
+    const engine = new IctCompositeEngine();
+    // A single opening candle: no confirmed pivots, no prior session, no HTF.
+    const candles: CausalCandle[] = [makeIstCandle("2026-01-05", 9, 15, 100, 110, 95, 105)];
+    const snap = engine.processCandle(candles, 0);
+
+    // Evidence is absent, so structure/bias coverage is UNKNOWN and the value
+    // is not silently collapsed to NEUTRAL (invariant 2: UNKNOWN != NEUTRAL).
+    expect(snap.coverage.structure).toBe("UNKNOWN");
+    expect(snap.coverage.bias).toBe("UNKNOWN");
+    expect(snap.bias.bias).toBe("UNKNOWN");
+    expect(snap.bias.bias).not.toBe("NEUTRAL");
+    // No prior session and no HTF projection: genuinely not-covered, not unknown.
+    expect(snap.coverage.sessionLevels).toBe("NOT_COVERED");
+    expect(snap.coverage.htf).toBe("NOT_COVERED");
+  });
+
+  it("distinguishes an UNKNOWN htf projection from a missing one", () => {
+    const engine = new IctCompositeEngine();
+    const candles: CausalCandle[] = [makeIstCandle("2026-01-05", 9, 15, 100, 110, 95, 105)];
+    expect(engine.processCandle(candles, 0, "UNKNOWN").coverage.htf).toBe("UNKNOWN");
+    expect(engine.processCandle(candles, 0, "BULLISH").coverage.htf).toBe("COMPLETE");
+    expect(engine.processCandle(candles, 0).coverage.htf).toBe("NOT_COVERED");
+  });
 });

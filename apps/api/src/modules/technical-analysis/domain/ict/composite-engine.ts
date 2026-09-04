@@ -44,30 +44,35 @@ export class IctCompositeEngine {
     const sessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
     const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels);
 
-    // If HTF bias is provided, it can reinforce or override local bias
-    const effectiveBias =
-      htfBias && htfBias !== "UNKNOWN" && htfBias !== "NEUTRAL"
-        ? { ...bias, bias: htfBias }
-        : bias;
-
+    // HTF bias is a separate (fractal) pillar. It is carried alongside the local
+    // bias and never overwrites its value: overwriting left the reason codes
+    // describing the opposite direction from the reported bias. Directional
+    // alignment between the two is enforced downstream in the strategy gate.
     const liquidity = this.liquidityResolver.resolve(
       current.close,
-      effectiveBias,
+      bias,
       struct,
       zones,
       sessionLevels
     );
 
+    // Coverage is evidence sufficiency, carried independently of directional
+    // value (invariant: UNKNOWN != NEUTRAL). NEUTRAL is a value the engine
+    // reached on sufficient evidence and stays COMPLETE so it can reach the
+    // gate; only absent/incomplete/ambiguous evidence is UNKNOWN/NOT_COVERED.
+    const structureWarmed = struct.confirmedPivots.length > 0;
     const coverage: PillarCoverage = {
-      structure: struct.trend !== "NEUTRAL" ? "COMPLETE" : "UNKNOWN",
-      zones: "COMPLETE",
+      structure: structureWarmed ? "COMPLETE" : "UNKNOWN",
+      zones: currentIndex >= 2 ? "COMPLETE" : "UNKNOWN",
       sessionLevels: sessionLevels.levels !== null ? "COMPLETE" : "NOT_COVERED",
-      bias:
-        effectiveBias.bias !== "UNKNOWN" && effectiveBias.bias !== "NEUTRAL"
-          ? "COMPLETE"
-          : "UNKNOWN",
+      bias: bias.bias !== "UNKNOWN" ? "COMPLETE" : "UNKNOWN",
       liquidity: liquidity.primaryTarget !== null ? "COMPLETE" : "NOT_COVERED",
-      htf: htfBias ? "COMPLETE" : "NOT_COVERED",
+      htf:
+        htfBias === undefined
+          ? "NOT_COVERED"
+          : htfBias === "UNKNOWN"
+            ? "UNKNOWN"
+            : "COMPLETE",
     };
 
     return {
@@ -78,8 +83,9 @@ export class IctCompositeEngine {
       structure: struct,
       zones,
       sessionLevels,
-      bias: effectiveBias,
+      bias,
       liquidity,
+      htfBias: htfBias ?? null,
       coverage,
     };
   }

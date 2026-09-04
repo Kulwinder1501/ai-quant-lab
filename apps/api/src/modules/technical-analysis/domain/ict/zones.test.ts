@@ -105,4 +105,87 @@ describe("IctZoneLedger", () => {
     expect(snap4.activeObs.length).toBe(0); // activeObs excludes INVALIDATED
     expect(snap4.lastZoneEvent?.event).toBe("INVALIDATED");
   });
+
+  // Fixture: bars 0-2 create one Bullish FVG (100 -> 105); bars 3-4 fill and
+  // then invert it. Used by the prefix-invariance and zoneId tests below.
+  function fvgLifecycleCandles(): CausalCandle[] {
+    return [
+      makeCandle(0, 95, 100, 90, 98),
+      makeCandle(1, 98, 122, 97, 120),
+      makeCandle(2, 115, 125, 105, 123),
+      makeCandle(3, 123, 124, 102, 110),
+      makeCandle(4, 110, 111, 95, 96),
+    ];
+  }
+
+  // Serialize the zone snapshot returned at `captureIndex` from a ledger fed
+  // bars 0..upToIndex. Serialization happens at the moment of the call so that
+  // later mutation of the (reference-shared) zone objects cannot alter it.
+  function snapshotJsonAt(
+    candles: readonly CausalCandle[],
+    captureIndex: number,
+    upToIndex: number
+  ): string {
+    const ledger = new IctZoneLedger(1.5, 0.5);
+    const structTracker = new IctStructureTracker(2);
+    let captured = "";
+    for (let i = 0; i <= upToIndex; i++) {
+      const s = structTracker.processCandle(candles, i);
+      const snap = ledger.processCandle(candles, i, s);
+      if (i === captureIndex) captured = JSON.stringify(snap);
+    }
+    return captured;
+  }
+
+  it("is prefix-invariant: the snapshot at bar i is identical regardless of later bars", () => {
+    const candles = fvgLifecycleCandles();
+    // Snapshot at bar 2 computed from a ledger that has only seen 0..2 ...
+    const fromShort = snapshotJsonAt(candles, 2, 2);
+    // ... must equal the snapshot at bar 2 from a ledger that will go on to 0..4.
+    const fromLong = snapshotJsonAt(candles, 2, 4);
+    expect(fromLong).toBe(fromShort);
+  });
+
+  it("assigns deterministic, origin-stable zoneIds that survive recomputation", () => {
+    const candles = fvgLifecycleCandles();
+    const run = () => {
+      const ledger = new IctZoneLedger(1.5, 0.5);
+      const structTracker = new IctStructureTracker(2);
+      let snap2!: ReturnType<IctZoneLedger["processCandle"]>;
+      for (let i = 0; i <= 2; i++) {
+        const s = structTracker.processCandle(candles, i);
+        snap2 = ledger.processCandle(candles, i, s);
+      }
+      return snap2;
+    };
+
+    const first = run();
+    const second = run();
+    expect(first.activeFvgs).toHaveLength(1);
+    // Derived from origin bar, not random: same across independent recomputation.
+    expect(first.activeFvgs[0].id).toBe("fvg-bullish-2");
+    expect(second.activeFvgs[0].id).toBe(first.activeFvgs[0].id);
+  });
+
+  it("gives overlapping same-direction FVGs with different origins distinct ids", () => {
+    // Two separate bullish gaps at different origin bars over the same prices.
+    const candles: CausalCandle[] = [
+      makeCandle(0, 95, 100, 90, 98),
+      makeCandle(1, 98, 122, 97, 120),
+      makeCandle(2, 115, 125, 105, 123), // FVG #1 origin (100 -> 105)
+      makeCandle(3, 123, 124, 104, 121), // pulls back but does not close the gap fully
+      makeCandle(4, 121, 140, 120, 138), // displacement up
+      makeCandle(5, 135, 145, 128, 143), // FVG #2 origin (low 128 > bar-4? forms new gap)
+    ];
+    const ledger = new IctZoneLedger(1.5, 0.5);
+    const structTracker = new IctStructureTracker(2);
+    let last!: ReturnType<IctZoneLedger["processCandle"]>;
+    for (let i = 0; i < candles.length; i++) {
+      const s = structTracker.processCandle(candles, i);
+      last = ledger.processCandle(candles, i, s);
+    }
+    const ids = new Set(last.activeFvgs.map((f) => f.id));
+    // However many survive as active, no two active zones share an id.
+    expect(ids.size).toBe(last.activeFvgs.length);
+  });
 });

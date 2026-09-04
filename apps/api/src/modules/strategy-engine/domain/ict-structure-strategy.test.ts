@@ -54,7 +54,10 @@ describe("IctStructureStrategy", () => {
         bias: "COMPLETE",
         zones: "COMPLETE",
         sessionLevels: "COMPLETE",
+        liquidity: "COMPLETE",
+        htf: "COMPLETE",
       },
+      htfBias: "BULLISH",
       bias: {
         bias: "BULLISH",
         dailyTemplate: "OLHC",
@@ -99,7 +102,10 @@ describe("IctStructureStrategy", () => {
         bias: "COMPLETE",
         zones: "COMPLETE",
         sessionLevels: "COMPLETE",
+        liquidity: "COMPLETE",
+        htf: "COMPLETE",
       },
+      htfBias: "BULLISH",
       bias: {
         bias: "BULLISH",
         dailyTemplate: "OLHC",
@@ -126,5 +132,73 @@ describe("IctStructureStrategy", () => {
 
     const proposals = strategy.evaluate(makeContext(alignedSnap, 98), { minimumRiskReward: 1.5 });
     expect(proposals).toHaveLength(0);
+  });
+
+  // A fully-covered, four-pillar-aligned LONG setup used as the base for the
+  // per-pillar negative matrix below. Each matrix case degrades exactly one
+  // pillar and asserts the gate fails closed.
+  function alignedLongSnap(): any {
+    return {
+      coverage: {
+        structure: "COMPLETE",
+        bias: "COMPLETE",
+        zones: "COMPLETE",
+        sessionLevels: "COMPLETE",
+        liquidity: "COMPLETE",
+        htf: "COMPLETE",
+      },
+      htfBias: "BULLISH",
+      bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 105 } },
+      structure: { trend: "BULLISH" },
+      zones: { activeObs: [{ id: "ob-1", state: "TOUCHED" }], activeFvgs: [] },
+      sessionLevels: { levels: { pdh: 120, pdl: 90 }, lastSweepEvent: null },
+      liquidity: {
+        alignmentStatus: "ALIGNED_LONG",
+        primaryTarget: { kind: "ERL_PDH", price: 120 },
+        intermediateTarget: 105,
+        invalidationLevel: 90,
+      },
+    };
+  }
+
+  describe("negative gate matrix: each degraded pillar fails closed", () => {
+    const strategy = new IctStructureStrategy();
+
+    for (const pillar of ["structure", "bias", "zones", "sessionLevels", "liquidity", "htf"] as const) {
+      it(`emits 0 proposals when coverage.${pillar} is UNKNOWN`, () => {
+        const snap = alignedLongSnap();
+        snap.coverage[pillar] = "UNKNOWN";
+        expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(0);
+      });
+
+      it(`emits 0 proposals when coverage.${pillar} is NOT_COVERED`, () => {
+        const snap = alignedLongSnap();
+        snap.coverage[pillar] = "NOT_COVERED";
+        expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(0);
+      });
+    }
+
+    it("emits 0 proposals when HTF bias contradicts the local direction", () => {
+      const snap = alignedLongSnap();
+      snap.htfBias = "BEARISH"; // fractal pillar disagrees
+      expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(0);
+    });
+
+    it("still emits the LONG proposal at the aligned baseline (matrix control)", () => {
+      const snap = alignedLongSnap();
+      expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(1);
+    });
+
+    it("treats a COMPLETE-but-NEUTRAL bias as no-trade at the gate, not as missing evidence", () => {
+      // Coverage is fully COMPLETE (the engine ran on sufficient evidence); the
+      // bias value is NEUTRAL (no directional edge). It must pass the coverage
+      // gate and be refused for lack of direction — never mapped to UNKNOWN.
+      const snap = alignedLongSnap();
+      snap.bias.bias = "NEUTRAL";
+      snap.structure.trend = "NEUTRAL";
+      snap.htfBias = null;
+      expect(snap.coverage.bias).toBe("COMPLETE");
+      expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(0);
+    });
   });
 });
