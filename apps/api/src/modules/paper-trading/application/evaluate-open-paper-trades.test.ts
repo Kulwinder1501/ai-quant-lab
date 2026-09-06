@@ -725,7 +725,7 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
-  it("exits with MOMENTUM_STALL on 5m timeframe if position has stalled for >= 20 mins and not reached +0.5R", async () => {
+  it("exits with MOMENTUM_STALL on 5m timeframe if position has stalled past the cutoff and not reached +0.5R", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
@@ -766,7 +766,68 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
-  it("holds when position has run >= +0.5R even if elapsed time >= 20 mins", async () => {
+  /*
+   * The cutoff itself, pinned from both sides.
+   *
+   * The two tests around this one use 21 elapsed minutes, which satisfies the old 20-minute cutoff
+   * and the current 10-minute one alike, so neither would notice the boundary moving. These two
+   * sit inside the window that only the current cutoff covers: a stall at 12 minutes must now be
+   * cut, and one at 8 minutes must not. Written as a pair on purpose -- a one-sided test passes if
+   * the rule degenerates into cutting everything.
+   */
+  it("cuts a stalled 5m scalp at 12 minutes, inside the window the old 20-minute cutoff let run", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:27:00.000Z"); // 12 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m", openedAt, entryPrice: 180, stopLoss: 150, targetPrice: 225,
+    });
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // 185 is below the 195 that +0.5R would require.
+    const densePremiums = denseReader(sample("2026-08-06T09:26:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings), candleRepository,
+      new FixedImpliedVolatilitySource(0.12), densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitReason: "MOMENTUM_STALL",
+      details: expect.objectContaining({ cutoffMinutes: 10 }),
+    });
+  });
+
+  it("holds a stalled 5m scalp at 8 minutes, before the cutoff", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:23:00.000Z"); // 8 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m", openedAt, entryPrice: 180, stopLoss: 150, targetPrice: 225,
+    });
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:22:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings), candleRepository,
+      new FixedImpliedVolatilitySource(0.12), densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("holds when position has run >= +0.5R even if elapsed time is past the cutoff", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
