@@ -125,8 +125,16 @@ async function main(): Promise<void> {
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
-  const bids = emptySide();
-  const asks = emptySide();
+  /*
+   * Snapshot and delta traffic are counted apart, because pooling them hides the answer.
+   * A snapshot is a full ordered 50-level dump by construction, so it always shows
+   * `num == index` and never looks sparse -- mixing it in would drag the delta reading toward
+   * "nothing to see" no matter what the deltas actually do. Only the delta rows carry evidence.
+   */
+  const stats = {
+    snapshot: { bids: emptySide(), asks: emptySide() },
+    delta: { bids: emptySide(), asks: emptySide() },
+  };
   let packets = 0;
   let snapshots = 0;
 
@@ -164,14 +172,16 @@ async function main(): Promise<void> {
           const decoded = packet as { feeds?: Record<string, unknown>; snapshot?: boolean };
           if (decoded?.feeds) {
             packets += 1;
-            if (decoded.snapshot === true) snapshots += 1;
+            const isSnapshot = decoded.snapshot === true;
+            if (isSnapshot) snapshots += 1;
+            const into = isSnapshot ? stats.snapshot : stats.delta;
             for (const feed of Object.values(decoded.feeds)) {
               const depth = (feed as { depth?: { bids?: unknown; asks?: unknown } }).depth;
               if (Array.isArray(depth?.bids)) {
-                record(bids, depth.bids as Record<string, unknown>[]);
+                record(into.bids, depth.bids as Record<string, unknown>[]);
               }
               if (Array.isArray(depth?.asks)) {
-                record(asks, depth.asks as Record<string, unknown>[]);
+                record(into.asks, depth.asks as Record<string, unknown>[]);
               }
             }
           }
@@ -186,16 +196,26 @@ async function main(): Promise<void> {
     await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
     streamer.close();
 
-    console.info(JSON.stringify({ packets, snapshots, symbols, seconds }));
-    report("bids", bids);
-    report("asks", asks);
-    console.info(packets === 0
-      ? "NO MESSAGES. Market closed, or the contract is dead -- this feed answers a dead "
-        + "subscription with silence rather than an error."
-      : "Read numEqualsArrayIndex together with everSparse. Near 100% with never-sparse messages "
-        + "means num is merely the position and the SDK's indexing is incidentally right, so the "
-        + "corruption is staleness alone and the fix is to clear the book each message. Well under "
-        + "100%, or sparse messages, means num is the book level and keying by it is the fix.");
+    const deltas = packets - snapshots;
+    console.info(JSON.stringify({ packets, snapshots, deltas, symbols, seconds }));
+    report("snapshot.bids", stats.snapshot.bids);
+    report("snapshot.asks", stats.snapshot.asks);
+    report("delta.bids", stats.delta.bids);
+    report("delta.asks", stats.delta.asks);
+
+    if (packets === 0) {
+      console.info("NO MESSAGES. Market closed, or the contract is dead -- this feed answers a "
+        + "dead subscription with silence rather than an error.");
+    } else if (deltas === 0) {
+      console.info("SNAPSHOT ONLY, so this run answers nothing. A snapshot is a full ordered "
+        + "50-level dump by construction and always reads num == index. The corruption arises in "
+        + "incremental updates, so this needs a run during live trading (from 09:15 IST).");
+    } else {
+      console.info("Read the delta.* rows only. Never-sparse with numEqualsArrayIndex near 100% "
+        + "means num is merely the position, so the corruption is staleness alone and the fix is "
+        + "to clear the book each message. Sparse messages, or numEqualsArrayIndex well under "
+        + "100%, mean num is the book level and keying by it is the fix.");
+    }
   } finally {
     await database.end();
   }
