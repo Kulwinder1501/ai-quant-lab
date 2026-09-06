@@ -4,6 +4,10 @@ import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/do
 import type { StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
 import type { BacktestMarketDataRepository } from "../domain/backtesting.js";
 import type { DatabaseQueryable } from "../../../infrastructure/database/database.js";
+import { IctCompositeEngine } from "../../technical-analysis/domain/ict/composite-engine.js";
+import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
+import { computeIctSnapshotsForContexts } from "../../technical-analysis/domain/ict/replay-builder.js";
+
 
 interface CompletedCandleRow extends QueryResultRow {
   id: string;
@@ -131,7 +135,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
     }
 
     const candleIds = candleResult.rows.map((row) => row.id);
-    const [indicatorResult, patternResult, priceActionResult] = await Promise.all([
+    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    const [indicatorResult, patternResult, priceActionResult, ictSnapshotResult] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
           indicator_snapshots.candle_id,
@@ -183,6 +188,16 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
           AND detected_at <= $2
         ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
       `, [candleIds, input.dataCutoffAt]),
+      this.database.query<{ bar_time: Date; snapshot_payload: IctStateCompositeSnapshot }>(`
+        SELECT bar_time, snapshot_payload
+        FROM ict_state_snapshots
+        WHERE instrument_id = $1
+          AND timeframe = $2
+          AND bar_time >= $3
+          AND bar_time <= $4
+          AND engine_version = $5
+          AND config_hash = $6
+      `, [input.instrumentId, input.timeframe, input.dataWindowStart, input.dataWindowEnd, ICT_STATE_ENGINE_VERSION, ictConfigHash]),
     ]);
 
     const indicatorsByCandle = new Map<string, StrategyMarketContext["indicators"]>();
@@ -219,11 +234,113 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
       });
     }
 
-    return candleResult.rows.map((row) => ({
-      candle: toCandle(row),
-      indicators: indicatorsByCandle.get(row.id) ?? [],
-      patterns: patternsByCandle.get(row.id) ?? [],
-      priceActionEvents: priceActionEventsByCandle.get(row.id) ?? [],
-    }));
+
+    const ictSnapshotsByTime = new Map<number, IctStateCompositeSnapshot>();
+    for (const row of ictSnapshotResult.rows) {
+      ictSnapshotsByTime.set(row.bar_time.getTime(), row.snapshot_payload);
+    }
+
+    const missingCandles = candleResult.rows.filter(r => !ictSnapshotsByTime.has(r.open_time.getTime()));
+    if (missingCandles.length > 0) {
+      const firstMissingTime = missingCandles[0].open_time;
+      const historyResult = await this.database.query<CompletedCandleRow>(`
+        (
+          SELECT
+            id, instrument_id, timeframe, open_time, close_time,
+            open, high, low, close, volume, '0' as tick_size
+          FROM candles
+          WHERE instrument_id = $1
+            AND timeframe = $2
+            AND is_complete = TRUE
+            AND open_time < $3
+          ORDER BY open_time DESC
+          LIMIT 1000
+        )
+        UNION ALL
+        (
+          SELECT
+            id, instrument_id, timeframe, open_time, close_time,
+            open, high, low, close, volume, '0' as tick_size
+          FROM candles
+          WHERE instrument_id = $1
+            AND timeframe = $2
+            AND is_complete = TRUE
+            AND open_time >= $3
+            AND open_time <= $4
+          ORDER BY open_time ASC
+        )
+        ORDER BY open_time ASC
+      `, [input.instrumentId, input.timeframe, firstMissingTime, input.dataWindowEnd]);
+
+const mockContexts = historyResult.rows.map(r => ({
+        candle: {
+          id: r.id,
+          instrumentId: r.instrument_id,
+          timeframe: r.timeframe,
+          openTime: r.open_time,
+          closeTime: r.close_time,
+          open: toNumber(r.open, "open"),
+          high: toNumber(r.high, "high"),
+          low: toNumber(r.low, "low"),
+          close: toNumber(r.close, "close"),
+          volume: toNumber(r.volume, "volume"),
+          tickSize: 0
+        },
+        indicators: [],
+        patterns: [],
+        priceActionEvents: []
+      } as unknown as StrategyMarketContext));
+
+      // Compute snapshots natively using replay builder to get HTF bias
+      // 3 bars of 5m = 15m HTF bias
+      const htfBarsPerBucket = input.timeframe === '5m' ? 3 : undefined;
+      const snapshots = computeIctSnapshotsForContexts(mockContexts, { htfBarsPerBucket });
+
+      for (let i = 0; i < mockContexts.length; i++) {
+        const snapshot = snapshots[i];
+        const openTimeMs = mockContexts[i].candle.openTime.getTime();
+        if (openTimeMs >= firstMissingTime.getTime() && !ictSnapshotsByTime.has(openTimeMs) && mockContexts[i].candle.openTime <= input.dataWindowEnd) {
+          ictSnapshotsByTime.set(openTimeMs, snapshot);
+          
+          await this.database.query(`
+            INSERT INTO ict_state_snapshots (
+              instrument_id, timeframe, engine_version, config_hash,
+              bar_index, bar_time, structure_trend, bias_direction, daily_template,
+              dealing_range_eq, primary_target_price, primary_target_kind,
+              invalidation_level, alignment_status, snapshot_payload
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+            ) ON CONFLICT (instrument_id, timeframe, bar_time, engine_version, config_hash) DO NOTHING
+          `, [
+            input.instrumentId,
+            input.timeframe,
+            snapshot.engineVersion,
+            snapshot.configHash,
+            snapshot.barIndex,
+            snapshot.barTime,
+            snapshot.structure.trend,
+            snapshot.bias.bias,
+            snapshot.bias.dailyTemplate,
+            snapshot.bias.dealingRange?.equilibrium ?? null,
+            snapshot.liquidity.primaryTarget?.price ?? null,
+            snapshot.liquidity.primaryTarget?.kind ?? null,
+            snapshot.liquidity.invalidationLevel ?? null,
+            snapshot.liquidity.alignmentStatus,
+            JSON.stringify(snapshot),
+          ]);
+        }
+      }
+    }
+
+    return candleResult.rows.map((row) => {
+      const ictSnapshot = ictSnapshotsByTime.get(row.open_time.getTime());
+      return {
+        candle: toCandle(row),
+        indicators: indicatorsByCandle.get(row.id) ?? [],
+        patterns: patternsByCandle.get(row.id) ?? [],
+        priceActionEvents: priceActionEventsByCandle.get(row.id) ?? [],
+        ...(ictSnapshot ? { ictSnapshot } : {}),
+      };
+    });
   }
 }

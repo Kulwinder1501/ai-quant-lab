@@ -15,7 +15,7 @@ export interface IctStructureStrategyConfiguration {
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
-  minimumRiskReward: 1.5,
+  minimumRiskReward: 1.2,
   minConfidence: 0.7,
   expiryCandles: 3,
   requirePoiReaction: true,
@@ -23,18 +23,14 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
 
 export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: ICT_STRUCTURE_STRATEGY_KEY,
-  name: "ICT Canonical Structure Strategy",
-  description:
-    "Four-pillar ICT institutional order flow strategy enforcing fractal bias, canonical structure with IDM, zone ledger lifecycle, and liquidity delivery path.",
-  version: 1,
+  name: "ICT Structural Alignment (V1)",
+  description: "Four-pillar structural strategy strictly trading in alignment with the higher-timeframe trend.",
+  version: 2,
   configuration: defaultIctStructureStrategyConfiguration as unknown as Record<string, unknown>,
 };
 
 export class IctStructureStrategy implements StrategyEvaluator {
-  evaluate(
-    context: StrategyMarketContext,
-    strategyConfiguration: Record<string, unknown>
-  ): ProposedTradeIdea[] {
+  evaluate(context: StrategyMarketContext, strategyConfiguration: Record<string, unknown> = {}): ProposedTradeIdea[] {
     const config: IctStructureStrategyConfiguration = {
       ...defaultIctStructureStrategyConfiguration,
       ...strategyConfiguration,
@@ -67,7 +63,15 @@ export class IctStructureStrategy implements StrategyEvaluator {
     // Pillar Gate 2b: Fractal alignment. The HTF bias is a required pillar; if
     // it is present it must agree with the intended direction, otherwise the
     // fractal objective and the local setup disagree and there is no trade.
-    if (ict.htfBias && ict.htfBias !== bias.bias) return [];
+    let explicitHtfBias = ict.htfBias;
+    if (context.higherTimeframeContexts && context.higherTimeframeContexts["15m"]?.ictSnapshot) {
+      const htfBiasVal = context.higherTimeframeContexts["15m"].ictSnapshot.bias.bias;
+      if (htfBiasVal !== "UNKNOWN" && htfBiasVal !== "NEUTRAL") {
+        explicitHtfBias = htfBiasVal;
+      }
+    }
+
+    if (explicitHtfBias && explicitHtfBias !== bias.bias) return [];
 
     // Pillar Gate 3: Liquidity Status
     if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];
@@ -107,7 +111,8 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     if (isBullish) {
       side = "LONG";
-      stopLoss = liquidity.invalidationLevel ?? (entryPrice * 0.995);
+      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 0.995);
+      stopLoss = rawStop * 0.9995; // 0.05% volatility buffer
       targetPrice = targetPool.price;
 
       if (stopLoss >= entryPrice || targetPrice <= entryPrice) return [];
@@ -186,7 +191,8 @@ export class IctStructureStrategy implements StrategyEvaluator {
       ];
     } else {
       side = "SHORT";
-      stopLoss = liquidity.invalidationLevel ?? (entryPrice * 1.005);
+      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 1.005);
+      stopLoss = rawStop * 1.0005; // 0.05% volatility buffer
       targetPrice = targetPool.price;
 
       if (stopLoss <= entryPrice || targetPrice >= entryPrice) return [];

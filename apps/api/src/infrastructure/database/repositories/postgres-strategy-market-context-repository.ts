@@ -19,6 +19,9 @@ import {
   type RegimeContext,
 } from "../../../modules/strategy-engine/domain/regime.js";
 import type { DatabaseQueryable } from "../database.js";
+import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
+import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
+
 
 interface CompletedCandleRow extends QueryResultRow {
   id: string;
@@ -120,6 +123,86 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     return this.assembleContext(input, candle);
   }
 
+  private async computeAndPersistIctSnapshot(
+    input: { instrumentId: string; timeframe: string },
+    targetCandle: CompletedCandleRow,
+    configHash: string,
+  ): Promise<IctStateCompositeSnapshot | undefined> {
+    const historyResult = await this.database.query<CompletedCandleRow>(`
+      SELECT
+        candles.id,
+        candles.instrument_id,
+        candles.timeframe,
+        candles.open_time,
+        candles.close_time,
+        candles.open,
+        candles.high,
+        candles.low,
+        candles.close,
+        candles.volume,
+        instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1
+        AND candles.timeframe = $2
+        AND candles.is_complete = TRUE
+        AND candles.open_time <= $3
+      ORDER BY candles.open_time DESC
+      LIMIT 1000
+    `, [input.instrumentId, input.timeframe, targetCandle.open_time]);
+
+    if (historyResult.rows.length === 0) return undefined;
+
+    const rows = [...historyResult.rows].reverse();
+    const causalCandles = rows.map((r) => ({
+      id: r.id,
+      openTime: r.open_time,
+      open: toNumber(r.open, "open"),
+      high: toNumber(r.high, "high"),
+      low: toNumber(r.low, "low"),
+      close: toNumber(r.close, "close"),
+      volume: toNumber(r.volume, "volume"),
+    }));
+
+    const engine = new IctCompositeEngine(defaultIctEngineConfig);
+    let snapshot: IctStateCompositeSnapshot | undefined;
+
+    for (let i = 0; i < causalCandles.length; i++) {
+      snapshot = engine.processCandle(causalCandles, i);
+    }
+
+    if (snapshot) {
+      await this.database.query(`
+        INSERT INTO ict_state_snapshots (
+          instrument_id, timeframe, engine_version, config_hash,
+          bar_index, bar_time, structure_trend, bias_direction, daily_template,
+          dealing_range_eq, primary_target_price, primary_target_kind,
+          invalidation_level, alignment_status, snapshot_payload
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+        ) ON CONFLICT (instrument_id, timeframe, bar_time, engine_version, config_hash) DO NOTHING
+      `, [
+        input.instrumentId,
+        input.timeframe,
+        snapshot.engineVersion,
+        snapshot.configHash,
+        snapshot.barIndex,
+        snapshot.barTime,
+        snapshot.structure.trend,
+        snapshot.bias.bias,
+        snapshot.bias.dailyTemplate,
+        snapshot.bias.dealingRange?.equilibrium ?? null,
+        snapshot.liquidity.primaryTarget?.price ?? null,
+        snapshot.liquidity.primaryTarget?.kind ?? null,
+        snapshot.liquidity.invalidationLevel ?? null,
+        snapshot.liquidity.alignmentStatus,
+        JSON.stringify(snapshot),
+      ]);
+    }
+
+    return snapshot;
+  }
+
   /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
   async findCompletedAt(input: {
     instrumentId: string;
@@ -209,7 +292,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<StrategyMarketContext> {
-    const [indicators, patterns, priceActionEvents] = await Promise.all([
+    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    const [indicators, patterns, priceActionEvents, ictSnapshotRows] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
           indicator_definitions.indicator_code,
@@ -245,9 +329,23 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id]),
+      this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
+        SELECT snapshot_payload
+        FROM ict_state_snapshots
+        WHERE instrument_id = $1
+          AND timeframe = $2
+          AND bar_time = $3
+          AND engine_version = $4
+          AND config_hash = $5
+      `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash]),
     ]);
 
     const regime = await this.findRegime(input, candle) ?? undefined;
+
+    let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
+    if (!ictSnapshot) {
+      ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
+    }
 
     return {
       candle: toCandle(candle),
@@ -274,6 +372,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         details: row.details,
       })),
       regime,
+      ...(ictSnapshot ? { ictSnapshot } : {}),
     };
   }
 
