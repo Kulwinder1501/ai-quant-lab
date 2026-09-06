@@ -16,6 +16,16 @@ import {
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
 
+/**
+ * How long a 5m scalp may go without progress before it is cut, and how much progress counts.
+ *
+ * Named rather than inline because they are the two numbers the rule turns on, and both were
+ * hand-chosen and untested until measured. See the block that uses them for the evidence and for
+ * why the cutoff is a band rather than an optimum.
+ */
+const MOMENTUM_STALL_CUTOFF_MINUTES = 10;
+const MOMENTUM_STALL_MINIMUM_PROGRESS_R = 0.5;
+
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
   asOf?: Date;
@@ -603,16 +613,38 @@ export class EvaluateOpenPaperTrades {
         });
       }
 
-      // Momentum Stall Stop (5m timeframe, elapsed market time >= 20 mins, gain < 0.5R)
+      // Momentum Stall Stop (5m timeframe, elapsed market time >= the cutoff, gain < 0.5R)
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.
+      //
+      // The cutoff was 20 minutes, chosen by judgment and never tested. Measured 2026-09-06 by
+      // replaying 243 5m scalp trades over 10 sessions from entry against the observed premium bid
+      // series, with barriers resolved before this clause exactly as they are below: gross by
+      // cutoff at the same 0.5R threshold ran 5min +3,005, 10min +6,427, 15min +3,112, 20min
+      // -5,499, 30min -3,538, 40min -7,219, and never-cut -22,888. The surface is smooth and
+      // unimodal around 10 minutes rather than a lone spike, 9 of 10 sessions improved, and the
+      // held-out sessions agreed, so waiting 20 minutes was giving back most of what the rule earns.
+      //
+      // Ten minutes, not a tuned optimum. A session-clustered bootstrap (the session is the unit;
+      // trades inside one share the same underlying move) puts this cell at +11,926 with a 95%
+      // interval of [-863, +21,642] -- so the *direction* is well supported but the exact cell is
+      // not identifiable on 10 sessions, and neighbouring cells at 0.25R and 15min/1R sit within
+      // noise of it. Re-run the sweep as sessions accumulate rather than reading 10/0.5R as optimal.
+      //
+      // This reduces a loss, it does not create edge: cohort fees are ~17,130 against a best
+      // achievable gross of +6,427, so the book stays net-negative either way.
       if (trade.timeframe === "5m") {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
         const initialRisk = trade.entryPrice - trade.stopLoss;
         const initialReward = trade.targetPrice - trade.entryPrice;
         const isScalp = initialRisk > 0 ? (initialReward / initialRisk) <= 1.6 : false;
-        
-        if (isScalp && elapsedMinutes >= 20 && initialRisk > 0 && freshBid < trade.entryPrice + 0.5 * initialRisk) {
+
+        if (
+          isScalp
+          && elapsedMinutes >= MOMENTUM_STALL_CUTOFF_MINUTES
+          && initialRisk > 0
+          && freshBid < trade.entryPrice + MOMENTUM_STALL_MINIMUM_PROGRESS_R * initialRisk
+        ) {
           return closeOption({
             exitPrice: freshBid,
             exitReason: "MOMENTUM_STALL",
@@ -621,6 +653,10 @@ export class EvaluateOpenPaperTrades {
             details: {
               source: "MOMENTUM_STALL_EVALUATOR",
               elapsedMinutes,
+              // Stamped so a booked exit explains itself: the cutoff has moved once already, and
+              // without it a stall booked under 20 minutes is indistinguishable from one under 10.
+              cutoffMinutes: MOMENTUM_STALL_CUTOFF_MINUTES,
+              minimumProgressR: MOMENTUM_STALL_MINIMUM_PROGRESS_R,
               freshBid,
               entryPrice: trade.entryPrice,
               initialRisk,
