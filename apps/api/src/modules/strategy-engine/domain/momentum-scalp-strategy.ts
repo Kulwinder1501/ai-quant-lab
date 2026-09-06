@@ -52,7 +52,7 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * RSI 55–75 / 25–45 (drops the exhaustion tail at 80/20), ATR stop 1.0× (was
  * 0.5× — stopped out on noise), and RRR 1.5 (provides edge over brokerage costs).
  */
-export const momentumScalpStrategyVersion = 3;
+export const momentumScalpStrategyVersion = 4;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
@@ -72,8 +72,8 @@ export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyCon
   rsiLongMax: 75,
   rsiShortMin: 25,
   rsiShortMax: 45,
-  atrStopMultiple: 1.0,
-  rewardRiskMultiple: 1.5,
+  atrStopMultiple: 1.5,
+  rewardRiskMultiple: 2.0,
   minimumConfidence: 0.5,
   expiryCandles: 5,
   requireRegime: false,
