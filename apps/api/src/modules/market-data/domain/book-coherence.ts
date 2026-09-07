@@ -24,6 +24,29 @@
  * and so any future capture mode can be validated against the same gate before it is trusted.
  */
 
+/**
+ * A calibrated plausibility limit for a front-month index future, as a fraction of price.
+ *
+ * Measured 2026-09-07 over 302,836 in-hours BANKNIFTY futures frames, spread as basis points of
+ * the best bid: p50 **5.76**, p90 7.09, p99 8.89, p99.9 10.36, max 20.42, and **zero** crossed
+ * books. 30 bps therefore sits about 5x the median and 1.5x the widest frame observed, so it
+ * passes normal and even fast markets and fires only on gross staleness -- a slot holding a price
+ * from minutes earlier lands hundreds of points, tens of basis points, away.
+ *
+ * Two things this calibration taught, both worth keeping:
+ *
+ * * The first value tried here was 2 bps, roughly a third of the *median*. It rejected 87-97% of
+ *   perfectly good frames and was briefly mistaken for evidence that the capture was corrupt.
+ * * Spread is a **weak** corruption detector. The pre-fix, mis-ordered capture had a spread
+ *   distribution centred on the same ~5.5 bps as a correct one, because the two defects were
+ *   unrelated. `wasReordered` and `CROSSED` are the discriminating signals; this limit is a
+ *   backstop for gross staleness, not the primary check.
+ *
+ * Exported as a named constant rather than a default parameter on purpose: the honest limit is
+ * instrument-specific, and a silent default is what would quietly re-admit a wrong one.
+ */
+export const FRONT_MONTH_INDEX_FUTURE_MAX_SPREAD_FRACTION = 0.003;
+
 export type BookCoherenceVerdict =
   | "COHERENT"
   /** One or both sides carry no positively priced level; a one-sided book has no spread. */
