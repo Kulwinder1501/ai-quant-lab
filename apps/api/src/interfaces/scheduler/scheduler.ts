@@ -760,9 +760,28 @@ async function main(): Promise<void> {
    * the size of the journal. Stop and target evaluation still runs on every pass, which is the
    * part that wants to be prompt.
    */
+  /*
+   * 15m, which is the timeframe this agent was actually measured on.
+   *
+   * The arg said `5m` while the comment above described "a completed 15m bar", so the running
+   * configuration had drifted from its own documented design. 15m is the side that has evidence:
+   * `measure:directional-scorer` replayed the scorer on 15m and produced the table in
+   * `ai-autonomous-agent.ts` -- LONG at +0.005R on NIFTY50 (367) and +0.182R on BANKNIFTY (413),
+   * which is what justifies leaving LONG enabled and SHORT scored-but-not-traded. No equivalent
+   * measurement exists for 5m, so running there executed a gate validated somewhere else.
+   *
+   * Brackets follow automatically: the agent sizes from the ticked timeframe's own ATR
+   * (`AGENT_ATR_STOP_MULTIPLE`), and refuses the trade outright when that ATR is missing rather
+   * than falling back to the flat 1.5%/3% it used to use -- the version that produced a ~370-point
+   * NIFTY stop against a ~30-point 15m ATR. Verified 2026-09-07 that 15m ATR is present and current
+   * for both symbols before this switch.
+   *
+   * The every-two-minutes cadence stays. It is deliberately faster than the bar, because stop and
+   * target evaluation runs on every pass and that is the part that wants to be prompt.
+   */
   cronSchedule("*/2 9-15 * * 1-5", () => {
     void schedule("AI_AGENT_TICK", () => runCommand("npm", [
-      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=5m",
+      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=15m",
     ]));
   });
 
