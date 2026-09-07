@@ -85,6 +85,15 @@ class IctDecoratedMarketData implements BacktestMarketDataRepository {
   }
 }
 
+function parseConcurrency(raw: string | undefined): number {
+  if (raw === undefined) return defaultBacktestConfiguration.maxConcurrentPositions;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`--max-concurrent-positions must be an integer >= 1; received "${raw}".`);
+  }
+  return value;
+}
+
 function parsePositionSizing(argumentsList: string[]): BacktestPositionSizing {
   const value = getOption(argumentsList, "position-sizing")?.trim().toUpperCase() || "FIXED_QUANTITY";
   if (value !== "FIXED_QUANTITY" && value !== "CONSTANT_RISK_FRACTION") {
@@ -190,6 +199,10 @@ async function main(): Promise<void> {
         positionSizing: parsePositionSizing(argumentsList),
         riskFractionPerTrade: parseFractionOption(argumentsList, "risk-fraction", defaultBacktestConfiguration.riskFractionPerTrade),
         marginFraction: parseFractionOption(argumentsList, "margin-fraction", defaultBacktestConfiguration.marginFraction),
+        // Defaults to 1, so an invocation that does not ask for concurrency reproduces the runs
+        // recorded before the engine supported it. Persisted in the run's `configuration` jsonb,
+        // so a concurrent run is never mistaken for a sequential one.
+        maxConcurrentPositions: parseConcurrency(getOption(argumentsList, "max-concurrent-positions")),
       },
     });
 
