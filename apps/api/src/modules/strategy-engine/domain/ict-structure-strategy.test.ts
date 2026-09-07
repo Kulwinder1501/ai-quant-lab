@@ -67,7 +67,7 @@ describe("IctStructureStrategy", () => {
         trend: "BULLISH",
       },
       zones: {
-        activeObs: [{ id: "ob-1", state: "TOUCHED" }],
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }],
         activeFvgs: [],
       },
       sessionLevels: {
@@ -115,7 +115,7 @@ describe("IctStructureStrategy", () => {
         trend: "BULLISH",
       },
       zones: {
-        activeObs: [{ id: "ob-1", state: "TOUCHED" }],
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }],
         activeFvgs: [],
       },
       sessionLevels: {
@@ -150,7 +150,7 @@ describe("IctStructureStrategy", () => {
       htfBias: "BULLISH",
       bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 105 } },
       structure: { trend: "BULLISH" },
-      zones: { activeObs: [{ id: "ob-1", state: "TOUCHED" }], activeFvgs: [] },
+      zones: { activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }], activeFvgs: [] },
       sessionLevels: { levels: { pdh: 120, pdl: 90 }, lastSweepEvent: null },
       liquidity: {
         alignmentStatus: "ALIGNED_LONG",
@@ -200,5 +200,67 @@ describe("IctStructureStrategy", () => {
       expect(snap.coverage.bias).toBe("COMPLETE");
       expect(strategy.evaluate(makeContext(snap, 98), {})).toHaveLength(0);
     });
+  });
+});
+
+/** The aligned-long snapshot the gate tests share, with a zones override for POI cases. */
+function alignedLongSnapshot(overrides: Record<string, unknown> = {}): any {
+  return {
+    coverage: {
+      structure: "COMPLETE", bias: "COMPLETE", zones: "COMPLETE",
+      sessionLevels: "COMPLETE", liquidity: "COMPLETE", htf: "COMPLETE",
+    },
+    htfBias: "BULLISH",
+    bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 105 } },
+    structure: { trend: "BULLISH", lastHL: { price: 90 } },
+    zones: { activeObs: [], activeFvgs: [] },
+    sessionLevels: { levels: { pdh: 120, pdl: 90 }, lastSweepEvent: null },
+    liquidity: {
+      alignmentStatus: "ALIGNED_LONG",
+      primaryTarget: { kind: "ERL_PDH", price: 120 },
+      intermediateTarget: 105,
+      invalidationLevel: 90,
+    },
+    ...overrides,
+  };
+}
+
+describe("IctStructureStrategy POI discrimination", () => {
+  /*
+   * These pin the behaviour that made `requirePoiReaction` free: the old test accepted any zone in
+   * state TOUCHED, so it passed every pillar-aligned bar on both indices (`noPoi: 0`).
+   */
+  it("refuses an order block that was touched but not traded into its mean threshold", () => {
+    // Bar low is 97. A mean threshold of 96 was never reached, so the OB is touched at its edge only.
+    const snapshot = alignedLongSnapshot({
+      zones: {
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 96, isExtreme: true, isIdmAdjacent: false }],
+        activeFvgs: [],
+      },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(0);
+  });
+
+  it("refuses a zone facing the wrong way, which used to count as confirmation", () => {
+    // A BEARISH order block is evidence against a long. The old check ignored `type` entirely.
+    const snapshot = alignedLongSnapshot({
+      zones: {
+        activeObs: [{ id: "ob-1", type: "BEARISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }],
+        activeFvgs: [],
+      },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(0);
+  });
+
+  it("accepts a fair value gap only once its consequent encroachment is traded into", () => {
+    const shallow = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 96, fillPercentage: 0.1 }] },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(shallow), {})).toHaveLength(0);
+
+    const deep = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 98, fillPercentage: 0.6 }] },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(deep), {})).toHaveLength(1);
   });
 });

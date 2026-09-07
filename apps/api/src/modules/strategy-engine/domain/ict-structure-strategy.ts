@@ -94,17 +94,49 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const currentPrice = context.candle.close;
     let poiEvidence: string | null = null;
 
+    /*
+     * The POI test used to accept ANY zone in state TOUCHED and ANY FVG with fillPercentage > 0,
+     * with no check that the zone even faced the right way. It therefore never rejected anything:
+     * measured over 45 days it passed every single pillar-aligned bar on both indices (`noPoi: 0`),
+     * so `requirePoiReaction` was free.
+     *
+     * The discriminators were already being computed and thrown away. `OrderBlock` carries
+     * `meanThreshold`, `isExtreme` and `isIdmAdjacent`; `FairValueGap` carries `midpoint`, the
+     * consequent encroachment. Lecture 7 is explicit that the entry is taken AT the mean threshold
+     * ("ये ऑर्डर ब्लॉक का मैं मीन थ्रेसहोल्ड लेता हूं"), not on first contact with the edge.
+     *
+     * Three requirements now, each straight from the source:
+     *   1. the zone must face the trade -- a BULLISH zone for a long. A touched bearish order block
+     *      is evidence against a long, and it used to count for one.
+     *   2. an order block must be traded INTO its mean threshold, not merely touched.
+     *   3. a fair value gap must be traded into its midpoint (CE), not merely broken by any amount.
+     *
+     * `isExtreme` and `isIdmAdjacent` are recorded rather than gated on. Lecture 7 pairs the extreme
+     * order block with the long targets, which is the pairing this strategy now takes after the
+     * liquidity-objective fix -- but that is a hypothesis to measure, so it travels as evidence
+     * instead of silently narrowing the population.
+     */
+    const wantedZone: "BULLISH" | "BEARISH" = isBullish ? "BULLISH" : "BEARISH";
+    const barLow = context.candle.low;
+    const barHigh = context.candle.high;
+    const reached = (level: number): boolean =>
+      isBullish ? barLow <= level : barHigh >= level;
+
+    let poiExtreme = false;
+    let poiIdmAdjacent = false;
+
     if (config.requirePoiReaction) {
       if (sessionLevels.lastSweepEvent?.eventType === "SWEEP") {
         poiEvidence = `Session ${sessionLevels.lastSweepEvent.levelType} swept and reclaimed`;
       } else {
-        // Check active zones
-        const touchedOb = zones.activeObs.find((o) => o.state === "TOUCHED");
-        const filledFvg = zones.activeFvgs.find((f) => f.fillPercentage > 0);
-        if (touchedOb) {
-          poiEvidence = `Order Block ${touchedOb.id} touched`;
-        } else if (filledFvg) {
-          poiEvidence = `Fair Value Gap ${filledFvg.id} tapped (${Math.round(filledFvg.fillPercentage * 100)}%)`;
+        const ob = zones.activeObs.find((o) => o.type === wantedZone && reached(o.meanThreshold));
+        const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
+        if (ob) {
+          poiEvidence = `Order Block ${ob.id} traded into its mean threshold ${ob.meanThreshold}`;
+          poiExtreme = ob.isExtreme;
+          poiIdmAdjacent = ob.isIdmAdjacent;
+        } else if (fvg) {
+          poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
         }
       }
 
@@ -162,7 +194,10 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          details: { poiEvidence },
+          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
+          // targets this strategy now takes, so these two flags are the covariates that
+          // hypothesis needs before anyone narrows the population on it.
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent },
         });
       }
 
@@ -242,7 +277,10 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          details: { poiEvidence },
+          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
+          // targets this strategy now takes, so these two flags are the covariates that
+          // hypothesis needs before anyone narrows the population on it.
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent },
         });
       }
 
