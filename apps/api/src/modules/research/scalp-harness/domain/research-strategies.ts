@@ -40,7 +40,7 @@ interface BaseEvaluator {
 }
 
 export const researchStrategySourceChecksums = Object.freeze({
-  "momentum-scalp-strategy.ts": "d245e18d4d55d48cf38a715395b45b1916f3f469096950d81e70ec2d5746f093",
+  "momentum-scalp-strategy.ts": "95feb96ed000a9e77034f5feae0bb236430ba954639e50cb24e6604dbcc26ad9",
   "momentum-scalp-index-strategy.ts": "e9a74bf002c7b66adacdd7400128a27d6cb03fc8bf0f4bf9d9654dfc64eeed4d",
   "momentum-scalp-pattern-strategy.ts": "b1146d24f53bc225832302486990e5f9aa5e299785305c26834d07e3cbeb01bd",
 });
@@ -231,35 +231,43 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
  * what a setup *is*. Removing those too would not be an ungated strategy, it would be no strategy —
  * and the every-bar baseline already exists in the matched control grid.
  */
+/**
+ * V5 and V6 carried forward against the V4 operational geometry, as V7 and V8.
+ *
+ * Both old cohorts derived their hash from the live `momentum-scalp` configuration and from this
+ * file's checksum, and the V4 bump (atrStopMultiple 1.0 -> 1.5, rewardRiskMultiple 1.5 -> 2.0) moved
+ * both. A cohort cannot span two geometries, so V5/V6 are SUPERSEDED in the registry and their
+ * adapters are removed -- `assertRegisteredAndUnchanged` runs on every adapter before any status
+ * check, so an adapter left behind would keep throwing whatever status its entry carried.
+ *
+ * The *pair* is preserved deliberately: V8 is to V7 exactly what V6 was to V5, a sibling capturing
+ * the same 1m setups with the closed 5m context recorded alongside. Collapsing them into one
+ * HTF-only cohort would have discarded a designed property the isolation tests pin.
+ *
+ * Both read the live configuration and checksum, as V5/V6 did. That is deliberate: the next bump of
+ * the operational twin must break these pins too and be handled the same way, rather than hiding
+ * behind a frozen copy that drifts from the code that actually runs.
+ */
 const momentumDefinition = buildStrategyDefinition({
-  // v5 rather than v4: the configuration changed materially, and reusing a version string for two
-  // different definitions is the exact failure the settlement policy registry exists to prevent.
-  // The definition hash changes regardless, so old captures never collide with new ones.
-  strategyKey: "momentum-v5-research",
-  researchVersion: 5,
+  strategyKey: "momentum-v7-research",
+  researchVersion: 7,
   featureSchemaVersion: "scalp-raw-context-v2",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
 });
 
 /**
- * `momentum-v5-research` with slower-timeframe context recorded, and nothing else changed.
+ * `momentum-v7-research` with slower-timeframe context recorded, and nothing else changed.
  *
  * The candidate logic is byte-identical -- same `MomentumScalpStrategy`, same ungated configuration
- * -- so this REUSES V5's `implementationArtifactChecksum`. That is not an oversight to be "fixed"
- * with a new checksum: the checksum is the SHA-256 of `momentum-scalp-strategy.ts`, which V6 does
+ * -- so this REUSES V7's `implementationArtifactChecksum`. That is not an oversight to be "fixed"
+ * with a new checksum: the checksum is the SHA-256 of `momentum-scalp-strategy.ts`, which V8 does
  * not touch, and the isolation test refuses any checksum that is not the real file's hash. Reusing
- * it is the machine-checked proof that `v6_candidate_logic == v5_candidate_logic`.
- *
- * The two versions do not collide: `buildStrategyDefinition` hashes the strategy key, research
- * version, configuration and feature-schema version alongside the checksum, and V6 differs on the
- * first three. `scalp-raw-context-v3` records that the payload now carries the `htf5m` covariate
- * block the V5 schema did not. V6 is a *sibling* of V5, capturing the same setups with more recorded
- * about each -- the same relationship `pattern-v4-research-v2` has to `pattern-v4-research`.
+ * it is the machine-checked proof that `v8_candidate_logic == v7_candidate_logic`.
  */
 const momentumHtfDefinition = buildStrategyDefinition({
-  strategyKey: "momentum-v6-research",
-  researchVersion: 6,
+  strategyKey: "momentum-v8-research",
+  researchVersion: 8,
   featureSchemaVersion: "scalp-raw-context-v3",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
@@ -301,8 +309,8 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
   ),
   new FrozenResearchAdapter(
-    // Same evaluator, gate and setup family as V5 above; the only difference is the HTF extender, so
-    // V6 captures the same 1m setups with the most recent closed 5m context recorded alongside each.
+    // Same evaluator, gate and setup family as V7 above; the only difference is the HTF extender, so
+    // V8 captures the same 1m setups with the most recent closed 5m context recorded alongside each.
     momentumHtfDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
     extractHtfObservations,

@@ -103,14 +103,16 @@ describe("MomentumScalpStrategy configuration", () => {
     }))).toThrow(/requires parameters for VWAP/);
   });
 
-  it("keeps the production v3 terms unchanged", () => {
+  it("keeps the production v4 terms unchanged", () => {
     expect(defaultMomentumScalpStrategyConfiguration).toMatchObject({
       rsiLongMin: 55,
       rsiLongMax: 75,
       rsiShortMin: 25,
       rsiShortMax: 45,
-      atrStopMultiple: 1.0,
-      rewardRiskMultiple: 1.5,
+      // V4 widened the stop and the target: the 1.0x ATR stop was narrower than BANKNIFTY's
+      // observed 5-second jump size, so ordinary noise resolved it rather than the thesis.
+      atrStopMultiple: 1.5,
+      rewardRiskMultiple: 2.0,
       minimumVwapDisplacementAtr: 0.10,
       idealVwapDisplacementAtr: 0.60,
     });

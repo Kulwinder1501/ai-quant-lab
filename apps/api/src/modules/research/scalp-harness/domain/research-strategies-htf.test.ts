@@ -52,14 +52,14 @@ function htf5m(): StrategyMarketContext {
   };
 }
 
-const v5 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v5-research")!;
-const v6 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v6-research")!;
+const v7 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v7-research")!;
+const v8 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v8-research")!;
 
-describe("momentum-v6-research HTF capture", () => {
-  it("v5 records no htf5m block; v6 records one even when no 5m context is attached", () => {
+describe("momentum-v8-research HTF capture", () => {
+  it("v7 records no htf5m block; v8 records one even when no 5m context is attached", () => {
     const ctx = qualifyingLong();
-    const [p5] = v5.evaluate(ctx, ctx);
-    const [p6] = v6.evaluate(ctx, ctx);
+    const [p5] = v7.evaluate(ctx, ctx);
+    const [p6] = v8.evaluate(ctx, ctx);
     expect(p5).toBeDefined();
     expect(p6).toBeDefined();
     expect(p5!.rawContext.htf5m).toBeUndefined();
@@ -67,19 +67,19 @@ describe("momentum-v6-research HTF capture", () => {
     expect((p6!.rawContext.htf5m as { present: boolean }).present).toBe(false);
   });
 
-  it("v6 records the attached 5m slice losslessly", () => {
+  it("v8 records the attached 5m slice losslessly", () => {
     const ctx = qualifyingLong(htf5m());
-    const [p6] = v6.evaluate(ctx, ctx);
+    const [p6] = v8.evaluate(ctx, ctx);
     const block = p6!.rawContext.htf5m as { present: boolean; candle: { close: number }; indicators: unknown[] };
     expect(block.present).toBe(true);
     expect(block.candle.close).toBe(1004);
     expect(block.indicators).toHaveLength(1);
   });
 
-  it("v6 is the same setup as v5 but a distinct proposal", () => {
+  it("v8 is the same setup as v7 but a distinct proposal", () => {
     const ctx = qualifyingLong(htf5m());
-    const [p5] = v5.evaluate(ctx, ctx);
-    const [p6] = v6.evaluate(ctx, ctx);
+    const [p5] = v7.evaluate(ctx, ctx);
+    const [p6] = v8.evaluate(ctx, ctx);
     expect(p6!.direction).toBe(p5!.direction);
     expect(p6!.setupType).toBe(p5!.setupType);
     // Distinct definition hash and HTF-enriched rawContext => distinct identity and payload, so the
