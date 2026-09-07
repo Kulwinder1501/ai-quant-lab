@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
 
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_V5,
     CandleEvidence,
     LabeledExample,
     PersistedModelVersion,
@@ -242,6 +244,60 @@ class InferenceTests(unittest.TestCase):
                 timeframe="1d",
             )
 
+    def test_a_legacy_v5_artifact_remains_loadable_after_the_v6_bump(self) -> None:
+        """The capacity bump must not orphan v5 models.
+
+        The volatility shadow families were trained under ml-feature-v5 and keep
+        building settled history after v6 becomes current, so an artifact is
+        validated against the schema version recorded in its own metadata and the
+        contract carries that version forward to feature construction.
+        """
+
+        v5_schema = feature_schema(FEATURE_SCHEMA_VERSION_V5)
+        v5_examples = [
+            dataclasses.replace(
+                reference_example(index, label),
+                features={name: float(index) for name in v5_schema},
+            )
+            for index, label in ((0, "BEARISH"), (1, "BULLISH"))
+        ]
+        model = dataclasses.replace(
+            production_model(),
+            feature_schema=tuple(
+                {"name": name, "dtype": "float64", "schemaVersion": FEATURE_SCHEMA_VERSION_V5}
+                for name in v5_schema
+            ),
+        )
+        metadata = compatible_metadata()
+        metadata["featureSchema"] = list(v5_schema)
+        metadata["featureSchemaVersion"] = FEATURE_SCHEMA_VERSION_V5
+        metadata["featureDefinition"] = feature_definition(FEATURE_SCHEMA_VERSION_V5)
+        metadata["trainingReferenceSet"] = build_reference_metadata(
+            v5_examples, schema=v5_schema, maximum_examples=2
+        )
+
+        contract = validate_production_artifact(
+            model,
+            metadata,
+            instrument_symbol="NIFTY50",
+            timeframe="1d",
+        )
+
+        self.assertEqual(contract.schema_version, FEATURE_SCHEMA_VERSION_V5)
+        self.assertEqual(contract.feature_schema, v5_schema)
+
+    def test_an_artifact_with_an_unknown_schema_version_is_rejected(self) -> None:
+        metadata = compatible_metadata()
+        metadata["featureSchemaVersion"] = "ml-feature-v99"
+
+        with self.assertRaisesRegex(InferenceError, "unknown feature-schema version"):
+            validate_production_artifact(
+                production_model(),
+                metadata,
+                instrument_symbol="NIFTY50",
+                timeframe="1d",
+            )
+
     def test_explanation_is_explicitly_research_only_and_uses_matching_evidence_versions(self) -> None:
         contract = validate_production_artifact(
             production_model(),
@@ -326,3 +382,46 @@ class InferenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PooledArtifactInstrumentGuardTests(unittest.TestCase):
+    """A pooled artifact may score its members and nothing else.
+
+    `dataset.instrument` records only the primary member of a pooled run, so the
+    single-instrument equality check would reject every other member -- which would make
+    a pooled model unable to predict at all, and therefore unable to build the settled
+    evidence promotion requires. Admitting the recorded pool is not a relaxation: an
+    instrument absent from the pool is still refused.
+    """
+
+    POOL = ["ASIANPAINT", "SBIN", "INFY"]
+
+    def test_a_pool_member_is_admitted(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        for symbol in self.POOL:
+            with self.subTest(symbol=symbol):
+                self.assertTrue(self._admits(dataset, symbol, "1d"))
+
+    def test_an_instrument_outside_the_pool_is_refused(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        self.assertFalse(self._admits(dataset, "NIFTY50", "1d"))
+
+    def test_a_single_instrument_artifact_still_requires_an_exact_match(self) -> None:
+        dataset = {"instrument": "NIFTY50", "timeframe": "1d"}
+        self.assertTrue(self._admits(dataset, "NIFTY50", "1d"))
+        self.assertFalse(self._admits(dataset, "SBIN", "1d"))
+
+    def test_the_timeframe_is_never_widened_by_pooling(self) -> None:
+        dataset = {"instrument": "ASIANPAINT", "timeframe": "1d", "pooledInstruments": self.POOL}
+        self.assertFalse(self._admits(dataset, "SBIN", "5m"))
+
+    @staticmethod
+    def _admits(dataset: dict[str, object], symbol: str, timeframe: str) -> bool:
+        """Mirrors the guard in inference._validate_artifact_metadata."""
+
+        if dataset.get("timeframe") != timeframe:
+            return False
+        pooled = dataset.get("pooledInstruments")
+        if isinstance(pooled, (list, tuple)) and pooled:
+            return symbol.upper() in {str(member).upper() for member in pooled}
+        return dataset.get("instrument") == symbol.upper()

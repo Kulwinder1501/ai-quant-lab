@@ -1,0 +1,6 @@
+# Deep-learning dependencies for Stage 5/6 sequence shadow scoring (TCN / stack).
+# Installed into the API/scheduler image alongside requirements.txt once those
+# candidates are shadow-enrolled. Keep out of requirements.txt so local tree-only
+# setups stay light.
+# CPU wheels are intentional.
+torch>=2.2,<3

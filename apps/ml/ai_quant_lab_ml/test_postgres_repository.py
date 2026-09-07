@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from ai_quant_lab_ml.contracts import DatasetRequest, InferenceRequest
@@ -112,6 +112,36 @@ def model_row(**overrides: Any) -> Row:
 
 
 class PostgresMlRepositoryTests(unittest.TestCase):
+    def test_shadow_pool_reads_only_explicitly_enrolled_versions(self) -> None:
+        enrolled_at = at(22)
+        connection = FakeConnection([[
+            model_row(
+                model_key="volatility-expansion-xgboost--NIFTY50--60m--h2",
+                validation_metrics={
+                    "validationProtocol": {"labelScheme": "volatility-expansion-v1"},
+                    "promotionAssessment": {"decision": "INITIAL_BASELINE_THRESHOLD_MET"},
+                },
+                shadow_enrolled_at=enrolled_at,
+            )
+        ]])
+
+        members = PostgresMlRepository(connection).list_shadow_pool("volatility-expansion-v1")
+
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0]["enrolled_at"], enrolled_at)
+        query, parameters = connection.calls[0]
+        self.assertIn("FROM volatility_shadow_enrollments", query)
+        self.assertIn("model_versions.id = volatility_shadow_enrollments.model_version_id", query)
+        self.assertEqual(parameters, ("volatility-expansion-v1", "volatility-expansion-v1"))
+
+    def test_directional_scheme_cannot_query_the_auxiliary_shadow_pool(self) -> None:
+        connection = FakeConnection([])
+
+        with self.assertRaisesRegex(ValueError, "directional"):
+            PostgresMlRepository(connection).list_shadow_pool("fixed-horizon-v1")
+
+        self.assertEqual(connection.calls, [])
+
     def test_loads_cutoff_bounded_source_evidence_and_later_labels(self) -> None:
         connection = FakeConnection([
             [{"id": "instrument-1", "symbol": "NIFTY50"}],
@@ -183,6 +213,23 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                     "vix_average": {"value": 12.0},
                 },
             ],
+            [
+                {
+                    "candle_id": "candle-1",
+                    "flow_date": date(2025, 12, 31),
+                    "fii_cash_net_cr": "-2400",
+                    "dii_cash_net_cr": "1800",
+                    "fii_scale": "1200",
+                    "dii_scale": "900",
+                    "fii_index_futures_net_cr": None,
+                    "fii_index_options_net_cr": None,
+                    "fii_futures_scale": None,
+                    "fii_options_scale": None,
+                },
+            ],
+            # Breadth panel: empty here — a panel below the participation floor
+            # publishes no context, and the evidence carries breadth=None.
+            [],
         ])
 
         records = PostgresMlRepository(connection).load_candle_evidence(request())  # type: ignore[arg-type]
@@ -235,6 +282,48 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                 "20",
             ),
         )
+
+        # The institutional-flow columns were previously declared in the feature
+        # schema but populated by nothing, so they were a constant NaN on both the
+        # training and the inference path. This asserts the loader actually reaches
+        # the evidence, and that the raw crore figure is normalised by its trailing
+        # scale rather than passed through.
+        self.assertAlmostEqual(records[0].fii_net_flow_ratio or 0.0, -2400.0 / 1200.0, places=10)
+        self.assertAlmostEqual(records[0].dii_net_flow_ratio or 0.0, 1800.0 / 900.0, places=10)
+        self.assertEqual(records[0].institutional_flow_date, date(2025, 12, 31))
+        # Absent, not imputed: a candle with no visible print must not read as flat.
+        self.assertIsNone(records[1].fii_net_flow_ratio)
+        self.assertIsNone(records[1].dii_net_flow_ratio)
+        self.assertIsNone(records[1].institutional_flow_date)
+
+        flow_sql, flow_params = connection.calls[6]
+        # The three bounds that keep this feature from leaking. Flows for session D
+        # are published after D closes, so a bar may only read a strictly earlier
+        # session's print, and only one already visible at the cutoff.
+        self.assertIn("WHERE published_at <= %s", flow_sql)
+        self.assertIn("visible_flows.published_at <= target.close_time", flow_sql)
+        self.assertIn(
+            "visible_flows.date < (target.close_time AT TIME ZONE 'Asia/Kolkata')::date", flow_sql
+        )
+        # Strictly prior sessions, so an outlier cannot normalise itself away.
+        self.assertIn("ROWS BETWEEN %s PRECEDING AND 1 PRECEDING", flow_sql)
+        self.assertEqual(flow_params, (at(31, 23), 20, 5, ["candle-1", "candle-2"]))
+
+        # The breadth panel is loaded under the same as-of discipline: completed
+        # daily bars received by the cutoff, warmed up before the window start.
+        breadth_sql, breadth_params = connection.calls[7]
+        self.assertIn("candles.timeframe = '1d'", breadth_sql)
+        self.assertIn("candles.is_complete = TRUE", breadth_sql)
+        self.assertIn("candles.received_at <= %s", breadth_sql)
+        self.assertIsNotNone(breadth_params)
+        self.assertIn("HDFCBANK", breadth_params[0])
+        self.assertIn("NIFTY50", breadth_params[0])
+        self.assertIn("BANKNIFTY", breadth_params[0])
+        self.assertEqual(breadth_params[1], at(31, 23))
+        self.assertEqual(breadth_params[3], at(1) - timedelta(days=60))
+        # An empty panel publishes no context; evidence stays None, never zero.
+        self.assertIsNone(records[0].breadth)
+        self.assertIsNone(records[1].breadth)
 
     def test_skips_evidence_queries_when_window_has_no_completed_candles(self) -> None:
         connection = FakeConnection([
@@ -456,6 +545,20 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                 "vix_close": "11",
                 "vix_average": {"value": 13.75},
             }],
+            [{
+                "candle_id": "candle-31",
+                "flow_date": date(2026, 1, 30),
+                "fii_cash_net_cr": "3000",
+                "dii_cash_net_cr": None,
+                "fii_scale": "1500",
+                "dii_scale": None,
+                "fii_index_futures_net_cr": None,
+                "fii_index_options_net_cr": None,
+                "fii_futures_scale": None,
+                "fii_options_scale": None,
+            }],
+            # Breadth panel (empty: below the participation floor, no context).
+            [],
         ])
 
         evidence = PostgresMlRepository(connection).load_latest_completed_candle_evidence(  # type: ignore[arg-type]
@@ -491,6 +594,21 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         self.assertEqual(evidence.vix_observed_at, at(31, 6))
         self.assertEqual(connection.calls[5][1][0], "INDIAVIX")
         self.assertEqual(connection.calls[5][1][3], ["candle-31"])
+
+        # Same argument for institutional flow: inference must go through the same
+        # loader, or the served vector carries a NaN where training carried a value.
+        self.assertAlmostEqual(evidence.fii_net_flow_ratio or 0.0, 3000.0 / 1500.0, places=10)
+        self.assertEqual(evidence.institutional_flow_date, date(2026, 1, 30))
+        # One side missing must not drag the other down with it.
+        self.assertIsNone(evidence.dii_net_flow_ratio)
+        self.assertEqual(connection.calls[6][1], (at(31, 23), 20, 5, ["candle-31"]))
+
+        # Breadth is resolved through the shared loader on the inference path
+        # too; an unmeasurable panel is absent evidence, never a default.
+        breadth_sql, breadth_params = connection.calls[7]
+        self.assertIn("candles.timeframe = '1d'", breadth_sql)
+        self.assertEqual(breadth_params[1], at(31, 23))
+        self.assertIsNone(evidence.breadth)
 
     def test_upserts_one_prediction_per_model_and_source_candle(self) -> None:
         connection = FakeConnection([
@@ -531,6 +649,115 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         self.assertEqual(json.loads(prediction_params[5]), [{"contribution": 0.25, "feature": "indicator.RSI.value"}])
         self.assertEqual(json.loads(prediction_params[6]), [{"details": {"prediction": "BULLISH"}, "kind": "MODEL_OUTPUT"}])
         self.assertEqual(prediction_params[7], at(31, 23))
+
+    def test_auxiliary_predictions_are_written_to_their_own_table(self) -> None:
+        """A non-directional prediction must never reach model_predictions.
+
+        That table's value is read as a trade direction by the strategy engine, the
+        autonomous agent, the market scanner, and the predictions dashboard, so a
+        volatility label landing there would be acted on as a directional signal.
+        """
+
+        from ai_quant_lab_ml.volatility_expansion import (
+            LABEL_SCHEME_VOLATILITY_EXPANSION,
+            VOLATILITY_ALPHABET,
+        )
+
+        connection = FakeConnection([
+            [{
+                "id": "aux-1",
+                "model_version_id": "model-1",
+                "instrument_id": "instrument-1",
+                "source_candle_id": "candle-31",
+                "label_scheme": LABEL_SCHEME_VOLATILITY_EXPANSION,
+                "prediction": "EXPANSION",
+                "confidence": "0.71",
+                "created_at": at(31, 7),
+            }],
+        ])
+
+        saved = PostgresMlRepository(connection).save_auxiliary_prediction(  # type: ignore[arg-type]
+            model_version_id="model-1",
+            instrument_id="instrument-1",
+            source_candle_id="candle-31",
+            label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION,
+            prediction="EXPANSION",
+            confidence=0.71,
+            feature_contributions=[{"feature": "candle.range_bps", "value": 0.4}],
+            explanation=[{"reason": "range widening"}],
+            evidence_cutoff_at=at(31, 23),
+            alphabet=VOLATILITY_ALPHABET,
+        )
+
+        self.assertEqual(saved["prediction"], "EXPANSION")
+        self.assertEqual(saved["labelScheme"], LABEL_SCHEME_VOLATILITY_EXPANSION)
+        self.assertAlmostEqual(saved["confidence"], 0.71, places=10)
+
+        sql, params = connection.calls[0]
+        self.assertIn("INSERT INTO auxiliary_model_predictions", sql)
+        self.assertNotIn("INSERT INTO model_predictions", sql)
+        # Idempotent per (model, source candle), like the directional table.
+        self.assertIn("ON CONFLICT (model_version_id, source_candle_id)", sql)
+        self.assertEqual(params[4], "EXPANSION")
+        self.assertEqual(params[8], at(31, 23))
+        self.assertEqual(connection.transaction_events, ["begin", "commit"])
+
+    def test_auxiliary_predictions_refuse_labels_from_the_wrong_alphabet(self) -> None:
+        from ai_quant_lab_ml.volatility_expansion import (
+            LABEL_SCHEME_VOLATILITY_EXPANSION,
+            VOLATILITY_ALPHABET,
+        )
+
+        repository = PostgresMlRepository(FakeConnection([]))  # type: ignore[arg-type]
+
+        def save(prediction: str) -> None:
+            repository.save_auxiliary_prediction(
+                model_version_id="model-1",
+                instrument_id="instrument-1",
+                source_candle_id="candle-31",
+                label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION,
+                prediction=prediction,
+                confidence=0.5,
+                feature_contributions=[],
+                explanation=[],
+                evidence_cutoff_at=at(31, 23),
+                alphabet=VOLATILITY_ALPHABET,
+            )
+
+        # Not in the declared alphabet at all.
+        with self.assertRaises(ValueError):
+            save("SIDEWAYS")
+        # A directional label is refused with its own message: it means a directional
+        # model wrote to the auxiliary path, which is as wrong as the reverse.
+        for directional in ("BULLISH", "BEARISH", "NEUTRAL"):
+            with self.assertRaises(ValueError):
+                save(directional)
+
+    def test_auxiliary_predictions_are_listed_by_instrument_and_scheme(self) -> None:
+        connection = FakeConnection([
+            [{
+                "id": "aux-1",
+                "model_version_id": "model-1",
+                "instrument_id": "instrument-1",
+                "source_candle_id": None,
+                "label_scheme": "volatility-expansion-v1",
+                "prediction": "CONTRACTION",
+                "confidence": "0.62",
+                "created_at": at(31, 7),
+            }],
+        ])
+
+        rows = PostgresMlRepository(connection).list_auxiliary_predictions(  # type: ignore[arg-type]
+            instrument_id="instrument-1", label_scheme="volatility-expansion-v1", limit=10,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["prediction"], "CONTRACTION")
+        self.assertIsNone(rows[0]["sourceCandleId"])
+        sql, params = connection.calls[0]
+        self.assertIn("FROM auxiliary_model_predictions", sql)
+        self.assertIn("WHERE instrument_id = %s AND label_scheme = %s", sql)
+        self.assertEqual(params, ("instrument-1", "volatility-expansion-v1", 10))
 
     def test_historical_reliability_uses_only_as_of_prediction_evidence_and_known_outcomes(self) -> None:
         connection = FakeConnection([

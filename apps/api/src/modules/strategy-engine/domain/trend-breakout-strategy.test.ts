@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { StrategyMarketContext } from "./strategy.js";
 import {
   defaultTrendBreakoutStrategyConfiguration,
+  parseTrendBreakoutStrategyConfiguration,
   TrendBreakoutStrategy,
 } from "./trend-breakout-strategy.js";
 
@@ -187,5 +188,60 @@ describe("TrendBreakoutStrategy", () => {
     expect(strategy.evaluate(missingIndicator, configuration())).toEqual([]);
     expect(strategy.evaluate(missingPattern, configuration())).toEqual([]);
     expect(strategy.evaluate(missingPriceAction, configuration())).toEqual([]);
+  });
+});
+
+describe("the pattern/trigger conjunction is a measurable arm", () => {
+  it("defaults to requiring both, so the rule is unchanged", () => {
+    /*
+     * The flags exist to measure the conjunction, not to change it. Verified beyond this unit test by
+     * replay: with defaults the 60m NIFTY50 measurement reproduces 0.4167 on 12 resolved LONG and
+     * 0.4000 on 25 SHORT exactly, as it did before the flags existed.
+     */
+    expect(defaultTrendBreakoutStrategyConfiguration.requirePattern).toBe(true);
+    expect(defaultTrendBreakoutStrategyConfiguration.requireTrigger).toBe(true);
+  });
+
+  it("treats an absent flag as required, so stored registrations keep their meaning", () => {
+    /*
+     * Every configuration already on disk predates these fields. Parsing them with `requiredBoolean`
+     * -- as every sibling field uses -- would throw on all of them, so adding a research lever would
+     * have retroactively invalidated the registry.
+     */
+    const { requirePattern, ...withoutPattern } = defaultTrendBreakoutStrategyConfiguration;
+    void requirePattern;
+
+    const parsed = parseTrendBreakoutStrategyConfiguration(
+      withoutPattern as unknown as Record<string, unknown>,
+    );
+
+    expect(parsed.requirePattern).toBe(true);
+  });
+
+  it("rejects a non-boolean flag rather than coercing it", () => {
+    expect(() => parseTrendBreakoutStrategyConfiguration({
+      ...defaultTrendBreakoutStrategyConfiguration, requirePattern: "false",
+    } as unknown as Record<string, unknown>)).toThrow(/boolean requirePattern/);
+  });
+
+  it("still needs at least one piece of evidence when both flags are off", () => {
+    /*
+     * With neither required the confidence formula tops out at 0.38 + 0.1 = 0.48, so an
+     * indicators-only rule would be a different strategy wearing this one's name and geometry. The
+     * measured sweep of 2026-09-02 depends on the loosened arms still being variants of this rule.
+     */
+    const configuration = {
+      ...defaultTrendBreakoutStrategyConfiguration,
+      requirePattern: false,
+      requireTrigger: false,
+    };
+    const bare: StrategyMarketContext = {
+      ...qualifyingLongContext(),
+      patterns: [],
+      priceActionEvents: [],
+    };
+
+    expect(new TrendBreakoutStrategy().evaluate(bare, configuration as unknown as Record<string, unknown>))
+      .toEqual([]);
   });
 });

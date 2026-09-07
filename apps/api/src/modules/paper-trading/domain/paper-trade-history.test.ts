@@ -33,6 +33,11 @@ function record(overrides: Partial<PaperTradeHistoryRecord> = {}): PaperTradeHis
     fees: 5,
     slippage: 1,
     notes: "",
+    // An index position rather than an option, which is what these summary figures are written
+    // against. The option fields carry the contract identity the ledger renders.
+    optionType: null,
+    optionStrike: null,
+    underlyingSymbol: null,
     ...overrides,
   };
 }
@@ -134,7 +139,22 @@ describe("summarizePaperTradeHistory", () => {
     expect(summary.averageHoldingMinutes).toBe(120);
     expect(summary.largestWin).toBe(300);
     expect(summary.largestLoss).toBe(-100);
-    expect(summary.exitReasonCounts).toEqual({ TARGET: 1, STOP_LOSS: 1, MANUAL: 0, CANCELLED: 0 });
+    // Every reason in the alphabet is reported, including those with no trades, so a
+    // consumer can render a stable set of buckets. EXPIRED joined it with option
+    // force-close at expiry.
+    expect(summary.exitReasonCounts).toEqual({
+      TARGET: 1,
+      STOP_LOSS: 1,
+      MANUAL: 0,
+      CANCELLED: 0,
+      EXPIRED: 0,
+      TRAP_DETECTED: 0,
+      T1_TARGET: 0,
+      T2_TARGET: 0,
+      RUNNER_TRAIL: 0,
+      MOMENTUM_STALL: 0,
+      SESSION_CLOSE: 0,
+    });
   });
 
   it("walks the realised equity curve in exit order to find the drawdown", () => {

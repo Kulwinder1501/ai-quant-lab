@@ -6,7 +6,8 @@ import { PostgresIndicatorDefinitionRepository } from "../../infrastructure/data
 import { PostgresIndicatorSnapshotRepository } from "../../infrastructure/database/repositories/postgres-indicator-snapshot-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { CalculateTechnicalIndicators } from "../../modules/technical-analysis/application/calculate-technical-indicators.js";
-import { parseHistoricalTimeframe, requireOption } from "./arguments.js";
+import { defaultIndicatorDefinitions, SMC_ALGORITHM_VERSION } from "../../modules/technical-analysis/domain/technical-indicator.js";
+import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
@@ -15,6 +16,15 @@ async function main(): Promise<void> {
   try {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
+    const fromArg = getOption(argumentsList, "from");
+    const since = fromArg ? parseDateOption(fromArg, false) : undefined;
+    const family = (getOption(argumentsList, "family") ?? "all").toLowerCase();
+    if (family !== "all" && family !== "smc") {
+      throw new Error(`Unsupported indicator family "${family}". Use all or smc.`);
+    }
+    const definitions = family === "smc"
+      ? defaultIndicatorDefinitions.filter((definition) => definition.algorithmVersion === SMC_ALGORITHM_VERSION)
+      : undefined;
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
       throw new Error(`NSE instrument "${symbol}" is not registered.`);
@@ -23,8 +33,8 @@ async function main(): Promise<void> {
       new PostgresCandleRepository(database),
       new PostgresIndicatorDefinitionRepository(database),
       new PostgresIndicatorSnapshotRepository(database),
-    ).execute({ instrumentId: instrument.id, timeframe });
-    console.info(JSON.stringify({ level: "info", message: "Technical indicator calculation complete", instrument: symbol, timeframe, ...result }));
+    ).execute({ instrumentId: instrument.id, timeframe, since, definitions });
+    console.info(JSON.stringify({ level: "info", message: "Technical indicator calculation complete", instrument: symbol, timeframe, family, since: since?.toISOString(), ...result }));
   } finally {
     await database.end();
   }

@@ -1,0 +1,519 @@
+import { sha256CanonicalJson } from "../../../platform/identity/identity.js";
+import { canonicalFrictionRungsBps } from "./canonical-friction.js";
+import { matchedControlCount, matchedControlMinuteCaliper } from "./matched-controls.js";
+
+/**
+ * Pre-registration for the exit-geometry falsification program — the studies, frozen before they run.
+ *
+ * ## Why registration has to precede the first result
+ *
+ * Every negative this project has recorded was reached by narrowing a search until something looked
+ * alive, then asking whether the survivor was real. That question is unanswerable after the fact: a
+ * winning cell out of 35 and a winning cell out of 350 look identical in a report, and the only
+ * difference — how many configurations were examined — is exactly the part nobody writes down. The
+ * deflated Sharpe ratio and probability-of-backtest-overfitting corrections both need the trial count
+ * as an *input*; reconstructing it from memory after the fact makes the correction decorative.
+ *
+ * So the parameter sets are frozen here, hashed, and stored before any of them is executed. A study
+ * that later wants a different horizon list or a wider grid is a *new* study with a new key — never an
+ * edit. `PATH_STUDY_V1` plus a follow-up `PATH_STUDY_V2` is two trials and is accounted as two; a
+ * silently widened `PATH_STUDY_V1` is one trial that has been lied about.
+ *
+ * ## What is deliberately not in here
+ *
+ * The trial *ledger* — one row per executed configuration, carrying `executedAt`, dataset cutoff,
+ * session range and code version. It is required before any geometry cell is searched, and it is
+ * intentionally left to the migration that lands the study runner, so its columns are determined by a
+ * real writer rather than guessed at here. No trial can execute unrecorded, because the runner and its
+ * table arrive together.
+ */
+
+export const studyRegistryEncodingVersion = "STUDY_REGISTRY_V1";
+
+/**
+ * Whether a study's candidate values were chosen before seeing outcomes from the data it will run on.
+ *
+ * Not a quality judgement and not a filter — a post-hoc family is a legitimate hypothesis and refusing
+ * to register it would only mean testing it unrecorded. It is a *provenance* flag, because a
+ * pre-specified grid and a family reverse-engineered from two good sessions carry different evidential
+ * weight, and a multiplicity correction that flattens both into "one more parameter family" is wrong in
+ * the direction that flatters us.
+ */
+export type StudyProvenance = "PRE_SPECIFIED" | "DATA_INSPECTED";
+
+export interface StudyDefinition {
+  /** Immutable identity. A changed specification requires a new key, never an edit to this one. */
+  readonly studyKey: string;
+  /** The single question this study is capable of answering, stated so a later reader cannot drift it. */
+  readonly question: string;
+  readonly provenance: StudyProvenance;
+  /** Where the candidate values came from. Required, and required to be honest, for DATA_INSPECTED. */
+  readonly provenanceNote: string;
+  /** The frozen parameter set. Hashed verbatim, so any change is detectable. */
+  readonly specification: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * How much independent evidence a result rests on, as a governance label rather than a test.
+ *
+ * Trade count is not sample size here. Intraday outcomes inside one session share a regime, a trend
+ * and overlapping forward windows, so the independent unit is the trading day — which is why the
+ * day-clustered bootstrap refuses an interval below two distinct days. But clearing that mechanical
+ * floor is not the same as being allowed to kill or promote a strategy family, and conflating the two
+ * is how a two-day reading becomes a verdict. These bands exist so a report has to *say* which it is.
+ */
+export type StudyEvidenceState =
+  | "EARLY_DIAGNOSTIC"
+  | "PROVISIONAL"
+  | "RESEARCH_USABLE"
+  | "STRONGER_VALIDATION";
+
+/**
+ * The version of the evidence boundaries below, recorded on every verdict that used them.
+ *
+ * ## What this fixes, and what it deliberately does not
+ *
+ * Gate A7 / Gap 6 asks for evidence thresholds to be "referenced, never copied", and describes the
+ * risk as duplication -- "the registry says 20, the plan says 20, and eventually a third service says
+ * 25". Measured 2026-09-02: in code there is no duplication. `evidenceState` below is the single
+ * implementation, and every consumer either calls it or takes `decisionGradeSessionMinimum` as a
+ * parameter. The property Gap 6 wants already held.
+ *
+ * What did not hold is provenance. Nothing recorded *which* boundaries produced a stored verdict, so
+ * the day these numbers change, all 180 stored `evidence_state` values silently become ambiguous --
+ * unreadable in the same way a control point would be if `controlPolicyVersion` were not stored
+ * beside it. That is what this version is for, and migration 091 stamps it on the row.
+ *
+ * A `StudyEvidencePolicy` object that every service reads -- which Gap 6 sketches -- was considered
+ * and not built. It would be an indirection layer over one function with one implementation, adding
+ * structure without removing a risk.
+ *
+ * > If any boundary below changes, `evidencePolicyVersion` MUST change with it.
+ *
+ * The stored version is then sufficient to say what a grade meant, and rows graded under different
+ * boundaries stay distinguishable rather than being silently comparable.
+ *
+ * No boundary changed when this was introduced: 5 / 20 / 60 are exactly the values that were already
+ * in force, so every existing row is truthfully `EVIDENCE_POLICY_V1` and nothing re-grades.
+ */
+export const evidencePolicyVersion = "EVIDENCE_POLICY_V1";
+
+/**
+ * Below this, a reading is a diagnostic and not evidence.
+ *
+ * Five sessions is where a cell stops being a handful of draws, and it was an unnamed inline literal
+ * until 2026-09-02 while the twenty below carried a documented rationale -- an odd asymmetry, since
+ * both decide what a report is allowed to claim.
+ */
+export const provisionalSessionMinimum = 5;
+
+/**
+ * The session count below which a study may not kill or advance a hypothesis.
+ *
+ * Twenty independent sessions is a judgement, not a theorem: it is the point at which the day-clustered
+ * interval stops being dominated by a single day's draw. Named here so a gate decision cites a frozen
+ * number instead of whatever the current sample happens to support.
+ */
+export const decisionGradeSessionMinimum = 20;
+
+/**
+ * The session count at which evidence is strong enough for the promotion ladder's upper rungs.
+ *
+ * Sixty is the `SHADOW -> PAPER` requirement in the promotion policy. Also an unnamed literal until
+ * 2026-09-02.
+ */
+export const strongerValidationSessionMinimum = 60;
+
+export function evidenceState(sessionCount: number): StudyEvidenceState {
+  if (!Number.isInteger(sessionCount) || sessionCount < 0) {
+    throw new Error("Evidence state needs a non-negative whole number of sessions.");
+  }
+  if (sessionCount < provisionalSessionMinimum) return "EARLY_DIAGNOSTIC";
+  if (sessionCount < decisionGradeSessionMinimum) return "PROVISIONAL";
+  if (sessionCount < strongerValidationSessionMinimum) return "RESEARCH_USABLE";
+  return "STRONGER_VALIDATION";
+}
+
+/** Whether a result at this session count may be used to kill or advance a hypothesis. */
+export function decisionGrade(sessionCount: number): boolean {
+  return sessionCount >= decisionGradeSessionMinimum;
+}
+
+/**
+ * How far one grouping cell has come, evaluated for that cell alone.
+ *
+ * ## Why the gate is cell-local
+ *
+ * A study spans many cells — cohort x instrument x timeframe x direction — and they accrue evidence at
+ * wildly different rates: a dense 1m cell can carry sixty opportunities a session while a rare
+ * cross-timeframe one carries a single opportunity a week. Requiring the whole universe to advance
+ * together would hold a well-supported cell hostage to a sparse one, and the obvious way to "fix" that
+ * — merging cells to reach a threshold faster — is worse than waiting, because timeframe is exactly the
+ * distinction the 1m-versus-5m question turns on. Pooling a 1m cell peaking at +3m with a 5m cell
+ * peaking at +20m manufactures a smooth curve describing neither.
+ *
+ * So a sparse cell stays unresolved indefinitely, and that is a legitimate outcome rather than a
+ * failure: "this setup is too rare to support a standalone claim from the data available" is a finding.
+ * It does not block the cells beside it, and it is never merged to reach a sample threshold.
+ *
+ * `DECISION_ELIGIBLE` deliberately does not mean proven. It means the cell has enough independent-session
+ * information for a Gate-1 reading to be taken seriously; effect size, interval width, stability across
+ * instruments, opportunity count and the multiplicity of the horizon search all remain separate
+ * questions.
+ */
+export type CellGateStanding =
+  | "INSUFFICIENT_DAYS"
+  | "DEGENERATE_INTERVAL"
+  | "PROVISIONAL"
+  | "DECISION_ELIGIBLE";
+
+export function cellGateStanding(sessionCount: number): CellGateStanding {
+  if (!Number.isInteger(sessionCount) || sessionCount < 0) {
+    throw new Error("Cell gate standing needs a non-negative whole number of sessions.");
+  }
+  if (sessionCount < 2) return "INSUFFICIENT_DAYS";
+  if (sessionCount < 5) return "DEGENERATE_INTERVAL";
+  if (sessionCount < decisionGradeSessionMinimum) return "PROVISIONAL";
+  return "DECISION_ELIGIBLE";
+}
+
+/**
+ * STAGE G1 — does the entry carry information at all, with no bracket attached?
+ *
+ * The point of a barrier-free study is that it cannot be steered by the exit policy it is meant to
+ * inform. Every existing settled row is barrier-truncated: `walkPath` returns the instant a stop or
+ * target is touched, so the stored 5/15/30/60-minute observations answer "what did this bracket do by
+ * horizon H", not "where did price go by horizon H". Those are different objects, and using the second
+ * to choose a bracket would be circular.
+ */
+const pathStudyV1: StudyDefinition = {
+  studyKey: "PATH_STUDY_V1",
+  question:
+    "Do selected opportunities have a better control-adjusted forward path than matched controls, and "
+    + "at which horizon does that advantage peak and decay?",
+  provenance: "PRE_SPECIFIED",
+  provenanceNote:
+    "Horizon ladder chosen for even coverage of the 1m-to-60m range before any forward-path figure was "
+    + "computed. No horizon was added or removed after inspecting a curve.",
+  specification: {
+    horizonsMinutes: [1, 2, 3, 5, 10, 15, 20, 30, 45, 60],
+    /** Units reported side by side: points is instrument-specific, bps and ATR are comparable. */
+    returnUnits: ["POINTS", "BPS", "ATR"],
+    /*
+     * Distributional statistics, not just the mean.
+     *
+     * A positive mean with a negative median says a handful of runners carries the whole result, which
+     * argues for a wide target; a positive median with a weak mean says the edge is broad and shallow,
+     * which argues for a tight one. Reporting only the mean cannot distinguish the two, and those two
+     * findings imply opposite exit designs.
+     */
+    statistics: [
+      "MEAN_DIRECTIONAL_RETURN", "MEDIAN_DIRECTIONAL_RETURN", "P_RETURN_POSITIVE",
+      "MEAN_MFE", "MEDIAN_MFE", "MEAN_MAE", "MEDIAN_MAE",
+      "MEDIAN_TIME_TO_MFE", "MEDIAN_TIME_TO_MAE", "GIVE_BACK_RATIO",
+    ],
+    /*
+     * Pinned because it changes shape without a bracket.
+     *
+     * In the bracket world give-back was measured against a fill. Barrier-free has no fill, so it is
+     * the share of the best point reached by horizon h that had been surrendered by the close of h.
+     * Left informal, two implementers would reasonably write two different formulas.
+     */
+    giveBackRatioDefinition: "(mfe_h - directionalReturn_h) / mfe_h, undefined when mfe_h <= 0",
+    /*
+     * Reported per horizon, because horizon eligibility is not constant across the session.
+     *
+     * A decision late in the day cannot support a 60-minute horizon, so the population eligible at
+     * +60m is systematically earlier-in-session than the one eligible at +1m. Left unreported, a real
+     * time-of-day effect reads as information decay. The second curve restricts to decisions eligible
+     * at *every* horizon, so the two can be compared: divergence between them is a time-of-day
+     * finding, not noise.
+     */
+    eligibilityReporting: ["PER_HORIZON_ELIGIBLE_DECISIONS", "PER_HORIZON_ELIGIBLE_SESSIONS"],
+    secondaryCurve: "COMMON_ELIGIBLE_SUBSET — decisions eligible at every horizon in the ladder",
+    /*
+     * Partition keys, never aggregation keys.
+     *
+     * The score gate decided what got *recorded* before it was lifted, so a gated population and an
+     * ungated one are different selection rules answering different questions. Their mean describes a
+     * strategy that never ran. `assertSingleCohort` already throws on this in the estimators; stating
+     * it in the study definition means the first stage cannot quietly pool either.
+     */
+    groupBy: ["STRATEGY_DEFINITION_HASH", "INSTRUMENT", "TIMEFRAME", "DIRECTION"],
+    controlPolicy: {
+      matchedControlCount,
+      matchedControlMinuteCaliper,
+      note: "Existing matched-control policy, unchanged: same instrument, session, direction and "
+        + "volatility regime inside the minute caliper, outcome-blind, full common support required.",
+    },
+    inference: "TRADING_DAY_BLOCK_BOOTSTRAP",
+    barrierPolicy: "NONE — the walker ignores stop, target and timeout entirely",
+    decisionGradeSessionMinimum,
+  },
+};
+
+/**
+ * STAGE G3 — which stop/target regions monetize the information, if any does.
+ *
+ * Gated behind G1 on purpose. Sweeping 35 cells over a population with no established control-adjusted
+ * edge produces a winning cell by multiplicity, and the two sweeps this project has already run
+ * (`NO_VIABLE_HORIZON`, `NO_VIABLE_STOP_MULTIPLE`) both moved stop and target *together* at a fixed
+ * 1.5 reward-to-risk — one diagonal through a two-dimensional space. Whether 1.5 is the right ratio has
+ * therefore never been tested, only assumed, and this grid is what separates the two axes.
+ */
+const geometryMatrixV1: StudyDefinition = {
+  studyKey: "GEOMETRY_MATRIX_V1",
+  question:
+    "Over a jointly varied stop and target grid, which cells produce positive net expectancy "
+    + "(monetization) and which produce positive selected-minus-control edge (selection)?",
+  provenance: "PRE_SPECIFIED",
+  provenanceNote:
+    "Grid bounds chosen to bracket the incumbent 1.0-ATR stop / 1.5-R target on both axes and to span "
+    + "reward-to-risk ratios from 0.17 to 6.0. Deliberately small: a larger grid buys resolution at the "
+    + "cost of a multiplicity correction that would consume the result.",
+  specification: {
+    stopAtrMultiples: [0.5, 0.75, 1.0, 1.25, 1.5],
+    targetAtrMultiples: [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0],
+    cellCount: 35,
+    incumbentCell: { stopAtrMultiple: 1.0, targetAtrMultiple: 1.5 },
+    /*
+     * Both surfaces, separately.
+     *
+     * Monetization asks whether the cell makes money; selection asks whether the strategy picked
+     * better states than matched controls under that same cell. A cell can be positive on one and flat
+     * on the other, and the two combinations mean opposite things — geometry that works on any input
+     * versus information that no geometry monetizes.
+     */
+    surfaces: {
+      MONETIZATION: "E[net selected outcome | stop, target]",
+      SELECTION: "E[selected outcome | stop, target] - E[matched control outcome | stop, target]",
+    },
+    controlsRunOnIdenticalGrid: true,
+    frictionRungsBps: canonicalFrictionRungsBps,
+    /*
+     * Cost in risk units scales as the inverse of the stop distance, so the tight rows of this grid pay
+     * materially more than the wide ones for the identical basis-point assumption. Reporting cost in
+     * bps alone would hide that entirely — it is constant at twice the rung — which is exactly the
+     * mechanism that makes a tight bracket look attractive gross and fail net.
+     */
+    costReporting: ["GROSS_R", "FRICTION_R_PER_RUNG", "NET_R_PER_RUNG", "GROSS_BPS", "NET_BPS_PER_RUNG"],
+    /*
+     * A neighbourhood requirement, not a maximum.
+     *
+     * An isolated winning cell surrounded by losers is the signature of a lucky draw, since adjacent
+     * geometries see almost the same trades. Stating the acceptance rule before the surface is computed
+     * is what stops it from being redrawn around whichever cell wins.
+     */
+    acceptanceRule:
+      "A candidate must sit in a contiguous region of same-signed cells, hold across instruments or "
+      + "carry a stated reason for specialisation, and survive the friction ladder. A single cell "
+      + "outperforming its neighbours is rejected as overfit.",
+    groupBy: ["STRATEGY_DEFINITION_HASH", "INSTRUMENT", "TIMEFRAME", "DIRECTION"],
+    ambiguityReporting: "PER_CELL — the ambiguous share rises as the bracket narrows toward the bar "
+      + "range, so a single global figure understates it in exactly the tight cells where it binds.",
+    gatedBehind: "PATH_STUDY_V1",
+    decisionGradeSessionMinimum,
+  },
+};
+
+/**
+ * The fixed-point challenger family, registered *as* a post-hoc hypothesis.
+ *
+ * These levels came from looking at two sessions' outcomes. That does not disqualify them — it is a
+ * real hypothesis and testing it unrecorded would be worse — but it does mean they cannot be counted
+ * alongside a pre-specified grid when the multiplicity correction runs. The provenance flag is the
+ * whole point of the entry.
+ *
+ * Also volatility-unnormalised, which is why BANKNIFTY gets an ATR-equivalent arm rather than the same
+ * raw numbers: a 10-point NIFTY50 move and a 10-point BANKNIFTY move are not the same event.
+ */
+const fixedPointsV1: StudyDefinition = {
+  studyKey: "FIXED_POINTS_V1",
+  question:
+    "Does a fixed point target outperform the volatility-normalised grid on the instrument and "
+    + "timeframe it was observed on?",
+  provenance: "DATA_INSPECTED",
+  provenanceNote:
+    "Candidate levels 10/15/20 points were selected after observing 2026-08-24 and 2026-08-25 scalp "
+    + "outcomes. Registered so the multiplicity accounting can treat them as post-hoc rather than "
+    + "pre-specified; they must not be pooled with GEOMETRY_MATRIX_V1's trial count.",
+  specification: {
+    nifty50TargetPoints: [10, 15, 20],
+    banknifty: "ATR_EQUIVALENT — the NIFTY50 levels mapped through ATR rather than reused raw, since "
+      + "the two instruments do not share a volatility scale.",
+    role: "SECONDARY_CHALLENGER — reported beside the primary grid, never as its own conclusion.",
+    groupBy: ["STRATEGY_DEFINITION_HASH", "INSTRUMENT", "TIMEFRAME", "DIRECTION"],
+    gatedBehind: "PATH_STUDY_V1",
+    decisionGradeSessionMinimum,
+  },
+};
+
+/**
+ * STAGE G1, second inference design — the same measurement, read through a simultaneous band.
+ *
+ * ## Why this is a new study and not a correction to V1
+ *
+ * Ten pointwise 95% intervals do not give 95% coverage across ten inspected horizons. Choosing the
+ * horizon that looks best and quoting its interval is a search, and V1's verdict did exactly that. The
+ * fix — one simultaneous band over the whole curve — changes *how evidence becomes a claim*, which is
+ * part of the research definition rather than a presentation detail.
+ *
+ * It would be easy to argue the change needs no version, since a simultaneous band is strictly more
+ * conservative and so cannot manufacture a finding. That argument is true and still the wrong one to
+ * make: the registry exists precisely so inferential semantics are not renegotiated after results have
+ * been looked at, and "it can only be stricter" is the shape of reasoning that erodes it. V1 has already
+ * run.
+ *
+ * The timing is deliberate. V1 produced 36 cells, 360 interval examinations and zero valid information
+ * claims, every cell at `INSUFFICIENT_DAYS` or `DEGENERATE_INTERVAL`. Versioning now means the
+ * inferential design is being corrected while everything is still early-diagnostic — not after a
+ * 20-session result someone disliked.
+ *
+ * ## What is identical to V1, on purpose
+ *
+ * Horizons, cell identity, the barrier-free path definition and the matching policy. The two studies
+ * therefore differ in exactly one dimension, and a V1-versus-V2 comparison isolates the inference.
+ *
+ * ## Scope of the band
+ *
+ * It controls the ten-horizon search *within* one cell. It says nothing about the 36 cells examined
+ * across the study; that is the trial ledger's job and remains open. Claiming otherwise would be a
+ * familywise guarantee this does not provide.
+ */
+const pathStudyV2: StudyDefinition = {
+  studyKey: "PATH_STUDY_V2",
+  question:
+    "Across the registered horizon ladder as a whole, is there simultaneous evidence of positive "
+    + "control-adjusted directional information in this cell?",
+  provenance: "PRE_SPECIFIED",
+  provenanceNote:
+    "Identical measurement to PATH_STUDY_V1 — same horizons, cells, path definition and matching "
+    + "policy. Registered as a new version because the inference changes: the verdict moves from ten "
+    + "pointwise intervals to one simultaneous band. Registered before the band was implemented, and "
+    + "while every V1 cell was still EARLY_DIAGNOSTIC or DEGENERATE_INTERVAL.",
+  specification: {
+    horizonsMinutes: [1, 2, 3, 5, 10, 15, 20, 30, 45, 60],
+    returnUnits: ["POINTS", "BPS", "ATR"],
+    statistics: [
+      "MEAN_DIRECTIONAL_RETURN", "MEDIAN_DIRECTIONAL_RETURN", "P_RETURN_POSITIVE",
+      "MEAN_MFE", "MEDIAN_MFE", "MEAN_MAE", "MEDIAN_MAE",
+      "MEDIAN_TIME_TO_MFE", "MEDIAN_TIME_TO_MAE", "GIVE_BACK_RATIO",
+    ],
+    giveBackRatioDefinition: "(mfe_h - directionalReturn_h) / mfe_h, undefined when mfe_h <= 0",
+    eligibilityReporting: ["PER_HORIZON_ELIGIBLE_DECISIONS", "PER_HORIZON_ELIGIBLE_SESSIONS"],
+    secondaryCurve: "COMMON_ELIGIBLE_SUBSET — decisions eligible at every horizon in the ladder",
+    /*
+     * The eligibility diagnostic is promoted from a reported curve to a stated verdict.
+     *
+     * If the available-case curve shows a sharp early peak decaying by +60m while the common-eligible
+     * curve is flat, the decay is a statement about session composition rather than about information.
+     * Both readings are useful; conflating them is not.
+     */
+    eligibilitySensitivity: ["STABLE", "COMPOSITION_SENSITIVE"],
+    groupBy: ["STRATEGY_DEFINITION_HASH", "INSTRUMENT", "TIMEFRAME", "DIRECTION"],
+    controlPolicy: {
+      matchedControlCount,
+      matchedControlMinuteCaliper,
+      note: "Existing matched-control policy, unchanged from PATH_STUDY_V1.",
+    },
+    barrierPolicy: "NONE — the walker ignores stop, target and timeout entirely",
+    /*
+     * The inference, pinned to the point where two implementations cannot quietly differ.
+     *
+     * Each field is here because leaving it to the implementer would change the answer. The two that
+     * matter most are the last: whether a thin horizon is dropped or the whole cell refused, and whether
+     * a replicate missing one horizon drops the horizon or the replicate. Dropping a horizon from a
+     * maximum *lowers* the critical value and makes the test less conservative — the opposite of the
+     * intent — so the resolution is stated rather than discovered.
+     */
+    inferencePolicy: "SIMULTANEOUS_DAY_MAXT_V1",
+    inference: {
+      resamplingUnit: "TRADING_DAY",
+      statistic: "STUDENTIZED_CONTROL_ADJUSTED_EDGE — per-horizon day-mean edge divided by its "
+        + "day-level standard error",
+      aggregationAcrossHorizons: "MAX",
+      claimDirection: "ONE_SIDED_POSITIVE",
+      nullHypothesis: "edge_h <= 0 for every registered horizon",
+      alternative: "edge_h > 0 for at least one registered horizon",
+      confidenceLevel: 0.95,
+      replicateCount: 4_000,
+      bootstrapSeedPolicy: "DETERMINISTIC — seeded from namespace, studyKey, cellKey and metric. No "
+        + "wall clock, and no PRNG state carried between cells.",
+      pointwiseIntervals: "DESCRIPTIVE_ONLY — reported per horizon, never the source of a verdict",
+      gateVerdictSource: "SIMULTANEOUS_LOWER_BAND",
+      /*
+       * One resampled day set serves every horizon, which is what preserves the dependence between
+       * horizons that the maximum is taken over. That forces the day set to be those days with
+       * contributions everywhere; the alternative — per-horizon day sets — would make the maximum a
+       * statistic over incomparable quantities.
+       */
+      resampledDaySet: "COMMON_SUPPORT_DAYS — trading days with contributions at every retained horizon",
+      horizonExclusionRule: "A horizon with fewer than two common-support days, or a zero day-level "
+        + "standard error, is excluded from the cell BEFORE resampling and reported by name. Horizons "
+        + "are never dropped during resampling, because removing one from the maximum lowers the "
+        + "critical value and weakens the test.",
+      dayExclusionRule: "A trading day without contributions at every retained horizon is excluded "
+        + "BEFORE resampling and reported by count. No replicate is discarded mid-run.",
+      scopeLimit: "Controls the horizon search WITHIN one cell only. The 36 registered cells remain a "
+        + "separate multiplicity problem for the trial ledger; this is not a familywise guarantee over "
+        + "the study.",
+    },
+    cellGate: "PER_CELL — a cell advances on its own independent-session support; sparse cells stay "
+      + "unresolved, never pooled to reach a threshold",
+    degenerateAtOrBelowSessions: 4,
+    provisionalFromSessions: 5,
+    decisionEligibleFromSessions: decisionGradeSessionMinimum,
+    gatedBehind: null,
+    supersedes: "PATH_STUDY_V1",
+    decisionGradeSessionMinimum,
+  },
+};
+
+export const registeredStudies: readonly StudyDefinition[] = [
+  pathStudyV1,
+  pathStudyV2,
+  geometryMatrixV1,
+  fixedPointsV1,
+];
+
+/**
+ * The definition's content hash — the value a re-registration is checked against.
+ *
+ * Covers the specification and its provenance, so widening a grid or reclassifying a post-hoc family
+ * as pre-specified both change it. It deliberately does *not* cover the runner's source, for the same
+ * reason the research manifest does not: an unchanged hash proves the declared policy is unchanged, and
+ * says nothing about the implementation. Code provenance belongs on the trial row, next to the result
+ * it produced.
+ */
+export function studyDefinitionHash(definition: StudyDefinition): string {
+  return sha256CanonicalJson({
+    encoding: studyRegistryEncodingVersion,
+    studyKey: definition.studyKey,
+    question: definition.question,
+    provenance: definition.provenance,
+    provenanceNote: definition.provenanceNote,
+    specification: definition.specification,
+  });
+}
+
+/** Rejects a definition that cannot serve as a registration before it reaches the table. */
+export function assertStudyRegistrable(definition: StudyDefinition): void {
+  if (!/^[A-Z0-9_]+_V[0-9]+$/.test(definition.studyKey)) {
+    throw new Error(
+      `Study key ${definition.studyKey} must be upper snake case ending in an explicit version, so a `
+      + "changed specification is registered as a new study rather than edited in place.",
+    );
+  }
+  if (definition.question.trim().length === 0) {
+    throw new Error(`${definition.studyKey} needs the question it is capable of answering.`);
+  }
+  if (definition.provenanceNote.trim().length === 0) {
+    throw new Error(
+      `${definition.studyKey} needs a provenance note. For a DATA_INSPECTED study it must say which `
+      + "observations the candidate values were drawn from.",
+    );
+  }
+  if (Object.keys(definition.specification).length === 0) {
+    throw new Error(`${definition.studyKey} has an empty specification, so nothing is actually frozen.`);
+  }
+}

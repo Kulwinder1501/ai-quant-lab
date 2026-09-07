@@ -6,8 +6,11 @@ interface RssFeedConfig {
 }
 
 const RSS_FEEDS: RssFeedConfig[] = [
-  { provider: "MONEYCONTROL", url: "https://www.moneycontrol.com/rss/marketreports.xml" },
-  { provider: "ECONOMIC_TIMES", url: "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms" },
+  { provider: "LIVEMINT", url: "https://www.livemint.com/rss/markets" },
+  { provider: "LIVEMINT", url: "https://www.livemint.com/rss/companies" },
+  { provider: "TIMES_OF_INDIA", url: "https://timesofindia.indiatimes.com/rssfeeds/1898055.cms" },
+  { provider: "BUSINESS_STANDARD", url: "https://www.business-standard.com/rss/markets-106.rss" },
+  { provider: "NDTV_PROFIT", url: "https://feeds.feedburner.com/ndtvprofit-latest" },
 ];
 
 const BULLISH_WORDS = [

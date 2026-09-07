@@ -4,6 +4,7 @@ export interface TradeIdeaRow {
   instrumentSymbol: string;
   instrumentName: string;
   strategyVersionId?: string | null;
+  strategyKey?: string | null;
   candleTimeframe?: string | null;
   candleCloseTime?: string | null;
   side: "BUY" | "SELL" | string;

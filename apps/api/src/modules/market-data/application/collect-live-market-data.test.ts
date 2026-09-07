@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CollectLiveMarketData } from "./collect-live-market-data.js";
 import type { CandleRepository, PersistedCandle, UpsertCandleInput } from "../domain/candle.js";
+import { CompletedCandleImmutableError } from "../domain/candle.js";
 import type { Instrument } from "../domain/instrument.js";
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../domain/live-market-data-provider.js";
 import { NseMarketSession } from "../domain/nse-market-session.js";
@@ -18,6 +19,18 @@ function candleRepository(): { repository: CandleRepository; saved: Map<string, 
     repository: {
       upsert: async (input: UpsertCandleInput) => {
         const key = keyFor(input.instrumentId, input.timeframe, input.openTime);
+        // Mirrors the real guard, `WHERE candles.is_complete = FALSE OR (source_metadata ?
+        // 'quoteObservedAt')`: a settled bar written by anyone other than a live collector
+        // refuses the overwrite. Without this the stub accepts every write and the crash-loop
+        // regression is invisible to these tests.
+        const stored = saved.get(key);
+        if (stored?.isComplete && !("quoteObservedAt" in stored.sourceMetadata)) {
+          throw new CompletedCandleImmutableError({
+            instrumentId: input.instrumentId,
+            timeframe: input.timeframe,
+            openTime: input.openTime,
+          });
+        }
         const persisted: PersistedCandle = {
           id: key,
           instrumentId: input.instrumentId,
@@ -62,7 +75,11 @@ describe("CollectLiveMarketData", () => {
       },
     };
     const candles = candleRepository();
-    const collector = new CollectLiveMarketData(provider, candles.repository, new NseMarketSession());
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      // Observing from the session open, so both windows below are fully watched.
+      new Date("2026-07-24T03:45:00Z"),
+    );
     const input = { subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }], timeframe: "1m" as const, ingestionId: "live-ingestion" };
 
     await collector.execute({ ...input, now: new Date("2026-07-24T03:45:15Z") });
@@ -85,5 +102,248 @@ describe("CollectLiveMarketData", () => {
       ingestionId: "live-ingestion",
       now: new Date("2026-07-25T04:00:00Z"), // Saturday
     })).resolves.toMatchObject({ quotesReceived: 0, quotesApplied: 0 });
+  });
+
+  it("never starts a window that opened before it did", async () => {
+    // A collector that starts mid-window cannot have seen the whole of it. Measured
+    // 2026-08-07: one started at 08:12 sealed the 08:00-08:15 NIFTY50 bar from three minutes
+    // of quotes, range 0.9 points, marked complete. The strategies and the indicator engine
+    // read it, and a later historical fetch would have skipped it as already present.
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => [{
+        providerInstrumentId: "NSE:RELIANCE", lastPrice: "100", cumulativeVolume: "1000",
+        observedAt: new Date("2026-07-24T04:12:00Z"), exchangeTimestamp: null,
+      }],
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:12:05Z"),
+    });
+
+    // The 04:00-04:15 window opened twelve minutes before observation began.
+    expect(result).toMatchObject({ quotesReceived: 1, quotesApplied: 0 });
+    expect([...candles.saved.values()]).toHaveLength(0);
+  });
+
+  it("starts the next window once it begins cleanly", async () => {
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => [{
+        providerInstrumentId: "NSE:RELIANCE", lastPrice: "100", cumulativeVolume: "1000",
+        observedAt: new Date("2026-07-24T04:16:00Z"), exchangeTimestamp: null,
+      }],
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:16:05Z"),
+    });
+
+    expect(result).toMatchObject({ quotesApplied: 1 });
+    expect([...candles.saved.values()][0]).toMatchObject({ isComplete: false });
+  });
+
+  it("tracks each timeframe independently when one process collects several", async () => {
+    const quote = (observedAt: string, price: string, volume: string): LiveMarketQuote => ({
+      providerInstrumentId: "NSE:RELIANCE",
+      lastPrice: price,
+      cumulativeVolume: volume,
+      observedAt: new Date(observedAt),
+      exchangeTimestamp: null,
+    });
+    // The CLI invokes the same collector once per timeframe on every poll. Each pair below is
+    // the 1m and 5m view of one provider snapshot.
+    const quotes = [
+      quote("2026-07-24T03:45:10Z", "100", "1000"),
+      quote("2026-07-24T03:45:10Z", "100", "1000"),
+      quote("2026-07-24T03:46:10Z", "101", "1010"),
+      quote("2026-07-24T03:46:10Z", "101", "1010"),
+      quote("2026-07-24T03:50:10Z", "102", "1050"),
+      quote("2026-07-24T03:50:10Z", "102", "1050"),
+    ];
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => {
+        const next = quotes.shift();
+        return next ? [next] : [];
+      },
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      provider,
+      candles.repository,
+      new NseMarketSession(),
+      new Date("2026-07-24T03:45:00Z"),
+    );
+    const executePair = async (now: string) => {
+      for (const timeframe of ["1m", "5m"] as const) {
+        await collector.execute({
+          subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+          timeframe,
+          ingestionId: "live-ingestion",
+          now: new Date(now),
+        });
+      }
+    };
+
+    await executePair("2026-07-24T03:45:15Z");
+    await executePair("2026-07-24T03:46:15Z");
+    await executePair("2026-07-24T03:50:15Z");
+
+    const values = [...candles.saved.values()];
+    expect(values.some((candle) => candle.timeframe === "1m" && candle.isComplete)).toBe(true);
+    expect(values.some((candle) => candle.timeframe === "5m" && candle.isComplete)).toBe(true);
+    expect(values.some((candle) => candle.timeframe === "5m" && !candle.isComplete)).toBe(true);
+  });
+
+  it("leaves an earlier run's unfinished bar incomplete rather than sealing a guess", async () => {
+    // Sealing it would make a partial permanent, and `skipExisting` skips only completed
+    // candles -- so left incomplete, the historical fetch corrects it.
+    const candles = candleRepository();
+    await candles.repository.upsert({
+      instrumentId: instrument.id, ingestionId: "older-run", timeframe: "15m",
+      openTime: new Date("2026-07-24T03:45:00Z"), closeTime: new Date("2026-07-24T04:00:00Z"),
+      open: "100", high: "100", low: "100", close: "100", volume: "0",
+      isComplete: false, source: "test-live", sourceMetadata: { quoteObservedAt: "2026-07-24T03:59:00Z" },
+    });
+    const provider: LiveMarketDataProvider = { id: "test-live", fetchQuotes: async () => [] };
+    const collector = new CollectLiveMarketData(
+      provider, candles.repository, new NseMarketSession(),
+      new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({
+      subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+      timeframe: "15m",
+      ingestionId: "live-ingestion",
+      now: new Date("2026-07-24T04:16:05Z"),
+    });
+
+    expect(result.candlesFinalized).toBe(0);
+    expect([...candles.saved.values()][0]).toMatchObject({ isComplete: false });
+  });
+});
+
+/**
+ * INDICES_INTRADAY re-fetches NIFTY50 and BANKNIFTY every minute and writes settled bars for
+ * windows this collector is still building. Treating that refusal as fatal crash-looped
+ * `live-collector-v2` on 2026-08-26 -- 19 restarts in a morning -- while the ETF collector
+ * running the identical CLI never restarted, because nothing else writes NIFTYBEES intraday.
+ */
+describe("CollectLiveMarketData against the settled series", () => {
+  const subscriptions = [{ instrument, providerInstrumentId: "NSE:RELIANCE" }];
+  const input = { subscriptions, timeframe: "1m" as const, ingestionId: "live-ingestion" };
+
+  function quoteAt(observedAt: string, lastPrice: string, cumulativeVolume: string): LiveMarketQuote {
+    return { providerInstrumentId: "NSE:RELIANCE", lastPrice, cumulativeVolume, observedAt: new Date(observedAt), exchangeTimestamp: null };
+  }
+
+  function queuedProvider(quotes: LiveMarketQuote[]): LiveMarketDataProvider {
+    return {
+      id: "test-live",
+      fetchQuotes: async () => { const next = quotes.shift(); return next ? [next] : []; },
+    };
+  }
+
+  /** What INDICES_INTRADAY does: seal the window on-grid, with no live-collector metadata. */
+  function sealFromSettledSeries(saved: Map<string, PersistedCandle>, close: string): string {
+    const key = [...saved.keys()][0]!;
+    saved.set(key, { ...saved.get(key)!, isComplete: true, close, sourceMetadata: {} });
+    return key;
+  }
+
+  it("yields the window it is building when the settled series seals it first", async () => {
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      queuedProvider([quoteAt("2026-07-24T03:45:10Z", "100", "1000"), quoteAt("2026-07-24T03:45:40Z", "104", "1020")]),
+      candles.repository, new NseMarketSession(), new Date("2026-07-24T03:45:00Z"),
+    );
+
+    await collector.execute({ ...input, now: new Date("2026-07-24T03:45:15Z") });
+    const key = sealFromSettledSeries(candles.saved, "101");
+
+    // Second quote falls in the same window, which the collector still holds cached.
+    await expect(collector.execute({ ...input, now: new Date("2026-07-24T03:45:45Z") }))
+      .resolves.toMatchObject({ quotesApplied: 0, candlesFinalized: 0 });
+    // The settled bar stands: not overwritten by the quote-polled one.
+    expect(candles.saved.get(key)).toMatchObject({ isComplete: true, close: "101" });
+  });
+
+  it("keeps collecting the next window after the settled series took the last one", async () => {
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(
+      queuedProvider([quoteAt("2026-07-24T03:45:10Z", "100", "1000"), quoteAt("2026-07-24T03:46:10Z", "104", "1020")]),
+      candles.repository, new NseMarketSession(), new Date("2026-07-24T03:45:00Z"),
+    );
+
+    await collector.execute({ ...input, now: new Date("2026-07-24T03:45:15Z") });
+    sealFromSettledSeries(candles.saved, "101");
+
+    // Rolling into 03:46 tries to seal the cached 03:45 bar, which is the refusal path.
+    const rolled = await collector.execute({ ...input, now: new Date("2026-07-24T03:46:15Z") });
+
+    // Not counted: the settled writer sealed that bar, not this collector.
+    expect(rolled.candlesFinalized).toBe(0);
+    expect(rolled.quotesApplied).toBe(1);
+    const next = [...candles.saved.values()].find((candle) => candle.openTime.getTime() === new Date("2026-07-24T03:46:00Z").getTime());
+    expect(next).toMatchObject({ isComplete: false, open: "104" });
+  });
+
+  it("does not count a stale bar as finalized when the settled series sealed it", async () => {
+    // The `finalizeStaleCandles` race: listed as incomplete, settled before the seal lands.
+    const candles = candleRepository();
+    await candles.repository.upsert({
+      instrumentId: instrument.id, ingestionId: "live-ingestion", timeframe: "1m",
+      openTime: new Date("2026-07-24T04:13:00Z"), closeTime: new Date("2026-07-24T04:14:00Z"),
+      open: "100", high: "100", low: "100", close: "100", volume: "0",
+      isComplete: false, source: "test-live", sourceMetadata: { quoteObservedAt: "2026-07-24T04:13:30Z" },
+    });
+    const listed = [...candles.saved.values()];
+    const racing: CandleRepository = {
+      ...candles.repository,
+      // Still reports it incomplete, as the real query would when the seal lands afterwards.
+      listIncomplete: async () => listed,
+    };
+    sealFromSettledSeries(candles.saved, "101");
+    const collector = new CollectLiveMarketData(
+      { id: "test-live", fetchQuotes: async () => [] },
+      racing, new NseMarketSession(), new Date("2026-07-24T04:12:00Z"),
+    );
+
+    const result = await collector.execute({ ...input, now: new Date("2026-07-24T04:16:05Z") });
+
+    expect(result.candlesFinalized).toBe(0);
+    expect([...candles.saved.values()][0]).toMatchObject({ isComplete: true, close: "101" });
+  });
+
+  it("still stops on a repository failure that is not a settled-bar refusal", async () => {
+    const candles = candleRepository();
+    const broken: CandleRepository = {
+      ...candles.repository,
+      upsert: async () => { throw new Error("connection terminated unexpectedly"); },
+    };
+    const collector = new CollectLiveMarketData(
+      queuedProvider([quoteAt("2026-07-24T03:45:10Z", "100", "1000")]),
+      broken, new NseMarketSession(), new Date("2026-07-24T03:45:00Z"),
+    );
+
+    await expect(collector.execute({ ...input, now: new Date("2026-07-24T03:45:15Z") }))
+      .rejects.toThrow(/connection terminated/);
   });
 });

@@ -15,6 +15,12 @@ export interface IndicatorPoint {
   lower?: number;
   signal?: number;
   histogram?: number;
+  type?: string;
+  top?: number;
+  bottom?: number;
+  level?: number;
+  equilibrium?: number;
+  active?: string | boolean;
 }
 
 export interface PatternAnnotation {

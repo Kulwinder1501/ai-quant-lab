@@ -106,6 +106,10 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       WHERE candles.instrument_id = $1
         AND candles.timeframe = $2
         AND candles.is_complete = TRUE
+        -- Yahoo historical imports mark the still-open session bar complete; its
+        -- close_time is still in the future. Strategies evaluate only bars whose
+        -- close has already elapsed, matching the market-scanner settled-bar rule.
+        AND candles.close_time <= CURRENT_TIMESTAMP
       ORDER BY candles.close_time DESC, candles.open_time DESC
       LIMIT 1
     `, [input.instrumentId, input.timeframe]);
@@ -113,7 +117,98 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     if (!candle) {
       return null;
     }
+    return this.assembleContext(input, candle);
+  }
 
+  /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
+  async findCompletedAt(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time = $3
+        AND candles.close_time <= CURRENT_TIMESTAMP
+      ORDER BY candles.open_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.closeTime]);
+    const candle = candleResult.rows[0];
+    return candle ? this.assembleContext(input, candle) : null;
+  }
+
+  /**
+   * The most recent completed context whose candle closed at or before `asOf`.
+   *
+   * The anti-lookahead fetch for higher-timeframe research covariates. At a 1m decision instant the
+   * relevant 5m context is the last 5m bar to have *closed*, which `findCompletedAt` (exact
+   * close-time match) returns only on a 5m boundary and misses at every 1m bar in between. The
+   * `close_time <= $3` guard is the same one `findRegime` uses, so a slower bar that has not closed
+   * by the decision instant can never be returned into a faster signal.
+   */
+  async findCompletedBefore(input: {
+    instrumentId: string;
+    timeframe: string;
+    asOf: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time <= $3
+      ORDER BY candles.close_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.asOf]);
+    const candle = candleResult.rows[0];
+    return candle
+      ? this.assembleContext({ instrumentId: input.instrumentId, timeframe: input.timeframe }, candle)
+      : null;
+  }
+
+  async listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]> {
+    // A defensive floor: a non-positive limit would otherwise become `LIMIT 0`
+    // and silently scan nothing, which reads as "no setups found".
+    const limit = Math.max(1, Math.floor(input.limit));
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT
+        candles.id,
+        candles.instrument_id,
+        candles.timeframe,
+        candles.open_time,
+        candles.close_time,
+        candles.open,
+        candles.high,
+        candles.low,
+        candles.close,
+        candles.volume,
+        instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1
+        AND candles.timeframe = $2
+        AND candles.is_complete = TRUE
+        AND candles.close_time <= CURRENT_TIMESTAMP
+      ORDER BY candles.close_time DESC, candles.open_time DESC
+      LIMIT $3
+    `, [input.instrumentId, input.timeframe, limit]);
+
+    // Selected newest-first so LIMIT keeps the most recent window, then reversed
+    // to chronological order so callers evaluate bars oldest-to-newest.
+    const rows = [...candleResult.rows].reverse();
+    return Promise.all(rows.map((candle) => this.assembleContext(input, candle)));
+  }
+
+  /** Loads every evidence dimension for one completed candle into a strategy context. */
+  private async assembleContext(
+    input: { instrumentId: string; timeframe: string },
+    candle: CompletedCandleRow,
+  ): Promise<StrategyMarketContext> {
     const [indicators, patterns, priceActionEvents] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT

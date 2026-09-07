@@ -4,11 +4,18 @@ import { useEffect, useState, useCallback } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
-import { formatNumber, formatTimestamp } from "../../research/presentation";
-import { ResearchShell } from "../../research/components/research-shell";
+import { formatNumber } from "../../research/presentation";
+import { errorMessage, isAbortError } from "../../../lib/errors";
+import { PageHeader } from "../../../components/layout/page-header";
 import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../domain";
-
-interface TradeIdeaOption {
+import { EquityMetrics } from "./equity-metrics";
+import { ActivePositionsTable } from "./active-positions-table";
+import { TradeHistoryTable } from "./trade-history-table";
+import { CreateAccountModal } from "./create-account-modal";
+import { OpenTradeModal } from "./open-trade-modal";
+import { CloseTradeModal } from "./close-trade-modal";
+import { useAppStore } from "../../../stores/app-store";
+export interface TradeIdeaOption {
   id: string;
   instrumentSymbol: string;
   instrumentName: string;
@@ -21,8 +28,10 @@ interface TradeIdeaOption {
 }
 
 export function PaperTradingDashboard() {
+  const activeAccountId = useAppStore((state) => state.activeAccountId);
+  const setActiveAccountId = useAppStore((state) => state.setActiveAccountId);
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>(activeAccountId ?? "");
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -41,8 +50,10 @@ export function PaperTradingDashboard() {
   const [tradeIdeas, setTradeIdeas] = useState<TradeIdeaOption[]>([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState<string>("");
   const [openFillPrice, setOpenFillPrice] = useState<number>(0);
-  const [openQuantity, setOpenQuantity] = useState<number>(50);
+  const [openLots, setOpenLots] = useState<number>(1);
+  const [openOrderType, setOpenOrderType] = useState<"MARKET" | "PENDING">("MARKET");
   const [openNotes, setOpenNotes] = useState<string>("Opened from Paper Trading UI");
+  const [openExpiryDate, setOpenExpiryDate] = useState("");
   const [openError, setOpenError] = useState<string | null>(null);
 
   const [showCloseModal, setShowCloseModal] = useState<boolean>(false);
@@ -51,49 +62,93 @@ export function PaperTradingDashboard() {
   const [closeNotes, setCloseNotes] = useState<string>("Manually closed from UI");
   const [closeError, setCloseError] = useState<string | null>(null);
 
-  const fetchAccounts = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const res = await getResearchJson("/paper-accounts", signal) as { data: PaperAccountSummary[] };
-      const list = res.data || [];
-      setAccounts(list);
-      if (list.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(list[0].id);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load paper accounts.");
-      }
-    }
-  }, [selectedAccountId]);
+  // Pure I/O: no state writes, so an effect can call it without cascading a render.
+  const loadAccounts = useCallback(async (signal?: AbortSignal) => {
+    const res = await getResearchJson("/paper-accounts", signal) as { data: PaperAccountSummary[] };
+    return res.data || [];
+  }, []);
 
-  const fetchSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
-    if (!accId) return;
+  const applyAccounts = useCallback((list: PaperAccountSummary[]) => {
+    setAccounts(list);
+    setSelectedAccountId((current) => {
+      if (activeAccountId && list.some((account) => account.id === activeAccountId)) {
+        return activeAccountId;
+      }
+      if (current && list.some((account) => account.id === current)) return current;
+      return list[0]?.id ?? "";
+    });
+  }, [activeAccountId]);
+
+  const applyAccountsError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load paper accounts."));
+  }, []);
+
+  const loadSummary = useCallback(async (accId: string, signal?: AbortSignal) => {
+    const res = await getResearchJson(`/paper-accounts/${accId}/summary`, signal) as { data: PaperAccountFullSummary };
+    return res.data;
+  }, []);
+
+  const applySummary = useCallback((data: PaperAccountFullSummary) => {
+    setSummary(data);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  const applySummaryError = useCallback((err: unknown) => {
+    if (isAbortError(err)) return;
+    setError(errorMessage(err, "Failed to load account summary."));
+    setLoading(false);
+  }, []);
+
+  const refreshSummary = useCallback((accId: string) => {
+    if (!accId) return Promise.resolve();
     setLoading(true);
     setError(null);
-    try {
-      const res = await getResearchJson(`/paper-accounts/${accId}/summary`, signal) as { data: PaperAccountFullSummary };
-      setSummary(res.data);
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to load account summary.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    return loadSummary(accId).then(applySummary, applySummaryError);
+  }, [loadSummary, applySummary, applySummaryError]);
+
+  // The summary effect may not raise `loading` itself, so account switches have to
+  // raise it from the event handler that triggers them.
+  const selectAccount = useCallback((accId: string) => {
+    setSelectedAccountId(accId);
+    setActiveAccountId(accId);
+    setLoading(true);
+    setError(null);
+  }, [setActiveAccountId]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchAccounts(controller.signal);
+    void loadAccounts(controller.signal).then(applyAccounts, applyAccountsError);
     return () => controller.abort();
-  }, [fetchAccounts]);
+  }, [loadAccounts, applyAccounts, applyAccountsError]);
 
   useEffect(() => {
     if (!selectedAccountId) return;
     const controller = new AbortController();
-    fetchSummary(selectedAccountId, controller.signal);
+    void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
     return () => controller.abort();
-  }, [selectedAccountId, fetchSummary]);
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
+
+  useEffect(() => {
+    const refreshOpenedAccount = (event: Event) => {
+      const notification = (event as CustomEvent<{ accountId?: string }>).detail;
+      void loadAccounts().then(applyAccounts, applyAccountsError);
+      if (notification?.accountId === selectedAccountId) {
+        void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+      }
+    };
+    window.addEventListener("automated-paper-trade-opened", refreshOpenedAccount);
+    return () => window.removeEventListener("automated-paper-trade-opened", refreshOpenedAccount);
+  }, [
+    selectedAccountId,
+    loadAccounts,
+    applyAccounts,
+    applyAccountsError,
+    loadSummary,
+    applySummary,
+    applySummaryError,
+  ]);
 
   const handleCreateAccount = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -105,9 +160,9 @@ export function PaperTradingDashboard() {
       }) as { data: PaperAccountSummary };
       setShowCreateModal(false);
       setAccounts((prev) => [...prev, res.data]);
-      setSelectedAccountId(res.data.id);
-    } catch (err: any) {
-      setCreateError(err.message || "Failed to create account.");
+      selectAccount(res.data.id);
+    } catch (err: unknown) {
+      setCreateError(errorMessage(err, "Failed to create account."));
     }
   };
 
@@ -120,9 +175,9 @@ export function PaperTradingDashboard() {
         data: { openTradesRead: number; eligibleCandlesRead: number; tradesClosed: number };
       };
       setEvalMessage(`Evaluated ${res.data.openTradesRead} open trades against ${res.data.eligibleCandlesRead} historical candles. Closed ${res.data.tradesClosed} trades based on stop-loss/take-profit rules.`);
-      await fetchSummary(selectedAccountId);
-    } catch (err: any) {
-      setEvalMessage(`Error evaluating trades: ${err.message}`);
+      await refreshSummary(selectedAccountId);
+    } catch (err: unknown) {
+      setEvalMessage(`Error evaluating trades: ${errorMessage(err, "Unknown error")}`);
     } finally {
       setEvaluating(false);
     }
@@ -140,7 +195,7 @@ export function PaperTradingDashboard() {
         setSelectedIdeaId(first.id);
         setOpenFillPrice(first.entryPrice || 0);
       }
-    } catch (err) {
+    } catch {
       // ignore
     }
   };
@@ -162,27 +217,35 @@ export function PaperTradingDashboard() {
         accountId: selectedAccountId,
         tradeIdeaId: selectedIdeaId,
         fillPrice: Number(openFillPrice),
-        quantity: Number(openQuantity),
+        lots: Number(openLots),
         notes: openNotes,
+        orderType: openOrderType,
+        asOptionBuyer: true,
+        expiryDate: openExpiryDate,
       });
       setShowOpenModal(false);
-      await fetchSummary(selectedAccountId);
-    } catch (err: any) {
-      setOpenError(err.message || "Failed to open simulated trade.");
+      await refreshSummary(selectedAccountId);
+    } catch (err: unknown) {
+      setOpenError(errorMessage(err, "Failed to open simulated trade."));
     }
   };
 
   const openCloseTradeModal = (trade: PaperTradeRow) => {
+    const markPrice = trade.liveValuation?.status === "AVAILABLE"
+      ? trade.liveValuation.markPrice
+      : null;
     setTradeToClose(trade);
-    setCloseExitPrice(trade.fillPrice);
-    setCloseNotes("Closed from UI");
-    setCloseError(null);
+    setCloseExitPrice(markPrice ?? 0);
+    setCloseNotes("Close at current server-verified market mark");
+    setCloseError(markPrice === null
+      ? trade.liveValuation?.reason || "A safe live mark is required before this position can be closed."
+      : null);
     setShowCloseModal(true);
   };
 
   const handleCloseTradeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!tradeToClose) return;
+    if (!tradeToClose || tradeToClose.liveValuation?.status !== "AVAILABLE" || closeExitPrice < 0) return;
     setCloseError(null);
     try {
       await postResearchJson("/paper-trades/close", {
@@ -193,10 +256,10 @@ export function PaperTradingDashboard() {
       setShowCloseModal(false);
       setTradeToClose(null);
       if (selectedAccountId) {
-        await fetchSummary(selectedAccountId);
+        await refreshSummary(selectedAccountId);
       }
-    } catch (err: any) {
-      setCloseError(err.message || "Failed to close trade.");
+    } catch (err: unknown) {
+      setCloseError(errorMessage(err, "Failed to close trade."));
     }
   };
 
@@ -211,13 +274,12 @@ export function PaperTradingDashboard() {
   };
 
   return (
-    <ResearchShell
-      activeView="paper-trading"
-      eyebrow="Quantitative Sandbox"
+    <>
+      <PageHeader eyebrow="Quantitative Sandbox"
       title="Simulated Portfolio & Execution"
       description="Test quantitative strategies with real-time simulated order execution, automated exit rules, and zero financial risk."
-      connectionLabel="Sandbox Ready"
-    >
+      connectionLabel="Sandbox Ready" />
+      <div className="mt-10">
       <div className="space-y-6">
         {/* Control Bar */}
         <Reveal>
@@ -231,7 +293,7 @@ export function PaperTradingDashboard() {
                 <select
                   id="acc-select"
                   value={selectedAccountId}
-                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  onChange={(e) => selectAccount(e.target.value)}
                   className="bg-transparent text-sm font-semibold text-white focus:outline-none focus:ring-2 focus:ring-cyan-400 cursor-pointer"
                 >
                   {accounts.map((acc) => (
@@ -277,7 +339,7 @@ export function PaperTradingDashboard() {
                 type="button"
                 onClick={openTradeModalWithIdeas}
                 disabled={!selectedAccountId}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-1.5"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-1.5"
               >
                 <span>🚀 Simulate Trade</span>
               </button>
@@ -300,380 +362,77 @@ export function PaperTradingDashboard() {
 
         {/* Metrics Summary Grid */}
         <Reveal delayMs={100}>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <GlassPanel className="p-5 border-white/10 bg-gradient-to-br from-slate-950 to-slate-900/80">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Equity</p>
-              <p className="mt-2 text-2xl md:text-3xl font-extrabold text-white">
-                ₹{formatNumber(metrics.equity, 2)}
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                Initial: ₹{formatNumber(summary?.account.openingBalance || 0, 0)}
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className="p-5 border-white/10 bg-gradient-to-br from-slate-950 to-slate-900/80">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Realized P&amp;L</p>
-              <p className={`mt-2 text-2xl md:text-3xl font-extrabold ${metrics.realizedPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {metrics.realizedPnl >= 0 ? "+" : ""}₹{formatNumber(metrics.realizedPnl, 2)}
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                From {metrics.totalTrades} closed simulated positions
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className="p-5 border-white/10 bg-gradient-to-br from-slate-950 to-slate-900/80">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Unrealized P&amp;L</p>
-              <p className={`mt-2 text-2xl md:text-3xl font-extrabold ${metrics.unrealizedPnl >= 0 ? "text-cyan-400" : "text-rose-400"}`}>
-                {metrics.unrealizedPnl >= 0 ? "+" : ""}₹{formatNumber(metrics.unrealizedPnl, 2)}
-              </p>
-              <p className="mt-1 text-xs text-slate-500">
-                Across {summary?.openTrades.length || 0} active positions
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className="p-5 border-white/10 bg-gradient-to-br from-slate-950 to-slate-900/80">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Win Rate &amp; Stats</p>
-              <div className="mt-2 flex items-baseline gap-2">
-                <span className="text-2xl md:text-3xl font-extrabold text-amber-300">
-                  {formatNumber(metrics.winRatePercent, 1)}%
-                </span>
-                <span className="text-xs text-slate-400">
-                  ({metrics.winningTrades}W / {metrics.losingTrades}L)
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-slate-500">
-                Execution accuracy on completed trades
-              </p>
-            </GlassPanel>
-          </div>
+          <EquityMetrics 
+            metrics={metrics} 
+            openingBalance={summary?.account.openingBalance || 0} 
+            openTradesCount={summary?.openTrades.length || 0} 
+          />
         </Reveal>
 
         {/* Open Positions Table */}
         <Reveal delayMs={200}>
-          <GlassPanel className="p-6 border-white/10">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-bold text-white">Active Simulated Positions ({summary?.openTrades.length || 0})</h2>
-                <p className="text-xs text-slate-400">Positions evaluated against market candles and take-profit/stop-loss targets.</p>
-              </div>
-            </div>
-
-            {loading && !summary ? (
-              <div className="py-8 text-center text-sm text-slate-400">Loading portfolio positions...</div>
-            ) : (summary?.openTrades.length || 0) === 0 ? (
-              <div className="py-10 text-center rounded-xl border border-dashed border-white/10 bg-white/5">
-                <p className="text-sm font-semibold text-slate-300">No open simulated trades</p>
-                <p className="text-xs text-slate-500 mt-1">Click &quot;Simulate Trade&quot; above to open a position from an AI strategy proposal.</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-white/10 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      <th className="py-3 px-4">Instrument</th>
-                      <th className="py-3 px-4">Side</th>
-                      <th className="py-3 px-4">Qty</th>
-                      <th className="py-3 px-4">Entry Price</th>
-                      <th className="py-3 px-4">Opened At</th>
-                      <th className="py-3 px-4">Notes</th>
-                      <th className="py-3 px-4 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5 text-sm">
-                    {summary?.openTrades.map((trade) => (
-                      <tr key={trade.id} className="hover:bg-white/[0.02] transition">
-                        <td className="py-3.5 px-4 font-bold text-white">
-                          {trade.instrumentSymbol || "NIFTY50"}
-                          <span className="block text-xs font-normal text-slate-500">{trade.timeframe || "1d"}</span>
-                        </td>
-                        <td className="py-3.5 px-4">
-                          <span className={`inline-flex px-2 py-0.5 rounded text-xs font-bold ${
-                            trade.side === "BUY" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                          }`}>
-                            {trade.side}
-                          </span>
-                        </td>
-                        <td className="py-3.5 px-4 font-medium text-slate-200">{formatNumber(trade.quantity, 0)}</td>
-                        <td className="py-3.5 px-4 font-semibold text-white">₹{formatNumber(trade.fillPrice, 2)}</td>
-                        <td className="py-3.5 px-4 text-xs text-slate-400">{formatTimestamp(trade.openedAt)}</td>
-                        <td className="py-3.5 px-4 text-xs text-slate-400 max-w-xs truncate">{trade.notes || "—"}</td>
-                        <td className="py-3.5 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => openCloseTradeModal(trade)}
-                            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 border border-rose-500/30 transition"
-                          >
-                            Close Position
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </GlassPanel>
+          <ActivePositionsTable 
+            openTrades={summary?.openTrades || []} 
+            pendingTrades={summary?.pendingTrades || []}
+            loading={loading && !summary} 
+            onCloseTrade={openCloseTradeModal} 
+          />
         </Reveal>
 
         {/* Closed Positions History */}
         <Reveal delayMs={300}>
-          <GlassPanel className="p-6 border-white/10">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-bold text-white">Trade History ({summary?.closedTrades.length || 0})</h2>
-                <p className="text-xs text-slate-400">Completed simulated trades with realized P&amp;L and exit trigger reasons.</p>
-              </div>
-            </div>
-
-            {(summary?.closedTrades.length || 0) === 0 ? (
-              <div className="py-8 text-center text-sm text-slate-500">No completed trade history yet.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-white/10 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      <th className="py-3 px-4">Instrument</th>
-                      <th className="py-3 px-4">Side</th>
-                      <th className="py-3 px-4">Qty</th>
-                      <th className="py-3 px-4">Entry / Exit</th>
-                      <th className="py-3 px-4">Realized P&amp;L</th>
-                      <th className="py-3 px-4">Return %</th>
-                      <th className="py-3 px-4">Exit Reason</th>
-                      <th className="py-3 px-4">Closed At</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5 text-sm">
-                    {summary?.closedTrades.map((trade) => {
-                      const pnl = trade.realizedPnl || 0;
-                      const ret = trade.returnPercent || 0;
-                      return (
-                        <tr key={trade.id} className="hover:bg-white/[0.02] transition">
-                          <td className="py-3.5 px-4 font-bold text-white">
-                            {trade.instrumentSymbol || "NIFTY50"}
-                            <span className="block text-xs font-normal text-slate-500">{trade.timeframe || "1d"}</span>
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <span className={`inline-flex px-2 py-0.5 rounded text-xs font-bold ${
-                              trade.side === "BUY" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-rose-500/20 text-rose-300 border border-rose-500/30"
-                            }`}>
-                              {trade.side}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 font-medium text-slate-200">{formatNumber(trade.quantity, 0)}</td>
-                          <td className="py-3.5 px-4 text-xs text-slate-300">
-                            <div>In: ₹{formatNumber(trade.fillPrice, 2)}</div>
-                            <div className="font-semibold text-white">Out: ₹{formatNumber(trade.exitPrice || 0, 2)}</div>
-                          </td>
-                          <td className={`py-3.5 px-4 font-bold ${pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                            {pnl >= 0 ? "+" : ""}₹{formatNumber(pnl, 2)}
-                          </td>
-                          <td className={`py-3.5 px-4 font-semibold ${ret >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-                            {ret >= 0 ? "+" : ""}{formatNumber(ret, 2)}%
-                          </td>
-                          <td className="py-3.5 px-4">
-                            <span className="inline-flex px-2 py-0.5 rounded text-xs bg-slate-800 text-slate-300 border border-white/10 font-mono">
-                              {trade.exitReason || "MANUAL"}
-                            </span>
-                          </td>
-                          <td className="py-3.5 px-4 text-xs text-slate-400">{formatTimestamp(trade.closedAt || null)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </GlassPanel>
+          <TradeHistoryTable 
+            closedTrades={summary?.closedTrades || []} 
+          />
         </Reveal>
 
         {/* Modal: Create Portfolio Account */}
-        {showCreateModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <GlassPanel className="w-full max-w-md p-6 border-cyan-500/30 bg-slate-950 shadow-2xl">
-              <h3 className="text-xl font-bold text-white">Create Paper Portfolio</h3>
-              <p className="text-xs text-slate-400 mt-1">Set an opening capital balance in INR for quantitative strategy simulations.</p>
-              {createError && <p className="mt-3 text-xs text-rose-400 bg-rose-500/10 p-2 rounded border border-rose-500/20">{createError}</p>}
-              <form onSubmit={handleCreateAccount} className="mt-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Portfolio Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={newAccountName}
-                    onChange={(e) => setNewAccountName(e.target.value)}
-                    className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                    placeholder="e.g. Breakout Alpha Fund"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Opening Capital (₹ INR)</label>
-                  <input
-                    type="number"
-                    required
-                    min="1000"
-                    step="1000"
-                    value={newAccountBalance}
-                    onChange={(e) => setNewAccountBalance(Number(e.target.value))}
-                    className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                  />
-                </div>
-                <div className="flex items-center justify-end gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowCreateModal(false)}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-400 hover:text-white transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-cyan-600 hover:bg-cyan-500 transition shadow-lg shadow-cyan-500/20"
-                  >
-                    Create Fund
-                  </button>
-                </div>
-              </form>
-            </GlassPanel>
-          </div>
-        )}
+        <CreateAccountModal 
+          show={showCreateModal}
+          onClose={() => setShowCreateModal(false)}
+          onSubmit={handleCreateAccount}
+          newAccountName={newAccountName}
+          setNewAccountName={setNewAccountName}
+          newAccountBalance={newAccountBalance}
+          setNewAccountBalance={setNewAccountBalance}
+          createError={createError}
+        />
 
         {/* Modal: Open Simulated Trade */}
-        {showOpenModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <GlassPanel className="w-full max-w-lg p-6 border-cyan-500/30 bg-slate-950 shadow-2xl">
-              <h3 className="text-xl font-bold text-white">Simulate Position Entry</h3>
-              <p className="text-xs text-slate-400 mt-1">Select an AI trade idea from the quantitative strategy engine and execute a simulated order.</p>
-              {openError && <p className="mt-3 text-xs text-rose-400 bg-rose-500/10 p-2 rounded border border-rose-500/20">{openError}</p>}
-              <form onSubmit={handleOpenTradeSubmit} className="mt-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Select Strategy Proposal</label>
-                  {tradeIdeas.length === 0 ? (
-                    <div className="mt-1 p-3 rounded-xl bg-slate-900 border border-white/10 text-xs text-slate-400">
-                      No active proposals found in database. Go to Strategy &amp; Ideas tab to generate new proposals first!
-                    </div>
-                  ) : (
-                    <select
-                      value={selectedIdeaId}
-                      onChange={(e) => handleIdeaSelectionChange(e.target.value)}
-                      className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                    >
-                      {tradeIdeas.map((idea) => (
-                        <option key={idea.id} value={idea.id}>
-                          {idea.side} {idea.instrumentSymbol} @ ₹{idea.entryPrice} (Target: ₹{idea.targetPrice}, SL: ₹{idea.stopLoss})
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Fill Price (₹)</label>
-                    <input
-                      type="number"
-                      required
-                      step="0.05"
-                      min="0.05"
-                      value={openFillPrice}
-                      onChange={(e) => setOpenFillPrice(Number(e.target.value))}
-                      className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-300 uppercase">Quantity (Shares/Lots)</label>
-                    <input
-                      type="number"
-                      required
-                      min="1"
-                      step="1"
-                      value={openQuantity}
-                      onChange={(e) => setOpenQuantity(Number(e.target.value))}
-                      className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Order Notes</label>
-                  <input
-                    type="text"
-                    value={openNotes}
-                    onChange={(e) => setOpenNotes(e.target.value)}
-                    className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
-                    placeholder="e.g. Entering on breakout confirmation"
-                  />
-                </div>
-                <div className="flex items-center justify-end gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowOpenModal(false)}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-400 hover:text-white transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={!selectedIdeaId}
-                    className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-lg shadow-cyan-500/20 disabled:opacity-50"
-                  >
-                    Confirm Simulation
-                  </button>
-                </div>
-              </form>
-            </GlassPanel>
-          </div>
-        )}
+        <OpenTradeModal 
+          show={showOpenModal}
+          onClose={() => setShowOpenModal(false)}
+          onSubmit={handleOpenTradeSubmit}
+          tradeIdeas={tradeIdeas}
+          selectedIdeaId={selectedIdeaId}
+          onIdeaSelectionChange={handleIdeaSelectionChange}
+          openFillPrice={openFillPrice}
+          setOpenFillPrice={setOpenFillPrice}
+          openLots={openLots}
+          setOpenLots={setOpenLots}
+          openOrderType={openOrderType}
+          setOpenOrderType={setOpenOrderType}
+          openNotes={openNotes}
+          setOpenNotes={setOpenNotes}
+          openExpiryDate={openExpiryDate}
+          setOpenExpiryDate={setOpenExpiryDate}
+          openError={openError}
+        />
 
         {/* Modal: Close Position Manually */}
-        {showCloseModal && tradeToClose && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <GlassPanel className="w-full max-w-md p-6 border-rose-500/30 bg-slate-950 shadow-2xl">
-              <h3 className="text-xl font-bold text-white">Manual Position Exit</h3>
-              <p className="text-xs text-slate-400 mt-1">
-                Closing simulated {tradeToClose.side} position on {tradeToClose.instrumentSymbol} ({tradeToClose.quantity} units entered at ₹{formatNumber(tradeToClose.fillPrice, 2)}).
-              </p>
-              {closeError && <p className="mt-3 text-xs text-rose-400 bg-rose-500/10 p-2 rounded border border-rose-500/20">{closeError}</p>}
-              <form onSubmit={handleCloseTradeSubmit} className="mt-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Simulated Exit Price (₹)</label>
-                  <input
-                    type="number"
-                    required
-                    step="0.05"
-                    min="0.05"
-                    value={closeExitPrice}
-                    onChange={(e) => setCloseExitPrice(Number(e.target.value))}
-                    className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-rose-400"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 uppercase">Exit Notes</label>
-                  <input
-                    type="text"
-                    value={closeNotes}
-                    onChange={(e) => setCloseNotes(e.target.value)}
-                    className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-rose-400"
-                    placeholder="e.g. Taking profits ahead of news event"
-                  />
-                </div>
-                <div className="flex items-center justify-end gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowCloseModal(false)}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-400 hover:text-white transition"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 rounded-xl text-sm font-semibold text-white bg-rose-600 hover:bg-rose-500 transition shadow-lg shadow-rose-500/20"
-                  >
-                    Close Position
-                  </button>
-                </div>
-              </form>
-            </GlassPanel>
-          </div>
-        )}
+        <CloseTradeModal 
+          show={showCloseModal}
+          onClose={() => setShowCloseModal(false)}
+          onSubmit={handleCloseTradeSubmit}
+          tradeToClose={tradeToClose}
+          closeExitPrice={closeExitPrice}
+          setCloseExitPrice={setCloseExitPrice}
+          closeNotes={closeNotes}
+          setCloseNotes={setCloseNotes}
+          closeError={closeError}
+        />
       </div>
-    </ResearchShell>
+    </div>
+    </>
   );
 }

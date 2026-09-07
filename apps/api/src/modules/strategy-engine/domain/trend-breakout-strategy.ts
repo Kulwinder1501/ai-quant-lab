@@ -27,6 +27,25 @@ export interface TrendBreakoutStrategyConfiguration {
    * must be a recorded part of the strategy version rather than an implicit default.
    */
   requireRegime: boolean;
+  /**
+   * Whether a same-candle candlestick pattern is mandatory, and whether a price-action trigger is.
+   *
+   * Both default **true**, which is the rule as it has always run -- these exist to make the
+   * conjunction a measurable arm rather than to change it. Recorded on the strategy version for the
+   * same reason `requireRegime` is: an implicit default would make two runs incomparable without
+   * anything saying so.
+   *
+   * Loosening either is a research arm, not a tuning knob. The pre-registered sweep of 2026-09-02
+   * established that `minimumConfidence` cannot raise the signal count because the scarcity lives in
+   * this conjunction -- 55% of 60m bars carry a candlestick pattern and 40% a price-action event, so
+   * requiring both is what makes the rule fire 0.04 times per session.
+   *
+   * At least one must remain required. With both absent the confidence formula tops out at
+   * `0.38 + 0.1 = 0.48`, below any sane floor, so the rule would be indicators-only -- a different
+   * strategy wearing this one's name and geometry.
+   */
+  requirePattern: boolean;
+  requireTrigger: boolean;
 }
 
 export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyConfiguration = {
@@ -50,6 +69,8 @@ export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyCon
   minimumConfidence: 0.7,
   expiryCandles: 1,
   requireRegime: false,
+  requirePattern: true,
+  requireTrigger: true,
 };
 
 /** Single source of the version, so persisted evidence cannot drift from the registration. */
@@ -203,6 +224,14 @@ export function parseTrendBreakoutStrategyConfiguration(raw: Record<string, unkn
     minimumConfidence: requiredNumber(raw, "minimumConfidence", 0, 1),
     expiryCandles: requiredNumber(raw, "expiryCandles", 1),
     requireRegime: requiredBoolean(raw, "requireRegime"),
+    /*
+     * Defaulted rather than required, unlike every sibling: stored registrations predate these
+     * fields, and `requiredBoolean` would throw on all of them. Absent must mean the historical
+     * behaviour -- both required -- or adding a research lever would retroactively invalidate every
+     * configuration already on disk.
+     */
+    requirePattern: optionalBoolean(raw, "requirePattern", true),
+    requireTrigger: optionalBoolean(raw, "requireTrigger", true),
   };
   if (!Number.isInteger(configuration.expiryCandles)
     || configuration.rsiLongMin >= configuration.rsiLongMax
@@ -290,14 +319,28 @@ function regimePermits(
   return context.regime.regime === permitted;
 }
 
+function optionalBoolean(raw: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = raw[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") {
+    throw new Error(`Trend breakout configuration requires a boolean ${key} when present.`);
+  }
+  return value;
+}
+
 function buildProposal(
   context: StrategyMarketContext,
   configuration: TrendBreakoutStrategyConfiguration,
   indicators: ResolvedIndicators,
   side: TradeSide,
-  pattern: PatternEvidence,
-  trigger: PriceActionEvidence,
+  pattern: PatternEvidence | null,
+  trigger: PriceActionEvidence | null,
 ): ProposedTradeIdea | null {
+  if (!pattern && !trigger) {
+    // Guarded here as well as in the config: indicators-only is a different strategy, and the
+    // confidence formula would top out at 0.48 anyway.
+    throw new Error("A trend-breakout proposal needs at least one of a pattern or a trigger.");
+  }
   const tickSize = context.candle.tickSize;
   if (!Number.isFinite(tickSize) || tickSize <= 0 || context.candle.close <= 0) return null;
 
@@ -316,7 +359,25 @@ function buildProposal(
 
   const riskReward = rounded(Math.abs(targetPrice - entryPrice) / risk);
   const distanceFromEma = Math.min(1, Math.abs(context.candle.close - indicators.emaValue) / indicators.atrValue);
-  const confidence = clamp(0.38 + trigger.confidence * 0.3 + pattern.confidence * 0.22 + distanceFromEma * 0.1);
+  /*
+   * A missing term contributes zero rather than being imputed.
+   *
+   * The alternative -- rescaling the remaining weights so the formula still spans 1.0 -- would make a
+   * looser arm's confidence incomparable with the control's, and the whole point of the arm is to
+   * compare them. So a trigger-only signal tops out at 0.78 and a pattern-only one at 0.70, and both
+   * are still judged against the same `minimumConfidence`.
+   *
+   * Zero is honest here specifically because absence is measured: the replay reads stored contexts
+   * where the detectors have run, and 55% of 60m bars carry a pattern. Where a layer had NOT been
+   * computed, zero would be an imputation and this would be wrong -- see the deferral taxonomy, which
+   * exists to keep "computed and empty" apart from "not computed".
+   */
+  const confidence = clamp(
+    0.38
+    + (trigger?.confidence ?? 0) * 0.3
+    + (pattern?.confidence ?? 0) * 0.22
+    + distanceFromEma * 0.1,
+  );
   if (confidence < configuration.minimumConfidence) return null;
 
   const labelSide = side === "LONG" ? "bullish" : "bearish";
@@ -326,20 +387,27 @@ function buildProposal(
       ...item,
       details: { ...item.details, close: context.candle.close },
     })),
-    {
+    /*
+     * Omitted when absent rather than recorded as an empty or zero-confidence item.
+     *
+     * An evidence list is a claim about what was actually read. A PATTERN row with confidence 0
+     * would assert the detector looked and found nothing of value, which is a different statement
+     * from "this arm did not require one" -- and the evidence list is what a reviewer reads back.
+     */
+    ...(pattern === null ? [] : [{
       sourceType: "PATTERN" as const,
       sourceReference: `${pattern.code}:${pattern.algorithmVersion}`,
       label: `${pattern.code} provides ${labelSide} candlestick confirmation`,
       contribution: rounded(pattern.confidence * 0.22),
       details: { confidence: pattern.confidence, contextCandleIds: pattern.contextCandleIds, ...pattern.details },
-    },
-    {
+    }]),
+    ...(trigger === null ? [] : [{
       sourceType: "PRICE_ACTION" as const,
       sourceReference: `${trigger.eventCode}:${trigger.algorithmVersion}`,
       label: `${trigger.eventCode} is the ${labelSide} entry trigger`,
       contribution: rounded(trigger.confidence * 0.3),
       details: { confidence: trigger.confidence, level: trigger.level, ...trigger.details },
-    },
+    }]),
     {
       sourceType: "STRATEGY" as const,
       sourceReference: `trend-breakout:v${trendBreakoutStrategyVersion}`,
@@ -382,8 +450,13 @@ function buildProposal(
     riskReward,
     confidence,
     reasoning: [
-      `Completed-candle ${trigger.eventCode.toLowerCase()} aligns with ${labelSide} EMA, SMA, MACD, RSI, and Supertrend conditions.`,
-      `${pattern.code} supplies same-candle ${labelSide} candlestick confirmation.`,
+      trigger === null
+        // Says what is absent, not nothing: a reader must not have to infer which arm produced this.
+        ? `Completed-candle ${labelSide} EMA, SMA, MACD, RSI and Supertrend conditions aligned with no price-action trigger required.`
+        : `Completed-candle ${trigger.eventCode.toLowerCase()} aligns with ${labelSide} EMA, SMA, MACD, RSI, and Supertrend conditions.`,
+      pattern === null
+        ? "No same-candle candlestick confirmation was required by this configuration."
+        : `${pattern.code} supplies same-candle ${labelSide} candlestick confirmation.`,
       `Reference entry ${entryPrice.toFixed(2)}, stop ${stopLoss.toFixed(2)}, target ${targetPrice.toFixed(2)} (${riskReward.toFixed(2)}R).`,
       "This is a close-time paper-trade proposal only; a later phase simulates an eligible next-candle fill.",
     ],
@@ -392,8 +465,11 @@ function buildProposal(
       strategyVersion: trendBreakoutStrategyVersion,
       sourceCandleId: context.candle.id,
       sourceCandleClose: context.candle.close,
-      trigger: trigger.eventCode,
-      pattern: pattern.code,
+      trigger: trigger?.eventCode ?? null,
+      pattern: pattern?.code ?? null,
+      // The arm, recorded on every proposal: a loosened row must never be mistaken for a control row.
+      requirePattern: configuration.requirePattern,
+      requireTrigger: configuration.requireTrigger,
       indicatorAlgorithmVersion: configuration.indicatorAlgorithmVersion,
       candlestickAlgorithmVersion: configuration.candlestickAlgorithmVersion,
       priceActionAlgorithmVersion: configuration.priceActionAlgorithmVersion,
@@ -424,7 +500,14 @@ export class TrendBreakoutStrategy {
     if (longConditions) {
       const pattern = selectedPattern(context, "BULLISH", configuration);
       const trigger = selectedTrigger(context, "BREAKOUT", "BULLISH", configuration);
-      if (pattern && trigger) {
+      /*
+       * Each piece of evidence is needed if its flag says so, and at least one must be present.
+       * With both flags false and both absent the rule would be indicators-only, so the second
+       * clause is what keeps a loosened arm a variant of this strategy rather than a new one.
+       */
+      if ((pattern || !configuration.requirePattern)
+        && (trigger || !configuration.requireTrigger)
+        && (pattern || trigger)) {
         const proposal = buildProposal(context, configuration, indicators, "LONG", pattern, trigger);
         if (proposal) return [proposal];
       }
@@ -440,7 +523,9 @@ export class TrendBreakoutStrategy {
     if (shortConditions) {
       const pattern = selectedPattern(context, "BEARISH", configuration);
       const trigger = selectedTrigger(context, "BREAKDOWN", "BEARISH", configuration);
-      if (pattern && trigger) {
+      if ((pattern || !configuration.requirePattern)
+        && (trigger || !configuration.requireTrigger)
+        && (pattern || trigger)) {
         const proposal = buildProposal(context, configuration, indicators, "SHORT", pattern, trigger);
         if (proposal) return [proposal];
       }

@@ -15,6 +15,7 @@ export interface DashboardTradeIdeaRow {
   instrumentSymbol: string;
   instrumentName: string;
   strategyVersionId: string | null;
+  strategyKey: string | null;
   candleTimeframe: string | null;
   candleCloseTime: Date | null;
   side: string;
@@ -117,6 +118,7 @@ export class PostgresDashboardQueryRepository {
     account: DashboardPaperAccountSummary | null;
     metrics: unknown;
     openTrades: Record<string, unknown>[];
+    pendingTrades: Record<string, unknown>[];
     closedTrades: Record<string, unknown>[];
   }> {
     const accResult = await this.database.query<QueryResultRow>(`
@@ -135,16 +137,28 @@ export class PostgresDashboardQueryRepository {
 
     const tradesResult = await this.database.query<QueryResultRow>(`
       SELECT
-        pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, '1d') AS timeframe, pt.side, pt.status,
+        pt.id, pt.account_id, pt.instrument_id, pt.trade_idea_id, COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe, pt.side, pt.status,
         pt.quantity, pt.entry_price, pt.stop_loss, pt.target_price, pt.opened_at, pt.closed_at,
-        pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.slippage, pt.notes,
+        pt.exit_price, pt.exit_reason, pt.realized_pnl, pt.fees, pt.fee_breakdown, pt.slippage, pt.notes,
+        -- pt.fees is the running total, entry plus exit. Split it here from the breakdown the
+        -- close path already writes, so the two legs stop being indistinguishable. Verified over
+        -- all 384 stored trades: entry.total is present on every row, exit.total on all but one
+        -- (closed by hand), and fees minus entry.total minus exit.total is 0.00 on every row --
+        -- which is what makes the subtraction a safe fallback for that row rather than a guess.
+        COALESCE((pt.fee_breakdown->'entry'->>'total')::numeric, pt.fees, 0) AS entry_fees,
+        COALESCE(
+          (pt.fee_breakdown->'exit'->>'total')::numeric,
+          pt.fees - COALESCE((pt.fee_breakdown->'entry'->>'total')::numeric, pt.fees, 0),
+          0
+        ) AS exit_fees,
+        pt.option_strike, pt.option_expiry, pt.option_type, pt.underlying_symbol, pt.entry_iv,
         COALESCE(i.symbol, 'NIFTY50') AS instrument_symbol,
         COALESCE(i.display_name, 'NIFTY 50 Index') AS instrument_name
       FROM paper_trades pt
       LEFT JOIN instruments i ON i.id = pt.instrument_id
       LEFT JOIN trade_ideas ti ON ti.id = pt.trade_idea_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
-      WHERE pt.account_id = $1
+      WHERE pt.account_id = $1 AND pt.excluded_from_evidence = false
       ORDER BY pt.opened_at DESC
     `, [accountId]);
 
@@ -166,22 +180,42 @@ export class PostgresDashboardQueryRepository {
         instrumentName: String(row.instrument_name),
         timeframe: row.timeframe ? String(row.timeframe) : "1d",
         tradeIdeaId: row.trade_idea_id ? String(row.trade_idea_id) : null,
-        side: String(row.side) === "LONG" || String(row.side) === "BUY" ? "BUY" : "SELL",
+        side: String(row.side),
         status: String(row.status),
         quantity,
         fillPrice: entryPrice,
         entryPrice,
+        stopLoss: toNumber(row.stop_loss),
+        targetPrice: toNumber(row.target_price),
         openedAt: row.opened_at instanceof Date ? row.opened_at.toISOString() : String(row.opened_at),
-        entryFees: toNumber(row.fees),
+        // Was `toNumber(row.fees)`, the running total, under a name that says entry. For a closed
+        // trade that reported the entry leg as entry+exit while `exitFees` below was hardcoded to
+        // 0 -- so the response asserted every exit was free.
+        entryFees: toNumber(row.entry_fees),
         entrySlippage: toNumber(row.slippage),
+        /** Entry plus exit. Named for what it is, so a consumer needing the total stops reaching for `entryFees`. */
+        totalFees: toNumber(row.fees),
+        feeBreakdown: row.fee_breakdown && typeof row.fee_breakdown === "object" ? row.fee_breakdown : {},
         exitPrice,
         closedAt: row.closed_at instanceof Date ? row.closed_at.toISOString() : row.closed_at ? String(row.closed_at) : null,
-        exitFees: 0,
+        exitFees: toNumber(row.exit_fees),
+        // Not split in storage: `paper_trades.slippage` is a single running column with no
+        // per-leg breakdown, and it is 0 on all 384 rows. Left at 0 rather than reported as
+        // `slippage` minus a number that was never recorded.
         exitSlippage: 0,
         exitReason: row.exit_reason ? String(row.exit_reason) : null,
         realizedPnl,
         returnPercent,
         notes: row.notes ? String(row.notes) : "",
+        optionStrike: row.option_strike === null || row.option_strike === undefined
+          ? null
+          : toNumber(row.option_strike),
+        optionExpiry: row.option_expiry instanceof Date
+          ? row.option_expiry.toISOString()
+          : row.option_expiry ? String(row.option_expiry) : null,
+        optionType: row.option_type ? String(row.option_type) : null,
+        underlyingSymbol: row.underlying_symbol ? String(row.underlying_symbol) : null,
+        entryIv: row.entry_iv === null || row.entry_iv === undefined ? null : toNumber(row.entry_iv),
       };
     });
 
@@ -189,11 +223,32 @@ export class PostgresDashboardQueryRepository {
       account,
       metrics,
       openTrades: formattedTrades.filter((t) => t.status === "OPEN"),
+      pendingTrades: formattedTrades.filter((t) => t.status === "PENDING"),
       closedTrades: formattedTrades.filter((t) => t.status === "CLOSED"),
     };
   }
 
-  async listTradeIdeas(limit = 50, dateStr?: string): Promise<DashboardTradeIdeaRow[]> {
+  /**
+   * Newest proposal first, where "newest" is the close of the candle the proposal
+   * was made on — not `generated_at`. `generated_at` is re-stamped every time a
+   * proposal is re-upserted, so a historical re-scan rewrites it for every row and
+   * the resulting order reflects the order the backfill happened to write in rather
+   * than which signal is most recent.
+   *
+   * `strategyKey` filters in SQL on purpose. Filtering in the browser instead applies
+   * `limit` across every strategy first, so the strategy whose rows were written last
+   * fills the whole page and the others vanish from the list entirely.
+   *
+   * Expired proposals are hidden by default. A lookback scan persists every historical
+   * hit, and without this filter the Strategy page fills with June/July setups that
+   * already passed `expires_at` and drown out anything still actionable today.
+   */
+  async listTradeIdeas(
+    limit = 50,
+    dateStr?: string,
+    strategyKey?: string,
+    includeExpired = false,
+  ): Promise<DashboardTradeIdeaRow[]> {
     let query = `
       SELECT
         ti.id,
@@ -213,19 +268,58 @@ export class PostgresDashboardQueryRepository {
         COALESCE(i.symbol, 'UNKNOWN') AS instrument_symbol,
         COALESCE(i.display_name, 'Unknown Instrument') AS instrument_name,
         c.timeframe AS candle_timeframe,
-        c.close_time AS candle_close_time
+        c.close_time AS candle_close_time,
+        s.strategy_key AS strategy_key
       FROM trade_ideas ti
       LEFT JOIN instruments i ON i.id = ti.instrument_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
+      LEFT JOIN strategy_versions sv ON sv.id = ti.strategy_version_id
+      LEFT JOIN strategies s ON s.id = sv.strategy_id
     `;
     
     const params: any[] = [limit];
-    if (dateStr) {
-      query += ` WHERE DATE(c.close_time AT TIME ZONE 'Asia/Kolkata') = $2 `;
-      params.push(dateStr);
+    const conditions: string[] = [];
+    if (!includeExpired) {
+      // NULL expiry is treated as still live (agent/manual rows without a clock).
+      conditions.push(`(ti.expires_at IS NULL OR ti.expires_at > CURRENT_TIMESTAMP)`);
+      // Hide proposals whose source bar is still forming. Yahoo/agent paths can
+      // attach an idea to today's open session; that is not a settled close.
+      conditions.push(`(c.id IS NULL OR (c.is_complete = TRUE AND c.close_time <= CURRENT_TIMESTAMP))`);
     }
-    
-    query += ` ORDER BY ti.generated_at DESC, ti.id DESC LIMIT $1`;
+    if (dateStr) {
+      params.push(dateStr);
+      // Yahoo daily bars stamp open_time at the NSE session open (≈09:15 IST). That
+      // is the trading-day label; close_time often falls on the next calendar date.
+      conditions.push(`DATE(c.open_time AT TIME ZONE 'Asia/Kolkata') = $${params.length}`);
+    }
+    if (strategyKey) {
+      // Filter on the registered strategy key, not on evidence JSON. Seeded
+      // scalp rows used to stamp evidence.strategy = 'momentum-scalp'; real
+      // proposals from GenerateTradeIdeas do not, so the evidence path silently
+      // hid every genuine idea from the Strategy / Scalp dashboards.
+      //
+      // One key or a comma-separated list, because the scalp tab is four registered
+      // strategies rather than one: `momentum-scalp` is the 1m engine, while the 5m
+      // ideas that actually trade carry `momentum-scalp-index` and
+      // `momentum-scalp-pattern`. A single-key filter therefore shows the wrong
+      // cohort. Equality against the joined value was worse -- no row can hold
+      // "a,b,c", so a dashboard sending the list rendered an empty tab rather than a
+      // partial one, which reads as "no scalp ideas exist" when 1,408 of them do.
+      //
+      // A list that parses to nothing (`strategy=,,`) falls through unfiltered, which
+      // is what the route already does with `strategy=` via `strategy || undefined`.
+      const strategyKeys = strategyKey.split(",").map((key) => key.trim()).filter((key) => key.length > 0);
+      if (strategyKeys.length > 0) {
+        params.push(strategyKeys);
+        conditions.push(`s.strategy_key = ANY($${params.length}::text[])`);
+      }
+    }
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(" AND ")} `;
+    }
+
+    // NULLS LAST keeps proposals with no source candle from sorting above real signals.
+    query += ` ORDER BY c.close_time DESC NULLS LAST, ti.generated_at DESC, ti.id DESC LIMIT $1`;
 
     const result = await this.database.query<QueryResultRow>(query, params);
 
@@ -235,6 +329,7 @@ export class PostgresDashboardQueryRepository {
       instrumentSymbol: String(row.instrument_symbol),
       instrumentName: String(row.instrument_name),
       strategyVersionId: row.strategy_version_id ? String(row.strategy_version_id) : null,
+      strategyKey: row.strategy_key ? String(row.strategy_key) : null,
       candleTimeframe: row.candle_timeframe ? String(row.candle_timeframe) : null,
       candleCloseTime: row.candle_close_time instanceof Date ? row.candle_close_time : null,
       side: String(row.side),
@@ -396,12 +491,23 @@ export class PostgresDashboardQueryRepository {
         FROM indicator_snapshots isnp
         JOIN indicator_definitions idf ON idf.id = isnp.indicator_definition_id
         WHERE isnp.candle_id = ANY($1::uuid[])
+          AND (
+            (
+              idf.indicator_code IN ('FVG', 'BOS', 'CHOCH', 'LIQUIDITY_SWEEP', 'ORDER_BLOCK', 'EQUILIBRIUM_ZONE')
+              AND idf.algorithm_version = 'smc-v2'
+            )
+            OR (
+              idf.indicator_code NOT IN ('FVG', 'BOS', 'CHOCH', 'LIQUIDITY_SWEEP', 'ORDER_BLOCK', 'EQUILIBRIUM_ZONE')
+              AND idf.algorithm_version = 'ta-v1'
+            )
+          )
       `, [candleIds]),
       this.database.query<QueryResultRow>(`
         SELECT pd.candle_id, pdf.pattern_code AS pattern_code, pdf.pattern_code AS display_name, pd.direction, pd.confidence
         FROM pattern_detections pd
         JOIN pattern_definitions pdf ON pdf.id = pd.pattern_definition_id
         WHERE pd.candle_id = ANY($1::uuid[])
+          AND pdf.algorithm_version = 'candlestick-v1'
       `, [candleIds]),
     ]);
 

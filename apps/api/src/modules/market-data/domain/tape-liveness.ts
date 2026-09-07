@@ -1,0 +1,235 @@
+/**
+ * Whether a bar series was actually moving, or was republishing one price.
+ *
+ * ## The defect this exists for
+ *
+ * From 2026-08-03 the index feed freezes daily from the 15:16 bar to the close: it keeps publishing
+ * bars, on time, with correct timestamps, and every one of them repeats the last real print.
+ * Measured on 1m NIFTY50 and BANKNIFTY over the 21 days to 2026-08-31, the 14 bars from 15:16 to
+ * 15:29 collapse to **two distinct closes per instrument per day**, every day.
+ *
+ * `GRID_POLICY_V1` admits decisions in `(09:15, 15:30]`, so those minutes are decision slots, and
+ * 41 proposals had already been recorded inside the frozen window before this gate existed.
+ *
+ * Nothing upstream catches it, and that is the point worth stating precisely: this is staleness by
+ * *value*, not by clock. The bars are present, complete, and correctly stamped, so a freshness check
+ * on `dataThrough` passes, feature warmup passes, and grid alignment passes. Every existing gate is
+ * answering a question the frozen tape does not fail.
+ *
+ * ## Why the test is value repetition and not zero volume
+ *
+ * Zero volume looks like the obvious signal and it is the wrong one. On 2026-08-31 NIFTY50 carried
+ * 348M of volume across the frozen window and still printed only two distinct closes; across the
+ * 21-day sample the per-minute zero-volume rate falls from 15/15 at 15:16-15:19 to 7/15 by 15:29.
+ * A volume test would have passed the tape on exactly the days it most needed to fail it.
+ *
+ * ## Why the threshold is two bars
+ *
+ * Measured, not chosen. Runs of consecutive OHLC-identical 1m bars, both indices, 21 days:
+ *
+ *   zone                    runs    longest run   mean   p99
+ *   healthy 09:16-15:15    10,800             1   1.00     1
+ *   frozen  15:16-15:29        72            13   5.83    13
+ *
+ * Not one repeated bar in 10,800 healthy runs. So "this bar is OHLC-identical to the bar before it"
+ * separates the two populations with no observed false positive, and a threshold of two is the
+ * earliest point at which the freeze is detectable at all.
+ *
+ * The comparison is on all four of open/high/low/close rather than close alone. That is the stricter
+ * reading -- some frozen days carry three distinct OHLC tuples against two distinct closes, so OHLC
+ * flags slightly less often -- and it still separates the populations completely. Preferring the
+ * stricter test means a genuinely thin but moving market is not called frozen.
+ *
+ * The calibration is on index 1m bars. An illiquid single stock could legitimately print identical
+ * consecutive minutes, so the threshold is exported rather than inlined: a caller extending this
+ * beyond the indices must re-measure before trusting the default.
+ *
+ * ## Why this lives in `market-data/domain` rather than beside its first caller
+ *
+ * It was written for `research/scalp-harness`, which was its only consumer. `pattern-intelligence`
+ * then needed the identical test — its `bar-integrity.ts` had been guarding the same freeze with a
+ * `zero range AND zero volume` conjunction, which the feed silently defeated once it began stamping
+ * constituent volume on the pinned price. Research internals are not importable from a production
+ * module, so the choice was to duplicate the rule or to move it somewhere both may read.
+ *
+ * It moved. A duplicated staleness rule is the worst outcome available here: the two copies would be
+ * calibrated once, together, and then drift apart on the next feed change, leaving two modules
+ * disagreeing about whether the same bar was real. `market-data/domain` is the right home on the
+ * merits as well — "was this bar a genuine print" is a fact about the feed, not about either
+ * consumer, and this module imports nothing from any other, so neither consumer acquires a cycle.
+ */
+
+/** Whether a bar series was moving, or republishing a price it had already printed. */
+export type TapeLiveness = "LIVE" | "FROZEN";
+
+/**
+ * Versioned because it changes what a control point asserts, and reported so a capture run says
+ * which tape rule was in force.
+ *
+ * Deliberately **not** a component of `controlPointKey`. That follows the rule `settlementPolicyVersion`
+ * already sets for `fillPolicyVersion`: putting a component version into an identity key lets one
+ * population version coexist under two different component rules as two separate keys, so the
+ * database quietly holds both instead of rejecting the second. The binding runs the other way
+ * instead --
+ *
+ * > if this rule or `frozenTapeIdenticalBarThreshold` changes, `controlPolicyVersion` MUST change.
+ *
+ * -- so a control point's population version stays sufficient to say what its eligibility meant.
+ *
+ * This is scalp-research governance sitting in a market-data file, and it stays here on purpose. The
+ * obligation above is only useful to someone editing the rule, so it has to be readable from where
+ * the rule is; filed in the research module it would be an instruction nobody changing the threshold
+ * ever sees. `pattern-intelligence` reads `assessTapeLiveness` and does not import this constant, so
+ * the obligation above binds the research population only -- it is not a claim that every consumer
+ * of the rule is versioned by it.
+ */
+export const tapeLivenessPolicyVersion = "TAPE_LIVENESS_V1";
+
+/**
+ * Consecutive OHLC-identical bars, inclusive of the reference bar, that mean the tape is frozen.
+ *
+ * Calibrated on **index 1m bars**. Retained as the default for callers that cannot name an
+ * instrument -- `isStaleBar` in `pattern-intelligence` takes a candle and its predecessor and has no
+ * instrument identity in scope -- and as the value every declared instrument currently shares, which
+ * `tape-liveness.test.ts` enforces so the two paths cannot silently diverge.
+ */
+export const frozenTapeIdenticalBarThreshold = 2;
+
+export class TapeThresholdPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TapeThresholdPolicyError";
+  }
+}
+
+/**
+ * The declared per-instrument frozen-tape threshold, keyed by instrument symbol.
+ *
+ * ## Why a declared table rather than one constant
+ *
+ * The threshold answers "how many identical consecutive bars mean the feed stopped publishing", and
+ * that is a property of the instrument, not of the system. Two identical consecutive minutes on
+ * NIFTY50 mean the feed froze; on an illiquid single stock they can mean nobody traded, which is a
+ * dull but genuine print. A global constant calibrated on indices would refuse those bars as a
+ * frozen tape and quietly delete the thinnest part of an equity's session from the sample.
+ *
+ * Keyed by symbol rather than instrument id so the policy is declarable in source and reviewable by
+ * a person; instrument UUIDs are neither.
+ *
+ * ## Undeclared instruments are refused, not defaulted
+ *
+ * An instrument absent from this table throws. Silently inheriting the index value is exactly the
+ * failure above, and it would be invisible -- the bars would simply stop appearing in the sample. A
+ * throw is recoverable and names the decision that has to be made; a mis-refused population is not
+ * recoverable, because nothing records what was dropped.
+ *
+ * Both current consumers cover NIFTY50 and BANKNIFTY only (17,805 and 15,698 pattern observations;
+ * the scalp harness captures the same two), so this refuses nothing that runs today.
+ *
+ * ## This does not bump `controlPolicyVersion`, deliberately
+ *
+ * The obligation recorded on `tapeLivenessPolicyVersion` binds on a change to the rule or to a
+ * threshold *value*. Neither changed here: both declared values are 2, identical to the previous
+ * global default, so no bar's verdict moves and every stored control point still means what it meant.
+ * What changed is where the number comes from.
+ *
+ * Bumping anyway would be actively harmful now that D4 refuses matched sets spanning policy
+ * versions: it would fragment the control population and cost matching power for no behavioural
+ * difference. `tape-liveness.test.ts` pins that every declared value equals the historical default,
+ * so the first time a value genuinely changes the pin fails and the version obligation lands on
+ * whoever changed it.
+ */
+export const frozenTapeThresholdPolicy: Readonly<Record<string, number>> = Object.freeze({
+  NIFTY50: 2,
+  BANKNIFTY: 2,
+});
+
+export function frozenTapeThresholdFor(instrumentSymbol: string): number {
+  const declared = Object.prototype.hasOwnProperty.call(frozenTapeThresholdPolicy, instrumentSymbol)
+    ? frozenTapeThresholdPolicy[instrumentSymbol]
+    : undefined;
+  if (declared === undefined) {
+    throw new TapeThresholdPolicyError(
+      `No frozen-tape threshold is declared for ${instrumentSymbol}. The index value of `
+      + `${frozenTapeIdenticalBarThreshold} is calibrated on index 1m bars, and an illiquid symbol `
+      + "can legitimately print identical consecutive bars -- inheriting it would refuse that "
+      + "instrument's thinnest bars as a frozen tape and drop them from the sample with no record. "
+      + "Declare a threshold in frozenTapeThresholdPolicy, and if it differs from the default, bump "
+      + "controlPolicyVersion with it.",
+    );
+  }
+  return declared;
+}
+
+export interface TapeBar {
+  readonly openTime: Date;
+  readonly open: number;
+  readonly high: number;
+  readonly low: number;
+  readonly close: number;
+}
+
+export interface TapeLivenessAssessment {
+  readonly liveness: TapeLiveness;
+  /**
+   * Length of the trailing run of OHLC-identical, time-contiguous bars, counting the reference bar.
+   *
+   * Always at least 1. Capped by how many bars the caller supplied, so it is a diagnostic rather
+   * than a measurement of how long the freeze has run -- which is exactly why it is not part of the
+   * ineligibility reason string.
+   */
+  readonly identicalBars: number;
+}
+
+function sameBarValues(left: TapeBar, right: TapeBar): boolean {
+  return left.open === right.open
+    && left.high === right.high
+    && left.low === right.low
+    && left.close === right.close;
+}
+
+/**
+ * Classifies the tape at the newest bar in `bars`.
+ *
+ * `bars` is chronological, oldest first, and its last element is the reference bar being judged. A
+ * gap breaks the run: two OHLC-identical bars that are not `intervalMs` apart are not evidence of a
+ * frozen tape, they are evidence of a missing bar, which is a different defect measured elsewhere.
+ * Walking backwards and stopping at the first break means a caller cannot manufacture a run by
+ * passing a non-contiguous window.
+ *
+ * A single bar is `LIVE` with `identicalBars: 1`. That is deliberate and not a gap in the check: the
+ * first bar of a session has nothing to be identical to, and refusing it would discard 09:16 every
+ * day to guard against a freeze that by construction cannot yet be visible. The freeze this targets
+ * runs for fourteen consecutive minutes, so it is still caught one bar later.
+ */
+export function assessTapeLiveness(input: {
+  readonly bars: readonly TapeBar[];
+  readonly intervalMs: number;
+  readonly threshold?: number;
+}): TapeLivenessAssessment {
+  if (input.bars.length === 0) {
+    throw new Error("Tape liveness requires at least the reference bar.");
+  }
+  if (!Number.isFinite(input.intervalMs) || input.intervalMs <= 0) {
+    throw new Error("Tape liveness requires a positive bar interval.");
+  }
+  const threshold = input.threshold ?? frozenTapeIdenticalBarThreshold;
+  if (!Number.isInteger(threshold) || threshold < 2) {
+    // A threshold of 1 would call every bar frozen, since a bar is trivially identical to itself.
+    throw new Error("A frozen-tape threshold below 2 bars cannot distinguish anything.");
+  }
+
+  let identicalBars = 1;
+  for (let index = input.bars.length - 1; index > 0; index -= 1) {
+    const newer = input.bars[index]!;
+    const older = input.bars[index - 1]!;
+    const contiguous = newer.openTime.getTime() - older.openTime.getTime() === input.intervalMs;
+    if (!contiguous || !sameBarValues(newer, older)) break;
+    identicalBars += 1;
+  }
+
+  return {
+    liveness: identicalBars >= threshold ? "FROZEN" : "LIVE",
+    identicalBars,
+  };
+}

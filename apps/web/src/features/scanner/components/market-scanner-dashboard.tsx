@@ -6,7 +6,7 @@ import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson } from "../../research/api";
 import { ReadOnlyBoundary } from "../../research/components/read-only-boundary";
 import { RequestStatePanel, type RequestState } from "../../research/components/request-state-panel";
-import { ResearchShell } from "../../research/components/research-shell";
+import { PageHeader } from "../../../components/layout/page-header";
 import { parseScannerEnvelope, parseWatchlistEnvelope } from "../api";
 import type { ScannerContext, ScannerRow, WatchlistInstrument } from "../domain";
 import { ScannerRowCard } from "./scanner-row-card";
@@ -125,14 +125,13 @@ export function MarketScannerDashboard() {
   }, [scannerState, unavailable, watchlistState]);
 
   return (
-    <ResearchShell
-      activeView="scanner"
-      connectionLabel={connectionLabel}
+    <>
+      <PageHeader connectionLabel={connectionLabel}
       description="Review active local instruments and their latest persisted completed-candle research context. Nothing on this page refreshes market data or creates an action."
       eyebrow="Local research platform - Phase 13"
       title="Market Scanner and Watchlist"
-      unavailable={unavailable}
-    >
+      unavailable={unavailable} />
+      <div className="mt-10">
       <Reveal delayMs={130}>
         <ReadOnlyBoundary
           description="The scanner only reads active local instruments and completed-candle research already stored by the platform. It does not collect market data, refresh a provider, produce a trade idea, create paper activity, connect to a broker, or place an order."
@@ -154,6 +153,7 @@ export function MarketScannerDashboard() {
       <section className="mt-10">
         <ScannerPanel context={scannerContext} records={scannerRecords} state={scannerState} />
       </section>
-    </ResearchShell>
+    </div>
+    </>
   );
 }

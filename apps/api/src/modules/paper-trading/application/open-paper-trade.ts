@@ -1,4 +1,11 @@
-import type { OpenPaperTradeInput, PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
+import type {
+  OpenPaperTradeInput,
+  OptionContractSpec,
+  PaperTrade,
+  PaperTradeRepository,
+} from "../domain/paper-trading.js";
+import type { TradeSide } from "../../strategy-engine/domain/strategy.js";
+import { calculateEntryFees } from "../domain/brokerage-calculator.js";
 
 export interface OpenPaperTradeRequest {
   accountId: string;
@@ -9,6 +16,17 @@ export interface OpenPaperTradeRequest {
   entrySlippage?: number;
   notes?: string;
   openedAt?: Date;
+  orderType?: "MARKET" | "PENDING";
+  /** When true (default), compute Zerodha options entry fees from premium × qty. */
+  applyBrokerageFees?: boolean;
+  stopLossOverride?: number;
+  targetPriceOverride?: number;
+  sideOverride?: TradeSide;
+  feeBreakdown?: Record<string, unknown>;
+  /** Persists strike/expiry/type/IV for live Black–Scholes mark-to-market. */
+  optionContract?: OptionContractSpec;
+  /** Regime observed at decision time. Research and audit only; nothing reads it back to trade. */
+  regimeObservationId?: string | null;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -30,7 +48,9 @@ export class OpenPaperTrade {
   async execute(input: OpenPaperTradeRequest): Promise<PaperTrade> {
     assertPositiveFinite(input.quantity, "Quantity");
     assertPositiveFinite(input.fillPrice, "Fill price");
-    const entryFees = input.entryFees ?? 0;
+    const applyFees = input.applyBrokerageFees !== false;
+    const entryBreakdown = applyFees ? calculateEntryFees(input.fillPrice, input.quantity) : null;
+    const entryFees = input.entryFees ?? entryBreakdown?.total ?? 0;
     const entrySlippage = input.entrySlippage ?? 0;
     assertNonNegativeFinite(entryFees, "Entry fees");
     assertNonNegativeFinite(entrySlippage, "Entry slippage");
@@ -47,6 +67,13 @@ export class OpenPaperTrade {
       entryFees,
       entrySlippage,
       notes: input.notes?.trim() ?? "",
+      status: input.orderType === "PENDING" ? "PENDING" : "OPEN",
+      feeBreakdown: input.feeBreakdown ?? (entryBreakdown ? { entry: entryBreakdown } : undefined),
+      stopLossOverride: input.stopLossOverride,
+      targetPriceOverride: input.targetPriceOverride,
+      sideOverride: input.sideOverride,
+      optionContract: input.optionContract,
+      regimeObservationId: input.regimeObservationId ?? null,
     };
     return this.paperTradeRepository.openFromTradeIdea(request);
   }

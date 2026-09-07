@@ -1,0 +1,205 @@
+import type { StrategyMarketContext } from "../../../strategy-engine/domain/strategy.js";
+import type {
+  ImmutableStrategyProposal,
+  MarketOpportunity,
+  RecordedRiskDecision,
+  ResearchControlPoint,
+  ResearchRiskSnapshot,
+  ResearchRiskSnapshotState,
+  ResearchRiskSubject,
+  ResearchStrategyDefinition,
+} from "../domain/contracts.js";
+import { buildCanonicalGeometry, canonicalAtrAlgorithmVersion, canonicalAtrParameters } from "../domain/policies.js";
+import { resolveOpportunities, type PersistedProposal } from "../domain/opportunity-resolver.js";
+import { buildRiskSnapshot, buildRiskSubject, evaluateResearchRisk } from "../domain/research-risk.js";
+import {
+  buildControlPoints,
+  researchScalpStrategies,
+  type ResearchFeatureCoverage,
+} from "../domain/research-strategies.js";
+import { selectCaptureStrategies } from "../domain/terminal-strategy-registry.js";
+import type { TapeLiveness } from "../../../market-data/domain/tape-liveness.js";
+import { parseDeferralReason, type DeferralFamily } from "../../../platform/observability/decision-audit-record.js";
+
+export interface ScalpResearchWritePort {
+  saveStrategyDefinition(definition: ResearchStrategyDefinition): Promise<string>;
+  saveProposal(proposal: ImmutableStrategyProposal): Promise<PersistedProposal>;
+  saveOpportunity(opportunity: MarketOpportunity): Promise<MarketOpportunity & { id: string }>;
+  saveControlPoint(control: ResearchControlPoint): Promise<ResearchControlPoint & { id: string }>;
+  saveRiskSnapshot(snapshot: ResearchRiskSnapshot): Promise<ResearchRiskSnapshot & { id: string }>;
+  saveRiskSubject(subject: ResearchRiskSubject): Promise<ResearchRiskSubject & { id: string }>;
+  saveRiskDecision(decision: RecordedRiskDecision): Promise<string>;
+}
+
+export interface CaptureResearchDecisionResult {
+  /**
+   * How many strategies ran at this decision instant.
+   *
+   * Deliberately not accompanied by benchmark/disabled counts. Every field on this result is summed
+   * across a session's minutes by the runner, and the registry selection is a session constant --
+   * summing it would report "2 disabled" as 750. The runner reports the selection once instead, by
+   * name; see `run-scalp-research-harness.ts`.
+   */
+  readonly strategyDefinitions: number;
+  readonly controls: number;
+  readonly proposals: number;
+  readonly opportunities: number;
+  readonly riskSubjects: number;
+  readonly riskDecisions: number;
+  /**
+   * Why this grid point was not a usable sample, as a taxonomy family, or null when it was.
+   *
+   * Returned rather than only stored because the runner is where a session is judged, and it cannot
+   * otherwise see a warmup gap at all -- that is decided inside `controlIneligibleReason` from the
+   * context, not from anything the runner passes in.
+   */
+  readonly deferralFamily: DeferralFamily | null;
+}
+
+function canonicalAtr(context: StrategyMarketContext): number {
+  const snapshot = context.indicators.find((item) => (
+    item.code === "ATR"
+    && item.algorithmVersion === canonicalAtrAlgorithmVersion
+    && item.parameters.period === canonicalAtrParameters.period
+    && item.parameters.smoothing === canonicalAtrParameters.smoothing
+  ));
+  const value = snapshot?.values.value;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error("CANONICAL_GEOMETRY_V1 requires completed ta-v1 Wilder ATR(14)." );
+  }
+  return value;
+}
+
+export class CaptureScalpResearchDecision {
+  constructor(private readonly writes: ScalpResearchWritePort) {}
+
+  async execute(input: {
+    reference1mContext: StrategyMarketContext;
+    strategyContexts: readonly StrategyMarketContext[];
+    sessionCloseAt: Date;
+    tickSize: number;
+    lotSize: number;
+    accountSnapshots: readonly { accountId: string; state: ResearchRiskSnapshotState }[];
+    /**
+     * Whether the candlestick and price-action layers had been computed for this bar.
+     *
+     * The caller normally defers a minute until this is COMPLETE. INCOMPLETE reaches here only past
+     * the runner's deadline, when waiting longer would lose the grid point altogether -- so the
+     * control is still written, and marked ineligible, while proposal generation is skipped.
+     */
+    featureCoverage: ResearchFeatureCoverage;
+    /**
+     * Whether the feed was publishing new prices at this bar, or republishing the previous one.
+     *
+     * Resolved by the caller from the preceding bars for the same reason `featureCoverage` is: it is
+     * a fact about the bar series, which `StrategyMarketContext` does not carry. See
+     * `resolve-tape-liveness.ts`.
+     */
+    tapeLiveness: TapeLiveness;
+  }): Promise<CaptureResearchDecisionResult> {
+    if (input.reference1mContext.candle.timeframe !== "1m") throw new Error("Capture requires a canonical 1m reference context.");
+    const decisionAt = input.reference1mContext.candle.closeTime;
+    for (const context of input.strategyContexts) {
+      if (context.candle.closeTime.getTime() !== decisionAt.getTime()) {
+        throw new Error("Every research strategy context must close at the canonical decisionAt.");
+      }
+    }
+
+    /*
+     * The Terminal Strategy Registry gate (Scalp Engine V2 §2). This is the single point every
+     * capture passes through, so validating here means an unregistered or in-place-edited strategy
+     * cannot write a row anywhere -- rather than only where someone remembered to check.
+     *
+     * `selectCaptureStrategies` also applies `TERMINAL -> default DISABLED`. Under the shipped
+     * benchmark opt-in both terminal strategies stay active, so this changes no behaviour today; see
+     * the registry for why the switch has to be thrown on a recorded session boundary.
+     */
+    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const activeStrategies = selection.active;
+
+    for (const strategy of activeStrategies) await this.writes.saveStrategyDefinition(strategy.definition);
+    // A context whose pattern layer has not been computed cannot produce a pattern-triggered
+    // proposal, and the absence is indistinguishable from a quiet bar once stored. Minting proposals
+    // from it would record a false negative as a real decision -- which is what happened on
+    // 2026-08-24, when 46% of evaluations read a bar with no patterns yet and the pattern strategy's
+    // firing rate fell 93% with no trace of why. Skipping is recoverable; a wrong row is not.
+    /*
+     * A frozen tape is disqualifying for the same reason, one layer earlier.
+     *
+     * The feed republishes the last print from the 15:16 bar to the close, so a proposal minted there
+     * records an entry at a price no longer being quoted, and its forward settlement reads the same
+     * repeated bars. 41 such proposals were already stored before this gate existed. As with an
+     * uncomputed feature layer: skipping is recoverable, a wrong row is not.
+     */
+    const tapeFrozen = input.tapeLiveness === "FROZEN";
+    const generated = input.featureCoverage === "INCOMPLETE" || tapeFrozen
+      ? []
+      : activeStrategies.flatMap((strategy) => input.strategyContexts
+        .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
+        .flatMap((context) => strategy.evaluate(context, input.reference1mContext)));
+    const proposals = await Promise.all(generated.map((proposal) => this.writes.saveProposal(proposal)));
+    const opportunities = await Promise.all(resolveOpportunities(proposals, input.sessionCloseAt).map((opportunity) => this.writes.saveOpportunity(opportunity)));
+
+    const atr = opportunities.length > 0 ? canonicalAtr(input.reference1mContext) : null;
+    const subjects: Array<ResearchRiskSubject & { id: string }> = [];
+    for (const opportunity of opportunities) {
+      const canonical = buildCanonicalGeometry({
+        opportunity,
+        atr: atr!,
+        tickSize: input.tickSize,
+        sessionCloseAt: input.sessionCloseAt,
+      });
+      subjects.push(await this.writes.saveRiskSubject(buildRiskSubject({
+        subjectType: "CANONICAL_OPPORTUNITY",
+        subjectId: opportunity.id,
+        instrumentId: opportunity.instrumentId,
+        decisionAt: opportunity.canonicalDecisionAt,
+        sessionCloseAt: input.sessionCloseAt,
+        geometry: canonical.geometry,
+        lotSize: input.lotSize,
+      })));
+    }
+    for (const proposal of proposals) {
+      subjects.push(await this.writes.saveRiskSubject(buildRiskSubject({
+        subjectType: "NATIVE_PROPOSAL",
+        subjectId: proposal.id,
+        instrumentId: proposal.instrumentId,
+        decisionAt: proposal.decisionAt,
+        sessionCloseAt: input.sessionCloseAt,
+        geometry: proposal.nativeGeometry,
+        lotSize: input.lotSize,
+      })));
+    }
+
+    let riskDecisions = 0;
+    for (const account of input.accountSnapshots) {
+      const snapshot = await this.writes.saveRiskSnapshot(buildRiskSnapshot({
+        accountId: account.accountId,
+        asOf: decisionAt,
+        decisionAt,
+        state: account.state,
+      }));
+      for (const subject of subjects) {
+        await this.writes.saveRiskDecision(evaluateResearchRisk({ subject, snapshot }));
+        riskDecisions += 1;
+      }
+    }
+    // Controls are the decision-completion marker for catch-up. Writing them last means a crash
+    // anywhere above leaves this minute discoverable; every preceding retry is immutable/idempotent.
+    const builtControls = buildControlPoints(
+      input.reference1mContext, input.sessionCloseAt, input.featureCoverage, input.tapeLiveness,
+    );
+    const controls = await Promise.all(builtControls.map((control) => this.writes.saveControlPoint(control)));
+    // Both directions of a grid point share one reason, so the first control carries the point's.
+    const firstReason = builtControls[0]?.ineligibleReason ?? null;
+    return {
+      strategyDefinitions: activeStrategies.length,
+      controls: controls.length,
+      proposals: proposals.length,
+      opportunities: opportunities.length,
+      riskSubjects: subjects.length,
+      riskDecisions,
+      deferralFamily: firstReason === null ? null : parseDeferralReason(firstReason).family,
+    };
+  }
+}
