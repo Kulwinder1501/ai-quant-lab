@@ -42,7 +42,8 @@ export class IctCompositeEngine {
     const struct = this.structTracker.processCandle(candles, currentIndex);
     const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
     const sessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
-    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels);
+    // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
+    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias);
 
     // HTF bias is a separate (fractal) pillar. It is carried alongside the local
     // bias and never overwrites its value: overwriting left the reason codes

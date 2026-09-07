@@ -21,6 +21,19 @@ export interface IctEngineConfig {
   readonly dealingRangeMinAtrMultiple: number;
   readonly maxSignalAgeBars: number;
   readonly maxUnderlyingDriftBps: number;
+  /**
+   * Where this engine instance gets its directional bias -- which depends on where it sits in the
+   * fractal chain, so it cannot be a global rule.
+   *
+   * `HIGHER_TIMEFRAME` (default, the execution level): bias must be supplied by the caller from a
+   * higher timeframe. Reading it from this level's own structure is what made the bias pillar a
+   * restatement of the structure pillar.
+   *
+   * `OWN_STRUCTURE` (the top of the chain): the swing sequence at this level IS the price-action
+   * read, per lecture 9 -- the monthly's own highs and lows establish the macro bias, which is then
+   * carried down. Without this the chain never terminates and every level resolves to UNKNOWN.
+   */
+  readonly biasSource: "HIGHER_TIMEFRAME" | "OWN_STRUCTURE";
 }
 
 export const defaultIctEngineConfig: IctEngineConfig = {
@@ -32,7 +45,8 @@ export const defaultIctEngineConfig: IctEngineConfig = {
   strongCloseThresholdFraction: 0.25,
   dealingRangeMinAtrMultiple: 2.0,
   maxSignalAgeBars: 3,
-  maxUnderlyingDriftBps: 25.0, // 25 bps drift tolerance
+  maxUnderlyingDriftBps: 25.0,
+  biasSource: "HIGHER_TIMEFRAME", // 25 bps drift tolerance
 };
 
 export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig): string {

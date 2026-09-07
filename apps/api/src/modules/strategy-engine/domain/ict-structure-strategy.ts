@@ -60,18 +60,28 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const isBearish = bias.bias === "BEARISH" && structure.trend === "BEARISH";
     if (!isBullish && !isBearish) return [];
 
-    // Pillar Gate 2b: Fractal alignment. The HTF bias is a required pillar; if
-    // it is present it must agree with the intended direction, otherwise the
-    // fractal objective and the local setup disagree and there is no trade.
-    let explicitHtfBias = ict.htfBias;
-    if (context.higherTimeframeContexts && context.higherTimeframeContexts["15m"]?.ictSnapshot) {
-      const htfBiasVal = context.higherTimeframeContexts["15m"].ictSnapshot.bias.bias;
-      if (htfBiasVal !== "UNKNOWN" && htfBiasVal !== "NEUTRAL") {
-        explicitHtfBias = htfBiasVal;
-      }
-    }
-
-    if (explicitHtfBias && explicitHtfBias !== bias.bias) return [];
+    /*
+     * There is no separate fractal-alignment gate any more, and its removal is the point.
+     *
+     * It compared `ict.htfBias` against `bias.bias`. Now that bias is SOURCED from the
+     * higher-timeframe read (see bias.ts), those two are the same value, so the comparison could
+     * only ever pass -- swapping a circular gate for a tautological one. Gate 2 above is the real
+     * alignment test: the higher-timeframe narrative against the execution-timeframe structure.
+     *
+     * The fractal pillar is still *required*: `coverage.htf` must be COMPLETE in Gate 1, so a bar
+     * with no higher-timeframe evidence produces nothing. What is gone is the redundant equality
+     * check, not the requirement.
+     *
+     * The dead `higherTimeframeContexts["15m"]` branch went with it. Nothing in production ever
+     * populated that key -- the research harness attaches "5m" and only to the 1m reference context.
+     *
+     * What remains below is a CONSISTENCY guard, not a pillar. Since bias is sourced from the
+     * higher-timeframe read and a sweep may now only confirm it, a snapshot whose bias contradicts
+     * its own `htfBias` is malformed and cannot be produced by the engine. Refusing it keeps the
+     * fail-closed invariant against a hand-built or future-constructed snapshot rather than trusting
+     * that the two can never disagree.
+     */
+    if (ict.htfBias && ict.htfBias !== bias.bias) return [];
 
     // Pillar Gate 3: Liquidity Status
     if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];

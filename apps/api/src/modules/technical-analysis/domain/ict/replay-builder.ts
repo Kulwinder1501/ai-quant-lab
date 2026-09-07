@@ -145,7 +145,12 @@ export function deriveHtfBiasSeries(
   config: IctEngineConfig = defaultIctEngineConfig,
 ): (IctBiasDirection | undefined)[] {
   const buckets = aggregateSessionHtfBuckets(contexts, barsPerBucket);
-  const htfEngine = new IctCompositeEngine(config);
+  /*
+   * The HTF engine sits at the top of this chain, so it reads its bias from its own swing sequence.
+   * Left on the default it would demand a bias from a level above it, find none, resolve UNKNOWN,
+   * and starve every base bar of the bias pillar -- measured as UNKNOWN on 2,325 of 2,325 bars.
+   */
+  const htfEngine = new IctCompositeEngine({ ...config, biasSource: "OWN_STRUCTURE" });
   const htfCandles = buckets.map((b) => b.candle);
   const bucketBias: { closeTime: Date; bias: IctBiasDirection }[] = buckets.map((bucket, i) => {
     const snap = htfEngine.processCandle(htfCandles, i);

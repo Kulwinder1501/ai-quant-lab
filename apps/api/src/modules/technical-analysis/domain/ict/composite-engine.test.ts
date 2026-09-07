@@ -38,7 +38,9 @@ describe("IctCompositeEngine", () => {
 
     let snap: any;
     for (let i = 0; i < candles.length; i++) {
-      snap = engine.processCandle(candles, i);
+      // Bias is sourced from the higher-timeframe read, so the replay must supply one; without
+      // it the bias pillar fails closed to UNKNOWN by design.
+      snap = engine.processCandle(candles, i, "BULLISH");
     }
 
     expect(snap.engineVersion).toBe(ICT_STATE_ENGINE_VERSION);
@@ -47,7 +49,7 @@ describe("IctCompositeEngine", () => {
     expect(snap.sessionLevels.levels).not.toBeNull();
     expect(snap.sessionLevels.levels?.pdh).toBe(112);
     expect(snap.sessionLevels.levels?.pdl).toBe(95);
-    expect(snap.bias.bias).toBe("BULLISH"); // PDL swept and reclaimed
+    expect(snap.bias.bias).toBe("BULLISH"); // higher-timeframe bias, confirmed by the PDL sweep
     expect(snap.coverage.zones).toBe("COMPLETE");
     expect(snap.coverage.sessionLevels).toBe("COMPLETE");
     expect(snap.coverage.bias).toBe("COMPLETE");
