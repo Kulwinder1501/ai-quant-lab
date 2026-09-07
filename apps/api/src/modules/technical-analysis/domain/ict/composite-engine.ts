@@ -39,9 +39,21 @@ export class IctCompositeEngine {
     htfBias?: IctBiasDirection
   ): IctStateCompositeSnapshot {
     const current = candles[currentIndex];
-    const struct = this.structTracker.processCandle(candles, currentIndex);
-    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
+    /*
+     * Session levels resolve FIRST now, because structure needs to know whether a prior-day level
+     * was swept on this bar -- lecture 5's CHoCH-for-IDM substitution depends on it. The session
+     * tracker takes only (candles, index) and never read structure, so the reorder is safe.
+     *
+     * Gated on `barIndex === currentIndex`: the substitution applies to the swing formed at the
+     * sweep, not to every bar for the rest of the session after one.
+     */
     const sessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
+    const sweep = sessionLevels.lastSweepEvent;
+    const sweptPriorDayLevel = sweep && sweep.eventType === "SWEEP" && sweep.barIndex === currentIndex
+      ? sweep.levelType
+      : undefined;
+    const struct = this.structTracker.processCandle(candles, currentIndex, sweptPriorDayLevel);
+    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
     // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
     const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias);
 

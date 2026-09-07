@@ -93,7 +93,24 @@ export class IctStructureTracker {
 
   constructor(private readonly pivotLength: number = 3) {}
 
-  processCandle(candles: readonly CausalCandle[], currentIndex: number): IctStructureSnapshot {
+  processCandle(
+    candles: readonly CausalCandle[],
+    currentIndex: number,
+    /**
+     * A prior-day level swept on this bar, if any.
+     *
+     * Lecture 5's substitution rule: when previous-day high/low liquidity has been grabbed and the
+     * reversal is being planned, the first swing on the left is labelled **CHoCH, not IDM**. That
+     * relabel is the mechanism -- it flips the directional frame so the swept low can be bought,
+     * and the lecture is explicit the trend has not really changed
+     * ("एक्चुअल में ट्रेंड चेंज नहीं हुआ है"): the trader flips frame deliberately, because the
+     * market works off liquidity rather than off order blocks.
+     *
+     * Without it the tracker always assigns that pivot as IDM, keeps the old trend, and the
+     * doctrine's canonical entry can never form.
+     */
+    sweptPriorDayLevel?: "PDH" | "PDL",
+  ): IctStructureSnapshot {
     let currentEvent: StructureEvent | null = null;
     const current = candles[currentIndex];
     const pivots = findConfirmedPivotAt(candles, currentIndex, this.pivotLength);
@@ -103,7 +120,10 @@ export class IctStructureTracker {
       this.confirmedPivots.push(pivots.low);
       this.lastInternalLow = pivots.low;
       if (this.trend === "BULLISH" && this.unconfirmedHigh) {
-        if (!this.activeIdm || pivots.low.index > this.activeIdm.index) {
+        if (sweptPriorDayLevel === "PDH") {
+          // Relabelled: breaking this low now flips the trend rather than merely confirming IDM.
+          this.lastHL = pivots.low;
+        } else if (!this.activeIdm || pivots.low.index > this.activeIdm.index) {
           this.activeIdm = pivots.low;
         }
       } else if (this.trend === "NEUTRAL") {
@@ -117,7 +137,11 @@ export class IctStructureTracker {
       this.confirmedPivots.push(pivots.high);
       this.lastInternalHigh = pivots.high;
       if (this.trend === "BEARISH" && this.unconfirmedLow) {
-        if (!this.activeIdm || pivots.high.index > this.activeIdm.index) {
+        if (sweptPriorDayLevel === "PDL") {
+          // The lecture-5 case: prior-day low swept, so this first left swing high becomes the
+          // CHoCH level. Breaking it flips the frame bullish; entry is the pullback to a POI.
+          this.lastLH = pivots.high;
+        } else if (!this.activeIdm || pivots.high.index > this.activeIdm.index) {
           this.activeIdm = pivots.high;
         }
       } else if (this.trend === "NEUTRAL") {

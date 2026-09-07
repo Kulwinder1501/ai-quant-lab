@@ -97,3 +97,56 @@ describe("IctStructureTracker", () => {
     expect(bosSnap.lastEvent?.isWickOnly).toBe(false);
   });
 });
+
+describe("CHoCH-for-IDM substitution after a prior-day sweep", () => {
+  /*
+   * Lecture 5: when previous-day liquidity has been grabbed, the first swing on the left is labelled
+   * CHoCH instead of IDM. That relabel is the mechanism -- it moves the level whose break flips the
+   * frame much closer to price, so the swept low becomes buyable.
+   *
+   * All three cases drive the SAME candles and differ only in the sweep argument, so any difference
+   * is attributable to the substitution alone. This fixture reaches BEARISH at bar 5 and would
+   * otherwise assign a swing high at 108 as IDM on bar 8, with the CHoCH level left back at 117.
+   */
+  function drive(sweep?: "PDH" | "PDL") {
+    const candles: CausalCandle[] = [
+      makeCandle(0, 120, 122, 118, 119), makeCandle(1, 119, 121, 110, 111),
+      makeCandle(2, 111, 113, 108, 112), makeCandle(3, 112, 116, 111, 115),
+      makeCandle(4, 115, 117, 104, 105), makeCandle(5, 105, 107, 96, 97),
+      makeCandle(6, 97, 106, 96, 105), makeCandle(7, 105, 108, 99, 100),
+      makeCandle(8, 100, 102, 90, 91), makeCandle(9, 91, 99, 90, 98),
+      makeCandle(10, 98, 100, 88, 89),
+    ];
+    const tracker = new IctStructureTracker(1);
+    let snap = tracker.processCandle(candles, 0);
+    for (let i = 1; i < candles.length; i += 1) {
+      snap = tracker.processCandle(candles, i, i >= 8 ? sweep : undefined);
+    }
+    return snap;
+  }
+
+  it("assigns the first left swing to the IDM slot when nothing was swept", () => {
+    const snap = drive(undefined);
+    expect(snap.trend).toBe("BEARISH");
+    expect(snap.idm?.price).toBe(108);
+    expect(snap.chochLevel).toBe(117);
+  });
+
+  it("relabels it as the CHoCH level when the prior-day low was swept", () => {
+    const snap = drive("PDL");
+    expect(snap.trend).toBe("BEARISH");
+    // Out of the IDM slot entirely, and the flip level moves from 117 down to 108 -- close enough
+    // to price that breaking it is the reversal the lecture plans the entry around.
+    expect(snap.idm).toBeNull();
+    expect(snap.chochLevel).toBe(108);
+  });
+
+  it("is direction-paired: a swept prior-day HIGH does nothing to a bearish trend", () => {
+    // A swept PDH implies a bearish reversal, which is not a frame flip for an already-bearish
+    // trend. Feeding the wrong side must leave the labelling untouched.
+    const wrongSide = drive("PDH");
+    const control = drive(undefined);
+    expect(wrongSide.idm?.price).toBe(control.idm?.price);
+    expect(wrongSide.chochLevel).toBe(control.chochLevel);
+  });
+});
