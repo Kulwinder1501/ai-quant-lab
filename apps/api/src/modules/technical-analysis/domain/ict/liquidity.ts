@@ -202,10 +202,28 @@ export class IctLiquidityResolver {
         };
       }
 
-      // Find nearest unmitigated ERL above current price
+      /*
+       * The objective is EXTERNAL range liquidity, so it is the farthest unmitigated ERL beyond
+       * equilibrium -- not the nearest pool above price.
+       *
+       * This used to ascending-sort and take [0], the CLOSEST pool above price, while
+       * `invalidationLevel` below is the structural swing low and the entry is required to be in
+       * Discount. Near reward against far risk makes R:R < 1 mechanical: measured over 45 days,
+       * median R:R was 0.051 on BANKNIFTY and 0.174 on NIFTY50 against a 1.2 gate, so 19 of 405 and
+       * 86 of 646 pillar-aligned bars could ever produce a trade.
+       *
+       * It also contradicted this function's own naming: `intermediateTarget` is equilibrium, a
+       * waypoint the primary objective is supposed to lie beyond, yet the primary was nearer than
+       * the intermediate on 80% of aligned bars. Requiring `price > equilibrium` makes that
+       * invariant hold by construction rather than by luck.
+       *
+       * Null when no pool lies beyond equilibrium: there is no external objective, so
+       * `coverage.liquidity` fails and the bar produces nothing. That is the honest outcome -- the
+       * previous code would have offered a target inside the range instead.
+       */
       const buyTargets = erlPools
-        .filter((p) => !p.isMitigated && p.price > currentPrice)
-        .sort((a, b) => a.price - b.price);
+        .filter((p) => !p.isMitigated && p.price > currentPrice && p.price > dealingRange.equilibrium)
+        .sort((a, b) => b.price - a.price);
 
       const primaryTarget = buyTargets[0] || null;
       const intermediateTarget = dealingRange.equilibrium;
@@ -236,10 +254,11 @@ export class IctLiquidityResolver {
         };
       }
 
-      // Find nearest unmitigated ERL below current price
+      // Mirror of the bullish objective: farthest unmitigated ERL below equilibrium, not the
+      // nearest pool below price. See the bullish branch for the measurement that motivated it.
       const sellTargets = erlPools
-        .filter((p) => !p.isMitigated && p.price < currentPrice)
-        .sort((a, b) => b.price - a.price);
+        .filter((p) => !p.isMitigated && p.price < currentPrice && p.price < dealingRange.equilibrium)
+        .sort((a, b) => a.price - b.price);
 
       const primaryTarget = sellTargets[0] || null;
       const intermediateTarget = dealingRange.equilibrium;

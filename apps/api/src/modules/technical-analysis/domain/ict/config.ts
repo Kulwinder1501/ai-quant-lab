@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 
-export const ICT_STATE_ENGINE_VERSION = "ict-state-v1";
+/*
+ * v2: the liquidity objective changed from the nearest ERL above/below price to the farthest one
+ * beyond equilibrium. Bumped rather than left alone because `ict_state_snapshots` is keyed on
+ * (instrument, timeframe, bar_time, engine_version, config_hash) -- and the selection lives in
+ * `liquidity.ts`, not in `IctEngineConfig`, so the config hash does NOT move with it. Without the
+ * bump, 12,622 rows of v1 geometry would keep being served under the same key as new v2 rows and
+ * the table would silently hold two incompatible geometries.
+ */
+export const ICT_STATE_ENGINE_VERSION = "ict-state-v2";
 export const ICT_STRUCTURE_STRATEGY_KEY = "ict-structure-v1";
 
 export interface IctEngineConfig {
