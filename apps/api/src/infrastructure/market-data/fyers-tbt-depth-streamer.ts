@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { FyersTokenService } from "./fyers-token-service.js";
 import { reconnectDelayMs } from "./fyers-live-streamer.js";
 import { parseDepthFrame, type DepthFrame } from "../../modules/market-data/domain/depth-frame.js";
+import { DepthBookAssembler } from "../../modules/market-data/domain/depth-book-assembler.js";
 
 /**
  * One WebSocket to the Fyers tick-by-tick depth feed, re-emitting frames as `frame` events.
@@ -66,6 +67,16 @@ function log(level: "info" | "error", message: string, extra: Record<string, unk
 }
 
 export class FyersTbtDepthStreamer extends EventEmitter {
+  /**
+   * Our own book, replacing the SDK's.
+   *
+   * The vendor `_addDepth` writes each level at its arrival index and never reads `num`, with no
+   * clear on snapshot and no removal path. Measured live 2026-09-07 over 119 delta messages:
+   * updates are sparse (7 of 50 levels on one side) and `num` equals the arrival index only
+   * 22-33% of the time, so most levels landed in the wrong slot and stale prices persisted. Only
+   * 1.6% of stored frames carried a plausible spread. See `depth-book-assembler.ts`.
+   */
+  private readonly bookAssembler = new DepthBookAssembler();
   private socket: FyersTbtSocketLike | null = null;
   private readonly subscriptions = new Set<string>();
   private connecting = false;
@@ -110,6 +121,7 @@ export class FyersTbtDepthStreamer extends EventEmitter {
           ) => FyersTbtSocketLike;
         }).fyersTbtSocket(accessToken, undefined, false, false));
       this.socket = socket;
+      this.installBookAssembler(socket);
 
       socket.on("open", () => {
         this.reconnectAttempts = 0;
@@ -130,6 +142,9 @@ export class FyersTbtDepthStreamer extends EventEmitter {
       });
 
       socket.on("depth", (...args: unknown[]) => {
+        // args[1] is now OUR assembled book when installBookAssembler took effect, and the vendor's
+        // reused Depth object only on the fallback path. Both present the same field names, so
+        // parseDepthFrame does not need to know which it received.
         // The SDK calls back with (ticker, depth). The depth object is REUSED per symbol, so
         // parseDepthFrame copies every array out of it rather than retaining the reference.
         const ticker = typeof args[0] === "string" ? args[0] : "";
@@ -195,6 +210,75 @@ export class FyersTbtDepthStreamer extends EventEmitter {
   }
 
   /** Conventions 2-4: string channel, subscribe then resume, arrays not Sets. */
+  /**
+   * Replaces the SDK's book assembly with ours, keyed by each level's own `num`.
+   *
+   * Monkey-patching `datastore.updateDepth` rather than reimplementing the socket on purpose: the
+   * SDK's auth, subscribe and reconnect handling is fine and worth keeping, and only the book
+   * assembly is wrong. The decoded protobuf packet is the first place `num` is still available --
+   * by the time the `depth` event fires, the SDK has already discarded it.
+   *
+   * Falls back silently when there is no datastore, which is the case for the injected fake socket
+   * the tests use. The fallback is the vendor's own behaviour, so a missing hook degrades to the
+   * previous (wrong) book rather than to no data; `assertBookAssemblerInstalled` is how a caller
+   * can insist. A shape change in the SDK would surface as depth frames failing the coherence gate.
+   */
+  private installBookAssembler(socket: FyersTbtSocketLike): void {
+    const store = (socket as unknown as {
+      datastore?: { updateDepth: (packet: unknown, callback: unknown, diffOnly: unknown) => void };
+    }).datastore;
+    if (!store || typeof store.updateDepth !== "function") {
+      log("info", "SDK datastore not present; leaving vendor book assembly in place", {});
+      return;
+    }
+
+    store.updateDepth = (packet: unknown, callback: unknown, _diffOnly: unknown): void => {
+      const decoded = packet as { feeds?: Record<string, unknown>; snapshot?: boolean };
+      if (!decoded?.feeds || typeof callback !== "function") return;
+      const isSnapshot = decoded.snapshot === true;
+
+      for (const feed of Object.values(decoded.feeds)) {
+        const value = feed as {
+          ticker?: unknown;
+          depth?: { bids?: unknown; asks?: unknown; tbq?: unknown; tsq?: unknown };
+          feedTime?: unknown;
+          sendTime?: unknown;
+          sequenceNo?: unknown;
+        };
+        const ticker = typeof value.ticker === "string" ? value.ticker : "";
+        if (ticker === "" || !value.depth) continue;
+
+        const book = this.bookAssembler.apply(ticker, value.depth, isSnapshot);
+        const unwrap = (wrapped: unknown): number => {
+          const raw = typeof wrapped === "object" && wrapped !== null && "value" in wrapped
+            ? (wrapped as { value: unknown }).value
+            : wrapped;
+          const parsed = typeof raw === "string" ? Number(raw) : raw;
+          return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : 0;
+        };
+        // Prices arrive as paise. The vendor divides by 100 in `_addDepth`; doing it here keeps the
+        // assembler unit-agnostic and the conversion in one place.
+        const toRupees = (values: readonly number[]): number[] => values.map((v) => v / 100);
+
+        (callback as (symbol: string, depth: unknown) => void)(ticker, {
+          bidprice: toRupees(book.bidPrice),
+          askprice: toRupees(book.askPrice),
+          bidqty: book.bidQty,
+          askqty: book.askQty,
+          bidordn: book.bidOrders,
+          askordn: book.askOrders,
+          tbq: unwrap(value.depth.tbq),
+          tsq: unwrap(value.depth.tsq),
+          snapshot: isSnapshot,
+          timestamp: unwrap(value.feedTime),
+          sendtime: unwrap(value.sendTime),
+          seqNo: unwrap(value.sequenceNo),
+        });
+      }
+    };
+    log("info", "Depth book assembler installed; levels keyed by num", {});
+  }
+
   private activate(symbols: string[]): void {
     if (!this.socket) return;
     this.socket.subscribe(symbols, this.channel, "depth");
