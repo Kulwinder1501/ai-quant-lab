@@ -59,60 +59,69 @@ describe("ICT replay builder", () => {
     });
   });
 
-  it("makes a higher-timeframe bucket visible only once it has closed", () => {
-    // One session, four 5m bars. With 2 bars per bucket: bucket A = bars 0-1
-    // (closes at bar 1's close), bucket B = bars 2-3 (closes at bar 3's close).
+  it("makes the daily HTF candle visible only once its session has closed", () => {
+    // Two sessions of two 5m bars each. Session 1 becomes a complete daily candle only when the
+    // first bar of session 2 arrives, so nothing inside session 1 can see it.
     const contexts = [
       ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
       ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
-      ctx("2026-01-05", 9, 25, 101, 103, 100, 102),
-      ctx("2026-01-05", 9, 30, 102, 104, 101, 103),
+      ctx("2026-01-06", 9, 15, 101, 103, 100, 102),
+      ctx("2026-01-06", 9, 20, 102, 104, 101, 103),
     ];
-    const series = deriveHtfBiasSeries(contexts, 2);
+    const series = deriveHtfBiasSeries(contexts);
 
-    // Bar 0 closes before any bucket has closed -> no HTF bias visible yet.
+    // Mid-session-1: no session has completed, so there is no daily candle at all.
     expect(series[0]).toBeUndefined();
-    // Bar 1 closes at the same instant bucket A closes -> A is visible.
+    // The LAST bar of session 1 closes at the same instant session 1's daily candle does, so it is
+    // visible to it. Simultaneous, not lookahead -- the same convention the bucket rule always used.
     expect(series[1]).toBeDefined();
-    // Bar 2 is after A but before B closes -> still exactly A's reading.
+    // The first bar of session 2 still sees only session 1: session 2 has not closed.
     expect(series[2]).toBe(series[1]);
   });
 
-  it("discards an incomplete session-end bucket instead of emitting a short bar", () => {
-    // Session 1 has three bars: bucket A (bars 0-1) completes; bar 2 is a lone
-    // partial that must be dropped when session 2 begins. Session 2 bar should
-    // therefore still only ever see bucket A.
+  it("never emits the still-forming final session as a daily candle", () => {
+    // Three sessions. The third is trailing, so only sessions 1 and 2 can ever become candles --
+    // a bar inside session 3 must not see session 3.
     const contexts = [
       ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
       ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
-      ctx("2026-01-05", 9, 25, 101, 103, 100, 102), // lone partial in session 1
-      ctx("2026-01-06", 9, 15, 102, 104, 101, 103), // session 2
+      ctx("2026-01-06", 9, 15, 100, 102, 99, 101),
+      ctx("2026-01-06", 9, 20, 101, 103, 100, 102),
+      ctx("2026-01-07", 9, 15, 101, 103, 100, 102),
     ];
-    const series = deriveHtfBiasSeries(contexts, 2);
-    // At the session-2 bar, only bucket A (from session 1) has ever closed; the
-    // partial third bar of session 1 never formed a bucket.
-    expect(series[3]).toBe(series[1]);
+    const series = deriveHtfBiasSeries(contexts);
+    // Growing the trailing session cannot change what any earlier bar saw. If the still-forming
+    // session were ever emitted, these would move.
+    const extended = deriveHtfBiasSeries([...contexts, ctx("2026-01-07", 9, 20, 102, 104, 101, 103)]);
+    for (let i = 0; i < contexts.length; i += 1) {
+      expect(extended[i]).toBe(series[i]);
+    }
+    // And the first bar of the run still sees nothing: no session had completed before it.
+    expect(series[0]).toBeUndefined();
   });
 
   it("is prefix-invariant: the snapshot at bar i does not depend on later bars", () => {
     const contexts = [
       ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
       ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
-      ctx("2026-01-05", 9, 25, 101, 103, 100, 102),
-      ctx("2026-01-05", 9, 30, 102, 104, 101, 103),
-      ctx("2026-01-05", 9, 35, 103, 105, 102, 104),
+      ctx("2026-01-06", 9, 15, 101, 103, 100, 102),
+      ctx("2026-01-06", 9, 20, 102, 104, 101, 103),
+      ctx("2026-01-07", 9, 15, 103, 105, 102, 104),
     ];
-    const shortRun = computeIctSnapshotsForContexts(contexts.slice(0, 3), { htfBarsPerBucket: 2 });
-    const longRun = computeIctSnapshotsForContexts(contexts, { htfBarsPerBucket: 2 });
+    const shortRun = computeIctSnapshotsForContexts(contexts.slice(0, 3));
+    const longRun = computeIctSnapshotsForContexts(contexts);
     expect(JSON.stringify(longRun[2])).toBe(JSON.stringify(shortRun[2]));
   });
 
-  it("leaves the HTF pillar uncovered when the base timeframe has no 60m mapping", () => {
-    const contexts = [ctx("2026-01-05", 9, 15, 100, 101, 99, 100)].map((c) => ({
-      ...c,
-      candle: { ...c.candle, timeframe: "1d" },
-    }));
+  it("leaves the HTF pillar uncovered when the window holds fewer than two sessions", () => {
+    // Replaces the old "no 60m mapping" case. Bucketing is no longer keyed on the base timeframe at
+    // all, so the only way to have no daily candle is to have no completed session.
+    const contexts = [
+      ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
+      ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
+    ];
     const snaps = computeIctSnapshotsForContexts(contexts);
     expect(snaps[0].coverage.htf).toBe("NOT_COVERED");
+    expect(snaps[1].coverage.htf).toBe("NOT_COVERED");
   });
 });
