@@ -52,6 +52,21 @@ export interface RegisteredStrategy {
    */
   executableSides?: readonly TradeSide[];
   /**
+   * Whether this strategy reads `StrategyMarketContext.ictSnapshot`.
+   *
+   * Declared rather than inferred, because assembling that snapshot is expensive: the composite
+   * engine rescans the causal window per decision point, and its liquidity pass is quadratic. The
+   * context repository asks the registry which timeframes have a consumer and skips the work
+   * entirely for the rest.
+   *
+   * Found 2026-09-07: `ict_state_snapshots` held 7,512 rows at 1m and was still growing, while the
+   * only consumer supports 5m and 15m only. Every one of those rows was computed, persisted and
+   * read by nothing. The alternative patch was a hardcoded `timeframe === "1m"` early return in the
+   * repository, which suppresses the symptom at one timeframe and silently goes stale the moment a
+   * consumer's supported set changes.
+   */
+  readsIctContext?: boolean;
+  /**
    * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.
    *
    * The governance gap this closes, found 2026-09-02: the research harness had recorded
@@ -272,8 +287,33 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: ictStructureStrategyRegistration,
     StrategyClass: IctStructureStrategy,
     supportedTimeframes: ["5m", "15m"],
+    readsIctContext: true,
   },
 ];
+
+/**
+ * The timeframes at which some registered strategy actually reads the ICT snapshot.
+ *
+ * Derived from the registry rather than listed separately, so it cannot drift from the
+ * `supportedTimeframes` of the strategies that consume it. A strategy that stops reading ICT, or
+ * narrows its timeframes, narrows this set with no other edit.
+ *
+ * Note this stays non-empty while `ict-structure-v1` is registered, even though that strategy is a
+ * measured negative wired to no runner. Retiring the ICT context entirely is a separate decision
+ * from not computing it where nothing can read it.
+ */
+export function ictContextTimeframes(): readonly string[] {
+  return [...new Set<string>(
+    registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes),
+  )].sort();
+}
+
+/** Whether assembling an ICT snapshot at `timeframe` can be read by anything. */
+export function ictContextConsumedAt(timeframe: string): boolean {
+  return ictContextTimeframes().includes(timeframe);
+}
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
   return strategy.supportedTimeframes.includes(timeframe);

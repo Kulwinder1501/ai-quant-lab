@@ -9,6 +9,7 @@ import type {
   StrategyMarketContext,
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
+import { ictContextConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
 import {
   deriveVolatilityRegime,
   regimeSourceIndicatorAlgorithmVersion,
@@ -328,6 +329,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     candle: CompletedCandleRow,
   ): Promise<StrategyMarketContext> {
     const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    const ictConsumed = ictContextConsumedAt(input.timeframe);
     const [indicators, patterns, priceActionEvents, ictSnapshotRows] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
@@ -364,21 +366,27 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id]),
-      this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
-        SELECT snapshot_payload
-        FROM ict_state_snapshots
-        WHERE instrument_id = $1
-          AND timeframe = $2
-          AND bar_time = $3
-          AND engine_version = $4
-          AND config_hash = $5
-      `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash]),
+      /*
+       * Skipped outright at a timeframe no registered strategy reads ICT at -- not queried and then
+       * discarded. There is nothing to find there, and the miss would send us on to compute it.
+       */
+      ictConsumed
+        ? this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
+            SELECT snapshot_payload
+            FROM ict_state_snapshots
+            WHERE instrument_id = $1
+              AND timeframe = $2
+              AND bar_time = $3
+              AND engine_version = $4
+              AND config_hash = $5
+          `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash])
+        : Promise.resolve({ rows: [] as { snapshot_payload: IctStateCompositeSnapshot }[] }),
     ]);
 
     const regime = await this.findRegime(input, candle) ?? undefined;
 
     let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
-    if (!ictSnapshot) {
+    if (!ictSnapshot && ictConsumed) {
       ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
     }
 
