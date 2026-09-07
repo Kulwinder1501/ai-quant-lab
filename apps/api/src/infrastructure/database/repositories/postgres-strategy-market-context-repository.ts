@@ -87,6 +87,8 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
 }
 
 /** Reads only completed-candle evidence, so strategy decisions cannot use a forming bar. */
+let ictPersistGrantWarned = false;
+
 export class PostgresStrategyMarketContextRepository implements StrategyMarketContextRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
@@ -172,6 +174,41 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     }
 
     if (snapshot) {
+      /*
+       * The persist is a lazy cache-fill, not the result. `scalp_research_writer` holds SELECT and
+       * only SELECT on this table by design (migration 076), so the research harness -- which calls
+       * `assembleContext` on the same path -- died with 42501 on every decision point and took the
+       * whole capture tick down with it.
+       *
+       * Only a missing write grant is tolerated, and only around the write. Anything else rethrows:
+       * a malformed payload or a broken constraint is a real defect and must not be swallowed. The
+       * computed snapshot is returned either way, so a reader without write access still gets the
+       * correct ICT context -- it just does not get to populate the cache for everyone else.
+       */
+      try {
+        await this.persistIctSnapshot(input, snapshot);
+      } catch (error) {
+        if ((error as { code?: string } | null)?.code !== "42501") throw error;
+        if (!ictPersistGrantWarned) {
+          ictPersistGrantWarned = true;
+          console.warn(JSON.stringify({
+            level: "warn",
+            message: "No write grant on ict_state_snapshots; computing ICT context without caching it",
+            hint: "Expected for the least-privilege scalp research role. Grant INSERT only if this "
+              + "role is meant to populate the cache, which would widen migration 076's boundary.",
+          }));
+        }
+      }
+    }
+
+    return snapshot;
+  }
+
+  private async persistIctSnapshot(
+    input: { instrumentId: string; timeframe: string },
+    snapshot: IctStateCompositeSnapshot,
+  ): Promise<void> {
+    {
       await this.database.query(`
         INSERT INTO ict_state_snapshots (
           instrument_id, timeframe, engine_version, config_hash,
@@ -199,8 +236,6 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         JSON.stringify(snapshot),
       ]);
     }
-
-    return snapshot;
   }
 
   /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
