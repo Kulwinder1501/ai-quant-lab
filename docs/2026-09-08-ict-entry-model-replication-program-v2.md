@@ -139,3 +139,75 @@ If no arm passes the group sign test at 7 of 7, the verdict is **NO_REPLICATED_E
 behind their default-off switches with both programs' measurements attached, and the honest summary
 becomes: the ICT entry model was tested on nine instruments across two eras with the rule fixed in
 advance, and it did not replicate.
+
+## Results — training era, all nine instruments
+
+2025-01-01 .. 2025-12-31, 15m, concurrency 5, 5,000,000 capital, 2bps. Mean P&L per trade.
+
+| instrument | control | killzone | ote |
+|---|---|---|---|
+| NIFTY50 | +97.61 (91) | +126.16 (79) | +101.79 (62) |
+| NIFTYBEES | -1.92 (109) | -2.01 (96) | -2.29 (72) |
+| BANKNIFTY | -30.11 (121) | +8.70 (99) | +77.30 (62) |
+| FINNIFTY | -56.02 (105) | -55.73 (88) | -0.78 (55) |
+| MIDCPNIFTY | -1.03 (140) | -28.25 (114) | -36.51 (84) |
+| NIFTYNXT50 | -171.97 (92) | -182.55 (86) | -202.22 (57) |
+| AXISBANK | +2.55 (114) | +4.00 (104) | +6.96 (79) |
+| ASIANPAINT | -10.82 (151) | -14.62 (125) | -15.94 (90) |
+| BAJFINANCE | -0.85 (167) | -2.06 (137) | -6.40 (101) |
+
+### Primary test — group sign test
+
+| group | control | killzone | ote | kz > ctl | ote > ctl |
+|---|---|---|---|---|---|
+| NIFTY | +47.84 | +62.07 | +49.75 | yes | yes |
+| BANK | -43.06 | -23.52 | +38.26 | yes | yes |
+| MIDCAP | -1.03 | -28.25 | -36.51 | no | no |
+| NEXT50 | -171.97 | -182.55 | -202.22 | no | no |
+| AXISBANK | +2.55 | +4.00 | +6.96 | yes | yes |
+| ASIANPAINT | -10.82 | -14.62 | -15.94 | no | no |
+| BAJFINANCE | -0.85 | -2.06 | -6.40 | no | no |
+
+**killzone: 3 of 7. ote: 3 of 7.** Both **FAIL**, and not marginally — 3 of 7 is below the 3.5 groups
+chance alone would deliver. Seven of seven was required to pass.
+
+The failure has the exact shape the registration warned about. Both arms win on the NIFTY group, the
+BANK group and AXISBANK, and lose on all four others. Those first two groups are the two indices v1
+measured. This is the HTF-confluence pattern reproduced precisely: monotone on the cell it was
+selected on, worse everywhere else.
+
+Note also that **control is negative in 5 of 7 groups**, NIFTYNXT50 at -171.97 per trade. The
+strategy is broadly loss-making and the two indices v1 happened to use were its favourable draw.
+
+### Pooled — and the power question, answered
+
+Clustered on session date across all nine instruments:
+
+| arm | trades | clusters | mean | SE | t |
+|---|---|---|---|---|---|
+| control | 1,090 | 183 | **-16.79** | 30.72 | -0.55 |
+| killzone | 928 | 174 | -16.04 | 31.13 | -0.52 |
+| ote | 662 | 156 | -7.90 | 34.87 | -0.23 |
+
+**Widening did what it was supposed to do.** Clusters 65 -> 183, and SE +-97 -> **+-30.72**, a 3.2x
+improvement. The resolution floor falls from roughly +-195 per trade to about +-61.
+
+And with that power the answer is no longer "unresolved" — it is negative. v1's pooled control mean
+of +24.71 on two indices becomes **-16.79** on nine. The favourable draw was the sample, not the
+strategy.
+
+Internal consistency check: v2's control on BANKNIFTY and NIFTY50 reproduces v1's numbers to the
+digit (-30.11 and +97.61), so the two programs are measuring the same thing.
+
+### Verdict
+
+**NO_REPLICATED_ENTRY_EDGE.**
+
+**The 2026 holdout was NOT spent.** The registration anticipated spending it, but the gate admits
+only an arm that passes training, and neither did. So the era remains clean and available. This is
+the ordering doing its job: had the holdout been run alongside the training era rather than behind
+it, it would have been burned for nothing.
+
+`ict-structure-v1` stays `TERMINAL_UNOWNED`, now on the strongest available evidence rather than on
+an underpowered null: nine instruments, seven exposure groups, rule fixed in advance, and the entry
+model did not replicate.
