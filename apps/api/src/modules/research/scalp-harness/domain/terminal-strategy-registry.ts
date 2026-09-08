@@ -274,10 +274,17 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   },
   {
     /*
-     * V7 carried forward against the rolled-back V5 geometry: same 1m evaluator, same ungated
-     * configuration, same MOMENTUM_CONTINUATION family. A new cohort from zero, not a continuation
-     * of V7's rows -- and deliberately not a resumption of V5's either, though V5 ran on this same
-     * declared geometry, because an implementation checksum separates them.
+     * V7 carried forward against the rolled-back V5 geometry, and then against V6's higher-timeframe
+     * gate: same 1m evaluator, same ungated configuration, same MOMENTUM_CONTINUATION family. A new
+     * cohort from zero, not a continuation of V7's rows -- and deliberately not a resumption of V5's
+     * either, though V5 ran on the same declared geometry, because an implementation checksum
+     * separates them.
+     *
+     * Note the research configuration keeps `htfConfluenceMode: "REQUIRE_AGREEMENT"` from the
+     * operational default while overriding only `minimumConfidence`. That is intentional: ungating
+     * lifts the *score* filter so the rejected population becomes observable, and the HTF gate is a
+     * structural trigger condition rather than a score, in the same class as the EMA cross and the
+     * RSI band. Zeroing it too would not be an ungated cohort, it would be a different strategy.
      */
     strategyKey: "momentum-v9-research",
     operationalStrategyKey: "momentum-scalp",
@@ -285,7 +292,19 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     researchStatus: "RESEARCH",
     productionEligibility: "NOT_YET_ELIGIBLE",
     closureReason: null,
-    pinnedDefinitionHash: "f4e244b11acf1b96c3f2677d9e8bb49e3e88514f2c2df4bd36c0556b0b01abdc",
+    /*
+     * Repinned, not superseded -- the one case where that is the right repair.
+     *
+     * The pin exists to stop a cohort's *accumulated rows* spanning two geometries. V9 has none: it
+     * was created and repinned inside a single unreleased change set, and the deployed image
+     * predates both, so it has never captured a proposal. Superseding it would leave a permanently
+     * empty V11 behind and make the registry imply V9 measured something it never ran to measure.
+     *
+     * The moment V9 captures one row this stops being available. Anything that moves the
+     * configuration or the checksum after a deploy is a V11, exactly as V4 forced V7 and the V5
+     * rollback forced V9.
+     */
+    pinnedDefinitionHash: "846e7e11fcabb92b9b43227cae4d4e5e155cbd76b6f8930bf53b6b77cb38b9b4",
     lineage: {
       parentStrategyKey: "momentum-v7-research",
       parentResearchVersion: 7,
@@ -305,7 +324,8 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     researchStatus: "RESEARCH",
     productionEligibility: "NOT_YET_ELIGIBLE",
     closureReason: null,
-    pinnedDefinitionHash: "5f1f338dc7f68b8a96bd7847b84568f56d88a36688173cc3723c2cba9925ffd4",
+    // Repinned with V9, and for the same reason: never deployed, so never accumulated a row.
+    pinnedDefinitionHash: "96033d405788f4ab7a2a2e2817e2a4d4b1996227e79d04c7663d54ee4920ce16",
     lineage: {
       parentStrategyKey: "momentum-v8-research",
       parentResearchVersion: 8,

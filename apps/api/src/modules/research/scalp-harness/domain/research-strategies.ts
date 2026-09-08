@@ -40,7 +40,7 @@ interface BaseEvaluator {
 }
 
 export const researchStrategySourceChecksums = Object.freeze({
-  "momentum-scalp-strategy.ts": "9f351dc56798d4da6e69f4238260156c0b841eefe5b96e7d9b350c0138f65123",
+  "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
   "momentum-scalp-index-strategy.ts": "e9a74bf002c7b66adacdd7400128a27d6cb03fc8bf0f4bf9d9654dfc64eeed4d",
   "momentum-scalp-pattern-strategy.ts": "b1146d24f53bc225832302486990e5f9aa5e299785305c26834d07e3cbeb01bd",
 });

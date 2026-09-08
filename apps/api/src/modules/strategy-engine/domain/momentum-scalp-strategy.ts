@@ -1,4 +1,6 @@
 import type { VolatilityRegime } from "./regime.js";
+import { biasAgreesWith, htfBiasFrom, type HtfBias } from "./htf-bias.js";
+import { isStrictlyHigherTimeframe } from "./timeframe-order.js";
 import {
   type ProposedTradeIdea,
   type StrategyMarketContext,
@@ -84,7 +86,23 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * Rolling back reduces the size of a loss; it does not create edge. v3 lost money too
  * (-1,723 on 2026-09-04). Entry selection is untouched here.
  */
-export const momentumScalpStrategyVersion = 5;
+/**
+ * v6 adds a higher-timeframe confluence gate, configurable and off by default at nothing -- see
+ * `htfConfluenceMode`. Production had never populated any higher-timeframe context at all until
+ * `GenerateTradeIdeas` began attaching it, so every confluence term in the codebase scored 0 on
+ * live signals; this is the first rule that reads one.
+ *
+ * Measured before wiring, over the 28 closed 1m option trades to 2026-09-08: requiring agreement
+ * blocks 12 of 28 at 15m and 2 of 28 at 5m. 5m is nearly inert because the 1m trigger already
+ * requires price on the correct side of VWAP with EMA(3/8) aligned, which largely implies the 5m
+ * relationship. 15m is the timeframe that binds, which is why it is the default.
+ *
+ * It is an exposure control, not an edge. At 15m the win rate is 25% among trades that agree and
+ * 25% among those that conflict, so the gate removes good and bad in proportion. Any P&L
+ * improvement it shows on a negative-expectancy book means "traded less" until the survivors beat
+ * the blocked on win rate. That test has not passed, and this gate does not claim it.
+ */
+export const momentumScalpStrategyVersion = 6;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
@@ -112,6 +130,10 @@ export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyCon
   minimumVwapDisplacementAtr: 0.10,
   idealVwapDisplacementAtr: 0.60,
   maximumVwapDisplacementAtr: 2.5,
+  htfConfluenceMode: "REQUIRE_AGREEMENT",
+  htfConfluenceTimeframe: "15m",
+  htfConfluenceEmaPeriod: 20,
+  htfConfluenceOnMissing: "ALLOW",
 };
 
 export const momentumScalpStrategyRegistration = {
@@ -148,6 +170,29 @@ export interface MomentumScalpStrategyConfiguration {
   idealVwapDisplacementAtr: number;
   /** Displacement beyond which entering is chasing an extended move. */
   maximumVwapDisplacementAtr: number;
+  /**
+   * Whether a slower timeframe may veto an entry.
+   *
+   * `OFF` restores exactly the v5 behaviour, which is what makes this reversible without a code
+   * change: the gate is a configuration decision, and turning it off must not require a deploy.
+   */
+  htfConfluenceMode: "OFF" | "REQUIRE_AGREEMENT";
+  /** Which slower timeframe supplies the bias. Must be strictly slower than the bar being traded. */
+  htfConfluenceTimeframe: string;
+  /** The EMA period on that slower bar whose side of price defines the bias. */
+  htfConfluenceEmaPeriod: number;
+  /**
+   * What to do when the slower bar, or its EMA, is not there.
+   *
+   * `ALLOW` is the default and it is a considered choice rather than laziness. Absence is the
+   * ordinary state early in a session -- the first 15m bar has not closed until 09:30 IST, and
+   * trades fire before then -- so `BLOCK` silently removes the open as well as the chop. It is also
+   * the failure mode that has already cost this project once: the ICT four-pillar gate failed
+   * closed on a pillar that was never populated and the strategy could never fire at all, which
+   * looked like "no setups found" rather than a bug. `BLOCK` is available for whoever wants the
+   * stricter reading, but it should be chosen deliberately and its no-trade windows checked.
+   */
+  htfConfluenceOnMissing: "ALLOW" | "BLOCK";
 }
 
 function requiredNumber(raw: Record<string, unknown>, key: string, min = -Infinity, max = Infinity): number {
@@ -164,6 +209,18 @@ function requiredString(raw: Record<string, unknown>, key: string): string {
     throw new Error(`Momentum scalp configuration requires a valid string ${key}.`);
   }
   return value.trim();
+}
+
+function requiredEnum<const T extends readonly string[]>(
+  raw: Record<string, unknown>,
+  key: string,
+  allowed: T,
+): T[number] {
+  const value = raw[key];
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new Error(`Momentum scalp configuration requires ${key} to be one of ${allowed.join(", ")}.`);
+  }
+  return value as T[number];
 }
 
 function requiredBoolean(raw: Record<string, unknown>, key: string): boolean {
@@ -214,6 +271,10 @@ export function parseMomentumScalpStrategyConfiguration(raw: Record<string, unkn
     minimumVwapDisplacementAtr: requiredNumber(raw, "minimumVwapDisplacementAtr", 0),
     idealVwapDisplacementAtr: requiredNumber(raw, "idealVwapDisplacementAtr", Number.EPSILON),
     maximumVwapDisplacementAtr: requiredNumber(raw, "maximumVwapDisplacementAtr", Number.EPSILON),
+    htfConfluenceMode: requiredEnum(raw, "htfConfluenceMode", ["OFF", "REQUIRE_AGREEMENT"] as const),
+    htfConfluenceTimeframe: requiredString(raw, "htfConfluenceTimeframe"),
+    htfConfluenceEmaPeriod: requiredNumber(raw, "htfConfluenceEmaPeriod", 1),
+    htfConfluenceOnMissing: requiredEnum(raw, "htfConfluenceOnMissing", ["ALLOW", "BLOCK"] as const),
   };
   if (configuration.rsiLongMax <= configuration.rsiLongMin) {
     throw new Error("Momentum scalp configuration requires rsiLongMax to be greater than rsiLongMin.");
@@ -332,6 +393,72 @@ interface ConfidenceBreakdown {
 }
 
 /**
+ * The higher-timeframe veto, resolved once per bar and reused for both sides.
+ *
+ * Every outcome is named rather than collapsed to a boolean, because "the slower bar disagreed"
+ * and "there was no slower bar" are different facts and a gate that cannot tell them apart is how
+ * a permanently-unpopulated input turns into a strategy that silently never fires.
+ */
+type HtfGateOutcome =
+  | { readonly status: "DISABLED" }
+  /** Configured against a timeframe that is not strictly slower than the one being traded. */
+  | { readonly status: "NOT_HIGHER"; readonly configured: string }
+  /** No slower context attached, or it carries no usable EMA. */
+  | { readonly status: "UNAVAILABLE"; readonly configured: string }
+  | {
+    readonly status: "RESOLVED";
+    readonly configured: string;
+    readonly bias: HtfBias;
+    readonly htfClose: number;
+    readonly emaPeriod: number;
+  };
+
+function resolveHtfGate(
+  context: StrategyMarketContext,
+  configuration: MomentumScalpStrategyConfiguration,
+): HtfGateOutcome {
+  const configured = configuration.htfConfluenceTimeframe;
+  if (configuration.htfConfluenceMode === "OFF") return { status: "DISABLED" };
+  // Scoring a bar against itself, or against something faster, manufactures agreement out of
+  // nothing. Treated as a configuration fault rather than silently passing.
+  if (!isStrictlyHigherTimeframe(context.candle.timeframe, configured)) {
+    return { status: "NOT_HIGHER", configured };
+  }
+
+  const htf = context.higherTimeframeContexts?.[configured as keyof NonNullable<typeof context.higherTimeframeContexts>];
+  if (!htf) return { status: "UNAVAILABLE", configured };
+  const bias = htfBiasFrom(htf, configuration.indicatorAlgorithmVersion, configuration.htfConfluenceEmaPeriod);
+  if (bias === null) return { status: "UNAVAILABLE", configured };
+  return {
+    status: "RESOLVED",
+    configured,
+    bias,
+    htfClose: htf.candle.close,
+    emaPeriod: configuration.htfConfluenceEmaPeriod,
+  };
+}
+
+/**
+ * `NOT_HIGHER` blocks unconditionally, and does not consult `htfConfluenceOnMissing`. That setting
+ * governs missing data; a timeframe that is not actually higher is a misconfiguration, and letting
+ * `ALLOW` wave it through would turn a typo into a silently ungated strategy.
+ */
+function htfGateAllows(
+  outcome: HtfGateOutcome,
+  side: TradeSide,
+  configuration: MomentumScalpStrategyConfiguration,
+): boolean {
+  switch (outcome.status) {
+    case "DISABLED": return true;
+    case "NOT_HIGHER": return false;
+    case "UNAVAILABLE": return configuration.htfConfluenceOnMissing === "ALLOW";
+    // A NEUTRAL bias -- an exact close-equals-EMA tie -- agrees with neither side and so blocks
+    // under REQUIRE_AGREEMENT. Measure-zero in practice; spelled out so it is not a surprise.
+    case "RESOLVED": return biasAgreesWith(outcome.bias, side);
+  }
+}
+
+/**
  * Confidence in [0.30, 1.00].
  *
  * v1 used `0.7 - vwapDistance * 0.2`, which had two defects. Its range was
@@ -361,7 +488,12 @@ function buildProposal(
   configuration: MomentumScalpStrategyConfiguration,
   indicators: ResolvedIndicators,
   side: TradeSide,
+  htfGate: HtfGateOutcome,
 ): ProposedTradeIdea | null {
+  // Applied before any geometry is computed: a vetoed setup should cost nothing and, more
+  // importantly, must not be able to reach the proposal path at all.
+  if (!htfGateAllows(htfGate, side, configuration)) return null;
+
   const tickSize = context.candle.tickSize;
   if (!Number.isFinite(tickSize) || tickSize <= 0 || context.candle.close <= 0) return null;
 
@@ -460,6 +592,28 @@ function buildProposal(
     },
   ];
 
+  if (htfGate.status !== "DISABLED") {
+    evidenceItems.push({
+      sourceType: "INDICATOR" as const,
+      sourceReference: `HTF:${htfGate.configured}`,
+      label: htfGate.status === "RESOLVED"
+        ? `Higher timeframe ${htfGate.configured} is ${htfGate.bias} (close ${htfGate.htfClose.toFixed(2)} vs EMA${htfGate.emaPeriod}), agreeing with a ${side}`
+        : `Higher timeframe ${htfGate.configured} bias was ${htfGate.status}, admitted under htfConfluenceOnMissing=${configuration.htfConfluenceOnMissing}`,
+      // The gate is a veto, not a term in the confidence formula. Claiming a numeric contribution
+      // would over-attribute a confidence this did not move -- the same reason `regime` reports null.
+      contribution: null,
+      details: {
+        mode: configuration.htfConfluenceMode,
+        timeframe: htfGate.configured,
+        status: htfGate.status,
+        onMissing: configuration.htfConfluenceOnMissing,
+        ...(htfGate.status === "RESOLVED"
+          ? { bias: htfGate.bias, htfClose: htfGate.htfClose, emaPeriod: htfGate.emaPeriod }
+          : {}),
+      },
+    });
+  }
+
   if (context.regime) {
     evidenceItems.push({
       sourceType: "REGIME" as const,
@@ -514,13 +668,17 @@ export class MomentumScalpStrategy {
     const regime: VolatilityRegime | null = context.regime?.regime ?? null;
     if (configuration.requireRegime && regime === null) return [];
 
+    // Resolved once and shared by both sides: the slower bar's bias does not depend on which
+    // direction we are testing, and resolving twice would invite the two to drift apart.
+    const htfGate = resolveHtfGate(context, configuration);
+
     const longConditions = context.candle.close > indicators.vwapValue
       && indicators.emaFastValue > indicators.emaSlowValue
       && indicators.rsiValue >= configuration.rsiLongMin
       && indicators.rsiValue <= configuration.rsiLongMax;
 
     if (longConditions) {
-      const proposal = buildProposal(context, configuration, indicators, "LONG");
+      const proposal = buildProposal(context, configuration, indicators, "LONG", htfGate);
       if (proposal) return [proposal];
     }
 
@@ -530,7 +688,7 @@ export class MomentumScalpStrategy {
       && indicators.rsiValue <= configuration.rsiShortMax;
 
     if (shortConditions) {
-      const proposal = buildProposal(context, configuration, indicators, "SHORT");
+      const proposal = buildProposal(context, configuration, indicators, "SHORT", htfGate);
       if (proposal) return [proposal];
     }
 
