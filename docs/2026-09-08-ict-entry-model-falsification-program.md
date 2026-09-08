@@ -148,3 +148,78 @@ not measured**. Anyone reading a killzone result should not read it as a CBDR re
 their first two, so together they admit 225 minutes of a 375-minute session and exclude 150 (40%).
 Noted because the filter is weaker than the name suggests; the windows are NOT revised, since they
 were registered.
+
+## Amendment 2 — 2026-09-08, after the training era, before any holdout look
+
+**Arm 1 (`poiPreference`) is a structural no-op and should not have been registered as an arm.**
+It returned results identical to its control to the digit: 121 trades and -3,644 on BANKNIFTY, 91
+and +8,883 on NIFTY50, same standard errors, pooled t = 0.25 for both.
+
+The reason is visible in the code and I should have seen it before registering. The chosen point of
+interest sets `poiEvidence`, `poiExtreme`, `poiIdmAdjacent` and `poiKind` — all of which are
+*evidence*. Entry, stop and target come from `currentPrice`, `liquidity.invalidationLevel` and
+`targetPool.price`, none of which consult the POI. So reordering the candidates can only change the
+outcome if it changes whether ANY point of interest was found, and it cannot: it is the same three
+candidates in a different order.
+
+The doctrine's actual claim — enter AT the block's mean threshold — is a **placement** claim, and
+hits the same wall Amendment 1 records for OTE: the backtester enters at the next candle's open.
+So two of this program's three arms turn out to be untestable without changing the execution model,
+and the registration failed to notice. That is a defect in the registration, recorded rather than
+quietly dropped.
+
+## Results — training era only
+
+2025-01-01 .. 2025-12-31, 15m, concurrency 5, 5,000,000 capital, 2bps slippage. Mean is P&L per
+trade; SE is clustered on IST session date; pooled clusters on session date **across both
+instruments**, because the two indices on the same day are not independent draws.
+
+| arm | BANKNIFTY mean (t) | NIFTY50 mean (t) | pooled trades | pooled mean | pooled t |
+|---|---|---|---|---|---|
+| control | -30.11 (-0.20) | +97.61 (1.22) | 212 | +24.71 | **0.25** |
+| blockfirst | -30.11 (-0.20) | +97.61 (1.22) | 212 | +24.71 | **0.25** |
+| killzone | +8.70 (0.05) | +126.16 (1.47) | 178 | +60.83 | **0.49** |
+| ote | +77.30 (0.33) | +101.79 (1.02) | 124 | +89.55 | **0.58** |
+
+**Configurations evaluated: 4.** Bonferroni-corrected Gate 2 threshold is therefore t ≈ 2.50.
+
+### Gate 4, done properly
+
+Rather than compare arm against control across runs — where concurrency and capital change which
+signals become trades and confound the comparison — the control's own 212 trades were split by
+whether their **signal bar** (entry bar minus one 15m candle, since entry is `NEXT_CANDLE_OPEN`) fell
+inside a killzone:
+
+| | trades | sessions | mean | SE | t |
+|---|---|---|---|---|---|
+| inside killzone | 135 | 51 | +36.67 | 119.84 | 0.31 |
+| outside killzone | 77 | 41 | +3.74 | 144.52 | 0.03 |
+
+Same direction as the arm, +32.93 per trade — and both halves are indistinguishable from zero, with
+the difference far inside either standard error. No evidence the window separates anything.
+
+### Verdict
+
+**NO_VIABLE_ENTRY_MODEL.**
+
+- Gate 1 (sign replication) — passed by killzone and ote on the training era. Both positive on both
+  instruments.
+- Gate 2 (noise floor) — **failed by every arm.** The best is ote at pooled t = 0.58 against a
+  corrected threshold of 2.50.
+- Gate 3 (era holdout) — **never consulted.** No configuration was selected on the training era, so
+  there was nothing to confirm. The 2026-01-01 .. 2026-09-05 holdout is therefore still unused and
+  remains available to a future program. This is the point of running the gates in order.
+- Gate 4 (paired delta) — failed. See above. `ote` additionally cut BANKNIFTY's trade count 49%,
+  just inside the ambiguity threshold.
+
+### The binding constraint is power, not the doctrine
+
+The control's pooled SE is +-97 per trade on 65 clustered sessions, so this cell cannot resolve an
+effect below roughly +-195 per trade. Nothing measured here comes close to that, and no amount of
+further feature work changes it: **the 2025 era on two indices yields 65 clustered sessions, and
+that is the ceiling.** A genuine test of the ICT entry model needs more sessions or more
+instruments, not more features. Registering a wider replication set is the only next step that
+could produce a different answer.
+
+`ict-structure-v1` stays `TERMINAL_UNOWNED`. The three arms stay in the tree behind their
+default-off switches with this measurement attached.

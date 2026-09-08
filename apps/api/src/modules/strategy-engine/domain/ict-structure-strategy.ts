@@ -86,14 +86,32 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   requireOte: false,
 };
 
+/**
+ * What version 2 was REGISTERED with, pinned as its own literal.
+ *
+ * A stored version's configuration is immutable, and a partial unique index allows one active
+ * version per strategy -- so widening the default object made `ensure` refuse, and bumping to v3
+ * would have needed v2 deactivated, a write to a row live paper trading may reference. Neither is
+ * necessary: `evaluate` merges the stored configuration over the CODE defaults, so keys added later
+ * are supplied by the defaults and the stored record keeps saying exactly what v2 was created with.
+ *
+ * Do not "tidy" this back into a reference to `defaultIctStructureStrategyConfiguration`. The two
+ * are meant to drift: one is a historical record, the other is current code.
+ */
+const registeredV2Configuration = {
+  minimumRiskReward: 1.2,
+  minConfidence: 0.7,
+  expiryCandles: 3,
+  requirePoiReaction: true,
+};
+
 export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: ICT_STRUCTURE_STRATEGY_KEY,
   name: "ICT Structural Alignment (V1)",
   description: "Four-pillar structural strategy strictly trading in alignment with the higher-timeframe trend.",
   version: 2,
-  configuration: defaultIctStructureStrategyConfiguration as unknown as Record<string, unknown>,
+  configuration: registeredV2Configuration as unknown as Record<string, unknown>,
 };
-
 export class IctStructureStrategy implements StrategyEvaluator {
   evaluate(context: StrategyMarketContext, strategyConfiguration: Record<string, unknown> = {}): ProposedTradeIdea[] {
     const config: IctStructureStrategyConfiguration = {
