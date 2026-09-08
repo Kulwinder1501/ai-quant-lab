@@ -52,6 +52,7 @@ describe("the shipped registry", () => {
       "index-v2-research",
       "index-v3-research",
       "momentum-v10-research",
+      "momentum-v11-research",
       "momentum-v4-research",
       "momentum-v5-research",
       "momentum-v6-research",
@@ -227,11 +228,11 @@ describe("guarding the running strategies", () => {
   });
 
   it("refuses an unregistered strategy", () => {
-    // momentum-v9-research and -v10 became real registered strategies when the twin was rolled back,
+    // momentum-v9-research through -v11 are real registered strategies for the current twin,
     // so the "unknown" fixture moves again to the next unclaimed key. Anything absent from the
     // registry serves; the point is that a key with no entry is refused rather than silently
     // captured.
-    const unknown = { ...definitionOf("momentum-v9-research"), strategyKey: "momentum-v11-research" };
+    const unknown = { ...definitionOf("momentum-v9-research"), strategyKey: "momentum-v12-research" };
 
     expect(() => assertRegisteredAndUnchanged(unknown)).toThrow(/not in the Terminal Strategy Registry/);
   });
@@ -249,7 +250,7 @@ describe("terminal strategies default to disabled", () => {
 
     expect([...selection.disabled].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect(selection.active.map((a) => a.definition.strategyKey).sort())
-      .toEqual(["momentum-v10-research", "momentum-v9-research", "pattern-v4-research-v2"]);
+      .toEqual(["momentum-v10-research", "momentum-v11-research", "momentum-v9-research", "pattern-v4-research-v2"]);
     expect(selection.benchmarkActivated).toEqual([]);
   });
 

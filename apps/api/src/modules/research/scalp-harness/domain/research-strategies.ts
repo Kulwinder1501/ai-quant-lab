@@ -214,6 +214,62 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
   }
 }
 
+/** V11 measures the fresh-setup entry policy without changing the production evaluator. */
+class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
+  private readonly previousSideBySeries = new Map<string, "LONG" | "SHORT">();
+
+  constructor(
+    readonly definition: ResearchStrategyDefinition,
+    readonly supportedTimeframes: readonly string[],
+    private readonly evaluator: BaseEvaluator,
+    private readonly setupFamily: string,
+    private readonly legacyGate: LegacyScoreGate,
+  ) {}
+
+  evaluate(strategyContext: StrategyMarketContext, reference1mContext: StrategyMarketContext): ImmutableStrategyProposal[] {
+    if (!this.supportedTimeframes.includes(strategyContext.candle.timeframe)) return [];
+    if (strategyContext.candle.instrumentId !== reference1mContext.candle.instrumentId) {
+      throw new Error("Strategy and reference contexts must belong to the same instrument.");
+    }
+    const proposals = this.evaluator.evaluate(strategyContext, this.definition.configuration);
+    const seriesKey = `${strategyContext.candle.instrumentId}:${strategyContext.candle.timeframe}`;
+    const proposal = proposals[0];
+    if (!proposal) {
+      this.previousSideBySeries.delete(seriesKey);
+      return [];
+    }
+    if (this.previousSideBySeries.get(seriesKey) === proposal.side) return [];
+    this.previousSideBySeries.set(seriesKey, proposal.side);
+    if (!proposal.expiresAt) throw new Error(`${this.definition.strategyKey} emitted a proposal without native expiry.`);
+    const pattern = typeof proposal.evidence.pattern === "string" ? proposal.evidence.pattern : null;
+    const setupType = pattern === null ? this.setupFamily : `${this.setupFamily}:${pattern}`;
+    const evidenceReferences = proposal.evidenceItems
+      .map((item) => `${item.sourceType}:${item.sourceReference ?? ""}`)
+      .sort();
+    return [buildProposal({
+      definition: this.definition,
+      strategyContext,
+      referenceCandle: reference1mContext.candle,
+      direction: proposal.side,
+      setupType,
+      setupFingerprintParts: [proposal.side, setupType, evidenceReferences],
+      nativeGeometry: {
+        direction: proposal.side,
+        entryOrderType: "MARKET_AT_REFERENCE",
+        entryPrice: proposal.entryPrice,
+        stopLoss: proposal.stopLoss,
+        targetPrice: proposal.targetPrice,
+        expiresAt: proposal.expiresAt,
+        geometryPolicyVersion: `${this.definition.strategyKey.toUpperCase().replaceAll("-", "_")}_NATIVE_V1`,
+      },
+      rawContext: {
+        ...rawContext(strategyContext, proposal, this.legacyGate),
+        freshSetup: { policy: "NEW_OR_DIRECTION_CHANGE", passed: true },
+      },
+    })];
+  }
+}
+
 /**
  * Lifts the score-based filter so the research versions record the setups the gate used to discard.
  *
@@ -279,6 +335,19 @@ const momentumHtfDefinition = buildStrategyDefinition({
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
 });
 
+const momentumFreshSetupDefinition = buildStrategyDefinition({
+  strategyKey: "momentum-v11-research",
+  researchVersion: 11,
+  featureSchemaVersion: "scalp-raw-context-v4",
+  // V11 starts from the current source artifact; historical V9/V10 pins remain immutable.
+  implementationArtifactChecksum: "b541d4c3091e722bac1391550e62580731814cff6ac748fd36b7ad85c98be654",
+  configuration: {
+    ...defaultMomentumScalpStrategyConfiguration,
+    minimumConfidence: 0,
+    freshSetupPolicy: "NEW_OR_DIRECTION_CHANGE",
+  } as Record<string, unknown>,
+});
+
 const indexDefinition = buildStrategyDefinition({
   strategyKey: "index-v3-research",
   researchVersion: 3,
@@ -320,6 +389,10 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
     momentumHtfDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
     extractHtfObservations,
+  ),
+  new FreshSetupResearchAdapter(
+    momentumFreshSetupDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
+    confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
   ),
   new FrozenResearchAdapter(
     indexDefinition, ["5m"], new MomentumScalpIndexStrategy(), "INDEX_MOMENTUM",

@@ -333,6 +333,20 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     },
   },
   {
+    strategyKey: "momentum-v11-research",
+    operationalStrategyKey: "momentum-scalp",
+    researchVersion: 11,
+    researchStatus: "RESEARCH",
+    productionEligibility: "NOT_YET_ELIGIBLE",
+    closureReason: null,
+    pinnedDefinitionHash: "8a5dab29eadc2d63a5443acedcaf6ca4ade3f1d3dcf07d773457f29f4c0aaf4f",
+    lineage: {
+      parentStrategyKey: "momentum-v10-research",
+      parentResearchVersion: 10,
+      parentTerminalReason: null,
+    },
+  },
+  {
     strategyKey: "index-v3-research",
     operationalStrategyKey: "momentum-scalp-index",
     researchVersion: 3,

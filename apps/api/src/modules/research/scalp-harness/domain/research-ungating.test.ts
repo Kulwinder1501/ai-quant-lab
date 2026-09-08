@@ -27,7 +27,7 @@ describe("research strategy ungating", () => {
     // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
     // meaning.
     expect(Object.keys(byKey).sort()).toEqual([
-      "index-v3-research", "momentum-v10-research", "momentum-v9-research",
+      "index-v3-research", "momentum-v10-research", "momentum-v11-research", "momentum-v9-research",
       "pattern-v4-research", "pattern-v4-research-v2",
     ]);
   });
