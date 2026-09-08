@@ -42,6 +42,7 @@ import type { RegimeContext } from "../../modules/strategy-engine/domain/regime.
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domain/session-close.js";
+import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-trade-cap.js";
 
 /**
  * Refuses to start on a timeframe nothing can trade.
@@ -143,6 +144,53 @@ const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
 /** An intraday signal raised after this has no session left to resolve in. */
 const LAST_SIGNAL_MINUTES = 15 * 60 + 25;
+const MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES = 15;
+const MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL = 2;
+
+interface MomentumScalpLossGuardDecision {
+  allowed: boolean;
+  reason: "WITHIN_GUARD" | "LOSS_COOLDOWN" | "CONSECUTIVE_LOSS_LIMIT";
+  consecutiveLosses: number;
+  latestLossAt: Date | null;
+}
+
+async function assessMomentumScalpLossGuard(input: {
+  database: ReturnType<typeof createDatabasePool>;
+  accountId: string;
+  symbol: string;
+  now: Date;
+}): Promise<MomentumScalpLossGuardDecision> {
+  const window = istTradingDayWindow(input.now);
+  const result = await input.database.query<{ realized_pnl: string; closed_at: Date }>(
+    `SELECT realized_pnl, closed_at
+       FROM paper_trades
+      WHERE account_id = $1
+        AND underlying_symbol = $2
+        AND status = 'CLOSED'
+        AND excluded_from_evidence = FALSE
+        AND closed_at >= $3
+        AND closed_at < $4
+      ORDER BY closed_at DESC
+      LIMIT 3`,
+    [input.accountId, input.symbol, window.start, input.now],
+  );
+  let consecutiveLosses = 0;
+  for (const row of result.rows) {
+    if (Number(row.realized_pnl) >= 0) break;
+    consecutiveLosses += 1;
+  }
+  const latestLossAt = result.rows[0] && Number(result.rows[0].realized_pnl) < 0
+    ? result.rows[0].closed_at
+    : null;
+  if (consecutiveLosses >= MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL) {
+    return { allowed: false, reason: "CONSECUTIVE_LOSS_LIMIT", consecutiveLosses, latestLossAt };
+  }
+  if (latestLossAt !== null
+    && input.now.getTime() - latestLossAt.getTime() < MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES * 60_000) {
+    return { allowed: false, reason: "LOSS_COOLDOWN", consecutiveLosses, latestLossAt };
+  }
+  return { allowed: true, reason: "WITHIN_GUARD", consecutiveLosses, latestLossAt };
+}
 
 /**
  * Records the regime observed for one series, returning its id, or null if it could not be recorded.
@@ -380,6 +428,27 @@ async function main(): Promise<void> {
                 explanation: "New entries are closed for the session: the square-off cutoff has passed.",
               });
               continue;
+            }
+
+            if (timeframe === "1m" && result.strategyKey === "momentum-scalp") {
+              const lossGuard = await assessMomentumScalpLossGuard({
+                database,
+                accountId: account.id,
+                symbol,
+                now,
+              });
+              if (!lossGuard.allowed) {
+                refused.push({
+                  tradeIdeaId, symbol, timeframe,
+                  reason: lossGuard.reason,
+                  explanation: lossGuard.reason === "LOSS_COOLDOWN"
+                    ? `1m momentum scalp is cooling down after a loss on ${symbol}; no re-entry for ${MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES} minutes.`
+                    : `1m momentum scalp reached ${MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL} consecutive losses on ${symbol}; no further entries this session.`,
+                  consecutiveLosses: lossGuard.consecutiveLosses,
+                  latestLossAt: lossGuard.latestLossAt?.toISOString() ?? null,
+                });
+                continue;
+              }
             }
 
             if (openPositions >= MAX_CONCURRENT_POSITIONS) {

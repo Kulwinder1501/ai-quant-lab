@@ -308,6 +308,44 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
+  it("moves a 1m momentum scalp stop to break-even after +0.5R", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
+      timeframe: "1m",
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225,
+    });
+    const paperTradeRepository = stubRepo(trade, closings);
+    paperTradeRepository.updateStopLoss = async (id, stop, reason) => {
+      stopUpdates.push({ id, stop, reason });
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      paperTradeRepository,
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(sample("2026-08-06T08:59:45.000Z", 210)),
+    ).execute({
+      accountId: "account-1",
+      asOf: new Date("2026-08-06T09:00:00.000Z"),
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(stopUpdates).toHaveLength(1);
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
+  });
+
 
   it("squares off an intraday option at the 15:15 IST cutoff, at the quoted bid", async () => {
     const closings: ClosePaperTradeInput[] = [];

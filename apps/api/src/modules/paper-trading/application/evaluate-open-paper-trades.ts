@@ -15,6 +15,7 @@ import {
 } from "../domain/option-mark-to-market.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
+import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
 
 /**
  * How long a scalp may go without progress before it is cut, and how much progress counts.
@@ -55,6 +56,8 @@ const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | und
   // borrow, so inventing a different number here would be fitting to noise twice over.
   "1m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
 });
+
+const MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R = 0.5;
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -574,6 +577,38 @@ export class EvaluateOpenPaperTrades {
       ? denseQuote.bid
       : null;
     if (freshBid !== null) {
+      if (trade.strategyKey === "momentum-scalp" && trade.timeframe === "1m") {
+        // The current risk sizing normally approves one option lot, so the existing bracket plan
+        // resolves to a single target. Its useful one-lot behavior is the break-even move; T1/T2
+        // partials remain unavailable until the execution path can persist bracket state.
+        const bracket = buildMultiTargetPlan({
+          side: trade.side,
+          entryPrice: trade.entryPrice,
+          stopLoss: trade.stopLoss,
+          quantity: trade.quantity,
+          lotSize: trade.quantity,
+        });
+        const initialRisk = Math.abs(trade.entryPrice - trade.stopLoss);
+        const breakevenTrigger = trade.side === "LONG"
+          ? trade.entryPrice + initialRisk * MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R
+          : trade.entryPrice - initialRisk * MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R;
+        const reachedBreakevenTrigger = trade.side === "LONG"
+          ? freshBid >= breakevenTrigger
+          : freshBid <= breakevenTrigger;
+        const stopCanMoveToBreakeven = trade.side === "LONG"
+          ? bracket.breakevenStopLoss > trade.stopLoss
+          : bracket.breakevenStopLoss < trade.stopLoss;
+        if (initialRisk > 0 && reachedBreakevenTrigger && stopCanMoveToBreakeven
+          && this.paperTradeRepository.updateStopLoss) {
+          await this.paperTradeRepository.updateStopLoss(
+            trade.id,
+            bracket.breakevenStopLoss,
+            `1m momentum scalp reached +${MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R}R`,
+          );
+          trade.stopLoss = bracket.breakevenStopLoss;
+          trade.stopLossEffectiveAt = asOf;
+        }
+      }
       const decision = decideOptionBuyerLiveExit(trade, freshBid, liveSpot);
       if (decision) {
         return closeOption({
