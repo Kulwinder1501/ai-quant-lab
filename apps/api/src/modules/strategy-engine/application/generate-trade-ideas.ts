@@ -9,7 +9,8 @@ import type { HistoricalTimeframe } from "../../market-data/domain/historical-da
 import { isStrictlyHigherTimeframe } from "../domain/timeframe-order.js";
 import type { RegimeContext } from "../domain/regime.js";
 import {
-  registeredStrategies,
+  liveTradableStrategies,
+  type RegisteredStrategy,
   strategyExecutableSides,
   strategySupportsTimeframe,
 } from "../domain/strategy-registry.js";
@@ -61,8 +62,14 @@ export interface ScanTradeIdeasResult {
   failureMessage?: string;
 }
 
-const STRATEGIES = registeredStrategies;
-
+/*
+ * Live idea generation, so terminal strategies are excluded here rather than at each call site.
+ *
+ * All three constructors of this service -- the paper bot, the manual CLI and the HTTP API -- produce
+ * live proposals; none of them is a measurement path, which reaches strategies directly through
+ * `requireRegisteredStrategy` instead. Filtering once here therefore covers every live consumer,
+ * and a new one cannot forget to.
+ */
 /**
  * Evaluates the latest completed candle only. The resulting idea is a research
  * proposal created after the candle close, never an order or a simulated fill.
@@ -72,6 +79,15 @@ export class GenerateTradeIdeas {
     private readonly strategyVersionRepository: StrategyVersionRepository,
     private readonly marketContextRepository: StrategyMarketContextRepository,
     private readonly tradeIdeaRepository: TradeIdeaRepository,
+    /**
+     * The strategies this instance may propose from. Defaults to the live-tradable set.
+     *
+     * It was a module-level constant, which made the ambient registry a hidden dependency of every
+     * test: they had to reach for whichever real strategy happened to suit, and gating the live set
+     * then broke four of them for a reason that had nothing to do with what they were testing.
+     * Injectable, they say which strategy they exercise.
+     */
+    private readonly strategies: readonly RegisteredStrategy[] = liveTradableStrategies(),
   ) {}
 
   /**
@@ -123,7 +139,7 @@ export class GenerateTradeIdeas {
     const context = latest ? await this.withHigherTimeframes(latest) : null;
     const results: GenerateTradeIdeasResult[] = [];
 
-    for (const strategyEntry of STRATEGIES) {
+    for (const strategyEntry of this.strategies) {
       const { registration, StrategyClass } = strategyEntry;
       // Each strategy is isolated. Without this, one strategy whose registered
       // configuration fails its own parser rejects the whole call *after* an
@@ -246,7 +262,7 @@ export class GenerateTradeIdeas {
     for (const context of scanned) contexts.push(await this.withHigherTimeframes(context));
     const results: ScanTradeIdeasResult[] = [];
 
-    for (const strategyEntry of STRATEGIES) {
+    for (const strategyEntry of this.strategies) {
       const { registration, StrategyClass } = strategyEntry;
       // Each strategy stays isolated for the same reason execute() isolates them:
       // one strategy that cannot parse its own configuration must not discard
