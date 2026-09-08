@@ -25,7 +25,8 @@ export class IctCompositeEngine {
     this.structTracker = new IctStructureTracker(config.pivotLength);
     this.zoneLedger = new IctZoneLedger(
       config.obDisplacementBodyAtrMultiple,
-      config.obMeanThresholdFraction
+      config.obMeanThresholdFraction,
+      config.invertedBlocksRemainPoi
     );
     this.sessionTracker = new IctSessionLevelTracker();
     this.biasTracker = new IctBiasTracker();

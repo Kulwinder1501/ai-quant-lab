@@ -34,6 +34,19 @@ export interface IctEngineConfig {
    * carried down. Without this the chain never terminates and every level resolves to UNKNOWN.
    */
   readonly biasSource: "HIGHER_TIMEFRAME" | "OWN_STRUCTURE";
+  /**
+   * Whether a FAILED order block survives as an opposite-side POI.
+   *
+   * Lecture 7 says it does: an order block that price closed through is not dead, it is a mitigation
+   * block (continuation) or a breaker block (reversal), and both are tradeable from the other side.
+   * The engine instead marks it INVALIDATED and prunes it, so the doctrine's second-chance POI has
+   * never existed here.
+   *
+   * Default `false`, which reproduces that pruning exactly. Turning it on ADDS points of interest
+   * that never previously existed, so it is a behaviour change and is measured as one rather than
+   * shipped as a bug fix.
+   */
+  readonly invertedBlocksRemainPoi: boolean;
 }
 
 export const defaultIctEngineConfig: IctEngineConfig = {
@@ -47,6 +60,7 @@ export const defaultIctEngineConfig: IctEngineConfig = {
   maxSignalAgeBars: 3,
   maxUnderlyingDriftBps: 25.0, // 25 bps drift tolerance
   biasSource: "HIGHER_TIMEFRAME",
+  invertedBlocksRemainPoi: false,
 };
 
 export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig): string {
