@@ -45,8 +45,8 @@ export const defaultIctEngineConfig: IctEngineConfig = {
   strongCloseThresholdFraction: 0.25,
   dealingRangeMinAtrMultiple: 2.0,
   maxSignalAgeBars: 3,
-  maxUnderlyingDriftBps: 25.0,
-  biasSource: "HIGHER_TIMEFRAME", // 25 bps drift tolerance
+  maxUnderlyingDriftBps: 25.0, // 25 bps drift tolerance
+  biasSource: "HIGHER_TIMEFRAME",
 };
 
 export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig): string {

@@ -66,14 +66,15 @@ export class IctCompositeEngine {
       bias,
       struct,
       zones,
-      sessionLevels
+      sessionLevels,
+      this.structTracker.confirmedPivotsView()
     );
 
     // Coverage is evidence sufficiency, carried independently of directional
     // value (invariant: UNKNOWN != NEUTRAL). NEUTRAL is a value the engine
     // reached on sufficient evidence and stays COMPLETE so it can reach the
     // gate; only absent/incomplete/ambiguous evidence is UNKNOWN/NOT_COVERED.
-    const structureWarmed = struct.confirmedPivots.length > 0;
+    const structureWarmed = struct.confirmedPivotCount > 0;
     const coverage: PillarCoverage = {
       structure: structureWarmed ? "COMPLETE" : "UNKNOWN",
       zones: currentIndex >= 2 ? "COMPLETE" : "UNKNOWN",

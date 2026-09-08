@@ -150,3 +150,43 @@ describe("CHoCH-for-IDM substitution after a prior-day sweep", () => {
     expect(wrongSide.chochLevel).toBe(control.chochLevel);
   });
 });
+
+describe("confirmed-pivot snapshots", () => {
+  /** A long alternating series so many pivots confirm. */
+  function zigzag(bars: number): CausalCandle[] {
+    const out: CausalCandle[] = [];
+    for (let i = 0; i < bars; i += 1) {
+      const base = 100 + (i % 2 === 0 ? 0 : 6) + i * 0.01;
+      out.push(makeCandle(i, base, base + 4, base - 4, base + (i % 2 === 0 ? -1 : 1)));
+    }
+    return out;
+  }
+
+  it("carries a count, never the pivot history, so a stored snapshot cannot grow", () => {
+    /*
+     * The snapshot used to expose the live array by reference, so an early snapshot would later
+     * report pivots confirmed long afterwards. Copying it instead made storage O(bars x pivots) and
+     * OOM'd a 10,405-bar run at 4GB -- and the payload is JSON-serialised into ict_state_snapshots,
+     * so every persisted row carried the whole history.
+     */
+    const candles = zigzag(120);
+    const tracker = new IctStructureTracker(1);
+    let early;
+    for (let i = 0; i < candles.length; i += 1) {
+      const snap = tracker.processCandle(candles, i);
+      if (i === 20) early = snap;
+    }
+    const late = tracker.processCandle(candles, candles.length - 1);
+
+    // The early snapshot's count is frozen at what bar 20 knew; the tracker has since seen more.
+    expect(early!.confirmedPivotCount).toBeLessThan(late.confirmedPivotCount);
+    expect(JSON.stringify(early)).not.toContain("openTime");
+  });
+
+  it("still exposes the real pivots for same-bar consumers", () => {
+    const candles = zigzag(60);
+    const tracker = new IctStructureTracker(1);
+    for (let i = 0; i < candles.length; i += 1) tracker.processCandle(candles, i);
+    expect(tracker.confirmedPivotsView().length).toBeGreaterThan(0);
+  });
+});

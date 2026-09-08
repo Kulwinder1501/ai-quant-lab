@@ -24,7 +24,19 @@ export interface IctStructureSnapshot {
   readonly chochLevel: number | null;
   readonly internalVsExternal: "INTERNAL" | "EXTERNAL";
   readonly lastEvent: StructureEvent | null;
-  readonly confirmedPivots: readonly ConfirmedPivot[];
+  /**
+   * How many pivots are confirmed so far -- a count, not the list.
+   *
+   * The snapshot used to carry the whole pivot history. That was wrong three ways: it was handed out
+   * by reference so a stored snapshot kept mutating; copying it instead made storage O(bars x pivots)
+   * and OOM'd a 10,405-bar run at a 4GB heap; and the composite snapshot is JSON-serialised into
+   * `ict_state_snapshots`, so every persisted row carried the entire history as JSON.
+   *
+   * The only snapshot consumer needed a count (`structureWarmed`). The liquidity resolver needs the
+   * real pivots, but only during the bar being computed, so it receives them as an argument from
+   * `IctStructureTracker.confirmedPivotsView()` and never retains them.
+   */
+  readonly confirmedPivotCount: number;
 }
 
 export interface MergedCandle extends CausalCandle {
@@ -91,7 +103,19 @@ export class IctStructureTracker {
   private lastInternalHigh: ConfirmedPivot | null = null;
   private confirmedPivots: ConfirmedPivot[] = [];
 
-  constructor(private readonly pivotLength: number = 3) {}
+  constructor(
+    private readonly pivotLength: number = 3,
+  ) {}
+
+  /**
+   * The live confirmed-pivot list, for consumers running inside the current bar.
+   *
+   * Deliberately not part of the snapshot: callers must use it and drop it, never store it. The
+   * liquidity resolver is the only consumer.
+   */
+  confirmedPivotsView(): readonly ConfirmedPivot[] {
+    return this.confirmedPivots;
+  }
 
   processCandle(
     candles: readonly CausalCandle[],
@@ -329,7 +353,7 @@ export class IctStructureTracker {
       chochLevel: this.trend === "BULLISH" ? (this.lastHL?.price ?? null) : (this.lastLH?.price ?? null),
       internalVsExternal: this.activeIdm !== null ? "INTERNAL" : "EXTERNAL",
       lastEvent: currentEvent,
-      confirmedPivots: this.confirmedPivots,
+      confirmedPivotCount: this.confirmedPivots.length,
     };
   }
 }

@@ -1,3 +1,4 @@
+import type { ConfirmedPivot } from "./causal-pivot.js";
 import type { IctStructureSnapshot } from "./structure.js";
 import type { IctZoneSnapshot, FairValueGap, OrderBlock } from "./zones.js";
 import type { SessionLevelsSnapshot } from "./session-levels.js";
@@ -31,8 +32,20 @@ export type FourPillarAlignmentStatus =
   | "BLOCKED_MISSING_PILLAR";
 
 export interface IctLiquiditySnapshot {
-  readonly erlPools: readonly LiquidityPool[];
-  readonly irlPools: readonly LiquidityPool[];
+  /*
+   * Counts, not the lists.
+   *
+   * The full pool arrays were carried in every snapshot and read by NOTHING outside this file --
+   * write-only, yet JSON-serialised into `ict_state_snapshots` on every persisted row. Pools
+   * accumulate with confirmed pivots, so the list grew linearly with bars while the number of
+   * snapshots grew too: retained memory was quadratic, measured at 54KB per snapshot by bar 5,000,
+   * which OOM'd a 10,405-bar run at a 4GB heap.
+   *
+   * Everything downstream reads only the DERIVED fields below -- the selected objective, the
+   * waypoint, the invalidation level and the status. Counts are kept for observability.
+   */
+  readonly erlPoolCount: number;
+  readonly irlPoolCount: number;
   readonly primaryTarget: LiquidityPool | null;
   readonly intermediateTarget: number | null;
   readonly invalidationLevel: number | null;
@@ -46,7 +59,9 @@ export class IctLiquidityResolver {
     biasSnap: IctBiasSnapshot,
     structSnap: IctStructureSnapshot,
     zoneSnap: IctZoneSnapshot,
-    sessionLevels: SessionLevelsSnapshot
+    sessionLevels: SessionLevelsSnapshot,
+    /** Passed in rather than read off the snapshot, which no longer carries the history. */
+    confirmedPivots: readonly ConfirmedPivot[] = []
   ): IctLiquiditySnapshot {
     const erlPools: LiquidityPool[] = [];
     const irlPools: LiquidityPool[] = [];
@@ -101,37 +116,64 @@ export class IctLiquidityResolver {
     }
 
     // Detect Equal Highs (EQH) and Equal Lows (EQL)
-    const confirmedPivots = structSnap.confirmedPivots || [];
     const highs = confirmedPivots.filter((p) => p.type === "HIGH");
     const lows = confirmedPivots.filter((p) => p.type === "LOW");
+    /*
+     * Equal Highs / Equal Lows, grouped rather than paired.
+     *
+     * This was an all-pairs double loop over every confirmed pivot, run on EVERY bar. Pivots grow
+     * linearly with bars, so the scan was quadratic per bar and cubic over a run -- and it pushed one
+     * pool per matching PAIR, so five equal highs became ten pools at essentially one price. Every
+     * snapshot then embedded that quadratically-growing array. A single 10,405-bar run died at a 10GB
+     * heap, which is why the 20-month measurements had to be chunked.
+     *
+     * Sorting and grouping adjacent levels within tolerance is O(k log k) and emits ONE pool per
+     * price level. The set of price LEVELS is identical, which is what matters: objective selection
+     * picks by price (the farthest unmitigated pool beyond equilibrium), never by pool count or id.
+     *
+     * Trimming old pivots was tried first and rejected: it changed the results, because after the
+     * farthest-ERL objective fix the target is frequently an OLD distant pool, so dropping pivots
+     * deletes the very levels the strategy aims at. Retention and the objective are coupled; cost
+     * and retention are not.
+     */
+    // 5 bps, exactly the threshold the all-pairs scan hardcoded, so grouping cannot change which
+    // levels qualify. `IctEngineConfig.equalHighLowTolerancePct` holds the same 0.05% but this
+    // resolver is stateless and never received the config; unifying them is a separate change.
+    const toleranceBps = 5;
 
-    for (let i = 0; i < highs.length - 1; i++) {
-      for (let j = i + 1; j < highs.length; j++) {
-        const diffBps = (Math.abs(highs[i].price - highs[j].price) / highs[i].price) * 10000;
-        if (diffBps <= 5) {
-          erlPools.push({
-            id: `erl-eqh-${highs[i].index}-${highs[j].index}`,
-            kind: "ERL_EQH",
-            price: Math.max(highs[i].price, highs[j].price),
-            isMitigated: currentPrice >= Math.max(highs[i].price, highs[j].price),
-          });
+    const groupEqualLevels = (
+      pivots: readonly ConfirmedPivot[],
+      kind: "ERL_EQH" | "ERL_EQL",
+    ): void => {
+      if (pivots.length < 2) return;
+      const sorted = [...pivots].sort((a, b) => a.price - b.price);
+      let groupStart = 0;
+      const flush = (from: number, to: number): void => {
+        if (to - from < 1) return; // a lone pivot is not an EQH/EQL cluster
+        const members = sorted.slice(from, to + 1);
+        const price = kind === "ERL_EQH"
+          ? Math.max(...members.map((m) => m.price))
+          : Math.min(...members.map((m) => m.price));
+        const indices = members.map((m) => m.index).sort((a, b) => a - b);
+        erlPools.push({
+          id: `erl-${kind === "ERL_EQH" ? "eqh" : "eql"}-${indices[0]}-${indices[indices.length - 1]}`,
+          kind,
+          price,
+          isMitigated: kind === "ERL_EQH" ? currentPrice >= price : currentPrice <= price,
+        });
+      };
+      for (let i = 1; i < sorted.length; i += 1) {
+        const spanBps = (Math.abs(sorted[i].price - sorted[groupStart].price) / sorted[groupStart].price) * 10000;
+        if (spanBps > toleranceBps) {
+          flush(groupStart, i - 1);
+          groupStart = i;
         }
       }
-    }
+      flush(groupStart, sorted.length - 1);
+    };
 
-    for (let i = 0; i < lows.length - 1; i++) {
-      for (let j = i + 1; j < lows.length; j++) {
-        const diffBps = (Math.abs(lows[i].price - lows[j].price) / lows[i].price) * 10000;
-        if (diffBps <= 5) {
-          erlPools.push({
-            id: `erl-eql-${lows[i].index}-${lows[j].index}`,
-            kind: "ERL_EQL",
-            price: Math.min(lows[i].price, lows[j].price),
-            isMitigated: currentPrice <= Math.min(lows[i].price, lows[j].price),
-          });
-        }
-      }
-    }
+    groupEqualLevels(highs, "ERL_EQH");
+    groupEqualLevels(lows, "ERL_EQL");
 
     // 2. Collect Internal Range Liquidity (IRL)
     for (const fvg of zoneSnap.activeFvgs) {
@@ -164,8 +206,8 @@ export class IctLiquidityResolver {
     // Gate 1: Check missing pillar
     if (bias === "UNKNOWN" || bias === "NEUTRAL" || trend === "NEUTRAL" || !dealingRange) {
       return {
-        erlPools,
-        irlPools,
+        erlPoolCount: erlPools.length,
+        irlPoolCount: irlPools.length,
         primaryTarget: null,
         intermediateTarget: null,
         invalidationLevel: null,
@@ -177,8 +219,8 @@ export class IctLiquidityResolver {
     // Gate 2: Bias vs Structure Directional Alignment
     if (bias !== trend) {
       return {
-        erlPools,
-        irlPools,
+        erlPoolCount: erlPools.length,
+        irlPoolCount: irlPools.length,
         primaryTarget: null,
         intermediateTarget: null,
         invalidationLevel: null,
@@ -192,8 +234,8 @@ export class IctLiquidityResolver {
       // Must be in Discount (< 50% EQ) to buy
       if (dealingRange.isPremium(currentPrice)) {
         return {
-          erlPools,
-          irlPools,
+          erlPoolCount: erlPools.length,
+          irlPoolCount: irlPools.length,
           primaryTarget: null,
           intermediateTarget: null,
           invalidationLevel: null,
@@ -232,8 +274,8 @@ export class IctLiquidityResolver {
       const invalidationLevel = structSnap.lastHL?.price ?? dealingRange.rangeLow;
 
       return {
-        erlPools,
-        irlPools,
+        erlPoolCount: erlPools.length,
+        irlPoolCount: irlPools.length,
         primaryTarget,
         intermediateTarget,
         invalidationLevel,
@@ -244,8 +286,8 @@ export class IctLiquidityResolver {
       // BEARISH: Must be in Premium (>= 50% EQ) to sell
       if (dealingRange.isDiscount(currentPrice)) {
         return {
-          erlPools,
-          irlPools,
+          erlPoolCount: erlPools.length,
+          irlPoolCount: irlPools.length,
           primaryTarget: null,
           intermediateTarget: null,
           invalidationLevel: null,
@@ -267,8 +309,8 @@ export class IctLiquidityResolver {
       const invalidationLevel = structSnap.lastLH?.price ?? dealingRange.rangeHigh;
 
       return {
-        erlPools,
-        irlPools,
+        erlPoolCount: erlPools.length,
+        irlPoolCount: irlPools.length,
         primaryTarget,
         intermediateTarget,
         invalidationLevel,

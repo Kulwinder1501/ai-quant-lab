@@ -66,7 +66,7 @@ describe("IctLiquidityResolver", () => {
       chochLevel: null,
       internalVsExternal: "EXTERNAL",
       lastEvent: null,
-      confirmedPivots: [],
+      confirmedPivotCount: 0,
     };
 
     // Current price is 110 (Premium >= 105)
@@ -101,7 +101,7 @@ describe("IctLiquidityResolver", () => {
       chochLevel: null,
       internalVsExternal: "EXTERNAL",
       lastEvent: null,
-      confirmedPivots: [],
+      confirmedPivotCount: 0,
     };
 
     // Current price is 98 (Discount < 105)
@@ -139,7 +139,7 @@ describe("IctLiquidityResolver", () => {
       chochLevel: null,
       internalVsExternal: "EXTERNAL",
       lastEvent: null,
-      confirmedPivots: [],
+      confirmedPivotCount: 0,
     };
 
     const snap = resolver.resolve(98, biasSnap, structSnap, dummyZones, dummySessionLevels);
@@ -180,7 +180,7 @@ describe("liquidity objective selection", () => {
     lastHH: pivot(10, lastHH, "HIGH"),
     lastHL: pivot(5, lastHL, "LOW"),
     lastLH: null, lastLL: null, idm: null, bosLevel: null, chochLevel: null,
-    internalVsExternal: "EXTERNAL", lastEvent: null, confirmedPivots: [],
+    internalVsExternal: "EXTERNAL", lastEvent: null, confirmedPivotCount: 0,
   });
 
   it("takes the farthest ERL beyond equilibrium, not the nearest pool above price", () => {

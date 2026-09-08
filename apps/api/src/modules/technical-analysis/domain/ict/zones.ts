@@ -297,9 +297,24 @@ export class IctZoneLedger {
       }
     }
 
+    /*
+     * Drop dead zones from the master lists rather than filtering them out on every bar.
+     *
+     * `this.fvgs` and `this.obs` were never pruned, so INVALIDATED and CONSUMED zones accumulated
+     * forever. Two costs, both quadratic over a run: the snapshot filtered the full history on EVERY
+     * bar, and it allocated a fresh array each time which the snapshot then retained. Together with
+     * the pivot history this is what OOM'd a 10,405-bar run at a 4GB heap.
+     *
+     * Behaviour-preserving: dead zones were already excluded from the snapshot, and the processing
+     * loops above already `continue` past them. Nothing reads a zone once it is invalidated or
+     * consumed -- `lastZoneEvent` refers to zones by id, not by reference.
+     */
+    this.fvgs = this.fvgs.filter((f) => f.state !== "INVALIDATED" && f.state !== "CONSUMED");
+    this.obs = this.obs.filter((o) => o.state !== "INVALIDATED" && o.state !== "CONSUMED");
+
     return {
-      activeFvgs: this.fvgs.filter((f) => f.state !== "INVALIDATED" && f.state !== "CONSUMED"),
-      activeObs: this.obs.filter((o) => o.state !== "INVALIDATED" && o.state !== "CONSUMED"),
+      activeFvgs: this.fvgs,
+      activeObs: this.obs,
       lastZoneEvent: this.lastEvent,
     };
   }
