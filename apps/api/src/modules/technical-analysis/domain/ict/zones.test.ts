@@ -16,7 +16,7 @@ function makeCandle(index: number, open: number, high: number, low: number, clos
 }
 
 describe("IctZoneLedger", () => {
-  it("tracks Bullish FVG lifecycle from CREATION -> PARTIALLY_FILLED -> INVERTED", () => {
+  it("tracks Bullish FVG lifecycle from CREATION -> PARTIALLY_FILLED -> re-entry as BEARISH", () => {
     const ledger = new IctZoneLedger(1.5, 0.5);
     const structTracker = new IctStructureTracker(2);
 
@@ -53,13 +53,27 @@ describe("IctZoneLedger", () => {
     expect(snap3.activeFvgs[0].state).toBe("PARTIALLY_FILLED");
     expect(snap3.activeFvgs[0].fillPercentage).toBe(0.6); // (105 - 102) / 5 = 3/5 = 0.6
 
-    // Candle 4: Closes through below 100 (close=96) -> INVERTED
+    // Candle 4: closes clean below 100, so the gap inverts.
+    //
+    // It used to stay in the list as state INVERTED while still reporting type BULLISH, which meant
+    // the strategy was offered a long at a level that had just failed as support. It now re-enters as
+    // a NEW gap carrying the flipped type -- dated to this bar, so a snapshot taken earlier cannot
+    // contain it, which reading the mutable `state` at the point of use would not have avoided.
     const c4 = makeCandle(4, 110, 111, 95, 96);
     candles.push(c4);
     let s4 = structTracker.processCandle(candles, 4);
     let snap4 = ledger.processCandle(candles, 4, s4);
-    expect(snap4.activeFvgs[0].state).toBe("INVERTED");
     expect(snap4.lastZoneEvent?.event).toBe("INVERTED");
+
+    const survivors = snap4.activeFvgs.filter((f) => f.id.startsWith("fvg-bullish-2"));
+    expect(survivors).toHaveLength(1);
+    const inverted = survivors[0];
+    expect(inverted.id).toBe("fvg-bullish-2-inv");
+    expect(inverted.type).toBe("BEARISH");
+    expect(inverted.state).toBe("FRESH");
+    expect(inverted.top).toBe(105);
+    expect(inverted.bottom).toBe(100);
+    expect(inverted.createdAtBarIndex).toBe(4);
   });
 
   it("invalidates an Order Block when price closes through its 50% Mean Threshold", () => {

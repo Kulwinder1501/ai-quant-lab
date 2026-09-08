@@ -155,6 +155,41 @@ export class IctZoneLedger {
    *    selection takes the first match in creation order they crowded out every fresh block: 1,081
    *    of 1,309 BANKNIFTY signals came from a mitigation block and not one from a fresh block.
    */
+  /**
+   * Handles a gap price has closed clean through, which flips which side it serves.
+   *
+   * A bullish gap price closed BELOW is no longer demand; on the retest it is supply. The ledger used
+   * to record that as `state = "INVERTED"` and leave the gap in the active list still advertising
+   * `type: "BULLISH"` -- so the strategy was offered a long at a level that had just failed as
+   * support. Gaps supply 85% of this strategy's entries, so this sat on the dominant path.
+   *
+   * Reading `state` at the point of use would have been the cheaper fix and would have read the
+   * future: zone objects are shared across snapshots and the backtest builds every snapshot before
+   * replaying, so a mutable field reads its FINAL value. Emitting a NEW gap dated to the inversion
+   * bar cannot leak, because a snapshot taken earlier does not contain it -- the same reasoning as
+   * `failBlock`.
+   *
+   * This is a correctness fix, not a policy: the gap survived before and it survives now. What
+   * changes is which side it is offered on.
+   */
+  private invertGap(fvg: FairValueGap, currentIndex: number, currentTime: Date): void {
+    fvg.state = "INVALIDATED";
+    fvg.invertedAtBarIndex = currentIndex;
+
+    const flipped: FairValueGap = {
+      ...fvg,
+      id: `${fvg.id}-inv`,
+      type: fvg.type === "BULLISH" ? "BEARISH" : "BULLISH",
+      createdAtBarIndex: currentIndex,
+      createdAtBarTime: currentTime,
+      fillPercentage: 0,
+      state: "FRESH",
+      invertedAtBarIndex: null,
+    };
+    this.fvgs.push(flipped);
+    this.lastEvent = { zoneId: flipped.id, zoneKind: "FVG", event: "INVERTED", barIndex: currentIndex };
+  }
+
   private failBlock(ob: OrderBlock, currentIndex: number, currentTime: Date): void {
     ob.state = "INVALIDATED";
     this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "INVALIDATED", barIndex: currentIndex };
@@ -347,7 +382,8 @@ export class IctZoneLedger {
     }
 
     // 3. Update FVG Lifecycle
-    for (const fvg of this.fvgs) {
+    // A copy: `invertGap` appends the flipped gap, which its own creation bar must not process.
+    for (const fvg of [...this.fvgs]) {
       if (fvg.state === "INVALIDATED" || fvg.state === "CONSUMED") continue;
       if (fvg.createdAtBarIndex === currentIndex) continue;
 
@@ -361,14 +397,7 @@ export class IctZoneLedger {
           fvg.fillPercentage = Math.max(fvg.fillPercentage, pct);
 
           if (current.close < fvg.bottom) {
-            fvg.state = "INVERTED";
-            fvg.invertedAtBarIndex = currentIndex;
-            this.lastEvent = {
-              zoneId: fvg.id,
-              zoneKind: "FVG",
-              event: "INVERTED",
-              barIndex: currentIndex,
-            };
+            this.invertGap(fvg, currentIndex, current.openTime);
           } else if (fvg.fillPercentage >= 1.0) {
             fvg.state = "CONSUMED";
           } else if (fvg.fillPercentage > 0) {
@@ -382,14 +411,7 @@ export class IctZoneLedger {
           fvg.fillPercentage = Math.max(fvg.fillPercentage, pct);
 
           if (current.close > fvg.top) {
-            fvg.state = "INVERTED";
-            fvg.invertedAtBarIndex = currentIndex;
-            this.lastEvent = {
-              zoneId: fvg.id,
-              zoneKind: "FVG",
-              event: "INVERTED",
-              barIndex: currentIndex,
-            };
+            this.invertGap(fvg, currentIndex, current.openTime);
           } else if (fvg.fillPercentage >= 1.0) {
             fvg.state = "CONSUMED";
           } else if (fvg.fillPercentage > 0) {
