@@ -3,6 +3,28 @@ import type { IctStructureSnapshot } from "./structure.js";
 
 export type ZoneLifecycleState = "FRESH" | "TOUCHED" | "PARTIALLY_FILLED" | "CONSUMED" | "INVALIDATED" | "INVERTED";
 
+/**
+ * The order-block taxonomy from lecture 7, which spends its whole length on the distinction.
+ *
+ * - `CLASSIC`   the familiar one: last opposing candle WITH an attached fair value gap.
+ * - `ADVANCE`   the same shape with NO fair value gap -- "जस्ट एक कैंडल है जिसके ऊपर ना नीचे
+ *               एफजी है, ये पूरी की पूरी कैंडल ऑर्डर ब्लॉक होगी". Never produced today: the
+ *               creation path only fires alongside a newly created FVG, so `attachedFvgId` is
+ *               always set. Classified for when that changes.
+ * - `REJECTION` the block candle is mostly wick -- "इसके अंदर कक जो है 50 पर से ज्यादा है तो
+ *               इसकी कक हम लेंगे". The doctrine also re-bases the zone onto 50% of the WICK
+ *               rather than the candle; that part is deliberately NOT done here, because moving
+ *               zone bounds changes which prices count as a tap.
+ * - `MITIGATION` a FAILED block: price closed through it instead of rejecting from it, in a
+ *               swing-FAILURE context. Explicitly a continuation pattern -- "मिटिगेशन ब्लॉक
+ *               कंटिन्यू पैटर्न है".
+ * - `BREAKER`   the same failure, except the swing was TAKEN rather than held. Lecture 7 says the
+ *               two look identical and differ only in that -- "थोड़ा सा माइनर डिफरेंस है जो
+ *               दोनों को अलग बनाता है" -- and this one is a reversal, not a continuation.
+ * - `RECLAIM`   the last opposing candle immediately after a market-structure shift.
+ */
+export type OrderBlockKind = "CLASSIC" | "ADVANCE" | "REJECTION" | "MITIGATION" | "BREAKER" | "RECLAIM";
+
 export interface FairValueGap {
   readonly id: string;
   readonly type: "BULLISH" | "BEARISH";
@@ -31,6 +53,17 @@ export interface OrderBlock {
   readonly attachedFvgId: string | null;
   readonly isExtreme: boolean;
   readonly isIdmAdjacent: boolean;
+  /*
+   * Immutable, deliberately.
+   *
+   * Reclassifying a failed block in place looked natural and leaked the future: the ledger hands
+   * live zone objects to every snapshot, and the backtest builds all snapshots BEFORE replaying, so
+   * a label written at bar 500 was visible to the strategy at bar 100. Measured: 34 BANKNIFTY
+   * signals were attributed to a MITIGATION block in a run where the flag that lets mitigation
+   * blocks exist was OFF. A failed block now becomes a NEW zone created at the failure bar, which
+   * earlier snapshots cannot contain.
+   */
+  readonly kind: OrderBlockKind;
   state: ZoneLifecycleState;
 }
 
@@ -45,15 +78,116 @@ export interface IctZoneSnapshot {
   } | null;
 }
 
+/**
+ * Labels a freshly created block, per the lecture 7 taxonomy.
+ *
+ * Precedence is deliberate and only one branch can be reached today:
+ *  1. `ADVANCE` -- structural (no gap at all), so it outranks any shape test. Unreachable while
+ *     creation requires a newly created FVG.
+ *  2. `REJECTION` -- a measured property of the block candle itself, so it beats a context label.
+ *  3. `RECLAIM` -- context: the last opposing candle right after a structure shift.
+ *  4. `CLASSIC` -- the default.
+ *
+ * The rejection test uses the wick FACING the trade (the lower wick of a bullish block, the upper
+ * wick of a bearish one) rather than both wicks summed. A candle with one long wick on the wrong side
+ * is not a rejection of anything, and pooling the two would label it as one.
+ */
+function classifyNewBlock(
+  obCandle: CausalCandle,
+  type: "BULLISH" | "BEARISH",
+  hasAttachedFvg: boolean,
+  structure: IctStructureSnapshot
+): OrderBlockKind {
+  if (!hasAttachedFvg) return "ADVANCE";
+
+  const range = obCandle.high - obCandle.low;
+  if (range > 0) {
+    const facingWick =
+      type === "BULLISH"
+        ? Math.min(obCandle.open, obCandle.close) - obCandle.low
+        : obCandle.high - Math.max(obCandle.open, obCandle.close);
+    if (facingWick / range > 0.5) return "REJECTION";
+  }
+
+  if (structure.lastEvent?.type === "CHOCH") return "RECLAIM";
+  return "CLASSIC";
+}
+
 export class IctZoneLedger {
   private fvgs: FairValueGap[] = [];
   private obs: OrderBlock[] = [];
   private lastEvent: IctZoneSnapshot["lastZoneEvent"] = null;
+  /**
+   * The most recent swing SWEEP, remembered across bars.
+   *
+   * Breaker and mitigation blocks are the same shape and differ only in whether the opposing swing
+   * was TAKEN before the block failed -- lecture 7 calls it "थोड़ा सा माइनर डिफरेंस". That sweep
+   * almost never lands on the same bar as the failure, and `structure.lastEvent` is null on most
+   * bars, so testing it at the failure bar alone would label practically everything MITIGATION.
+   */
+  private lastSweep: { direction: "BULLISH" | "BEARISH"; barIndex: number } | null = null;
 
   constructor(
     private readonly displacementThreshold: number = 1.5,
-    private readonly meanThresholdFraction: number = 0.5
+    private readonly meanThresholdFraction: number = 0.5,
+    private readonly invertedBlocksRemainPoi: boolean = false
   ) {}
+
+  /**
+   * Handles a block that price closed THROUGH -- the moment the doctrine and this engine part ways.
+   *
+   * The engine's reading is that the block was wrong, so it is invalidated and pruned. Lecture 7's
+   * reading is that the block was wrong in a way that MATTERS: it is now a mitigation block if the
+   * opposing swing merely failed (continuation -- "मिटिगेशन ब्लॉक कंटिन्यू पैटर्न है"), or a breaker
+   * block if the swing was swept first (reversal). Either way price can trade back to it, from the
+   * other side.
+   *
+   * "From the other side" is why this emits a NEW zone with the polarity FLIPPED rather than
+   * relabelling the old one. Three things fall out of that which mutation got wrong:
+   *
+   *  - It cannot leak. The new zone is created at the failure bar, so a snapshot taken before that
+   *    bar does not contain it. Relabelling in place was visible to every earlier snapshot.
+   *  - Consumers need no special case. A bullish block that failed becomes a BEARISH zone, so the
+   *    ordinary `type` match finds it on the correct side. Asking consumers to read `state` and
+   *    flip the side themselves was a second place to get it wrong.
+   *  - It gets an ending for free. Running the normal lifecycle for its new type retires it the
+   *    usual way. Exempting inverted blocks from the lifecycle made them immortal, and because
+   *    selection takes the first match in creation order they crowded out every fresh block: 1,081
+   *    of 1,309 BANKNIFTY signals came from a mitigation block and not one from a fresh block.
+   */
+  private failBlock(ob: OrderBlock, currentIndex: number, currentTime: Date): void {
+    ob.state = "INVALIDATED";
+    this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "INVALIDATED", barIndex: currentIndex };
+    if (!this.invertedBlocksRemainPoi) return;
+
+    /*
+     * "Taken" means a sweep in the failed block's OWN direction at or after its block candle: a
+     * bullish block whose rally swept a swing high and then reversed back down through it. A sweep
+     * the other way, or one predating the block, says nothing about this block's failure.
+     *
+     * The window opens at the BLOCK CANDLE, not at the creation bar. A block is only recognised two
+     * bars after its candle -- the displacement leg and the gap bar have to land first -- so keying
+     * off `createdAtBarIndex` discarded any sweep performed by that displacement leg, which is the
+     * commonest breaker geometry there is: the impulse takes the high, then fails back through the
+     * block it came from. Measured: it labelled a hand-built breaker MITIGATION.
+     */
+    const swingWasTaken =
+      this.lastSweep !== null &&
+      this.lastSweep.direction === ob.type &&
+      this.lastSweep.barIndex >= ob.obCandleIndex;
+
+    const flipped: OrderBlock = {
+      ...ob,
+      id: `${ob.id}-inv`,
+      type: ob.type === "BULLISH" ? "BEARISH" : "BULLISH",
+      kind: swingWasTaken ? "BREAKER" : "MITIGATION",
+      createdAtBarIndex: currentIndex,
+      createdAtBarTime: currentTime,
+      state: "FRESH",
+    };
+    this.obs.push(flipped);
+    this.lastEvent = { zoneId: flipped.id, zoneKind: "OB", event: "INVERTED", barIndex: currentIndex };
+  }
 
   processCandle(
     candles: readonly CausalCandle[],
@@ -62,6 +196,21 @@ export class IctZoneLedger {
   ): IctZoneSnapshot {
     this.lastEvent = null;
     const current = candles[currentIndex];
+
+    /*
+     * Detach from the arrays the previous bar handed out, before anything mutates them.
+     *
+     * The prune at the end of this method already builds fresh arrays, so bar N's snapshot holds the
+     * array built at the end of bar N -- and bar N+1 then pushed the flipped zone straight into it.
+     * A zone created at bar 3 duly turned up in the snapshot taken at bar 2. Copying costs two
+     * reference-only array copies per bar.
+     */
+    this.fvgs = [...this.fvgs];
+    this.obs = [...this.obs];
+
+    if (structure.lastEvent?.type === "SWEEP") {
+      this.lastSweep = { direction: structure.lastEvent.direction, barIndex: currentIndex };
+    }
 
     // 1. Detect 3-bar Fair Value Gap on current bar (currentIndex = candle 3)
     let newlyCreatedFvg: FairValueGap | null = null;
@@ -157,6 +306,7 @@ export class IctZoneLedger {
             attachedFvgId: newlyCreatedFvg.id,
             isExtreme: structure.lastHL ? obCandle.low <= structure.lastHL.price : true,
             isIdmAdjacent: structure.idm ? Math.abs(obCandle.low - structure.idm.price) / obCandle.low < 0.005 : false,
+            kind: classifyNewBlock(obCandle, "BULLISH", true, structure),
             state: "FRESH",
           };
           this.obs.push(ob);
@@ -182,6 +332,7 @@ export class IctZoneLedger {
             attachedFvgId: newlyCreatedFvg.id,
             isExtreme: structure.lastLH ? obCandle.high >= structure.lastLH.price : true,
             isIdmAdjacent: structure.idm ? Math.abs(obCandle.high - structure.idm.price) / obCandle.high < 0.005 : false,
+            kind: classifyNewBlock(obCandle, "BEARISH", true, structure),
             state: "FRESH",
           };
           this.obs.push(ob);
@@ -249,7 +400,9 @@ export class IctZoneLedger {
     }
 
     // 4. Update Order Block Lifecycle
-    for (const ob of this.obs) {
+    // A snapshot of the list: `failBlock` appends the flipped zone, which must not be processed by
+    // the same pass that created it -- its own creation bar is exempt from its lifecycle.
+    for (const ob of [...this.obs]) {
       if (ob.state === "INVALIDATED" || ob.state === "CONSUMED") continue;
       // Do not update on the bar the OB candle itself formed, but allow on subsequent bars
       if (ob.createdAtBarIndex === currentIndex) continue;
@@ -257,13 +410,7 @@ export class IctZoneLedger {
       if (ob.type === "BULLISH") {
         if (current.low <= ob.top) {
           if (current.close < ob.meanThreshold) {
-            ob.state = "INVALIDATED";
-            this.lastEvent = {
-              zoneId: ob.id,
-              zoneKind: "OB",
-              event: "INVALIDATED",
-              barIndex: currentIndex,
-            };
+            this.failBlock(ob, currentIndex, current.openTime);
           } else {
             ob.state = "TOUCHED";
             this.lastEvent = {
@@ -277,13 +424,7 @@ export class IctZoneLedger {
       } else if (ob.type === "BEARISH") {
         if (current.high >= ob.bottom) {
           if (current.close > ob.meanThreshold) {
-            ob.state = "INVALIDATED";
-            this.lastEvent = {
-              zoneId: ob.id,
-              zoneKind: "OB",
-              event: "INVALIDATED",
-              barIndex: currentIndex,
-            };
+            this.failBlock(ob, currentIndex, current.openTime);
           } else {
             ob.state = "TOUCHED";
             this.lastEvent = {

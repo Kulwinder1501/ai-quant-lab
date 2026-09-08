@@ -6,6 +6,7 @@ import type {
 } from "./strategy.js";
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
+import type { OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
 
 export interface IctStructureStrategyConfiguration {
   minimumRiskReward: number;
@@ -124,19 +125,39 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     let poiExtreme = false;
     let poiIdmAdjacent = false;
+    /*
+     * Which lecture-7 block type supplied the entry, recorded but NOT gated on.
+     *
+     * The taxonomy claims these are different setups -- a mitigation block continues, a breaker
+     * reverses -- so the label has to be measurable per trade before any of that can be tested. It
+     * stays a covariate until it separates outcomes.
+     */
+    let poiKind: OrderBlockKind | "FVG" | "SESSION_SWEEP" | null = null;
 
     if (config.requirePoiReaction) {
       if (sessionLevels.lastSweepEvent?.eventType === "SWEEP") {
         poiEvidence = `Session ${sessionLevels.lastSweepEvent.levelType} swept and reclaimed`;
+        poiKind = "SESSION_SWEEP";
       } else {
+        /*
+         * Matching on `type` alone is correct for order blocks -- a failed block re-enters the ledger
+         * as a NEW zone carrying the flipped type -- but it is WRONG for fair value gaps, which are
+         * relabelled in place: a bullish gap that price has closed below still advertises itself as
+         * bullish support here, the reverse of what inversion means. Reading `state` to flip the
+         * side would read the future, because the ledger hands out live zone objects and the
+         * backtest builds every snapshot before replaying any of it. Left as it stands, and recorded
+         * as a defect, rather than papered over with a fix that leaks.
+         */
         const ob = zones.activeObs.find((o) => o.type === wantedZone && reached(o.meanThreshold));
         const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
         if (ob) {
           poiEvidence = `Order Block ${ob.id} traded into its mean threshold ${ob.meanThreshold}`;
           poiExtreme = ob.isExtreme;
           poiIdmAdjacent = ob.isIdmAdjacent;
+          poiKind = ob.kind;
         } else if (fvg) {
           poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
+          poiKind = "FVG";
         }
       }
 
@@ -197,7 +218,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind },
         });
       }
 
@@ -280,7 +301,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind },
         });
       }
 

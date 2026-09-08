@@ -16,7 +16,11 @@ import {
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
 import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
-import { ICT_STRUCTURE_STRATEGY_KEY } from "../../modules/technical-analysis/domain/ict/config.js";
+import {
+  ICT_STRUCTURE_STRATEGY_KEY,
+  defaultIctEngineConfig,
+  type IctEngineConfig,
+} from "../../modules/technical-analysis/domain/ict/config.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
 
@@ -78,11 +82,32 @@ class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository
  * source bar and load it back into the context.
  */
 class IctDecoratedMarketData implements BacktestMarketDataRepository {
-  constructor(private readonly inner: BacktestMarketDataRepository) {}
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly config: IctEngineConfig
+  ) {}
 
   async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
-    return decorateContextsWithIct(await this.inner.listContexts(input));
+    return decorateContextsWithIct(await this.inner.listContexts(input), { config: this.config });
   }
+}
+
+/**
+ * The engine config for this run, which until now was always the default.
+ *
+ * `--ict-inverted-poi` is the one knob exposed, because it is the only engine setting whose effect
+ * is an open question: it decides whether a failed order block survives as an opposite-side point of
+ * interest, per lecture 7, or is discarded as this engine has always discarded it. Two arms of the
+ * same run differ by that flag alone, and it lands in the config hash, so the two arms cannot share
+ * a cached snapshot.
+ */
+function parseIctEngineConfig(argumentsList: string[]): IctEngineConfig {
+  const raw = getOption(argumentsList, "ict-inverted-poi")?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return defaultIctEngineConfig;
+  if (raw !== "true" && raw !== "false") {
+    throw new Error(`--ict-inverted-poi must be true or false; received "${raw}".`);
+  }
+  return { ...defaultIctEngineConfig, invertedBlocksRemainPoi: raw === "true" };
 }
 
 function parseConcurrency(raw: string | undefined): number {
@@ -174,7 +199,7 @@ async function main(): Promise<void> {
     // The ICT strategy reads its four-pillar snapshot from the context; attach it
     // in the replay builder. Incumbent strategies never see this decoration.
     if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
-      marketData = new IctDecoratedMarketData(marketData);
+      marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList));
     }
 
     const result = await new RunBacktest(
