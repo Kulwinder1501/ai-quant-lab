@@ -416,3 +416,116 @@ describe("the live-tradable gate", () => {
     expect(saved).toEqual([]);
   });
 });
+
+/*
+ * Higher-timeframe attachment.
+ *
+ * Production never populated `higherTimeframeContexts`, so every live confluence score was 0 and
+ * the terms that read it were inert. These pin the three properties that make the attachment
+ * trustworthy rather than merely present: it asks for the last *closed* slower bar, it refuses a
+ * bar that closed after the decision, and it never attaches a timeframe that is not actually higher.
+ */
+describe("GenerateTradeIdeas higher-timeframe attachment", () => {
+  function contextAt(timeframe: string, closeTime: Date, close: number): StrategyMarketContext {
+    const base = qualifyingContext();
+    return { ...base, candle: { ...base.candle, id: `candle-${timeframe}`, timeframe, closeTime, close } };
+  }
+
+  function harness(overrides: Partial<StrategyMarketContextRepository>) {
+    const seen: StrategyMarketContext[] = [];
+    const versions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input: SaveTradeIdeaProposalInput) => ({
+        id: "idea-1",
+        instrumentId: input.instrumentId,
+        strategyVersionId: input.strategyVersionId,
+        sourceCandleId: input.sourceCandleId,
+        side: input.side,
+        status: "PROPOSED" as const,
+        entryPrice: input.entryPrice,
+        stopLoss: input.stopLoss,
+        targetPrice: input.targetPrice,
+        riskReward: input.riskReward,
+        confidence: input.confidence,
+        reasoning: input.reasoning,
+        generatedAt: new Date(),
+        expiresAt: input.expiresAt ?? null,
+      }),
+    };
+    const contexts = {
+      findLatestCompleted: async () => { const c = contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110); seen.push(c); return c; },
+      listCompletedContexts: async () => [],
+      ...overrides,
+    } as StrategyMarketContextRepository;
+    return { generator: new GenerateTradeIdeas(versions, contexts, ideas), seen };
+  }
+
+  it("attaches the last closed slower bar, and asks for it as of the decision bar's close", async () => {
+    const asked: Array<{ timeframe: string; asOf: Date }> = [];
+    let evaluated: StrategyMarketContext | null = null;
+    const { generator } = harness({
+      findLatestCompleted: async () => contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110),
+      findCompletedBefore: async (input) => {
+        asked.push({ timeframe: input.timeframe, asOf: input.asOf });
+        const htf = contextAt(input.timeframe, new Date("2026-07-25T03:40:00Z"), 109);
+        evaluated = htf;
+        return htf;
+      },
+    });
+
+    await generator.execute({ instrumentId: "instrument-1", timeframe: "1m" });
+
+    expect(asked.map((a) => a.timeframe)).toEqual(["5m", "15m"]);
+    // As-of is the decision bar's close, not "now": a scan of a historical bar must see the slower
+    // state that existed then, not today's.
+    expect(asked.every((a) => a.asOf.toISOString() === "2026-07-25T03:45:00.000Z")).toBe(true);
+    expect(evaluated).not.toBeNull();
+  });
+
+  it("refuses a slower bar that closed after the decision instant", async () => {
+    const { generator } = harness({
+      findLatestCompleted: async () => contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110),
+      // A query regression that drops the `close_time <= asOf` guard looks exactly like this, and
+      // would otherwise inflate every downstream result silently instead of failing.
+      findCompletedBefore: async (input) => contextAt(input.timeframe, new Date("2026-07-25T03:50:00Z"), 109),
+    });
+
+    await expect(generator.execute({ instrumentId: "instrument-1", timeframe: "1m" }))
+      .rejects.toThrow(/HTF_CONTEXT_LOOKAHEAD/);
+  });
+
+  it("never attaches a timeframe that is not strictly higher than the one being evaluated", async () => {
+    const asked: string[] = [];
+    const { generator } = harness({
+      findLatestCompleted: async () => contextAt("15m", new Date("2026-07-25T03:45:00Z"), 110),
+      findCompletedBefore: async (input) => { asked.push(input.timeframe); return null; },
+    });
+
+    await generator.execute({ instrumentId: "instrument-1", timeframe: "15m" });
+
+    // Neither 5m (faster) nor 15m (itself) qualifies, so nothing is fetched at all.
+    expect(asked).toEqual([]);
+  });
+
+  it("degrades to no attachment when the repository cannot fetch slower bars", async () => {
+    const { generator } = harness({
+      findLatestCompleted: async () => contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110),
+    });
+
+    // Absence of the optional method is a legitimate state, not an error: every existing stub and
+    // caller keeps working and simply gets no higher-timeframe context.
+    await expect(generator.execute({ instrumentId: "instrument-1", timeframe: "1m" })).resolves.toBeDefined();
+  });
+});

@@ -17,14 +17,44 @@ import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implie
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
 
 /**
- * How long a 5m scalp may go without progress before it is cut, and how much progress counts.
+ * How long a scalp may go without progress before it is cut, and how much progress counts.
  *
- * Named rather than inline because they are the two numbers the rule turns on, and both were
- * hand-chosen and untested until measured. See the block that uses them for the evidence and for
- * why the cutoff is a band rather than an optimum.
+ * Keyed by timeframe rather than hardcoded to one, because the rule now runs on two and their
+ * evidence is not the same strength. A timeframe absent from this table has no stall at all, which
+ * is how a new timeframe stays opted out until someone measures it rather than inheriting a cell
+ * fitted on a different bar size.
+ *
+ * `5m` -- measured, and the direction is well supported. See the block that uses this for the
+ * sweep, the bootstrap interval, and why the cutoff is a band rather than an optimum.
+ *
+ * `1m` -- ENABLED BY REQUEST, AGAINST THE MEASUREMENT. The sweep of 2026-09-07 ran this exact rule
+ * over every closed 1m option trade, 9 cutoffs x 5 progress levels, replayed from the observed
+ * premium bid series. On cohort A -- `momentum-scalp` on AutoBot-Scalp1m, which is the bot this
+ * actually governs -- the surface was negative in 41 of 45 cells, with a paired session-clustered
+ * t of -0.62 at exactly the (10, 0.5R) cell configured here. That is not significant either, so
+ * the honest reading is "no evidence it helps on 1m", not "proven harmful"; the recorded
+ * conclusion was nonetheless "do not extend the rule to the Scalp1m bot".
+ *
+ * It is enabled anyway because it was asked for, and it is cheap to reverse: delete the `1m` line
+ * and the rule is off. Two things to know before reading any result from it. Cohort B, a different
+ * strategy and era, did show a robust region at 3-6 minutes -- but setting progress to +infinity
+ * there gave identical results to 3 decimals, meaning every surviving trade was below the progress
+ * threshold anyway and the condition did no work. On 1m this is a holding-period cap wearing a
+ * stall rule's costume, and holding period is the lever already closed as NO_VIABLE_HORIZON. And
+ * 1m entries are what the cap will bite: 9 of 11 trades on 2026-09-08 closed inside 10 minutes, so
+ * expect it to fire rarely and change little.
  */
-const MOMENTUM_STALL_CUTOFF_MINUTES = 10;
-const MOMENTUM_STALL_MINIMUM_PROGRESS_R = 0.5;
+interface MomentumStallPolicy {
+  readonly cutoffMinutes: number;
+  readonly minimumProgressR: number;
+}
+
+const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | undefined>> = Object.freeze({
+  "5m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
+  // Deliberately the 5m cell rather than a 1m-specific one: cohort A produced no better cell to
+  // borrow, so inventing a different number here would be fitting to noise twice over.
+  "1m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
+});
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -613,7 +643,9 @@ export class EvaluateOpenPaperTrades {
         });
       }
 
-      // Momentum Stall Stop (5m timeframe, elapsed market time >= the cutoff, gain < 0.5R)
+      // Momentum Stall Stop (a timeframe with a policy, elapsed market time >= its cutoff, gain
+      // below its progress threshold). See MOMENTUM_STALL_POLICIES for which timeframes are in and
+      // what evidence each rests on -- 1m is enabled by request against its own measurement.
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.
       //
@@ -633,7 +665,8 @@ export class EvaluateOpenPaperTrades {
       //
       // This reduces a loss, it does not create edge: cohort fees are ~17,130 against a best
       // achievable gross of +6,427, so the book stays net-negative either way.
-      if (trade.timeframe === "5m") {
+      const stallPolicy = trade.timeframe ? MOMENTUM_STALL_POLICIES[trade.timeframe] : undefined;
+      if (stallPolicy) {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
         const initialRisk = trade.entryPrice - trade.stopLoss;
         const initialReward = trade.targetPrice - trade.entryPrice;
@@ -641,9 +674,9 @@ export class EvaluateOpenPaperTrades {
 
         if (
           isScalp
-          && elapsedMinutes >= MOMENTUM_STALL_CUTOFF_MINUTES
+          && elapsedMinutes >= stallPolicy.cutoffMinutes
           && initialRisk > 0
-          && freshBid < trade.entryPrice + MOMENTUM_STALL_MINIMUM_PROGRESS_R * initialRisk
+          && freshBid < trade.entryPrice + stallPolicy.minimumProgressR * initialRisk
         ) {
           return closeOption({
             exitPrice: freshBid,
@@ -655,8 +688,11 @@ export class EvaluateOpenPaperTrades {
               elapsedMinutes,
               // Stamped so a booked exit explains itself: the cutoff has moved once already, and
               // without it a stall booked under 20 minutes is indistinguishable from one under 10.
-              cutoffMinutes: MOMENTUM_STALL_CUTOFF_MINUTES,
-              minimumProgressR: MOMENTUM_STALL_MINIMUM_PROGRESS_R,
+              // The timeframe joins them now that the rule runs on more than one, because 5m and 1m
+              // stalls rest on very different evidence and must be separable in the booked record.
+              timeframe: trade.timeframe,
+              cutoffMinutes: stallPolicy.cutoffMinutes,
+              minimumProgressR: stallPolicy.minimumProgressR,
               freshBid,
               entryPrice: trade.entryPrice,
               initialRisk,
