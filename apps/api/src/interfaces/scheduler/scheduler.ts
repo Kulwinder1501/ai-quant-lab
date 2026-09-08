@@ -1094,6 +1094,13 @@ async function main(): Promise<void> {
     );
   }
 
+  /*
+   * Hand-maintained, and it drifts: this list gates nothing, so adding a `cronSchedule` without
+   * adding its name here leaves the scheduler running a job its own startup log denies. Caught on
+   * 2026-09-08 when AUXILIARY_PREDICTION_SETTLEMENT ran but the log advertised 24 jobs. That matters
+   * because the symptom of a stalled job is silence, and a job missing from the manifest is silent
+   * by construction.
+   */
   log("Scheduler started", {
     jobs: [
       "EOD_PIPELINE",
@@ -1115,6 +1122,7 @@ async function main(): Promise<void> {
       "DEPTH_FRAME_STALENESS",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
+      "AUXILIARY_PREDICTION_SETTLEMENT",
       "CANDLE_GAP_CHECK",
       // Ungated for the same reason as the two above: it reads stored contexts and places no orders,
       // so it runs without a live feed. Listing it inside the Fyers-gated group below would
