@@ -103,16 +103,26 @@ describe("MomentumScalpStrategy configuration", () => {
     }))).toThrow(/requires parameters for VWAP/);
   });
 
-  it("keeps the production v4 terms unchanged", () => {
+  it("keeps the production v5 terms unchanged", () => {
     expect(defaultMomentumScalpStrategyConfiguration).toMatchObject({
       rsiLongMin: 55,
       rsiLongMax: 75,
       rsiShortMin: 25,
       rsiShortMax: 45,
-      // V4 widened the stop and the target: the 1.0x ATR stop was narrower than BANKNIFTY's
-      // observed 5-second jump size, so ordinary noise resolved it rather than the thesis.
-      atrStopMultiple: 1.5,
-      rewardRiskMultiple: 2.0,
+      // V5 restores v3's geometry, withdrawing v4.
+      //
+      // V4's argument was not baseless -- a 1.0x ATR stop is narrower than BANKNIFTY's observed
+      // 5-second jump size, so noise can resolve it rather than the thesis. It simply did not
+      // survive contact: on its only live session (2026-09-08) all eleven entries stopped out
+      // anyway, so the wider stop bought no survival and only enlarged each loss. The promotion
+      // rested on seven summed monthly windows with no trade counts and no clustered standard
+      // error, which is not enough to move live geometry.
+      //
+      // 1.5R also keeps the strategy inside the `reward/risk <= 1.6` MOMENTUM_STALL gate in
+      // evaluate-open-paper-trades.ts. v4's 2.0R put every trade outside it, silently exempting
+      // the strategy from its time stop (17/17 v3 trades eligible, 0/11 v4 trades).
+      atrStopMultiple: 1.0,
+      rewardRiskMultiple: 1.5,
       minimumVwapDisplacementAtr: 0.10,
       idealVwapDisplacementAtr: 0.60,
     });

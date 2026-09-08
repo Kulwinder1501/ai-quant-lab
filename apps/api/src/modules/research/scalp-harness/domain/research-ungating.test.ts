@@ -27,15 +27,15 @@ describe("research strategy ungating", () => {
     // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
     // meaning.
     expect(Object.keys(byKey).sort()).toEqual([
-      "index-v3-research", "momentum-v7-research", "momentum-v8-research",
+      "index-v3-research", "momentum-v10-research", "momentum-v9-research",
       "pattern-v4-research", "pattern-v4-research-v2",
     ]);
   });
 
-  it("registers momentum-v8-research as an ungated 1m sibling of v7, same candidate logic", () => {
+  it("registers momentum-v10-research as an ungated 1m sibling of v9, same candidate logic", () => {
     const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
-    const v7 = byKey["momentum-v7-research"]!;
-    const v8 = byKey["momentum-v8-research"]!;
+    const v7 = byKey["momentum-v9-research"]!;
+    const v8 = byKey["momentum-v10-research"]!;
     // Ungated like v7, and runs on the same 1m timeframe.
     expect(v8.definition.configuration.minimumConfidence).toBe(0);
     expect(v8.supportedTimeframes).toEqual(["1m"]);
@@ -51,7 +51,7 @@ describe("research strategy ungating", () => {
   it("lifts each strategy's own score gate, not a generically-named one", () => {
     // The pattern strategy gates on scoreThreshold and has no minimumConfidence at all. Setting the
     // wrong key would leave its 5-of-9 confluence gate fully active while looking ungated.
-    expect(byKey["momentum-v7-research"]!.definition.configuration.minimumConfidence).toBe(0);
+    expect(byKey["momentum-v9-research"]!.definition.configuration.minimumConfidence).toBe(0);
     expect(byKey["index-v3-research"]!.definition.configuration.minimumConfidence).toBe(0);
     expect(byKey["pattern-v4-research"]!.definition.configuration.scoreThreshold).toBe(0);
     expect(byKey["pattern-v4-research"]!.definition.configuration.minimumConfidence).toBeUndefined();

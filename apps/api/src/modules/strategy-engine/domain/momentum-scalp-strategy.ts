@@ -52,7 +52,39 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * RSI 55–75 / 25–45 (drops the exhaustion tail at 80/20), ATR stop 1.0× (was
  * 0.5× — stopped out on noise), and RRR 1.5 (provides edge over brokerage costs).
  */
-export const momentumScalpStrategyVersion = 4;
+/**
+ * v4 widened the stop to 1.5× ATR and pushed the target to 2.0R. It is withdrawn here, and
+ * v5 restores v3's geometry exactly. Rolling *forward* to v5 rather than reactivating the
+ * stored v3 row is deliberate on two counts: a version configuration is immutable by contract
+ * (see PostgresStrategyVersionRepository), and the boot seed treats the code-declared version
+ * as authoritative — flipping `is_active` by hand while the code declared something else is
+ * what crash-looped the API for eighteen hours on 2026-09-06. A fresh number also keeps trade
+ * attribution unambiguous: rows under v5 are post-incident by construction.
+ *
+ * Why v4 is withdrawn, measured 2026-09-08 on its first and only live session:
+ *
+ * 11 trades, 0 wins, -6,291 net against 879 in fees -- a directional loss, not a friction one.
+ * The widened stop is the amplifier rather than the cause: every entry was stopped, so the
+ * 1.5× multiple simply made each of eleven wrong entries lose about half again as much as
+ * v3's 1.0× would have. Realised stop distance moved from ~3.0% of premium under v3 to 3.93%.
+ *
+ * The promotion evidence never cleared this project's own bar. Seven monthly backtest windows
+ * summed to +456.7 index points against v3's -2,625.3, but three of the seven were negative,
+ * `metrics` recorded no trade count or win rate, and no session-clustered standard error was
+ * attached to a difference read off summed net P&L -- the same error already booked against the
+ * ICT comparison, where +-17k turned out to be t=-0.24. The windows were also run on 1m index
+ * points while the live book trades options and pays real brokerage.
+ *
+ * Restoring 1.5R additionally restores stall eligibility. The MOMENTUM_STALL gate in
+ * evaluate-open-paper-trades.ts admits a trade only when reward/risk <= 1.6, so v4's 2.0R
+ * silently exempted the whole strategy from the time stop: 17 of 17 v3 trades were eligible
+ * and 0 of 11 v4 trades were. That coupling is incidental rather than designed, and it is
+ * addressed separately -- this rollback only stops feeding it.
+ *
+ * Rolling back reduces the size of a loss; it does not create edge. v3 lost money too
+ * (-1,723 on 2026-09-04). Entry selection is untouched here.
+ */
+export const momentumScalpStrategyVersion = 5;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
@@ -72,8 +104,8 @@ export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyCon
   rsiLongMax: 75,
   rsiShortMin: 25,
   rsiShortMax: 45,
-  atrStopMultiple: 1.5,
-  rewardRiskMultiple: 2.0,
+  atrStopMultiple: 1.0,
+  rewardRiskMultiple: 1.5,
   minimumConfidence: 0.5,
   expiryCandles: 5,
   requireRegime: false,

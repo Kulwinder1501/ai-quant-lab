@@ -52,10 +52,10 @@ function htf5m(): StrategyMarketContext {
   };
 }
 
-const v7 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v7-research")!;
-const v8 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v8-research")!;
+const v7 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v9-research")!;
+const v8 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v10-research")!;
 
-describe("momentum-v8-research HTF capture", () => {
+describe("momentum-v10-research HTF capture", () => {
   it("v7 records no htf5m block; v8 records one even when no 5m context is attached", () => {
     const ctx = qualifyingLong();
     const [p5] = v7.evaluate(ctx, ctx);
