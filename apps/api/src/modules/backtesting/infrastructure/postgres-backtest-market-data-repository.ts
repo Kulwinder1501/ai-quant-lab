@@ -293,8 +293,10 @@ const mockContexts = historyResult.rows.map(r => ({
 
       // Compute snapshots natively using replay builder to get HTF bias
       // 3 bars of 5m = 15m HTF bias
-      const htfBarsPerBucket = input.timeframe === '5m' ? 3 : undefined;
-      const snapshots = computeIctSnapshotsForContexts(mockContexts, { htfBarsPerBucket });
+      // The higher timeframe is the daily session, chosen by the builder. This used to pass 3
+      // bars for a 5m base -- a 15m bucket -- which disagreed with the builder's own 60m default
+      // and with the doctrine's daily anchor.
+      const snapshots = computeIctSnapshotsForContexts(mockContexts);
 
       for (let i = 0; i < mockContexts.length; i++) {
         const snapshot = snapshots[i];

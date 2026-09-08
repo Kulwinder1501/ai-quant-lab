@@ -22,24 +22,17 @@ import type { IctBiasDirection } from "./bias.js";
  * shorter synthetic bar, so a partial session-end bucket never leaks.
  */
 
-/** Base bars that make up one 60m higher-timeframe bucket, by base timeframe. */
-const BARS_PER_60M_BUCKET: Readonly<Record<string, number>> = {
-  "1m": 60,
-  "3m": 20,
-  "5m": 12,
-  "10m": 6,
-  "15m": 4,
-  "30m": 2,
-};
-
 export interface DecorateIctOptions {
   readonly config?: IctEngineConfig;
-  /**
-   * Base bars per 60m HTF bucket. Defaults to the value implied by the run's
-   * base timeframe; when the base timeframe has no 60m mapping (e.g. `60m`,
-   * `1d`) the HTF pillar is left uncovered and the four-pillar gate fails closed.
+  /*
+   * There is no bucket-size knob any more, deliberately.
+   *
+   * The higher timeframe is the DAILY session, because that is what the doctrine anchors on:
+   * lecture 9 works monthly -> weekly -> daily, and lecture 11 names the daily timeframe 226 times
+   * against 3 mentions of one-hour. The previous default was a 60m bucket, and the backtest
+   * repository passed 3 bars for a 5m base -- a 15m bucket -- so two callers disagreed about what
+   * "higher timeframe" even meant, and neither matched the source material.
    */
-  readonly htfBarsPerBucket?: number;
 }
 
 function contextToCausalCandle(context: StrategyMarketContext): CausalCandle {
@@ -64,21 +57,28 @@ interface HtfBucket {
  * Aggregates the base contexts into complete, session-contained HTF buckets.
  *
  * A bucket accumulates base bars of one IST session until it reaches
- * `barsPerBucket`, at which point it is emitted. A bucket that is still partial
+ * the session boundary, at which point it is emitted. A bucket that is still partial
  * when the session changes is discarded — never emitted as a short bar — so no
  * bucket straddles an overnight gap and no incomplete bucket is ever visible.
  */
+/**
+ * One HTF candle per COMPLETED IST session.
+ *
+ * A session is only complete once a bar from the next session arrives, so the trailing session is
+ * never emitted -- the current, still-forming day can never become visible to a bar inside it. That
+ * is the same anti-lookahead property the count-based bucketing had, obtained here for free from the
+ * session boundary rather than from a bar count that had to be tuned per timeframe.
+ */
 function aggregateSessionHtfBuckets(
   contexts: readonly StrategyMarketContext[],
-  barsPerBucket: number,
 ): HtfBucket[] {
   const buckets: HtfBucket[] = [];
   let acc:
     | { sessionDate: string; open: number; high: number; low: number; close: number; openTime: Date; closeTime: Date; count: number; firstId: string }
     | null = null;
 
-  const flushIfComplete = () => {
-    if (acc && acc.count === barsPerBucket) {
+  const flush = () => {
+    if (acc) {
       buckets.push({
         candle: {
           id: `htf-${acc.firstId}`,
@@ -100,9 +100,8 @@ function aggregateSessionHtfBuckets(
     const sessionDate = istSessionDate(c.openTime);
 
     if (acc && acc.sessionDate !== sessionDate) {
-      // The session changed before the bucket filled: the partial bucket is
-      // incomplete and is dropped rather than emitted as a short synthetic bar.
-      acc = null;
+      // The session changed, so the accumulated session is complete: emit it as the daily candle.
+      flush();
     }
 
     if (!acc) {
@@ -125,9 +124,9 @@ function aggregateSessionHtfBuckets(
       acc.count += 1;
     }
 
-    flushIfComplete();
   }
 
+  // No trailing flush: the final session is still forming and must never be emitted.
   return buckets;
 }
 
@@ -141,11 +140,15 @@ function aggregateSessionHtfBuckets(
  */
 export function deriveHtfBiasSeries(
   contexts: readonly StrategyMarketContext[],
-  barsPerBucket: number,
   config: IctEngineConfig = defaultIctEngineConfig,
 ): (IctBiasDirection | undefined)[] {
-  const buckets = aggregateSessionHtfBuckets(contexts, barsPerBucket);
-  const htfEngine = new IctCompositeEngine(config);
+  const buckets = aggregateSessionHtfBuckets(contexts);
+  /*
+   * The HTF engine sits at the top of this chain, so it reads its bias from its own swing sequence.
+   * Left on the default it would demand a bias from a level above it, find none, resolve UNKNOWN,
+   * and starve every base bar of the bias pillar -- measured as UNKNOWN on 2,325 of 2,325 bars.
+   */
+  const htfEngine = new IctCompositeEngine({ ...config, biasSource: "OWN_STRUCTURE" });
   const htfCandles = buckets.map((b) => b.candle);
   const bucketBias: { closeTime: Date; bias: IctBiasDirection }[] = buckets.map((bucket, i) => {
     const snap = htfEngine.processCandle(htfCandles, i);
@@ -168,13 +171,6 @@ export function deriveHtfBiasSeries(
   return series;
 }
 
-function resolveBarsPerBucket(contexts: readonly StrategyMarketContext[], options: DecorateIctOptions): number | null {
-  if (options.htfBarsPerBucket !== undefined) return options.htfBarsPerBucket;
-  const timeframe = contexts[0]?.candle.timeframe;
-  if (!timeframe) return null;
-  return BARS_PER_60M_BUCKET[timeframe] ?? null;
-}
-
 /**
  * Computes the composite ICT snapshot for every context, in order.
  *
@@ -186,10 +182,12 @@ export function computeIctSnapshotsForContexts(
   options: DecorateIctOptions = {},
 ): IctStateCompositeSnapshot[] {
   const config = options.config ?? defaultIctEngineConfig;
-  const barsPerBucket = resolveBarsPerBucket(contexts, options);
-  const htfBiasSeries = barsPerBucket === null
-    ? new Array<IctBiasDirection | undefined>(contexts.length).fill(undefined)
-    : deriveHtfBiasSeries(contexts, barsPerBucket, config);
+  /*
+   * Always daily. A run whose window holds fewer than two sessions produces no complete daily
+   * bucket, so every bar gets `undefined`, `coverage.htf` is NOT_COVERED and the four-pillar gate
+   * fails closed -- which is the honest outcome for a window too short to carry a daily bias.
+   */
+  const htfBiasSeries = deriveHtfBiasSeries(contexts, config);
 
   const engine = new IctCompositeEngine(config);
   const causalCandles = contexts.map(contextToCausalCandle);

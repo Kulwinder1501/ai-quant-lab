@@ -24,7 +24,19 @@ export interface IctStructureSnapshot {
   readonly chochLevel: number | null;
   readonly internalVsExternal: "INTERNAL" | "EXTERNAL";
   readonly lastEvent: StructureEvent | null;
-  readonly confirmedPivots: readonly ConfirmedPivot[];
+  /**
+   * How many pivots are confirmed so far -- a count, not the list.
+   *
+   * The snapshot used to carry the whole pivot history. That was wrong three ways: it was handed out
+   * by reference so a stored snapshot kept mutating; copying it instead made storage O(bars x pivots)
+   * and OOM'd a 10,405-bar run at a 4GB heap; and the composite snapshot is JSON-serialised into
+   * `ict_state_snapshots`, so every persisted row carried the entire history as JSON.
+   *
+   * The only snapshot consumer needed a count (`structureWarmed`). The liquidity resolver needs the
+   * real pivots, but only during the bar being computed, so it receives them as an argument from
+   * `IctStructureTracker.confirmedPivotsView()` and never retains them.
+   */
+  readonly confirmedPivotCount: number;
 }
 
 export interface MergedCandle extends CausalCandle {
@@ -91,9 +103,38 @@ export class IctStructureTracker {
   private lastInternalHigh: ConfirmedPivot | null = null;
   private confirmedPivots: ConfirmedPivot[] = [];
 
-  constructor(private readonly pivotLength: number = 3) {}
+  constructor(
+    private readonly pivotLength: number = 3,
+  ) {}
 
-  processCandle(candles: readonly CausalCandle[], currentIndex: number): IctStructureSnapshot {
+  /**
+   * The live confirmed-pivot list, for consumers running inside the current bar.
+   *
+   * Deliberately not part of the snapshot: callers must use it and drop it, never store it. The
+   * liquidity resolver is the only consumer.
+   */
+  confirmedPivotsView(): readonly ConfirmedPivot[] {
+    return this.confirmedPivots;
+  }
+
+  processCandle(
+    candles: readonly CausalCandle[],
+    currentIndex: number,
+    /**
+     * A prior-day level swept on this bar, if any.
+     *
+     * Lecture 5's substitution rule: when previous-day high/low liquidity has been grabbed and the
+     * reversal is being planned, the first swing on the left is labelled **CHoCH, not IDM**. That
+     * relabel is the mechanism -- it flips the directional frame so the swept low can be bought,
+     * and the lecture is explicit the trend has not really changed
+     * ("एक्चुअल में ट्रेंड चेंज नहीं हुआ है"): the trader flips frame deliberately, because the
+     * market works off liquidity rather than off order blocks.
+     *
+     * Without it the tracker always assigns that pivot as IDM, keeps the old trend, and the
+     * doctrine's canonical entry can never form.
+     */
+    sweptPriorDayLevel?: "PDH" | "PDL",
+  ): IctStructureSnapshot {
     let currentEvent: StructureEvent | null = null;
     const current = candles[currentIndex];
     const pivots = findConfirmedPivotAt(candles, currentIndex, this.pivotLength);
@@ -103,7 +144,10 @@ export class IctStructureTracker {
       this.confirmedPivots.push(pivots.low);
       this.lastInternalLow = pivots.low;
       if (this.trend === "BULLISH" && this.unconfirmedHigh) {
-        if (!this.activeIdm || pivots.low.index > this.activeIdm.index) {
+        if (sweptPriorDayLevel === "PDH") {
+          // Relabelled: breaking this low now flips the trend rather than merely confirming IDM.
+          this.lastHL = pivots.low;
+        } else if (!this.activeIdm || pivots.low.index > this.activeIdm.index) {
           this.activeIdm = pivots.low;
         }
       } else if (this.trend === "NEUTRAL") {
@@ -117,7 +161,11 @@ export class IctStructureTracker {
       this.confirmedPivots.push(pivots.high);
       this.lastInternalHigh = pivots.high;
       if (this.trend === "BEARISH" && this.unconfirmedLow) {
-        if (!this.activeIdm || pivots.high.index > this.activeIdm.index) {
+        if (sweptPriorDayLevel === "PDL") {
+          // The lecture-5 case: prior-day low swept, so this first left swing high becomes the
+          // CHoCH level. Breaking it flips the frame bullish; entry is the pullback to a POI.
+          this.lastLH = pivots.high;
+        } else if (!this.activeIdm || pivots.high.index > this.activeIdm.index) {
           this.activeIdm = pivots.high;
         }
       } else if (this.trend === "NEUTRAL") {
@@ -305,7 +353,7 @@ export class IctStructureTracker {
       chochLevel: this.trend === "BULLISH" ? (this.lastHL?.price ?? null) : (this.lastLH?.price ?? null),
       internalVsExternal: this.activeIdm !== null ? "INTERNAL" : "EXTERNAL",
       lastEvent: currentEvent,
-      confirmedPivots: this.confirmedPivots,
+      confirmedPivotCount: this.confirmedPivots.length,
     };
   }
 }

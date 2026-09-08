@@ -10,6 +10,8 @@ import {
   strategyExecutableSides,
   strategyKeys,
   strategySupportsTimeframe,
+  ictContextTimeframes,
+  ictContextConsumedAt,
 } from "./strategy-registry.js";
 
 describe("strategy registry", () => {
@@ -184,5 +186,37 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
         .map((strategy) => strategy.registration.strategyKey);
       expect(owners, timeframe).toEqual(["trend-breakout"]);
     }
+  });
+});
+
+describe("ICT context consumption", () => {
+  it("reports exactly the timeframes of the strategies that declare they read it", () => {
+    // Derived, not listed. If it were listed it could drift from the consumer's own
+    // supportedTimeframes, which is how the repository ends up computing a snapshot nobody reads.
+    const declared = registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes);
+    expect(ictContextTimeframes()).toEqual([...new Set<string>(declared)].sort());
+  });
+
+  it("excludes 1m, where nothing reads ICT", () => {
+    // The measured waste this gate exists for: 7,512 ict_state_snapshots rows at 1m, computed and
+    // persisted by the writable context path and read by nothing.
+    expect(ictContextConsumedAt("1m")).toBe(false);
+    expect(ictContextConsumedAt("3m")).toBe(false);
+    expect(ictContextConsumedAt("1d")).toBe(false);
+  });
+
+  it("includes the timeframes the ICT strategy actually supports", () => {
+    expect(ictContextConsumedAt("5m")).toBe(true);
+    expect(ictContextConsumedAt("15m")).toBe(true);
+  });
+
+  it("stops consuming a timeframe when the only consumer stops reading ICT", () => {
+    // Guards the gate against the failure that matters in the other direction: a future strategy
+    // that reads ICT at a new timeframe must widen the set by declaring it, and nothing else.
+    const consumers = registeredStrategies.filter((s) => s.readsIctContext === true);
+    expect(consumers).toHaveLength(1);
+    expect(consumers[0].registration.strategyKey).toBe("ict-structure-v1");
   });
 });

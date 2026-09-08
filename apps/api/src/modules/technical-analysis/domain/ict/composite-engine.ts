@@ -25,7 +25,8 @@ export class IctCompositeEngine {
     this.structTracker = new IctStructureTracker(config.pivotLength);
     this.zoneLedger = new IctZoneLedger(
       config.obDisplacementBodyAtrMultiple,
-      config.obMeanThresholdFraction
+      config.obMeanThresholdFraction,
+      config.invertedBlocksRemainPoi
     );
     this.sessionTracker = new IctSessionLevelTracker();
     this.biasTracker = new IctBiasTracker();
@@ -39,10 +40,23 @@ export class IctCompositeEngine {
     htfBias?: IctBiasDirection
   ): IctStateCompositeSnapshot {
     const current = candles[currentIndex];
-    const struct = this.structTracker.processCandle(candles, currentIndex);
-    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
+    /*
+     * Session levels resolve FIRST now, because structure needs to know whether a prior-day level
+     * was swept on this bar -- lecture 5's CHoCH-for-IDM substitution depends on it. The session
+     * tracker takes only (candles, index) and never read structure, so the reorder is safe.
+     *
+     * Gated on `barIndex === currentIndex`: the substitution applies to the swing formed at the
+     * sweep, not to every bar for the rest of the session after one.
+     */
     const sessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
-    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels);
+    const sweep = sessionLevels.lastSweepEvent;
+    const sweptPriorDayLevel = sweep && sweep.eventType === "SWEEP" && sweep.barIndex === currentIndex
+      ? sweep.levelType
+      : undefined;
+    const struct = this.structTracker.processCandle(candles, currentIndex, sweptPriorDayLevel);
+    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
+    // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
+    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias);
 
     // HTF bias is a separate (fractal) pillar. It is carried alongside the local
     // bias and never overwrites its value: overwriting left the reason codes
@@ -53,14 +67,15 @@ export class IctCompositeEngine {
       bias,
       struct,
       zones,
-      sessionLevels
+      sessionLevels,
+      this.structTracker.confirmedPivotsView()
     );
 
     // Coverage is evidence sufficiency, carried independently of directional
     // value (invariant: UNKNOWN != NEUTRAL). NEUTRAL is a value the engine
     // reached on sufficient evidence and stays COMPLETE so it can reach the
     // gate; only absent/incomplete/ambiguous evidence is UNKNOWN/NOT_COVERED.
-    const structureWarmed = struct.confirmedPivots.length > 0;
+    const structureWarmed = struct.confirmedPivotCount > 0;
     const coverage: PillarCoverage = {
       structure: structureWarmed ? "COMPLETE" : "UNKNOWN",
       zones: currentIndex >= 2 ? "COMPLETE" : "UNKNOWN",

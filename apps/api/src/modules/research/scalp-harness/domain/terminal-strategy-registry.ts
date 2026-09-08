@@ -142,6 +142,45 @@ const PATTERN_V4_TERMINAL_REASON =
 const INDEX_V3_TERMINAL_REASON =
   "horizon sweep returned NO_VIABLE_HORIZON; both width and holding period exhausted";
 /** The three v1-schema definitions share one history, so they share one reason string. */
+/*
+ * V5 and V6 both derive their definition hash from the *live* `momentum-scalp` configuration and
+ * from the checksum of `momentum-scalp-strategy.ts`. The operational twin changed underneath them
+ * when it was bumped to V4 (atrStopMultiple 1.0 -> 1.5, rewardRiskMultiple 1.5 -> 2.0), so both
+ * hashes moved and the pins stopped matching.
+ *
+ * Repinning is the wrong repair and `assertRegisteredAndUnchanged` says so: a cohort that silently
+ * changes geometry mid-flight stops meaning what it meant, and its accumulated rows become a
+ * mixture of two different experiments. SUPERSEDED is the honest status -- neither cohort concluded
+ * anything, and neither carries evidence for or against the idea. The inquiry continues as V7 under
+ * a new key, against the V4 geometry, from zero.
+ */
+const MOMENTUM_TWIN_V4_SUPERSEDED_REASON =
+  'replaced when the operational twin momentum-scalp was bumped to V4 (atrStopMultiple 1.0 -> 1.5, '
+  + 'rewardRiskMultiple 1.5 -> 2.0), which moved both the declared configuration and the '
+  + 'implementation checksum the pin covers; the cohort cannot span two geometries, so it carries '
+  + 'no evidence for or against the idea and continues as momentum-v7-research';
+
+/*
+ * The same handle, turned a second time, in the opposite direction.
+ *
+ * V7/V8 were opened against the V4 geometry. V4 was withdrawn on 2026-09-08 after its only live
+ * session (11 trades, 0 wins) and the operational twin was rolled back to V5, restoring v3's
+ * atrStopMultiple 1.0 and rewardRiskMultiple 1.5. That moved the declared configuration and the
+ * implementation checksum the pin covers, exactly as the V4 bump did.
+ *
+ * A rollback is a geometry change like any other. It is tempting to argue that V9 merely resumes
+ * V5's cohort -- same declared geometry, after all -- but the two are separated by a real
+ * implementation checksum, and pooling across that gap would rebuild the mixture the pin exists to
+ * prevent. Same geometry is not the same strategy. V7/V8 concluded nothing and carry no evidence
+ * either way; the inquiry continues as V9/V10 from zero.
+ */
+const MOMENTUM_TWIN_V5_ROLLBACK_SUPERSEDED_REASON =
+  'replaced when the operational twin momentum-scalp was rolled back to V5 (atrStopMultiple 1.5 -> '
+  + '1.0, rewardRiskMultiple 2.0 -> 1.5) after V4 was withdrawn, which moved both the declared '
+  + 'configuration and the implementation checksum the pin covers; the cohort cannot span two '
+  + 'geometries, so it carries no evidence for or against the idea and continues as '
+  + 'momentum-v9-research';
+
 const V1_SCHEMA_SUPERSEDED_REASON =
   "replaced when the feature schema moved from scalp-raw-context-v1 to v2; zero captured proposals, "
   + "so it carries no evidence for or against the idea";
@@ -157,11 +196,12 @@ const V1_SCHEMA_SUPERSEDED_REASON =
 export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
   {
     strategyKey: "momentum-v5-research",
-    operationalStrategyKey: "momentum-scalp",
+    // No adapter any more, so nothing computes a live hash for it to fail against.
+    operationalStrategyKey: null,
     researchVersion: 5,
-    researchStatus: "RESEARCH",
-    productionEligibility: "NOT_YET_ELIGIBLE",
-    closureReason: null,
+    researchStatus: "SUPERSEDED",
+    productionEligibility: "NEVER_ELIGIBLE",
+    closureReason: MOMENTUM_TWIN_V4_SUPERSEDED_REASON,
     pinnedDefinitionHash: "9c4f0cdfd26e15c69308e54c418aca71b116b3ef9757897fb6b5756f868b963b",
     lineage: {
       parentStrategyKey: "momentum-v4-research",
@@ -179,15 +219,116 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
      * exists for or against it.
      */
     strategyKey: "momentum-v6-research",
-    operationalStrategyKey: "momentum-scalp",
+    operationalStrategyKey: null,
     researchVersion: 6,
-    researchStatus: "RESEARCH",
-    productionEligibility: "NOT_YET_ELIGIBLE",
-    closureReason: null,
+    researchStatus: "SUPERSEDED",
+    productionEligibility: "NEVER_ELIGIBLE",
+    closureReason: MOMENTUM_TWIN_V4_SUPERSEDED_REASON,
     pinnedDefinitionHash: "be3163e853b89248eb7cad9a93530d9e1ad366b4a3a41e9ee645c6ab819ea658",
     lineage: {
       parentStrategyKey: "momentum-v5-research",
       parentResearchVersion: 5,
+      parentTerminalReason: null,
+    },
+  },
+  {
+    /*
+     * V5 carried forward against the V4 geometry: same 1m evaluator, same ungated configuration,
+     * same MOMENTUM_CONTINUATION family. A new cohort from zero, not a continuation of V5's rows.
+     */
+    strategyKey: "momentum-v7-research",
+    // No adapter any more, so nothing computes a live hash for it to fail against.
+    operationalStrategyKey: null,
+    researchVersion: 7,
+    researchStatus: "SUPERSEDED",
+    productionEligibility: "NEVER_ELIGIBLE",
+    closureReason: MOMENTUM_TWIN_V5_ROLLBACK_SUPERSEDED_REASON,
+    pinnedDefinitionHash: "713a7eed5e81e90cbce5382804343bed60598c07f900a51802225ddc40bff445",
+    lineage: {
+      parentStrategyKey: "momentum-v5-research",
+      parentResearchVersion: 5,
+      // V5 is SUPERSEDED, not TERMINAL: it concluded nothing, so there is no verdict to carry.
+      parentTerminalReason: null,
+    },
+  },
+  {
+    /*
+     * V6 carried forward: V7 with the closed 5m context recorded alongside each 1m decision. Same
+     * sibling relationship V6 had to V5, so the "does slower-timeframe information discriminate?"
+     * question continues rather than being abandoned. V6's 46 rows over two sessions answered it
+     * neither way, so nothing is lost but the accumulation.
+     */
+    strategyKey: "momentum-v8-research",
+    // No adapter any more, so nothing computes a live hash for it to fail against.
+    operationalStrategyKey: null,
+    researchVersion: 8,
+    researchStatus: "SUPERSEDED",
+    productionEligibility: "NEVER_ELIGIBLE",
+    closureReason: MOMENTUM_TWIN_V5_ROLLBACK_SUPERSEDED_REASON,
+    pinnedDefinitionHash: "3536638968a1bb860c0d747587d5a0f898300f154eac928dc1f195fc6e146c03",
+    lineage: {
+      parentStrategyKey: "momentum-v6-research",
+      parentResearchVersion: 6,
+      parentTerminalReason: null,
+    },
+  },
+  {
+    /*
+     * V7 carried forward against the rolled-back V5 geometry, and then against V6's higher-timeframe
+     * gate: same 1m evaluator, same ungated configuration, same MOMENTUM_CONTINUATION family. A new
+     * cohort from zero, not a continuation of V7's rows -- and deliberately not a resumption of V5's
+     * either, though V5 ran on the same declared geometry, because an implementation checksum
+     * separates them.
+     *
+     * Note the research configuration keeps `htfConfluenceMode: "REQUIRE_AGREEMENT"` from the
+     * operational default while overriding only `minimumConfidence`. That is intentional: ungating
+     * lifts the *score* filter so the rejected population becomes observable, and the HTF gate is a
+     * structural trigger condition rather than a score, in the same class as the EMA cross and the
+     * RSI band. Zeroing it too would not be an ungated cohort, it would be a different strategy.
+     */
+    strategyKey: "momentum-v9-research",
+    operationalStrategyKey: "momentum-scalp",
+    researchVersion: 9,
+    researchStatus: "RESEARCH",
+    productionEligibility: "NOT_YET_ELIGIBLE",
+    closureReason: null,
+    /*
+     * Repinned, not superseded -- the one case where that is the right repair.
+     *
+     * The pin exists to stop a cohort's *accumulated rows* spanning two geometries. V9 has none: it
+     * was created and repinned inside a single unreleased change set, and the deployed image
+     * predates both, so it has never captured a proposal. Superseding it would leave a permanently
+     * empty V11 behind and make the registry imply V9 measured something it never ran to measure.
+     *
+     * The moment V9 captures one row this stops being available. Anything that moves the
+     * configuration or the checksum after a deploy is a V11, exactly as V4 forced V7 and the V5
+     * rollback forced V9.
+     */
+    pinnedDefinitionHash: "846e7e11fcabb92b9b43227cae4d4e5e155cbd76b6f8930bf53b6b77cb38b9b4",
+    lineage: {
+      parentStrategyKey: "momentum-v7-research",
+      parentResearchVersion: 7,
+      // V7 is SUPERSEDED, not TERMINAL: it concluded nothing, so there is no verdict to carry.
+      parentTerminalReason: null,
+    },
+  },
+  {
+    /*
+     * V8 carried forward: V9 with the closed 5m context recorded alongside each 1m decision. Same
+     * sibling relationship V8 had to V7, so the "does slower-timeframe information discriminate?"
+     * question continues rather than being abandoned.
+     */
+    strategyKey: "momentum-v10-research",
+    operationalStrategyKey: "momentum-scalp",
+    researchVersion: 10,
+    researchStatus: "RESEARCH",
+    productionEligibility: "NOT_YET_ELIGIBLE",
+    closureReason: null,
+    // Repinned with V9, and for the same reason: never deployed, so never accumulated a row.
+    pinnedDefinitionHash: "96033d405788f4ab7a2a2e2817e2a4d4b1996227e79d04c7663d54ee4920ce16",
+    lineage: {
+      parentStrategyKey: "momentum-v8-research",
+      parentResearchVersion: 8,
       parentTerminalReason: null,
     },
   },

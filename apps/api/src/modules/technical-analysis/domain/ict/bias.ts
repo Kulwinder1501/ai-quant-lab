@@ -26,7 +26,21 @@ export class IctBiasTracker {
     candles: readonly CausalCandle[],
     currentIndex: number,
     structure: IctStructureSnapshot,
-    sessionLevels: SessionLevelsSnapshot
+    sessionLevels: SessionLevelsSnapshot,
+    /** Where bias comes from at this level of the fractal chain. See `IctEngineConfig.biasSource`. */
+    biasSource: "HIGHER_TIMEFRAME" | "OWN_STRUCTURE",
+    /**
+     * The higher-timeframe directional read, which is what bias actually IS.
+     *
+     * Source doctrine (lecture 9, "What Is BIAS"): three institutional levels -- monthly (macro),
+     * weekly (intermediate term), daily (short term) -- analysed **monthly to daily**, explicitly
+     * not daily to monthly. Bias is the higher-timeframe narrative; the execution timeframe supplies
+     * structure and liquidity, never the bias.
+     *
+     * Absent (or UNKNOWN) means no higher-timeframe evidence, which resolves to UNKNOWN rather than
+     * NEUTRAL: missing evidence is not a reading of "no direction".
+     */
+    htfBias?: IctBiasDirection
   ): IctBiasSnapshot {
     const current = candles[currentIndex];
     const currentDate = sessionLevels.currentSessionDate;
@@ -73,36 +87,73 @@ export class IctBiasTracker {
     // 2. Derive Bias from Structure + Session Liquidity Sweeps
     let bias: IctBiasDirection = "UNKNOWN";
 
-    // A. Prior Session Level sweep has high predictive weight for day's bias
+    /*
+     * A. A prior-session sweep CONFIRMS the higher-timeframe bias; it never overrides it.
+     *
+     * It used to override, which contradicted the source doctrine and produced a state the engine
+     * should not hold. Lecture 5 is explicit that a sweep's meaning depends on the trend: with the
+     * trend, a swept prior-day low gives the full move to the prior-day high ("हाई का पूरा टारगेट
+     * है"); against the trend, the same sweep gives only a pop to the nearest untapped POI before
+     * the trend resumes. So a bullish sweep under a bearish higher timeframe is not a long -- and
+     * letting it set bias BULLISH made exactly that claim.
+     */
     const sweep = sessionLevels.lastSweepEvent;
-    if (sweep && sweep.eventType === "SWEEP") {
-      if (sweep.levelType === "PDL") {
-        bias = "BULLISH";
-        reasons.push("Prior Day Low (SSL) swept and reclaimed -> Bullish expansion expected");
-      } else if (sweep.levelType === "PDH") {
-        bias = "BEARISH";
-        reasons.push("Prior Day High (BSL) swept and rejected -> Bearish expansion expected");
-      }
+    const sweptDirection: IctBiasDirection | null = sweep && sweep.eventType === "SWEEP"
+      ? (sweep.levelType === "PDL" ? "BULLISH" : sweep.levelType === "PDH" ? "BEARISH" : null)
+      : null;
+
+    if (sweptDirection !== null && sweptDirection === htfBias) {
+      bias = sweptDirection;
+      const level = sweptDirection === "BULLISH" ? "Prior Day Low (SSL)" : "Prior Day High (BSL)";
+      reasons.push(`${level} swept with the higher-timeframe ${htfBias} bias -> full expansion expected`);
+    } else if (sweptDirection !== null) {
+      // Recorded, not acted on: a counter-trend sweep is a scalp back to the nearest POI, which
+      // this strategy does not trade. Bias stays with the higher timeframe below.
+      reasons.push(`Counter-trend ${sweptDirection} sweep against higher-timeframe bias -> not a reversal`);
     }
 
-    // B. If no active sweep event, defer to confirmed structural trend
+    /*
+     * B. Otherwise the higher-timeframe read IS the bias.
+     *
+     * This used to fall back to `structure.trend` -- the confirmed trend on the *execution*
+     * timeframe. That made the bias pillar a restatement of the structure pillar, and the strategy
+     * then gated on the two agreeing, so the gate could not reject anything: measured over 45 days
+     * it passed 405 of 405 pillar-aligned BANKNIFTY bars and 646 of 646 on NIFTY50. Two of the four
+     * pillars were one measurement.
+     *
+     * Sourcing bias from the higher timeframe is both what the doctrine says and what makes
+     * `bias vs structure.trend` an independent test: a higher-timeframe uptrend against a local
+     * downtrend is now a refusal instead of a tautology.
+     */
     if (bias === "UNKNOWN") {
-      if (structure.trend === "BULLISH") {
-        bias = "BULLISH";
-        reasons.push("Confirmed Bullish Market Structure (BOS/HH/HL)");
-      } else if (structure.trend === "BEARISH") {
-        bias = "BEARISH";
-        reasons.push("Confirmed Bearish Market Structure (BOS/LH/LL)");
-      } else if (dailyTemplate === "UNKNOWN") {
-        // No sweep, no structural trend, and too little session history to
-        // resolve the intraday path: evidence is absent, not directionless.
-        bias = "UNKNOWN";
-        reasons.push("Insufficient session history to resolve path or structure -> bias unknown");
-      } else {
-        // The session path has formed and structure is genuinely ranging: the
-        // engine ran on sufficient evidence and found no directional edge.
+      if (biasSource === "OWN_STRUCTURE") {
+        /*
+         * Top of the fractal chain. Here the swing sequence *is* the price-action read -- lecture 9
+         * derives the macro bias from the monthly's own highs and lows ("प्राइस एक्शन बुलिश हाई लो
+         * हाई लो") and carries it down. Reading structure at THIS level is correct; reading it at the
+         * execution level is the circularity this option exists to separate.
+         */
+        if (structure.trend === "BULLISH" || structure.trend === "BEARISH") {
+          bias = structure.trend;
+          reasons.push(`Own swing sequence is ${structure.trend} (top of the fractal chain)`);
+        } else if (dailyTemplate === "UNKNOWN") {
+          bias = "UNKNOWN";
+          reasons.push("Insufficient history to resolve the price-action read -> bias unknown");
+        } else {
+          bias = "NEUTRAL";
+          reasons.push("Price-action read is ranging -> no directional edge");
+        }
+      } else if (htfBias === "BULLISH" || htfBias === "BEARISH") {
+        bias = htfBias;
+        reasons.push(`Higher-timeframe bias is ${htfBias} (monthly-to-daily narrative)`);
+      } else if (htfBias === "NEUTRAL") {
+        // The higher timeframe was resolved and carries no direction. Evidence present, edge absent.
         bias = "NEUTRAL";
-        reasons.push("Session path formed but structure is ranging -> no directional edge");
+        reasons.push("Higher-timeframe read is directionless -> no bias");
+      } else {
+        // Absent or UNKNOWN. Fails closed: the pillar is uncovered, not neutral.
+        bias = "UNKNOWN";
+        reasons.push("No higher-timeframe evidence available -> bias unknown");
       }
     }
 

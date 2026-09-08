@@ -929,4 +929,87 @@ describe("EvaluateOpenPaperTrades", () => {
     expect(result.tradesClosed).toBe(1);
     expect(closings[0]).toMatchObject({ exitReason: "MOMENTUM_STALL", exitPrice: 185 });
   });
+
+  /*
+   * 1m, enabled by request against its own measurement.
+   *
+   * The 2026-09-07 sweep found the rule negative in 41 of 45 cells on the cohort this governs, so
+   * these tests pin *behaviour*, not benefit. They exist so that turning 1m back off is a visible,
+   * deliberate edit rather than a silent regression -- deleting the `1m` policy fails the first of
+   * them, which is the whole point of writing it down.
+   */
+  it("stalls a 1m scalp on the same cutoff, because 1m now carries a policy", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "1m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      targetPrice: 225, // 1.5R, inside the scalp band -- the V5 geometry
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitReason: "MOMENTUM_STALL",
+      exitPrice: 185,
+      // The timeframe is stamped so a 1m stall stays separable from a 5m one in the booked record.
+      // They rest on different evidence and must never be pooled when the rule is next measured.
+      details: expect.objectContaining({ timeframe: "1m", cutoffMinutes: 10, minimumProgressR: 0.5 }),
+    });
+  });
+
+  /*
+   * The table is an allowlist, not a default.
+   *
+   * A timeframe with no policy has no stall, so a new one stays opted out until someone measures
+   * it. Without this, widening the rule from `=== "5m"` to a lookup could quietly have swept in
+   * every swing timeframe the book trades.
+   */
+  it("does not stall a 15m position, which carries no policy", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "15m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225, // 1.5R: a scalp by geometry, so only the missing policy holds it
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toEqual([]);
+  });
 });

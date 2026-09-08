@@ -44,7 +44,7 @@ describe("IctBiasTracker", () => {
     for (let i = 0; i < candles.length; i++) {
       const sStruct = structTracker.processCandle(candles, i);
       const sSession = sessionTracker.processCandle(candles, i);
-      snap = biasTracker.processCandle(candles, i, sStruct, sSession);
+      snap = biasTracker.processCandle(candles, i, sStruct, sSession, "OWN_STRUCTURE");
     }
 
     expect(snap.dailyTemplate).toBe("OLHC");
@@ -65,13 +65,13 @@ describe("IctBiasTracker", () => {
     for (let i = 0; i < candles.length; i++) {
       const sStruct = structTracker.processCandle(candles, i);
       const sSession = sessionTracker.processCandle(candles, i);
-      snap = biasTracker.processCandle(candles, i, sStruct, sSession);
+      snap = biasTracker.processCandle(candles, i, sStruct, sSession, "OWN_STRUCTURE");
     }
 
     expect(snap.dailyTemplate).toBe("OHLC");
   });
 
-  it("prioritizes SSL sweep of PDL into Bullish bias", () => {
+  it("treats a PDL sweep as confirmation of the higher-timeframe bias, not a source of it", () => {
     const biasTracker = new IctBiasTracker();
     const structTracker = new IctStructureTracker(2);
     const sessionTracker = new IctSessionLevelTracker();
@@ -81,16 +81,34 @@ describe("IctBiasTracker", () => {
     ];
     let sStruct = structTracker.processCandle(candles, 0);
     let sSession = sessionTracker.processCandle(candles, 0);
-    biasTracker.processCandle(candles, 0, sStruct, sSession);
+    biasTracker.processCandle(candles, 0, sStruct, sSession, "OWN_STRUCTURE");
 
     // Day 2 Bar 1: Sweeps PDL (95) with Low 93, but closes 97 (SWEEP)
     candles.push(makeIstCandle("2026-01-06", 9, 15, 98, 99, 93, 97));
     sStruct = structTracker.processCandle(candles, 1);
     sSession = sessionTracker.processCandle(candles, 1);
-    const snap = biasTracker.processCandle(candles, 1, sStruct, sSession);
+    /*
+     * Sweep alone, with no higher-timeframe read: UNKNOWN, not BULLISH.
+     *
+     * Bias is the higher-timeframe narrative (lecture 9: monthly -> weekly -> daily). A sweep is a
+     * confirmation event on the execution timeframe; on its own it is not evidence of direction, and
+     * missing evidence fails closed rather than resolving to NEUTRAL.
+     */
+    const noHtf = biasTracker.processCandle(candles, 1, sStruct, sSession, "OWN_STRUCTURE");
+    expect(noHtf.bias).toBe("UNKNOWN");
 
-    expect(snap.bias).toBe("BULLISH");
-    expect(snap.reasons[0]).toContain("Prior Day Low (SSL) swept");
+    // Sweep AGREEING with a bullish higher timeframe: confirmed, full expansion expected.
+    const agreeing = biasTracker.processCandle(candles, 1, sStruct, sSession, "HIGHER_TIMEFRAME", "BULLISH");
+    expect(agreeing.bias).toBe("BULLISH");
+    expect(agreeing.reasons[0]).toContain("swept with the higher-timeframe BULLISH bias");
+
+    // Sweep AGAINST a bearish higher timeframe: recorded, but bias stays bearish. Lecture 5 -- a
+    // counter-trend sweep is a pop to the nearest POI, not a reversal.
+    const against = biasTracker.processCandle(candles, 1, sStruct, sSession, "HIGHER_TIMEFRAME", "BEARISH");
+    expect(against.bias).toBe("BEARISH");
+    expect(against.reasons.join(" ")).toContain("Counter-trend BULLISH sweep");
+
+    const snap = agreeing;
     expect(snap.dealingRange?.equilibrium).toBe(102.5); // (110 + 95)/2
     expect(snap.dealingRange?.isDiscount(97)).toBe(true);
     expect(snap.dealingRange?.isPremium(105)).toBe(true);

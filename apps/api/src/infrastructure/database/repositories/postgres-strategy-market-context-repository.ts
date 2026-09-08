@@ -9,6 +9,7 @@ import type {
   StrategyMarketContext,
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
+import { ictContextConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
 import {
   deriveVolatilityRegime,
   regimeSourceIndicatorAlgorithmVersion,
@@ -87,6 +88,8 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
 }
 
 /** Reads only completed-candle evidence, so strategy decisions cannot use a forming bar. */
+let ictPersistGrantWarned = false;
+
 export class PostgresStrategyMarketContextRepository implements StrategyMarketContextRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
@@ -172,6 +175,41 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     }
 
     if (snapshot) {
+      /*
+       * The persist is a lazy cache-fill, not the result. `scalp_research_writer` holds SELECT and
+       * only SELECT on this table by design (migration 076), so the research harness -- which calls
+       * `assembleContext` on the same path -- died with 42501 on every decision point and took the
+       * whole capture tick down with it.
+       *
+       * Only a missing write grant is tolerated, and only around the write. Anything else rethrows:
+       * a malformed payload or a broken constraint is a real defect and must not be swallowed. The
+       * computed snapshot is returned either way, so a reader without write access still gets the
+       * correct ICT context -- it just does not get to populate the cache for everyone else.
+       */
+      try {
+        await this.persistIctSnapshot(input, snapshot);
+      } catch (error) {
+        if ((error as { code?: string } | null)?.code !== "42501") throw error;
+        if (!ictPersistGrantWarned) {
+          ictPersistGrantWarned = true;
+          console.warn(JSON.stringify({
+            level: "warn",
+            message: "No write grant on ict_state_snapshots; computing ICT context without caching it",
+            hint: "Expected for the least-privilege scalp research role. Grant INSERT only if this "
+              + "role is meant to populate the cache, which would widen migration 076's boundary.",
+          }));
+        }
+      }
+    }
+
+    return snapshot;
+  }
+
+  private async persistIctSnapshot(
+    input: { instrumentId: string; timeframe: string },
+    snapshot: IctStateCompositeSnapshot,
+  ): Promise<void> {
+    {
       await this.database.query(`
         INSERT INTO ict_state_snapshots (
           instrument_id, timeframe, engine_version, config_hash,
@@ -199,8 +237,6 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         JSON.stringify(snapshot),
       ]);
     }
-
-    return snapshot;
   }
 
   /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
@@ -293,6 +329,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     candle: CompletedCandleRow,
   ): Promise<StrategyMarketContext> {
     const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    const ictConsumed = ictContextConsumedAt(input.timeframe);
     const [indicators, patterns, priceActionEvents, ictSnapshotRows] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
@@ -329,21 +366,27 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id]),
-      this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
-        SELECT snapshot_payload
-        FROM ict_state_snapshots
-        WHERE instrument_id = $1
-          AND timeframe = $2
-          AND bar_time = $3
-          AND engine_version = $4
-          AND config_hash = $5
-      `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash]),
+      /*
+       * Skipped outright at a timeframe no registered strategy reads ICT at -- not queried and then
+       * discarded. There is nothing to find there, and the miss would send us on to compute it.
+       */
+      ictConsumed
+        ? this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
+            SELECT snapshot_payload
+            FROM ict_state_snapshots
+            WHERE instrument_id = $1
+              AND timeframe = $2
+              AND bar_time = $3
+              AND engine_version = $4
+              AND config_hash = $5
+          `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash])
+        : Promise.resolve({ rows: [] as { snapshot_payload: IctStateCompositeSnapshot }[] }),
     ]);
 
     const regime = await this.findRegime(input, candle) ?? undefined;
 
     let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
-    if (!ictSnapshot) {
+    if (!ictSnapshot && ictConsumed) {
       ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
     }
 

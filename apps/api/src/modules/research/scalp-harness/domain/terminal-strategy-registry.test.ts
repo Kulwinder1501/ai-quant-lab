@@ -51,9 +51,13 @@ describe("the shipped registry", () => {
     expect([...researchStrategyRegistry.map((e) => e.strategyKey)].sort()).toEqual([
       "index-v2-research",
       "index-v3-research",
+      "momentum-v10-research",
       "momentum-v4-research",
       "momentum-v5-research",
       "momentum-v6-research",
+      "momentum-v7-research",
+      "momentum-v8-research",
+      "momentum-v9-research",
       "pattern-v3-research",
       "pattern-v4-research",
       "pattern-v4-research-v2",
@@ -214,7 +218,7 @@ describe("guarding the running strategies", () => {
      * leaves every one of those checksums intact while redefining what the accumulating cohort
      * measures. The definition hash moves, so this catches it.
      */
-    const tuned = { ...definitionOf("momentum-v5-research"), strategyDefinitionHash: "b".repeat(64) };
+    const tuned = { ...definitionOf("momentum-v9-research"), strategyDefinitionHash: "b".repeat(64) };
 
     expect(() => assertRegisteredAndUnchanged(tuned)).toThrow(StrategyRegistryError);
     expect(() => assertRegisteredAndUnchanged(tuned)).toThrow(/edited in place/);
@@ -223,18 +227,19 @@ describe("guarding the running strategies", () => {
   });
 
   it("refuses an unregistered strategy", () => {
-    // momentum-v6-research became a real registered strategy, so the "unknown" fixture moves to the
-    // next unclaimed key. Anything absent from the registry serves; the point is that a key with no
-    // entry is refused rather than silently captured.
-    const unknown = { ...definitionOf("momentum-v5-research"), strategyKey: "momentum-v7-research" };
+    // momentum-v9-research and -v10 became real registered strategies when the twin was rolled back,
+    // so the "unknown" fixture moves again to the next unclaimed key. Anything absent from the
+    // registry serves; the point is that a key with no entry is refused rather than silently
+    // captured.
+    const unknown = { ...definitionOf("momentum-v9-research"), strategyKey: "momentum-v11-research" };
 
     expect(() => assertRegisteredAndUnchanged(unknown)).toThrow(/not in the Terminal Strategy Registry/);
   });
 
   it("refuses a version the registry does not have live", () => {
-    const rewound = { ...definitionOf("momentum-v5-research"), researchVersion: 4 };
+    const rewound = { ...definitionOf("momentum-v9-research"), researchVersion: 8 };
 
-    expect(() => assertRegisteredAndUnchanged(rewound)).toThrow(/registered at 5/);
+    expect(() => assertRegisteredAndUnchanged(rewound)).toThrow(/registered at 9/);
   });
 });
 
@@ -244,7 +249,7 @@ describe("terminal strategies default to disabled", () => {
 
     expect([...selection.disabled].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect(selection.active.map((a) => a.definition.strategyKey).sort())
-      .toEqual(["momentum-v5-research", "momentum-v6-research", "pattern-v4-research-v2"]);
+      .toEqual(["momentum-v10-research", "momentum-v9-research", "pattern-v4-research-v2"]);
     expect(selection.benchmarkActivated).toEqual([]);
   });
 

@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 
-export const ICT_STATE_ENGINE_VERSION = "ict-state-v1";
+/*
+ * v2: the liquidity objective changed from the nearest ERL above/below price to the farthest one
+ * beyond equilibrium. Bumped rather than left alone because `ict_state_snapshots` is keyed on
+ * (instrument, timeframe, bar_time, engine_version, config_hash) -- and the selection lives in
+ * `liquidity.ts`, not in `IctEngineConfig`, so the config hash does NOT move with it. Without the
+ * bump, 12,622 rows of v1 geometry would keep being served under the same key as new v2 rows and
+ * the table would silently hold two incompatible geometries.
+ */
+export const ICT_STATE_ENGINE_VERSION = "ict-state-v2";
 export const ICT_STRUCTURE_STRATEGY_KEY = "ict-structure-v1";
 
 export interface IctEngineConfig {
@@ -13,6 +21,32 @@ export interface IctEngineConfig {
   readonly dealingRangeMinAtrMultiple: number;
   readonly maxSignalAgeBars: number;
   readonly maxUnderlyingDriftBps: number;
+  /**
+   * Where this engine instance gets its directional bias -- which depends on where it sits in the
+   * fractal chain, so it cannot be a global rule.
+   *
+   * `HIGHER_TIMEFRAME` (default, the execution level): bias must be supplied by the caller from a
+   * higher timeframe. Reading it from this level's own structure is what made the bias pillar a
+   * restatement of the structure pillar.
+   *
+   * `OWN_STRUCTURE` (the top of the chain): the swing sequence at this level IS the price-action
+   * read, per lecture 9 -- the monthly's own highs and lows establish the macro bias, which is then
+   * carried down. Without this the chain never terminates and every level resolves to UNKNOWN.
+   */
+  readonly biasSource: "HIGHER_TIMEFRAME" | "OWN_STRUCTURE";
+  /**
+   * Whether a FAILED order block survives as an opposite-side POI.
+   *
+   * Lecture 7 says it does: an order block that price closed through is not dead, it is a mitigation
+   * block (continuation) or a breaker block (reversal), and both are tradeable from the other side.
+   * The engine instead marks it INVALIDATED and prunes it, so the doctrine's second-chance POI has
+   * never existed here.
+   *
+   * Default `false`, which reproduces that pruning exactly. Turning it on ADDS points of interest
+   * that never previously existed, so it is a behaviour change and is measured as one rather than
+   * shipped as a bug fix.
+   */
+  readonly invertedBlocksRemainPoi: boolean;
 }
 
 export const defaultIctEngineConfig: IctEngineConfig = {
@@ -25,6 +59,8 @@ export const defaultIctEngineConfig: IctEngineConfig = {
   dealingRangeMinAtrMultiple: 2.0,
   maxSignalAgeBars: 3,
   maxUnderlyingDriftBps: 25.0, // 25 bps drift tolerance
+  biasSource: "HIGHER_TIMEFRAME",
+  invertedBlocksRemainPoi: false,
 };
 
 export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig): string {
