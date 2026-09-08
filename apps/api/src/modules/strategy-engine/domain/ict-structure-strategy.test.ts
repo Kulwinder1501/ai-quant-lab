@@ -88,9 +88,15 @@ describe("IctStructureStrategy", () => {
     const idea = proposals[0];
     expect(idea.side).toBe("LONG");
     expect(idea.entryPrice).toBe(98);
-    expect(idea.stopLoss).toBe(90);
+    // 90 x 0.9995. The strategy places the stop a 0.05% volatility buffer BEYOND the structural
+    // invalidation rather than exactly on it -- a stop resting on the level is hit by the move that
+    // merely touches it. This assertion predated the buffer.
+    expect(idea.stopLoss).toBeCloseTo(89.955, 3);
     expect(idea.targetPrice).toBe(120);
-    expect(idea.riskReward).toBe(2.75); // (120 - 98) / (98 - 90) = 22 / 8 = 2.75
+    // (120 - 98) / (98 - 89.955) = 22 / 8.045. Follows from the volatility buffer above: the stop
+    // sits past the invalidation, so risk is slightly larger and the ratio slightly lower than the
+    // 2.75 this assertion was written against.
+    expect(idea.riskReward).toBeCloseTo(2.734, 2);
     expect(idea.confidence).toBeGreaterThanOrEqual(0.7);
   });
 

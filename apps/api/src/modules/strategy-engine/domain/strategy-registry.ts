@@ -288,6 +288,30 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     StrategyClass: IctStructureStrategy,
     supportedTimeframes: ["5m", "15m"],
     readsIctContext: true,
+    operationalDisposition: {
+      status: "TERMINAL_UNOWNED",
+      since: "2026-09-08",
+      evidence:
+        "Closed on sign instability, not on a negative mean. Measured after four doctrinal fixes "
+        + "verified against the source lectures (farthest-ERL objective, bias sourced from the "
+        + "higher timeframe rather than local structure, daily HTF anchor, POI discrimination on "
+        + "mean threshold) and after the engine's quadratic state retention was fixed so runs could "
+        + "be continuous rather than chunked. Unchunked, 2bps slippage, concurrency 5: at 15m over "
+        + "20 months NIFTY50 is +18,342 (PF 2.46, 112 trades, 31.3%) while BANKNIFTY is -17,592 "
+        + "(PF 0.74, 184 trades, 13.6%); at 5m over a common continuous window the signs REVERSE, "
+        + "BANKNIFTY +1,175 (PF 1.15, 45 trades) against NIFTY50 -2,951 (PF 0.53, 57 trades). It "
+        + "also flips on window alone: NIFTY50 5m is +1,793 (PF 1.32) over 2026-02-27..09-05 and "
+        + "-2,951 over 2026-06-01..09-05, a SUBSET of that same period. Whichever cell looks "
+        + "profitable is the cell that was selected.",
+      whyStillRegistered:
+        "The four doctrinal fixes and the lecture-by-lecture conformance record are the asset here, "
+        + "not the strategy. Keeping it registered keeps that reasoning attached to running code "
+        + "rather than stranded in a commit message, and the remaining known gaps (fractal cascade, "
+        + "ITH/ITL/STH/STL hierarchy, killzones, CBDR) stay documented against something real. "
+        + "Owned by no bot: absent from every sandbox in bot-sandboxes.ts and referenced by no "
+        + "runner, so registration costs nothing. Do not resume by re-running a positive cell -- any "
+        + "cell can be made positive by moving a different axis.",
+    },
   },
 ];
 
