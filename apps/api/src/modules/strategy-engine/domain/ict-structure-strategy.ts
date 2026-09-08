@@ -7,12 +7,69 @@ import type {
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
 import type { OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
+import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
+
+/**
+ * Which point of interest wins when several are available on the same bar.
+ *
+ * `SWEEP_FIRST` is the incumbent and reaches an order block almost never: measured over
+ * 2025-01-01..2026-09-05 on BANKNIFTY 15m, 1,045 of 1,222 entries came from a fair value gap and
+ * 141 from a session sweep, leaving 36 from a block of any kind. `BLOCK_FIRST` puts the block ahead
+ * of the gap, which is the order the doctrine states.
+ */
+export type IctPoiPreference = "SWEEP_FIRST" | "BLOCK_FIRST";
+
+/**
+ * Killzone windows as IST minutes-of-day, half-open [from, to).
+ *
+ * Fixed in docs/2026-09-08-ict-entry-model-falsification-program.md BEFORE measurement, so they are
+ * not tunable here. The first two are contiguous by construction; together the three admit 225 of a
+ * 375-minute session and exclude 150 (40%).
+ */
+const KILLZONE_WINDOWS: readonly { readonly name: string; readonly from: number; readonly to: number }[] = [
+  { name: "OPEN_DRIVE", from: 9 * 60 + 15, to: 10 * 60 + 15 },
+  { name: "LATE_MORNING", from: 10 * 60 + 15, to: 11 * 60 + 30 },
+  { name: "AFTERNOON", from: 13 * 60, to: 14 * 60 + 30 },
+];
+
+function killzoneAt(instant: Date): string | null {
+  const minute = istMinuteOfDay(instant);
+  for (const w of KILLZONE_WINDOWS) {
+    if (minute >= w.from && minute < w.to) return w.name;
+  }
+  return null;
+}
+
+/**
+ * Whether price sits in the 62-79% retracement of the dealing range -- the optimal trade entry.
+ *
+ * For a long that is the DEEP end of discount: 62-79% back off the range high is 21-38% up from the
+ * range low. Mirrored for a short.
+ *
+ * Registered as `entryPlacement` and implemented as a FILTER, not as placement. See the amendment in
+ * the program document: the backtester enters at the next candle's open and cannot rest a limit
+ * order at a level, so "enter AT the OTE" is not expressible. This asks instead whether the signal
+ * bar is already inside the band, which is a strictly weaker claim.
+ */
+function isWithinOte(price: number, rangeLow: number, rangeHigh: number, isBullish: boolean): boolean {
+  const span = rangeHigh - rangeLow;
+  if (span <= 0) return false;
+  const near = isBullish ? rangeLow + span * 0.21 : rangeLow + span * 0.62;
+  const far = isBullish ? rangeLow + span * 0.38 : rangeLow + span * 0.79;
+  return price >= near && price <= far;
+}
 
 export interface IctStructureStrategyConfiguration {
   minimumRiskReward: number;
   minConfidence: number;
   expiryCandles: number;
   requirePoiReaction: boolean;
+  /** Entry-model arm 1. Defaults to the incumbent order, so an unconfigured run is unchanged. */
+  poiPreference: IctPoiPreference;
+  /** Entry-model arm 2. Restricts entries to the pre-registered killzone windows. */
+  requireKillzone: boolean;
+  /** Entry-model arm 3. Requires the signal bar to sit inside the 62-79% retracement. */
+  requireOte: boolean;
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
@@ -20,6 +77,13 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   minConfidence: 0.7,
   expiryCandles: 3,
   requirePoiReaction: true,
+  /*
+   * All three entry-model arms default OFF, so every arm is exactly one configuration key away from
+   * its own control and a paired same-bar delta is available for Gate 4.
+   */
+  poiPreference: "SWEEP_FIRST",
+  requireKillzone: false,
+  requireOte: false,
 };
 
 export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
@@ -123,6 +187,31 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const reached = (level: number): boolean =>
       isBullish ? barLow <= level : barHigh >= level;
 
+    /*
+     * Entry-model arm 2: killzone.
+     *
+     * Placed AFTER the pillar gates and BEFORE the point-of-interest search, deliberately. A time
+     * window is a property of the bar, not of the setup, so putting it here means the arm and its
+     * control see the same candidate bars and differ only in which of them are admitted -- the
+     * paired comparison Gate 4 asks for. Sited any later and it would be filtering an already
+     * filtered population.
+     */
+    const killzone = killzoneAt(context.candle.openTime);
+    if (config.requireKillzone && killzone === null) return [];
+
+    /*
+     * Entry-model arm 3: optimal trade entry.
+     *
+     * Needs the dealing range, and refuses when there is none rather than passing: an OTE band
+     * without a range is not a wide band, it is an unanswered question.
+     */
+    let oteOk = true;
+    if (config.requireOte) {
+      const range = bias.dealingRange;
+      oteOk = range !== null && isWithinOte(currentPrice, range.rangeLow, range.rangeHigh, isBullish);
+      if (!oteOk) return [];
+    }
+
     let poiExtreme = false;
     let poiIdmAdjacent = false;
     /*
@@ -135,30 +224,52 @@ export class IctStructureStrategy implements StrategyEvaluator {
     let poiKind: OrderBlockKind | "FVG" | "SESSION_SWEEP" | null = null;
 
     if (config.requirePoiReaction) {
-      if (sessionLevels.lastSweepEvent?.eventType === "SWEEP") {
-        poiEvidence = `Session ${sessionLevels.lastSweepEvent.levelType} swept and reclaimed`;
+      /*
+       * Entry-model arm 1: which point of interest wins.
+       *
+       * Both candidates are resolved before either is chosen, so the ordering is the only thing the
+       * arm changes. Resolving them is side-effect free, so `SWEEP_FIRST` remains byte-identical to
+       * the incumbent short-circuit.
+       */
+      const sweptSessionLevel = sessionLevels.lastSweepEvent?.eventType === "SWEEP"
+        ? sessionLevels.lastSweepEvent.levelType
+        : null;
+      /*
+       * Matching on `type` is now correct for both zone kinds: a failed block and an inverted gap
+       * each re-enter the ledger as a NEW zone carrying the flipped type, dated to the bar the
+       * inversion happened on. Reading the mutable `state` to work the side out here would read the
+       * future, because the ledger hands out live zone objects and the backtest builds every
+       * snapshot before replaying any of it.
+       */
+      const ob = zones.activeObs.find((o) => o.type === wantedZone && reached(o.meanThreshold));
+      const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
+
+      const takeBlock = (): boolean => {
+        if (!ob) return false;
+        poiEvidence = `Order Block ${ob.id} traded into its mean threshold ${ob.meanThreshold}`;
+        poiExtreme = ob.isExtreme;
+        poiIdmAdjacent = ob.isIdmAdjacent;
+        poiKind = ob.kind;
+        return true;
+      };
+      const takeGap = (): boolean => {
+        if (!fvg) return false;
+        poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
+        poiKind = "FVG";
+        return true;
+      };
+      const takeSweep = (): boolean => {
+        if (sweptSessionLevel === null) return false;
+        poiEvidence = `Session ${sweptSessionLevel} swept and reclaimed`;
         poiKind = "SESSION_SWEEP";
-      } else {
-        /*
-         * Matching on `type` alone is correct for order blocks -- a failed block re-enters the ledger
-         * as a NEW zone carrying the flipped type -- but it is WRONG for fair value gaps, which are
-         * relabelled in place: a bullish gap that price has closed below still advertises itself as
-         * bullish support here, the reverse of what inversion means. Reading `state` to flip the
-         * side would read the future, because the ledger hands out live zone objects and the
-         * backtest builds every snapshot before replaying any of it. Left as it stands, and recorded
-         * as a defect, rather than papered over with a fix that leaks.
-         */
-        const ob = zones.activeObs.find((o) => o.type === wantedZone && reached(o.meanThreshold));
-        const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
-        if (ob) {
-          poiEvidence = `Order Block ${ob.id} traded into its mean threshold ${ob.meanThreshold}`;
-          poiExtreme = ob.isExtreme;
-          poiIdmAdjacent = ob.isIdmAdjacent;
-          poiKind = ob.kind;
-        } else if (fvg) {
-          poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
-          poiKind = "FVG";
-        }
+        return true;
+      };
+
+      const order = config.poiPreference === "BLOCK_FIRST"
+        ? [takeBlock, takeGap, takeSweep]
+        : [takeSweep, takeBlock, takeGap];
+      for (const take of order) {
+        if (take()) break;
       }
 
       if (!poiEvidence) {
@@ -218,7 +329,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone },
         });
       }
 
@@ -301,7 +412,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone },
         });
       }
 

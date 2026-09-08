@@ -122,3 +122,29 @@ If no arm clears all four gates, the verdict is recorded as **NO_VIABLE_ENTRY_MO
 `ict-structure-v1` stays `TERMINAL_UNOWNED`. The features stay in the tree behind their default-off
 switches, with the measurement attached, so the next person does not rebuild them to re-learn the
 same thing.
+
+## Amendment 1 — 2026-09-08, before any entry-model measurement
+
+**OTE is implemented as a filter, not as placement.** Registered as
+`entryPlacement: "SIGNAL_CLOSE" | "OTE"`, meaning entry AT the 0.62-0.79 retracement. The
+backtester enters at the next candle's open (`NEXT_CANDLE_OPEN`) and has no way to rest a limit
+order at a level, so that is not expressible without changing the execution model — which would
+change every other strategy's runs too, and is out of scope here.
+
+The arm therefore ships as `requireOte: boolean`: admit the bar only if the signal bar's close is
+already inside the band. This is a **strictly weaker** version of the registered hypothesis. It can
+show that trading only from deep discount/premium helps or does not; it cannot show what entering at
+a better price would have done. A pass here would not license the placement claim.
+
+Recorded before any number was seen, per the rule at the top of this document.
+
+**CBDR is not implemented at all.** The registration paired it with killzones as "the reference".
+In the doctrine CBDR supplies standard-deviation projections for TARGETS, which is a target feature,
+not an entry filter — and this arm is an entry filter. `requireKillzone` is purely time-of-day. The
+CBDR proxy registered above is therefore unused, and the CBDR half of feature 2 is **not built and
+not measured**. Anyone reading a killzone result should not read it as a CBDR result.
+
+**Killzone windows admit more than they exclude.** The three registered windows are contiguous in
+their first two, so together they admit 225 minutes of a 375-minute session and exclude 150 (40%).
+Noted because the filter is weaker than the name suggests; the windows are NOT revised, since they
+were registered.
