@@ -22,6 +22,8 @@ import {
   DEFAULT_MAX_BAR_AGE_MINUTES,
 } from "../../modules/paper-trading/domain/bot-data-freshness.js";
 import {
+  liveTradableStrategies,
+  mayProposeLiveTrades,
   registeredStrategies,
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
@@ -46,16 +48,28 @@ import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domai
  *
  * The generator skips a strategy whose `supportedTimeframes` do not include the requested
  * one, and reports nothing -- so a misconfigured timeframe looks exactly like a quiet market.
+ *
+ * "Can trade" means MAY trade. This used to check `registeredStrategies`, which counts strategies
+ * that are registered only so backtests can reach them: 15m passed the check on the strength of
+ * `ict-structure-v1` and `trend-breakout`, both measured out as TERMINAL_UNOWNED. The check was
+ * therefore satisfied by two strategies that must never propose, which is the same green signal over
+ * unexamined ground it exists to prevent.
  */
 function assertScannableTimeframes(timeframes: readonly string[]): void {
+  const tradable = liveTradableStrategies();
   for (const timeframe of timeframes) {
-    const supported = registeredStrategies.some((strategy) => strategySupportsTimeframe(strategy, timeframe));
+    const supported = tradable.some((strategy) => strategySupportsTimeframe(strategy, timeframe));
     if (!supported) {
       throw new Error(
-        `No registered strategy supports the ${timeframe} timeframe, so scanning it can only ever `
-        + "produce nothing. Supported: "
-        + registeredStrategies
+        `No live-tradable strategy supports the ${timeframe} timeframe, so scanning it can only ever `
+        + "produce nothing. Live-tradable: "
+        + (tradable.length === 0 ? "(none)" : tradable
           .map((strategy) => `${strategy.registration.strategyKey} (${strategy.supportedTimeframes.join(", ")})`)
+          .join("; "))
+        + ". Terminal (registered for measurement only): "
+        + registeredStrategies
+          .filter((strategy) => !mayProposeLiveTrades(strategy))
+          .map((strategy) => `${strategy.registration.strategyKey}`)
           .join("; ") + ".",
       );
     }
@@ -113,7 +127,17 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * a TIMEFRAME_UNSUPPORTED line per strategy per symbol per run, which is noise in the report and
  * nothing more. Drop it if that noise ever obscures something real.
  */
-const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
+/*
+ * 15m is gone, and its absence is the point.
+ *
+ * Only `ict-structure-v1` and `trend-breakout` ever supported it, and both are now TERMINAL_UNOWNED
+ * -- so with `operationalDisposition` actually enforced there is no strategy that may trade 15m, and
+ * `assertScannableTimeframes` refuses to start on it. Scanning it anyway would have built contexts
+ * and ICT snapshots every five minutes to feed a generator that can no longer act on them.
+ *
+ * Restoring 15m means registering a 15m strategy that is not measured out, not re-adding the string.
+ */
+const SCAN_TIMEFRAMES = ["1m", "5m"] as const;
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;

@@ -119,6 +119,42 @@ export interface RegisteredStrategy {
   };
 }
 
+/**
+ * Whether a strategy may put up a LIVE trade idea.
+ *
+ * `operationalDisposition` recorded a verdict and gated nothing: `ict-structure-v1` and
+ * `trend-breakout` were both TERMINAL_UNOWNED, both `is_active = true`, and both timeframe-eligible
+ * for the paper bot, so the only thing standing between a measured-out strategy and a live proposal
+ * was its own gate never happening to pass. That is not a control.
+ *
+ * Registered is deliberately NOT the same as tradeable. A terminal strategy stays in the registry so
+ * backtests and the differential harness can still reach it through `requireRegisteredStrategy`
+ * -- which is exactly what `whyStillRegistered` is for -- and this predicate is what separates the
+ * two. Anything that produces live ideas filters on it; anything that measures does not.
+ *
+ * The switch is exhaustive so a new disposition cannot default into permission: adding a status
+ * fails the type check here, and the runtime arm refuses rather than guessing.
+ */
+export function mayProposeLiveTrades(strategy: RegisteredStrategy): boolean {
+  const disposition = strategy.operationalDisposition;
+  if (disposition === undefined) return true;
+  switch (disposition.status) {
+    case "TERMINAL_UNOWNED":
+      return false;
+    default: {
+      const unhandled: never = disposition.status;
+      throw new Error(
+        `Unhandled operational disposition "${String(unhandled)}": refusing to assume it may trade live.`,
+      );
+    }
+  }
+}
+
+/** The strategies a live path may propose from. Measurement paths use `registeredStrategies`. */
+export function liveTradableStrategies(): readonly RegisteredStrategy[] {
+  return registeredStrategies.filter(mayProposeLiveTrades);
+}
+
 /** Both sides unless the registration narrows them. */
 export function strategyExecutableSides(strategy: RegisteredStrategy): readonly TradeSide[] {
   return strategy.executableSides ?? ["LONG", "SHORT"];

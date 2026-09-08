@@ -7,6 +7,7 @@ import type {
   TradeIdeaRepository,
 } from "../domain/strategy.js";
 import { defaultTrendBreakoutStrategyConfiguration } from "../domain/trend-breakout-strategy.js";
+import { mayProposeLiveTrades, registeredStrategies } from "../domain/strategy-registry.js";
 import { GenerateTradeIdeas } from "./generate-trade-ideas.js";
 
 function qualifyingContext(): StrategyMarketContext {
@@ -189,7 +190,7 @@ describe("GenerateTradeIdeas", () => {
       },
     };
 
-    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas)
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
       .execute({ instrumentId: "instrument-1", timeframe: "1d" });
 
     // Every registered strategy is evaluated, so the result is one entry each.
@@ -275,7 +276,7 @@ describe("GenerateTradeIdeas", () => {
       },
     };
 
-    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas)
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
       .executeScan({ instrumentId: "instrument-1", timeframe: "1m", lookback: 2 });
 
     const scalp = result.find((entry) => entry.strategyKey === "momentum-scalp");
@@ -307,7 +308,7 @@ describe("GenerateTradeIdeas", () => {
       listCompletedContexts: async () => [qualifyingContext()],
     };
 
-    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved))
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved), registeredStrategies)
       .execute({ instrumentId: "instrument-1", timeframe: "1d" });
 
     expect(result.find((entry) => entry.strategyKey === "momentum-scalp")).toEqual({
@@ -336,7 +337,7 @@ describe("GenerateTradeIdeas", () => {
       listCompletedContexts: async () => [withRegime],
     };
 
-    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]))
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]), registeredStrategies)
       .execute({ instrumentId: "instrument-1", timeframe: "1d" });
 
     expect(result.find((entry) => entry.strategyKey === "trend-breakout")?.regime)
@@ -355,7 +356,7 @@ describe("GenerateTradeIdeas", () => {
       listCompletedContexts: async () => [qualifyingContext()],
     };
 
-    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]))
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas([]), registeredStrategies)
       .execute({ instrumentId: "instrument-1", timeframe: "1d" });
 
     const entry = result.find((item) => item.strategyKey === "trend-breakout");
@@ -371,10 +372,47 @@ describe("GenerateTradeIdeas", () => {
       listCompletedContexts: async () => window,
     };
 
-    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved))
+    const result = await new GenerateTradeIdeas(passthroughStrategyVersions(), contexts, recordingIdeas(saved), registeredStrategies)
       .executeScan({ instrumentId: "instrument-1", timeframe: "1m", lookback: 1 });
 
     expect(result.find((entry) => entry.strategyKey === "trend-breakout")?.skippedReason).toBe("TIMEFRAME_UNSUPPORTED");
     expect(saved.every((idea) => idea.strategyVersionId === "strategy-version-momentum-scalp")).toBe(true);
+  });
+});
+
+describe("the live-tradable gate", () => {
+  it("excludes a terminal strategy from the default set", () => {
+    /*
+     * `operationalDisposition` recorded a verdict and gated nothing: `ict-structure-v1` and
+     * `trend-breakout` were both TERMINAL_UNOWNED, both active, and both timeframe-eligible for the
+     * paper bot, so only their own gates failing to pass kept them out of live proposals.
+     */
+    const terminal = registeredStrategies.filter((strategy) => !mayProposeLiveTrades(strategy));
+    expect(terminal.map((strategy) => strategy.registration.strategyKey).sort())
+      .toEqual(["ict-structure-v1", "trend-breakout"]);
+  });
+
+  it("keeps terminal strategies registered, so measurement paths can still reach them", () => {
+    // Registered is not tradeable: backtests and the differential harness resolve them by key.
+    const keys = registeredStrategies.map((strategy) => strategy.registration.strategyKey);
+    expect(keys).toContain("ict-structure-v1");
+    expect(keys).toContain("trend-breakout");
+  });
+
+  it("proposes nothing when every candidate strategy is terminal", async () => {
+    // The behavioural half: an empty tradable set must yield no proposals, not fall back to the
+    // registry. `[]` here stands in for the state the real default reaches on a 15m scan.
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
+    };
+    const saved: SaveTradeIdeaProposalInput[] = [];
+
+    const result = await new GenerateTradeIdeas(
+      passthroughStrategyVersions(), contexts, recordingIdeas(saved), [],
+    ).execute({ instrumentId: "instrument-1", timeframe: "15m" });
+
+    expect(result).toEqual([]);
+    expect(saved).toEqual([]);
   });
 });
