@@ -201,9 +201,8 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "strategy. It is also traded by no bot already -- removed from Classic on 2026-08-17 as a "
         + "15m-and-slower trend strategy outside the scalp band -- so the registration is what keeps "
         + "its ideas available to research and backtesting (`run-backtest` still defaults to it). "
-        + "Nothing evaluates 30m, 60m or 1d at all: SCAN_TIMEFRAMES is 1m/5m/15m and the autonomous "
-        + "agent runs --timeframe=5m, so the intraday and swing work those comments assign to it was "
-        + "never wired.",
+        + "The autonomous agent owns 15m/30m/60m/1d while SCAN_TIMEFRAMES is the 1m/5m scalp band, "
+        + "so the intraday and swing work those comments assign to it is deliberately separate.",
     },
   },
   {
