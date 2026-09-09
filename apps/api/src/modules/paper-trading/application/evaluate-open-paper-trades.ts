@@ -1,4 +1,5 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
+import { advanceProtectiveStop, momentumScalp1mStopPolicy } from "../domain/protective-stop.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
 import {
@@ -56,8 +57,6 @@ const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | und
   // borrow, so inventing a different number here would be fitting to noise twice over.
   "1m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
 });
-
-const MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R = 0.5;
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -578,34 +577,32 @@ export class EvaluateOpenPaperTrades {
       : null;
     if (freshBid !== null) {
       if (trade.strategyKey === "momentum-scalp" && trade.timeframe === "1m") {
-        // The current risk sizing normally approves one option lot, so the existing bracket plan
-        // resolves to a single target. Its useful one-lot behavior is the break-even move; T1/T2
-        // partials remain unavailable until the execution path can persist bracket state.
-        const bracket = buildMultiTargetPlan({
-          side: trade.side,
+        /*
+         * Break-even, and the trail behind the same policy object.
+         *
+         * The inlined version measured progress from `trade.stopLoss`, which is the value it then
+         * moved -- so on the next sweep the trade's own risk had changed and every derived quantity
+         * shifted with it. It also carried a SHORT branch with inverted comparisons, unreachable
+         * because `decideOptionBuyerLiveExit` throws on any side but LONG.
+         *
+         * The policy's trail is null, so this is the same behaviour as before: break-even at +0.5R
+         * and nothing else. Turning the trail on is a research decision with a registered gate --
+         * see the note in `protective-stop.ts`.
+         */
+        const advance = advanceProtectiveStop({
           entryPrice: trade.entryPrice,
-          stopLoss: trade.stopLoss,
-          quantity: trade.quantity,
-          lotSize: trade.quantity,
+          initialStopLoss: trade.initialStopLoss ?? trade.stopLoss,
+          currentStopLoss: trade.stopLoss,
+          markPremium: freshBid,
+          policy: momentumScalp1mStopPolicy,
         });
-        const initialRisk = Math.abs(trade.entryPrice - trade.stopLoss);
-        const breakevenTrigger = trade.side === "LONG"
-          ? trade.entryPrice + initialRisk * MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R
-          : trade.entryPrice - initialRisk * MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R;
-        const reachedBreakevenTrigger = trade.side === "LONG"
-          ? freshBid >= breakevenTrigger
-          : freshBid <= breakevenTrigger;
-        const stopCanMoveToBreakeven = trade.side === "LONG"
-          ? bracket.breakevenStopLoss > trade.stopLoss
-          : bracket.breakevenStopLoss < trade.stopLoss;
-        if (initialRisk > 0 && reachedBreakevenTrigger && stopCanMoveToBreakeven
-          && this.paperTradeRepository.updateStopLoss) {
+        if (advance && this.paperTradeRepository.updateStopLoss) {
           await this.paperTradeRepository.updateStopLoss(
             trade.id,
-            bracket.breakevenStopLoss,
-            `1m momentum scalp reached +${MOMENTUM_SCALP_BREAKEVEN_TRIGGER_R}R`,
+            advance.stopLoss,
+            `1m momentum scalp ${advance.reason}`,
           );
-          trade.stopLoss = bracket.breakevenStopLoss;
+          trade.stopLoss = advance.stopLoss;
           trade.stopLossEffectiveAt = asOf;
         }
       }
@@ -703,7 +700,20 @@ export class EvaluateOpenPaperTrades {
       const stallPolicy = trade.timeframe ? MOMENTUM_STALL_POLICIES[trade.timeframe] : undefined;
       if (stallPolicy) {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
-        const initialRisk = trade.entryPrice - trade.stopLoss;
+        /*
+         * The OPENING stop, not the one currently in force.
+         *
+         * This read `trade.stopLoss`, which break-even advances to entry at +0.5R -- so risk
+         * collapsed toward zero, `reward / risk` blew past the `<= 1.6` scalp test, and this time
+         * stop switched itself off for exactly the trades that touched +0.5R and then died. Same
+         * failure that withdrew V4, arriving through the stop instead of the target.
+         *
+         * Latent rather than active when found: 0 of 414 trades had ever moved a stop, so no
+         * historical measurement is affected. Falls back to the live stop only for a trade loaded
+         * before migration 106 filled the column.
+         */
+        const openingStop = trade.initialStopLoss ?? trade.stopLoss;
+        const initialRisk = trade.entryPrice - openingStop;
         const initialReward = trade.targetPrice - trade.entryPrice;
         const isScalp = initialRisk > 0 ? (initialReward / initialRisk) <= 1.6 : false;
 
