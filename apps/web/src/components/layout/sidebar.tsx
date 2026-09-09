@@ -13,11 +13,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
-  LineChart,
 } from "lucide-react";
 import { classNames } from "../ui/class-names";
 import { type ReactNode } from "react";
-import { isStockIntelligenceUiEnabled } from "../../features/stock-intelligence/enabled";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -60,14 +58,6 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         { name: "Strategy & Ideas", href: "/strategy", icon: <Lightbulb className="size-5" /> },
       ],
     },
-    ...(isStockIntelligenceUiEnabled()
-      ? [{
-        title: "INTELLIGENCE",
-        items: [
-          { name: "Stock Intelligence", href: "/stock-intelligence", icon: <LineChart className="size-5" /> },
-        ],
-      }]
-      : []),
     {
       title: "AI & ML",
       items: [
