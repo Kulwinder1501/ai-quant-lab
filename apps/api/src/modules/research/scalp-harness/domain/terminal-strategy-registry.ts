@@ -339,7 +339,13 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     researchStatus: "RESEARCH",
     productionEligibility: "NOT_YET_ELIGIBLE",
     closureReason: null,
-    pinnedDefinitionHash: "8a5dab29eadc2d63a5443acedcaf6ca4ade3f1d3dcf07d773457f29f4c0aaf4f",
+    /*
+     * Re-pinned when V11's implementationArtifactChecksum moved from a CRLF literal to the shared
+     * content-hash lookup. Free to do: V11 is not in any deployed image and has captured no rows, so
+     * no stored definition carries the old hash. The same change to V9/V10/index/pattern would NOT
+     * be free -- see the note on `frozenSourceContentDigests`.
+     */
+    pinnedDefinitionHash: "637f2d9b46131e78a20abd699f7c344148797ab640a21405f8c5fbb00a04479e",
     lineage: {
       parentStrategyKey: "momentum-v10-research",
       parentResearchVersion: 10,

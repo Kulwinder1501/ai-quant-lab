@@ -8,7 +8,7 @@ import {
 import {
   defaultMomentumScalpStrategyConfiguration,
 } from "../../../strategy-engine/domain/momentum-scalp-strategy.js";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 
 /**
  * Pins the Option-A ungating: the research versions must capture the setups the historical gate threw
@@ -19,7 +19,7 @@ import { researchScalpStrategies } from "./research-strategies.js";
  * plausible-looking rows, just of a filtered population, and no downstream estimate would look wrong.
  */
 describe("research strategy ungating", () => {
-  const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
+  const byKey = Object.fromEntries(createResearchScalpStrategies().map((s) => [s.definition.strategyKey, s]));
 
   it("registers the ungated research versions, distinct from the gated historical ones", () => {
     // A version string must mean one definition forever; the gated captures live under the old keys.
@@ -33,7 +33,7 @@ describe("research strategy ungating", () => {
   });
 
   it("registers momentum-v10-research as an ungated 1m sibling of v9, same candidate logic", () => {
-    const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
+    const byKey = Object.fromEntries(createResearchScalpStrategies().map((s) => [s.definition.strategyKey, s]));
     const v7 = byKey["momentum-v9-research"]!;
     const v8 = byKey["momentum-v10-research"]!;
     // Ungated like v7, and runs on the same 1m timeframe.
@@ -68,10 +68,10 @@ describe("research strategy ungating", () => {
 
   it("changes the definition hash, so ungated captures can never merge with gated ones", () => {
     // The hash covers the configuration, so this is structural rather than a naming convention.
-    const hashes = researchScalpStrategies.map((s) => s.definition.strategyDefinitionHash);
+    const hashes = createResearchScalpStrategies().map((s) => s.definition.strategyDefinitionHash);
     // Tied to the registry length rather than a literal: the invariant is that every registered
     // strategy has its own hash, which must hold as cohorts are added, not just at a count of three.
-    expect(new Set(hashes).size).toBe(researchScalpStrategies.length);
+    expect(new Set(hashes).size).toBe(createResearchScalpStrategies().length);
     for (const hash of hashes) expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 

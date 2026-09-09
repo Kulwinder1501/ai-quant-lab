@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 import type { StrategyMarketContext } from "../../../strategy-engine/domain/strategy.js";
 
 /**
@@ -52,8 +52,8 @@ function htf5m(): StrategyMarketContext {
   };
 }
 
-const v7 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v9-research")!;
-const v8 = researchScalpStrategies.find((s) => s.definition.strategyKey === "momentum-v10-research")!;
+const v7 = createResearchScalpStrategies().find((s) => s.definition.strategyKey === "momentum-v9-research")!;
+const v8 = createResearchScalpStrategies().find((s) => s.definition.strategyKey === "momentum-v10-research")!;
 
 describe("momentum-v10-research HTF capture", () => {
   it("v7 records no htf5m block; v8 records one even when no 5m context is attached", () => {

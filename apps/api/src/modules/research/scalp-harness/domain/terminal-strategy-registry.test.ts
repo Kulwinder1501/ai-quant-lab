@@ -10,7 +10,7 @@ import {
   terminalStrategyRegistryVersion,
   type RegisteredResearchStrategy,
 } from "./terminal-strategy-registry.js";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 import type { ResearchStrategyDefinition } from "./contracts.js";
 
 function entry(overrides: Partial<RegisteredResearchStrategy> = {}): RegisteredResearchStrategy {
@@ -28,7 +28,7 @@ function entry(overrides: Partial<RegisteredResearchStrategy> = {}): RegisteredR
 }
 
 function definitionOf(strategyKey: string): ResearchStrategyDefinition {
-  const adapter = researchScalpStrategies.find((a) => a.definition.strategyKey === strategyKey);
+  const adapter = createResearchScalpStrategies().find((a) => a.definition.strategyKey === strategyKey);
   if (!adapter) throw new Error(`No running adapter for ${strategyKey}.`);
   return adapter.definition;
 }
@@ -207,7 +207,7 @@ describe("guarding the running strategies", () => {
      * records what the code produced when those rows were written; this asserts the code still
      * produces them. If it did not, the pins would be a decorative constant rather than a guard.
      */
-    for (const adapter of researchScalpStrategies) {
+    for (const adapter of createResearchScalpStrategies()) {
       expect(() => assertRegisteredAndUnchanged(adapter.definition)).not.toThrow();
     }
   });
@@ -246,7 +246,7 @@ describe("guarding the running strategies", () => {
 
 describe("terminal strategies default to disabled", () => {
   it("excludes both terminal strategies when nothing is opted in", () => {
-    const selection = selectCaptureStrategies(researchScalpStrategies, { benchmarkStrategyKeys: [] });
+    const selection = selectCaptureStrategies(createResearchScalpStrategies(), { benchmarkStrategyKeys: [] });
 
     expect([...selection.disabled].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect(selection.active.map((a) => a.definition.strategyKey).sort())
@@ -261,9 +261,9 @@ describe("terminal strategies default to disabled", () => {
      * §2 requires the switch to be thrown on a recorded session boundary. A registry that did it on
      * the day it landed would be indistinguishable from a regression.
      */
-    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const selection = selectCaptureStrategies(createResearchScalpStrategies());
 
-    expect(selection.active).toHaveLength(researchScalpStrategies.length);
+    expect(selection.active).toHaveLength(createResearchScalpStrategies().length);
     expect(selection.disabled).toEqual([]);
     expect([...selection.benchmarkActivated].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect([...benchmarkResearchStrategyKeys].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
@@ -272,20 +272,20 @@ describe("terminal strategies default to disabled", () => {
   it("preserves adapter order among the active set, so capture order does not shift", () => {
     // Proposal rows are written in iteration order; reordering them would churn nothing semantically
     // but would make a diff of captured rows unreadable against history.
-    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const selection = selectCaptureStrategies(createResearchScalpStrategies());
 
     expect(selection.active.map((a) => a.definition.strategyKey))
-      .toEqual(researchScalpStrategies.map((a) => a.definition.strategyKey));
+      .toEqual(createResearchScalpStrategies().map((a) => a.definition.strategyKey));
   });
 
   it("refuses to benchmark-activate a superseded strategy", () => {
-    expect(() => selectCaptureStrategies(researchScalpStrategies, {
+    expect(() => selectCaptureStrategies(createResearchScalpStrategies(), {
       benchmarkStrategyKeys: ["pattern-v3-research"],
     })).toThrow(/SUPERSEDED and cannot be benchmark-activated/);
   });
 
   it("refuses an unregistered benchmark key rather than silently capturing nothing", () => {
-    expect(() => selectCaptureStrategies(researchScalpStrategies, {
+    expect(() => selectCaptureStrategies(createResearchScalpStrategies(), {
       benchmarkStrategyKeys: ["typo-v9-research"],
     })).toThrow(/not registered/);
   });

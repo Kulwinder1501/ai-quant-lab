@@ -39,6 +39,36 @@ interface BaseEvaluator {
   evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[];
 }
 
+/**
+ * Content digests of the frozen source strategies, for DRIFT DETECTION only.
+ *
+ * Deliberately separate from `researchStrategySourceChecksums` below, which is the **provenance
+ * pin**: the value each research version declared and which feeds `strategyDefinitionHash`. The two
+ * answer different questions and must not be merged:
+ *
+ *  - this map: "has the file changed since we froze it?" -- must be machine-independent, so it is
+ *    the digest of LF-normalised CONTENT.
+ *  - that map: "what did version N declare it was measured against?" -- immutable history, whatever
+ *    bytes it was computed over.
+ *
+ * They disagree today, and that is the reason for the split rather than a bug to tidy. Measured
+ * 2026-09-09: the pins for `momentum-scalp-index-strategy.ts` and `momentum-scalp-pattern-strategy.ts`
+ * are CRLF digests (written on a Windows working tree), while `momentum-scalp-strategy.ts` is an LF
+ * digest. The old guard hashed raw bytes and threw on the FIRST entry, so it never reached the other
+ * two and nobody saw the inconsistency.
+ *
+ * **Do not "fix" the pins to match this map.** `implementationArtifactChecksum` is an input to
+ * `strategyDefinitionHash`, `index-v3-research` and the pattern versions have captured rows under
+ * their current hashes, and research definitions still THROW on payload divergence -- so re-pinning
+ * them would break the next harness tick. Freezing a wrong-flavoured digest costs nothing as long as
+ * it is stable; changing it costs the capture history.
+ */
+export const frozenSourceContentDigests = Object.freeze({
+  "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
+  "momentum-scalp-index-strategy.ts": "ecf9fe47c96ddce944c269757a292c5fc647e3d03364d3adab2339024a1f0396",
+  "momentum-scalp-pattern-strategy.ts": "dfccae9d5df2e0a7d702a2148bdb9e4108db774c2acd531495c9c7ffd5bc32d7",
+});
+
 export const researchStrategySourceChecksums = Object.freeze({
   "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
   "momentum-scalp-index-strategy.ts": "e9a74bf002c7b66adacdd7400128a27d6cb03fc8bf0f4bf9d9654dfc64eeed4d",
@@ -339,8 +369,16 @@ const momentumFreshSetupDefinition = buildStrategyDefinition({
   strategyKey: "momentum-v11-research",
   researchVersion: 11,
   featureSchemaVersion: "scalp-raw-context-v4",
-  // V11 starts from the current source artifact; historical V9/V10 pins remain immutable.
-  implementationArtifactChecksum: "b541d4c3091e722bac1391550e62580731814cff6ac748fd36b7ad85c98be654",
+  /*
+   * The shared lookup, not a literal.
+   *
+   * This was pinned to b541d4c..., the CRLF digest of momentum-scalp-strategy.ts on a Windows working
+   * tree -- the value the isolation guard reported as "actual" while it was still hashing raw bytes.
+   * It is not the digest of the file's content, so no LF checkout reproduces it, and the checksum
+   * travels into the definition hash and is persisted as provenance. V11 runs the same source
+   * artifact as V9 and V10, so it pins the same content hash they do.
+   */
+  implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: {
     ...defaultMomentumScalpStrategyConfiguration,
     minimumConfidence: 0,
@@ -378,7 +416,22 @@ const patternDefinition = buildStrategyDefinition({
  * The V2 adapter emits nothing unless a caller has loaded `patternObservations` into the context, so
  * adding it here is inert until the detection pass runs alongside capture.
  */
-export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
+/**
+ * A FRESH set of adapters, because one of them carries state.
+ *
+ * `FreshSetupResearchAdapter` remembers the previous proposal's side per series, so a module-level
+ * array would have made that memory process-wide: every consumer in one process sharing one history.
+ * `verify-live-backfill-parity` rebuilds proposals from the same adapters the capture path has
+ * already advanced, so a rebuilt point would have been judged against state the original evaluation
+ * never saw -- and capture rows use KEEP_EXISTING on payload divergence, so the mismatch would not
+ * throw, it would silently keep the older row.
+ *
+ * Call this ONCE per run over a chronological series and hold the result: per bar resets the memory
+ * so nothing is ever suppressed, and per process shares it so results depend on what ran before.
+ * The stateful adapter is order-dependent by nature; that is the feature, and this is its scope.
+ */
+export function createResearchScalpStrategies(): readonly ResearchStrategyAdapter[] {
+  return [
   new FrozenResearchAdapter(
     momentumDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
@@ -405,7 +458,8 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
     confluenceScoreGate(defaultMomentumScalpPatternStrategyConfiguration.scoreThreshold),
   ),
   new PatternIntelligenceResearchAdapter(),
-];
+  ];
+}
 
 /**
  * The 1m indicator set the three research strategies actually read, as (code, parameters) pairs.
