@@ -23,8 +23,10 @@ import {
 } from "../../modules/technical-analysis/domain/ict/config.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
-import type { StrategyMarketContext } from "../../modules/strategy-engine/domain/strategy.js";
-import type { StrategyEvaluator } from "../../modules/strategy-engine/domain/strategy-registry.js";
+import {
+  EmaStrengthFilteredStrategy,
+  FreshSetupFilteredStrategy,
+} from "../../modules/backtesting/domain/entry-filters.js";
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
@@ -160,52 +162,6 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "ema-strength-015") return "EMA_STRENGTH_015_ATR";
   if (raw === "fresh-setup") return "FRESH_SETUP";
   throw new Error(`--entry-filter must be none, ema-strength-015, or fresh-setup, received "${raw}".`);
-}
-
-function indicatorValue(
-  context: StrategyMarketContext,
-  code: string,
-  period: number,
-): number | null {
-  const indicator = context.indicators.find((candidate) => (
-    candidate.code === code
-    && candidate.parameters.period === period
-    && typeof candidate.values.value === "number"
-  ));
-  return indicator && typeof indicator.values.value === "number" ? indicator.values.value : null;
-}
-
-class EmaStrengthFilteredStrategy implements StrategyEvaluator {
-  constructor(private readonly inner: StrategyEvaluator) {}
-
-  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>) {
-    const proposals = this.inner.evaluate(context, configuration);
-    const fast = indicatorValue(context, "EMA", 3);
-    const slow = indicatorValue(context, "EMA", 8);
-    const atr = indicatorValue(context, "ATR", 14);
-    if (fast === null || slow === null || atr === null || atr <= 0) return [];
-    if (Math.abs(fast - slow) / atr < 0.15) return [];
-    return proposals;
-  }
-}
-
-/** Backtest-only control for repeated proposals from one continuously active setup. */
-class FreshSetupFilteredStrategy implements StrategyEvaluator {
-  private previousSide: "LONG" | "SHORT" | null = null;
-
-  constructor(private readonly inner: StrategyEvaluator) {}
-
-  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>) {
-    const proposals = this.inner.evaluate(context, configuration);
-    const proposal = proposals[0] ?? null;
-    if (!proposal) {
-      this.previousSide = null;
-      return [];
-    }
-    if (proposal.side === this.previousSide) return [];
-    this.previousSide = proposal.side;
-    return proposals;
-  }
 }
 
 /** A decimal fraction in (0, 1], falling back to the engine default. */

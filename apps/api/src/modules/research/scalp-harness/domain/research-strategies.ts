@@ -35,7 +35,7 @@ export interface ResearchStrategyAdapter {
   evaluate(strategyContext: StrategyMarketContext, reference1mContext: StrategyMarketContext): ImmutableStrategyProposal[];
 }
 
-interface BaseEvaluator {
+export interface BaseEvaluator {
   evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[];
 }
 
@@ -245,7 +245,7 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
 }
 
 /** V11 measures the fresh-setup entry policy without changing the production evaluator. */
-class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
+export class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
   private readonly previousSideBySeries = new Map<string, "LONG" | "SHORT">();
 
   constructor(
@@ -268,7 +268,8 @@ class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
       this.previousSideBySeries.delete(seriesKey);
       return [];
     }
-    if (this.previousSideBySeries.get(seriesKey) === proposal.side) return [];
+    const previousSide = this.previousSideBySeries.get(seriesKey);
+    if (previousSide === proposal.side) return [];
     this.previousSideBySeries.set(seriesKey, proposal.side);
     if (!proposal.expiresAt) throw new Error(`${this.definition.strategyKey} emitted a proposal without native expiry.`);
     const pattern = typeof proposal.evidence.pattern === "string" ? proposal.evidence.pattern : null;
@@ -294,7 +295,19 @@ class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
       },
       rawContext: {
         ...rawContext(strategyContext, proposal, this.legacyGate),
-        freshSetup: { policy: "NEW_OR_DIRECTION_CHANGE", passed: true },
+        /*
+         * WHY this bar was fresh, not merely that it was.
+         *
+         * This recorded `passed: true`, which no row could ever contradict: a suppressed bar returns
+         * before any row is built, so the field was constant and carried no information at all. The
+         * two ways a setup becomes fresh behave differently -- a first entry into a new run of
+         * proposals is not the same event as a reversal -- and separating them gives the covariate
+         * variance to be analysed on, within V11's own rows rather than only against V10's.
+         */
+        freshSetup: {
+          policy: "NEW_OR_DIRECTION_CHANGE",
+          reason: previousSide === undefined ? "FIRST_PROPOSAL" : "DIRECTION_CHANGE",
+        },
       },
     })];
   }
