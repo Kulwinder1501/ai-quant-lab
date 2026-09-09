@@ -132,3 +132,64 @@ If Set A fails, the verdict is **NO_NIFTY_SPECIFIC_EDGE** and the question is cl
 evidence attached — no collection is performed. If Set A passes and Set C contradicts it, the verdict
 is INDEX_ARTEFACT_NOT_TRADEABLE_EDGE. Only A, B and C all passing licenses further work, and the next
 step then is costing in options space, not trading.
+
+## Results — Set A, 2023-01-02 .. 2024-12-31 (looked at once)
+
+Stored data, no collection. 495 sessions per instrument, 24.8 bars each, 246 in 2023 and 249 in 2024
+— verified complete before the run. Both runs completed; no OOM, no re-scoping.
+
+**A1 — NIFTY50 whole window**
+
+| instrument | trades | sessions | net | mean/trade | SE | t |
+|---|---|---|---|---|---|---|
+| **NIFTY50** | 345 | 85 | **-14,061** | **-40.76** | 29.8 | **-1.37** |
+| BANKNIFTY | 234 | 72 | -11,960 | -51.11 | 95.0 | -0.54 |
+
+Required mean > 0 with t > 2.0. **FAILED** — the sign is negative before significance is even reached.
+
+**A2 — per calendar year**
+
+| instrument | year | trades | sessions | net | mean/trade | t |
+|---|---|---|---|---|---|---|
+| NIFTY50 | 2023 | 172 | 39 | -2,112 | -12.28 | -0.54 |
+| NIFTY50 | 2024 | 173 | 46 | -11,949 | -69.07 | -1.35 |
+| BANKNIFTY | 2023 | 131 | 42 | -17,825 | -136.07 | -1.89 |
+| BANKNIFTY | 2024 | 103 | 30 | +5,865 | +56.94 | +0.28 |
+
+Required positive in both years. **FAILED** — NIFTY50 is negative in both.
+
+**A3 — control.** BANKNIFTY is also negative over the window, so the framing is not falsified by a
+control that unexpectedly wins. No REFRAME. (Note BANKNIFTY's own years disagree, -136.07 then
++56.94, which is the instability this strategy has shown at every scale.)
+
+### What this settles
+
+The 2025 discovery was noise, and the confirmation set says so with more evidence than the discovery
+had:
+
+| era | trades | clustered sessions | mean/trade | SE | t |
+|---|---|---|---|---|---|
+| 2025 (discovery) | 91 | 29 | **+97.61** | 80.2 | 1.22 |
+| 2023-2024 (Set A) | 345 | 85 | **-40.76** | **29.8** | -1.37 |
+
+Nearly four times the trades, nearly three times the clustered sessions, and the standard error falls
+from +-80 to +-30 exactly as the power argument predicted. The estimate does not merely fail to
+confirm — it lands on the other side of zero. Same instrument, same timeframe, same settings,
+opposite sign.
+
+Stated precisely: **there is no evidence of a NIFTY-specific edge, and the point estimate is
+negative** (t = -1.37 is not significantly negative either — it is indistinguishable from zero, which
+is itself the answer for a strategy that has to clear option spread and theta to be traded).
+
+### Verdict
+
+**NO_NIFTY_SPECIFIC_EDGE.**
+
+Set A failed A1 and A2, so per the stopping condition the question closes here. **Sets B and C are
+not earned and no collection is performed** — the 2017–2022 era and the NIFTYBEES resolution stay
+unspent, which is the whole point of sequencing them behind A. The Fyers history remains available
+(2017-08 for eight instruments) if a future, differently-motivated program wants it.
+
+`ict-structure-v1` stays `TERMINAL_UNOWNED`, and this is now the third independent line saying so:
+the four-pillar gate, the entry-model replication across nine instruments, and now a NIFTY-specific
+confirmation set on 3.8x the discovery sample.
