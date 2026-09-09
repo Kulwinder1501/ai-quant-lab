@@ -10,7 +10,7 @@ import {
   terminalStrategyRegistryVersion,
   type RegisteredResearchStrategy,
 } from "./terminal-strategy-registry.js";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 import type { ResearchStrategyDefinition } from "./contracts.js";
 
 function entry(overrides: Partial<RegisteredResearchStrategy> = {}): RegisteredResearchStrategy {
@@ -28,7 +28,7 @@ function entry(overrides: Partial<RegisteredResearchStrategy> = {}): RegisteredR
 }
 
 function definitionOf(strategyKey: string): ResearchStrategyDefinition {
-  const adapter = researchScalpStrategies.find((a) => a.definition.strategyKey === strategyKey);
+  const adapter = createResearchScalpStrategies().find((a) => a.definition.strategyKey === strategyKey);
   if (!adapter) throw new Error(`No running adapter for ${strategyKey}.`);
   return adapter.definition;
 }
@@ -51,9 +51,14 @@ describe("the shipped registry", () => {
     expect([...researchStrategyRegistry.map((e) => e.strategyKey)].sort()).toEqual([
       "index-v2-research",
       "index-v3-research",
+      "momentum-v10-research",
+      "momentum-v11-research",
       "momentum-v4-research",
       "momentum-v5-research",
       "momentum-v6-research",
+      "momentum-v7-research",
+      "momentum-v8-research",
+      "momentum-v9-research",
       "pattern-v3-research",
       "pattern-v4-research",
       "pattern-v4-research-v2",
@@ -202,7 +207,7 @@ describe("guarding the running strategies", () => {
      * records what the code produced when those rows were written; this asserts the code still
      * produces them. If it did not, the pins would be a decorative constant rather than a guard.
      */
-    for (const adapter of researchScalpStrategies) {
+    for (const adapter of createResearchScalpStrategies()) {
       expect(() => assertRegisteredAndUnchanged(adapter.definition)).not.toThrow();
     }
   });
@@ -214,7 +219,7 @@ describe("guarding the running strategies", () => {
      * leaves every one of those checksums intact while redefining what the accumulating cohort
      * measures. The definition hash moves, so this catches it.
      */
-    const tuned = { ...definitionOf("momentum-v5-research"), strategyDefinitionHash: "b".repeat(64) };
+    const tuned = { ...definitionOf("momentum-v9-research"), strategyDefinitionHash: "b".repeat(64) };
 
     expect(() => assertRegisteredAndUnchanged(tuned)).toThrow(StrategyRegistryError);
     expect(() => assertRegisteredAndUnchanged(tuned)).toThrow(/edited in place/);
@@ -223,28 +228,29 @@ describe("guarding the running strategies", () => {
   });
 
   it("refuses an unregistered strategy", () => {
-    // momentum-v6-research became a real registered strategy, so the "unknown" fixture moves to the
-    // next unclaimed key. Anything absent from the registry serves; the point is that a key with no
-    // entry is refused rather than silently captured.
-    const unknown = { ...definitionOf("momentum-v5-research"), strategyKey: "momentum-v7-research" };
+    // momentum-v9-research through -v11 are real registered strategies for the current twin,
+    // so the "unknown" fixture moves again to the next unclaimed key. Anything absent from the
+    // registry serves; the point is that a key with no entry is refused rather than silently
+    // captured.
+    const unknown = { ...definitionOf("momentum-v9-research"), strategyKey: "momentum-v12-research" };
 
     expect(() => assertRegisteredAndUnchanged(unknown)).toThrow(/not in the Terminal Strategy Registry/);
   });
 
   it("refuses a version the registry does not have live", () => {
-    const rewound = { ...definitionOf("momentum-v5-research"), researchVersion: 4 };
+    const rewound = { ...definitionOf("momentum-v9-research"), researchVersion: 8 };
 
-    expect(() => assertRegisteredAndUnchanged(rewound)).toThrow(/registered at 5/);
+    expect(() => assertRegisteredAndUnchanged(rewound)).toThrow(/registered at 9/);
   });
 });
 
 describe("terminal strategies default to disabled", () => {
   it("excludes both terminal strategies when nothing is opted in", () => {
-    const selection = selectCaptureStrategies(researchScalpStrategies, { benchmarkStrategyKeys: [] });
+    const selection = selectCaptureStrategies(createResearchScalpStrategies(), { benchmarkStrategyKeys: [] });
 
     expect([...selection.disabled].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect(selection.active.map((a) => a.definition.strategyKey).sort())
-      .toEqual(["momentum-v5-research", "momentum-v6-research", "pattern-v4-research-v2"]);
+      .toEqual(["momentum-v10-research", "momentum-v11-research", "momentum-v9-research", "pattern-v4-research-v2"]);
     expect(selection.benchmarkActivated).toEqual([]);
   });
 
@@ -255,9 +261,9 @@ describe("terminal strategies default to disabled", () => {
      * §2 requires the switch to be thrown on a recorded session boundary. A registry that did it on
      * the day it landed would be indistinguishable from a regression.
      */
-    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const selection = selectCaptureStrategies(createResearchScalpStrategies());
 
-    expect(selection.active).toHaveLength(researchScalpStrategies.length);
+    expect(selection.active).toHaveLength(createResearchScalpStrategies().length);
     expect(selection.disabled).toEqual([]);
     expect([...selection.benchmarkActivated].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
     expect([...benchmarkResearchStrategyKeys].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
@@ -266,20 +272,20 @@ describe("terminal strategies default to disabled", () => {
   it("preserves adapter order among the active set, so capture order does not shift", () => {
     // Proposal rows are written in iteration order; reordering them would churn nothing semantically
     // but would make a diff of captured rows unreadable against history.
-    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const selection = selectCaptureStrategies(createResearchScalpStrategies());
 
     expect(selection.active.map((a) => a.definition.strategyKey))
-      .toEqual(researchScalpStrategies.map((a) => a.definition.strategyKey));
+      .toEqual(createResearchScalpStrategies().map((a) => a.definition.strategyKey));
   });
 
   it("refuses to benchmark-activate a superseded strategy", () => {
-    expect(() => selectCaptureStrategies(researchScalpStrategies, {
+    expect(() => selectCaptureStrategies(createResearchScalpStrategies(), {
       benchmarkStrategyKeys: ["pattern-v3-research"],
     })).toThrow(/SUPERSEDED and cannot be benchmark-activated/);
   });
 
   it("refuses an unregistered benchmark key rather than silently capturing nothing", () => {
-    expect(() => selectCaptureStrategies(researchScalpStrategies, {
+    expect(() => selectCaptureStrategies(createResearchScalpStrategies(), {
       benchmarkStrategyKeys: ["typo-v9-research"],
     })).toThrow(/not registered/);
   });

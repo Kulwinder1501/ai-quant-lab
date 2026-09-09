@@ -166,6 +166,15 @@ function buildAgent(overrides: {
 describe("AiAutonomousAgent.tick", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("rejects scalp timeframes instead of opening autonomous scalp trades", async () => {
+    const database = fakePool({});
+    const { agent } = buildAgent({ database });
+
+    await expect(agent.tick("NIFTY50", "5m", 24_050)).rejects.toThrow(
+      /does not own 5m.*scalp path/i,
+    );
+  });
+
   it("opens through the option entry gate, never at the index level", async () => {
     // The defect this replaces: `openFromTradeIdea({ fillPrice: livePrice })` booked 75 units of
     // NIFTY50 spot at ~24,050 -- an instrument that cannot be bought.

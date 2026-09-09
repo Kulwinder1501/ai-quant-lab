@@ -12,6 +12,7 @@ import type {
 } from "../../pattern-intelligence/domain/observation-summary.js";
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
+import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
 export type TradeSide = "LONG" | "SHORT";
 export type TradeIdeaStatus = "PROPOSED" | "ACCEPTED" | "EXPIRED" | "REJECTED";
@@ -108,6 +109,11 @@ export interface StrategyMarketContext {
    */
   higherTimeframes?: readonly HigherTimeframeContext[];
   /**
+   * Versioned ICT Composite Snapshot (Pillars 1-4: Structure, Bias, Zones, Liquidity).
+   * Populated per closed bar strictly causally without lookahead.
+   */
+  ictSnapshot?: IctStateCompositeSnapshot;
+  /**
    * Raw higher-timeframe contexts keyed by timeframe, when a caller has loaded them.
    *
    * Distinct from `higherTimeframes` above, and additive on purpose. That field carries a
@@ -133,6 +139,20 @@ export interface StrategyMarketContextRepository {
    * have already closed still surface as SHORT proposals.
    */
   listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]>;
+  /**
+   * The most recent completed context whose candle closed at or before `asOf`.
+   *
+   * The anti-lookahead fetch for higher-timeframe context. At a 1m decision instant the relevant
+   * 5m context is the last 5m bar to have *closed*; an exact close-time match lands one only on a
+   * 5m boundary and misses at every 1m bar in between. The implementation's `close_time <= $asOf`
+   * guard is what makes a slower bar unable to leak into a faster signal.
+   *
+   * Optional because it is additive: a caller that does not supply it simply gets no
+   * higher-timeframe context, which every strategy already treats as a legitimate state rather
+   * than an error. Making it required would break every existing stub at once for a capability
+   * only the momentum path reads.
+   */
+  findCompletedBefore?(input: { instrumentId: string; timeframe: string; asOf: Date }): Promise<StrategyMarketContext | null>;
 }
 
 export interface TradeIdeaEvidence {

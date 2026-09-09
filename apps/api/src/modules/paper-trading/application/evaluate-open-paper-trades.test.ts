@@ -308,6 +308,44 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
+  it("moves a 1m momentum scalp stop to break-even after +0.5R", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
+      timeframe: "1m",
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225,
+    });
+    const paperTradeRepository = stubRepo(trade, closings);
+    paperTradeRepository.updateStopLoss = async (id, stop, reason) => {
+      stopUpdates.push({ id, stop, reason });
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      paperTradeRepository,
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(sample("2026-08-06T08:59:45.000Z", 210)),
+    ).execute({
+      accountId: "account-1",
+      asOf: new Date("2026-08-06T09:00:00.000Z"),
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(stopUpdates).toHaveLength(1);
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
+  });
+
 
   it("squares off an intraday option at the 15:15 IST cutoff, at the quoted bid", async () => {
     const closings: ClosePaperTradeInput[] = [];
@@ -725,7 +763,7 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
-  it("exits with MOMENTUM_STALL on 5m timeframe if position has stalled for >= 20 mins and not reached +0.5R", async () => {
+  it("exits with MOMENTUM_STALL on 5m timeframe if position has stalled past the cutoff and not reached +0.5R", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
@@ -766,7 +804,68 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
-  it("holds when position has run >= +0.5R even if elapsed time >= 20 mins", async () => {
+  /*
+   * The cutoff itself, pinned from both sides.
+   *
+   * The two tests around this one use 21 elapsed minutes, which satisfies the old 20-minute cutoff
+   * and the current 10-minute one alike, so neither would notice the boundary moving. These two
+   * sit inside the window that only the current cutoff covers: a stall at 12 minutes must now be
+   * cut, and one at 8 minutes must not. Written as a pair on purpose -- a one-sided test passes if
+   * the rule degenerates into cutting everything.
+   */
+  it("cuts a stalled 5m scalp at 12 minutes, inside the window the old 20-minute cutoff let run", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:27:00.000Z"); // 12 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m", openedAt, entryPrice: 180, stopLoss: 150, targetPrice: 225,
+    });
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // 185 is below the 195 that +0.5R would require.
+    const densePremiums = denseReader(sample("2026-08-06T09:26:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings), candleRepository,
+      new FixedImpliedVolatilitySource(0.12), densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitReason: "MOMENTUM_STALL",
+      details: expect.objectContaining({ cutoffMinutes: 10 }),
+    });
+  });
+
+  it("holds a stalled 5m scalp at 8 minutes, before the cutoff", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:23:00.000Z"); // 8 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "5m", openedAt, entryPrice: 180, stopLoss: 150, targetPrice: 225,
+    });
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:22:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings), candleRepository,
+      new FixedImpliedVolatilitySource(0.12), densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("holds when position has run >= +0.5R even if elapsed time is past the cutoff", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
@@ -867,5 +966,88 @@ describe("EvaluateOpenPaperTrades", () => {
 
     expect(result.tradesClosed).toBe(1);
     expect(closings[0]).toMatchObject({ exitReason: "MOMENTUM_STALL", exitPrice: 185 });
+  });
+
+  /*
+   * 1m, enabled by request against its own measurement.
+   *
+   * The 2026-09-07 sweep found the rule negative in 41 of 45 cells on the cohort this governs, so
+   * these tests pin *behaviour*, not benefit. They exist so that turning 1m back off is a visible,
+   * deliberate edit rather than a silent regression -- deleting the `1m` policy fails the first of
+   * them, which is the whole point of writing it down.
+   */
+  it("stalls a 1m scalp on the same cutoff, because 1m now carries a policy", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "1m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      targetPrice: 225, // 1.5R, inside the scalp band -- the V5 geometry
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      exitReason: "MOMENTUM_STALL",
+      exitPrice: 185,
+      // The timeframe is stamped so a 1m stall stays separable from a 5m one in the booked record.
+      // They rest on different evidence and must never be pooled when the rule is next measured.
+      details: expect.objectContaining({ timeframe: "1m", cutoffMinutes: 10, minimumProgressR: 0.5 }),
+    });
+  });
+
+  /*
+   * The table is an allowlist, not a default.
+   *
+   * A timeframe with no policy has no stall, so a new one stays opted out until someone measures
+   * it. Without this, widening the rule from `=== "5m"` to a lookup could quietly have swept in
+   * every swing timeframe the book trades.
+   */
+  it("does not stall a 15m position, which carries no policy", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      timeframe: "15m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225, // 1.5R: a scalp by geometry, so only the missing policy holds it
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toEqual([]);
   });
 });

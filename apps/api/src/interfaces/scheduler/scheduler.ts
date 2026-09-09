@@ -347,6 +347,7 @@ async function main(): Promise<void> {
         "--from", todayIst,
       ]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
+      await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
     });
   });
 
@@ -672,6 +673,38 @@ async function main(): Promise<void> {
   });
 
   /**
+   * Grades the volatility shadow predictions.
+   *
+   * `CANDIDATE_SETTLEMENT` above settles the research candidate ledger and nothing else. The
+   * volatility alphabet lives in its own table and has its own settler, and that settler was never
+   * scheduled -- `models:settle-auxiliary` existed as an npm script and ran only when somebody typed
+   * it. Measured 2026-09-08: 4,869 predictions written on a schedule, graded by hand, and the
+   * settled share varied 50%-95% BY MODEL according to when the command had last been run with a
+   * limit. Accuracy compared across models was therefore partly a comparison of who had been graded.
+   *
+   * Its own job type, not folded into `CANDIDATE_SETTLEMENT`: a stall in one must not be invisible
+   * behind the other's run rows, which is exactly how the `OPTION_CHAIN` stall hid.
+   *
+   * Same cadence as the candidate ledger, and for the same reason -- half-hourly picks up short
+   * horizons while they are fresh. The EOD pass is at :20 rather than :10 so it lands after the
+   * 16:06 shadow-predict write and does not contend with the candidate settlement at 16:10.
+   *
+   * Not gated on the Fyers token: it reads stored bars, so it works on a day the feed never
+   * authenticated, which is a day worth grading.
+   */
+  cronSchedule("15,45 9-15 * * 1-5", () => {
+    void schedule("AUXILIARY_PREDICTION_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "models:settle-auxiliary"]);
+    });
+  });
+
+  cronSchedule("20 16 * * 1-5", () => {
+    void schedule("AUXILIARY_PREDICTION_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "models:settle-auxiliary"]);
+    });
+  });
+
+  /**
 /**
    * The timeframes the nightly gap check and heal actually scan.
    *
@@ -762,7 +795,7 @@ async function main(): Promise<void> {
    */
   cronSchedule("*/2 9-15 * * 1-5", () => {
     void schedule("AI_AGENT_TICK", () => runCommand("npm", [
-      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=5m",
+      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=15m",
     ]));
   });
 
@@ -1061,6 +1094,13 @@ async function main(): Promise<void> {
     );
   }
 
+  /*
+   * Hand-maintained, and it drifts: this list gates nothing, so adding a `cronSchedule` without
+   * adding its name here leaves the scheduler running a job its own startup log denies. Caught on
+   * 2026-09-08 when AUXILIARY_PREDICTION_SETTLEMENT ran but the log advertised 24 jobs. That matters
+   * because the symptom of a stalled job is silence, and a job missing from the manifest is silent
+   * by construction.
+   */
   log("Scheduler started", {
     jobs: [
       "EOD_PIPELINE",
@@ -1082,6 +1122,7 @@ async function main(): Promise<void> {
       "DEPTH_FRAME_STALENESS",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
+      "AUXILIARY_PREDICTION_SETTLEMENT",
       "CANDLE_GAP_CHECK",
       // Ungated for the same reason as the two above: it reads stored contexts and places no orders,
       // so it runs without a live feed. Listing it inside the Fyers-gated group below would

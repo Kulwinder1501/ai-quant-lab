@@ -26,6 +26,31 @@ implements AuxiliaryPredictionSettlementRepository {
    * always graded under the rule its model was trained on. A model whose protocol
    * lacks the band yields NULL here and the service skips it rather than guessing.
    */
+  /**
+   * Marks volatility predictions carrying no source candle as permanently ungradeable.
+   *
+   * The listing query inner-joins `candles` on `source_candle_id`, so a row without one is never
+   * returned and never resolved: it stays `settled_at IS NULL, unsettleable_reason IS NULL` for
+   * ever and counts as pending in every report. `NO_SOURCE_CANDLE` records which of the two it is.
+   */
+  async markAnchorlessVolatilityPredictionsUnsettleable(limit: number): Promise<number> {
+    const bounded = Math.max(1, Math.min(Math.trunc(limit), 50_000));
+    const result = await this.database.query(`
+      UPDATE auxiliary_model_predictions
+      SET unsettleable_reason = 'NO_SOURCE_CANDLE'
+      WHERE id IN (
+        SELECT id FROM auxiliary_model_predictions
+        WHERE label_scheme = $1
+          AND settled_at IS NULL
+          AND unsettleable_reason IS NULL
+          AND source_candle_id IS NULL
+        ORDER BY created_at ASC
+        LIMIT $2
+      )
+    `, [VOLATILITY_SCHEME, bounded]);
+    return result.rowCount ?? 0;
+  }
+
   async listSettleableVolatilityPredictions(limit: number): Promise<SettleableAuxiliaryPrediction[]> {
     const bounded = Math.max(1, Math.min(Math.trunc(limit), 50_000));
     const result = await this.database.query(`

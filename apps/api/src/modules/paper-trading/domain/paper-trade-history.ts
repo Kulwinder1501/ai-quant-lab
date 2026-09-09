@@ -17,6 +17,7 @@ export interface PaperTradeHistoryRecord {
   instrumentName: string;
   timeframe: string | null;
   tradeIdeaId: string | null;
+  strategyName?: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: number;

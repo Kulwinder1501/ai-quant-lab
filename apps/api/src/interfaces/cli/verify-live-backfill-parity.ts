@@ -8,7 +8,7 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import {
   controlIneligibleReason,
-  researchScalpStrategies,
+  createResearchScalpStrategies,
 } from "../../modules/research/scalp-harness/domain/research-strategies.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
 import {
@@ -274,7 +274,7 @@ async function main(): Promise<void> {
 
         // Reconstruction runs the same frozen adapters over the completed session. Coverage is
         // COMPLETE by construction here: the session is closed and every feature job has finished.
-        const rebuilt = researchScalpStrategies.flatMap((strategy) => contexts
+        const rebuilt = createResearchScalpStrategies().flatMap((strategy) => contexts
           .filter((context) => strategy.supportedTimeframes.includes(context.candle.timeframe))
           .flatMap((context) => strategy.evaluate(context, reference)));
 

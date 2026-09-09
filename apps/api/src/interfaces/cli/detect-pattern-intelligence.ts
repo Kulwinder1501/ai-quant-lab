@@ -15,6 +15,7 @@ import {
   normalizeUnderlying,
   priceScaleFromTickSize,
 } from "../../modules/pattern-intelligence/domain/instrument-identifiers.js";
+import { istSessionDate } from "../../modules/platform/calendar/trading-session.js";
 import { getOption, parseDateOption, requireOption } from "./arguments.js";
 
 /**
@@ -67,7 +68,8 @@ async function main(): Promise<void> {
     const registration = await definitions.registerFrozenDefinitions();
     console.log(`Definitions: ${registration.inserted} newly frozen, ${registration.alreadyPresent} already present.`);
 
-    const stored = await new PostgresCandleRepository(database).listCompleted(instrument.id, timeframe);
+    const candleRepo = new PostgresCandleRepository(database);
+    const stored = await candleRepo.listCompleted(instrument.id, timeframe);
     const candles = stored
       .filter((candle) => (from === null || candle.openTime >= from) && (to === null || candle.openTime <= to))
       .map((candle) => ({
@@ -82,6 +84,42 @@ async function main(): Promise<void> {
     if (candles.length === 0) {
       console.log(`No completed ${timeframe} candles for ${symbol} in the requested window.`);
       return;
+    }
+
+    const firstBarDate = istSessionDate(candles[0]!.openTime);
+    let referenceLevels: { pdh: number; pdl: number; pdc: number } | undefined;
+
+    // Resolve causal reference levels from prior session completed bars
+    const priorBars = stored.filter((c) => istSessionDate(c.openTime) < firstBarDate);
+    if (priorBars.length > 0) {
+      const latestPriorDate = istSessionDate(priorBars[priorBars.length - 1]!.openTime);
+      const priorSessionBars = priorBars.filter((c) => istSessionDate(c.openTime) === latestPriorDate);
+      if (priorSessionBars.length > 0) {
+        referenceLevels = {
+          pdh: Math.max(...priorSessionBars.map((c) => Number(c.high))),
+          pdl: Math.min(...priorSessionBars.map((c) => Number(c.low))),
+          pdc: Number(priorSessionBars[priorSessionBars.length - 1]!.close),
+        };
+      }
+    }
+
+    if (!referenceLevels) {
+      const dailyCandles = await candleRepo.listCompleted(instrument.id, "1d");
+      const priorDailyBars = dailyCandles.filter((c) => istSessionDate(c.openTime) < firstBarDate);
+      if (priorDailyBars.length > 0) {
+        const lastDaily = priorDailyBars[priorDailyBars.length - 1]!;
+        referenceLevels = {
+          pdh: Number(lastDaily.high),
+          pdl: Number(lastDaily.low),
+          pdc: Number(lastDaily.close),
+        };
+      }
+    }
+
+    if (referenceLevels) {
+      console.log(
+        `PIT Session Reference Levels resolved: PDH=${referenceLevels.pdh}, PDL=${referenceLevels.pdl}, PDC=${referenceLevels.pdc}`
+      );
     }
 
     /*
@@ -135,7 +173,7 @@ async function main(): Promise<void> {
       definitions,
       ledger,
       coverage: new PostgresPatternCoverageRecorder(database, instrument.id),
-    }).execute({ candles, source });
+    }).execute({ candles, source, referenceLevels });
 
     console.log([
       `${symbol} ${timeframe} [${mode}]: evaluated ${result.candlesEvaluated} candles`,

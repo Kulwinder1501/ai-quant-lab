@@ -65,7 +65,8 @@ function assertConfiguration(configuration: BacktestConfiguration): void {
     || configuration.invalidGapPolicy !== "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET"
     || configuration.exitPolicy !== "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST"
     || configuration.endOfDataExitPolicy !== "CLOSE_AT_FINAL_COMPLETED_CANDLE_CLOSE"
-    || configuration.maxConcurrentPositions !== 1) {
+    || !Number.isInteger(configuration.maxConcurrentPositions)
+    || configuration.maxConcurrentPositions < 1) {
     throw new Error("Backtest configuration is invalid.");
   }
 }
@@ -274,7 +275,20 @@ export class BacktestEngine {
     const trades: BacktestTrade[] = [];
     let realisedEquity = configuration.initialCapital;
     let pending: PendingSignal | null = null;
-    let position: OpenPosition | null = null;
+    /*
+     * Open positions in ENTRY order. `trades` is appended in CLOSE order, because the metrics walk
+     * that array to build the realised-equity curve -- so a drawdown computed from it has to see
+     * closes in the order they happened, not the order the entries did.
+     *
+     * At `maxConcurrentPositions: 1` (the default) this is behaviourally identical to the single
+     * slot it replaces: `committedMargin` is always 0 at the moment a fill is admitted, so the
+     * capital check reduces to the old comparison against `realisedEquity`. Previously recorded runs
+     * stay reproducible, which is why the default is not being raised along with the capability.
+     */
+    const openPositions: OpenPosition[] = [];
+    let committedMargin = 0;
+    const marginFor = (candidate: OpenPosition): number =>
+      candidate.paperTrade.entryPrice * candidate.paperTrade.quantity * configuration.marginFraction;
 
     for (let index = 0; index < contexts.length; index += 1) {
       const context = contexts[index];
@@ -286,16 +300,20 @@ export class BacktestEngine {
         } else if (candidate === "UNSIZABLE") {
           counters.skippedSignalsUnsizable += 1;
         } else if (
-          candidate.paperTrade.entryPrice * candidate.paperTrade.quantity * configuration.marginFraction
-            + candidate.entryFees > realisedEquity + 1e-9
+          // Available capital, not gross equity: margin already committed to positions still open
+          // cannot fund a new one. With one position this is the old check unchanged, since
+          // `committedMargin` is 0 whenever a fill is admitted.
+          marginFor(candidate) + candidate.entryFees > realisedEquity - committedMargin + 1e-9
         ) {
           counters.skippedSignalsInsufficientCapital += 1;
         } else {
-          position = candidate;
+          openPositions.push(candidate);
+          committedMargin += marginFor(candidate);
         }
       }
 
-      if (position) {
+      for (let slot = 0; slot < openPositions.length; slot += 1) {
+        const position = openPositions[slot];
         const decision = decidePaperTradeExit(position.paperTrade, context.candle);
         if (decision) {
           const exitTime = decision.fillRule.startsWith("OPEN_GAP") ? context.candle.openTime : context.candle.closeTime;
@@ -310,14 +328,17 @@ export class BacktestEngine {
           });
           trades.push(trade);
           realisedEquity += trade.pnl;
-          position = null;
+          committedMargin -= marginFor(position);
+          openPositions.splice(slot, 1);
+          slot -= 1;
         }
       }
 
       const proposal = proposalFor(context, this.strategy, strategyConfiguration);
       if (!proposal) continue;
       counters.signalCount += 1;
-      if (position || pending) {
+      // A pending fill occupies a slot: it is already committed to open on the next bar.
+      if (openPositions.length + (pending ? 1 : 0) >= configuration.maxConcurrentPositions) {
         counters.skippedSignalsWhilePositionOpen += 1;
       } else if (index === contexts.length - 1) {
         counters.skippedSignalsNoNextCandle += 1;
@@ -326,19 +347,25 @@ export class BacktestEngine {
       }
     }
 
-    if (position && contexts.length > 0) {
+    if (contexts.length > 0) {
+      // Entry order, so an end-of-data flush is deterministic rather than dependent on iteration
+      // order of whatever happened to still be open.
       const lastContext = contexts[contexts.length - 1];
-      const trade = closePosition({
-        position,
-        exitContext: lastContext,
-        rawExitPrice: lastContext.candle.close,
-        exitReason: "END_OF_DATA",
-        exitTime: lastContext.candle.closeTime,
-        fillRule: "END_OF_DATA_CLOSE",
-        configuration,
-      });
-      trades.push(trade);
-      realisedEquity += trade.pnl;
+      for (const position of openPositions) {
+        const trade = closePosition({
+          position,
+          exitContext: lastContext,
+          rawExitPrice: lastContext.candle.close,
+          exitReason: "END_OF_DATA",
+          exitTime: lastContext.candle.closeTime,
+          fillRule: "END_OF_DATA_CLOSE",
+          configuration,
+        });
+        trades.push(trade);
+        realisedEquity += trade.pnl;
+      }
+      openPositions.length = 0;
+      committedMargin = 0;
     }
 
     return {

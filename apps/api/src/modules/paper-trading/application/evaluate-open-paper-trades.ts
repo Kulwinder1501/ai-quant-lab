@@ -1,4 +1,5 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
+import { advanceProtectiveStop, momentumScalp1mStopPolicy } from "../domain/protective-stop.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
 import {
@@ -15,6 +16,47 @@ import {
 } from "../domain/option-mark-to-market.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
+import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
+
+/**
+ * How long a scalp may go without progress before it is cut, and how much progress counts.
+ *
+ * Keyed by timeframe rather than hardcoded to one, because the rule now runs on two and their
+ * evidence is not the same strength. A timeframe absent from this table has no stall at all, which
+ * is how a new timeframe stays opted out until someone measures it rather than inheriting a cell
+ * fitted on a different bar size.
+ *
+ * `5m` -- measured, and the direction is well supported. See the block that uses this for the
+ * sweep, the bootstrap interval, and why the cutoff is a band rather than an optimum.
+ *
+ * `1m` -- ENABLED BY REQUEST, AGAINST THE MEASUREMENT. The sweep of 2026-09-07 ran this exact rule
+ * over every closed 1m option trade, 9 cutoffs x 5 progress levels, replayed from the observed
+ * premium bid series. On cohort A -- `momentum-scalp` on AutoBot-Scalp1m, which is the bot this
+ * actually governs -- the surface was negative in 41 of 45 cells, with a paired session-clustered
+ * t of -0.62 at exactly the (10, 0.5R) cell configured here. That is not significant either, so
+ * the honest reading is "no evidence it helps on 1m", not "proven harmful"; the recorded
+ * conclusion was nonetheless "do not extend the rule to the Scalp1m bot".
+ *
+ * It is enabled anyway because it was asked for, and it is cheap to reverse: delete the `1m` line
+ * and the rule is off. Two things to know before reading any result from it. Cohort B, a different
+ * strategy and era, did show a robust region at 3-6 minutes -- but setting progress to +infinity
+ * there gave identical results to 3 decimals, meaning every surviving trade was below the progress
+ * threshold anyway and the condition did no work. On 1m this is a holding-period cap wearing a
+ * stall rule's costume, and holding period is the lever already closed as NO_VIABLE_HORIZON. And
+ * 1m entries are what the cap will bite: 9 of 11 trades on 2026-09-08 closed inside 10 minutes, so
+ * expect it to fire rarely and change little.
+ */
+interface MomentumStallPolicy {
+  readonly cutoffMinutes: number;
+  readonly minimumProgressR: number;
+}
+
+const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | undefined>> = Object.freeze({
+  "5m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
+  // Deliberately the 5m cell rather than a 1m-specific one: cohort A produced no better cell to
+  // borrow, so inventing a different number here would be fitting to noise twice over.
+  "1m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
+});
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -534,6 +576,36 @@ export class EvaluateOpenPaperTrades {
       ? denseQuote.bid
       : null;
     if (freshBid !== null) {
+      if (trade.strategyKey === "momentum-scalp" && trade.timeframe === "1m") {
+        /*
+         * Break-even, and the trail behind the same policy object.
+         *
+         * The inlined version measured progress from `trade.stopLoss`, which is the value it then
+         * moved -- so on the next sweep the trade's own risk had changed and every derived quantity
+         * shifted with it. It also carried a SHORT branch with inverted comparisons, unreachable
+         * because `decideOptionBuyerLiveExit` throws on any side but LONG.
+         *
+         * The policy's trail is null, so this is the same behaviour as before: break-even at +0.5R
+         * and nothing else. Turning the trail on is a research decision with a registered gate --
+         * see the note in `protective-stop.ts`.
+         */
+        const advance = advanceProtectiveStop({
+          entryPrice: trade.entryPrice,
+          initialStopLoss: trade.initialStopLoss ?? trade.stopLoss,
+          currentStopLoss: trade.stopLoss,
+          markPremium: freshBid,
+          policy: momentumScalp1mStopPolicy,
+        });
+        if (advance && this.paperTradeRepository.updateStopLoss) {
+          await this.paperTradeRepository.updateStopLoss(
+            trade.id,
+            advance.stopLoss,
+            `1m momentum scalp ${advance.reason}`,
+          );
+          trade.stopLoss = advance.stopLoss;
+          trade.stopLossEffectiveAt = asOf;
+        }
+      }
       const decision = decideOptionBuyerLiveExit(trade, freshBid, liveSpot);
       if (decision) {
         return closeOption({
@@ -603,16 +675,54 @@ export class EvaluateOpenPaperTrades {
         });
       }
 
-      // Momentum Stall Stop (5m timeframe, elapsed market time >= 20 mins, gain < 0.5R)
+      // Momentum Stall Stop (a timeframe with a policy, elapsed market time >= its cutoff, gain
+      // below its progress threshold). See MOMENTUM_STALL_POLICIES for which timeframes are in and
+      // what evidence each rests on -- 1m is enabled by request against its own measurement.
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.
-      if (trade.timeframe === "5m") {
+      //
+      // The cutoff was 20 minutes, chosen by judgment and never tested. Measured 2026-09-06 by
+      // replaying 243 5m scalp trades over 10 sessions from entry against the observed premium bid
+      // series, with barriers resolved before this clause exactly as they are below: gross by
+      // cutoff at the same 0.5R threshold ran 5min +3,005, 10min +6,427, 15min +3,112, 20min
+      // -5,499, 30min -3,538, 40min -7,219, and never-cut -22,888. The surface is smooth and
+      // unimodal around 10 minutes rather than a lone spike, 9 of 10 sessions improved, and the
+      // held-out sessions agreed, so waiting 20 minutes was giving back most of what the rule earns.
+      //
+      // Ten minutes, not a tuned optimum. A session-clustered bootstrap (the session is the unit;
+      // trades inside one share the same underlying move) puts this cell at +11,926 with a 95%
+      // interval of [-863, +21,642] -- so the *direction* is well supported but the exact cell is
+      // not identifiable on 10 sessions, and neighbouring cells at 0.25R and 15min/1R sit within
+      // noise of it. Re-run the sweep as sessions accumulate rather than reading 10/0.5R as optimal.
+      //
+      // This reduces a loss, it does not create edge: cohort fees are ~17,130 against a best
+      // achievable gross of +6,427, so the book stays net-negative either way.
+      const stallPolicy = trade.timeframe ? MOMENTUM_STALL_POLICIES[trade.timeframe] : undefined;
+      if (stallPolicy) {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
-        const initialRisk = trade.entryPrice - trade.stopLoss;
+        /*
+         * The OPENING stop, not the one currently in force.
+         *
+         * This read `trade.stopLoss`, which break-even advances to entry at +0.5R -- so risk
+         * collapsed toward zero, `reward / risk` blew past the `<= 1.6` scalp test, and this time
+         * stop switched itself off for exactly the trades that touched +0.5R and then died. Same
+         * failure that withdrew V4, arriving through the stop instead of the target.
+         *
+         * Latent rather than active when found: 0 of 414 trades had ever moved a stop, so no
+         * historical measurement is affected. Falls back to the live stop only for a trade loaded
+         * before migration 106 filled the column.
+         */
+        const openingStop = trade.initialStopLoss ?? trade.stopLoss;
+        const initialRisk = trade.entryPrice - openingStop;
         const initialReward = trade.targetPrice - trade.entryPrice;
         const isScalp = initialRisk > 0 ? (initialReward / initialRisk) <= 1.6 : false;
-        
-        if (isScalp && elapsedMinutes >= 20 && initialRisk > 0 && freshBid < trade.entryPrice + 0.5 * initialRisk) {
+
+        if (
+          isScalp
+          && elapsedMinutes >= stallPolicy.cutoffMinutes
+          && initialRisk > 0
+          && freshBid < trade.entryPrice + stallPolicy.minimumProgressR * initialRisk
+        ) {
           return closeOption({
             exitPrice: freshBid,
             exitReason: "MOMENTUM_STALL",
@@ -621,6 +731,13 @@ export class EvaluateOpenPaperTrades {
             details: {
               source: "MOMENTUM_STALL_EVALUATOR",
               elapsedMinutes,
+              // Stamped so a booked exit explains itself: the cutoff has moved once already, and
+              // without it a stall booked under 20 minutes is indistinguishable from one under 10.
+              // The timeframe joins them now that the rule runs on more than one, because 5m and 1m
+              // stalls rest on very different evidence and must be separable in the booked record.
+              timeframe: trade.timeframe,
+              cutoffMinutes: stallPolicy.cutoffMinutes,
+              minimumProgressR: stallPolicy.minimumProgressR,
               freshBid,
               entryPrice: trade.entryPrice,
               initialRisk,

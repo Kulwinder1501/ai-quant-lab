@@ -157,4 +157,5 @@ describe("model prediction HTTP routes", () => {
     expect(mutationAttempt).toEqual({ status: 404, body: { error: "Route not found" } });
     expect(calls).toHaveLength(0);
   });
+
 });

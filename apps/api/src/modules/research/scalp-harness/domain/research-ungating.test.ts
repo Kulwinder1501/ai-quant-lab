@@ -8,7 +8,7 @@ import {
 import {
   defaultMomentumScalpStrategyConfiguration,
 } from "../../../strategy-engine/domain/momentum-scalp-strategy.js";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 
 /**
  * Pins the Option-A ungating: the research versions must capture the setups the historical gate threw
@@ -19,7 +19,7 @@ import { researchScalpStrategies } from "./research-strategies.js";
  * plausible-looking rows, just of a filtered population, and no downstream estimate would look wrong.
  */
 describe("research strategy ungating", () => {
-  const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
+  const byKey = Object.fromEntries(createResearchScalpStrategies().map((s) => [s.definition.strategyKey, s]));
 
   it("registers the ungated research versions, distinct from the gated historical ones", () => {
     // A version string must mean one definition forever; the gated captures live under the old keys.
@@ -27,31 +27,31 @@ describe("research strategy ungating", () => {
     // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
     // meaning.
     expect(Object.keys(byKey).sort()).toEqual([
-      "index-v3-research", "momentum-v5-research", "momentum-v6-research",
+      "index-v3-research", "momentum-v10-research", "momentum-v11-research", "momentum-v9-research",
       "pattern-v4-research", "pattern-v4-research-v2",
     ]);
   });
 
-  it("registers momentum-v6-research as an ungated 1m sibling of v5, same candidate logic", () => {
-    const byKey = Object.fromEntries(researchScalpStrategies.map((s) => [s.definition.strategyKey, s]));
-    const v5 = byKey["momentum-v5-research"]!;
-    const v6 = byKey["momentum-v6-research"]!;
-    // Ungated like v5, and runs on the same 1m timeframe.
-    expect(v6.definition.configuration.minimumConfidence).toBe(0);
-    expect(v6.supportedTimeframes).toEqual(["1m"]);
+  it("registers momentum-v10-research as an ungated 1m sibling of v9, same candidate logic", () => {
+    const byKey = Object.fromEntries(createResearchScalpStrategies().map((s) => [s.definition.strategyKey, s]));
+    const v7 = byKey["momentum-v9-research"]!;
+    const v8 = byKey["momentum-v10-research"]!;
+    // Ungated like v7, and runs on the same 1m timeframe.
+    expect(v8.definition.configuration.minimumConfidence).toBe(0);
+    expect(v8.supportedTimeframes).toEqual(["1m"]);
     // Same candidate logic == same implementation checksum. This is the machine-checked proof, not
     // an oversight: a different checksum would have to name a different source file, and there is none.
-    expect(v6.definition.implementationArtifactChecksum).toBe(v5.definition.implementationArtifactChecksum);
+    expect(v8.definition.implementationArtifactChecksum).toBe(v7.definition.implementationArtifactChecksum);
     // The schema bump is what records the added HTF payload, and it is what keeps the two hashes apart.
-    expect(v6.definition.featureSchemaVersion).toBe("scalp-raw-context-v3");
-    expect(v5.definition.featureSchemaVersion).toBe("scalp-raw-context-v2");
-    expect(v6.definition.strategyDefinitionHash).not.toBe(v5.definition.strategyDefinitionHash);
+    expect(v8.definition.featureSchemaVersion).toBe("scalp-raw-context-v3");
+    expect(v7.definition.featureSchemaVersion).toBe("scalp-raw-context-v2");
+    expect(v8.definition.strategyDefinitionHash).not.toBe(v7.definition.strategyDefinitionHash);
   });
 
   it("lifts each strategy's own score gate, not a generically-named one", () => {
     // The pattern strategy gates on scoreThreshold and has no minimumConfidence at all. Setting the
     // wrong key would leave its 5-of-9 confluence gate fully active while looking ungated.
-    expect(byKey["momentum-v5-research"]!.definition.configuration.minimumConfidence).toBe(0);
+    expect(byKey["momentum-v9-research"]!.definition.configuration.minimumConfidence).toBe(0);
     expect(byKey["index-v3-research"]!.definition.configuration.minimumConfidence).toBe(0);
     expect(byKey["pattern-v4-research"]!.definition.configuration.scoreThreshold).toBe(0);
     expect(byKey["pattern-v4-research"]!.definition.configuration.minimumConfidence).toBeUndefined();
@@ -68,10 +68,10 @@ describe("research strategy ungating", () => {
 
   it("changes the definition hash, so ungated captures can never merge with gated ones", () => {
     // The hash covers the configuration, so this is structural rather than a naming convention.
-    const hashes = researchScalpStrategies.map((s) => s.definition.strategyDefinitionHash);
+    const hashes = createResearchScalpStrategies().map((s) => s.definition.strategyDefinitionHash);
     // Tied to the registry length rather than a literal: the invariant is that every registered
     // strategy has its own hash, which must hold as cohorts are added, not just at a count of three.
-    expect(new Set(hashes).size).toBe(researchScalpStrategies.length);
+    expect(new Set(hashes).size).toBe(createResearchScalpStrategies().length);
     for (const hash of hashes) expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 

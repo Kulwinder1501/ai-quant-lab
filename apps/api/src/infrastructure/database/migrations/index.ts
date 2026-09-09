@@ -96,6 +96,14 @@ import { differentialClassificationsMigration } from "./095-differential-classif
 import { autonomousAgentStrategyIdentityMigration } from "./096-autonomous-agent-strategy-identity.js";
 import { oneActiveStrategyVersionMigration } from "./097-one-active-strategy-version.js";
 import { oneActiveStrategyVersionIndexMigration } from "./098-one-active-strategy-version-index.js";
+import { stockIntelligenceCanonicalModelMigration } from "./099-stock-intelligence-canonical-model.js";
+import { stockIntelligenceCorporateActionIdentityMigration } from "./100-stock-intelligence-corporate-action-identity.js";
+import { stockIntelligenceReplayHarnessMigration } from "./101-stock-intelligence-replay-harness.js";
+import { stockIntelligenceFeatureIdentityMigration } from "./102-stock-intelligence-feature-identity.js";
+import { stockIntelligenceSnapshotMigration } from "./103-stock-intelligence-prediction-snapshots.js";
+import { stockIntelligenceGate7ReportMigration } from "./104-stock-intelligence-gate7-reports.js";
+import { ictStateSnapshotsMigration } from "./105-ict-state-snapshots.js";
+import { paperTradeInitialStopLossMigration } from "./106-paper-trade-initial-stop-loss.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -196,4 +204,12 @@ export const migrations = [
   autonomousAgentStrategyIdentityMigration,
   oneActiveStrategyVersionMigration,
   oneActiveStrategyVersionIndexMigration,
+  stockIntelligenceCanonicalModelMigration,
+  stockIntelligenceCorporateActionIdentityMigration,
+  stockIntelligenceReplayHarnessMigration,
+  stockIntelligenceFeatureIdentityMigration,
+  stockIntelligenceSnapshotMigration,
+  stockIntelligenceGate7ReportMigration,
+  ictStateSnapshotsMigration,
+  paperTradeInitialStopLossMigration,
 ];
