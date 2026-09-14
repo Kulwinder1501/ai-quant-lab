@@ -20,7 +20,7 @@ import type { Migration } from "../migration-runner.js";
  * NOT NULL is set after the backfill, so the column cannot silently accept a row that forgot it.
  */
 export const paperTradeInitialStopLossMigration: Migration = {
-  id: "107-paper-trade-initial-stop-loss",
+  id: "106-paper-trade-initial-stop-loss",
   sql: `
     ALTER TABLE paper_trades
       ADD COLUMN IF NOT EXISTS initial_stop_loss NUMERIC(20,6);

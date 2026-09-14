@@ -32,7 +32,7 @@ import type { Migration } from "../migration-runner.js";
  * evidence out from under whatever later reads it.
  */
 export const candidateDatasetMigration: Migration = {
-  id: "106-candidate-dataset",
+  id: "107-candidate-dataset",
   sql: `
     CREATE TABLE IF NOT EXISTS candidate_dataset_entries (
       -- logicalKey over instrumentSymbol/decisionAt/side/refusal/observedIn.snapshotId; the identity
