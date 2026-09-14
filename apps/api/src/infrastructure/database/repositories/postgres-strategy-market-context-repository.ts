@@ -429,6 +429,37 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<RegimeContext | null> {
+    const raw = await this.findRawVix({
+      instrumentId: input.instrumentId,
+      timeframe: input.timeframe,
+      closeTime: candle.close_time,
+    });
+    return raw ? deriveVolatilityRegime(raw.vixClose, raw.vixSma20) : null;
+  }
+
+  /**
+   * The raw VIX close and its SMA(20), the same point-in-time lookup `findRegime` uses -- but
+   * returning the pair itself rather than folding it into `deriveVolatilityRegime`'s ratio.
+   *
+   * Public (unlike `findRegime`) because Brain V2.2's State Interpreter (`state-interpreter.ts`)
+   * threads `volatilityReading: {vixClose, vixSma20} | null` as a caller-supplied sibling input and
+   * derives its own regime reading itself -- it does not consume `RegimeContext`. Extracted as a
+   * shared private helper rather than duplicating the query, so this and `findRegime` cannot silently
+   * drift onto two different VIX readings for the same instant.
+   */
+  async findRawVolatilityReading(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
+    return this.findRawVix(input);
+  }
+
+  private async findRawVix(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
     const vixResult = await this.database.query<{ id: string }>(
       "SELECT id FROM instruments WHERE symbol = $1",
       [regimeSourceInstrumentSymbol],
@@ -446,7 +477,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     // The VIX bar must have closed no later than the target bar, so the regime is
     // knowable at decision time. The lower bound stops a long gap in the VIX series
     // from carrying a stale reading forward as if it were current.
-    const earliestAcceptableCloseTime = new Date(candle.close_time.getTime() - stalenessMilliseconds);
+    const earliestAcceptableCloseTime = new Date(input.closeTime.getTime() - stalenessMilliseconds);
     const vixCandleResult = await this.database.query<{ id: string; close: string }>(`
       SELECT id, close
       FROM candles
@@ -457,7 +488,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         AND close_time >= $4
       ORDER BY close_time DESC
       LIMIT 1
-    `, [vixInstrumentId, input.timeframe, candle.close_time, earliestAcceptableCloseTime]);
+    `, [vixInstrumentId, input.timeframe, input.closeTime, earliestAcceptableCloseTime]);
     const vixCandle = vixCandleResult.rows[0];
     if (!vixCandle) {
       return null;
@@ -485,6 +516,6 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       return null;
     }
 
-    return deriveVolatilityRegime(toNumber(vixCandle.close, "VIX close"), vixSma20);
+    return { vixClose: toNumber(vixCandle.close, "VIX close"), vixSma20 };
   }
 }

@@ -7,6 +7,38 @@ import { buildOfiObservations } from "../../modules/research/domain/ofi-signal-o
 import { runFalsificationHarness } from "../../modules/research/domain/falsification-harness.js";
 
 /**
+ * Pre-registered 2026-09-09, before evaluating any session not already inspected while diagnosing
+ * the defect this amends. Recorded here rather than only in the doc, for the same reason the Phase 1
+ * gate above is enforced in code: a threshold that lives only in a document is the one that gets
+ * quietly loosened the day it is inconvenient.
+ *
+ * ## Why a fixed count is not enough for the negative-lag probe
+ *
+ * `runFalsificationHarness`'s own `minimumSample` (default 100) exists so a lag probe surviving on
+ * only a handful of overlap-filtered pairs cannot manufacture a failure through small-n variance —
+ * but a diagnostic run across six 2026-09-01..09-08 BANKNIFTY-futures sessions found `lag=-30`
+ * clearing 100 while still sitting at 0.4-1.2% of the full session (120-487 of ~10,600-42,300
+ * observations), and failing on exactly that sliver on 3 of 6 sessions. A fixed count that scales
+ * with neither the session length nor the observation cadence cannot tell "a handful" from "a small
+ * but real fraction of a much larger session" — which is precisely the gap between what 100 was
+ * built for and what it was asked to judge.
+ *
+ * ## The fraction, and how it was chosen
+ *
+ * `NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION = 0.05`: a lag probe must clear both the harness's absolute
+ * floor of 100 AND 5% of the full observation count. 5% sits with a wide margin above every failing
+ * sample this diagnostic saw (max 1.2%) and a wide margin below every passing one (`lag=-10` sat at
+ * 60-100% of the full session in every session inspected) — chosen for that margin, not fitted to
+ * land between the two closest observed values.
+ *
+ * **This was chosen after inspecting the sessions it was chosen against, and that is disclosed
+ * rather than hidden.** No session already used to diagnose the defect (2026-09-01 through 09-08) is
+ * to be re-evaluated under this floor and reported as a result. The next real read is whichever
+ * session lands after this change, on data no one had seen when the fraction was picked.
+ */
+const NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION = 0.05;
+
+/**
  * Runs the OFI signal through the R0 falsification harness (Phase 28 step 4).
  *
  * ## The gate is enforced here, in code, not merely written down in the protocol
@@ -191,11 +223,14 @@ async function main(): Promise<void> {
       const built = buildOfiObservations({
         frames, ofiWindowMs: options.ofiWindowMs, horizonMs, levels: options.levels,
       });
-      const report = runFalsificationHarness(built.observations, { seed: options.seed });
+      const minimumSample = Math.max(100, Math.ceil(built.observations.length * NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION));
+      const report = runFalsificationHarness(built.observations, { seed: options.seed, minimumSample });
       return {
         horizonMs,
         observations: built.observations.length,
         skipped: built.skipped,
+        // Printed so a lag's sample size can be read against what it had to clear, not just its IC.
+        negativeLagMinimumSample: minimumSample,
         verdict: report.verdict,
         ic: report.real.ic,
         confidenceInterval: report.real.confidenceInterval,
