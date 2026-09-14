@@ -1,6 +1,7 @@
 import type { QueryResultRow } from "pg";
 import type { DatabaseQueryable } from "../database.js";
 import type { CandleRepository, PersistedCandle, UpsertCandleInput } from "../../../modules/market-data/domain/candle.js";
+import { CompletedCandleImmutableError } from "../../../modules/market-data/domain/candle.js";
 
 interface CandleRow extends QueryResultRow {
   id: string;
@@ -83,7 +84,7 @@ export class PostgresCandleRepository implements CandleRepository {
         source = EXCLUDED.source,
         source_metadata = EXCLUDED.source_metadata,
         received_at = CURRENT_TIMESTAMP
-      WHERE candles.is_complete = FALSE
+      WHERE candles.is_complete = FALSE OR (candles.source_metadata ? 'quoteObservedAt')
       RETURNING ${returningColumns}
     `, [
       input.instrumentId,
@@ -110,7 +111,11 @@ export class PostgresCandleRepository implements CandleRepository {
       throw new Error("Candle upsert did not return a row.");
     }
     if (!hasSameValues(existing, input)) {
-      throw new Error("Completed candles are immutable; record a provider correction as a new data revision.");
+      throw new CompletedCandleImmutableError({
+        instrumentId: input.instrumentId,
+        timeframe: input.timeframe,
+        openTime: input.openTime,
+      });
     }
     return existing;
   }
@@ -148,5 +153,33 @@ export class PostgresCandleRepository implements CandleRepository {
       ORDER BY open_time ASC
     `, [instrumentId, timeframe]);
     return result.rows.map(toCandle);
+  }
+
+  /**
+   * The settled daily close for a symbol on a session, by symbol rather than id.
+   *
+   * Restricted to complete candles: a provisional close is still moving, and this
+   * is used as the denominator of an offshore premium, where a mid-session value
+   * would silently misreport the gap. Returns null when the session has no settled
+   * daily bar, which a caller reports as an unmeasurable gap rather than zero.
+   */
+  async findCloseOn(symbol: string, date: Date): Promise<number | null> {
+    const result = await this.database.query<{ close: string }>(`
+      SELECT c.close
+      FROM candles c
+      JOIN instruments i ON i.id = c.instrument_id
+      WHERE i.symbol = $1
+        AND c.timeframe = '1d'
+        AND c.is_complete = TRUE
+        AND c.open_time >= $2::date
+        AND c.open_time < ($2::date + INTERVAL '1 day')
+      ORDER BY c.open_time DESC
+      LIMIT 1
+    `, [symbol, date.toISOString().slice(0, 10)]);
+
+    const row = result.rows[0];
+    if (!row) return null;
+    const parsed = Number.parseFloat(String(row.close));
+    return Number.isFinite(parsed) ? parsed : null;
   }
 }

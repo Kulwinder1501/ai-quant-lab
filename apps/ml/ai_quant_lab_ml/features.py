@@ -1,4 +1,4 @@
-﻿"""Deterministic, source-candle-only feature and label construction.
+"""Deterministic, source-candle-only feature and label construction.
 
 The feature mapping in this module is deliberately fixed.  A model trained with
 ``ml-feature-v2`` therefore receives the same ordered columns regardless of
@@ -27,11 +27,27 @@ from typing import Any
 
 from .contracts import (
     FEATURE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2,
+    FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_V6,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V8,
+    FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
+    FEATURE_SCHEMA_VERSION_V9,
+    KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
     IndicatorEvidence,
     LabeledExample,
     MarketLabel,
+    schema_version_for,
+)
+from .triple_barrier import TripleBarrierError, triple_barrier_label
+from .volatility_expansion import (
+    VolatilityExpansionError,
+    trailing_range_of,
+    volatility_expansion_label,
 )
 
 
@@ -49,7 +65,7 @@ def trailing_feature_context(series: Sequence[tuple[float, float]]) -> tuple[flo
     """Return ``(prior_close, median_volume)`` for the final bar of a series.
 
     ``series`` is chronological ``(close, volume)`` for consecutive completed
-    candles ending with the bar being scored â€” the same walk
+    candles ending with the bar being scored — the same walk
     :func:`build_labeled_examples` performs during training. Inference must use
     this helper rather than passing placeholders: a feature that is real during
     training and missing at prediction time is train/serve skew, and the imputer
@@ -75,6 +91,52 @@ _CANDLE_FEATURES: tuple[str, ...] = (
     "candle.range_bps",
     "candle.upper_wick_bps",
     "candle.lower_wick_bps",
+    "candle.gap_fill_bps",
+    "candle.is_gap_defended",
+)
+
+# Institutional cash flow, normalised to be scale-free and era-robust. Both are
+# populated by ``PostgresMlRepository._load_institutional_flow``, which enforces
+# the point-in-time rule that matters here: flows for session D are published
+# *after* D closes, so a bar may only read a print from a strictly earlier session.
+#
+# ``market.gift_nifty_implied_gap_bps`` used to sit alongside these. It is gone:
+# nothing populated it, so it was a guaranteed-NaN column in both training and
+# inference. Re-add it together with a loader once a real offshore feed exists --
+# a declared column with no source is worse than an absent one, because it enters
+# the versioned contract and forces a retrain while contributing nothing.
+_LEGACY_MARKET_FEATURES: tuple[str, ...] = (
+    "market.fii_net_flow_ratio",
+    "market.dii_net_flow_ratio",
+)
+
+_MARKET_FEATURES: tuple[str, ...] = _LEGACY_MARKET_FEATURES + (
+    "market.fii_futures_net_flow_ratio",
+    "market.fii_options_net_flow_ratio",
+)
+
+# The three gap columns describe a session boundary, so inside a session they are
+# not merely uninformative but actively misleading:
+#
+# * ``overnight_gap_bps`` compares the bar's open to the *previous bar's* close.
+#   On a continuously quoted index that is ~0 on essentially every intraday bar.
+# * ``is_gap_defended`` is gated on |gap| > 20bps, which minute-to-minute never
+#   fires, making the column a constant 0.0 — zero information.
+# * ``gap_fill_bps`` is the harmful one. It means open->low when the gap is
+#   positive and open->high when it is negative, so at 1m, where the gap sign is
+#   noise, a single column carries two opposite meanings selected at random. It
+#   also duplicates upper_wick_bps / lower_wick_bps.
+#
+# ``volume_median_ratio`` is deliberately retained. It is the right normalisation
+# for scalping the moment the feed carries real volume; note that Yahoo's ^NSEI
+# 1m series reports zero volume on every bar, so against that source the column
+# imputes to a constant and contributes nothing.
+_SCALP_EXCLUDED_CANDLE_FEATURES: frozenset[str] = frozenset(
+    {"candle.overnight_gap_bps", "candle.gap_fill_bps", "candle.is_gap_defended"}
+)
+
+_SCALP_CANDLE_FEATURES: tuple[str, ...] = tuple(
+    name for name in _CANDLE_FEATURES if name not in _SCALP_EXCLUDED_CANDLE_FEATURES
 )
 
 _INDICATOR_VALUE_FIELDS: Mapping[str, tuple[str, ...]] = {
@@ -105,7 +167,7 @@ _INDICATOR_PARAMETERS: Mapping[str, Mapping[str, Any]] = {
     "SUPERTREND": {"atrPeriod": 10, "multiplier": 3},
 }
 
-_PATTERN_CODES: tuple[str, ...] = (
+_PATTERN_CODES_V5: tuple[str, ...] = (
     "DOJI",
     "HAMMER",
     "HANGING_MAN",
@@ -121,6 +183,40 @@ _PATTERN_CODES: tuple[str, ...] = (
     "INSIDE_BAR",
     "OUTSIDE_BAR",
 )
+
+_PATTERN_CODES_V8: tuple[str, ...] = (
+    "DOJI",
+    "DRAGONFLY_DOJI",
+    "GRAVESTONE_DOJI",
+    "HAMMER",
+    "HANGING_MAN",
+    "SHOOTING_STAR",
+    "BULLISH_ENGULFING",
+    "BEARISH_ENGULFING",
+    "MORNING_STAR",
+    "EVENING_STAR",
+    "BULLISH_HARAMI",
+    "BEARISH_HARAMI",
+    "THREE_WHITE_SOLDIERS",
+    "THREE_BLACK_CROWS",
+    "INSIDE_BAR",
+    "OUTSIDE_BAR",
+    "PIERCING_LINE",
+    "DARK_CLOUD_COVER",
+    "TWEEZER_BOTTOM",
+    "TWEEZER_TOP",
+    "BULLISH_MARUBOZU",
+    "BEARISH_MARUBOZU",
+    "THREE_INSIDE_UP",
+    "THREE_INSIDE_DOWN",
+)
+
+_PATTERN_CODES_V9_ADDITIONS: tuple[str, ...] = (
+    "INVERTED_HAMMER",
+    "SPINNING_TOP",
+)
+
+_PATTERN_CODES: tuple[str, ...] = _PATTERN_CODES_V8 + _PATTERN_CODES_V9_ADDITIONS
 
 _PRICE_ACTION_EVENT_TYPES: tuple[str, ...] = (
     "BREAKOUT",
@@ -138,7 +234,7 @@ _PRICE_ACTION_EVENT_TYPES: tuple[str, ...] = (
 _DIRECTIONS: tuple[str, ...] = ("BULLISH", "BEARISH", "NEUTRAL")
 
 
-def _build_feature_schema() -> tuple[str, ...]:
+def _build_feature_schema_v5() -> tuple[str, ...]:
     indicator_features = tuple(
         f"indicator.{code}.{field}"
         for code, fields in _INDICATOR_VALUE_FIELDS.items()
@@ -147,7 +243,7 @@ def _build_feature_schema() -> tuple[str, ...]:
     supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
     pattern_features = tuple(
         f"pattern.{code}.{direction.lower()}_confidence"
-        for code in _PATTERN_CODES
+        for code in _PATTERN_CODES_V5
         for direction in _DIRECTIONS
     )
     price_action_features = tuple(
@@ -158,38 +254,212 @@ def _build_feature_schema() -> tuple[str, ...]:
         f"price_action.{event_type}.level_distance_bps" for event_type in _PRICE_ACTION_EVENT_TYPES
     )
     regime_features = ("regime.vix_sma20.value_ratio",)
-    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features
+    return _CANDLE_FEATURES + indicator_features + supertrend_features + pattern_features + price_action_features + regime_features + _LEGACY_MARKET_FEATURES
 
+def _build_feature_schema_scalp(market_features: tuple[str, ...]) -> tuple[str, ...]:
+    indicator_features = tuple(
+        f"indicator.{code}.{field}"
+        for code, fields in _INDICATOR_VALUE_FIELDS.items()
+        for field in fields
+    )
+    supertrend_features = ("indicator.SUPERTREND.trend_up", "indicator.SUPERTREND.trend_down")
+    return _SCALP_CANDLE_FEATURES + indicator_features + supertrend_features + market_features
+
+
+# The v6 swing schema: 36 columns against v5's 113. Explicit rather than
+# generated, because the whole point of the version is *which columns exist*;
+# a builder that derives the list from shared tables invites an accidental
+# contract change when a table gains an entry.
+#
+# What changed against v5, and why:
+#
+# * The 42 pattern and 30 price-action confidence one-hots collapse into four
+#   aggregate scores. On daily NIFTY50 those blocks are zero on the vast
+#   majority of rows, and 72 near-constant columns are variance for the
+#   imputer and noise for the fold estimates while carrying at most "some
+#   bullish/bearish detection fired, this strongly".
+# * The two SUPPORT/RESISTANCE level distances survive as the only per-event
+#   columns: they are the price-action block's dense structural content.
+# * Bollinger middle/upper/lower are gone: middle *is* SMA20, and the bands
+#   are middle +/- 2 standard deviations, so given `indicator.SMA.value_bps`
+#   and the deviation ratio all three are exact linear combinations. The same
+#   reasoning removes the SuperTrend band levels in favour of its line and
+#   trend flags.
+# * VWAP is gone from the swing schema: with one bar per session, a
+#   session-reset VWAP is the bar's typical price restated, and on index
+#   series the volume weighting is meaningless because index "volume" is
+#   synthetic or zero.
+# * `candle.gap_fill_bps` and `candle.is_gap_defended` are gone. The dual
+#   meaning of gap_fill (open->low on up-gaps, open->high on down-gaps) makes
+#   one column carry two opposite quantities on every timeframe, not just
+#   intraday; the wick columns already carry the same evidence unambiguously.
+# * Seven point-in-time breadth columns arrive from the twenty-equity research
+#   panel and the two indices (Phase 25, Workstream B4). Their sources,
+#   windows, and floors are part of the contract; see the BREADTH_* constants.
+FEATURE_SCHEMA_V6: tuple[str, ...] = (
+    "candle.close_return_bps",
+    "candle.overnight_gap_bps",
+    "candle.high_atr_ratio",
+    "candle.low_atr_ratio",
+    "candle.volume_median_ratio",
+    "candle.body_return_bps",
+    "candle.range_bps",
+    "candle.upper_wick_bps",
+    "candle.lower_wick_bps",
+    "indicator.SMA.value_bps",
+    "indicator.EMA.value_bps",
+    "indicator.RSI.value",
+    "indicator.MACD.macd",
+    "indicator.MACD.signal",
+    "indicator.MACD.histogram",
+    "indicator.ATR.value_ratio",
+    "indicator.BOLLINGER_BANDS.standardDeviation_ratio",
+    "indicator.SUPERTREND.value_bps",
+    "indicator.SUPERTREND.trend_up",
+    "indicator.SUPERTREND.trend_down",
+    "pattern.bullish_confidence",
+    "pattern.bearish_confidence",
+    "price_action.bullish_confidence",
+    "price_action.bearish_confidence",
+    "price_action.SUPPORT.level_distance_bps",
+    "price_action.RESISTANCE.level_distance_bps",
+    "regime.vix_sma20.value_ratio",
+    "market.fii_net_flow_ratio",
+    "market.dii_net_flow_ratio",
+    "breadth.advance_decline_ratio",
+    "breadth.median_return_bps",
+    "breadth.return_dispersion_bps",
+    "breadth.above_sma20_ratio",
+    "breadth.median_volume_ratio",
+    "breadth.bank_it_spread_bps",
+    "cross.nifty_banknifty_return_gap_bps",
+)
+
+# Futures/options institutional flows change the ordered contract. They belong to
+# v7 rather than silently changing every existing v6 artifact from 36 to 38 columns.
+FEATURE_SCHEMA_V7: tuple[str, ...] = (
+    FEATURE_SCHEMA_V6[:29]
+    + ("market.fii_futures_net_flow_ratio", "market.fii_options_net_flow_ratio")
+    + FEATURE_SCHEMA_V6[29:]
+)
+
+# 11 scale-free candlestick geometry features normalised by ATR or Range.
+_CANDLE_GEOMETRY_FEATURES: tuple[str, ...] = (
+    "candle.body_atr_ratio",
+    "candle.upper_wick_atr_ratio",
+    "candle.lower_wick_atr_ratio",
+    "candle.range_atr_ratio",
+    "candle.close_position_within_range",
+    "candle.body_to_range_ratio",
+    "candle.upper_wick_to_range_ratio",
+    "candle.lower_wick_to_range_ratio",
+    "candle.gap_from_previous_close_atr",
+    "candle.close_vs_previous_high_atr",
+    "candle.close_vs_previous_low_atr",
+)
+
+# Model B schema: Model A (V7) + raw candle geometry
+FEATURE_SCHEMA_V8_GEOMETRY: tuple[str, ...] = FEATURE_SCHEMA_V7 + _CANDLE_GEOMETRY_FEATURES
+
+# Multi-hot binary pattern flags for the 24 frozen textbook patterns under V8
+_PATTERN_BINARY_FEATURES_V8: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES_V8
+)
+
+# Model C schema (V8): Model B (V8_GEOMETRY: 49) + named multi-hot pattern flags (24) = 73 features
+FEATURE_SCHEMA_V8: tuple[str, ...] = FEATURE_SCHEMA_V8_GEOMETRY + _PATTERN_BINARY_FEATURES_V8
+assert len(FEATURE_SCHEMA_V8) == 73, f"FEATURE_SCHEMA_V8 must have exactly 73 features, got {len(FEATURE_SCHEMA_V8)}"
+
+# Model D schema (V9): V8 (73) + inverted_hammer + spinning_top (2) = 75 features
+_PATTERN_BINARY_FEATURES_V9_ADDITIONS: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES_V9_ADDITIONS
+)
+FEATURE_SCHEMA_V9: tuple[str, ...] = FEATURE_SCHEMA_V8 + _PATTERN_BINARY_FEATURES_V9_ADDITIONS
+assert len(FEATURE_SCHEMA_V9) == 75, f"FEATURE_SCHEMA_V9 must have exactly 75 features, got {len(FEATURE_SCHEMA_V9)}"
+
+# Multi-hot binary pattern flags for all known patterns
+_PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
+    f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
+)
 
 # A tuple, rather than a data-dependent list, is the versioned model contract.
-FEATURE_SCHEMA: tuple[str, ...] = _build_feature_schema()
+# FEATURE_SCHEMA is always the *current* swing schema; the v5 tuple stays
+# importable because v5 artifacts remain loadable and their feature vectors
+# must be reconstructible bit-for-bit at inference.
+FEATURE_SCHEMA_V5: tuple[str, ...] = _build_feature_schema_v5()
 
-# The public constant is made entirely of JSON values so a CLI can embed it in
-# artifact metadata or model-version provenance without a custom encoder.
-_FEATURE_DEFINITION: dict[str, Any] = {
-    "schemaVersion": FEATURE_SCHEMA_VERSION,
-    "features": list(FEATURE_SCHEMA),
-    "indicatorAlgorithmVersion": "ta-v1",
-    "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
-    "patternAlgorithmVersion": "candlestick-v1",
-    "priceActionAlgorithmVersion": "price-action-v2",
+# The ablation contract: v7 minus the two candlestick aggregates. Derived from v7 by filtering
+# rather than written out, so it cannot drift out of step the next time v7 changes, and the
+# assertion below fails loudly if either column is ever renamed.
+FEATURE_SCHEMA_V7_NO_PATTERN: tuple[str, ...] = tuple(
+    column for column in FEATURE_SCHEMA_V7
+    if column not in ("pattern.bullish_confidence", "pattern.bearish_confidence")
+)
+assert len(FEATURE_SCHEMA_V7_NO_PATTERN) == len(FEATURE_SCHEMA_V7) - 2
+
+FEATURE_SCHEMA: tuple[str, ...] = FEATURE_SCHEMA_V7
+FEATURE_SCHEMA_SCALP_V2: tuple[str, ...] = _build_feature_schema_scalp(_LEGACY_MARKET_FEATURES)
+FEATURE_SCHEMA_SCALP: tuple[str, ...] = _build_feature_schema_scalp(_MARKET_FEATURES)
+
+# The ordered contract for every schema version this codebase can construct.
+# An unknown version is a hard error rather than a silent fallback: falling
+# back to "the current swing schema" is exactly how a v5 artifact would end up
+# scored against v6 columns.
+_SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
+    FEATURE_SCHEMA_VERSION: FEATURE_SCHEMA_V7,
+    FEATURE_SCHEMA_VERSION_V9: FEATURE_SCHEMA_V9,
+    FEATURE_SCHEMA_VERSION_V8: FEATURE_SCHEMA_V8,
+    FEATURE_SCHEMA_VERSION_V8_GEOMETRY: FEATURE_SCHEMA_V8_GEOMETRY,
+    FEATURE_SCHEMA_VERSION_V6: FEATURE_SCHEMA_V6,
+    FEATURE_SCHEMA_VERSION_V5: FEATURE_SCHEMA_V5,
+    FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
+    FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
+    FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
 }
-# Kept as a convenient JSON-safe public constant.  Runtime code should call
+assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
+
+
+def _definition_for(schema_version: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": schema_version,
+        "features": list(_SCHEMA_BY_VERSION[schema_version]),
+        "indicatorAlgorithmVersion": "ta-v1",
+        "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
+        "patternAlgorithmVersion": "candlestick-v1",
+        "priceActionAlgorithmVersion": "price-action-v2",
+    }
+
+
+_FEATURE_DEFINITION_BY_VERSION: Mapping[str, dict[str, Any]] = {
+    version: _definition_for(version) for version in _SCHEMA_BY_VERSION
+}
+
+# Kept as convenient JSON-safe public constants.  Runtime code should call
 # feature_definition() so an accidental caller mutation cannot affect future
 # artifact metadata.
-FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+FEATURE_DEFINITION: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[FEATURE_SCHEMA_VERSION], sort_keys=True))
+FEATURE_DEFINITION_SCALP: dict[str, Any] = json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[FEATURE_SCHEMA_VERSION_SCALP], sort_keys=True))
 
 
-def feature_schema() -> tuple[str, ...]:
-    """Return the immutable ordered feature names for ``ml-feature-v1``."""
+def _require_known_version(schema_version: str) -> str:
+    if schema_version not in _SCHEMA_BY_VERSION:
+        raise FeatureConstructionError(
+            f"Unknown feature-schema version {schema_version!r}; "
+            f"known versions are {', '.join(KNOWN_FEATURE_SCHEMA_VERSIONS)}."
+        )
+    return schema_version
 
-    return FEATURE_SCHEMA
+
+def feature_schema(schema_version: str = FEATURE_SCHEMA_VERSION) -> tuple[str, ...]:
+    """Return the immutable ordered feature names for a given schema version."""
+
+    return _SCHEMA_BY_VERSION[_require_known_version(schema_version)]
 
 
-def feature_definition() -> dict[str, Any]:
-    """Return an independent JSON-safe description of the ml-feature-v1 contract."""
+def feature_definition(schema_version: str = FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
+    """Return an independent JSON-safe description of the contract."""
 
-    return json.loads(json.dumps(_FEATURE_DEFINITION, sort_keys=True))
+    return json.loads(json.dumps(_FEATURE_DEFINITION_BY_VERSION[_require_known_version(schema_version)], sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -278,6 +548,9 @@ def build_feature_vector(
     *,
     prior_close: float,
     median_volume: float,
+    prior_high: float = _nan(),
+    prior_low: float = _nan(),
+    schema_version: str = FEATURE_SCHEMA_VERSION,
     indicator_algorithm_version: str = "ta-v1",
     pattern_algorithm_version: str = "candlestick-v1",
     price_action_algorithm_version: str = "price-action-v2",
@@ -298,18 +571,87 @@ def build_feature_vector(
     atr_indicator = _first_indicator_by_code(candle.indicators, "ATR", indicator_algorithm_version)
     atr_val = _numeric_or_nan(atr_indicator.values.get("value")) if atr_indicator else _nan()
 
-    values: dict[str, float] = {name: _nan() for name in FEATURE_SCHEMA}
+    overnight_gap_bps = _ratio_bps(open_price, prior_close)
+
+    # Calculate Gap Fill & Gap Defense
+    gap_fill_bps = _nan()
+    is_gap_defended = 0.0
+    if math.isfinite(overnight_gap_bps):
+        if overnight_gap_bps > 0:
+            gap_fill_bps = _ratio_bps(low_price, open_price)
+            if overnight_gap_bps > 20.0:
+                gap_half_price = prior_close + (open_price - prior_close) * 0.5
+                if low_price >= gap_half_price:
+                    is_gap_defended = 1.0
+        elif overnight_gap_bps < 0:
+            gap_fill_bps = _ratio_bps(high_price, open_price)
+            if overnight_gap_bps < -20.0:
+                gap_half_price = prior_close + (open_price - prior_close) * 0.5
+                if high_price <= gap_half_price:
+                    is_gap_defended = 1.0
+
+    # Geometry calculations with NaN / Zero-division safety
+    body = abs(close_price - open_price)
+    range_val = high_price - low_price
+    upper_wick = high_price - max(open_price, close_price)
+    lower_wick = min(open_price, close_price) - low_price
+
+    body_atr_ratio = body / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    upper_wick_atr_ratio = upper_wick / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    lower_wick_atr_ratio = lower_wick / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+    range_atr_ratio = range_val / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan()
+
+    close_position_within_range = (close_price - low_price) / range_val if range_val > 0 else _nan()
+    body_to_range_ratio = body / range_val if range_val > 0 else _nan()
+    upper_wick_to_range_ratio = upper_wick / range_val if range_val > 0 else _nan()
+    lower_wick_to_range_ratio = lower_wick / range_val if range_val > 0 else _nan()
+
+    gap_from_previous_close_atr = (
+        (open_price - prior_close) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_close))
+        else _nan()
+    )
+    close_vs_previous_high_atr = (
+        (close_price - prior_high) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_high))
+        else _nan()
+    )
+    close_vs_previous_low_atr = (
+        (close_price - prior_low) / atr_val
+        if (math.isfinite(atr_val) and atr_val > 0 and math.isfinite(prior_low))
+        else _nan()
+    )
+
+    schema_keys = feature_schema(schema_version)
+    values: dict[str, float] = {name: _nan() for name in schema_keys}
     values.update(
         {
             "candle.close_return_bps": _ratio_bps(close_price, prior_close),
-            "candle.overnight_gap_bps": _ratio_bps(open_price, prior_close),
-            "candle.high_atr_ratio": (high_price - close_price) / atr_val if atr_val > 0 else _nan(),
-            "candle.low_atr_ratio": (close_price - low_price) / atr_val if atr_val > 0 else _nan(),
-            "candle.volume_median_ratio": volume / median_volume if median_volume > 0 else _nan(),
+            "candle.overnight_gap_bps": overnight_gap_bps,
+            "candle.high_atr_ratio": (high_price - close_price) / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan(),
+            "candle.low_atr_ratio": (close_price - low_price) / atr_val if (math.isfinite(atr_val) and atr_val > 0) else _nan(),
+            "candle.volume_median_ratio": volume / median_volume if (math.isfinite(median_volume) and median_volume > 0) else _nan(),
             "candle.body_return_bps": _ratio_bps(close_price, open_price),
             "candle.range_bps": _ratio_bps(high_price, low_price),
             "candle.upper_wick_bps": _ratio_bps(high_price, max(open_price, close_price)),
             "candle.lower_wick_bps": _ratio_bps(min(open_price, close_price), low_price),
+            "candle.gap_fill_bps": gap_fill_bps,
+            "candle.is_gap_defended": is_gap_defended,
+            "candle.body_atr_ratio": body_atr_ratio,
+            "candle.upper_wick_atr_ratio": upper_wick_atr_ratio,
+            "candle.lower_wick_atr_ratio": lower_wick_atr_ratio,
+            "candle.range_atr_ratio": range_atr_ratio,
+            "candle.close_position_within_range": close_position_within_range,
+            "candle.body_to_range_ratio": body_to_range_ratio,
+            "candle.upper_wick_to_range_ratio": upper_wick_to_range_ratio,
+            "candle.lower_wick_to_range_ratio": lower_wick_to_range_ratio,
+            "candle.gap_from_previous_close_atr": gap_from_previous_close_atr,
+            "candle.close_vs_previous_high_atr": close_vs_previous_high_atr,
+            "candle.close_vs_previous_low_atr": close_vs_previous_low_atr,
+            "market.fii_net_flow_ratio": _numeric_or_nan(candle.fii_net_flow_ratio),
+            "market.dii_net_flow_ratio": _numeric_or_nan(candle.dii_net_flow_ratio),
+            "market.fii_futures_net_flow_ratio": _numeric_or_nan(candle.fii_futures_net_flow_ratio),
+            "market.fii_options_net_flow_ratio": _numeric_or_nan(candle.fii_options_net_flow_ratio),
             "regime.vix_sma20.value_ratio": _numeric_or_nan(candle.vix_value_ratio),
         }
     )
@@ -348,6 +690,8 @@ def build_feature_vector(
             for pattern in candle.patterns
             if pattern.code.upper() == pattern_code and pattern.algorithm_version == pattern_algorithm_version
         ]
+        # Multi-hot binary flag: 1.0 if this pattern was detected on this candle, 0.0 otherwise
+        values[f"pattern.is_{pattern_code.lower()}"] = 1.0 if matching else 0.0
         for direction in _DIRECTIONS:
             confidences = (
                 _numeric_or_nan(pattern.confidence)
@@ -385,7 +729,46 @@ def build_feature_vector(
                 _numeric_or_nan(level_event.level), close_price
             )
 
-    return values
+    # v6 aggregates: the strongest bullish and bearish detection across the
+    # whole block, replacing the per-code/per-type one-hots. The default 0.0
+    # (not NaN) keeps the v5 convention that "nothing fired" is evidence of
+    # absence, not a missing measurement. Computed unconditionally; the final
+    # schema filter drops them for versions that do not declare them.
+    values["pattern.bullish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(pattern.confidence)
+        for pattern in candle.patterns
+        if pattern.algorithm_version == pattern_algorithm_version and pattern.direction.upper() == "BULLISH"
+    )
+    values["pattern.bearish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(pattern.confidence)
+        for pattern in candle.patterns
+        if pattern.algorithm_version == pattern_algorithm_version and pattern.direction.upper() == "BEARISH"
+    )
+    values["price_action.bullish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(event.confidence)
+        for event in candle.price_action_events
+        if event.algorithm_version == price_action_algorithm_version and event.direction.upper() == "BULLISH"
+    )
+    values["price_action.bearish_confidence"] = _maximum_confidence(
+        _numeric_or_nan(event.confidence)
+        for event in candle.price_action_events
+        if event.algorithm_version == price_action_algorithm_version and event.direction.upper() == "BEARISH"
+    )
+
+    # v6 breadth: attached by the repository as the latest settled panel
+    # session at or before this bar's close. None -- either no context or an
+    # unmeasurable member statistic -- stays NaN for the imputer, because "the
+    # panel was not observable" is missing evidence, unlike a silent zero.
+    breadth = candle.breadth
+    values["breadth.advance_decline_ratio"] = _numeric_or_nan(None if breadth is None else breadth.advance_decline)
+    values["breadth.median_return_bps"] = _numeric_or_nan(None if breadth is None else breadth.median_return_bps)
+    values["breadth.return_dispersion_bps"] = _numeric_or_nan(None if breadth is None else breadth.return_dispersion_bps)
+    values["breadth.above_sma20_ratio"] = _numeric_or_nan(None if breadth is None else breadth.above_sma20_share)
+    values["breadth.median_volume_ratio"] = _numeric_or_nan(None if breadth is None else breadth.median_volume_ratio)
+    values["breadth.bank_it_spread_bps"] = _numeric_or_nan(None if breadth is None else breadth.bank_it_spread_bps)
+    values["cross.nifty_banknifty_return_gap_bps"] = _numeric_or_nan(None if breadth is None else breadth.index_return_gap_bps)
+
+    return {k: v for k, v in values.items() if k in schema_keys}
 
 
 def label_from_future_close(
@@ -480,7 +863,9 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
     # at or before the candle it describes.
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
     prior_close = _nan()
-    
+    prior_high = _nan()
+    prior_low = _nan()
+
     # Process chronologically so relative metrics work correctly
     sorted_records = sorted(records, key=lambda c: c.close_time)
 
@@ -489,13 +874,15 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if math.isfinite(current_volume):
             volume_window.append(current_volume)
         median_volume = statistics.median(volume_window) if volume_window else _nan()
-        
+
         try:
             _validate_evidence_scope(candle, request)
         except FeatureConstructionError:
             prior_close = _source_number(candle.close, "close")
+            prior_high = _source_number(candle.high, "high")
+            prior_low = _source_number(candle.low, "low")
             continue
-            
+
         label_result = label_from_future_close(
             source_close=candle.close,
             future_close=candle.future_close,
@@ -503,6 +890,8 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         )
         if label_result is None:
             prior_close = _source_number(candle.close, "close")
+            prior_high = _source_number(candle.high, "high")
+            prior_low = _source_number(candle.low, "low")
             continue
         if candle.future_close_time is None:
             raise FeatureConstructionError(
@@ -513,6 +902,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if candle.future_close_time > request.data_window_end:
             raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
 
+        schema_version = schema_version_for(request.timeframe)
         examples.append(
             LabeledExample(
                 candle_id=candle.candle_id,
@@ -527,6 +917,9 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
                     candle,
                     prior_close=prior_close,
                     median_volume=median_volume,
+                    prior_high=prior_high,
+                    prior_low=prior_low,
+                    schema_version=schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,
                     price_action_algorithm_version=request.price_action_algorithm_version,
@@ -535,18 +928,242 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
             )
         )
         prior_close = _source_number(candle.close, "close")
+        prior_high = _source_number(candle.high, "high")
+        prior_low = _source_number(candle.low, "low")
+
+    return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
+
+
+def build_triple_barrier_examples(records: Sequence[CandleEvidence], request: DatasetRequest) -> list[LabeledExample]:
+    """Turn evidence into labeled examples under the triple-barrier scheme.
+
+    The parallel of :func:`build_labeled_examples`: the chronological walk, the
+    feature construction, and the as-of discipline are identical, so this shares
+    :func:`build_feature_vector` and the same validation. Only the *label* differs
+    -- it comes from :func:`triple_barrier_label` over ``candle.forward_path``, with
+    the profit/stop barriers scaled to the source bar's ATR.
+
+    A candle is skipped (not an error) when it has no usable ATR, no forward path
+    yet, or a same-bar double touch the OHLC cannot order -- the same "omit what
+    cannot be labelled" rule the fixed-horizon builder applies to a missing future
+    close. ``label_available_at`` is the barrier-touch time, which the split's
+    purge gap must cover by setting ``horizon_bars`` to the vertical-barrier count.
+    """
+
+    _validate_request(request)
+    if not (math.isfinite(request.barrier_upper_multiple) and request.barrier_upper_multiple > 0):
+        raise FeatureConstructionError("barrier_upper_multiple must be finite and greater than zero.")
+    if not (math.isfinite(request.barrier_lower_multiple) and request.barrier_lower_multiple > 0):
+        raise FeatureConstructionError("barrier_lower_multiple must be finite and greater than zero.")
+
+    examples: list[LabeledExample] = []
+    volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    prior_close = _nan()
+    sorted_records = sorted(records, key=lambda candle: candle.close_time)
+
+    for candle in sorted_records:
+        current_volume = _source_number(candle.volume, "volume")
+        if math.isfinite(current_volume):
+            volume_window.append(current_volume)
+        median_volume = statistics.median(volume_window) if volume_window else _nan()
+
+        try:
+            _validate_evidence_scope(candle, request)
+        except FeatureConstructionError:
+            prior_close = _source_number(candle.close, "close")
+            continue
+
+        source_close = _source_number(candle.close, "close")
+        atr_indicator = _first_indicator_by_code(candle.indicators, "ATR", request.indicator_algorithm_version)
+        atr_value = _numeric_or_nan(atr_indicator.values.get("value")) if atr_indicator else _nan()
+        # A barrier cannot be placed without a volatility scale. Missing ATR is a
+        # skip, not a failure -- the same treatment a missing label gets.
+        if source_close <= 0 or not (math.isfinite(atr_value) and atr_value > 0):
+            prior_close = source_close
+            continue
+
+        try:
+            result = triple_barrier_label(
+                source_close=source_close,
+                atr=atr_value,
+                upper_multiple=request.barrier_upper_multiple,
+                lower_multiple=request.barrier_lower_multiple,
+                forward_path=candle.forward_path,
+            )
+        except TripleBarrierError as error:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} has a malformed forward path: {error}") from error
+        if result is None:
+            # No forward path yet, or a same-bar double touch: unlabelable, omit.
+            prior_close = source_close
+            continue
+
+        # Right-censoring guard. A NEUTRAL means "no barrier within the window",
+        # but if the available path is shorter than the vertical barrier the run
+        # simply ended early -- a later bar could still have touched a barrier, so
+        # this is unknown, not a genuine time-out. A horizontal touch inside a
+        # short path is still valid (the barrier was reached before data ran out).
+        if result.touched == "VERTICAL" and len(candle.forward_path) < request.horizon_bars:
+            prior_close = source_close
+            continue
+
+        if result.touch_close_time <= candle.close_time:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} barrier touch must be after its close time.")
+        if result.touch_close_time > request.data_window_end:
+            raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
+
+        schema_version = schema_version_for(request.timeframe)
+        examples.append(
+            LabeledExample(
+                candle_id=candle.candle_id,
+                instrument_id=candle.instrument_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                observed_at=candle.close_time,
+                label_available_at=result.touch_close_time,
+                forward_return=result.forward_return,
+                label=result.label,
+                features=build_feature_vector(
+                    candle,
+                    prior_close=prior_close,
+                    median_volume=median_volume,
+                    schema_version=schema_version,
+                    indicator_algorithm_version=request.indicator_algorithm_version,
+                    pattern_algorithm_version=request.pattern_algorithm_version,
+                    price_action_algorithm_version=request.price_action_algorithm_version,
+                ),
+                vix_observed_at=candle.vix_observed_at,
+            )
+        )
+        prior_close = source_close
+
+    return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
+
+
+def build_volatility_expansion_examples(
+    records: Sequence[CandleEvidence], request: DatasetRequest
+) -> list[LabeledExample]:
+    """Turn evidence into labeled examples under the volatility-expansion scheme.
+
+    Shares the chronological walk, the feature vector, and the as-of validation with
+    the other builders; only the label differs. ``request.horizon_bars`` is used for
+    **both** windows -- the trailing range is the K bars ending at the source bar and
+    the forward range is the K bars after it -- because equal windows make the ratio
+    directly interpretable as "wider or narrower than the recent past".
+
+    The trailing window is built from bars already walked, so it can never contain
+    future information. A candle is skipped when the trailing window is not yet full
+    (no scale to compare against) or the label is censored.
+
+    The returned labels are CONTRACTION/STABLE/EXPANSION, **not** the directional
+    alphabet, so callers must pass ``VOLATILITY_ALPHABET`` to training, evaluation,
+    and persistence.
+    """
+
+    _validate_request(request)
+    window = request.horizon_bars
+    examples: list[LabeledExample] = []
+    volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    trailing_highs: collections.deque[float] = collections.deque(maxlen=window)
+    trailing_lows: collections.deque[float] = collections.deque(maxlen=window)
+    prior_close = _nan()
+    sorted_records = sorted(records, key=lambda candle: candle.close_time)
+
+    for candle in sorted_records:
+        current_volume = _source_number(candle.volume, "volume")
+        if math.isfinite(current_volume):
+            volume_window.append(current_volume)
+        median_volume = statistics.median(volume_window) if volume_window else _nan()
+
+        source_close = _source_number(candle.close, "close")
+        # The trailing window advances for every candle, including ones that fail
+        # scope validation, so the envelope stays a true picture of recent range.
+        trailing_highs.append(_source_number(candle.high, "high"))
+        trailing_lows.append(_source_number(candle.low, "low"))
+
+        try:
+            _validate_evidence_scope(candle, request)
+        except FeatureConstructionError:
+            prior_close = source_close
+            continue
+
+        if len(trailing_highs) < window:
+            prior_close = source_close
+            continue
+
+        try:
+            result = volatility_expansion_label(
+                trailing_range=trailing_range_of(list(trailing_highs), list(trailing_lows)),
+                forward_path=candle.forward_path,
+                expected_forward_bars=window,
+                band=request.expansion_band,
+            )
+        except VolatilityExpansionError as error:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} has a malformed forward path: {error}"
+            ) from error
+        if result is None:
+            prior_close = source_close
+            continue
+
+        label_available_at = result.label_available_at
+        if label_available_at <= candle.close_time:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} label must become known after its close time."
+            )
+        if label_available_at > request.data_window_end:
+            raise FeatureConstructionError(
+                f"Candle {candle.candle_id} label falls outside the requested data window."
+            )
+
+        examples.append(
+            LabeledExample(
+                candle_id=candle.candle_id,
+                instrument_id=candle.instrument_id,
+                symbol=candle.symbol,
+                timeframe=candle.timeframe,
+                observed_at=candle.close_time,
+                label_available_at=label_available_at,
+                # The realised range ratio, kept where forward_return lives so the
+                # continuous quantity behind the class is not thrown away.
+                forward_return=result.range_ratio,
+                label=result.label,
+                features=build_feature_vector(
+                    candle,
+                    prior_close=prior_close,
+                    median_volume=median_volume,
+                    schema_version=schema_version_for(request.timeframe),
+                    indicator_algorithm_version=request.indicator_algorithm_version,
+                    pattern_algorithm_version=request.pattern_algorithm_version,
+                    price_action_algorithm_version=request.price_action_algorithm_version,
+                ),
+                vix_observed_at=candle.vix_observed_at,
+            )
+        )
+        prior_close = source_close
 
     return sorted(examples, key=lambda example: (example.observed_at, example.label_available_at, example.candle_id))
 
 
 __all__ = [
     "FEATURE_SCHEMA",
+    "FEATURE_SCHEMA_V5",
+    "FEATURE_SCHEMA_V6",
+    "FEATURE_SCHEMA_V7",
+    "FEATURE_SCHEMA_SCALP",
+    "FEATURE_SCHEMA_SCALP_V2",
     "FEATURE_DEFINITION",
+    "FEATURE_DEFINITION_SCALP",
     "FEATURE_SCHEMA_VERSION",
+    "FEATURE_SCHEMA_VERSION_V5",
+    "FEATURE_SCHEMA_VERSION_V6",
+    "FEATURE_SCHEMA_VERSION_SCALP",
+    "FEATURE_SCHEMA_VERSION_SCALP_V2",
     "FeatureConstructionError",
     "LabelResult",
     "build_feature_vector",
     "build_labeled_examples",
+    "build_triple_barrier_examples",
+    "build_volatility_expansion_examples",
     "feature_schema",
     "feature_definition",
     "label_from_future_close",

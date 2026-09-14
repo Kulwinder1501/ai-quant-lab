@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 
 from ai_quant_lab_ml.artifacts import load_model_artifact, write_model_artifact
 from ai_quant_lab_ml.contracts import (
+    CATBOOST_ALGORITHM,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     XGBOOST_ALGORITHM,
@@ -43,6 +44,7 @@ from ai_quant_lab_ml.training import (
 SKLEARN_AVAILABLE = importlib.util.find_spec("sklearn") is not None
 XGBOOST_AVAILABLE = SKLEARN_AVAILABLE and importlib.util.find_spec("xgboost") is not None
 LIGHTGBM_AVAILABLE = SKLEARN_AVAILABLE and importlib.util.find_spec("lightgbm") is not None
+CATBOOST_AVAILABLE = SKLEARN_AVAILABLE and importlib.util.find_spec("catboost") is not None
 
 START = datetime(2023, 1, 2, tzinfo=UTC)
 SCHEMA = ("signal", "momentum", "always_missing")
@@ -51,6 +53,7 @@ SCHEMA = ("signal", "momentum", "always_missing")
 # trees to actually split on this little synthetic history.
 XGBOOST_HYPERPARAMETERS = {"n_estimators": 30, "max_depth": 2}
 LIGHTGBM_HYPERPARAMETERS = {"n_estimators": 30, "num_leaves": 4, "min_child_samples": 5}
+CATBOOST_HYPERPARAMETERS = {"n_estimators": 30, "max_depth": 2, "learning_rate": 0.1}
 
 
 def build_split(*, three_class: bool = True, seed: int = 11, rows: int = 360) -> TemporalSplit:
@@ -99,6 +102,8 @@ def selected_class_margin(pipeline: object, features: dict[str, float], predicte
         margins = classifier.estimator.get_booster().predict(
             xgboost.DMatrix(standardized), output_margin=True, validate_features=False,
         )
+    elif algorithm == CATBOOST_ALGORITHM:
+        margins = classifier.estimator.predict(standardized, prediction_type="RawFormulaVal")
     else:
         margins = classifier.estimator.predict(standardized, raw_score=True)
 
@@ -123,6 +128,12 @@ class LabelEncodedClassifierTests(unittest.TestCase):
         def predict_proba(self, X: object) -> list[list[float]]:
             return [[0.7, 0.3], [0.2, 0.8]]
 
+    class ColumnVectorEstimator(RecordingEstimator):
+        """Mimics CatBoost's multiclass predict shape of (n, 1)."""
+
+        def predict(self, X: object) -> list[list[int]]:
+            return [[0], [1]]
+
     def test_encodes_only_observed_labels_in_canonical_order(self) -> None:
         estimator = self.RecordingEstimator()
         classifier = LabelEncodedClassifier(estimator)
@@ -133,6 +144,12 @@ class LabelEncodedClassifierTests(unittest.TestCase):
         # absent, so the codes stay contiguous from zero as XGBoost requires.
         self.assertEqual(classifier.classes_, ("BEARISH", "BULLISH"))
         self.assertEqual(estimator.fitted_targets, [1, 0, 1])
+        self.assertEqual(classifier.predict([[0.0], [1.0]]), ["BEARISH", "BULLISH"])
+
+    def test_decodes_column_vector_predictions(self) -> None:
+        classifier = LabelEncodedClassifier(self.ColumnVectorEstimator())
+        classifier.fit([[0.0], [1.0], [2.0]], ["BULLISH", "BEARISH", "BULLISH"])
+
         self.assertEqual(classifier.predict([[0.0], [1.0]]), ["BEARISH", "BULLISH"])
 
     def test_rejects_labels_outside_the_fixed_space(self) -> None:
@@ -155,12 +172,13 @@ class AlgorithmRegistryTests(unittest.TestCase):
         self.assertEqual(algorithm_identifier("logistic"), LOGISTIC_BASELINE_ALGORITHM)
         self.assertEqual(algorithm_identifier("xgboost"), XGBOOST_ALGORITHM)
         self.assertEqual(algorithm_identifier("lightgbm"), LIGHTGBM_ALGORITHM)
+        self.assertEqual(algorithm_identifier("catboost"), CATBOOST_ALGORITHM)
 
     def test_rejects_an_unknown_algorithm(self) -> None:
         with self.assertRaisesRegex(TrainingError, "Unknown algorithm"):
-            algorithm_identifier("catboost")
+            algorithm_identifier("pytorch-transformer")
         with self.assertRaisesRegex(TrainingError, "Unknown algorithm"):
-            train_model("catboost", build_split(), schema=SCHEMA)
+            train_model("pytorch-transformer", build_split(), schema=SCHEMA)
 
     @unittest.skipUnless(XGBOOST_AVAILABLE, "xgboost is not installed")
     def test_an_unknown_hyperparameter_fails_loudly(self) -> None:
@@ -243,10 +261,55 @@ class LightgbmTrainingTests(unittest.TestCase):
         self.assertEqual(predict_labels(reloaded.model, split.validation, schema=SCHEMA), expected)
 
 
+@unittest.skipUnless(CATBOOST_AVAILABLE, "catboost is not installed")
+class CatboostTrainingTests(unittest.TestCase):
+    def test_trains_a_recorded_deterministic_ordered_forest(self) -> None:
+        split = build_split()
+
+        result = train_model("catboost", split, schema=SCHEMA, hyperparameters=CATBOOST_HYPERPARAMETERS)
+        metadata = training_metadata(result)
+
+        self.assertEqual(result.algorithm, CATBOOST_ALGORITHM)
+        self.assertEqual(tuple(result.model.named_steps), ("imputer", "scaler", "classifier"))
+        self.assertEqual(metadata["hyperparameters"]["nEstimators"], 30)
+        self.assertEqual(metadata["hyperparameters"]["maxDepth"], 2)
+        self.assertEqual(metadata["hyperparameters"]["boostingType"], "Ordered")
+        self.assertIn("catboostVersion", metadata["hyperparameters"])
+        self.assertEqual(metadata["featureSchema"], list(SCHEMA))
+        self.assertGreater(result.validation_metrics.macro_f1, 0.5)
+
+    def test_repeated_runs_on_one_split_agree(self) -> None:
+        split = build_split()
+
+        first = train_model("catboost", split, schema=SCHEMA, hyperparameters=CATBOOST_HYPERPARAMETERS)
+        second = train_model("catboost", split, schema=SCHEMA, hyperparameters=CATBOOST_HYPERPARAMETERS)
+
+        self.assertEqual(
+            predict_labels(first.model, split.validation, schema=SCHEMA),
+            predict_labels(second.model, split.validation, schema=SCHEMA),
+        )
+
+    def test_a_boosted_pipeline_survives_the_checksummed_artifact_round_trip(self) -> None:
+        split = build_split()
+        result = train_model("catboost", split, schema=SCHEMA, hyperparameters=CATBOOST_HYPERPARAMETERS)
+        expected = predict_labels(result.model, split.validation, schema=SCHEMA)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "catboost-candidate.pkl"
+            written = write_model_artifact(path, model=result.model, metadata=training_metadata(result))
+            reloaded = load_model_artifact(path, expected_checksum=written.checksum)
+
+        self.assertEqual(predict_labels(reloaded.model, split.validation, schema=SCHEMA), expected)
+
+
 class TreeShapExplanationTests(unittest.TestCase):
     def assert_contributions_reconstruct_the_margin(self, choice: str, algorithm: str, *, three_class: bool) -> None:
         split = build_split(three_class=three_class)
-        hyperparameters = XGBOOST_HYPERPARAMETERS if choice == "xgboost" else LIGHTGBM_HYPERPARAMETERS
+        hyperparameters = {
+            "xgboost": XGBOOST_HYPERPARAMETERS,
+            "lightgbm": LIGHTGBM_HYPERPARAMETERS,
+            "catboost": CATBOOST_HYPERPARAMETERS,
+        }[choice]
         result = train_model(choice, split, schema=SCHEMA, hyperparameters=hyperparameters)
         features = dict(split.validation[0].features)
 
@@ -288,6 +351,14 @@ class TreeShapExplanationTests(unittest.TestCase):
     @unittest.skipUnless(LIGHTGBM_AVAILABLE, "lightgbm is not installed")
     def test_lightgbm_binary_contributions_are_additive(self) -> None:
         self.assert_contributions_reconstruct_the_margin("lightgbm", LIGHTGBM_ALGORITHM, three_class=False)
+
+    @unittest.skipUnless(CATBOOST_AVAILABLE, "catboost is not installed")
+    def test_catboost_multiclass_contributions_are_additive(self) -> None:
+        self.assert_contributions_reconstruct_the_margin("catboost", CATBOOST_ALGORITHM, three_class=True)
+
+    @unittest.skipUnless(CATBOOST_AVAILABLE, "catboost is not installed")
+    def test_catboost_binary_contributions_are_additive(self) -> None:
+        self.assert_contributions_reconstruct_the_margin("catboost", CATBOOST_ALGORITHM, three_class=False)
 
     @unittest.skipUnless(XGBOOST_AVAILABLE, "xgboost is not installed")
     def test_a_forest_is_refused_by_the_linear_explainer(self) -> None:
@@ -344,11 +415,12 @@ class ProductionGateTests(unittest.TestCase):
     def test_a_boosted_algorithm_passes_the_algorithm_check(self) -> None:
         from ai_quant_lab_ml.inference import validate_production_artifact
 
-        # The schema check is the next gate, which proves the algorithm gate let
-        # the boosted family through rather than rejecting it outright.
-        for algorithm in (XGBOOST_ALGORITHM, LIGHTGBM_ALGORITHM):
+        # The schema-version check is the next gate (an empty metadata mapping
+        # declares no version), which proves the algorithm gate let the boosted
+        # family through rather than rejecting it outright.
+        for algorithm in (XGBOOST_ALGORITHM, LIGHTGBM_ALGORITHM, CATBOOST_ALGORITHM):
             with self.subTest(algorithm=algorithm):
-                with self.assertRaisesRegex(InferenceError, "incompatible persisted feature schema"):
+                with self.assertRaisesRegex(InferenceError, "unknown feature-schema version"):
                     validate_production_artifact(
                         self.model_version(algorithm),
                         {},

@@ -57,6 +57,7 @@ function metrics(): BacktestMetrics {
     skippedSignalsWhilePositionOpen: 0,
     skippedSignalsInvalidGap: 0,
     skippedSignalsInsufficientCapital: 0,
+    skippedSignalsUnsizable: 0,
     tradeCount: 1,
     winningTradeCount: 1,
     losingTradeCount: 0,

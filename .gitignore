@@ -9,3 +9,26 @@ __pycache__/
 data/
 models/
 postgres-data/
+.claude/settings.local.json
+
+# Local .env backups — never commit; they hold live secrets.
+.env.bak*
+
+# TypeScript incremental build artifacts — regenerated, never reviewed.
+*.tsbuildinfo
+
+# Throwaway probe scripts. Never shipped -- this repo is public.
+scratch/
+# Same intent, for probes written beside the code they poke at rather than in scratch/.
+# Four of these were committed because only the directory form was listed here.
+scratch_*.ts
+
+# Database backups and large dumps
+backups/
+*.dump
+
+# Scheduler diagnostic logs, bind-mounted out of the container so they survive a recreate
+# (SCHEDULER_LOG_FILE in docker-compose.v2.yml). Read after an incident, never committed --
+# machine output that can run to tens of megabytes.
+logs/
+video_info.json

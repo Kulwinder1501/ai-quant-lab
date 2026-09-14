@@ -52,6 +52,7 @@ describe("algorithmFamily", () => {
     expect(algorithmFamily("sklearn-logistic-regression-v1")).toBe("LINEAR");
     expect(algorithmFamily("xgboost-gradient-boosting-v1")).toBe("GRADIENT_BOOSTING");
     expect(algorithmFamily("lightgbm-gradient-boosting-v1")).toBe("GRADIENT_BOOSTING");
+    expect(algorithmFamily("catboost-gradient-boosting-v1")).toBe("GRADIENT_BOOSTING");
     expect(algorithmFamily("pytorch-transformer-v9")).toBe("OTHER");
   });
 });

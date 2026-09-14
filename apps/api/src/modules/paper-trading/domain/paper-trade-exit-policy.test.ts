@@ -12,6 +12,7 @@ function openTrade(overrides: Partial<PaperTrade> = {}): PaperTrade {
     side: "LONG",
     status: "OPEN",
     quantity: 10,
+    remainingQuantity: 10,
     entryPrice: 100,
     stopLoss: 95,
     targetPrice: 110,

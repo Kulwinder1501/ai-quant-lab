@@ -23,14 +23,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import (
-    FEATURE_SCHEMA_VERSION,
-    LABELS,
+    CATBOOST_ALGORITHM,
+    DIRECTIONAL_ALPHABET,
+    KNOWN_FEATURE_SCHEMA_VERSIONS,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     SUPPORTED_ALGORITHMS,
     TREE_ENSEMBLE_ALGORITHMS,
     XGBOOST_ALGORITHM,
+    AnyLabel,
     CandleEvidence,
+    LabelAlphabet,
     MarketLabel,
     PersistedModelVersion,
 )
@@ -45,6 +48,14 @@ CONTRIBUTION_METHOD_BY_ALGORITHM: Mapping[str, str] = {
     LOGISTIC_BASELINE_ALGORITHM: LINEAR_CONTRIBUTION_METHOD,
     XGBOOST_ALGORITHM: TREE_CONTRIBUTION_METHOD,
     LIGHTGBM_ALGORITHM: TREE_CONTRIBUTION_METHOD,
+    # CatBoost's ShapValues importance is also an exact TreeSHAP decomposition
+    # of the selected class's raw margin, so the persisted method name is
+    # shared; the adapter that produces it is CatBoost-specific below.
+    CATBOOST_ALGORITHM: TREE_CONTRIBUTION_METHOD,
+    # Sequence families use dedicated explainers in sequence_inference.py;
+    # these entries document the persisted method names for dashboards.
+    "pytorch-causal-tcn-v1": "TEMPORAL_OCCLUSION_V1",
+    "oof-logistic-stack-v1": "STACK_META_COEFFICIENT_V1",
 }
 
 
@@ -60,6 +71,10 @@ class ProductionInferenceContract:
     instrument_symbol: str
     timeframe: str
     feature_schema: tuple[str, ...]
+    # The schema version recorded in the artifact's own metadata. Feature
+    # construction at scoring time must use this, never the current default:
+    # a v5 artifact scored against v6-built columns is silent garbage.
+    schema_version: str
     horizon_bars: int
     neutral_threshold_bps: float
     indicator_algorithm_version: str
@@ -149,25 +164,43 @@ def validate_production_artifact(
     *,
     instrument_symbol: str,
     timeframe: str,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+    allow_candidate_pool_member: bool = False,
 ) -> ProductionInferenceContract:
-    """Reject any artifact that cannot prove it matches the request and V1 contract."""
+    """Reject any artifact that cannot prove it matches the request and V1 contract.
 
-    if model_version.stage != "PRODUCTION":
+    ``allow_candidate_pool_member`` admits a CANDIDATE that is enrolled in the
+    daily model competition: its shadow predictions build the live track record
+    the competition ranks on, and every other artifact integrity check below
+    still applies to it unchanged.
+    """
+
+    allowed_stages = ("PRODUCTION", "CANDIDATE") if allow_candidate_pool_member else ("PRODUCTION",)
+    if model_version.stage not in allowed_stages:
         raise InferenceError("Only a PRODUCTION model may create a Phase 11 prediction.")
     if model_version.algorithm not in SUPPORTED_ALGORITHMS:
         raise InferenceError(
             f"No local explainer exists for {model_version.algorithm}; "
             f"supported algorithms are {', '.join(SUPPORTED_ALGORITHMS)}."
         )
-    expected_schema = feature_schema()
+    # The artifact declares its own schema version, and every subsequent check
+    # is made against *that* version's contract. A version this codebase cannot
+    # construct features for is rejected outright; a known older version (v5)
+    # stays scorable, which is what keeps the volatility shadow families alive
+    # across the v6 capacity bump.
+    schema_version = metadata.get("featureSchemaVersion")
+    if schema_version not in KNOWN_FEATURE_SCHEMA_VERSIONS:
+        raise InferenceError(
+            f"The production artifact declares unknown feature-schema version {schema_version!r}; "
+            f"known versions are {', '.join(KNOWN_FEATURE_SCHEMA_VERSIONS)}."
+        )
+    expected_schema = feature_schema(schema_version)
     if _schema_names(model_version.feature_schema) != expected_schema:
         raise InferenceError("The production model has an incompatible persisted feature schema.")
     metadata_schema = metadata.get("featureSchema")
     if not isinstance(metadata_schema, list) or tuple(metadata_schema) != expected_schema:
         raise InferenceError("The production artifact does not match the fixed feature schema.")
-    if metadata.get("featureSchemaVersion") != FEATURE_SCHEMA_VERSION:
-        raise InferenceError("The production artifact has an incompatible feature-schema version.")
-    if metadata.get("featureDefinition") != feature_definition():
+    if metadata.get("featureDefinition") != feature_definition(schema_version):
         raise InferenceError("The production artifact has an incompatible feature definition.")
     if metadata.get("algorithm") != model_version.algorithm:
         raise InferenceError("The production artifact algorithm does not match its persisted model version.")
@@ -177,7 +210,21 @@ def validate_production_artifact(
     dataset = metadata.get("dataset")
     expected_symbol = _require_non_blank(instrument_symbol, "Instrument symbol").upper()
     expected_timeframe = _require_non_blank(timeframe, "Timeframe")
-    if not isinstance(dataset, Mapping) or dataset.get("instrument") != expected_symbol or dataset.get("timeframe") != expected_timeframe:
+    if not isinstance(dataset, Mapping) or dataset.get("timeframe") != expected_timeframe:
+        raise InferenceError("The production artifact was trained for a different instrument or timeframe.")
+    # A pooled cross-sectional model is trained on many instruments at once, and its
+    # `dataset.instrument` records only the primary member. Scoring is therefore allowed
+    # for any instrument in the recorded pool -- that is the entire point of pooling
+    # scale-free features -- and refused for anything outside it. The guard is not
+    # relaxed: an instrument the model never saw is still rejected, and a model without
+    # a recorded pool still has to match its single instrument exactly.
+    pooled = dataset.get("pooledInstruments")
+    if isinstance(pooled, (list, tuple)) and pooled:
+        if expected_symbol not in {str(symbol).upper() for symbol in pooled}:
+            raise InferenceError(
+                f"{expected_symbol} is not a member of this pooled artifact's training set."
+            )
+    elif dataset.get("instrument") != expected_symbol:
         raise InferenceError("The production artifact was trained for a different instrument or timeframe.")
 
     protocol = metadata.get("validationProtocol")
@@ -205,7 +252,9 @@ def validate_production_artifact(
             "The production artifact has no training-only similar-setup reference data. Retrain and promote a Phase 11-compatible model."
         )
     try:
-        training_reference_data = parse_reference_metadata(reference_metadata, expected_schema=expected_schema)
+        training_reference_data = parse_reference_metadata(
+            reference_metadata, expected_schema=expected_schema, alphabet=alphabet
+        )
     except ReferenceDataError as error:
         raise InferenceError(f"The production artifact has invalid training-only reference data: {error}") from error
 
@@ -214,6 +263,7 @@ def validate_production_artifact(
         instrument_symbol=expected_symbol,
         timeframe=expected_timeframe,
         feature_schema=expected_schema,
+        schema_version=schema_version,
         horizon_bars=_positive_integer(protocol.get("horizonBars"), "Artifact horizonBars"),
         neutral_threshold_bps=_non_negative_finite(protocol.get("neutralThresholdBps"), "Artifact neutralThresholdBps"),
         indicator_algorithm_version=_require_non_blank(protocol.get("indicatorAlgorithmVersion"), "Artifact indicator algorithm version"),
@@ -377,6 +427,29 @@ def _lightgbm_contribution_rows(estimator: Any, standardized: Sequence[float], w
     return _contribution_rows(raw, width=width, class_count=class_count, source="The LightGBM booster")
 
 
+def _catboost_contribution_rows(estimator: Any, standardized: Sequence[float], width: int, class_count: int) -> list[list[float]]:
+    """Read exact TreeSHAP values from the fitted CatBoost model.
+
+    CatBoost exposes SHAP through ``get_feature_importance(type="ShapValues")``
+    rather than a ``pred_contrib`` predict flag, which is why this family needs
+    its own adapter. The output is one ``width + 1`` block per scored class
+    (binary models emit a single block for the positive class), the same layout
+    ``_contribution_rows`` already normalises for the other two boosters.
+    """
+
+    try:
+        from catboost import Pool
+    except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
+        raise InferenceError("catboost is required to explain a CatBoost artifact. Install apps/ml requirements first.") from error
+    if not hasattr(estimator, "get_feature_importance"):
+        raise InferenceError("The promoted CatBoost classifier does not expose SHAP feature importances.")
+    try:
+        raw = estimator.get_feature_importance(data=Pool([list(standardized)]), type="ShapValues")
+    except Exception as error:  # noqa: BLE001 - any library failure is an explanation failure here.
+        raise InferenceError(f"The promoted CatBoost model could not produce TreeSHAP contributions: {error}") from error
+    return _contribution_rows(raw, width=width, class_count=class_count, source="The CatBoost model")
+
+
 def _tree_contributions(
     classifier: Any,
     standardized: Sequence[float],
@@ -390,11 +463,12 @@ def _tree_contributions(
     estimator = getattr(classifier, "estimator", None)
     if estimator is None:
         raise InferenceError("The promoted boosted artifact does not expose its underlying booster.")
-    rows = (
-        _xgboost_contribution_rows(estimator, standardized, width, len(classes))
-        if algorithm == XGBOOST_ALGORITHM
-        else _lightgbm_contribution_rows(estimator, standardized, width, len(classes))
-    )
+    if algorithm == XGBOOST_ALGORITHM:
+        rows = _xgboost_contribution_rows(estimator, standardized, width, len(classes))
+    elif algorithm == CATBOOST_ALGORITHM:
+        rows = _catboost_contribution_rows(estimator, standardized, width, len(classes))
+    else:
+        rows = _lightgbm_contribution_rows(estimator, standardized, width, len(classes))
 
     if len(rows) == 1:
         if len(classes) != 2:
@@ -426,7 +500,12 @@ class _ScoredVector:
     confidence: float
 
 
-def _score_fixed_vector(model: Any, features: Mapping[str, Any], selected_schema: Sequence[str]) -> _ScoredVector:
+def _score_fixed_vector(
+    model: Any,
+    features: Mapping[str, Any],
+    selected_schema: Sequence[str],
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> _ScoredVector:
     """Apply the stored imputer and scaler, then score the fixed feature vector.
 
     Both transforms were fitted on the training partition only, so scoring here
@@ -455,15 +534,18 @@ def _score_fixed_vector(model: Any, features: Mapping[str, Any], selected_schema
         raise InferenceError("The promoted model could not score the fixed feature vector.") from error
     if len(imputed) != len(selected_schema) or len(standardized) != len(selected_schema):
         raise InferenceError("The promoted pipeline changed the fixed feature schema width.")
-    if any(label not in LABELS for label in classes):
-        raise InferenceError("The promoted classifier exposes a label outside the Phase 11 label set.")
+    permitted = set(alphabet.labels)
+    if any(label not in permitted for label in classes):
+        raise InferenceError(
+            f"The promoted classifier exposes a label outside the {alphabet.name} label set."
+        )
     predicted_label = str(raw_prediction)
-    if predicted_label not in LABELS or predicted_label not in classes:
+    if predicted_label not in permitted or predicted_label not in classes:
         raise InferenceError("The promoted classifier returned an unsupported prediction label.")
     if len(probability_row) != len(classes):
         raise InferenceError("The promoted classifier probability width does not match its classes.")
 
-    probabilities: dict[MarketLabel, float] = {label: 0.0 for label in LABELS}
+    probabilities: dict[AnyLabel, float] = {label: 0.0 for label in alphabet.labels}
     for label, value in zip(classes, probability_row, strict=True):
         probability = _finite(value, f"Probability for {label}")
         if probability < 0 or probability > 1:
@@ -493,6 +575,7 @@ def explain_prediction(
     algorithm: str = LOGISTIC_BASELINE_ALGORITHM,
     schema: Sequence[str] | None = None,
     maximum_features: int = 12,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> ExplainablePrediction:
     """Score one fixed-schema vector and explain it with its own model's arithmetic.
 
@@ -515,7 +598,7 @@ def explain_prediction(
     if isinstance(maximum_features, bool) or not isinstance(maximum_features, int) or maximum_features <= 0:
         raise InferenceError("maximum_features must be a positive integer.")
 
-    scored = _score_fixed_vector(model, features, selected_schema)
+    scored = _score_fixed_vector(model, features, selected_schema, alphabet)
     width = len(selected_schema)
     if algorithm in TREE_ENSEMBLE_ALGORITHMS:
         contribution_values, intercept = _tree_contributions(
@@ -645,7 +728,7 @@ def build_prediction_explanation(
             "details": {
                 "modelKey": contract.model_key,
                 "artifactChecksum": artifact_checksum,
-                "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+                "featureSchemaVersion": contract.schema_version,
                 "sourceCandleId": candle.candle_id,
                 "sourceCandleCloseTime": candle.close_time.isoformat(),
                 "evidenceCutoffAt": evidence_cutoff_at.isoformat(),
@@ -691,6 +774,7 @@ def build_prediction_explanation(
 
 
 __all__ = [
+    "CATBOOST_ALGORITHM",
     "CONTRIBUTION_METHOD_BY_ALGORITHM",
     "LIGHTGBM_ALGORITHM",
     "LINEAR_CONTRIBUTION_METHOD",

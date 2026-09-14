@@ -106,6 +106,10 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       WHERE candles.instrument_id = $1
         AND candles.timeframe = $2
         AND candles.is_complete = TRUE
+        -- Yahoo historical imports mark the still-open session bar complete; its
+        -- close_time is still in the future. Strategies evaluate only bars whose
+        -- close has already elapsed, matching the market-scanner settled-bar rule.
+        AND candles.close_time <= CURRENT_TIMESTAMP
       ORDER BY candles.close_time DESC, candles.open_time DESC
       LIMIT 1
     `, [input.instrumentId, input.timeframe]);
@@ -113,7 +117,98 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     if (!candle) {
       return null;
     }
+    return this.assembleContext(input, candle);
+  }
 
+  /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
+  async findCompletedAt(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time = $3
+        AND candles.close_time <= CURRENT_TIMESTAMP
+      ORDER BY candles.open_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.closeTime]);
+    const candle = candleResult.rows[0];
+    return candle ? this.assembleContext(input, candle) : null;
+  }
+
+  /**
+   * The most recent completed context whose candle closed at or before `asOf`.
+   *
+   * The anti-lookahead fetch for higher-timeframe research covariates. At a 1m decision instant the
+   * relevant 5m context is the last 5m bar to have *closed*, which `findCompletedAt` (exact
+   * close-time match) returns only on a 5m boundary and misses at every 1m bar in between. The
+   * `close_time <= $3` guard is the same one `findRegime` uses, so a slower bar that has not closed
+   * by the decision instant can never be returned into a faster signal.
+   */
+  async findCompletedBefore(input: {
+    instrumentId: string;
+    timeframe: string;
+    asOf: Date;
+  }): Promise<StrategyMarketContext | null> {
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1 AND candles.timeframe = $2
+        AND candles.is_complete = TRUE AND candles.close_time <= $3
+      ORDER BY candles.close_time DESC
+      LIMIT 1
+    `, [input.instrumentId, input.timeframe, input.asOf]);
+    const candle = candleResult.rows[0];
+    return candle
+      ? this.assembleContext({ instrumentId: input.instrumentId, timeframe: input.timeframe }, candle)
+      : null;
+  }
+
+  async listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]> {
+    // A defensive floor: a non-positive limit would otherwise become `LIMIT 0`
+    // and silently scan nothing, which reads as "no setups found".
+    const limit = Math.max(1, Math.floor(input.limit));
+    const candleResult = await this.database.query<CompletedCandleRow>(`
+      SELECT
+        candles.id,
+        candles.instrument_id,
+        candles.timeframe,
+        candles.open_time,
+        candles.close_time,
+        candles.open,
+        candles.high,
+        candles.low,
+        candles.close,
+        candles.volume,
+        instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1
+        AND candles.timeframe = $2
+        AND candles.is_complete = TRUE
+        AND candles.close_time <= CURRENT_TIMESTAMP
+      ORDER BY candles.close_time DESC, candles.open_time DESC
+      LIMIT $3
+    `, [input.instrumentId, input.timeframe, limit]);
+
+    // Selected newest-first so LIMIT keeps the most recent window, then reversed
+    // to chronological order so callers evaluate bars oldest-to-newest.
+    const rows = [...candleResult.rows].reverse();
+    return Promise.all(rows.map((candle) => this.assembleContext(input, candle)));
+  }
+
+  /** Loads every evidence dimension for one completed candle into a strategy context. */
+  private async assembleContext(
+    input: { instrumentId: string; timeframe: string },
+    candle: CompletedCandleRow,
+  ): Promise<StrategyMarketContext> {
     const [indicators, patterns, priceActionEvents] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
@@ -192,6 +287,37 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<RegimeContext | null> {
+    const raw = await this.findRawVix({
+      instrumentId: input.instrumentId,
+      timeframe: input.timeframe,
+      closeTime: candle.close_time,
+    });
+    return raw ? deriveVolatilityRegime(raw.vixClose, raw.vixSma20) : null;
+  }
+
+  /**
+   * The raw VIX close and its SMA(20), the same point-in-time lookup `findRegime` uses -- but
+   * returning the pair itself rather than folding it into `deriveVolatilityRegime`'s ratio.
+   *
+   * Public (unlike `findRegime`) because Brain V2.2's State Interpreter (`state-interpreter.ts`)
+   * threads `volatilityReading: {vixClose, vixSma20} | null` as a caller-supplied sibling input and
+   * derives its own regime reading itself -- it does not consume `RegimeContext`. Extracted as a
+   * shared private helper rather than duplicating the query, so this and `findRegime` cannot silently
+   * drift onto two different VIX readings for the same instant.
+   */
+  async findRawVolatilityReading(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
+    return this.findRawVix(input);
+  }
+
+  private async findRawVix(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
     const vixResult = await this.database.query<{ id: string }>(
       "SELECT id FROM instruments WHERE symbol = $1",
       [regimeSourceInstrumentSymbol],
@@ -209,7 +335,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     // The VIX bar must have closed no later than the target bar, so the regime is
     // knowable at decision time. The lower bound stops a long gap in the VIX series
     // from carrying a stale reading forward as if it were current.
-    const earliestAcceptableCloseTime = new Date(candle.close_time.getTime() - stalenessMilliseconds);
+    const earliestAcceptableCloseTime = new Date(input.closeTime.getTime() - stalenessMilliseconds);
     const vixCandleResult = await this.database.query<{ id: string; close: string }>(`
       SELECT id, close
       FROM candles
@@ -220,7 +346,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         AND close_time >= $4
       ORDER BY close_time DESC
       LIMIT 1
-    `, [vixInstrumentId, input.timeframe, candle.close_time, earliestAcceptableCloseTime]);
+    `, [vixInstrumentId, input.timeframe, input.closeTime, earliestAcceptableCloseTime]);
     const vixCandle = vixCandleResult.rows[0];
     if (!vixCandle) {
       return null;
@@ -248,6 +374,6 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       return null;
     }
 
-    return deriveVolatilityRegime(toNumber(vixCandle.close, "VIX close"), vixSma20);
+    return { vixClose: toNumber(vixCandle.close, "VIX close"), vixSma20 };
   }
 }

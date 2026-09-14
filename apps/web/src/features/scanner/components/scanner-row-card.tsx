@@ -72,7 +72,7 @@ export function ScannerRowCard({ record }: { record: ScannerRow }) {
           </div>
         </div>
 
-        <dl className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-5 grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-xl bg-slate-950/40 p-3"><dt className="text-xs text-slate-500">Open</dt><dd className="mt-1 text-sm font-medium text-slate-200">{formatNumber(candle.open)}</dd></div>
           <div className="rounded-xl bg-slate-950/40 p-3"><dt className="text-xs text-slate-500">High / low</dt><dd className="mt-1 text-sm font-medium text-slate-200">{formatNumber(candle.high)} / {formatNumber(candle.low)}</dd></div>
           <div className="rounded-xl bg-slate-950/40 p-3"><dt className="text-xs text-slate-500">Volume</dt><dd className="mt-1 text-sm font-medium text-slate-200">{formatNumber(candle.volume, 2)}</dd></div>
@@ -112,7 +112,7 @@ export function ScannerRowCard({ record }: { record: ScannerRow }) {
             {model ? <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${labelTone(model.prediction)}`}>{model.prediction}</span> : null}
           </div>
           {model ? (
-            <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <dl className="mt-4 grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-4">
               <div><dt className="text-xs text-slate-500">Confidence</dt><dd className="mt-1 text-sm font-medium text-slate-200">{formatPercentage(model.confidence)}</dd></div>
               <div><dt className="text-xs text-slate-500">Evidence cutoff</dt><dd className="mt-1 text-sm font-medium text-slate-200">{formatTimestamp(model.evidenceCutoffAt)}</dd></div>
               <div><dt className="text-xs text-slate-500">Model</dt><dd className="mt-1 text-sm font-medium text-slate-200">{model.model.key} v{model.model.version}</dd></div>

@@ -1,0 +1,144 @@
+[
+  {
+    "name": "HAMMER_AFTER_DOWNTREND",
+    "candles": [
+      { "id": "1", "open": 14.2, "high": 14.5, "low": 13.8, "close": 14.0 },
+      { "id": "2", "open": 13.2, "high": 13.5, "low": 12.8, "close": 13.0 },
+      { "id": "3", "open": 12.2, "high": 12.5, "low": 11.8, "close": 12.0 },
+      { "id": "4", "open": 11.2, "high": 11.5, "low": 10.8, "close": 11.0 },
+      { "id": "5", "open": 10.0, "high": 10.5, "low": 8.0, "close": 10.4 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "HAMMER",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "SHOOTING_STAR_AFTER_UPTREND",
+    "candles": [
+      { "id": "1", "open": 9.8, "high": 10.2, "low": 9.6, "close": 10.0 },
+      { "id": "2", "open": 10.8, "high": 11.2, "low": 10.6, "close": 11.0 },
+      { "id": "3", "open": 11.8, "high": 12.2, "low": 11.6, "close": 12.0 },
+      { "id": "4", "open": 12.8, "high": 13.2, "low": 12.6, "close": 13.0 },
+      { "id": "5", "open": 13.2, "high": 16.0, "low": 13.1, "close": 13.5 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "SHOOTING_STAR",
+    "expectedDirection": "BEARISH"
+  },
+  {
+    "name": "BULLISH_ENGULFING",
+    "candles": [
+      { "id": "1", "open": 12.0, "high": 12.2, "low": 9.8, "close": 10.0 },
+      { "id": "2", "open": 9.5, "high": 12.7, "low": 9.4, "close": 12.5 }
+    ],
+    "targetCandleId": "2",
+    "expectedPattern": "BULLISH_ENGULFING",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "BEARISH_ENGULFING",
+    "candles": [
+      { "id": "1", "open": 10.0, "high": 12.2, "low": 9.8, "close": 12.0 },
+      { "id": "2", "open": 12.5, "high": 12.7, "low": 9.4, "close": 9.5 }
+    ],
+    "targetCandleId": "2",
+    "expectedPattern": "BEARISH_ENGULFING",
+    "expectedDirection": "BEARISH"
+  },
+  {
+    "name": "BULLISH_MARUBOZU",
+    "candles": [
+      { "id": "1", "open": 100.0, "high": 110.0, "low": 99.8, "close": 109.8 }
+    ],
+    "targetCandleId": "1",
+    "expectedPattern": "BULLISH_MARUBOZU",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "BEARISH_MARUBOZU",
+    "candles": [
+      { "id": "1", "open": 110.0, "high": 110.2, "low": 99.8, "close": 100.2 }
+    ],
+    "targetCandleId": "1",
+    "expectedPattern": "BEARISH_MARUBOZU",
+    "expectedDirection": "BEARISH"
+  },
+  {
+    "name": "PIERCING_LINE",
+    "candles": [
+      { "id": "1", "open": 14.2, "high": 14.5, "low": 13.8, "close": 14.0 },
+      { "id": "2", "open": 13.2, "high": 13.5, "low": 12.8, "close": 13.0 },
+      { "id": "3", "open": 12.2, "high": 12.5, "low": 11.8, "close": 12.0 },
+      { "id": "4", "open": 12.0, "high": 12.2, "low": 9.8, "close": 10.0 },
+      { "id": "5", "open": 9.5, "high": 11.8, "low": 9.4, "close": 11.5 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "PIERCING_LINE",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "DARK_CLOUD_COVER",
+    "candles": [
+      { "id": "1", "open": 9.8, "high": 10.2, "low": 9.6, "close": 10.0 },
+      { "id": "2", "open": 10.8, "high": 11.2, "low": 10.6, "close": 11.0 },
+      { "id": "3", "open": 11.8, "high": 12.2, "low": 11.6, "close": 12.0 },
+      { "id": "4", "open": 12.0, "high": 14.5, "low": 11.8, "close": 14.0 },
+      { "id": "5", "open": 14.8, "high": 14.9, "low": 12.2, "close": 12.5 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "DARK_CLOUD_COVER",
+    "expectedDirection": "BEARISH"
+  },
+  {
+    "name": "TWEEZER_BOTTOM",
+    "candles": [
+      { "id": "1", "open": 14.2, "high": 14.5, "low": 13.8, "close": 14.0 },
+      { "id": "2", "open": 13.2, "high": 13.5, "low": 12.8, "close": 13.0 },
+      { "id": "3", "open": 12.2, "high": 12.5, "low": 11.8, "close": 12.0 },
+      { "id": "4", "open": 12.0, "high": 12.2, "low": 10.0, "close": 10.2 },
+      { "id": "5", "open": 10.2, "high": 12.0, "low": 10.02, "close": 11.8 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "TWEEZER_BOTTOM",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "TWEEZER_TOP",
+    "candles": [
+      { "id": "1", "open": 9.8, "high": 10.2, "low": 9.6, "close": 10.0 },
+      { "id": "2", "open": 10.8, "high": 11.2, "low": 10.6, "close": 11.0 },
+      { "id": "3", "open": 11.8, "high": 12.2, "low": 11.6, "close": 12.0 },
+      { "id": "4", "open": 12.0, "high": 14.0, "low": 11.8, "close": 13.8 },
+      { "id": "5", "open": 13.8, "high": 13.98, "low": 12.0, "close": 12.2 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "TWEEZER_TOP",
+    "expectedDirection": "BEARISH"
+  },
+  {
+    "name": "THREE_INSIDE_UP",
+    "candles": [
+      { "id": "1", "open": 18.2, "high": 18.5, "low": 17.8, "close": 18.0 },
+      { "id": "2", "open": 17.2, "high": 17.5, "low": 16.8, "close": 17.0 },
+      { "id": "3", "open": 15.0, "high": 15.2, "low": 10.8, "close": 11.0 },
+      { "id": "4", "open": 11.5, "high": 13.8, "low": 11.2, "close": 13.5 },
+      { "id": "5", "open": 13.5, "high": 16.0, "low": 13.2, "close": 15.5 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "THREE_INSIDE_UP",
+    "expectedDirection": "BULLISH"
+  },
+  {
+    "name": "THREE_INSIDE_DOWN",
+    "candles": [
+      { "id": "1", "open": 8.8, "high": 9.2, "low": 8.6, "close": 9.0 },
+      { "id": "2", "open": 9.8, "high": 10.2, "low": 9.6, "close": 10.0 },
+      { "id": "3", "open": 11.0, "high": 15.2, "low": 10.8, "close": 15.0 },
+      { "id": "4", "open": 14.5, "high": 14.7, "low": 12.2, "close": 12.5 },
+      { "id": "5", "open": 12.5, "high": 12.7, "low": 10.2, "close": 10.5 }
+    ],
+    "targetCandleId": "5",
+    "expectedPattern": "THREE_INSIDE_DOWN",
+    "expectedDirection": "BEARISH"
+  }
+]

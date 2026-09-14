@@ -14,6 +14,58 @@ from typing import Any
 
 ARTIFACT_FORMAT_VERSION = "ai-quant-lab-pickle-v1"
 
+# apps/ml/ai_quant_lab_ml/artifacts.py -> parents[3] is the repo root. Note this is one
+# deeper than train.py, whose ROOT_DIRECTORY uses parents[2] from apps/ml/train.py; both
+# must land on the same directory or the two sides disagree on where artifacts live.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_ARTIFACT_ROOT = _REPO_ROOT / "models"
+
+#: The directory name every artifact path contains, used to re-root a stored path that
+#: was written under a different mount.
+_ARTIFACT_ROOT_SEGMENT = "models"
+
+
+def resolve_artifact_path(path: str | Path, *, artifact_root: Path | None = None) -> Path:
+    r"""Resolve a stored artifact path against the local artifact root.
+
+    ``model_versions.artifact_uri`` holds the absolute path of whichever environment
+    wrote it, and this project trains from two: the host writes
+    ``C:\...\AI Quant Lab\models\...`` and the container writes ``/app/models/...``.
+    Neither path exists in the other environment, so a model trained in one was
+    unloadable in the other -- observed as "Could not read a valid pickle artifact from
+    pp\models\..." during a host-run shadow-prediction pass, which silently skipped
+    every container-trained model.
+
+    Rewriting the stored rows was rejected: the path recorded is a true statement about
+    where that artifact was written, and the checksum already guarantees the *content*
+    is the right one wherever it is found. So the stored value is left alone and
+    translated at load time.
+
+    The stored path wins when it exists, which keeps the common case exact. Otherwise
+    the portion after the final ``models`` segment is re-joined onto the local root.
+    Separators are normalised by hand because a Windows path string does not split into
+    parts under ``PosixPath`` and vice versa.
+    """
+
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+
+    root = artifact_root if artifact_root is not None else DEFAULT_ARTIFACT_ROOT
+    segments = [part for part in str(path).replace("\\", "/").split("/") if part]
+    if _ARTIFACT_ROOT_SEGMENT in segments:
+        # The last occurrence: a repository checkout could itself sit under a directory
+        # called "models", and the tail after the *final* one is the artifact's own
+        # relative location.
+        tail = segments[len(segments) - 1 - segments[::-1].index(_ARTIFACT_ROOT_SEGMENT) + 1:]
+        if tail:
+            rerooted = root.joinpath(*tail)
+            if rerooted.exists():
+                return rerooted
+    # Nothing readable. Returning the original keeps the error message pointing at what
+    # the database actually says, which is the more useful diagnostic.
+    return candidate
+
 
 class ArtifactError(ValueError):
     """Raised when an artifact cannot be serialized or parsed."""
@@ -44,23 +96,7 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def write_model_artifact(
-    path: str | Path,
-    *,
-    model: Any,
-    metadata: Mapping[str, Any],
-) -> WrittenModelArtifact:
-    """Atomically write a local model artifact and return its file checksum.
-
-    Metadata lives inside the checksummed payload so the feature schema,
-    training configuration, and metrics cannot silently drift from the model.
-    The checksum detects accidental damage; as with all pickle files, callers
-    must load only artifacts from a trusted local source.
-    """
-
-    destination = Path(path)
-    if not destination.name:
-        raise ArtifactError("An artifact file path is required.")
+def _serialize_artifact_envelope(*, model: Any, metadata: Mapping[str, Any]) -> bytes:
     try:
         payload = pickle.dumps(
             {
@@ -79,9 +115,43 @@ def write_model_artifact(
         "payloadSha256": payload_checksum,
     }
     try:
-        serialized_envelope = pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
+        return pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL)
     except (pickle.PickleError, TypeError, AttributeError) as error:  # pragma: no cover - payload is already pickled
         raise ArtifactError("The artifact envelope could not be serialized.") from error
+
+
+def compute_artifact_checksum(*, model: Any, metadata: Mapping[str, Any]) -> str:
+    """Return the SHA-256 checksum ``write_model_artifact`` would record, without writing.
+
+    Pickling the same model/metadata twice (once here, once inside
+    ``write_model_artifact``) is deterministic, so callers can use this to name a
+    destination path *before* writing -- e.g. a content-addressed filename that
+    cannot collide across two different underlying artifacts the way a fixed
+    filename can.
+    """
+
+    return sha256_bytes(_serialize_artifact_envelope(model=model, metadata=metadata))
+
+
+def write_model_artifact(
+    path: str | Path,
+    *,
+    model: Any,
+    metadata: Mapping[str, Any],
+) -> WrittenModelArtifact:
+    """Atomically write a local model artifact and return its file checksum.
+
+    Metadata lives inside the checksummed payload so the feature schema,
+    training configuration, and metrics cannot silently drift from the model.
+    The checksum detects accidental damage; as with all pickle files, callers
+    must load only artifacts from a trusted local source.
+    """
+
+    destination = Path(path)
+    if not destination.name:
+        raise ArtifactError("An artifact file path is required.")
+
+    serialized_envelope = _serialize_artifact_envelope(model=model, metadata=metadata)
 
     # Persist the hash of the bytes on disk.  That is the checksum recorded on
     # model_versions and therefore catches any file-level modification.
@@ -116,7 +186,7 @@ def load_model_artifact(
     addition to validating the checksum stored in the artifact envelope.
     """
 
-    source = Path(path)
+    source = resolve_artifact_path(path)
     try:
         serialized_envelope = source.read_bytes()
         envelope = pickle.loads(serialized_envelope)
@@ -158,6 +228,7 @@ __all__ = [
     "ArtifactIntegrityError",
     "LoadedModelArtifact",
     "WrittenModelArtifact",
+    "compute_artifact_checksum",
     "load_model_artifact",
     "sha256_bytes",
     "write_model_artifact",

@@ -5,7 +5,7 @@ import { createApp } from "./interfaces/http/app.js";
 
 const environment = loadEnvironment();
 const database = createDatabasePool(environment.DATABASE_URL);
-const app = createApp({ database });
+const app = createApp({ database, environment });
 
 const server = app.listen(environment.API_PORT, () => {
   console.info(`AI Quant Lab API listening on port ${environment.API_PORT}`);

@@ -1,12 +1,14 @@
 """Deterministic local model training, with every library imported lazily.
 
-Three model families share one pipeline contract — ``imputer``, ``scaler``,
+Four model families share one pipeline contract — ``imputer``, ``scaler``,
 ``classifier`` — so an artifact from any of them can be scored, compared, and
 promoted by the same code:
 
 * the scikit-learn logistic-regression baseline, explained by linear terms;
 * an XGBoost gradient-boosted forest, explained by exact TreeSHAP values;
-* a LightGBM gradient-boosted forest, explained the same way.
+* a LightGBM gradient-boosted forest, explained the same way;
+* a CatBoost ordered-boosting forest, explained by CatBoost's own exact
+  TreeSHAP implementation.
 
 The boosted models do not need the scaler (a split point is scale-invariant) or
 the imputer (both libraries route missing values down a learned default branch),
@@ -24,12 +26,17 @@ from typing import Any
 
 from .contracts import (
     ALGORITHM_BY_CHOICE,
+    CATBOOST_ALGORITHM,
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     LABELS,
     LIGHTGBM_ALGORITHM,
     LOGISTIC_BASELINE_ALGORITHM,
     XGBOOST_ALGORITHM,
+    AnyLabel,
+    ClassMetrics,
     EvaluationMetrics,
+    LabelAlphabet,
     LabeledExample,
     MarketLabel,
     TemporalSplit,
@@ -78,57 +85,99 @@ def _feature_matrix(examples: Sequence[LabeledExample], schema: Sequence[str]) -
     return matrix
 
 
-def _labels(examples: Sequence[LabeledExample]) -> list[MarketLabel]:
+def _labels(examples: Sequence[LabeledExample]) -> list[AnyLabel]:
     return [example.label for example in examples]
 
 
-def _class_counts(labels: Sequence[MarketLabel]) -> dict[MarketLabel, int]:
+def _class_counts(labels: Sequence[AnyLabel], alphabet: LabelAlphabet) -> dict[AnyLabel, int]:
     counts = Counter(labels)
-    return {label: int(counts[label]) for label in LABELS}
+    return {label: int(counts[label]) for label in alphabet.labels}
 
 
 def evaluate_predictions(
-    actual: Sequence[MarketLabel], predicted: Sequence[MarketLabel],
+    actual: Sequence[AnyLabel],
+    predicted: Sequence[AnyLabel],
+    *,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> EvaluationMetrics:
-    """Evaluate a fixed three-class label space without importing sklearn early."""
+    """Evaluate a three-class label space without importing sklearn early.
+
+    ``alphabet`` defaults to the directional one, so every existing caller keeps
+    identical behaviour and identical persisted numbers.
+
+    The ``directional_*`` metric fields are computed against
+    ``alphabet.abstain_label`` rather than a hardcoded ``("BULLISH", "BEARISH")``.
+    For the directional alphabet that is exactly the previous behaviour (NEUTRAL is
+    the abstain class); for another alphabet it generalises to the same idea -- how
+    often the model committed, and how often it was right when it did.
+    """
 
     if not actual:
         raise TrainingError("Cannot evaluate an empty label sequence.")
     if len(actual) != len(predicted):
         raise TrainingError("actual and predicted labels must have the same length.")
-    if any(label not in LABELS for label in actual) or any(label not in LABELS for label in predicted):
-        raise TrainingError("Labels must be one of BEARISH, NEUTRAL, or BULLISH.")
+    permitted = set(alphabet.labels)
+    if any(label not in permitted for label in actual) or any(label not in permitted for label in predicted):
+        raise TrainingError(f"Labels must be one of {', '.join(alphabet.labels)}.")
 
     try:
-        from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+        from sklearn.metrics import (
+            accuracy_score,
+            balanced_accuracy_score,
+            f1_score,
+            precision_recall_fscore_support,
+        )
     except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
         raise RuntimeError("scikit-learn is required to evaluate model predictions. Install apps/ml requirements first.") from error
 
-    directional_predictions = 0
-    correct_directional_predictions = 0
+    decisive_predictions = 0
+    correct_decisive_predictions = 0
     for a, p in zip(actual, predicted):
-        if p in ("BULLISH", "BEARISH"):
-            directional_predictions += 1
+        if p != alphabet.abstain_label:
+            decisive_predictions += 1
             if a == p:
-                correct_directional_predictions += 1
-    
+                correct_decisive_predictions += 1
+
     sample_count = len(actual)
-    coverage = float(directional_predictions) / sample_count if sample_count > 0 else 0.0
-    directional_hit_rate = (
-        float(correct_directional_predictions) / directional_predictions
-        if directional_predictions > 0
+    coverage = float(decisive_predictions) / sample_count if sample_count > 0 else 0.0
+    decisive_hit_rate = (
+        float(correct_decisive_predictions) / decisive_predictions
+        if decisive_predictions > 0
         else None
     )
+
+    # Per-class breakdown. macro-F1 averages away the only number a strategy acting on a
+    # single class can use: a straddle is taken on a predicted EXPANSION, so its precision
+    # is what decides whether the trade pays.
+    precision, recall, per_class_f1, actual_support = precision_recall_fscore_support(
+        actual, predicted, labels=list(alphabet.labels), zero_division=0
+    )
+    predicted_counts = Counter(predicted)
+    per_class: dict[str, ClassMetrics] = {}
+    for index, label in enumerate(alphabet.labels):
+        predicted_count = int(predicted_counts.get(label, 0))
+        actual_count = int(actual_support[index])
+        per_class[str(label)] = ClassMetrics(
+            # None rather than 0.0 when the class was never predicted or never occurred:
+            # "never attempted" and "always wrong" are opposite facts, and sklearn's
+            # zero_division=0 collapses them into the same number.
+            precision=float(precision[index]) if predicted_count > 0 else None,
+            recall=float(recall[index]) if actual_count > 0 else None,
+            f1=float(per_class_f1[index]),
+            predicted_count=predicted_count,
+            actual_count=actual_count,
+        )
 
     return EvaluationMetrics(
         accuracy=float(accuracy_score(actual, predicted)),
         balanced_accuracy=float(balanced_accuracy_score(actual, predicted)),
-        macro_f1=float(f1_score(actual, predicted, labels=list(LABELS), average="macro", zero_division=0)),
-        directional_predictions=directional_predictions,
-        directional_hit_rate=directional_hit_rate,
+        macro_f1=float(f1_score(actual, predicted, labels=list(alphabet.labels), average="macro", zero_division=0)),
+        directional_predictions=decisive_predictions,
+        directional_hit_rate=decisive_hit_rate,
         coverage=coverage,
         sample_count=sample_count,
-        class_counts=_class_counts(actual),
+        class_counts=_class_counts(actual, alphabet),
+        per_class=per_class,
     )
 
 
@@ -137,7 +186,8 @@ def predict_labels(
     examples: Sequence[LabeledExample],
     *,
     schema: Sequence[str] | None = None,
-) -> list[MarketLabel]:
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> list[AnyLabel]:
     """Predict labels for already-built examples using the declared schema order.
 
     Promotion code uses this helper to score an existing production artifact on
@@ -159,8 +209,8 @@ def predict_labels(
     except (TypeError, ValueError, AttributeError) as error:
         raise TrainingError("The supplied model could not score the provided feature matrix.") from error
     predictions = [str(value) for value in raw_predictions]
-    if any(label not in LABELS for label in predictions):
-        raise TrainingError("The supplied model returned a label outside the fixed Phase 10 label set.")
+    if any(label not in set(alphabet.labels) for label in predictions):
+        raise TrainingError(f"The supplied model returned a label outside the {alphabet.name} label set.")
     return predictions  # type: ignore[return-value]
 
 
@@ -169,7 +219,8 @@ def _prepared_split(
     schema: Sequence[str] | None,
     *,
     algorithm_label: str,
-) -> tuple[tuple[str, ...], list[MarketLabel], list[MarketLabel]]:
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> tuple[tuple[str, ...], list[AnyLabel], list[AnyLabel]]:
     """Validate one purged split and its feature schema before any library loads."""
 
     if not split.train:
@@ -184,8 +235,8 @@ def _prepared_split(
 
     train_labels = _labels(split.train)
     validation_labels = _labels(split.validation)
-    if any(label not in LABELS for label in (*train_labels, *validation_labels)):
-        raise TrainingError("Labels must be one of BEARISH, NEUTRAL, or BULLISH.")
+    if any(label not in set(alphabet.labels) for label in (*train_labels, *validation_labels)):
+        raise TrainingError(f"Labels must be one of {', '.join(alphabet.labels)}.")
     if len(set(train_labels)) < 2:
         raise TrainingError(f"{algorithm_label} requires at least two classes in the training partition.")
     return selected_schema, train_labels, validation_labels
@@ -197,21 +248,22 @@ def _fitted_result(
     pipeline: Any,
     split: TemporalSplit,
     selected_schema: tuple[str, ...],
-    train_labels: Sequence[MarketLabel],
-    validation_labels: Sequence[MarketLabel],
+    train_labels: Sequence[AnyLabel],
+    validation_labels: Sequence[AnyLabel],
     hyperparameters: Mapping[str, Any],
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit one pipeline on the training partition only and score both partitions."""
 
     pipeline.fit(_feature_matrix(split.train, selected_schema), list(train_labels))
-    train_predictions = predict_labels(pipeline, split.train, schema=selected_schema)
-    validation_predictions = predict_labels(pipeline, split.validation, schema=selected_schema)
+    train_predictions = predict_labels(pipeline, split.train, schema=selected_schema, alphabet=alphabet)
+    validation_predictions = predict_labels(pipeline, split.validation, schema=selected_schema, alphabet=alphabet)
     return BaselineTrainingResult(
         algorithm=algorithm,
         model=pipeline,
         feature_schema=selected_schema,
-        training_metrics=evaluate_predictions(train_labels, train_predictions),
-        validation_metrics=evaluate_predictions(validation_labels, validation_predictions),
+        training_metrics=evaluate_predictions(train_labels, train_predictions, alphabet=alphabet),
+        validation_metrics=evaluate_predictions(validation_labels, validation_predictions, alphabet=alphabet),
         training_rows=len(split.train),
         validation_rows=len(split.validation),
         hyperparameters=dict(hyperparameters),
@@ -257,6 +309,7 @@ def train_logistic_regression_baseline(
     schema: Sequence[str] | None = None,
     random_state: int = 42,
     max_iter: int = 1_000,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit the Phase 10 logistic-regression benchmark on a purged temporal split.
 
@@ -266,7 +319,7 @@ def train_logistic_regression_baseline(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="Logistic regression",
+        split, schema, algorithm_label="Logistic regression", alphabet=alphabet,
     )
     max_iter = _positive_int(max_iter, "max_iter")
 
@@ -302,10 +355,11 @@ def train_logistic_regression_baseline(
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters={"maxIter": max_iter, "solver": "lbfgs", "randomState": random_state},
+        alphabet=alphabet,
     )
 
 
-def _boosting_pipeline(classifier: Any) -> Any:
+def _boosting_pipeline(classifier: Any, alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET) -> Any:
     """Wrap a boosted classifier in the shared three-step artifact contract."""
 
     try:
@@ -319,7 +373,9 @@ def _boosting_pipeline(classifier: Any) -> Any:
         steps=[
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
             ("scaler", StandardScaler()),
-            ("classifier", LabelEncodedClassifier(classifier)),
+            # The encoder must know the full alphabet, not just the classes present
+            # in this fold, so the stored artifact decodes to the same labels later.
+            ("classifier", LabelEncodedClassifier(classifier, labels=alphabet.labels)),
         ]
     )
 
@@ -336,6 +392,7 @@ def train_xgboost_classifier(
     colsample_bytree: float = 0.8,
     min_child_weight: float = 5.0,
     reg_lambda: float = 1.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit a deterministic XGBoost forest on the same purged temporal split.
 
@@ -346,7 +403,7 @@ def train_xgboost_classifier(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="XGBoost",
+        split, schema, algorithm_label="XGBoost", alphabet=alphabet,
     )
     hyperparameters = {
         "nEstimators": _positive_int(n_estimators, "n_estimators"),
@@ -381,12 +438,13 @@ def train_xgboost_classifier(
     )
     return _fitted_result(
         algorithm=XGBOOST_ALGORITHM,
-        pipeline=_boosting_pipeline(classifier),
+        pipeline=_boosting_pipeline(classifier, alphabet),
         split=split,
         selected_schema=selected_schema,
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters=hyperparameters,
+        alphabet=alphabet,
     )
 
 
@@ -403,6 +461,7 @@ def train_lightgbm_classifier(
     subsample: float = 0.8,
     colsample_bytree: float = 0.8,
     reg_lambda: float = 1.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Fit a deterministic LightGBM forest on the same purged temporal split.
 
@@ -412,7 +471,7 @@ def train_lightgbm_classifier(
     """
 
     selected_schema, train_labels, validation_labels = _prepared_split(
-        split, schema, algorithm_label="LightGBM",
+        split, schema, algorithm_label="LightGBM", alphabet=alphabet,
     )
     hyperparameters = {
         "nEstimators": _positive_int(n_estimators, "n_estimators"),
@@ -453,12 +512,97 @@ def train_lightgbm_classifier(
     )
     return _fitted_result(
         algorithm=LIGHTGBM_ALGORITHM,
-        pipeline=_boosting_pipeline(classifier),
+        pipeline=_boosting_pipeline(classifier, alphabet),
         split=split,
         selected_schema=selected_schema,
         train_labels=train_labels,
         validation_labels=validation_labels,
         hyperparameters=hyperparameters,
+        alphabet=alphabet,
+    )
+
+
+def train_catboost_classifier(
+    split: TemporalSplit,
+    *,
+    schema: Sequence[str] | None = None,
+    random_state: int = 42,
+    n_estimators: int = 300,
+    max_depth: int = 4,
+    learning_rate: float = 0.05,
+    subsample: float = 0.8,
+    colsample_bytree: float = 0.8,
+    reg_lambda: float = 3.0,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+) -> BaselineTrainingResult:
+    """Fit a deterministic CatBoost forest on the same purged temporal split.
+
+    The keyword names deliberately mirror the other boosted trainers so one CLI
+    flag means one thing everywhere; they are mapped onto CatBoost's own
+    vocabulary here (``max_depth`` -> ``depth``, ``colsample_bytree`` -> ``rsm``,
+    ``reg_lambda`` -> ``l2_leaf_reg``).
+
+    ``boosting_type="Ordered"`` is the reason this family exists at all: each
+    tree's leaf values are estimated on permutation prefixes the tree was not
+    fitted on, which is a prediction-shift control that neither XGBoost nor
+    LightGBM has. Plain-mode CatBoost would be a third copy of the same bias.
+    Ordered boosting does **not** replace chronological splitting, purge, or the
+    leakage audit; it only changes how each tree is regularised internally.
+    """
+
+    selected_schema, train_labels, validation_labels = _prepared_split(
+        split, schema, algorithm_label="CatBoost", alphabet=alphabet,
+    )
+    hyperparameters = {
+        "nEstimators": _positive_int(n_estimators, "n_estimators"),
+        "maxDepth": _positive_int(max_depth, "max_depth"),
+        "learningRate": _positive_float(learning_rate, "learning_rate"),
+        "subsample": _fraction(subsample, "subsample"),
+        "colsampleByTree": _fraction(colsample_bytree, "colsample_bytree"),
+        "regLambda": _non_negative_float(reg_lambda, "reg_lambda"),
+        "boostingType": "Ordered",
+        "bootstrapType": "Bernoulli",
+        "randomState": random_state,
+    }
+
+    try:
+        import catboost
+        from catboost import CatBoostClassifier
+    except ImportError as error:  # pragma: no cover - depends on the optional runtime environment
+        raise RuntimeError("catboost is required for gradient-boosted training. Install apps/ml requirements first.") from error
+
+    # The library version is recorded because CatBoost's ordered-boosting
+    # internals have changed across releases; an artifact's numbers are only
+    # reproducible against the version that produced them.
+    hyperparameters["catboostVersion"] = str(catboost.__version__)
+
+    # thread_count=1 and a fixed seed keep repeated runs on the same split
+    # byte-identical, which the artifact checksum relies on. Bernoulli bootstrap
+    # is the direct analogue of the row subsampling the other two families use;
+    # rsm is CatBoost's per-split column subsampling.
+    classifier = CatBoostClassifier(
+        iterations=hyperparameters["nEstimators"],
+        depth=hyperparameters["maxDepth"],
+        learning_rate=hyperparameters["learningRate"],
+        subsample=hyperparameters["subsample"],
+        rsm=hyperparameters["colsampleByTree"],
+        l2_leaf_reg=hyperparameters["regLambda"],
+        boosting_type="Ordered",
+        bootstrap_type="Bernoulli",
+        random_seed=random_state,
+        thread_count=1,
+        allow_writing_files=False,
+        verbose=0,
+    )
+    return _fitted_result(
+        algorithm=CATBOOST_ALGORITHM,
+        pipeline=_boosting_pipeline(classifier, alphabet),
+        split=split,
+        selected_schema=selected_schema,
+        train_labels=train_labels,
+        validation_labels=validation_labels,
+        hyperparameters=hyperparameters,
+        alphabet=alphabet,
     )
 
 
@@ -466,6 +610,7 @@ TRAINERS = {
     "logistic": train_logistic_regression_baseline,
     "xgboost": train_xgboost_classifier,
     "lightgbm": train_lightgbm_classifier,
+    "catboost": train_catboost_classifier,
 }
 
 
@@ -476,12 +621,16 @@ def train_model(
     schema: Sequence[str] | None = None,
     random_state: int = 42,
     hyperparameters: Mapping[str, Any] | None = None,
+    alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
 ) -> BaselineTrainingResult:
     """Train one registered algorithm so callers stay free of library imports.
 
     ``hyperparameters`` are the trainer's own keyword arguments. An unknown key
     fails loudly rather than being silently dropped, so a mistyped CLI flag can
     never produce a model trained with defaults it did not ask for.
+
+    ``alphabet`` selects the label space. It defaults to the directional one, so an
+    existing caller trains and scores exactly as before.
     """
 
     trainer = TRAINERS.get(algorithm_choice)
@@ -491,7 +640,7 @@ def train_model(
         )
     supplied = dict(hyperparameters or {})
     try:
-        return trainer(split, schema=schema, random_state=random_state, **supplied)
+        return trainer(split, schema=schema, random_state=random_state, alphabet=alphabet, **supplied)
     except TypeError as error:
         raise TrainingError(f"Invalid hyperparameters for {algorithm_choice}: {error}") from error
 
@@ -507,7 +656,7 @@ def algorithm_identifier(algorithm_choice: str) -> str:
     return identifier
 
 
-def training_metadata(result: BaselineTrainingResult) -> dict[str, Any]:
+def training_metadata(result: BaselineTrainingResult, schema_version: str = FEATURE_SCHEMA_VERSION) -> dict[str, Any]:
     """Return JSON-compatible metadata to persist alongside a pickle artifact."""
 
     def metrics_to_mapping(metrics: EvaluationMetrics) -> dict[str, Any]:
@@ -525,9 +674,9 @@ def training_metadata(result: BaselineTrainingResult) -> dict[str, Any]:
     return {
         "algorithm": result.algorithm,
         "hyperparameters": dict(result.hyperparameters),
-        "featureSchemaVersion": FEATURE_SCHEMA_VERSION,
+        "featureSchemaVersion": schema_version,
         "featureSchema": list(result.feature_schema),
-        "featureDefinition": feature_definition(),
+        "featureDefinition": feature_definition(schema_version),
         "trainingRows": result.training_rows,
         "validationRows": result.validation_rows,
         "trainingMetrics": metrics_to_mapping(result.training_metrics),
@@ -543,6 +692,7 @@ __all__ = [
     "algorithm_identifier",
     "evaluate_predictions",
     "predict_labels",
+    "train_catboost_classifier",
     "train_lightgbm_classifier",
     "train_logistic_regression_baseline",
     "train_model",

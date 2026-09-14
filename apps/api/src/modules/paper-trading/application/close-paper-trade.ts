@@ -1,4 +1,5 @@
 import type { PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
+import { calculateExitFees } from "../domain/brokerage-calculator.js";
 
 export interface ClosePaperTradeRequest {
   paperTradeId: string;
@@ -7,6 +8,10 @@ export interface ClosePaperTradeRequest {
   exitSlippage?: number;
   notes?: string;
   closedAt?: Date;
+  /** When true (default), compute Zerodha options exit fees from premium × qty. */
+  applyBrokerageFees?: boolean;
+  exitPriceSource?: "MANUAL_INPUT" | "SERVER_OPTION_MARK";
+  valuationDetails?: Record<string, unknown>;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -30,8 +35,14 @@ export class ClosePaperTrade {
     if (!trade) {
       throw new Error(`Open paper trade ${input.paperTradeId} was not found.`);
     }
-    assertPositiveFinite(input.exitPrice, "Exit price");
-    const exitFees = input.exitFees ?? 0;
+    if (trade.optionType === "CE" || trade.optionType === "PE") {
+      assertNonNegativeFinite(input.exitPrice, "Exit price");
+    } else {
+      assertPositiveFinite(input.exitPrice, "Exit price");
+    }
+    const applyFees = input.applyBrokerageFees !== false;
+    const exitBreakdown = applyFees ? calculateExitFees(input.exitPrice, trade.quantity) : null;
+    const exitFees = input.exitFees ?? exitBreakdown?.total ?? 0;
     const exitSlippage = input.exitSlippage ?? 0;
     assertNonNegativeFinite(exitFees, "Exit fees");
     assertNonNegativeFinite(exitSlippage, "Exit slippage");
@@ -46,7 +57,12 @@ export class ClosePaperTrade {
       closedAt,
       exitFees,
       exitSlippage,
-      details: { source: "MANUAL", notes: input.notes?.trim() ?? "" },
+      feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
+      details: {
+        source: input.exitPriceSource ?? "MANUAL_INPUT",
+        notes: input.notes?.trim() ?? "",
+        ...(input.valuationDetails ? { valuation: input.valuationDetails } : {}),
+      },
     });
   }
 }

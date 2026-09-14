@@ -23,7 +23,7 @@ export function ReadOnlyBoundary({
         </div>
         <span className="rounded-full border border-cyan-200/35 bg-cyan-200/10 px-3 py-1 text-xs font-semibold text-cyan-50">{badge}</span>
       </div>
-      <ul className="mt-4 grid gap-2 text-xs text-slate-300 sm:grid-cols-2 lg:grid-cols-4">
+      <ul className="mt-4 grid gap-2 text-xs text-slate-300 grid-cols-1 md:grid-cols-2 lg:grid-cols-4">
         {points.map((point) => <li className="rounded-lg bg-slate-950/35 px-3 py-2" key={point}>{point}</li>)}
       </ul>
     </GlassPanel>

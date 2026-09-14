@@ -4,6 +4,7 @@ import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { seedCoreInstruments } from "../../modules/market-data/application/seed-core-instruments.js";
 import { seedMarketData } from "../../modules/market-data/application/seed-market-data.js";
+import { seedScalpData } from "../../modules/market-data/application/seed-scalp-data.js";
 
 async function main(): Promise<void> {
   const environment = loadEnvironment();
@@ -13,6 +14,8 @@ async function main(): Promise<void> {
     console.info(JSON.stringify({ level: "info", message: "Core instruments seeded", symbols: instruments.map((instrument) => instrument.symbol) }));
     await seedMarketData(database);
     console.info(JSON.stringify({ level: "info", message: "Historical market data, indicators, patterns, strategies, and trade ideas seeded" }));
+    await seedScalpData(database);
+    console.info(JSON.stringify({ level: "info", message: "Scalp data seeded" }));
   } finally {
     await database.end();
   }
