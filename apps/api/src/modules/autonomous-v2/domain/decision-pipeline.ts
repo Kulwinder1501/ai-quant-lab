@@ -119,6 +119,8 @@ export interface DecisionPipelineStages {
 
 export interface DecisionPipelineRun {
   readonly decisionId: string;
+  /** The sealed context every stage ran against -- carried so a persister can seal/reference it. */
+  readonly context: Readonly<BaseDecisionContext>;
   /** Null when the decision never got an APPROVED candidate set -- no CANDIDATE_RESOLVED artifact exists. */
   readonly lineage: DecisionLineage | null;
   readonly outcome: DecisionPipelineOutcome;
@@ -185,6 +187,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
   if (opportunityResult.outcome === "DEFERRED") {
     return {
       decisionId: input.decisionId,
+      context: input.context,
       lineage: null,
       outcome: {
         kind: "DEFERRED",
@@ -197,6 +200,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
   if (opportunityResult.outcome === "NO_ACTION") {
     return {
       decisionId: input.decisionId,
+      context: input.context,
       lineage: null,
       outcome: { kind: "CLOSED_NO_ACTION", reason: opportunityResult.reason },
       stages,
@@ -207,6 +211,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
     // contract change rather than left to fall through silently.
     return {
       decisionId: input.decisionId,
+      context: input.context,
       lineage: null,
       outcome: { kind: "REJECTED", reasons: opportunityResult.reasons },
       stages,
@@ -248,6 +253,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
   if (thesisResult.outcome === "DEFERRED") {
     return {
       decisionId: input.decisionId,
+      context: input.context,
       lineage,
       outcome: { kind: "DEFERRED", reason: thesisResult.reason, blockingDependency: thesisResult.blockingDependency },
       stages,
@@ -262,7 +268,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
 
   const thesisDead = deadSidesOutcome(thesis);
   if (thesisDead !== null) {
-    return { decisionId: input.decisionId, lineage, outcome: thesisDead, stages };
+    return { decisionId: input.decisionId, context: input.context, lineage, outcome: thesisDead, stages };
   }
 
   // P7: Edge Engine (always APPROVED)
@@ -276,7 +282,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
 
   const edgeDead = deadSidesOutcome(edge);
   if (edgeDead !== null) {
-    return { decisionId: input.decisionId, lineage, outcome: edgeDead, stages };
+    return { decisionId: input.decisionId, context: input.context, lineage, outcome: edgeDead, stages };
   }
 
   // P8: Risk (always APPROVED)
@@ -296,7 +302,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
 
   const riskDead = deadSidesOutcome(risk);
   if (riskDead !== null) {
-    return { decisionId: input.decisionId, lineage, outcome: riskDead, stages };
+    return { decisionId: input.decisionId, context: input.context, lineage, outcome: riskDead, stages };
   }
 
   // P9: Instrument Policy
@@ -304,6 +310,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
   if (instrumentResult.outcome === "DEFERRED") {
     return {
       decisionId: input.decisionId,
+      context: input.context,
       lineage,
       outcome: {
         kind: "DEFERRED",
@@ -322,7 +329,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
 
   const instrumentDead = deadSidesOutcome(instrument);
   if (instrumentDead !== null) {
-    return { decisionId: input.decisionId, lineage, outcome: instrumentDead, stages };
+    return { decisionId: input.decisionId, context: input.context, lineage, outcome: instrumentDead, stages };
   }
 
   // P10: Execution Simulator (always APPROVED)
@@ -338,8 +345,8 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
 
   const executionDead = deadSidesOutcome(execution);
   if (executionDead !== null) {
-    return { decisionId: input.decisionId, lineage, outcome: executionDead, stages };
+    return { decisionId: input.decisionId, context: input.context, lineage, outcome: executionDead, stages };
   }
 
-  return { decisionId: input.decisionId, lineage, outcome: { kind: "EXECUTED" }, stages };
+  return { decisionId: input.decisionId, context: input.context, lineage, outcome: { kind: "EXECUTED" }, stages };
 }
