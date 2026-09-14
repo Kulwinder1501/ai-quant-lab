@@ -70,6 +70,28 @@ describe("buildOfiObservations", () => {
     expect(result.lookaheadViolations).toHaveLength(0);
   });
 
+  it("stamps labelEndAt as the forward frame's own timestamp, not at + horizonMs", () => {
+    // This was the missing field: leaving it unset silently disabled the harness's negative-lag
+    // overlap guard for every OFI observation (see the module doc). At 100ms spacing with a 200ms
+    // horizon and 50ms tolerance, the forward frame lands at a 100ms multiple, which is never
+    // exactly `at + 200`.
+    const result = buildOfiObservations({
+      frames: series(10, { askPriceDriftFrom: 5 }),
+      ofiWindowMs: 300,
+      horizonMs: 200,
+      horizonToleranceMs: 50,
+    });
+
+    expect(result.observations.length).toBeGreaterThan(0);
+    for (const observation of result.observations) {
+      expect(observation.labelEndAt).toBeDefined();
+      expect(observation.labelEndAt!.getTime()).toBeGreaterThan(observation.at.getTime());
+      // The forward frame is a real captured frame, so its timestamp is a 100ms-spacing multiple
+      // from T0 -- confirming this is the frame's own stamp, not a synthetic at+horizonMs value.
+      expect((observation.labelEndAt!.getTime() - T0) % STEP_MS).toBe(0);
+    }
+  });
+
   it("truncates the feature window at a segment boundary rather than reaching through it", () => {
     // A gap at frame 5 restarts the OFI chain. The first observations after it must sum only
     // post-gap increments, even though a 300ms window would otherwise reach back across the hole.

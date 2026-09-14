@@ -103,7 +103,8 @@ import { stockIntelligenceFeatureIdentityMigration } from "./102-stock-intellige
 import { stockIntelligenceSnapshotMigration } from "./103-stock-intelligence-prediction-snapshots.js";
 import { stockIntelligenceGate7ReportMigration } from "./104-stock-intelligence-gate7-reports.js";
 import { ictStateSnapshotsMigration } from "./105-ict-state-snapshots.js";
-import { paperTradeInitialStopLossMigration } from "./106-paper-trade-initial-stop-loss.js";
+import { candidateDatasetMigration } from "./106-candidate-dataset.js";
+import { paperTradeInitialStopLossMigration } from "./107-paper-trade-initial-stop-loss.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -211,5 +212,6 @@ export const migrations = [
   stockIntelligenceSnapshotMigration,
   stockIntelligenceGate7ReportMigration,
   ictStateSnapshotsMigration,
+  candidateDatasetMigration,
   paperTradeInitialStopLossMigration,
 ];

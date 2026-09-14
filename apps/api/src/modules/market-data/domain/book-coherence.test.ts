@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { assessBook, type AssessBookInput } from "./book-coherence.js";
+import {
+  assessBook,
+  FRONT_MONTH_INDEX_FUTURE_MAX_SPREAD_FRACTION,
+  type AssessBookInput,
+} from "./book-coherence.js";
 
-/** A front-month index future: a real spread is well under a basis point. */
-const FUTURES_LIMIT = 0.0002;
+/**
+ * The calibrated limit. Measured p50 is 5.76 bps and the widest observed frame 20.42 bps, so the
+ * earlier 2 bps here sat below the median and rejected most valid books.
+ */
+const FUTURES_LIMIT = FRONT_MONTH_INDEX_FUTURE_MAX_SPREAD_FRACTION;
 
 function book(
   bidPrice: number[], askPrice: number[],
@@ -38,11 +45,19 @@ describe("assessBook", () => {
     expect(r.verdict).toBe("COHERENT");
   });
 
-  it("rejects the observed staleness signature: a ~32 point gap on a 57,800 future", () => {
-    // The real corruption -- each side internally tight, the two sides far apart.
+  it("accepts a ~32 point gap, which is normal for this instrument and not staleness", () => {
+    // Measured against the REST quote endpoint on 2026-09-07: our book matched it exactly and the
+    // vendor's own payload reported spread 28.6, so ~5 bps is the real market. An earlier version
+    // of this test asserted SPREAD_IMPLAUSIBLE here on a mis-set 2 bps limit.
     const r = assessBook(book([57800.0, 57799.2], [57832.2, 57833.0]));
-    expect(r.verdict).toBe("SPREAD_IMPLAUSIBLE");
+    expect(r.verdict).toBe("COHERENT");
     expect(r.spread).toBeCloseTo(32.2, 6);
+  });
+
+  it("still rejects gross staleness, which is what the limit is actually for", () => {
+    // A slot holding a price from minutes earlier lands hundreds of points away: ~35 bps here.
+    const r = assessBook(book([57800.0], [58000.0]));
+    expect(r.verdict).toBe("SPREAD_IMPLAUSIBLE");
   });
 
   it("rejects a crossed book, including the exactly-touching case", () => {

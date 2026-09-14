@@ -1,8 +1,14 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS: PHASES 0, 1, 2 BUILT; PHASE 3 COMPUTATION BUILT BUT NOT EVALUATED. PHASE 1 GATE MET IN
-MINIATURE ONLY — a full session has not yet been captured, so no signal result may be claimed.
-PHASE 4 SHUT.**
+**STATUS (2026-09-09): PHASE 1 GATE MET AT SESSION SCALE, PHASE 4 STILL DIAGNOSTIC ONLY. Two bugs
+found and fixed in the harness call path, neither in `falsification-harness.ts` itself: a missing
+`labelEndAt` stamp (2026-09-09), and a negative-lag sample floor too small to tell "a handful of
+edge-case pairs" from "a small real fraction of a large session" (2026-09-09, pre-registered as
+`NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION = 0.05` in `evaluate-ofi-signal.ts`). Neither fix has been
+tested against a session no one had already inspected. The 6 sessions used to diagnose both bugs
+(2026-09-01 through 09-08) must not be re-run and reported as confirmation — see §7's closing note.
+**Next real read is the first session captured after 2026-09-09.** No Phase 5 work starts before
+that.**
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -401,3 +407,95 @@ Written before the data arrives, so they cannot be renegotiated afterwards.
 - **Does the volatility track want this data?** The one signal here with replicated skill is
   volatility expansion. Depth data may serve it better than it serves a new directional hunt. Worth
   asking before committing to Phases 3-6.
+
+---
+
+## 7. First real Phase 4 results (2026-09-09), and a bug they exposed
+
+The collector has been running continuously since 2026-08-21 (via `NSE:BANKNIFTY26SEPFUT`, rolling
+from `NSE:BANKNIFTY26AUGFUT`). By 2026-09-09 several full sessions clear `RECONSTRUCTIBLE` at session
+scale, so Phase 1's gate is finally met for real and Phase 4 was run for the first time.
+
+**Coverage is narrower than the plan envisioned:** depth is captured on `NSE:BANKNIFTY26SEPFUT` only
+(and its predecessor contract before the roll) — **no NIFTY50 depth exists at all**, and the one
+option strike captured (2026-08-21) is a one-day smoke test. Every result below is BANKNIFTY futures
+only. §5's "a result that holds on one index and not the other is drift" rule cannot even be checked
+yet — there is no second index to check it against.
+
+### A bug: every prior run was failing closed for the wrong reason
+
+The first real run (2026-09-08 session, all four horizons 1s/5s/30s/60s) returned
+`FAIL_NEGATIVE_LAG` on every horizon. `FalsificationObservation.labelEndAt` exists specifically so
+`alignAtLag` can reject a lag probe whose "past" label had not actually resolved yet by the current
+decision (documented in `falsification-harness.ts` as exactly this scenario) — but
+`buildOfiObservations` never set it. At this feed's measured **~500ms median frame cadence**, a lag
+of 10 observations covers only ~5000ms of real time — about one `ofiWindowMs` — so the probe was
+comparing the feature against a label that had barely finished resolving, or hadn't, and reading the
+resulting correlation as "predicts the past."
+
+**Fixed** in `ofi-signal-observations.ts`: `labelEndAt` is now stamped from the forward frame's own
+`receivedAt`, not a synthetic `at + horizonMs`. One new test (`ofi-signal-observations.test.ts`)
+asserts it is populated and later than the decision instant. No change to `falsification-harness.ts`
+itself — the guard already existed and was correctly designed; it just never received the field it
+needed.
+
+### Result after the fix: partial, not clean
+
+Re-running the same session, and five more (2026-09-01 through 2026-09-07), at the two horizons long
+enough relative to `ofiWindowMs` (5000ms) for the fix to fully apply:
+
+| session | 30s horizon | 60s horizon |
+|---|---|---|
+| 2026-09-01 | NO_SIGNAL (IC -0.088) | NO_SIGNAL (IC -0.068) |
+| 2026-09-02 | FAIL_NEGATIVE_LAG | NO_SIGNAL (IC -0.074) |
+| 2026-09-03 | FAIL_NEGATIVE_LAG | FAIL_NEGATIVE_LAG |
+| 2026-09-04 | NO_SIGNAL (IC -0.097) | NO_SIGNAL (IC -0.100) |
+| 2026-09-07 | FAIL_NEGATIVE_LAG | NO_SIGNAL (IC -0.073) |
+| 2026-09-08 | NO_SIGNAL (IC -0.113) | NO_SIGNAL (IC -0.116) |
+
+Before the fix, every horizon on every session failed closed. After it, 4/6 sessions clear at 60s and
+3/6 at 30s — a real improvement, but **not a clean pass rate**, and the residual failures are not
+explained yet. Every session that DOES clear reports a small negative IC (-0.07 to -0.12), which is
+suggestive but drawn from a diagnostic that is still failing on half the sessions tested — **not
+strong enough to call NO_INFORMATION_FLOW_SIGNAL** (§5's kill condition) and certainly not strong
+enough to move to Phase 5.
+
+**The two shortest horizons (1s, 5s) remain unmeasurable, for a different and better-understood
+reason.** With `ofiWindowMs=5000`, a horizon at or below that window means the feature and a
+lag-shifted "past" return describe overlapping ticks by construction — no `labelEndAt` guard fixes
+that, because the labels genuinely are resolved; the windows themselves overlap. Testing 1s/5s
+horizons validly needs a smaller `ofiWindowMs`, decided before looking at any result from it, not
+after.
+
+**Open, and the reason no verdict is claimed yet:** why do 2 of 6 sessions still fail at 30s (1 of 6
+at 60s) after a fix that clearly works elsewhere? Candidates, not yet distinguished: genuinely
+borderline sessions where a self-calibrated placebo band happens to sit close to a real small
+autocorrelation; a session-specific data quality issue the `RECONSTRUCTIBLE` gate doesn't catch;
+or a second, smaller instance of the same class of bug the `labelEndAt` fix addressed. Whichever it
+is, it should be diagnosed before any of this is read as a signal result — the pre-registered
+programme is explicit that a placebo/integrity failure outranks any IC claim.
+
+**Diagnosed, 2026-09-09.** In every one of the 3 residual failures, the failing lag was `-30` and
+nothing else, and its surviving sample was 0.4-1.2% of the full session (120-487 observations out of
+10,600-42,300) -- a tiny, non-random sliver left over after the overlap filters, producing a noisy
+rank-IC that occasionally cleared the harness's fixed `minimumSample=100` floor by chance. `-10`, by
+contrast, sat at 60-100% of the full session in every one of the 6 sessions and never failed after
+the `labelEndAt` fix. A fixed sample count cannot distinguish "a handful of edge-case pairs" (what
+100 was built for) from "a small but real fraction of a much larger session" -- exactly the gap
+between what the floor was designed to catch and what it was actually being asked to judge here.
+
+**Pre-registered 2026-09-09** (recorded in code at
+`NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION` in `evaluate-ofi-signal.ts`, not only here): a negative-lag
+probe must now clear both the harness's absolute floor of 100 **and** 5% of the full observation
+count. 5% sits with a wide margin above every failing sample seen so far (max 1.2%) and a wide margin
+below every passing one (60-100%) -- chosen for that margin, not fitted to land precisely between the
+two closest observed values. No change to `falsification-harness.ts`; `minimumSample` was already a
+caller-supplied option, so this is a call-site change only.
+
+**Disclosed rather than hidden: this fraction was chosen after inspecting the six sessions it now
+has to work on.** That is a real deviation from "never re-derive a threshold from the data being
+tested," and papering over it would be worse than naming it. The 2026-09-01 through 09-08 sessions
+already used to diagnose this are **not** to be re-evaluated under the new floor and reported as a
+confirming result -- that would just be re-fitting with extra steps. The next genuine read is
+whichever session is captured after 2026-09-09, on data no one had seen when 5% was chosen. Until
+that lands, this section's status is unchanged: no Phase 4/5 conclusion, diagnostic only.
