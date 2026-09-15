@@ -88,6 +88,20 @@ export interface CronStallVerdict {
 }
 
 /**
+ * A canary's expected firing window, as a pair of pure functions over the wall clock.
+ *
+ * Generalised out of the scheduler's own `canaryShouldBeFiring`/`canaryWindowOpenedAt` on
+ * 2026-09-15, when `scalp-research-scheduler.ts` needed the exact same stall arithmetic for a
+ * differently-shaped schedule (a weekday-market-hours tick, not `scheduler.ts`'s `9-15` range). The
+ * baseline computation in `assessCronStall` below has nothing schedule-specific in it; only "is this
+ * canary supposed to be firing right now" and "when did its current window open" differ per caller.
+ */
+export interface CanaryWindow {
+  readonly shouldBeFiring: (now: Date) => boolean;
+  readonly windowOpenedAt: (now: Date) => Date;
+}
+
+/**
  * Whether the cron timers have provably stalled.
  *
  * ## The baseline is the latest of three instants, and each one prevents a false positive
@@ -109,11 +123,14 @@ export function assessCronStall(input: {
   readonly now: Date;
   readonly processStartedAt: Date;
   readonly toleranceMs: number;
+  readonly window: CanaryWindow;
+  /** Identifies the canary in the reason text -- typically its cron expression. */
+  readonly canaryLabel: string;
 }): CronStallVerdict {
   if (input.toleranceMs <= 0) {
     throw new Error("A cron stall tolerance must be positive; zero would restart on every check.");
   }
-  if (!canaryShouldBeFiring(input.now)) {
+  if (!input.window.shouldBeFiring(input.now)) {
     return {
       stalled: false,
       reason: "outside the canary window; the schedule is not expected to fire",
@@ -124,7 +141,7 @@ export function assessCronStall(input: {
   const baseline = Math.max(
     input.lastFiredAt?.getTime() ?? 0,
     input.processStartedAt.getTime(),
-    canaryWindowOpenedAt(input.now).getTime(),
+    input.window.windowOpenedAt(input.now).getTime(),
   );
   const silentForMs = input.now.getTime() - baseline;
   if (silentForMs <= input.toleranceMs) {
@@ -134,10 +151,32 @@ export function assessCronStall(input: {
   return {
     stalled: true,
     reason: input.lastFiredAt === null
-      ? `the canary "${canaryCronExpression}" has never fired, and the window opened `
+      ? `the canary "${input.canaryLabel}" has never fired, and the window opened `
         + `${Math.round(silentForMs / 60_000)} minutes ago`
-      : `the canary "${canaryCronExpression}" last fired ${Math.round(silentForMs / 60_000)} minutes `
+      : `the canary "${input.canaryLabel}" last fired ${Math.round(silentForMs / 60_000)} minutes `
         + "ago inside its own window",
     silentForMs,
   };
+}
+
+/**
+ * `scalp-research-scheduler.ts`'s own tick canary: the densest of its three hour-restricted tick
+ * schedules, `50 * 10-14 * * 1-5` (every minute, IST hours 10-14, weekdays). Its full tick coverage
+ * actually spans 09:16-15:30 IST (three schedules stitched together -- see the scheduler for why),
+ * but the densest single expression is what a stall watchdog should watch, for the same reason
+ * `scheduler.ts` picked its own busiest schedule as its canary: a ten-minute silence inside the
+ * densest window is unambiguous, and there is no benefit to watching a sparser one as well.
+ */
+export const scalpResearchTickCanaryExpression = "50 * 10-14 * * 1-5";
+
+export function scalpResearchTickShouldBeFiring(now: Date): boolean {
+  const { weekday, hour } = istParts(now);
+  return weekday >= 1 && weekday <= 5 && hour >= 10 && hour <= 14;
+}
+
+/** The instant the current firing window opened: 10:00 IST on `now`'s IST date. */
+export function scalpResearchTickWindowOpenedAt(now: Date): Date {
+  const shifted = new Date(now.getTime() + istOffsetMs);
+  shifted.setUTCHours(10, 0, 0, 0);
+  return new Date(shifted.getTime() - istOffsetMs);
 }

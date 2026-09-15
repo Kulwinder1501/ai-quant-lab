@@ -16,6 +16,8 @@ import {
 import {
   assessCronStall,
   canaryCronExpression,
+  canaryShouldBeFiring,
+  canaryWindowOpenedAt,
 } from "../../modules/scheduling/domain/cron-liveness.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
@@ -1225,6 +1227,8 @@ async function main(): Promise<void> {
         now: new Date(),
         processStartedAt: processStartedAt,
         toleranceMs: CRON_STALL_TOLERANCE_MS,
+        window: { shouldBeFiring: canaryShouldBeFiring, windowOpenedAt: canaryWindowOpenedAt },
+        canaryLabel: canaryCronExpression,
       });
     } catch (error) {
       // A throw here must not take the scheduler down: the watchdog failing is not a stall.
