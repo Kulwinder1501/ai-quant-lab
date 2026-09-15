@@ -29,6 +29,7 @@ from .contracts import (
     HistoricalPredictionReliability,
     AnyLabel,
     ForwardBar,
+    IctEvidence,
     IndicatorEvidence,
     InferenceRequest,
     LabelAlphabet,
@@ -447,6 +448,26 @@ _INSTITUTIONAL_FLOW_SQL = """
     WHERE target.id = ANY(%s::uuid[])
 """
 
+# One row per candle_id -- computed once, ahead of time, by
+# apps/api/src/interfaces/cli/backfill-ict-structural-features.ts, unlike every other evidence query
+# here which resolves an as-of/staleness window at read time. There is nothing to resolve: the
+# feature was extracted from the candle's own close in the same pass that computed it, so a present
+# row is exactly this candle's evidence, not a prior session's carried forward.
+_ICT_STRUCTURAL_FEATURES_SQL = """
+    SELECT
+      candle_id,
+      htf_bias,
+      premium_discount_zone,
+      distance_to_nearest_order_block,
+      nearest_order_block_side,
+      has_bos_level,
+      has_choch_level,
+      distance_to_bos_level,
+      distance_to_choch_level
+    FROM ict_structural_features
+    WHERE candle_id = ANY(%s::uuid[])
+"""
+
 _TIMEFRAME_PATTERN = re.compile(r"^(\d+)(m|h|d)$")
 _TIMEFRAME_UNIT_SECONDS: Mapping[str, int] = {"m": 60, "h": 3600, "d": 86400}
 
@@ -834,6 +855,7 @@ class PostgresMlRepository:
 
         regime_by_candle = self._load_vix_regime(candle_ids, timeframe, request.data_cutoff_at)
         flow_by_candle = self._load_institutional_flow(candle_ids, request.data_cutoff_at)
+        ict_by_candle = self._load_ict_evidence(candle_ids)
         # Breadth exists only in the swing schema; scalp evidence skips the
         # panel load entirely rather than attaching context no column reads.
         breadth_contexts = (
@@ -903,6 +925,7 @@ class PostgresMlRepository:
                     institutional_flow_date=None if flow is None else flow.flow_date,
                     breadth=latest_breadth_at(breadth_contexts, close_time),
                     forward_path=forward_paths.get(candle_id, ()),
+                    ict=ict_by_candle.get(candle_id),
                 )
             )
         return tuple(evidence)
@@ -1020,6 +1043,48 @@ class PostgresMlRepository:
                 flow_date=row["flow_date"],
             )
         return flow_by_candle
+
+    def _load_ict_evidence(self, candle_ids: Sequence[str]) -> dict[str, IctEvidence]:
+        """Map candle id to its ICT structural read, when the backfill has computed one.
+
+        A candle absent from `ict_structural_features` (never backfilled for this instrument/
+        timeframe, or backfilled under a different engine/config version) is simply absent from the
+        result -- `CandleEvidence.ict` stays None, which `build_feature_vector` already treats as
+        "not computed for this bar" rather than a zero reading.
+        """
+
+        if not candle_ids:
+            return {}
+
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(_ICT_STRUCTURAL_FEATURES_SQL, (list(candle_ids),))
+            rows = list(cursor.fetchall())
+
+        ict_by_candle: dict[str, IctEvidence] = {}
+        for row in rows:
+            distance_to_nearest_order_block = row["distance_to_nearest_order_block"]
+            distance_to_bos_level = row["distance_to_bos_level"]
+            distance_to_choch_level = row["distance_to_choch_level"]
+            ict_by_candle[str(row["candle_id"])] = IctEvidence(
+                htf_bias=row["htf_bias"],
+                premium_discount_zone=row["premium_discount_zone"],
+                distance_to_nearest_order_block=(
+                    None if distance_to_nearest_order_block is None
+                    else _to_float(distance_to_nearest_order_block, "ICT distance to nearest order block")
+                ),
+                nearest_order_block_side=row["nearest_order_block_side"],
+                has_bos_level=bool(row["has_bos_level"]),
+                has_choch_level=bool(row["has_choch_level"]),
+                distance_to_bos_level=(
+                    None if distance_to_bos_level is None
+                    else _to_float(distance_to_bos_level, "ICT distance to BOS level")
+                ),
+                distance_to_choch_level=(
+                    None if distance_to_choch_level is None
+                    else _to_float(distance_to_choch_level, "ICT distance to CHoCH level")
+                ),
+            )
+        return ict_by_candle
 
     def _load_vix_regime(
         self,
@@ -1268,6 +1333,7 @@ class PostgresMlRepository:
         # constant.
         regime = self._load_vix_regime([candle_id], timeframe, request.data_cutoff_at).get(candle_id)
         flow = self._load_institutional_flow([candle_id], request.data_cutoff_at).get(candle_id)
+        ict = self._load_ict_evidence([candle_id]).get(candle_id)
         breadth = (
             latest_breadth_at(
                 self._load_breadth_contexts(
@@ -1306,6 +1372,7 @@ class PostgresMlRepository:
             fii_options_net_flow_ratio=None if flow is None else flow.fii_options_net_flow_ratio,
             institutional_flow_date=None if flow is None else flow.flow_date,
             breadth=breadth,
+            ict=ict,
         )
 
     def create_candidate_model(

@@ -908,7 +908,9 @@ def _validate_evidence_scope(candle: CandleEvidence, request: DatasetRequest) ->
         raise FeatureConstructionError(f"Candle {candle.candle_id} must close after it opens.")
 
 
-def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRequest) -> list[LabeledExample]:
+def build_labeled_examples(
+    records: Sequence[CandleEvidence], request: DatasetRequest, *, schema_version: str | None = None
+) -> list[LabeledExample]:
     """Turn adapter-provided evidence into chronologically ordered labeled examples.
 
     Records without a future close are intentionally omitted: they are valid
@@ -916,6 +918,13 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
     to attach a future close exactly ``request.horizon_bars`` after each source
     candle and to enforce the immutable data cutoff before calling this pure
     function.
+
+    ``schema_version`` defaults to ``schema_version_for(request.timeframe)`` -- the production
+    training/inference contract, unchanged for every existing caller. Passing it explicitly is for
+    an ablation/experiment run comparing schema versions on the SAME dataset (e.g. v9 vs
+    ml-feature-v-ict): without an override here, every caller silently gets the production schema
+    regardless of what was requested, since nothing else in this function reads a schema from
+    ``request``.
     """
 
     _validate_request(request)
@@ -964,7 +973,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if candle.future_close_time > request.data_window_end:
             raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
 
-        schema_version = schema_version_for(request.timeframe)
+        resolved_schema_version = schema_version if schema_version is not None else schema_version_for(request.timeframe)
         examples.append(
             LabeledExample(
                 candle_id=candle.candle_id,
@@ -981,7 +990,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
                     median_volume=median_volume,
                     prior_high=prior_high,
                     prior_low=prior_low,
-                    schema_version=schema_version,
+                    schema_version=resolved_schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,
                     price_action_algorithm_version=request.price_action_algorithm_version,

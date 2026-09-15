@@ -531,6 +531,19 @@ class FeatureConstructionTests(unittest.TestCase):
         schema_v9 = feature_schema(FEATURE_SCHEMA_VERSION_V9)
         self.assertEqual(schema_v9, FEATURE_SCHEMA_V9)
 
+    def test_build_labeled_examples_defaults_to_the_production_schema(self) -> None:
+        """Without an override, the schema is `schema_version_for(request.timeframe)`, unchanged."""
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT
+
+        source = evidence(future_close=103.0)
+        examples = build_labeled_examples([source], request())
+        self.assertEqual(len(examples), 1)
+        self.assertNotIn("ict.htf_bias_bullish", examples[0].features)
+
+        # An explicit override changes which columns get built, on the identical candle.
+        overridden = build_labeled_examples([source], request(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        self.assertIn("ict.htf_bias_bullish", overridden[0].features)
+
     def test_v_ict_schema_is_v9_plus_eleven_ict_columns(self) -> None:
         from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V9, FEATURE_SCHEMA_VERSION_V_ICT
         from ai_quant_lab_ml.features import FEATURE_SCHEMA_V9, FEATURE_SCHEMA_V_ICT
