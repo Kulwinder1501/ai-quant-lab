@@ -128,6 +128,20 @@ FEATURE_SCHEMA_VERSION_V_ICT = "ml-feature-v-ict"
 #: was found NOT to be.
 FEATURE_SCHEMA_VERSION_V_ICT_REFINED = "ml-feature-v-ict-refined"
 
+#: v-ict-refined plus "Optimal Trade Entry" (see `ote.ts` and `_ICT_OTE_COLUMNS` in features.py) --
+#: the 62-79% Fibonacci retracement band of the current dealing range, lecture 10's "OTE". Reuses
+#: `bias.ts`'s `DealingRange` as the doctrine's swing leg rather than a new abstraction; already
+#: exists as a strategy-layer FILTER (`ict-structure-strategy.ts`'s `requireOte`) but never as a
+#: covariate before this version.
+FEATURE_SCHEMA_VERSION_V_ICT_OTE = "ml-feature-v-ict-ote"
+
+#: v-ict-ote plus the ITH/ITL/STH/STL "swing hierarchy" (see `swing-hierarchy.ts` and
+#: `_ICT_SWING_HIERARCHY_COLUMNS` in features.py) -- lecture 8's nested "swing of swings"
+#: classification over the same confirmed pivots `structure` is derived from, plus the doctrine's
+#: directional "which side is protected" rule, checked directly against the source transcript and
+#: previously the largest documented gap after the fractal cascade itself.
+FEATURE_SCHEMA_VERSION_V_ICT_SWING = "ml-feature-v-ict-swing"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -142,6 +156,8 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     FEATURE_SCHEMA_VERSION_V_ICT,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
@@ -466,6 +482,28 @@ class IctEvidence:
     htf_order_block_distance: float | None = None
     refined_order_block_distance: float | None = None
     stop_compression_ratio: float | None = None
+    # "Optimal Trade Entry" (see ote.ts): the 62-79% retracement band of the current dealing range.
+    # None when no dealing range has formed yet or the trend is NEUTRAL -- the band only exists for
+    # a side, the same "missing, not a zero" convention as every other field above. The band's own
+    # edges (`oteBandLow`/`oteBandHigh` in the TS feature) are deliberately NOT carried here: like
+    # every other field on this dataclass they would be absolute price levels, which this module's
+    # own leakage rule (see features.py's docstring) bans as an ML input -- only the distance is.
+    ote_side: str | None = None  # "BULLISH" | "BEARISH" | None
+    ote_is_within: bool | None = None
+    ote_distance_to_band: float | None = None
+    # ITH/ITL/STH/STL "swing hierarchy" (see swing-hierarchy.ts): a nested "swing of swings"
+    # classification over the same confirmed pivots `structure` already derives from, plus the
+    # doctrine's directional "which side is protected" rule. Distances are None whenever the relevant
+    # Intermediate/Short Term point has not been confirmed yet on this bar -- missing evidence, not a
+    # zero, the same convention as every other distance field above. `swing_protected_side` is None
+    # when the trend was NEUTRAL or the relevant Intermediate Term point had not formed -- there is
+    # nothing for the doctrine to call protected in that case, not "no polarity".
+    swing_distance_to_ith: float | None = None
+    swing_distance_to_itl: float | None = None
+    swing_distance_to_sth: float | None = None
+    swing_distance_to_stl: float | None = None
+    swing_protected_side: str | None = None  # "INTERMEDIATE_TERM_HIGH" | "INTERMEDIATE_TERM_LOW" | None
+    swing_protected_breached: bool | None = None
 
 
 @dataclass(frozen=True)

@@ -53,6 +53,14 @@ describe("IctCompositeEngine", () => {
     expect(snap.coverage.zones).toBe("COMPLETE");
     expect(snap.coverage.sessionLevels).toBe("COMPLETE");
     expect(snap.coverage.bias).toBe("COMPLETE");
+    // Present on every snapshot, even before any Intermediate/Short Term point has been confirmed --
+    // an empty swing hierarchy is a real (if uninformative) reading, not a missing pillar.
+    expect(snap.swingHierarchy).toEqual({
+      nearestIntermediateTermHigh: null,
+      nearestIntermediateTermLow: null,
+      nearestShortTermHigh: null,
+      nearestShortTermLow: null,
+    });
   });
 
   it("reports UNKNOWN (not NEUTRAL) coverage before there is sufficient evidence", () => {

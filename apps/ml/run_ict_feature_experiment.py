@@ -7,16 +7,23 @@ variables a directional model never sees. `ml-feature-v-ict` (v9 + 11 ICT column
 built to test that, following the same "extract the behavior, register a new schema, run the
 existing leakage audit" pattern as `ml-feature-v7-nopattern`.
 
-A three-way comparison, not two: `ml-feature-v-ict`'s order-block distance is the NAIVE,
+A five-way comparison, not two: `ml-feature-v-ict`'s order-block distance is the NAIVE,
 same-timeframe construction, checked against the source transcripts and found not to be what the
 doctrine actually describes (lecture 4's "Refined Order Block", lecture 3's structure-mapping
 section -- both read top-down, anchored to a higher timeframe, never independently per timeframe).
-`ml-feature-v-ict-refined` adds the doctrine-faithful cross-timeframe construction on top. Comparing
-all three on identical data answers two separate questions at once: does ICT help at all, and if the
-naive version doesn't, does building the real thing change that.
+`ml-feature-v-ict-refined` adds the doctrine-faithful cross-timeframe construction on top.
+`ml-feature-v-ict-ote` adds "Optimal Trade Entry" -- the 62-79% Fibonacci retracement band of the
+current dealing range (see `ote.ts`) -- on top of that, the same-timeframe covariate counterpart to
+the OTE band that already exists as a strategy-layer FILTER (`ict-structure-strategy.ts`'s
+`requireOte`) but had never been measured as a feature before. `ml-feature-v-ict-swing` adds the
+ITH/ITL/STH/STL "swing hierarchy" (see `swing-hierarchy.ts`) on top of that -- lecture 8's nested
+"swing of swings" classification, previously the largest documented gap after the fractal cascade
+itself. Comparing all five on identical data answers four questions in one pass: does ICT help at
+all, does the doctrine-faithful cross-timeframe construction change that, does adding OTE change it
+again, and does adding the swing hierarchy change it a third time.
 
 This runs `run_leakage_audit` -- the same base/shuffle/lag/era harness used for every other
-directional feature measured in this project -- under all three schemas, on both NIFTY50 and
+directional feature measured in this project -- under all five schemas, on both NIFTY50 and
 BANKNIFTY 15m, because a result that does not replicate across both indices has closed every prior
 ICT candidate here. The comparison is on the *same* horizon/threshold/window/split throughout, not
 an attempt to reproduce any other script's exact historical number.
@@ -34,13 +41,17 @@ import psycopg
 from ai_quant_lab_ml.contracts import (
     FEATURE_SCHEMA_VERSION_V9,
     FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING,
     DatasetRequest,
 )
 from ai_quant_lab_ml.features import (
     FEATURE_SCHEMA_V9,
     FEATURE_SCHEMA_V_ICT,
+    FEATURE_SCHEMA_V_ICT_OTE,
     FEATURE_SCHEMA_V_ICT_REFINED,
+    FEATURE_SCHEMA_V_ICT_SWING,
     build_labeled_examples,
 )
 from ai_quant_lab_ml.leakage import LeakageAuditError, run_leakage_audit
@@ -114,6 +125,8 @@ def main() -> None:
                 (FEATURE_SCHEMA_VERSION_V9, FEATURE_SCHEMA_V9),
                 (FEATURE_SCHEMA_VERSION_V_ICT, FEATURE_SCHEMA_V_ICT),
                 (FEATURE_SCHEMA_VERSION_V_ICT_REFINED, FEATURE_SCHEMA_V_ICT_REFINED),
+                (FEATURE_SCHEMA_VERSION_V_ICT_OTE, FEATURE_SCHEMA_V_ICT_OTE),
+                (FEATURE_SCHEMA_VERSION_V_ICT_SWING, FEATURE_SCHEMA_V_ICT_SWING),
             ):
                 print(f"--- {symbol} {timeframe} {schema_version} ---", file=sys.stderr)
                 result = run_one(connection, symbol, timeframe, schema_version, schema)

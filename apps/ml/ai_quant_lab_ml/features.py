@@ -36,7 +36,9 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
     FEATURE_SCHEMA_VERSION_V9,
     FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -438,6 +440,54 @@ assert len(FEATURE_SCHEMA_V_ICT_REFINED) == 92, (
     f"FEATURE_SCHEMA_V_ICT_REFINED must have exactly 92 features, got {len(FEATURE_SCHEMA_V_ICT_REFINED)}"
 )
 
+# "Optimal Trade Entry" (see `ote.ts`): the 62-79% Fibonacci retracement band of the current dealing
+# range. Unlike the refined order block, this is same-timeframe -- no HTF pairing needed -- and is
+# present on every bar that has a dealing range and a non-NEUTRAL trend (both already required for
+# `ict.premium_discount_is_premium`/`is_discount` above to be meaningful, so coverage should track
+# closely with those two columns rather than with the sparser refined-order-block pair).
+#
+# Band edges themselves are NOT columns -- this module's own docstring bans absolute price levels
+# (era leakage), so only the ATR-normalised distance to the band is carried, following the same
+# convention as every other level-distance column here.
+_ICT_OTE_COLUMNS: tuple[str, ...] = (
+    "ict.ote_side_is_bullish",
+    "ict.ote_side_is_bearish",
+    "ict.ote_is_within",
+    "ict.ote_distance_to_band_atr",
+)
+
+# v-ict-refined plus the 4 OTE columns above -- extends the same nested ablation chain:
+# v9 subset-of v-ict subset-of v-ict-refined subset-of v-ict-ote.
+FEATURE_SCHEMA_V_ICT_OTE: tuple[str, ...] = FEATURE_SCHEMA_V_ICT_REFINED + _ICT_OTE_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_OTE) == 96, (
+    f"FEATURE_SCHEMA_V_ICT_OTE must have exactly 96 features, got {len(FEATURE_SCHEMA_V_ICT_OTE)}"
+)
+
+# ITH/ITL/STH/STL "swing hierarchy" (see `swing-hierarchy.ts`): a nested "swing of swings"
+# classification over the same confirmed pivots `structure`'s own HH/HL/LL/LH columns are derived
+# from, plus the doctrine's directional "which side is protected" rule. Present whenever the trend is
+# non-NEUTRAL and at least one Intermediate/Short Term point has been confirmed -- independent of
+# whether a dealing range has formed, so coverage need not track `ict.premium_discount_is_premium`.
+#
+# Band/level edges are NOT columns, same leakage rule as everywhere else here -- only the
+# ATR-normalised distances and the protected-side/breach flags are.
+_ICT_SWING_HIERARCHY_COLUMNS: tuple[str, ...] = (
+    "ict.swing_protected_side_is_ith",
+    "ict.swing_protected_side_is_itl",
+    "ict.swing_protected_breached",
+    "ict.distance_to_ith_atr",
+    "ict.distance_to_itl_atr",
+    "ict.distance_to_sth_atr",
+    "ict.distance_to_stl_atr",
+)
+
+# v-ict-ote plus the 7 swing-hierarchy columns above -- extends the same nested ablation chain:
+# v9 subset-of v-ict subset-of v-ict-refined subset-of v-ict-ote subset-of v-ict-swing.
+FEATURE_SCHEMA_V_ICT_SWING: tuple[str, ...] = FEATURE_SCHEMA_V_ICT_OTE + _ICT_SWING_HIERARCHY_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_SWING) == 103, (
+    f"FEATURE_SCHEMA_V_ICT_SWING must have exactly 103 features, got {len(FEATURE_SCHEMA_V_ICT_SWING)}"
+)
+
 # Multi-hot binary pattern flags for all known patterns
 _PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
     f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
@@ -478,6 +528,8 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
     FEATURE_SCHEMA_VERSION_V_ICT: FEATURE_SCHEMA_V_ICT,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED: FEATURE_SCHEMA_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE: FEATURE_SCHEMA_V_ICT_OTE,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING: FEATURE_SCHEMA_V_ICT_SWING,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
@@ -792,6 +844,43 @@ def build_feature_vector(
     )
     values["ict.stop_compression_ratio"] = (
         ict.stop_compression_ratio if (ict and ict.stop_compression_ratio is not None) else _nan()
+    )
+
+    # "Optimal Trade Entry" (v-ict-ote schema only). Same-timeframe -- present whenever a dealing
+    # range has formed and the trend is non-NEUTRAL (see ote.ts / contracts.py's IctEvidence
+    # docstring), so coverage should track `ict.premium_discount_is_premium`/`is_discount` above
+    # rather than the sparser refined-order-block pair.
+    values["ict.ote_side_is_bullish"] = 1.0 if (ict and ict.ote_side == "BULLISH") else 0.0
+    values["ict.ote_side_is_bearish"] = 1.0 if (ict and ict.ote_side == "BEARISH") else 0.0
+    values["ict.ote_is_within"] = 1.0 if (ict and ict.ote_is_within) else 0.0
+    values["ict.ote_distance_to_band_atr"] = (
+        ict.ote_distance_to_band / atr_val
+        if (ict and ict.ote_distance_to_band is not None and has_atr)
+        else _nan()
+    )
+
+    # ITH/ITL/STH/STL "swing hierarchy" (v-ict-swing schema only). `swing_protected_*` is None
+    # whenever the trend was NEUTRAL or the relevant Intermediate Term point had not formed --
+    # defaults to both one-hots 0.0 and breach 0.0, the same "absence, not a learned zero" posture
+    # every other flag here already takes.
+    values["ict.swing_protected_side_is_ith"] = (
+        1.0 if (ict and ict.swing_protected_side == "INTERMEDIATE_TERM_HIGH") else 0.0
+    )
+    values["ict.swing_protected_side_is_itl"] = (
+        1.0 if (ict and ict.swing_protected_side == "INTERMEDIATE_TERM_LOW") else 0.0
+    )
+    values["ict.swing_protected_breached"] = 1.0 if (ict and ict.swing_protected_breached) else 0.0
+    values["ict.distance_to_ith_atr"] = (
+        ict.swing_distance_to_ith / atr_val if (ict and ict.swing_distance_to_ith is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_itl_atr"] = (
+        ict.swing_distance_to_itl / atr_val if (ict and ict.swing_distance_to_itl is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_sth_atr"] = (
+        ict.swing_distance_to_sth / atr_val if (ict and ict.swing_distance_to_sth is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_stl_atr"] = (
+        ict.swing_distance_to_stl / atr_val if (ict and ict.swing_distance_to_stl is not None and has_atr) else _nan()
     )
 
     for pattern_code in _PATTERN_CODES:

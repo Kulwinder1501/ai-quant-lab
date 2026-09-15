@@ -31,6 +31,8 @@ function makeSnapshot(overrides: {
   readonly activeObs?: readonly OrderBlock[];
   readonly bosLevel?: number | null;
   readonly chochLevel?: number | null;
+  readonly trend?: IctStateCompositeSnapshot["structure"]["trend"];
+  readonly swingHierarchy?: IctStateCompositeSnapshot["swingHierarchy"];
 }): IctStateCompositeSnapshot {
   return {
     engineVersion: "ict-state-v2",
@@ -38,7 +40,7 @@ function makeSnapshot(overrides: {
     barIndex: 0,
     barTime: new Date(),
     structure: {
-      trend: "NEUTRAL",
+      trend: overrides.trend ?? "NEUTRAL",
       lastHH: null,
       lastHL: null,
       lastLL: null,
@@ -49,6 +51,12 @@ function makeSnapshot(overrides: {
       internalVsExternal: "EXTERNAL",
       lastEvent: null,
       confirmedPivotCount: 0,
+    },
+    swingHierarchy: overrides.swingHierarchy ?? {
+      nearestIntermediateTermHigh: null,
+      nearestIntermediateTermLow: null,
+      nearestShortTermHigh: null,
+      nearestShortTermLow: null,
     },
     zones: {
       activeFvgs: [],
@@ -166,6 +174,52 @@ describe("extractIctStructuralFeatures", () => {
     expect(features.refinedOrderBlock!.htfOrderBlockSide).toBe("BULLISH");
     expect(features.refinedOrderBlock!.refinedOrderBlockDistance).toBe(1); // |100 - 99|
     expect(features.refinedOrderBlock!.stopCompressionRatio).toBeCloseTo(4 / 10, 10);
+  });
+
+  it("computes the OTE feature from the dealing range and trend, null when either is missing", () => {
+    const dealingRange = {
+      rangeHigh: 200,
+      rangeLow: 100,
+      equilibrium: 150,
+      isPremium: (p: number) => p >= 150,
+      isDiscount: (p: number) => p < 150,
+    };
+    const withRangeAndTrend = extractIctStructuralFeatures(
+      makeSnapshot({ dealingRange, trend: "BULLISH" }),
+      130
+    );
+    expect(withRangeAndTrend.ote).not.toBeNull();
+    expect(withRangeAndTrend.ote!.side).toBe("BULLISH");
+    expect(withRangeAndTrend.ote!.isWithinOte).toBe(true);
+
+    expect(extractIctStructuralFeatures(makeSnapshot({ dealingRange: null, trend: "BULLISH" }), 130).ote).toBeNull();
+    expect(extractIctStructuralFeatures(makeSnapshot({ dealingRange, trend: "NEUTRAL" }), 130).ote).toBeNull();
+  });
+
+  it("computes the swing-hierarchy feature from the snapshot's swing hierarchy and trend", () => {
+    const nearestIntermediateTermLow = {
+      index: 0,
+      time: new Date(),
+      price: 100,
+      type: "LOW" as const,
+      confirmedAtIndex: 3,
+      confirmedAtTime: new Date(),
+    };
+    const features = extractIctStructuralFeatures(
+      makeSnapshot({
+        trend: "BULLISH",
+        swingHierarchy: {
+          nearestIntermediateTermHigh: null,
+          nearestIntermediateTermLow,
+          nearestShortTermHigh: null,
+          nearestShortTermLow: null,
+        },
+      }),
+      110
+    );
+    expect(features.swingHierarchy.protectedSide).toBe("INTERMEDIATE_TERM_LOW");
+    expect(features.swingHierarchy.protectedLevelBreached).toBe(false);
+    expect(features.swingHierarchy.distanceToIntermediateTermLow).toBe(10);
   });
 
   it("is a pure function of one snapshot: identical input twice gives identical output", () => {

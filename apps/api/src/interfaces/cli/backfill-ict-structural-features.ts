@@ -108,6 +108,8 @@ async function main(): Promise<void> {
         const snapshot = snapshots[i];
         const features = extractIctStructuralFeatures(snapshot, context.candle.close, alignedHtfSnapshots[i]);
         const refined = features.refinedOrderBlock;
+        const ote = features.ote;
+        const swing = features.swingHierarchy;
         const base = values.length;
         values.push(
           context.candle.id,
@@ -128,10 +130,21 @@ async function main(): Promise<void> {
           refined?.htfOrderBlockSide ?? null,
           refined?.htfOrderBlockDistance ?? null,
           refined?.refinedOrderBlockDistance ?? null,
-          refined?.stopCompressionRatio ?? null
+          refined?.stopCompressionRatio ?? null,
+          ote?.side ?? null,
+          ote?.isWithinOte ?? null,
+          ote?.oteBandLow ?? null,
+          ote?.oteBandHigh ?? null,
+          ote?.distanceToOteBand ?? null,
+          swing.distanceToIntermediateTermHigh,
+          swing.distanceToIntermediateTermLow,
+          swing.distanceToShortTermHigh,
+          swing.distanceToShortTermLow,
+          swing.protectedSide,
+          swing.protectedLevelBreached
         );
         rowPlaceholders.push(
-          `(${Array.from({ length: 19 }, (_, j) => `$${base + j + 1}`).join(", ")})`
+          `(${Array.from({ length: 30 }, (_, j) => `$${base + j + 1}`).join(", ")})`
         );
       }
 
@@ -142,7 +155,10 @@ async function main(): Promise<void> {
             htf_bias, premium_discount_zone, distance_to_nearest_order_block, nearest_order_block_side,
             has_bos_level, has_choch_level, distance_to_bos_level, distance_to_choch_level,
             htf_timeframe, htf_order_block_side, htf_order_block_distance,
-            refined_order_block_distance, stop_compression_ratio
+            refined_order_block_distance, stop_compression_ratio,
+            ote_side, ote_is_within, ote_band_low, ote_band_high, ote_distance_to_band,
+            swing_distance_to_ith, swing_distance_to_itl, swing_distance_to_sth, swing_distance_to_stl,
+            swing_protected_side, swing_protected_breached
           ) VALUES ${rowPlaceholders.join(", ")}
           ON CONFLICT (candle_id) DO UPDATE SET
             instrument_id = EXCLUDED.instrument_id,
@@ -162,7 +178,18 @@ async function main(): Promise<void> {
             htf_order_block_side = EXCLUDED.htf_order_block_side,
             htf_order_block_distance = EXCLUDED.htf_order_block_distance,
             refined_order_block_distance = EXCLUDED.refined_order_block_distance,
-            stop_compression_ratio = EXCLUDED.stop_compression_ratio
+            stop_compression_ratio = EXCLUDED.stop_compression_ratio,
+            ote_side = EXCLUDED.ote_side,
+            ote_is_within = EXCLUDED.ote_is_within,
+            ote_band_low = EXCLUDED.ote_band_low,
+            ote_band_high = EXCLUDED.ote_band_high,
+            ote_distance_to_band = EXCLUDED.ote_distance_to_band,
+            swing_distance_to_ith = EXCLUDED.swing_distance_to_ith,
+            swing_distance_to_itl = EXCLUDED.swing_distance_to_itl,
+            swing_distance_to_sth = EXCLUDED.swing_distance_to_sth,
+            swing_distance_to_stl = EXCLUDED.swing_distance_to_stl,
+            swing_protected_side = EXCLUDED.swing_protected_side,
+            swing_protected_breached = EXCLUDED.swing_protected_breached
         `,
         values
       );

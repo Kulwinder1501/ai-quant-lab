@@ -94,6 +94,13 @@ export interface IctStateCompositeSnapshot {
   readonly bias: import("./bias.js").IctBiasSnapshot;
   readonly liquidity: import("./liquidity.js").IctLiquiditySnapshot;
   /**
+   * The ITH/ITL/STH/STL swing hierarchy (see `swing-hierarchy.ts`), derived from the same confirmed
+   * pivots `structure` is derived from. A separate field rather than folded into `structure` because
+   * it is a genuinely different classification (a nested "swing of swings" over the raw pivot
+   * stream) from `structure`'s single most-recent HH/HL/LL/LH per role.
+   */
+  readonly swingHierarchy: import("./swing-hierarchy.js").SwingHierarchySnapshot;
+  /**
    * Direction of the higher-timeframe (fractal) bias supplied to the engine, or
    * null when no HTF projection was available. Carried separately from the local
    * bias so the strategy can require fractal alignment without the HTF value

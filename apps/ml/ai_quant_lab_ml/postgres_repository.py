@@ -467,7 +467,16 @@ _ICT_STRUCTURAL_FEATURES_SQL = """
       htf_order_block_side,
       htf_order_block_distance,
       refined_order_block_distance,
-      stop_compression_ratio
+      stop_compression_ratio,
+      ote_side,
+      ote_is_within,
+      ote_distance_to_band,
+      swing_distance_to_ith,
+      swing_distance_to_itl,
+      swing_distance_to_sth,
+      swing_distance_to_stl,
+      swing_protected_side,
+      swing_protected_breached
     FROM ict_structural_features
     WHERE candle_id = ANY(%s::uuid[])
 """
@@ -1096,6 +1105,17 @@ class PostgresMlRepository:
                     row["refined_order_block_distance"], "ICT refined order block distance"
                 ),
                 stop_compression_ratio=optional_float(row["stop_compression_ratio"], "ICT stop compression ratio"),
+                ote_side=row["ote_side"],
+                ote_is_within=(None if row["ote_is_within"] is None else bool(row["ote_is_within"])),
+                ote_distance_to_band=optional_float(row["ote_distance_to_band"], "ICT OTE distance to band"),
+                swing_distance_to_ith=optional_float(row["swing_distance_to_ith"], "ICT swing distance to ITH"),
+                swing_distance_to_itl=optional_float(row["swing_distance_to_itl"], "ICT swing distance to ITL"),
+                swing_distance_to_sth=optional_float(row["swing_distance_to_sth"], "ICT swing distance to STH"),
+                swing_distance_to_stl=optional_float(row["swing_distance_to_stl"], "ICT swing distance to STL"),
+                swing_protected_side=row["swing_protected_side"],
+                swing_protected_breached=(
+                    None if row["swing_protected_breached"] is None else bool(row["swing_protected_breached"])
+                ),
             )
         return ict_by_candle
 

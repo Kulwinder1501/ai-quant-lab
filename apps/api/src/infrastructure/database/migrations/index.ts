@@ -107,6 +107,8 @@ import { paperTradeInitialStopLossMigration } from "./106-paper-trade-initial-st
 import { candidateDatasetMigration } from "./107-candidate-dataset.js";
 import { ictStructuralFeaturesMigration } from "./108-ict-structural-features.js";
 import { ictRefinedOrderBlockMigration } from "./109-ict-refined-order-block.js";
+import { ictOteMigration } from "./110-ict-ote.js";
+import { ictSwingHierarchyMigration } from "./111-ict-swing-hierarchy.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -218,4 +220,6 @@ export const migrations = [
   candidateDatasetMigration,
   ictStructuralFeaturesMigration,
   ictRefinedOrderBlockMigration,
+  ictOteMigration,
+  ictSwingHierarchyMigration,
 ];

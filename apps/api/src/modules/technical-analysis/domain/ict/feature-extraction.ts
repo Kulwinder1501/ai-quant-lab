@@ -2,6 +2,8 @@ import type { IctStateCompositeSnapshot } from "./config.js";
 import type { IctBiasDirection } from "./bias.js";
 import { isDoctrinallyValidOrderBlockCandidate, type OrderBlock } from "./zones.js";
 import { computeRefinedOrderBlock, type RefinedOrderBlockFeature } from "./refined-order-block.js";
+import { computeOte, type OteFeature } from "./ote.js";
+import { computeSwingHierarchyFeature, type SwingHierarchyFeature } from "./swing-hierarchy.js";
 
 /**
  * Structural feature extraction for ML consumption -- NOT a trading decision.
@@ -85,6 +87,19 @@ export interface IctStructuralFeatures {
    * to on this bar either way.
    */
   readonly refinedOrderBlock: RefinedOrderBlockFeature | null;
+  /**
+   * The doctrine-faithful "Optimal Trade Entry" -- the 62-79% retracement band of the current
+   * dealing range (see `ote.ts`). Null under the same "genuinely absent, not a zero" convention as
+   * every other optional field here: no dealing range has formed yet, or the trend is `NEUTRAL` (the
+   * band only exists for a side).
+   */
+  readonly ote: OteFeature | null;
+  /**
+   * The ITH/ITL/STH/STL swing hierarchy (see `swing-hierarchy.ts`) -- always present as a record,
+   * unlike `ote`/`refinedOrderBlock`, because its own fields (not this wrapper) carry the "genuinely
+   * absent" nulls for whichever Intermediate/Short Term point has not formed yet.
+   */
+  readonly swingHierarchy: SwingHierarchyFeature;
 }
 
 function nearestOrderBlock(
@@ -136,5 +151,7 @@ export function extractIctStructuralFeatures(
       htfSnapshot == null
         ? null
         : computeRefinedOrderBlock(htfSnapshot.zones.activeObs, snapshot.zones.activeObs, currentPrice),
+    ote: computeOte(dealingRange, snapshot.structure.trend, currentPrice),
+    swingHierarchy: computeSwingHierarchyFeature(snapshot.swingHierarchy, snapshot.structure.trend, currentPrice),
   };
 }

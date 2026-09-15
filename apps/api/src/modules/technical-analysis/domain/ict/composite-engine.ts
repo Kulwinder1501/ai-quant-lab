@@ -12,6 +12,7 @@ import { IctZoneLedger } from "./zones.js";
 import { IctSessionLevelTracker } from "./session-levels.js";
 import { IctBiasTracker, type IctBiasDirection } from "./bias.js";
 import { IctLiquidityResolver } from "./liquidity.js";
+import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
 
 export class IctCompositeEngine {
   private readonly structTracker: IctStructureTracker;
@@ -54,6 +55,10 @@ export class IctCompositeEngine {
       ? sweep.levelType
       : undefined;
     const struct = this.structTracker.processCandle(candles, currentIndex, sweptPriorDayLevel);
+    // Reads the same confirmed-pivot stream `struct` was just derived from, transiently -- see
+    // `confirmedPivotsView()`'s own "use it and drop it" rule, followed here exactly as the
+    // liquidity resolver below already does with the same accessor.
+    const swingHierarchy = computeSwingHierarchySnapshot(this.structTracker.confirmedPivotsView());
     const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
     // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
     const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias);
@@ -96,6 +101,7 @@ export class IctCompositeEngine {
       barIndex: currentIndex,
       barTime: current.openTime,
       structure: struct,
+      swingHierarchy,
       zones,
       sessionLevels,
       bias,
