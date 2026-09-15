@@ -122,6 +122,12 @@ FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
 #: production v9 artifact.
 FEATURE_SCHEMA_VERSION_V_ICT = "ml-feature-v-ict"
 
+#: v-ict plus the cross-timeframe "Refined Order Block" columns (see `refined-order-block.ts` and
+#: `_ICT_REFINED_ORDER_BLOCK_COLUMNS` in features.py) -- the doctrine-faithful construction, checked
+#: directly against the source transcripts, that v-ict's naive same-timeframe order-block distance
+#: was found NOT to be.
+FEATURE_SCHEMA_VERSION_V_ICT_REFINED = "ml-feature-v-ict-refined"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -135,6 +141,7 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
@@ -449,6 +456,16 @@ class IctEvidence:
     has_choch_level: bool
     distance_to_bos_level: float | None
     distance_to_choch_level: float | None
+    # Cross-timeframe "Refined Order Block" (see refined-order-block.ts): distance_to_nearest_order_block
+    # above is the naive, same-timeframe approximation checked against source doctrine and found
+    # incomplete -- lecture 4/lecture 3 both describe order blocks and structure as read top-down,
+    # anchored to a higher-timeframe zone, not detected independently per timeframe. These four fields
+    # are that construction. None when no HTF pairing was backfilled for this row, or (for the refined
+    # pair specifically) when an HTF order block is active but no LTF order block nests inside it.
+    htf_order_block_side: str | None = None
+    htf_order_block_distance: float | None = None
+    refined_order_block_distance: float | None = None
+    stop_compression_ratio: float | None = None
 
 
 @dataclass(frozen=True)

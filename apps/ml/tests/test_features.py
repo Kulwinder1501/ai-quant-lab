@@ -633,6 +633,71 @@ class FeatureConstructionTests(unittest.TestCase):
         observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V9)
         self.assertFalse(any(key.startswith("ict.") for key in observed))
 
+    def test_v_ict_refined_schema_is_v_ict_plus_six_refined_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V_ICT, FEATURE_SCHEMA_V_ICT_REFINED
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT_REFINED), len(FEATURE_SCHEMA_V_ICT) + 6)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT_REFINED[: len(FEATURE_SCHEMA_V_ICT)], FEATURE_SCHEMA_V_ICT)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT_REFINED), FEATURE_SCHEMA_V_ICT_REFINED)
+        self.assertNotIn("ict.stop_compression_ratio", FEATURE_SCHEMA_V_ICT)
+
+    def test_v_ict_refined_defaults_to_absence_without_a_refinement(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED, IctEvidence
+
+        # HTF order block present, but no nested refinement found on this bar.
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+                htf_order_block_side="BULLISH",
+                htf_order_block_distance=40.0,
+                refined_order_block_distance=None,
+                stop_compression_ratio=None,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_REFINED)
+        self.assertEqual(observed["ict.htf_order_block_is_bullish"], 1.0)
+        self.assertEqual(observed["ict.htf_order_block_is_bearish"], 0.0)
+        self.assertEqual(observed["ict.has_refined_order_block"], 0.0)
+        self.assertTrue(math.isnan(observed["ict.refined_order_block_distance_atr"]))
+        self.assertTrue(math.isnan(observed["ict.stop_compression_ratio"]))
+
+    def test_v_ict_refined_populates_from_a_real_refinement(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+                htf_order_block_side="BEARISH",
+                htf_order_block_distance=40.0,
+                refined_order_block_distance=8.0,
+                stop_compression_ratio=0.375,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_REFINED)
+        self.assertEqual(observed["ict.htf_order_block_is_bearish"], 1.0)
+        self.assertAlmostEqual(observed["ict.htf_order_block_distance_atr"], 10.0, places=10)  # 40.0 / 4.0
+        self.assertEqual(observed["ict.has_refined_order_block"], 1.0)
+        self.assertAlmostEqual(observed["ict.refined_order_block_distance_atr"], 2.0, places=10)  # 8.0 / 4.0
+        self.assertAlmostEqual(observed["ict.stop_compression_ratio"], 0.375, places=10)
+
     def test_candlestick_geometry_scale_free_and_zero_division_protection(self) -> None:
         from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8_GEOMETRY
 

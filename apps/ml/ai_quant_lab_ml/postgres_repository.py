@@ -463,7 +463,11 @@ _ICT_STRUCTURAL_FEATURES_SQL = """
       has_bos_level,
       has_choch_level,
       distance_to_bos_level,
-      distance_to_choch_level
+      distance_to_choch_level,
+      htf_order_block_side,
+      htf_order_block_distance,
+      refined_order_block_distance,
+      stop_compression_ratio
     FROM ict_structural_features
     WHERE candle_id = ANY(%s::uuid[])
 """
@@ -1060,6 +1064,9 @@ class PostgresMlRepository:
             cursor.execute(_ICT_STRUCTURAL_FEATURES_SQL, (list(candle_ids),))
             rows = list(cursor.fetchall())
 
+        def optional_float(value: Any, field: str) -> float | None:
+            return None if value is None else _to_float(value, field)
+
         ict_by_candle: dict[str, IctEvidence] = {}
         for row in rows:
             distance_to_nearest_order_block = row["distance_to_nearest_order_block"]
@@ -1083,6 +1090,12 @@ class PostgresMlRepository:
                     None if distance_to_choch_level is None
                     else _to_float(distance_to_choch_level, "ICT distance to CHoCH level")
                 ),
+                htf_order_block_side=row["htf_order_block_side"],
+                htf_order_block_distance=optional_float(row["htf_order_block_distance"], "ICT HTF order block distance"),
+                refined_order_block_distance=optional_float(
+                    row["refined_order_block_distance"], "ICT refined order block distance"
+                ),
+                stop_compression_ratio=optional_float(row["stop_compression_ratio"], "ICT stop compression ratio"),
             )
         return ict_by_candle
 

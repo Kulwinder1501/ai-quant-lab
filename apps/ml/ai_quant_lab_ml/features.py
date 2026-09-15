@@ -36,6 +36,7 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
     FEATURE_SCHEMA_VERSION_V9,
     FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -410,6 +411,33 @@ _ICT_FEATURE_COLUMNS: tuple[str, ...] = (
 FEATURE_SCHEMA_V_ICT: tuple[str, ...] = FEATURE_SCHEMA_V9 + _ICT_FEATURE_COLUMNS
 assert len(FEATURE_SCHEMA_V_ICT) == 86, f"FEATURE_SCHEMA_V_ICT must have exactly 86 features, got {len(FEATURE_SCHEMA_V_ICT)}"
 
+# The cross-timeframe "Refined Order Block" columns -- checked directly against the source
+# transcripts (lecture 4's "Refined Order Block" section, lecture 3's structure-mapping section):
+# order blocks and structure are read top-down, anchored to a higher-timeframe zone, never detected
+# independently per timeframe. `ict.distance_to_nearest_order_block_atr` above is exactly that
+# rejected, naive construction, kept only as the baseline these four columns are compared against.
+#
+# `htf_order_block_distance_atr` is present whenever an HTF pairing was backfilled for the row (an
+# HTF order block is active on almost every bar -- measured 99.99%+ coverage on NIFTY50/BANKNIFTY
+# 15m/60m). `refined_order_block_distance_atr` and `stop_compression_ratio` are only present on the
+# ~16-18% of bars where an LTF order block actually nests inside the HTF one -- the doctrine's own
+# refinement is a genuinely occasional condition, not a re-derivation of the naive distance.
+_ICT_REFINED_ORDER_BLOCK_COLUMNS: tuple[str, ...] = (
+    "ict.htf_order_block_is_bullish",
+    "ict.htf_order_block_is_bearish",
+    "ict.htf_order_block_distance_atr",
+    "ict.has_refined_order_block",
+    "ict.refined_order_block_distance_atr",
+    "ict.stop_compression_ratio",
+)
+
+# v-ict (v9 + the naive same-timeframe OB/BOS/CHoCH read) plus the 6 refined columns above -- a
+# three-way nested ablation chain: v9 subset-of v-ict subset-of v-ict-refined.
+FEATURE_SCHEMA_V_ICT_REFINED: tuple[str, ...] = FEATURE_SCHEMA_V_ICT + _ICT_REFINED_ORDER_BLOCK_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_REFINED) == 92, (
+    f"FEATURE_SCHEMA_V_ICT_REFINED must have exactly 92 features, got {len(FEATURE_SCHEMA_V_ICT_REFINED)}"
+)
+
 # Multi-hot binary pattern flags for all known patterns
 _PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
     f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
@@ -449,6 +477,7 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
     FEATURE_SCHEMA_VERSION_V_ICT: FEATURE_SCHEMA_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED: FEATURE_SCHEMA_V_ICT_REFINED,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
@@ -744,6 +773,25 @@ def build_feature_vector(
     )
     values["ict.distance_to_choch_level_atr"] = (
         ict.distance_to_choch_level / atr_val if (ict and ict.distance_to_choch_level is not None and has_atr) else _nan()
+    )
+
+    # Cross-timeframe "Refined Order Block" (v-ict-refined schema only). `htf_order_block_*` is
+    # present whenever an HTF pairing was backfilled (an HTF order block is active almost every bar);
+    # `refined_order_block_distance_atr`/`stop_compression_ratio` are only present on the bars where a
+    # genuine nested refinement was found -- see contracts.py's IctEvidence docstring.
+    values["ict.htf_order_block_is_bullish"] = 1.0 if (ict and ict.htf_order_block_side == "BULLISH") else 0.0
+    values["ict.htf_order_block_is_bearish"] = 1.0 if (ict and ict.htf_order_block_side == "BEARISH") else 0.0
+    values["ict.htf_order_block_distance_atr"] = (
+        ict.htf_order_block_distance / atr_val if (ict and ict.htf_order_block_distance is not None and has_atr) else _nan()
+    )
+    values["ict.has_refined_order_block"] = 1.0 if (ict and ict.refined_order_block_distance is not None) else 0.0
+    values["ict.refined_order_block_distance_atr"] = (
+        ict.refined_order_block_distance / atr_val
+        if (ict and ict.refined_order_block_distance is not None and has_atr)
+        else _nan()
+    )
+    values["ict.stop_compression_ratio"] = (
+        ict.stop_compression_ratio if (ict and ict.stop_compression_ratio is not None) else _nan()
     )
 
     for pattern_code in _PATTERN_CODES:
