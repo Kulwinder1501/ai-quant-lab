@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { pathStudyCodeFiles, studyCodeVersion } from "./study-code-version.js";
+import { domainDirectory, pathStudyCodeFiles, studyCodeVersion } from "./study-code-version.js";
+
+/**
+ * Measured 2026-09-15 against the live production image: `run-path-study` had been throwing ENOENT
+ * on every container invocation since it was first deployed, because `studyCodeVersion` resolved its
+ * own directory to the compiled `dist/...` path and looked for `.ts` siblings there, which were never
+ * compiled into `dist` -- only `src` carries them. These tests pin the fix directly against realistic
+ * dist/src path pairs, since the existing tests above run this module via source (vitest/tsx) and
+ * would pass identically whether or not the fix existed.
+ */
+describe("domainDirectory: compiled-vs-source path correction", () => {
+  it("swaps a dist segment for src, on both POSIX and Windows separators", () => {
+    expect(domainDirectory("/app/apps/api/dist/modules/research/scalp-harness/domain"))
+      .toBe("/app/apps/api/src/modules/research/scalp-harness/domain");
+    expect(domainDirectory("C:\\app\\apps\\api\\dist\\modules\\research\\scalp-harness\\domain"))
+      .toBe("C:\\app\\apps\\api\\src\\modules\\research\\scalp-harness\\domain");
+  });
+
+  it("leaves a path with no dist segment unchanged, the dev/test case", () => {
+    const sourcePath = "/repo/apps/api/src/modules/research/scalp-harness/domain";
+    expect(domainDirectory(sourcePath)).toBe(sourcePath);
+  });
+
+  it("does not touch a directory or package merely named similarly to 'dist'", () => {
+    // "distribution" must not be mistaken for the "dist" outDir segment.
+    const path = "/app/apps/distribution/api/src/modules/research/scalp-harness/domain";
+    expect(domainDirectory(path)).toBe(path);
+  });
+});
 
 describe("study code version", () => {
   it("is stable across calls and order-independent in its file list", () => {
