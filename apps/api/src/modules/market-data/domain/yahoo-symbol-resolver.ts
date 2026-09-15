@@ -32,13 +32,25 @@ const indexSymbols: Record<string, string> = {
   FINNIFTY: "NIFTY_FIN_SERVICE.NS",
 };
 
+/**
+ * Lab-canonical symbols whose NSE/Yahoo trading ticker has since changed.
+ * Verified against Yahoo chart responses (not guessed): without these, history
+ * collection asks for the retired `.NS` name and gets "symbol may be delisted".
+ */
+const renamedEquityYahooTickers: Record<string, string> = {
+  // Tata Motors demerger / rename: historical series continues under TMPV on Yahoo.
+  TATAMOTORS: "TMPV.NS",
+  // LTIMindtree trading symbol LTIM → LTM (effective 2026-02-27); Yahoo follows LTM.NS.
+  LTIM: "LTM.NS",
+};
+
 export function resolveYahooSymbol(symbol: string): string {
   const trimmed = symbol.trim();
   if (!trimmed) {
     throw new Error("Cannot resolve an empty symbol to a Yahoo symbol.");
   }
   const upper = trimmed.toUpperCase();
-  const mapped = indexSymbols[upper];
+  const mapped = indexSymbols[upper] ?? renamedEquityYahooTickers[upper];
   if (mapped !== undefined) return mapped;
   // Already-qualified tickers pass through: `^GSPC`, `RELIANCE.NS`, `GIFT=F`.
   if (upper.startsWith("^") || upper.includes(".") || upper.includes("=")) return upper;
@@ -46,4 +58,7 @@ export function resolveYahooSymbol(symbol: string): string {
 }
 
 /** The canonical symbols this resolver knows by name, for callers that enumerate them. */
-export const YAHOO_MAPPED_SYMBOLS = Object.keys(indexSymbols);
+export const YAHOO_MAPPED_SYMBOLS = [
+  ...Object.keys(indexSymbols),
+  ...Object.keys(renamedEquityYahooTickers),
+];

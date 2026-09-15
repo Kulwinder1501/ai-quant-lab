@@ -1,5 +1,6 @@
 import type { StrategyMarketContext } from "./strategy.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
+import { istSessionDate } from "../../platform/calendar/trading-session.js";
 
 /**
  * Builds higher-timeframe context for a replayed series, so the confluence terms in
@@ -66,7 +67,7 @@ interface Bucket {
 }
 
 function sessionKey(closeTime: Date): string {
-  return closeTime.toISOString().slice(0, 10);
+  return istSessionDate(closeTime);
 }
 
 /**

@@ -39,10 +39,13 @@ function build(options: {
   forward?: RangeBar[];
   forwardCloseTime?: Date | null;
   forwardWindowClosed?: boolean;
+  anchorless?: number;
 }) {
   const recordSettlement = vi.fn(async (_outcome: AuxiliarySettlementOutcome) => undefined);
   const recordUnsettleable = vi.fn(async (_predictionId: string, _reason: string) => undefined);
+  const markAnchorless = vi.fn(async (_limit: number) => options.anchorless ?? 0);
   const repository: AuxiliaryPredictionSettlementRepository = {
+    markAnchorlessVolatilityPredictionsUnsettleable: markAnchorless,
     listSettleableVolatilityPredictions: async () => options.items,
     loadRangeWindows: async () => ({
       trailing: options.trailing ?? window(10),
@@ -53,7 +56,7 @@ function build(options: {
     recordSettlement,
     recordUnsettleable,
   };
-  return { service: new SettleAuxiliaryPredictions(repository), recordSettlement, recordUnsettleable };
+  return { service: new SettleAuxiliaryPredictions(repository), recordSettlement, recordUnsettleable, markAnchorless };
 }
 
 describe("SettleAuxiliaryPredictions", () => {
@@ -179,5 +182,31 @@ describe("SettleAuxiliaryPredictions", () => {
   it("rejects a non-positive batch limit", async () => {
     const { service } = build({ items: [] });
     await expect(service.execute({ limit: 0 })).rejects.toThrow(/positive integer/);
+  });
+});
+
+describe("anchorless volatility predictions", () => {
+  it("resolves them before listing the gradeable ones, and reports the count", async () => {
+    /*
+     * They are invisible to the listing query, which inner-joins the source candle, so before this
+     * they were neither graded nor marked and counted as pending for ever -- 467 of them, written
+     * 2026-08-04..2026-08-13.
+     */
+    const { service } = build({ items: [], anchorless: 467 });
+    const result = await service.execute();
+    expect(result.markedAnchorless).toBe(467);
+    expect(result.examined).toBe(0);
+  });
+
+  it("reports zero when there are none, rather than omitting the field", async () => {
+    const { service } = build({ items: [] });
+    const result = await service.execute();
+    expect(result.markedAnchorless).toBe(0);
+  });
+
+  it("passes the batch limit through, so one pass cannot mark an unbounded number", async () => {
+    const { service, markAnchorless } = build({ items: [], anchorless: 3 });
+    await service.execute({ limit: 25 });
+    expect(markAnchorless).toHaveBeenCalledWith(25);
   });
 });

@@ -290,3 +290,67 @@ describe("BacktestEngine", () => {
     expect(() => backtest([source, overlapping], {})).toThrow("must not overlap");
   });
 });
+
+describe("BacktestEngine concurrency", () => {
+  /*
+   * Three signals on consecutive bars, none of which can resolve: the bars never touch 95 or 110,
+   * so every position stays open until END_OF_DATA. That isolates admission from exit behaviour.
+   */
+  const flatBar = { open: 100, high: 101, low: 99, close: 100 };
+  const contexts = [
+    context("c1", "2026-01-05", flatBar),
+    context("c2", "2026-01-06", flatBar),
+    context("c3", "2026-01-07", flatBar),
+    context("c4", "2026-01-08", flatBar),
+    context("c5", "2026-01-09", flatBar),
+  ];
+  const strategy = new FixedSignalStrategy({
+    c1: longProposal(), c2: longProposal(), c3: longProposal(),
+  });
+  const config = (overrides: Partial<BacktestConfiguration>): BacktestConfiguration =>
+    ({ ...defaultBacktestConfiguration, ...overrides });
+
+  it("still admits exactly one position at the default, and blocks the rest", () => {
+    // The default is deliberately unchanged, so previously recorded runs stay reproducible.
+    expect(defaultBacktestConfiguration.maxConcurrentPositions).toBe(1);
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({}));
+    expect(result.metrics.signalCount).toBe(3);
+    expect(result.metrics.tradeCount).toBe(1);
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(2);
+  });
+
+  it("admits up to maxConcurrentPositions and blocks only beyond it", () => {
+    const two = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 2 }));
+    expect(two.metrics.tradeCount).toBe(2);
+    expect(two.metrics.skippedSignalsWhilePositionOpen).toBe(1);
+
+    const three = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 3 }));
+    expect(three.metrics.tradeCount).toBe(3);
+    expect(three.metrics.skippedSignalsWhilePositionOpen).toBe(0);
+  });
+
+  it("counts a pending fill against the limit, since it is already committed to open", () => {
+    // With a limit of 1, the signal on c2 arrives while c1's fill is pending, not yet open. It must
+    // still be refused: treating a pending slot as free would over-admit by one on every bar.
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 1 }));
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(2);
+  });
+
+  it("charges each concurrent position against available capital, not gross equity", () => {
+    // 100 units at ~100 with marginFraction 1 needs ~10,000 per position. Capital for two, asked
+    // for three: the third is refused for capital, not for concurrency.
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({
+      maxConcurrentPositions: 3, quantity: 100, initialCapital: 25_000, marginFraction: 1,
+    }));
+    expect(result.metrics.tradeCount).toBe(2);
+    expect(result.metrics.skippedSignalsInsufficientCapital).toBe(1);
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(0);
+  });
+
+  it("rejects a non-integer or sub-1 concurrency rather than silently clamping", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: bad })))
+        .toThrow(/Backtest configuration is invalid/);
+    }
+  });
+});

@@ -30,7 +30,19 @@ function fakeQueryable(responses: QueryResponses): { database: DatabaseQueryable
     if (text.includes("FROM price_action_events")) {
       return { rows: responses.priceActionEvents ?? [] };
     }
-    throw new Error(`Unexpected query: ${text}`);
+    /*
+     * The repository gained an ICT snapshot path after this fake was written: it reads cached
+     * snapshots and writes any it had to compute. The fake threw on both, so this test has been red
+     * since that path landed -- and the thrown message looked empty because the query is a template
+     * literal beginning with a newline, which the reporter truncated at.
+     *
+     * An empty read is the honest response: it forces the repository down the compute-and-persist
+     * branch, which is the behaviour the assertions below actually care about.
+     */
+    if (text.includes("ict_state_snapshots")) {
+      return { rows: [] };
+    }
+    throw new Error(`Unexpected query: ${JSON.stringify(text)}`);
   };
 
   return { database: { query } as unknown as DatabaseQueryable, calls };
@@ -122,7 +134,14 @@ describe("PostgresBacktestMarketDataRepository", () => {
       dataCutoffAt,
     });
 
-    expect(contexts).toEqual([
+    /*
+     * `toMatchObject`, not `toEqual`: the repository attaches an `ictSnapshot` to each context now,
+     * so a whole-object equality assertion fails on a key it was never written to know about. What
+     * this test is actually about is the candle/indicator/pattern reconstruction and the cutoff, so
+     * it asserts those and tolerates additional context keys rather than re-pinning the ICT payload
+     * -- which changes whenever the engine version or config hash moves.
+     */
+    expect(contexts).toMatchObject([
       {
         candle: {
           id: "candle-1",
@@ -185,11 +204,24 @@ describe("PostgresBacktestMarketDataRepository", () => {
       },
     ]);
 
-    expect(calls).toHaveLength(4);
-    const candleQuery = calls[0];
-    const indicatorQuery = calls[1];
-    const patternQuery = calls[2];
-    const priceActionQuery = calls[3];
+    /*
+     * The evidence queries are found by content, not by index or by an exact call count.
+     *
+     * This asserted exactly four calls, which broke when the repository gained the ICT snapshot
+     * path (it now reads cached snapshots and writes any it computes -- eight calls here). Pinning
+     * a count made an unrelated feature fail a test about cutoff reconstruction, and pinning indices
+     * would silently compare the wrong query the moment call order shifted.
+     */
+    const findQuery = (fragment: string): QueryCall | undefined =>
+      calls.find((call) => call.text.includes(fragment));
+    const candleQuery = findQuery("FROM candles");
+    const indicatorQuery = findQuery("FROM indicator_snapshots");
+    const patternQuery = findQuery("FROM pattern_detections");
+    const priceActionQuery = findQuery("FROM price_action_events");
+    for (const [name, q] of [["candle", candleQuery], ["indicator", indicatorQuery],
+      ["pattern", patternQuery], ["priceAction", priceActionQuery]] as const) {
+      expect(q, `${name} query was not issued`).toBeDefined();
+    }
     expect(candleQuery?.text).toContain("candles.is_complete = TRUE");
     expect(candleQuery?.text).toContain("candles.received_at <= $5");
     expect(candleQuery?.values).toEqual(["instrument-1", "1d", dataWindowStart, dataWindowEnd, dataCutoffAt]);

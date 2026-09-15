@@ -120,6 +120,18 @@ export const AGENT_REWARD_RISK_MULTIPLE = 2;
  */
 export const AGENT_EXECUTABLE_SIDES: readonly TradeSide[] = ["LONG"];
 
+/** The autonomous agent owns intraday and swing bars, not the scalp band. */
+export const AUTONOMOUS_AGENT_TIMEFRAMES = ["15m", "30m", "60m", "1d"] as const;
+
+function assertAutonomousAgentTimeframe(timeframe: string): void {
+  if (!AUTONOMOUS_AGENT_TIMEFRAMES.includes(timeframe as typeof AUTONOMOUS_AGENT_TIMEFRAMES[number])) {
+    throw new Error(
+      `Autonomous agent does not own ${timeframe}; use one of ${AUTONOMOUS_AGENT_TIMEFRAMES.join(", ")}. `
+      + "1m, 3m, and 5m belong to the scalp path.",
+    );
+  }
+}
+
 /**
  * Entry costs are **not** defined here.
  *
@@ -446,6 +458,7 @@ export class AiAutonomousAgent {
   }
 
   public async tick(symbol: string, timeframe: string, livePrice: number): Promise<void> {
+    assertAutonomousAgentTimeframe(timeframe);
     const now = new Date();
     const ts = now.toISOString();
 

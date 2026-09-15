@@ -51,6 +51,7 @@ interface PaperTradeRow extends QueryResultRow {
   remaining_quantity?: string | null;
   entry_price: string;
   stop_loss: string;
+  initial_stop_loss: string | number;
   stop_loss_effective_at: Date;
   target_price: string;
   opened_at: Date;
@@ -119,6 +120,7 @@ const tradeColumns = `
   paper_trades.remaining_quantity,
   paper_trades.entry_price,
   paper_trades.stop_loss,
+  paper_trades.initial_stop_loss,
   paper_trades.stop_loss_effective_at,
   paper_trades.target_price,
   paper_trades.opened_at,
@@ -175,6 +177,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
       : toNumber(row.quantity, "trade quantity"),
     entryPrice: toNumber(row.entry_price, "trade entry price"),
     stopLoss: toNumber(row.stop_loss, "trade stop loss"),
+    initialStopLoss: Number(row.initial_stop_loss),
     stopLossEffectiveAt: row.stop_loss_effective_at,
     targetPrice: toNumber(row.target_price, "trade target price"),
     openedAt: row.opened_at,
@@ -523,12 +526,12 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO paper_trades (
         account_id, trade_idea_id, instrument_id, side, status, quantity, remaining_quantity,
-        entry_price, stop_loss, stop_loss_effective_at, target_price, opened_at,
+        entry_price, stop_loss, initial_stop_loss, stop_loss_effective_at, target_price, opened_at,
         fees, fee_breakdown, slippage, notes,
         option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv,
         regime_observation_id
       ) VALUES (
-        $1, $2, $3, $4, $14, $5, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
+        $1, $2, $3, $4, $14, $5, $5, $6, $7, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
         $15, $16, $17, $18, $19, $20, $21
       ) RETURNING id
     `, [
@@ -1061,6 +1064,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
   async updateStopLoss(id: string, newStopLoss: number, reason?: string): Promise<void> {
     assertPositiveFinite(newStopLoss, "New stop loss");
     await this.database.query(`
+      -- initial_stop_loss is deliberately NOT touched: it records what the trade opened with,
+      -- and the stall rule reads it precisely because stop_loss moves.
       UPDATE paper_trades
       SET stop_loss = $2,
           stop_loss_effective_at = CURRENT_TIMESTAMP,

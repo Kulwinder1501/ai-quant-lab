@@ -15,8 +15,18 @@ import {
   type HigherTimeframeResolverOptions,
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
+import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
+import {
+  ICT_STRUCTURE_STRATEGY_KEY,
+  defaultIctEngineConfig,
+  type IctEngineConfig,
+} from "../../modules/technical-analysis/domain/ict/config.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
+import {
+  EmaStrengthFilteredStrategy,
+  FreshSetupFilteredStrategy,
+} from "../../modules/backtesting/domain/entry-filters.js";
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
@@ -68,6 +78,51 @@ class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository
   }
 }
 
+/**
+ * Wraps the market-data repository to attach the causal ICT composite snapshot
+ * to every context after loading, so the `ict-structure-v1` strategy can read
+ * its four-pillar state. The snapshot state lives here in the replay builder,
+ * never in the strategy instance, exactly as the live path will persist it per
+ * source bar and load it back into the context.
+ */
+class IctDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly config: IctEngineConfig
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    return decorateContextsWithIct(await this.inner.listContexts(input), { config: this.config });
+  }
+}
+
+/**
+ * The engine config for this run, which until now was always the default.
+ *
+ * `--ict-inverted-poi` is the one knob exposed, because it is the only engine setting whose effect
+ * is an open question: it decides whether a failed order block survives as an opposite-side point of
+ * interest, per lecture 7, or is discarded as this engine has always discarded it. Two arms of the
+ * same run differ by that flag alone, and it lands in the config hash, so the two arms cannot share
+ * a cached snapshot.
+ */
+function parseIctEngineConfig(argumentsList: string[]): IctEngineConfig {
+  const raw = getOption(argumentsList, "ict-inverted-poi")?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return defaultIctEngineConfig;
+  if (raw !== "true" && raw !== "false") {
+    throw new Error(`--ict-inverted-poi must be true or false; received "${raw}".`);
+  }
+  return { ...defaultIctEngineConfig, invertedBlocksRemainPoi: raw === "true" };
+}
+
+function parseConcurrency(raw: string | undefined): number {
+  if (raw === undefined) return defaultBacktestConfiguration.maxConcurrentPositions;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`--max-concurrent-positions must be an integer >= 1; received "${raw}".`);
+  }
+  return value;
+}
+
 function parsePositionSizing(argumentsList: string[]): BacktestPositionSizing {
   const value = getOption(argumentsList, "position-sizing")?.trim().toUpperCase() || "FIXED_QUANTITY";
   if (value !== "FIXED_QUANTITY" && value !== "CONSTANT_RISK_FRACTION") {
@@ -97,6 +152,16 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
     throw new Error("--strategy-config must be a JSON object of setting overrides.");
   }
   return parsed as Record<string, unknown>;
+}
+
+type BacktestEntryFilter = "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP";
+
+function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
+  const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
+  if (raw === "none") return "NONE";
+  if (raw === "ema-strength-015") return "EMA_STRENGTH_015_ATR";
+  if (raw === "fresh-setup") return "FRESH_SETUP";
+  throw new Error(`--entry-filter must be none, ema-strength-015, or fresh-setup, received "${raw}".`);
 }
 
 /** A decimal fraction in (0, 1], falling back to the engine default. */
@@ -132,6 +197,7 @@ async function main(): Promise<void> {
     const { registration, StrategyClass } = requireRegisteredStrategy(
       getOption(argumentsList, "strategy")?.trim() || "trend-breakout",
     );
+    const entryFilter = parseEntryFilter(argumentsList);
     const strategyVersion = await new PostgresStrategyVersionRepository(database).ensure(registration);
     if (strategyVersion.isArchived || !strategyVersion.isActive) {
       throw new Error(`Strategy version ${strategyVersion.strategyKey}@${strategyVersion.version} is not active.`);
@@ -139,17 +205,28 @@ async function main(): Promise<void> {
 
     const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
-    const marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
+    let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
       : new HigherTimeframeDecoratedMarketData(
         new PostgresBacktestMarketDataRepository(database),
         higherTimeframeBuckets,
       );
+    // The ICT strategy reads its four-pillar snapshot from the context; attach it
+    // in the replay builder. Incumbent strategies never see this decoration.
+    if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
+      marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList));
+    }
 
+    const strategyEvaluator = new StrategyClass();
+    const replayStrategy = entryFilter === "EMA_STRENGTH_015_ATR"
+      ? new EmaStrengthFilteredStrategy(strategyEvaluator)
+      : entryFilter === "FRESH_SETUP"
+        ? new FreshSetupFilteredStrategy(strategyEvaluator)
+        : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
-      new BacktestEngine(new StrategyClass()),
+      new BacktestEngine(replayStrategy),
     ).execute({
       strategyVersionId: strategyVersion.id,
       strategyConfiguration: configurationOverride === null
@@ -168,6 +245,10 @@ async function main(): Promise<void> {
         positionSizing: parsePositionSizing(argumentsList),
         riskFractionPerTrade: parseFractionOption(argumentsList, "risk-fraction", defaultBacktestConfiguration.riskFractionPerTrade),
         marginFraction: parseFractionOption(argumentsList, "margin-fraction", defaultBacktestConfiguration.marginFraction),
+        // Defaults to 1, so an invocation that does not ask for concurrency reproduces the runs
+        // recorded before the engine supported it. Persisted in the run's `configuration` jsonb,
+        // so a concurrent run is never mistaken for a sequential one.
+        maxConcurrentPositions: parseConcurrency(getOption(argumentsList, "max-concurrent-positions")),
       },
     });
 
@@ -176,6 +257,7 @@ async function main(): Promise<void> {
       message: "Historical backtest complete",
       instrument: symbol,
       strategy: `${strategyVersion.strategyKey}@${strategyVersion.version}`,
+      entryFilter,
       dataWindowStart: dataWindowStart.toISOString(),
       dataWindowEnd: dataWindowEnd.toISOString(),
       dataCutoffAt: dataCutoffAt.toISOString(),

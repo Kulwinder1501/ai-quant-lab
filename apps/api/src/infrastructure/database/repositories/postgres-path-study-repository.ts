@@ -127,6 +127,22 @@ export class PostgresPathStudyRepository {
   }
 
   /**
+   * When this study was last declared, so a scheduler can tell whether its own scheduled run
+   * actually happened -- see `scalp-research-scheduler.ts`'s startup catch-up, built after
+   * `PATH_STUDY_V2`'s weekly Saturday run silently missed three consecutive weeks (2026-08-25
+   * through 2026-09-15) with no restart and no error, the cron-desync failure `cron-liveness.ts`
+   * documents. `null` when the study has never been declared, which reads the same as "badly
+   * overdue" to a caller checking staleness.
+   */
+  async findLatestDeclaredAt(studyKey: string): Promise<Date | null> {
+    const result = await this.database.query<{ declared_at: Date }>(
+      "SELECT max(declared_at) AS declared_at FROM research_scalp.study_trials WHERE study_key = $1",
+      [studyKey],
+    );
+    return result.rows[0]?.declared_at ?? null;
+  }
+
+  /**
    * Every matched opportunity in the window, with its matched controls.
    *
    * Only opportunities that achieved full common support appear: a control set that never matched
