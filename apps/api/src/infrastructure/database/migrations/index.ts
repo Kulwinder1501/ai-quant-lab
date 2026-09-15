@@ -105,6 +105,7 @@ import { stockIntelligenceGate7ReportMigration } from "./104-stock-intelligence-
 import { ictStateSnapshotsMigration } from "./105-ict-state-snapshots.js";
 import { paperTradeInitialStopLossMigration } from "./106-paper-trade-initial-stop-loss.js";
 import { candidateDatasetMigration } from "./107-candidate-dataset.js";
+import { ictStructuralFeaturesMigration } from "./108-ict-structural-features.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -214,4 +215,5 @@ export const migrations = [
   ictStateSnapshotsMigration,
   paperTradeInitialStopLossMigration,
   candidateDatasetMigration,
+  ictStructuralFeaturesMigration,
 ];
