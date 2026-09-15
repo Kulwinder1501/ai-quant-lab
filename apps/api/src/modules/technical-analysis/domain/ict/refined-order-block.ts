@@ -1,4 +1,4 @@
-import type { OrderBlock } from "./zones.js";
+import { isDoctrinallyValidOrderBlockCandidate, type OrderBlock } from "./zones.js";
 import type { IctStateCompositeSnapshot } from "./config.js";
 
 /**
@@ -52,15 +52,18 @@ function distanceToMeanThreshold(ob: OrderBlock, price: number): number {
 }
 
 /**
- * The HTF order block a trader would currently be watching: the active one nearest to price. The
- * doctrine assumes the trader has already picked one from their own directional read; this is the
- * simplest price-only stand-in for that judgment call, since a feature extractor has no directional
- * read of its own to consult.
+ * The HTF order block a trader would currently be watching: the nearest-to-price one among the
+ * doctrinally valid candidates (`isDoctrinallyValidOrderBlockCandidate` -- only the IDM-adjacent or
+ * extreme block in the current swing range is ever a real candidate, on any timeframe; see its own
+ * docstring in zones.ts). The doctrine assumes the trader has already picked one from their own
+ * directional read; nearest-to-price among the valid set is the simplest stand-in for that judgment
+ * call, since a feature extractor has no directional read of its own to consult.
  */
 function selectRelevantHtfOrderBlock(htfObs: readonly OrderBlock[], price: number): OrderBlock | null {
   let best: OrderBlock | null = null;
   let bestDistance = Infinity;
   for (const ob of htfObs) {
+    if (!isDoctrinallyValidOrderBlockCandidate(ob)) continue;
     const distance = distanceToMeanThreshold(ob, price);
     if (distance < bestDistance) {
       best = ob;

@@ -1,6 +1,6 @@
 import type { IctStateCompositeSnapshot } from "./config.js";
 import type { IctBiasDirection } from "./bias.js";
-import type { OrderBlock } from "./zones.js";
+import { isDoctrinallyValidOrderBlockCandidate, type OrderBlock } from "./zones.js";
 import { computeRefinedOrderBlock, type RefinedOrderBlockFeature } from "./refined-order-block.js";
 
 /**
@@ -26,13 +26,19 @@ import { computeRefinedOrderBlock, type RefinedOrderBlockFeature } from "./refin
  * active order block -- which is most bars, unlike the gated `primaryTarget`.
  *
  * `distanceToNearestOrderBlock`/`nearestOrderBlockSide` are checked against the source doctrine and
- * found NAIVE: lecture 4 ("Refined Order Block") and lecture 3's structure-mapping section are both
- * explicit that order blocks and structure are read top-down across timeframes -- a higher-timeframe
- * order block marks the box, and only a lower-timeframe order block NESTED inside that same box is
- * the doctrine's actual construction (see `refined-order-block.ts` for the transcript passages this
- * is checked against). They are kept here, unchanged, as the same-timeframe baseline for comparing
- * against the doctrine-faithful `refinedOrderBlock` field below -- not because they are correct on
- * their own.
+ * found NAIVE in two distinct ways, corrected in two separate passes:
+ *  1. Cross-timeframe: lecture 4 ("Refined Order Block") and lecture 3's structure-mapping section
+ *     are both explicit that order blocks and structure are read top-down across timeframes -- a
+ *     higher-timeframe order block marks the box, and only a lower-timeframe order block NESTED
+ *     inside that same box is the doctrine's actual construction (see `refined-order-block.ts` for
+ *     the transcript passages this is checked against).
+ *  2. Same-timeframe selection: even on ONE timeframe, the doctrine does not treat every active order
+ *     block as a valid candidate -- only the one right after IDM and the one at the extreme end of
+ *     the current swing range are real; everything else is explicitly "not a candidate at all" (see
+ *     `isDoctrinallyValidOrderBlockCandidate` in zones.ts). This field is filtered to that set.
+ * Kept here as the same-timeframe baseline for comparing against the doctrine-faithful
+ * `refinedOrderBlock` field below -- corrected on selection, but still same-timeframe, not because
+ * ignoring the HTF pairing is itself correct.
  */
 
 export type PremiumDiscountZone = "PREMIUM" | "DISCOUNT" | "UNKNOWN";
@@ -46,11 +52,14 @@ export interface IctStructuralFeatures {
    */
   readonly premiumDiscountZone: PremiumDiscountZone;
   /**
-   * Absolute price distance from the current close to the nearest ACTIVE order block's mean
-   * threshold (the 50% level the doctrine treats as the actual entry, not the block's outer edge).
-   * Null when no order block is currently active. Unsigned by design -- direction is carried
-   * separately by `nearestOrderBlockSide`, so a model can learn the two independently rather than
-   * this feature silently encoding a sign convention.
+   * Absolute price distance from the current close to the nearest doctrinally-valid order block's
+   * mean threshold (the 50% level the doctrine treats as the actual entry, not the block's outer
+   * edge) -- restricted to `isIdmAdjacent`/`isExtreme` blocks, per lecture 4's explicit "whatever
+   * forms in between is not a candidate at all" rule (see
+   * `isDoctrinallyValidOrderBlockCandidate` in zones.ts). Null when no such order block is currently
+   * active. Unsigned by design -- direction is carried separately by `nearestOrderBlockSide`, so a
+   * model can learn the two independently rather than this feature silently encoding a sign
+   * convention.
    */
   readonly distanceToNearestOrderBlock: number | null;
   /** Polarity of the nearest order block, or null alongside a null distance. */
@@ -106,7 +115,10 @@ export function extractIctStructuralFeatures(
   const premiumDiscountZone: PremiumDiscountZone =
     dealingRange === null ? "UNKNOWN" : dealingRange.isPremium(currentPrice) ? "PREMIUM" : "DISCOUNT";
 
-  const nearest = nearestOrderBlock(snapshot.zones.activeObs, currentPrice);
+  const nearest = nearestOrderBlock(
+    snapshot.zones.activeObs.filter(isDoctrinallyValidOrderBlockCandidate),
+    currentPrice
+  );
 
   const bosLevel = snapshot.structure.bosLevel;
   const chochLevel = snapshot.structure.chochLevel;

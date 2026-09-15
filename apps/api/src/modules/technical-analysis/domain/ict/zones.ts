@@ -97,6 +97,26 @@ export interface IctZoneSnapshot {
 }
 
 /**
+ * Whether an order block is one of the (at most) two the doctrine ever treats as a real candidate.
+ *
+ * Lecture 4 (Order Block/FVG) is explicit and repeated across multiple worked examples: order blocks
+ * only ever matter within the range from the IDM point to the next structural swing, and within that
+ * range only the FIRST one (just after IDM, `isIdmAdjacent`) and the LAST one (at the extreme end,
+ * `isExtreme`) are real -- "जस्ट आईडीएम के ऊपर वाला पहला ऑर्डर ब्लॉक और लास्ट वाला... उसके बीच वाले
+ * कुछ वर्क नहीं करता" (~47:08), and again "इसके बीच में जितने भी ऑर्डर ब्लॉक बने... उससे हमें कोई
+ * लेना देना नहीं" (~42:44) -- whatever forms in between is explicitly declared irrelevant, not merely
+ * lower-priority.
+ *
+ * `isIdmAdjacent`/`isExtreme` were computed on `OrderBlock` from the start, but nothing in
+ * `feature-extraction.ts` or `refined-order-block.ts` actually filtered on them until this predicate
+ * was added -- both treated every active order block as an equally valid "nearest" candidate, which
+ * is exactly the "in-between" case the transcript rules out.
+ */
+export function isDoctrinallyValidOrderBlockCandidate(ob: OrderBlock): boolean {
+  return ob.isIdmAdjacent || ob.isExtreme;
+}
+
+/**
  * Labels a freshly created block, per the lecture 7 taxonomy.
  *
  * Precedence is deliberate and only one branch can be reached today:

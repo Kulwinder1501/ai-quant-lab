@@ -113,12 +113,21 @@ describe("extractIctStructuralFeatures", () => {
     expect(extractIctStructuralFeatures(makeSnapshot({ dealingRange }), 95).premiumDiscountZone).toBe("DISCOUNT");
   });
 
-  it("finds the nearest active order block by distance to its mean threshold, unsigned", () => {
-    const near = makeOb({ id: "ob-near", type: "BULLISH", meanThreshold: 98 });
-    const far = makeOb({ id: "ob-far", type: "BEARISH", meanThreshold: 130 });
+  it("finds the nearest doctrinally-valid active order block by distance to its mean threshold, unsigned", () => {
+    const near = makeOb({ id: "ob-near", type: "BULLISH", meanThreshold: 98, isExtreme: true });
+    const far = makeOb({ id: "ob-far", type: "BEARISH", meanThreshold: 130, isIdmAdjacent: true });
     const features = extractIctStructuralFeatures(makeSnapshot({ activeObs: [far, near] }), 100);
     expect(features.distanceToNearestOrderBlock).toBe(2); // |100 - 98|
     expect(features.nearestOrderBlockSide).toBe("BULLISH");
+  });
+
+  it("ignores an order block that is neither IDM-adjacent nor extreme, even if it is nearer to price", () => {
+    // Per lecture 4: order blocks "in between" the IDM-adjacent one and the extreme one are
+    // explicitly not real candidates at all -- see isDoctrinallyValidOrderBlockCandidate in zones.ts.
+    const inBetween = makeOb({ id: "ob-mid", type: "BULLISH", meanThreshold: 99 }); // nearest to price, but not valid
+    const valid = makeOb({ id: "ob-valid", type: "BULLISH", meanThreshold: 90, isExtreme: true });
+    const features = extractIctStructuralFeatures(makeSnapshot({ activeObs: [inBetween, valid] }), 100);
+    expect(features.distanceToNearestOrderBlock).toBe(10); // |100 - 90|, not |100 - 99|
   });
 
   it("returns null distance/side when no order block is active", () => {
@@ -147,7 +156,7 @@ describe("extractIctStructuralFeatures", () => {
   });
 
   it("computes a real cross-timeframe refinement when both HTF and LTF order blocks are supplied", () => {
-    const htfOb = makeOb({ id: "htf-1", type: "BULLISH", meanThreshold: 100, top: 105, bottom: 95 }); // range 10
+    const htfOb = makeOb({ id: "htf-1", type: "BULLISH", meanThreshold: 100, top: 105, bottom: 95, isExtreme: true }); // range 10
     const ltfOb = makeOb({ id: "ltf-1", type: "BULLISH", meanThreshold: 99, top: 101, bottom: 97 }); // range 4, nested
     const htfSnapshot = makeSnapshot({ activeObs: [htfOb] });
     const ltfSnapshot = makeSnapshot({ activeObs: [ltfOb] });
