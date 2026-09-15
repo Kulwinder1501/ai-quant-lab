@@ -578,12 +578,28 @@ export class EvaluateOpenPaperTrades {
          * The policy's trail is null, so this is the same behaviour as before: break-even at +0.5R
          * and nothing else. Turning the trail on is a research decision with a registered gate --
          * see the note in `protective-stop.ts`.
+         *
+         * Progress is measured against the peak bid seen since the trade opened, not just
+         * `freshBid`. The barrier scan above already walks every tick in `observedSamples` (this
+         * bot sweeps every five minutes against a book sampled roughly twice a minute); checking
+         * only the single latest bid here meant a peak that reached +0.5R and receded before the
+         * next sweep's fresh quote could never trigger the move -- the exact sampling asymmetry
+         * that left this stop un-advanced in every closed trade to date. Reusing the same scan the
+         * barrier check already paid for closes the gap without adding a second query.
          */
+        const peakBid = observedSamples.reduce(
+          (max, observed) => (
+            observed.bid !== null && Number.isFinite(observed.bid) && observed.bid > max
+              ? observed.bid
+              : max
+          ),
+          freshBid,
+        );
         const advance = advanceProtectiveStop({
           entryPrice: trade.entryPrice,
           initialStopLoss: trade.initialStopLoss ?? trade.stopLoss,
           currentStopLoss: trade.stopLoss,
-          markPremium: freshBid,
+          markPremium: peakBid,
           policy: momentumScalp1mStopPolicy,
         });
         if (advance && this.paperTradeRepository.updateStopLoss) {

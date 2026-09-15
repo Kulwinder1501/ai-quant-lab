@@ -346,6 +346,53 @@ describe("EvaluateOpenPaperTrades", () => {
     expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
   });
 
+  it("moves a 1m momentum scalp stop to break-even from a peak seen in the tick history, even after price receded before the latest bid", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
+      timeframe: "1m",
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225,
+    });
+    const paperTradeRepository = stubRepo(trade, closings);
+    paperTradeRepository.updateStopLoss = async (id, stop, reason) => {
+      stopUpdates.push({ id, stop, reason });
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    // +0.5R is 195 (risk 30 off a 180 entry). The book touched 200 at 08:55 and receded to 190 by
+    // the fresh bid this sweep sees -- 190 alone is only +0.33R, so a check against freshBid alone
+    // would never move the stop even though the trade did reach the trigger.
+    const result = await new EvaluateOpenPaperTrades(
+      paperTradeRepository,
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(
+        sample("2026-08-06T08:59:45.000Z", 190),
+        [
+          sample("2026-08-06T08:50:45.000Z", 182),
+          sample("2026-08-06T08:55:45.000Z", 200),
+          sample("2026-08-06T08:59:45.000Z", 190),
+        ],
+      ),
+    ).execute({
+      accountId: "account-1",
+      asOf: new Date("2026-08-06T09:00:00.000Z"),
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(stopUpdates).toHaveLength(1);
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
+  });
 
   it("squares off an intraday option at the 15:15 IST cutoff, at the quoted bid", async () => {
     const closings: ClosePaperTradeInput[] = [];
