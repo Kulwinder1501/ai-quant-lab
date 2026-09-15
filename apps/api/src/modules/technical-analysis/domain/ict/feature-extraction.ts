@@ -1,6 +1,7 @@
 import type { IctStateCompositeSnapshot } from "./config.js";
 import type { IctBiasDirection } from "./bias.js";
 import type { OrderBlock } from "./zones.js";
+import { computeRefinedOrderBlock, type RefinedOrderBlockFeature } from "./refined-order-block.js";
 
 /**
  * Structural feature extraction for ML consumption -- NOT a trading decision.
@@ -23,6 +24,15 @@ import type { OrderBlock } from "./zones.js";
  * only when the four-pillar gate is already aligned). This computes it directly off
  * `zones.activeObs`, independent of any gate, so it is available on every bar that has at least one
  * active order block -- which is most bars, unlike the gated `primaryTarget`.
+ *
+ * `distanceToNearestOrderBlock`/`nearestOrderBlockSide` are checked against the source doctrine and
+ * found NAIVE: lecture 4 ("Refined Order Block") and lecture 3's structure-mapping section are both
+ * explicit that order blocks and structure are read top-down across timeframes -- a higher-timeframe
+ * order block marks the box, and only a lower-timeframe order block NESTED inside that same box is
+ * the doctrine's actual construction (see `refined-order-block.ts` for the transcript passages this
+ * is checked against). They are kept here, unchanged, as the same-timeframe baseline for comparing
+ * against the doctrine-faithful `refinedOrderBlock` field below -- not because they are correct on
+ * their own.
  */
 
 export type PremiumDiscountZone = "PREMIUM" | "DISCOUNT" | "UNKNOWN";
@@ -59,6 +69,13 @@ export interface IctStructuralFeatures {
   /** Signed distance (current close minus level) so direction is preserved; null when absent. */
   readonly distanceToBosLevel: number | null;
   readonly distanceToChochLevel: number | null;
+  /**
+   * The doctrine-faithful, cross-timeframe order-block refinement (see `refined-order-block.ts`).
+   * Null when no `htfSnapshot` was supplied to `extractIctStructuralFeatures`, or when one was
+   * supplied but no HTF order block is currently active -- there is nothing to anchor a refinement
+   * to on this bar either way.
+   */
+  readonly refinedOrderBlock: RefinedOrderBlockFeature | null;
 }
 
 function nearestOrderBlock(
@@ -77,7 +94,13 @@ function nearestOrderBlock(
 
 export function extractIctStructuralFeatures(
   snapshot: IctStateCompositeSnapshot,
-  currentPrice: number
+  currentPrice: number,
+  /**
+   * The higher-timeframe composite snapshot visible as of this bar (already anti-lookahead aligned
+   * by the caller -- see `alignHtfSnapshotsToLtf`), or omitted/null when no HTF series is available.
+   * Optional so every existing single-timeframe caller is unaffected.
+   */
+  htfSnapshot?: IctStateCompositeSnapshot | null
 ): IctStructuralFeatures {
   const dealingRange = snapshot.bias.dealingRange;
   const premiumDiscountZone: PremiumDiscountZone =
@@ -97,5 +120,9 @@ export function extractIctStructuralFeatures(
     hasChochLevel: chochLevel !== null,
     distanceToBosLevel: bosLevel !== null ? currentPrice - bosLevel : null,
     distanceToChochLevel: chochLevel !== null ? currentPrice - chochLevel : null,
+    refinedOrderBlock:
+      htfSnapshot == null
+        ? null
+        : computeRefinedOrderBlock(htfSnapshot.zones.activeObs, snapshot.zones.activeObs, currentPrice),
   };
 }

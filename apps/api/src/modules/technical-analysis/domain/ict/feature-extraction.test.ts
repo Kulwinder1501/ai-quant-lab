@@ -135,6 +135,30 @@ describe("extractIctStructuralFeatures", () => {
     expect(features.distanceToChochLevel).toBeNull();
   });
 
+  it("leaves refinedOrderBlock null when no HTF snapshot is supplied", () => {
+    const features = extractIctStructuralFeatures(makeSnapshot({ activeObs: [] }), 100);
+    expect(features.refinedOrderBlock).toBeNull();
+  });
+
+  it("leaves refinedOrderBlock null when an HTF snapshot is supplied but has no active order block", () => {
+    const htfSnapshot = makeSnapshot({ activeObs: [] });
+    const ltfSnapshot = makeSnapshot({ activeObs: [] });
+    expect(extractIctStructuralFeatures(ltfSnapshot, 100, htfSnapshot).refinedOrderBlock).toBeNull();
+  });
+
+  it("computes a real cross-timeframe refinement when both HTF and LTF order blocks are supplied", () => {
+    const htfOb = makeOb({ id: "htf-1", type: "BULLISH", meanThreshold: 100, top: 105, bottom: 95 }); // range 10
+    const ltfOb = makeOb({ id: "ltf-1", type: "BULLISH", meanThreshold: 99, top: 101, bottom: 97 }); // range 4, nested
+    const htfSnapshot = makeSnapshot({ activeObs: [htfOb] });
+    const ltfSnapshot = makeSnapshot({ activeObs: [ltfOb] });
+
+    const features = extractIctStructuralFeatures(ltfSnapshot, 100, htfSnapshot);
+    expect(features.refinedOrderBlock).not.toBeNull();
+    expect(features.refinedOrderBlock!.htfOrderBlockSide).toBe("BULLISH");
+    expect(features.refinedOrderBlock!.refinedOrderBlockDistance).toBe(1); // |100 - 99|
+    expect(features.refinedOrderBlock!.stopCompressionRatio).toBeCloseTo(4 / 10, 10);
+  });
+
   it("is a pure function of one snapshot: identical input twice gives identical output", () => {
     const snapshot = makeSnapshot({ htfBias: "BEARISH", bosLevel: 50, activeObs: [makeOb({ id: "a", type: "BULLISH", meanThreshold: 90 })] });
     expect(extractIctStructuralFeatures(snapshot, 88)).toEqual(extractIctStructuralFeatures(snapshot, 88));
