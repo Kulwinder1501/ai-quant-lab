@@ -114,6 +114,14 @@ FEATURE_SCHEMA_VERSION_SCALP_V2 = "ml-feature-scalp-v2"
 #: key, and an ablated artifact must be impossible to confuse with a production one.
 FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
 
+#: v9 (Model D: 75 columns) plus the ICT structural covariates -- HTF bias, premium/discount zone,
+#: distance to the nearest order block, and BOS/CHoCH presence/distance. Registered as its own
+#: version, not patched into v9 in place, for the same reason v7-nopattern is: this is the
+#: feature-vs-signal experiment the ICT engine's own close-out doc named as unproven ("plausible as
+#: features, unproven as signal"), and a model trained on it must be impossible to confuse with a
+#: production v9 artifact.
+FEATURE_SCHEMA_VERSION_V_ICT = "ml-feature-v-ict"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -126,6 +134,7 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V_ICT,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
@@ -414,6 +423,35 @@ class PriceActionEvidence:
 
 
 @dataclass(frozen=True)
+class IctEvidence:
+    """One bar's ICT structural read, as covariates -- not a trading signal.
+
+    Mirrors ``IctStructuralFeatures`` from
+    ``apps/api/src/modules/technical-analysis/domain/ict/feature-extraction.ts`` field for field, so
+    the two stay in lockstep by inspection rather than by a generated contract. Point-in-time safety
+    is inherited from that extractor: it is a pure function of one already-sealed
+    ``IctStateCompositeSnapshot``, which is itself immune to the batch-replay mutable-zone leak fixed
+    alongside it. Distances are raw price units here; ``build_feature_vector`` normalises them by ATR
+    the same way it does every other level-distance column, so this dataclass carries the unscaled
+    fact rather than a value tied to one instrument's price scale.
+
+    ``None`` fields mean the underlying structural read was unavailable on this bar (no dealing range
+    formed, no active order block, no confirmed swing to derive a BOS/CHoCH level from) -- the same
+    "missing evidence, not a learned zero" convention every other optional field on ``CandleEvidence``
+    already follows.
+    """
+
+    htf_bias: str | None  # "BULLISH" | "BEARISH" | "NEUTRAL" | "UNKNOWN" | None
+    premium_discount_zone: str  # "PREMIUM" | "DISCOUNT" | "UNKNOWN"
+    distance_to_nearest_order_block: float | None
+    nearest_order_block_side: str | None  # "BULLISH" | "BEARISH" | None
+    has_bos_level: bool
+    has_choch_level: bool
+    distance_to_bos_level: float | None
+    distance_to_choch_level: float | None
+
+
+@dataclass(frozen=True)
 class ForwardBar:
     """One completed bar on the forward path after a source candle, in time order.
 
@@ -474,6 +512,10 @@ class CandleEvidence:
     # vertical barrier and obeying the same as-of cutoff as ``future_close``. Empty
     # for the fixed-horizon scheme, which never reads it. Never a feature.
     forward_path: Sequence["ForwardBar"] = ()
+    # The ICT structural read for this bar, or None when not computed for this
+    # (instrument, timeframe) -- absence, not zero evidence. Only schema versions
+    # that declare `ict.*` columns read this; every other schema ignores it.
+    ict: "IctEvidence | None" = None
 
 @dataclass(frozen=True)
 class LabeledExample:

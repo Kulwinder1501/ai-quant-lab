@@ -531,6 +531,95 @@ class FeatureConstructionTests(unittest.TestCase):
         schema_v9 = feature_schema(FEATURE_SCHEMA_VERSION_V9)
         self.assertEqual(schema_v9, FEATURE_SCHEMA_V9)
 
+    def test_v_ict_schema_is_v9_plus_eleven_ict_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V9, FEATURE_SCHEMA_VERSION_V_ICT
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V9, FEATURE_SCHEMA_V_ICT
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT), len(FEATURE_SCHEMA_V9) + 11)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT[: len(FEATURE_SCHEMA_V9)], FEATURE_SCHEMA_V9)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT), FEATURE_SCHEMA_V_ICT)
+        # v9 itself must not have gained the ICT columns as a side effect of this change.
+        self.assertNotIn("ict.htf_bias_bullish", FEATURE_SCHEMA_V9)
+
+    def test_v_ict_features_default_to_absence_when_no_ict_evidence_is_attached(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT
+
+        observed = features_of(evidence(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        # One-hots default to 0.0 (evidence of absence), matching pattern.is_* / SUPERTREND's own
+        # convention -- never left out of the vector just because nothing was attached.
+        for column in (
+            "ict.htf_bias_bullish",
+            "ict.htf_bias_bearish",
+            "ict.premium_discount_is_premium",
+            "ict.premium_discount_is_discount",
+            "ict.nearest_order_block_is_bullish",
+            "ict.nearest_order_block_is_bearish",
+            "ict.has_bos_level",
+            "ict.has_choch_level",
+        ):
+            self.assertEqual(observed[column], 0.0, column)
+        # The ATR-normalised distances are a genuinely missing measurement, so NaN, not 0.
+        for column in (
+            "ict.distance_to_nearest_order_block_atr",
+            "ict.distance_to_bos_level_atr",
+            "ict.distance_to_choch_level_atr",
+        ):
+            self.assertTrue(math.isnan(observed[column]), column)
+
+    def test_v_ict_features_populate_from_attached_ict_evidence(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BEARISH",
+                premium_discount_zone="PREMIUM",
+                distance_to_nearest_order_block=8.0,
+                nearest_order_block_side="BEARISH",
+                has_bos_level=True,
+                has_choch_level=True,
+                distance_to_bos_level=-12.0,
+                distance_to_choch_level=6.0,
+            ),
+        )
+
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        self.assertEqual(observed["ict.htf_bias_bullish"], 0.0)
+        self.assertEqual(observed["ict.htf_bias_bearish"], 1.0)
+        self.assertEqual(observed["ict.premium_discount_is_premium"], 1.0)
+        self.assertEqual(observed["ict.premium_discount_is_discount"], 0.0)
+        self.assertEqual(observed["ict.nearest_order_block_is_bullish"], 0.0)
+        self.assertEqual(observed["ict.nearest_order_block_is_bearish"], 1.0)
+        self.assertEqual(observed["ict.has_bos_level"], 1.0)
+        self.assertEqual(observed["ict.has_choch_level"], 1.0)
+        # Raw distances (8.0, -12.0, 6.0) divided by ATR (4.0) -- scale-free, per this module's own
+        # anti-leakage rule against absolute price levels.
+        self.assertAlmostEqual(observed["ict.distance_to_nearest_order_block_atr"], 2.0, places=10)
+        self.assertAlmostEqual(observed["ict.distance_to_bos_level_atr"], -3.0, places=10)
+        self.assertAlmostEqual(observed["ict.distance_to_choch_level_atr"], 1.5, places=10)
+
+    def test_v_ict_columns_are_absent_from_every_other_schema(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V9, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+            ),
+        )
+        # ict evidence attached, but built under v9: no ict.* key should leak into a production
+        # schema's vector just because the evidence happened to be present on the candle.
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V9)
+        self.assertFalse(any(key.startswith("ict.") for key in observed))
+
     def test_candlestick_geometry_scale_free_and_zero_division_protection(self) -> None:
         from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8_GEOMETRY
 
