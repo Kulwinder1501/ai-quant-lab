@@ -21,30 +21,23 @@ import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
 /**
  * How long a scalp may go without progress before it is cut, and how much progress counts.
  *
- * Keyed by timeframe rather than hardcoded to one, because the rule now runs on two and their
- * evidence is not the same strength. A timeframe absent from this table has no stall at all, which
- * is how a new timeframe stays opted out until someone measures it rather than inheriting a cell
- * fitted on a different bar size.
+ * Keyed by timeframe rather than hardcoded to one. A timeframe absent from this table has no stall
+ * at all, which is how a new timeframe stays opted out until someone measures it rather than
+ * inheriting a cell fitted on a different bar size.
  *
  * `5m` -- measured, and the direction is well supported. See the block that uses this for the
  * sweep, the bootstrap interval, and why the cutoff is a band rather than an optimum.
  *
- * `1m` -- ENABLED BY REQUEST, AGAINST THE MEASUREMENT. The sweep of 2026-09-07 ran this exact rule
- * over every closed 1m option trade, 9 cutoffs x 5 progress levels, replayed from the observed
- * premium bid series. On cohort A -- `momentum-scalp` on AutoBot-Scalp1m, which is the bot this
- * actually governs -- the surface was negative in 41 of 45 cells, with a paired session-clustered
- * t of -0.62 at exactly the (10, 0.5R) cell configured here. That is not significant either, so
- * the honest reading is "no evidence it helps on 1m", not "proven harmful"; the recorded
- * conclusion was nonetheless "do not extend the rule to the Scalp1m bot".
- *
- * It is enabled anyway because it was asked for, and it is cheap to reverse: delete the `1m` line
- * and the rule is off. Two things to know before reading any result from it. Cohort B, a different
- * strategy and era, did show a robust region at 3-6 minutes -- but setting progress to +infinity
- * there gave identical results to 3 decimals, meaning every surviving trade was below the progress
- * threshold anyway and the condition did no work. On 1m this is a holding-period cap wearing a
- * stall rule's costume, and holding period is the lever already closed as NO_VIABLE_HORIZON. And
- * 1m entries are what the cap will bite: 9 of 11 trades on 2026-09-08 closed inside 10 minutes, so
- * expect it to fire rarely and change little.
+ * `1m` was added here 2026-09-08 "by request and against its measurement" (the sweep of 2026-09-07
+ * found the rule negative in 41 of 45 cells on the cohort it actually governs, t=-0.62 at the exact
+ * cell configured, i.e. no evidence it helps). Reverted 2026-09-15 back to the pre-09-08 state --
+ * no 1m entry, no stall on 1m -- since the live cell this rule now actually governs is 1m
+ * (`momentum-scalp` on AutoBot-Scalp1m; 5m was independently retired to `executableSides: []` on
+ * 2026-09-03, three days *before* this table's 5m cutoff was even lowered to 10 minutes -- see
+ * `stall-cutoff-20min-is-too-slow` / `scalp-gate-is-only-executable-cell` in project memory), and
+ * running an against-the-measurement rule on the one cell that actually trades was the part worth
+ * undoing. The 5m entry stays: it is the one this table's own evidence supports, even though 5m is
+ * not live right now -- reverting it too would erase a real, if currently unexercised, finding.
  */
 interface MomentumStallPolicy {
   readonly cutoffMinutes: number;
@@ -53,9 +46,6 @@ interface MomentumStallPolicy {
 
 const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | undefined>> = Object.freeze({
   "5m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
-  // Deliberately the 5m cell rather than a 1m-specific one: cohort A produced no better cell to
-  // borrow, so inventing a different number here would be fitting to noise twice over.
-  "1m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
 });
 
 export interface EvaluateOpenPaperTradesInput {
@@ -677,7 +667,8 @@ export class EvaluateOpenPaperTrades {
 
       // Momentum Stall Stop (a timeframe with a policy, elapsed market time >= its cutoff, gain
       // below its progress threshold). See MOMENTUM_STALL_POLICIES for which timeframes are in and
-      // what evidence each rests on -- 1m is enabled by request against its own measurement.
+      // what evidence each rests on -- 1m was tried and reverted 2026-09-15, against its own
+      // measurement's request-driven addition; it carries no policy and therefore no stall.
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.
       //
