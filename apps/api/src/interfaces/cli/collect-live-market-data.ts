@@ -12,6 +12,7 @@ import type { Instrument } from "../../modules/market-data/domain/instrument.js"
 import type { LiveMarketDataProvider } from "../../modules/market-data/domain/live-market-data-provider.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
+import { isNseHoliday, istDateKey } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { getOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 function parsePositiveSeconds(value: string | undefined): number {
@@ -150,13 +151,39 @@ async function main(): Promise<void> {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
 
+    /*
+     * `session`'s own holiday set comes from `--holidays`/NSE_HOLIDAYS -- a static list frozen at
+     * process start, never the live `nse_holidays` table every other collector reads. This process
+     * is long-running (days at a time, under `restart: unless-stopped`), so a stale or empty list
+     * silently keeps polling through a real holiday: measured 2026-09-16, 352 flat, zero-volume 1m
+     * NIFTY50 candles recorded across the full nominal session on 2026-09-14 (Ganesh Chaturthi,
+     * confirmed in `nse_holidays`) -- Fyers' quote endpoint kept answering with the prior close, and
+     * nothing here knew the exchange was shut to disregard it. Checked once per loop iteration
+     * (cheap, one indexed lookup) rather than once at startup, so a holiday that falls while this
+     * process is already running is still caught.
+     */
+    let lastLoggedHolidayDate: string | null = null;
+
     do {
-      for (const timeframe of timeframes) {
-        const result = await collector.execute({ subscriptions, timeframe, ingestionId, now: new Date() });
-        finalizedCount += result.candlesFinalized;
-        // Logged per timeframe: "the poll ran" and "this timeframe sealed a bar" are different
-        // facts, and a single merged line hides which aggregator is falling behind.
-        console.info(JSON.stringify({ level: "info", message: "Live poll complete", timeframe, ...result }));
+      const holiday = await isNseHoliday(database);
+      if (holiday.holiday) {
+        const todayKey = istDateKey(new Date());
+        if (lastLoggedHolidayDate !== todayKey) {
+          console.info(JSON.stringify({
+            level: "info",
+            message: "NSE holiday; live market data collection paused for the day.",
+            holiday: holiday.name,
+          }));
+          lastLoggedHolidayDate = todayKey;
+        }
+      } else {
+        for (const timeframe of timeframes) {
+          const result = await collector.execute({ subscriptions, timeframe, ingestionId, now: new Date() });
+          finalizedCount += result.candlesFinalized;
+          // Logged per timeframe: "the poll ran" and "this timeframe sealed a bar" are different
+          // facts, and a single merged line hides which aggregator is falling behind.
+          console.info(JSON.stringify({ level: "info", message: "Live poll complete", timeframe, ...result }));
+        }
       }
       if (getOption(argumentsList, "once") === "true" || argumentsList.includes("--once") || stopping) {
         break;
