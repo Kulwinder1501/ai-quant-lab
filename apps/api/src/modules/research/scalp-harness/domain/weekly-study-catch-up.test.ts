@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isWeeklyStudyOverdue } from "./weekly-study-catch-up.js";
+import { isTransientDatabaseConnectionError, isWeeklyStudyOverdue } from "./weekly-study-catch-up.js";
 
 const days = (n: number): number => n * 24 * 60 * 60_000;
 const STALE_AFTER = days(8);
@@ -41,5 +41,26 @@ describe("isWeeklyStudyOverdue", () => {
     expect(() => isWeeklyStudyOverdue({
       lastDeclaredAt: null, now: new Date(), staleAfterMs: 0,
     })).toThrow(/staleAfterMs must be positive/);
+  });
+});
+
+describe("isTransientDatabaseConnectionError", () => {
+  it("treats connection-refused, cannot-connect-now, timeout, and reset as transient", () => {
+    expect(isTransientDatabaseConnectionError({ code: "ECONNREFUSED" })).toBe(true);
+    expect(isTransientDatabaseConnectionError({ code: "57P03" })).toBe(true);
+    expect(isTransientDatabaseConnectionError({ code: "ETIMEDOUT" })).toBe(true);
+    expect(isTransientDatabaseConnectionError({ code: "ECONNRESET" })).toBe(true);
+  });
+
+  it("does not treat a real query/schema defect as transient", () => {
+    expect(isTransientDatabaseConnectionError({ code: "42P01" })).toBe(false); // undefined_table
+    expect(isTransientDatabaseConnectionError(new Error("syntax error"))).toBe(false);
+  });
+
+  it("handles non-object and codeless errors without throwing", () => {
+    expect(isTransientDatabaseConnectionError(null)).toBe(false);
+    expect(isTransientDatabaseConnectionError(undefined)).toBe(false);
+    expect(isTransientDatabaseConnectionError("a plain string")).toBe(false);
+    expect(isTransientDatabaseConnectionError({})).toBe(false);
   });
 });

@@ -30,3 +30,20 @@ export function isWeeklyStudyOverdue(input: {
   if (input.lastDeclaredAt === null) return true;
   return input.now.getTime() - input.lastDeclaredAt.getTime() > input.staleAfterMs;
 }
+
+/**
+ * Whether an error from the catch-up check's own database connection is the kind worth retrying --
+ * the database not yet accepting connections during a whole-stack restart -- as opposed to a real
+ * defect (a bad query, a missing table) that retrying would only delay reporting.
+ *
+ * Measured 2026-09-16: a host-standby restart brings every container back at once, and this check
+ * ran (and failed with `ECONNREFUSED`) before `database-v2` had finished starting up. `57P03` is
+ * Postgres's own code for "the database system is starting up" -- reachable if the container itself
+ * accepted the TCP connection before Postgres inside it was ready to serve. Postgres's connection
+ * pool (`pg`) surfaces both as a plain `code` field on the thrown error, not a subclass, hence the
+ * loose `{ code?: unknown }` read rather than an `instanceof` check.
+ */
+export function isTransientDatabaseConnectionError(error: unknown): boolean {
+  const code = (error as { readonly code?: unknown } | null)?.code;
+  return code === "ECONNREFUSED" || code === "57P03" || code === "ETIMEDOUT" || code === "ECONNRESET";
+}

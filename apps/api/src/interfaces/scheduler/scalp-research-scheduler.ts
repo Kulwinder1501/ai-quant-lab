@@ -6,7 +6,10 @@ import { loadEnvironment } from "../../config/environment.js";
 import { requireIsolatedResearchDatabaseUrl } from "../cli/scalp-research-database.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresPathStudyRepository } from "../../infrastructure/database/repositories/postgres-path-study-repository.js";
-import { isWeeklyStudyOverdue } from "../../modules/research/scalp-harness/domain/weekly-study-catch-up.js";
+import {
+  isTransientDatabaseConnectionError,
+  isWeeklyStudyOverdue,
+} from "../../modules/research/scalp-harness/domain/weekly-study-catch-up.js";
 import {
   assessCronStall,
   scalpResearchTickCanaryExpression,
@@ -94,12 +97,39 @@ async function weeklyPathStudy(): Promise<void> {
  *
  * A short-lived pool: this check runs once at startup and the connection is not needed again, since
  * every actual job below does its own work in a spawned child process with its own connection.
+ *
+ * Retries a bounded number of times on a transient connection failure before giving up. Measured
+ * 2026-09-16: a host-standby restart brings every container in the stack back at once, and this
+ * check ran (and failed with `ECONNREFUSED`) before `database-v2` had finished starting up -- with no
+ * retry, that whole-stack-restart race silently skipped the one check this exists for, every time it
+ * happened to lose the race. See `isTransientDatabaseConnectionError` for which failures qualify; a
+ * real query/schema defect is not one of them and still surfaces on the first attempt.
  */
 const PATH_STUDY_CATCH_UP_STALE_AFTER_MS = 8 * 24 * 60 * 60_000; // a week, plus a day of slack
+const PATH_STUDY_CATCH_UP_CONNECT_ATTEMPTS = 5;
+const PATH_STUDY_CATCH_UP_RETRY_DELAY_MS = 5_000;
 async function checkAndCatchUpMissedWeeklyStudy(researchDatabaseUrl: string): Promise<void> {
   const pool = createDatabasePool(researchDatabaseUrl);
   try {
-    const lastDeclaredAt = await new PostgresPathStudyRepository(pool).findLatestDeclaredAt(PATH_STUDY_KEY);
+    const repository = new PostgresPathStudyRepository(pool);
+    let lastDeclaredAt: Date | null = null;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        lastDeclaredAt = await repository.findLatestDeclaredAt(PATH_STUDY_KEY);
+        break;
+      } catch (error) {
+        if (attempt >= PATH_STUDY_CATCH_UP_CONNECT_ATTEMPTS || !isTransientDatabaseConnectionError(error)) {
+          throw error;
+        }
+        console.info(JSON.stringify({
+          level: "info",
+          message: "Weekly path study catch-up check found the database not ready yet; retrying",
+          attempt, ofAttempts: PATH_STUDY_CATCH_UP_CONNECT_ATTEMPTS,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        await new Promise((resolve) => setTimeout(resolve, PATH_STUDY_CATCH_UP_RETRY_DELAY_MS));
+      }
+    }
     const overdue = isWeeklyStudyOverdue({
       lastDeclaredAt, now: new Date(), staleAfterMs: PATH_STUDY_CATCH_UP_STALE_AFTER_MS,
     });
