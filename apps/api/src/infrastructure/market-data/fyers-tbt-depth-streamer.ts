@@ -249,11 +249,26 @@ export class FyersTbtDepthStreamer extends EventEmitter {
         if (ticker === "" || !value.depth) continue;
 
         const book = this.bookAssembler.apply(ticker, value.depth, isSnapshot);
+        /*
+         * `sequenceNo`, `feedTime`, `sendTime`, `tbq` and `tsq` are 64-bit fields, and protobuf.js
+         * decodes those to a `Long` object, not a number or a string -- the same encoding
+         * `depth-book-assembler.ts` documents for `price`. A `Long` renders as e.g. `"45571"` under
+         * `JSON.stringify` (which is why it looks like a string in a log) but is not one, so the
+         * prior `typeof raw === "string"` check never matched it and every one of these fields
+         * silently fell through to 0. `String(raw)` calls the Long's own `toString()`, which is
+         * exact for these fields (sequence counters and epoch-second timestamps sit far under
+         * `Number.MAX_SAFE_INTEGER`); `Number("[object Object]")` for a genuine plain object is NaN,
+         * so this cannot mistake one for the other.
+         */
         const unwrap = (wrapped: unknown): number => {
           const raw = typeof wrapped === "object" && wrapped !== null && "value" in wrapped
             ? (wrapped as { value: unknown }).value
             : wrapped;
-          const parsed = typeof raw === "string" ? Number(raw) : raw;
+          const parsed = typeof raw === "string"
+            ? Number(raw)
+            : typeof raw === "object" && raw !== null
+              ? Number(String(raw))
+              : raw;
           return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : 0;
         };
         // Prices arrive as paise. The vendor divides by 100 in `_addDepth`; doing it here keeps the
