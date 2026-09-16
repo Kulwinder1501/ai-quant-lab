@@ -94,3 +94,85 @@ export class FreshSetupFilteredStrategy implements StrategyEvaluator {
     return proposals;
   }
 }
+
+/** Minutes since IST midnight, e.g. 09:15 IST -> 555. */
+export function istMinuteOfDay(instant: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(instant);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0") % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
+}
+
+/** A half-open [startMinute, endMinute) window of IST minute-of-day, entry blocked while inside it. */
+export interface BlockedIstWindow {
+  readonly startMinute: number;
+  readonly endMinute: number;
+}
+
+/**
+ * Admits a bar's proposal only when its own open time falls outside every blocked IST window.
+ *
+ * Registered as part of `docs/2026-09-16-scalp1m-time-of-day-falsification-v1.md`, configs A/B/C.
+ * Gates on the CANDLE's time, not the proposal's, so what is blocked is when the strategy is
+ * allowed to open a new position -- an already-open trade already reaching its bar-by-bar barrier
+ * check elsewhere in the engine is untouched by this filter.
+ */
+export class TimeWindowFilteredStrategy implements StrategyEvaluator {
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly blockedWindows: readonly BlockedIstWindow[],
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+
+    const minuteOfDay = istMinuteOfDay(context.candle.openTime);
+    const blocked = this.blockedWindows.some(
+      (window) => minuteOfDay >= window.startMinute && minuteOfDay < window.endMinute,
+    );
+    return blocked ? [] : proposals;
+  }
+}
+
+/**
+ * Admits a bar only when its own volume is at least `multiple` times the mean of the prior
+ * `lookback` bars' volume, keyed per instrument+timeframe series.
+ *
+ * The baseline is built from bars STRICTLY BEFORE the signal bar -- the signal bar's own volume is
+ * never in its own denominator, which would inflate the ratio on exactly the bars a real breakout
+ * would want to admit. Fail-closed, matching `EmaStrengthFilteredStrategy`: fewer than `lookback`
+ * prior bars is an insufficient baseline, not a free pass, so the population under this filter's
+ * name is never larger than what it could actually evaluate.
+ */
+export class RelativeVolumeFilteredStrategy implements StrategyEvaluator {
+  static readonly DEFAULT_MULTIPLE = 1.5;
+  static readonly DEFAULT_LOOKBACK = 20;
+
+  private readonly recentVolumeBySeries = new Map<string, number[]>();
+
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly multiple: number = RelativeVolumeFilteredStrategy.DEFAULT_MULTIPLE,
+    private readonly lookback: number = RelativeVolumeFilteredStrategy.DEFAULT_LOOKBACK,
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    const seriesKey = `${context.candle.instrumentId}:${context.candle.timeframe}`;
+    const history = this.recentVolumeBySeries.get(seriesKey) ?? [];
+
+    let result: ProposedTradeIdea[] = [];
+    if (proposals.length > 0 && history.length >= this.lookback) {
+      const baseline = history.reduce((sum, value) => sum + value, 0) / history.length;
+      if (baseline > 0 && context.candle.volume >= this.multiple * baseline) result = proposals;
+    }
+
+    history.push(context.candle.volume);
+    if (history.length > this.lookback) history.shift();
+    this.recentVolumeBySeries.set(seriesKey, history);
+    return result;
+  }
+}

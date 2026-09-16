@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ProposedTradeIdea, StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
 import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-registry.js";
-import { EmaStrengthFilteredStrategy, FreshSetupFilteredStrategy, indicatorValue } from "./entry-filters.js";
+import {
+  EmaStrengthFilteredStrategy,
+  FreshSetupFilteredStrategy,
+  RelativeVolumeFilteredStrategy,
+  TimeWindowFilteredStrategy,
+  indicatorValue,
+  istMinuteOfDay,
+} from "./entry-filters.js";
 
 /**
  * These filters shipped with no coverage at all, which for the stateful one meant its three
@@ -160,5 +167,119 @@ describe("FreshSetupFilteredStrategy", () => {
     const inner = new AlwaysProposes("LONG");
     expect(new FreshSetupFilteredStrategy(inner).evaluate(context("c1"), {})).toHaveLength(1);
     expect(new FreshSetupFilteredStrategy(inner).evaluate(context("c1"), {})).toHaveLength(1);
+  });
+});
+
+describe("istMinuteOfDay", () => {
+  it("converts a UTC instant to IST minute-of-day", () => {
+    expect(istMinuteOfDay(new Date("2026-09-09T03:45:00.000Z"))).toBe(9 * 60 + 15); // session open
+    expect(istMinuteOfDay(new Date("2026-09-09T05:30:00.000Z"))).toBe(11 * 60); // 11:00 IST
+    expect(istMinuteOfDay(new Date("2026-09-09T08:00:00.000Z"))).toBe(13 * 60 + 30); // 13:30 IST
+  });
+});
+
+describe("TimeWindowFilteredStrategy", () => {
+  const blockElevenToHalfOne = [{ startMinute: 11 * 60, endMinute: 13 * 60 + 30 }];
+
+  it("admits a bar whose open time falls outside every blocked window", () => {
+    const filtered = new TimeWindowFilteredStrategy(new AlwaysProposes("LONG"), blockElevenToHalfOne);
+    // 09:15 IST = 03:45 UTC
+    const ctx = context("c1", [], { openTime: new Date("2026-09-09T03:45:00.000Z") });
+    expect(filtered.evaluate(ctx, {})).toHaveLength(1);
+  });
+
+  it("drops a bar whose open time falls inside a blocked window", () => {
+    const filtered = new TimeWindowFilteredStrategy(new AlwaysProposes("LONG"), blockElevenToHalfOne);
+    // 12:00 IST = 06:30 UTC
+    const ctx = context("c1", [], { openTime: new Date("2026-09-09T06:30:00.000Z") });
+    expect(filtered.evaluate(ctx, {})).toEqual([]);
+  });
+
+  it("treats the window as half-open: start is blocked, end is admitted", () => {
+    const filtered = new TimeWindowFilteredStrategy(new AlwaysProposes("LONG"), blockElevenToHalfOne);
+    const atStart = context("c1", [], { openTime: new Date("2026-09-09T05:30:00.000Z") }); // 11:00 IST
+    const atEnd = context("c2", [], { openTime: new Date("2026-09-09T08:00:00.000Z") }); // 13:30 IST
+    expect(filtered.evaluate(atStart, {})).toEqual([]);
+    expect(filtered.evaluate(atEnd, {})).toHaveLength(1);
+  });
+
+  it("does not consult the clock when the strategy proposed nothing", () => {
+    const filtered = new TimeWindowFilteredStrategy(new AlwaysProposes(null), blockElevenToHalfOne);
+    const ctx = context("c1", [], { openTime: new Date("2026-09-09T03:45:00.000Z") });
+    expect(filtered.evaluate(ctx, {})).toEqual([]);
+  });
+
+  it("supports multiple disjoint blocked windows", () => {
+    const filtered = new TimeWindowFilteredStrategy(new AlwaysProposes("LONG"), [
+      { startMinute: 11 * 60, endMinute: 13 * 60 + 30 },
+      { startMinute: 14 * 60 + 45, endMinute: 15 * 60 + 15 },
+    ]);
+    // 15:00 IST = 09:30 UTC, inside the second window
+    const ctx = context("c1", [], { openTime: new Date("2026-09-09T09:30:00.000Z") });
+    expect(filtered.evaluate(ctx, {})).toEqual([]);
+  });
+});
+
+describe("RelativeVolumeFilteredStrategy", () => {
+  function feed(filtered: RelativeVolumeFilteredStrategy, inner: AlwaysProposes, volumes: number[]) {
+    let last: ProposedTradeIdea[] = [];
+    volumes.forEach((volume, index) => {
+      last = filtered.evaluate(context(`c${index}`, [], { volume }), {});
+    });
+    return last;
+  }
+
+  it("refuses (fail-closed) before the lookback window is full, even on huge volume", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 20);
+    // Only 5 prior bars fed; the 6th, however large, still lacks a 20-bar baseline.
+    const result = feed(filtered, inner, [100, 100, 100, 100, 100, 100_000]);
+    expect(result).toEqual([]);
+  });
+
+  it("admits a bar whose volume clears the multiple of the trailing mean", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 20);
+    const baseline = Array(20).fill(100); // mean 100
+    const result = feed(filtered, inner, [...baseline, 151]); // 151 >= 1.5 * 100
+    expect(result).toHaveLength(1);
+  });
+
+  it("drops a bar whose volume falls short of the multiple", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 20);
+    const baseline = Array(20).fill(100);
+    const result = feed(filtered, inner, [...baseline, 149]); // 149 < 1.5 * 100
+    expect(result).toEqual([]);
+  });
+
+  it("never includes the signal bar's own volume in its baseline", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 3);
+    // Baseline bars: 10, 10, 10 (mean 10). A signal bar of 1,000,000 must not enter its own mean.
+    const first = feed(filtered, inner, [10, 10, 10, 1_000_000]);
+    expect(first).toHaveLength(1); // 1,000,000 >= 1.5 * 10
+    // Next bar's baseline is now [10, 10, 1_000_000] (mean ~333,340), so 20 no longer clears it.
+    const second = filtered.evaluate(context("next", [], { volume: 20 }), {});
+    expect(second).toEqual([]);
+  });
+
+  it("does not consult volume when the strategy proposed nothing, but still records the bar", () => {
+    const inner = new AlwaysProposes(null);
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 2);
+    expect(filtered.evaluate(context("c1", [], { volume: 100 }), {})).toEqual([]);
+    expect(filtered.evaluate(context("c2", [], { volume: 100 }), {})).toEqual([]);
+    inner.setSide("LONG");
+    // Baseline now has 2 bars (100, 100); a 151-volume bar should clear 1.5x.
+    expect(filtered.evaluate(context("c3", [], { volume: 151 }), {})).toHaveLength(1);
+  });
+
+  it("keys the rolling baseline per series, so two instruments do not share volume history", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new RelativeVolumeFilteredStrategy(inner, 1.5, 1);
+    filtered.evaluate(context("a1", [], { volume: 100, instrumentId: "instrument-1" }), {});
+    const other = filtered.evaluate(context("b1", [], { volume: 151, instrumentId: "instrument-2" }), {});
+    // instrument-2 has no baseline of its own yet, so it must refuse despite instrument-1's history.
+    expect(other).toEqual([]);
   });
 });
