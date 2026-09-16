@@ -1063,14 +1063,23 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
 
   async updateStopLoss(id: string, newStopLoss: number, reason?: string): Promise<void> {
     assertPositiveFinite(newStopLoss, "New stop loss");
+    /*
+     * $2 is bound twice, deliberately as two separate placeholders rather than one reused
+     * parameter: `stop_loss = $2` infers numeric from the column, while `$4::text` casts to
+     * text for the note. Postgres unifies every occurrence of one placeholder into a single
+     * type, so reusing $2 for both (as this used to) throws "inconsistent types deduced for
+     * parameter $2" (42P08, "text versus numeric") -- not on every call, only when the
+     * planner actually needs to unify both uses, which is data/plan-dependent and had gone
+     * unnoticed until it took down an entire agent tick in production, 2026-09-16.
+     */
     await this.database.query(`
       -- initial_stop_loss is deliberately NOT touched: it records what the trade opened with,
       -- and the stall rule reads it precisely because stop_loss moves.
       UPDATE paper_trades
       SET stop_loss = $2,
           stop_loss_effective_at = CURRENT_TIMESTAMP,
-          notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $2::text, ']')
+          notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $4::text, ']')
       WHERE id = $1 AND status = 'OPEN'
-    `, [id, newStopLoss, reason || "Dynamic Stop-Loss Tightening"]);
+    `, [id, newStopLoss, reason || "Dynamic Stop-Loss Tightening", newStopLoss]);
   }
 }
