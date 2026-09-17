@@ -1602,7 +1602,11 @@ class PostgresMlRepository:
         Membership comes from ``volatility_shadow_enrollments``. Training writes that
         row only after the candidate clears its statistical gate, and enrollment is
         sticky: a failed experiment or a newer retrain cannot silently replace the
-        exact version accumulating live evidence.
+        exact version accumulating live evidence. Because enrollment is sticky
+        rather than following promotion, the enrolled version keeps being scored
+        even once the promotion lifecycle archives it in favour of a later
+        retrain -- so ``ARCHIVED`` is included in the stage filter below
+        alongside ``CANDIDATE``/``PRODUCTION``, and only ``REJECTED`` is excluded.
         """
 
         query = """
@@ -1624,7 +1628,13 @@ class PostgresMlRepository:
               ON model_versions.id = volatility_shadow_enrollments.model_version_id
             WHERE volatility_shadow_enrollments.label_scheme = %s
               AND (model_versions.validation_metrics -> 'validationProtocol' ->> 'labelScheme') = %s
-              AND model_versions.stage IN ('CANDIDATE', 'PRODUCTION')
+              -- ARCHIVED is included deliberately: enrollment is sticky to one exact
+              -- version, and a later retrain being promoted archives that version
+              -- without touching its enrollment. Excluding ARCHIVED here silently
+              -- dropped every sticky-enrolled model out of its own shadow pool the
+              -- moment it was superseded -- REJECTED (failed its gate outright) is
+              -- the only stage that should never be scored.
+              AND model_versions.stage IN ('CANDIDATE', 'PRODUCTION', 'ARCHIVED')
         """
         normalized_label_scheme = _require_non_blank(label_scheme, "Label scheme")
         parameters: list[Any] = [normalized_label_scheme, normalized_label_scheme]
