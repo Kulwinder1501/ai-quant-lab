@@ -207,3 +207,34 @@ export class SmcConfidenceGatedStrategy implements StrategyEvaluator {
     return adjusted.filter((proposal) => proposal.confidence >= this.minimumConfidence);
   }
 }
+
+/**
+ * Drops a proposal when the bar's own candlestick pattern(s) agree with its direction.
+ *
+ * Registered for `docs/2026-09-17-scalp1m-pattern-alignment-falsification-v1.md`. Live-idea data
+ * (277 `momentum-scalp` ideas, deduplicated per idea across every pattern detected on its source
+ * bar) found the opposite of naive intuition: a bar whose only pattern(s) *agree* with the
+ * proposal's side hits target 33.8% of the time (n=66), against 49.1% when a pattern *contradicts*
+ * it (n=57) and 42.0% with no pattern at all (n=151) -- a confirming candlestick shape correlates
+ * with a *worse* outcome here, not a better one.
+ *
+ * A bar can carry several detected patterns at once (up to 4, in this data) with different
+ * directions; `hasAligned`/`hasContradicting` are independent booleans over the whole set, not a
+ * single verdict, so a bar with both an agreeing and a disagreeing pattern is neither silently
+ * dropped nor silently kept under one label.
+ */
+export class PatternAlignmentFilteredStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.filter((proposal) => {
+      const hasAligned = context.patterns.some((pattern) => (
+        (pattern.direction === "BULLISH" && proposal.side === "LONG")
+        || (pattern.direction === "BEARISH" && proposal.side === "SHORT")
+      ));
+      return !hasAligned;
+    });
+  }
+}

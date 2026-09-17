@@ -4,6 +4,7 @@ import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-re
 import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
+  PatternAlignmentFilteredStrategy,
   RelativeVolumeFilteredStrategy,
   SmcConfidenceGatedStrategy,
   TimeWindowFilteredStrategy,
@@ -332,5 +333,60 @@ describe("SmcConfidenceGatedStrategy", () => {
   it("does not consult SMC when the strategy proposed nothing", () => {
     const gated = new SmcConfidenceGatedStrategy(new AlwaysProposes(null), true);
     expect(gated.evaluate(context("c1", BEARISH_SWEEP), {})).toEqual([]);
+  });
+});
+
+describe("PatternAlignmentFilteredStrategy", () => {
+  function withPatterns(id: string, patterns: StrategyMarketContext["patterns"]): StrategyMarketContext {
+    return { ...context(id), patterns };
+  }
+
+  const BULLISH_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "BULLISH_ENGULFING", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+  const BEARISH_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "BEARISH_ENGULFING", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+  const NEUTRAL_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "DOJI", algorithmVersion: "candlestick-v1", direction: "NEUTRAL",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+
+  it("drops a LONG proposal when a bullish (agreeing) pattern is present", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("LONG"));
+    expect(filtered.evaluate(withPatterns("c1", BULLISH_PATTERN), {})).toEqual([]);
+  });
+
+  it("drops a SHORT proposal when a bearish (agreeing) pattern is present", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("SHORT"));
+    expect(filtered.evaluate(withPatterns("c1", BEARISH_PATTERN), {})).toEqual([]);
+  });
+
+  it("admits a LONG proposal when the only pattern present disagrees with it", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("LONG"));
+    expect(filtered.evaluate(withPatterns("c1", BEARISH_PATTERN), {})).toHaveLength(1);
+  });
+
+  it("admits a proposal when the only pattern present is neutral", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("LONG"));
+    expect(filtered.evaluate(withPatterns("c1", NEUTRAL_PATTERN), {})).toHaveLength(1);
+  });
+
+  it("admits a proposal when no pattern is present at all", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("LONG"));
+    expect(filtered.evaluate(context("c1"), {})).toHaveLength(1);
+  });
+
+  it("drops a proposal when any one of several patterns on the bar agrees, even if others disagree", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes("LONG"));
+    const mixed = [...BEARISH_PATTERN, ...BULLISH_PATTERN, ...NEUTRAL_PATTERN];
+    expect(filtered.evaluate(withPatterns("c1", mixed), {})).toEqual([]);
+  });
+
+  it("does not consult patterns when the strategy proposed nothing", () => {
+    const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes(null));
+    expect(filtered.evaluate(withPatterns("c1", BULLISH_PATTERN), {})).toEqual([]);
   });
 });

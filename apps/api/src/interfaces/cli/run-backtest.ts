@@ -27,6 +27,7 @@ import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
   RelativeVolumeFilteredStrategy,
+  PatternAlignmentFilteredStrategy,
   SmcConfidenceGatedStrategy,
   TimeWindowFilteredStrategy,
   type BlockedIstWindow,
@@ -162,7 +163,8 @@ type BacktestEntryFilter =
   | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP"
   | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
   | "RVOL_1" | "RVOL_2" | "RVOL_3"
-  | "SMC_GATE_ON" | "SMC_GATE_OFF";
+  | "SMC_GATE_ON" | "SMC_GATE_OFF"
+  | "PATTERN_ALIGNMENT";
 
 function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
@@ -177,10 +179,11 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "rvol-3") return "RVOL_3";
   if (raw === "smc-gate-on") return "SMC_GATE_ON";
   if (raw === "smc-gate-off") return "SMC_GATE_OFF";
+  if (raw === "pattern-alignment") return "PATTERN_ALIGNMENT";
   throw new Error(
     "--entry-filter must be none, ema-strength-015, fresh-setup, trading-window-a, "
-    + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, or "
-    + `smc-gate-off, received "${raw}".`,
+    + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, "
+    + `smc-gate-off, or pattern-alignment, received "${raw}".`,
   );
 }
 
@@ -270,7 +273,9 @@ async function main(): Promise<void> {
             )
             : entryFilter === "SMC_GATE_ON" || entryFilter === "SMC_GATE_OFF"
               ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
-              : strategyEvaluator;
+              : entryFilter === "PATTERN_ALIGNMENT"
+                ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
+                : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
