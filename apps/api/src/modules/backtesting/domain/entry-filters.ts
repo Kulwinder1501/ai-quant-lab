@@ -1,5 +1,6 @@
 import type { ProposedTradeIdea, StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
 import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-registry.js";
+import { applySmcConfluenceToProposal } from "../../strategy-engine/domain/smc-confluence.js";
 
 /**
  * Backtest-only entry filters: decorators that drop a strategy's proposals without touching it.
@@ -174,5 +175,35 @@ export class RelativeVolumeFilteredStrategy implements StrategyEvaluator {
     if (history.length > this.lookback) history.shift();
     this.recentVolumeBySeries.set(seriesKey, history);
     return result;
+  }
+}
+
+/**
+ * Replays the live decision pipeline's SMC confidence gate: optionally applies the real
+ * `applySmcConfluenceToProposal` (the same function `generate-trade-ideas.ts` calls), then drops
+ * anything below the options-entry floor (`options-entry-validator.ts`'s literal `0.6`).
+ *
+ * Registered for `docs/2026-09-17-scalp1m-smc-gate-falsification-v1.md`. `applySmc: true` is the
+ * control -- the closest a backtest can get to today's live behaviour, since the generic backtest
+ * engine never calls `applySmcConfluenceToProposal` at all (only `generate-trade-ideas.ts` does).
+ * `applySmc: false` is the arm under test: does the strategy do any better if this confidence
+ * adjustment is skipped, still gated at the same floor.
+ */
+export class SmcConfidenceGatedStrategy implements StrategyEvaluator {
+  static readonly OPTIONS_ENTRY_MINIMUM_CONFIDENCE = 0.6;
+
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly applySmc: boolean,
+    private readonly minimumConfidence: number = SmcConfidenceGatedStrategy.OPTIONS_ENTRY_MINIMUM_CONFIDENCE,
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    const adjusted = this.applySmc
+      ? proposals.map((proposal) => applySmcConfluenceToProposal(context, proposal))
+      : proposals;
+    return adjusted.filter((proposal) => proposal.confidence >= this.minimumConfidence);
   }
 }

@@ -5,6 +5,7 @@ import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
   RelativeVolumeFilteredStrategy,
+  SmcConfidenceGatedStrategy,
   TimeWindowFilteredStrategy,
   indicatorValue,
   istMinuteOfDay,
@@ -281,5 +282,55 @@ describe("RelativeVolumeFilteredStrategy", () => {
     const other = filtered.evaluate(context("b1", [], { volume: 151, instrumentId: "instrument-2" }), {});
     // instrument-2 has no baseline of its own yet, so it must refuse despite instrument-1's history.
     expect(other).toEqual([]);
+  });
+});
+
+describe("SmcConfidenceGatedStrategy", () => {
+  /** Proposes the given side at a caller-chosen confidence, so the floor can be tested precisely. */
+  class FixedConfidenceProposes implements StrategyEvaluator {
+    constructor(private readonly side: "LONG" | "SHORT", private readonly confidence: number) {}
+    evaluate(): ProposedTradeIdea[] {
+      return [{ ...proposal(this.side), confidence: this.confidence }];
+    }
+  }
+
+  const BEARISH_SWEEP: StrategyMarketContext["indicators"] = [{
+    code: "LIQUIDITY_SWEEP", algorithmVersion: "smc-v2", parameters: {},
+    values: { type: "BEARISH_SWEEP", level: 100 },
+  }];
+  const BULLISH_FVG: StrategyMarketContext["indicators"] = [{
+    code: "FVG", algorithmVersion: "smc-v2", parameters: {},
+    values: { type: "BULLISH", top: 101, bottom: 100 },
+  }];
+
+  it("applies the real SMC adjustment and drops what it pushes below the 0.6 options-entry floor", () => {
+    // LIQUIDITY_SWEEP weight 5 -> -0.05 against a LONG. 0.64 - 0.05 = 0.59, below the floor.
+    const gated = new SmcConfidenceGatedStrategy(new FixedConfidenceProposes("LONG", 0.64), true);
+    expect(gated.evaluate(context("c1", BEARISH_SWEEP), {})).toEqual([]);
+  });
+
+  it("does not apply SMC when disabled, so the same signal has no effect on the same proposal", () => {
+    const gated = new SmcConfidenceGatedStrategy(new FixedConfidenceProposes("LONG", 0.64), false);
+    const result = gated.evaluate(context("c1", BEARISH_SWEEP), {});
+    expect(result).toHaveLength(1);
+    expect(result[0]!.confidence).toBe(0.64);
+  });
+
+  it("still enforces the confidence floor with SMC disabled, on the base confidence alone", () => {
+    const gated = new SmcConfidenceGatedStrategy(new FixedConfidenceProposes("LONG", 0.5), false);
+    expect(gated.evaluate(context("c1", []), {})).toEqual([]);
+  });
+
+  it("lets a confirming signal rescue a proposal that would otherwise miss the floor, only when enabled", () => {
+    // FVG weight 3 -> +0.03 for a LONG. 0.58 + 0.03 = 0.61, clears the floor.
+    const withSmc = new SmcConfidenceGatedStrategy(new FixedConfidenceProposes("LONG", 0.58), true);
+    const withoutSmc = new SmcConfidenceGatedStrategy(new FixedConfidenceProposes("LONG", 0.58), false);
+    expect(withSmc.evaluate(context("c1", BULLISH_FVG), {})).toHaveLength(1);
+    expect(withoutSmc.evaluate(context("c1", BULLISH_FVG), {})).toEqual([]);
+  });
+
+  it("does not consult SMC when the strategy proposed nothing", () => {
+    const gated = new SmcConfidenceGatedStrategy(new AlwaysProposes(null), true);
+    expect(gated.evaluate(context("c1", BEARISH_SWEEP), {})).toEqual([]);
   });
 });
