@@ -822,6 +822,18 @@ export class AiAutonomousAgent {
     // protect. For a short, "tighter" means moving the stop *down* toward the price.
     if (newsSentiment < -0.3 && newsSentiment > -0.7 && existingTrades.length > 0 && this.paperTradeRepo.updateStopLoss) {
       for (const t of existingTrades) {
+        /*
+         * `livePrice` is the underlying's price; `t.entryPrice`/`t.stopLoss` on an option-buyer
+         * trade are option premium. Comparing the two units directly (as this did) computes a
+         * "tightened" stop off the underlying's price entirely -- e.g. an underlying near 23,000
+         * against a premium near 190 -- which either fails `paper_trades_check` (stop_loss must
+         * stay on the correct side of entry_price) or, worse, would move a real premium stop to a
+         * nonsense underlying-scale level were the constraint ever loosened. Measured 2026-09-16:
+         * this crashed every NIFTY50 agent tick for an open option position via exactly that
+         * constraint violation. Every live paper trade is an option-buyer trade (see
+         * `scalp-gate-is-only-executable-cell` in project memory), so this rule has never had a
+         * position it could safely apply to.
+         */
         if (isOptionBuyerTrade(t)) continue;
         const tightSl = Number((t.side === "LONG" ? livePrice * 0.995 : livePrice * 1.005).toFixed(2));
         // Only ever moves the stop closer to the price, and never through it.
@@ -846,9 +858,13 @@ export class AiAutonomousAgent {
     // PROFIT TRAILING STOP: If trade is in profit by >= 1%, move stop to breakeven + trail 0.5%
     if (existingTrades.length > 0 && this.paperTradeRepo.updateStopLoss) {
       for (const t of existingTrades) {
+        // Same underlying-vs-premium unit mismatch as Circuit Breaker Rule 2 just above -- see
+        // its comment. `pnlPct` off `livePrice` for an option-buyer trade is not the trade's own
+        // P&L at all, it is the underlying's, ~100x too large, and always looks like a runaway
+        // profit that overshoots the real premium entirely.
         if (isOptionBuyerTrade(t)) continue;
         // Calculate profit percentage
-        const pnlPct = t.side === "LONG" 
+        const pnlPct = t.side === "LONG"
           ? (livePrice - t.entryPrice) / t.entryPrice 
           : (t.entryPrice - livePrice) / t.entryPrice;
         

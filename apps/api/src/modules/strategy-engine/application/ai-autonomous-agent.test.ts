@@ -360,6 +360,55 @@ describe("AiAutonomousAgent.tick", () => {
     expect(newStop).toBeGreaterThan(24_050);
   });
 
+  it("does not tighten an option-buyer trade's stop off the underlying's price (sentiment breaker)", async () => {
+    // Regression: `livePrice` (~24,050, the underlying) compared directly against an option
+    // trade's premium-denominated stopLoss/entryPrice crashed the whole tick in production,
+    // 2026-09-16 -- `paper_trades_check` rejects a stop_loss computed on the underlying's scale.
+    // Every live paper trade is an option-buyer trade, so this rule must skip all of them.
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const optionTrade = {
+      id: "trade-open", instrumentId: "inst-1", side: "LONG", quantity: 75, stopLoss: 150,
+      entryPrice: 186.8, underlyingSymbol: "NIFTY50", optionStrike: 24_600, optionType: "CE",
+      optionExpiry: new Date("2026-08-27T10:00:00.000Z"),
+    };
+    const { agent, updateStopLoss } = buildAgent({
+      database,
+      newsScore: -0.4, // Inside Rule 2's band: worse than -0.3, better than -0.7.
+      openTrades: [optionTrade],
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(updateStopLoss).not.toHaveBeenCalled();
+  });
+
+  it("does not tighten an option-buyer trade's stop on the profit-trailing rule", async () => {
+    // Same unit mismatch as above: (livePrice - entryPrice) / entryPrice against a ~187 premium
+    // and a ~24,050 underlying reads as a many-thousand-percent "profit" that would trivially
+    // clear the 1% trigger and compute a stop on the underlying's scale.
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const optionTrade = {
+      id: "trade-open", instrumentId: "inst-1", side: "LONG", quantity: 75, stopLoss: 150,
+      entryPrice: 186.8, underlyingSymbol: "NIFTY50", optionStrike: 24_600, optionType: "CE",
+      optionExpiry: new Date("2026-08-27T10:00:00.000Z"),
+    };
+    const { agent, updateStopLoss } = buildAgent({
+      database,
+      newsScore: 0.3, // Outside Rule 2's band, so only the profit-trailing rule can act.
+      openTrades: [optionTrade],
+    });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    expect(updateStopLoss).not.toHaveBeenCalled();
+  });
+
   it("liquidates the panic breaker at the observed premium, not the underlying's level", async () => {
     // The position is an option. Closing it at `livePrice` (~24,050) against a premium near 200
     // books a fabricated ~24,000-point gain per unit on an emergency liquidation.

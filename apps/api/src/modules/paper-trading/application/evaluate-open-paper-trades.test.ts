@@ -346,6 +346,53 @@ describe("EvaluateOpenPaperTrades", () => {
     expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
   });
 
+  it("moves a 1m momentum scalp stop to break-even from a peak seen in the tick history, even after price receded before the latest bid", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
+      timeframe: "1m",
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225,
+    });
+    const paperTradeRepository = stubRepo(trade, closings);
+    paperTradeRepository.updateStopLoss = async (id, stop, reason) => {
+      stopUpdates.push({ id, stop, reason });
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    // +0.5R is 195 (risk 30 off a 180 entry). The book touched 200 at 08:55 and receded to 190 by
+    // the fresh bid this sweep sees -- 190 alone is only +0.33R, so a check against freshBid alone
+    // would never move the stop even though the trade did reach the trigger.
+    const result = await new EvaluateOpenPaperTrades(
+      paperTradeRepository,
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(
+        sample("2026-08-06T08:59:45.000Z", 190),
+        [
+          sample("2026-08-06T08:50:45.000Z", 182),
+          sample("2026-08-06T08:55:45.000Z", 200),
+          sample("2026-08-06T08:59:45.000Z", 190),
+        ],
+      ),
+    ).execute({
+      accountId: "account-1",
+      asOf: new Date("2026-08-06T09:00:00.000Z"),
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(stopUpdates).toHaveLength(1);
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
+  });
 
   it("squares off an intraday option at the 15:15 IST cutoff, at the quoted bid", async () => {
     const closings: ClosePaperTradeInput[] = [];
@@ -969,14 +1016,15 @@ describe("EvaluateOpenPaperTrades", () => {
   });
 
   /*
-   * 1m, enabled by request against its own measurement.
-   *
-   * The 2026-09-07 sweep found the rule negative in 41 of 45 cells on the cohort this governs, so
-   * these tests pin *behaviour*, not benefit. They exist so that turning 1m back off is a visible,
-   * deliberate edit rather than a silent regression -- deleting the `1m` policy fails the first of
-   * them, which is the whole point of writing it down.
+   * 1m carried a policy from 2026-09-08 to 2026-09-15, added "by request and against its
+   * measurement" (the 2026-09-07 sweep found the rule negative in 41 of 45 cells on the cohort it
+   * actually governs). Reverted 2026-09-15: 1m is the live cell running this rule against its own
+   * evidence was meant to change, and 5m -- the cell the evidence actually supports -- had already
+   * been independently retired days before its own cutoff was even lowered. This test now pins the
+   * reverted behaviour, mirroring "does not stall a 15m position" below: a timeframe absent from
+   * the table has no stall.
    */
-  it("stalls a 1m scalp on the same cutoff, because 1m now carries a policy", async () => {
+  it("does not stall a 1m scalp, since 1m carries no policy after the 2026-09-15 revert", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
@@ -994,6 +1042,8 @@ describe("EvaluateOpenPaperTrades", () => {
       listIncomplete: async () => [],
       listCompleted: async () => [],
     };
+    // Below the +0.5R progress threshold (195), so the only thing that can stop a stall here is the
+    // 1m timeframe carrying no policy -- the same conditions that stalled it before the revert.
     const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
 
     const result = await new EvaluateOpenPaperTrades(
@@ -1003,14 +1053,7 @@ describe("EvaluateOpenPaperTrades", () => {
       densePremiums,
     ).execute({ accountId: "account-1", asOf, exitFees: 0 });
 
-    expect(result.tradesClosed).toBe(1);
-    expect(closings[0]).toMatchObject({
-      exitReason: "MOMENTUM_STALL",
-      exitPrice: 185,
-      // The timeframe is stamped so a 1m stall stays separable from a 5m one in the booked record.
-      // They rest on different evidence and must never be pooled when the rule is next measured.
-      details: expect.objectContaining({ timeframe: "1m", cutoffMinutes: 10, minimumProgressR: 0.5 }),
-    });
+    expect(result.tradesClosed).toBe(0);
   });
 
   /*

@@ -35,9 +35,23 @@ export interface FairValueGap {
   readonly createdAtBarTime: Date;
   readonly candle1Index: number;
   readonly candle3Index: number;
-  fillPercentage: number;
-  state: ZoneLifecycleState;
-  invertedAtBarIndex: number | null;
+  /*
+   * Fully immutable, deliberately -- including these three, which used to be mutated in place on
+   * the SAME object as fill/state advanced bar over bar.
+   *
+   * The batch replay builder (`replay-builder.ts`) hands every bar's snapshot the LIVE zone object,
+   * not a copy, and a backtest computes every snapshot before any of them is read. A snapshot taken
+   * at bar 100 therefore held a reference to an object that kept changing underneath it as bars
+   * 101..N ran, so reading `snapshots[100].zones.activeFvgs[0].fillPercentage` after the full replay
+   * returned bar N's value, not bar 100's -- silently violating the "prefix-invariant by
+   * construction" contract `computeIctSnapshotsForContexts` documents. The array holding the zones
+   * was already re-copied per bar (see the top of `processCandle`); the objects inside it were not.
+   * Every transition below now produces a NEW object instead of writing into this one, so a snapshot
+   * already handed out can never change again.
+   */
+  readonly fillPercentage: number;
+  readonly state: ZoneLifecycleState;
+  readonly invertedAtBarIndex: number | null;
 }
 
 export interface OrderBlock {
@@ -64,7 +78,11 @@ export interface OrderBlock {
    * earlier snapshots cannot contain.
    */
   readonly kind: OrderBlockKind;
-  state: ZoneLifecycleState;
+  /*
+   * Also fully immutable now -- see `FairValueGap`'s equivalent note. TOUCHED used to be written into
+   * this same object across bars, which leaked forward the same way `fillPercentage` did.
+   */
+  readonly state: ZoneLifecycleState;
 }
 
 export interface IctZoneSnapshot {
@@ -76,6 +94,26 @@ export interface IctZoneSnapshot {
     readonly event: "CREATED" | "TOUCHED" | "PARTIALLY_FILLED" | "CONSUMED" | "INVALIDATED" | "INVERTED";
     readonly barIndex: number;
   } | null;
+}
+
+/**
+ * Whether an order block is one of the (at most) two the doctrine ever treats as a real candidate.
+ *
+ * Lecture 4 (Order Block/FVG) is explicit and repeated across multiple worked examples: order blocks
+ * only ever matter within the range from the IDM point to the next structural swing, and within that
+ * range only the FIRST one (just after IDM, `isIdmAdjacent`) and the LAST one (at the extreme end,
+ * `isExtreme`) are real -- "जस्ट आईडीएम के ऊपर वाला पहला ऑर्डर ब्लॉक और लास्ट वाला... उसके बीच वाले
+ * कुछ वर्क नहीं करता" (~47:08), and again "इसके बीच में जितने भी ऑर्डर ब्लॉक बने... उससे हमें कोई
+ * लेना देना नहीं" (~42:44) -- whatever forms in between is explicitly declared irrelevant, not merely
+ * lower-priority.
+ *
+ * `isIdmAdjacent`/`isExtreme` were computed on `OrderBlock` from the start, but nothing in
+ * `feature-extraction.ts` or `refined-order-block.ts` actually filtered on them until this predicate
+ * was added -- both treated every active order block as an equally valid "nearest" candidate, which
+ * is exactly the "in-between" case the transcript rules out.
+ */
+export function isDoctrinallyValidOrderBlockCandidate(ob: OrderBlock): boolean {
+  return ob.isIdmAdjacent || ob.isExtreme;
 }
 
 /**
@@ -134,6 +172,42 @@ export class IctZoneLedger {
   ) {}
 
   /**
+   * Handles a gap price has closed clean through, which flips which side it serves.
+   *
+   * A bullish gap price closed BELOW is no longer demand; on the retest it is supply. The ledger used
+   * to record that as `state = "INVERTED"` and leave the gap in the active list still advertising
+   * `type: "BULLISH"` -- so the strategy was offered a long at a level that had just failed as
+   * support. Gaps supply 85% of this strategy's entries, so this sat on the dominant path.
+   *
+   * Emitting a NEW gap dated to the inversion bar, rather than relabelling in place, is what makes
+   * this cannot-leak: a snapshot taken earlier does not contain it -- the same reasoning as
+   * `failBlock`. Returns both halves instead of mutating `fvg` or pushing directly, so the caller
+   * controls exactly when each becomes visible to `this.fvgs`.
+   *
+   * This is a correctness fix, not a policy: the gap survived before and it survives now. What
+   * changes is which side it is offered on.
+   */
+  private invertGap(
+    fvg: FairValueGap,
+    currentIndex: number,
+    currentTime: Date
+  ): { readonly updatedOriginal: FairValueGap; readonly flipped: FairValueGap } {
+    const updatedOriginal: FairValueGap = { ...fvg, state: "INVALIDATED", invertedAtBarIndex: currentIndex };
+    const flipped: FairValueGap = {
+      ...fvg,
+      id: `${fvg.id}-inv`,
+      type: fvg.type === "BULLISH" ? "BEARISH" : "BULLISH",
+      createdAtBarIndex: currentIndex,
+      createdAtBarTime: currentTime,
+      fillPercentage: 0,
+      state: "FRESH",
+      invertedAtBarIndex: null,
+    };
+    this.lastEvent = { zoneId: flipped.id, zoneKind: "FVG", event: "INVERTED", barIndex: currentIndex };
+    return { updatedOriginal, flipped };
+  }
+
+  /**
    * Handles a block that price closed THROUGH -- the moment the doctrine and this engine part ways.
    *
    * The engine's reading is that the block was wrong, so it is invalidated and pruned. Lecture 7's
@@ -154,46 +228,18 @@ export class IctZoneLedger {
    *    usual way. Exempting inverted blocks from the lifecycle made them immortal, and because
    *    selection takes the first match in creation order they crowded out every fresh block: 1,081
    *    of 1,309 BANKNIFTY signals came from a mitigation block and not one from a fresh block.
+   *
+   * Returns both halves instead of mutating `ob` or pushing directly, for the same reason as
+   * `invertGap`.
    */
-  /**
-   * Handles a gap price has closed clean through, which flips which side it serves.
-   *
-   * A bullish gap price closed BELOW is no longer demand; on the retest it is supply. The ledger used
-   * to record that as `state = "INVERTED"` and leave the gap in the active list still advertising
-   * `type: "BULLISH"` -- so the strategy was offered a long at a level that had just failed as
-   * support. Gaps supply 85% of this strategy's entries, so this sat on the dominant path.
-   *
-   * Reading `state` at the point of use would have been the cheaper fix and would have read the
-   * future: zone objects are shared across snapshots and the backtest builds every snapshot before
-   * replaying, so a mutable field reads its FINAL value. Emitting a NEW gap dated to the inversion
-   * bar cannot leak, because a snapshot taken earlier does not contain it -- the same reasoning as
-   * `failBlock`.
-   *
-   * This is a correctness fix, not a policy: the gap survived before and it survives now. What
-   * changes is which side it is offered on.
-   */
-  private invertGap(fvg: FairValueGap, currentIndex: number, currentTime: Date): void {
-    fvg.state = "INVALIDATED";
-    fvg.invertedAtBarIndex = currentIndex;
-
-    const flipped: FairValueGap = {
-      ...fvg,
-      id: `${fvg.id}-inv`,
-      type: fvg.type === "BULLISH" ? "BEARISH" : "BULLISH",
-      createdAtBarIndex: currentIndex,
-      createdAtBarTime: currentTime,
-      fillPercentage: 0,
-      state: "FRESH",
-      invertedAtBarIndex: null,
-    };
-    this.fvgs.push(flipped);
-    this.lastEvent = { zoneId: flipped.id, zoneKind: "FVG", event: "INVERTED", barIndex: currentIndex };
-  }
-
-  private failBlock(ob: OrderBlock, currentIndex: number, currentTime: Date): void {
-    ob.state = "INVALIDATED";
+  private failBlock(
+    ob: OrderBlock,
+    currentIndex: number,
+    currentTime: Date
+  ): { readonly updatedOriginal: OrderBlock; readonly flipped: OrderBlock | null } {
+    const updatedOriginal: OrderBlock = { ...ob, state: "INVALIDATED" };
     this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "INVALIDATED", barIndex: currentIndex };
-    if (!this.invertedBlocksRemainPoi) return;
+    if (!this.invertedBlocksRemainPoi) return { updatedOriginal, flipped: null };
 
     /*
      * "Taken" means a sweep in the failed block's OWN direction at or after its block candle: a
@@ -220,8 +266,8 @@ export class IctZoneLedger {
       createdAtBarTime: currentTime,
       state: "FRESH",
     };
-    this.obs.push(flipped);
     this.lastEvent = { zoneId: flipped.id, zoneKind: "OB", event: "INVERTED", barIndex: currentIndex };
+    return { updatedOriginal, flipped };
   }
 
   processCandle(
@@ -382,82 +428,73 @@ export class IctZoneLedger {
     }
 
     // 3. Update FVG Lifecycle
-    // A copy: `invertGap` appends the flipped gap, which its own creation bar must not process.
-    for (const fvg of [...this.fvgs]) {
-      if (fvg.state === "INVALIDATED" || fvg.state === "CONSUMED") continue;
-      if (fvg.createdAtBarIndex === currentIndex) continue;
-
-      const gapHeight = fvg.top - fvg.bottom;
-      if (gapHeight <= 0) continue;
-
-      if (fvg.type === "BULLISH") {
-        if (current.low <= fvg.top && current.high >= fvg.bottom) {
-          const penetration = Math.max(0, fvg.top - current.low);
-          const pct = Math.min(1.0, penetration / gapHeight);
-          fvg.fillPercentage = Math.max(fvg.fillPercentage, pct);
-
-          if (current.close < fvg.bottom) {
-            this.invertGap(fvg, currentIndex, current.openTime);
-          } else if (fvg.fillPercentage >= 1.0) {
-            fvg.state = "CONSUMED";
-          } else if (fvg.fillPercentage > 0) {
-            fvg.state = "PARTIALLY_FILLED";
-          }
+    // Builds a brand new array rather than mutating in place -- see the `FairValueGap` docstring for
+    // why. `invertGap` returns both halves instead of pushing, so the flipped gap is appended once,
+    // after this pass, and its own creation bar is naturally exempt from being processed by it.
+    {
+      const nextFvgs: FairValueGap[] = [];
+      const bornThisBar: FairValueGap[] = [];
+      for (const fvg of this.fvgs) {
+        if (fvg.state === "INVALIDATED" || fvg.state === "CONSUMED" || fvg.createdAtBarIndex === currentIndex) {
+          nextFvgs.push(fvg);
+          continue;
         }
-      } else if (fvg.type === "BEARISH") {
-        if (current.high >= fvg.bottom && current.low <= fvg.top) {
-          const penetration = Math.max(0, current.high - fvg.bottom);
-          const pct = Math.min(1.0, penetration / gapHeight);
-          fvg.fillPercentage = Math.max(fvg.fillPercentage, pct);
 
-          if (current.close > fvg.top) {
-            this.invertGap(fvg, currentIndex, current.openTime);
-          } else if (fvg.fillPercentage >= 1.0) {
-            fvg.state = "CONSUMED";
-          } else if (fvg.fillPercentage > 0) {
-            fvg.state = "PARTIALLY_FILLED";
-          }
+        const gapHeight = fvg.top - fvg.bottom;
+        const touches =
+          gapHeight > 0 &&
+          (fvg.type === "BULLISH"
+            ? current.low <= fvg.top && current.high >= fvg.bottom
+            : current.high >= fvg.bottom && current.low <= fvg.top);
+        if (!touches) {
+          nextFvgs.push(fvg);
+          continue;
+        }
+
+        const penetration =
+          fvg.type === "BULLISH" ? Math.max(0, fvg.top - current.low) : Math.max(0, current.high - fvg.bottom);
+        const pct = Math.max(fvg.fillPercentage, Math.min(1.0, penetration / gapHeight));
+        const inverts = fvg.type === "BULLISH" ? current.close < fvg.bottom : current.close > fvg.top;
+
+        if (inverts) {
+          const { updatedOriginal, flipped } = this.invertGap(fvg, currentIndex, current.openTime);
+          nextFvgs.push(updatedOriginal);
+          bornThisBar.push(flipped);
+        } else {
+          const nextState: ZoneLifecycleState = pct >= 1.0 ? "CONSUMED" : pct > 0 ? "PARTIALLY_FILLED" : fvg.state;
+          nextFvgs.push(pct === fvg.fillPercentage && nextState === fvg.state ? fvg : { ...fvg, fillPercentage: pct, state: nextState });
         }
       }
+      this.fvgs = [...nextFvgs, ...bornThisBar];
     }
 
-    // 4. Update Order Block Lifecycle
-    // A snapshot of the list: `failBlock` appends the flipped zone, which must not be processed by
-    // the same pass that created it -- its own creation bar is exempt from its lifecycle.
-    for (const ob of [...this.obs]) {
-      if (ob.state === "INVALIDATED" || ob.state === "CONSUMED") continue;
-      // Do not update on the bar the OB candle itself formed, but allow on subsequent bars
-      if (ob.createdAtBarIndex === currentIndex) continue;
-
-      if (ob.type === "BULLISH") {
-        if (current.low <= ob.top) {
-          if (current.close < ob.meanThreshold) {
-            this.failBlock(ob, currentIndex, current.openTime);
-          } else {
-            ob.state = "TOUCHED";
-            this.lastEvent = {
-              zoneId: ob.id,
-              zoneKind: "OB",
-              event: "TOUCHED",
-              barIndex: currentIndex,
-            };
-          }
+    // 4. Update Order Block Lifecycle -- same copy-on-write shape as the FVG pass above.
+    {
+      const nextObs: OrderBlock[] = [];
+      const bornThisBar: OrderBlock[] = [];
+      for (const ob of this.obs) {
+        if (ob.state === "INVALIDATED" || ob.state === "CONSUMED" || ob.createdAtBarIndex === currentIndex) {
+          nextObs.push(ob);
+          continue;
         }
-      } else if (ob.type === "BEARISH") {
-        if (current.high >= ob.bottom) {
-          if (current.close > ob.meanThreshold) {
-            this.failBlock(ob, currentIndex, current.openTime);
-          } else {
-            ob.state = "TOUCHED";
-            this.lastEvent = {
-              zoneId: ob.id,
-              zoneKind: "OB",
-              event: "TOUCHED",
-              barIndex: currentIndex,
-            };
-          }
+
+        const touches = ob.type === "BULLISH" ? current.low <= ob.top : current.high >= ob.bottom;
+        if (!touches) {
+          nextObs.push(ob);
+          continue;
+        }
+
+        const fails = ob.type === "BULLISH" ? current.close < ob.meanThreshold : current.close > ob.meanThreshold;
+        if (fails) {
+          const { updatedOriginal, flipped } = this.failBlock(ob, currentIndex, current.openTime);
+          nextObs.push(updatedOriginal);
+          if (flipped) bornThisBar.push(flipped);
+        } else {
+          nextObs.push(ob.state === "TOUCHED" ? ob : { ...ob, state: "TOUCHED" });
+          this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "TOUCHED", barIndex: currentIndex };
         }
       }
+      this.obs = [...nextObs, ...bornThisBar];
     }
 
     /*

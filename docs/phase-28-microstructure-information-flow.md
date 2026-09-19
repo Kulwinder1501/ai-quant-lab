@@ -1,14 +1,16 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS (2026-09-09): PHASE 1 GATE MET AT SESSION SCALE, PHASE 4 STILL DIAGNOSTIC ONLY. Two bugs
-found and fixed in the harness call path, neither in `falsification-harness.ts` itself: a missing
-`labelEndAt` stamp (2026-09-09), and a negative-lag sample floor too small to tell "a handful of
-edge-case pairs" from "a small real fraction of a large session" (2026-09-09, pre-registered as
-`NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION = 0.05` in `evaluate-ofi-signal.ts`). Neither fix has been
-tested against a session no one had already inspected. The 6 sessions used to diagnose both bugs
-(2026-09-01 through 09-08) must not be re-run and reported as confirmation — see §7's closing note.
-**Next real read is the first session captured after 2026-09-09.** No Phase 5 work starts before
-that.**
+**STATUS (2026-09-15): FIRST CLEAN PHASE 4 PASS, ON TWO DAYS, ONE INSTRUMENT. §7's 2026-09-11
+single-day blind read reported NO_SIGNAL at 30s/60s, but that verdict rested on a broken placebo —
+`wrongDayMatchedTime` is a documented no-op when only one calendar day is present, and it happened to
+be the largest-magnitude placebo at both horizons, so it alone set a band that was never really
+active. Re-running the *same* capture session (which spans 2026-09-10 and 2026-09-11, both already
+post the 2026-09-09 pre-registration and never previously combined) gives the placebo two real days
+to swap between. Result: **PASS at 30s (IC −0.081, band 0.0044) and 60s (IC −0.078, band 0.0140)**,
+consistent in sign and magnitude with the earlier 6-session diagnostic. See §7's closing update for
+full detail and the caveats that still apply — this is one 2-day window on one instrument
+(BANKNIFTY futures; no NIFTY50 depth exists), not yet a replicated result, and Phase 5 (cost-aware
+gate) has not started.
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -499,3 +501,60 @@ already used to diagnose this are **not** to be re-evaluated under the new floor
 confirming result -- that would just be re-fitting with extra steps. The next genuine read is
 whichever session is captured after 2026-09-09, on data no one had seen when 5% was chosen. Until
 that lands, this section's status is unchanged: no Phase 4/5 conclusion, diagnostic only.
+
+## 8. First clean pass (2026-09-15): the 2026-09-11 NO_SIGNAL verdict was a broken placebo, not a real one
+
+The genuinely blind 2026-09-11 read (above) reported `NO_SIGNAL` at 30s/60s, but with a flagged
+caveat: the real IC exactly equalled the `wrong-day-matched-time` placebo IC at both horizons,
+because that evaluation queried a single calendar day and the placebo is a documented no-op with
+nothing to swap with. Since it happened to be the largest placebo at both horizons, a no-op placebo
+was setting the pass/fail threshold.
+
+**Fix: no code change, only how the existing tool was invoked.** The capture session covering
+2026-09-11 (`5d2abf31-f85e-4b78-968d-10572840a676`) actually spans two full trading days —
+2026-09-10 (44,561 frames) and 2026-09-11 (45,523 frames) — because the collector's socket stayed
+open overnight. Both days are post-2026-09-09 and neither has been reported as a standalone result
+before, so evaluating the whole session (rather than isolating 2026-09-11 alone) is not re-deriving
+anything from inspected data — it is fixing a real methodological gap (one day is not enough for a
+day-swap placebo) using data that was already blind.
+
+```
+research:evaluate-ofi --symbol=NSE:BANKNIFTY26SEPFUT \
+  --session=5d2abf31-f85e-4b78-968d-10572840a676 --horizons=30000,60000
+```
+
+Sequence health: `RECONSTRUCTIBLE`, 90,084 frames, 0 missed sequences, 1 duplicate (flagged
+correctly), span 1,813.5 minutes.
+
+| horizon | verdict | IC | 95% CI | placebo band | negative-lag |
+|---|---|---|---|---|---|
+| 30s | **PASS** | −0.0807 | [−0.0894, −0.0722] | 0.0044 (wrong-day-matched-time, now real) | clears |
+| 60s | **PASS** | −0.0783 | [−0.0880, −0.0687] | 0.0140 (block-permutation) | clears |
+
+Both placebo bands are now genuine (four distinct, non-degenerate placebo ICs each, none dominated by
+a no-op), both confidence intervals exclude zero, and both negative-lag probes clear their
+(correctly floored) sample thresholds with zero `failures`. This is the programme's first clean
+Phase 4 `PASS` — not a diagnostic, not a placebo-compromised NO_SIGNAL.
+
+**What this is not, yet:**
+
+- **Not replicated across instruments.** BANKNIFTY futures only — no NIFTY50 depth exists (§0's
+  cross-instrument drift check, applied to every other signal in this codebase, cannot even be
+  attempted here).
+- **Not replicated across independent windows.** This is one 2-day joint evaluation. The direction
+  and rough magnitude (−0.07 to −0.12) match the earlier 6-session diagnostic, which is reassuring,
+  but that diagnostic ran under the broken-`labelEndAt` and pre-floor-fix code and is not a clean
+  confirmation either. A second, independent multi-day blind window (accumulating forward from here)
+  is the next honest check before treating the sign as established.
+- **futures, not options.** The system trades index options; this signal has not been translated
+  into an options-premium or execution-cost frame at all. Phase 5 (cost-aware gate) has not started,
+  and per §5's pre-registered kill conditions, a negative net expectancy on either index there is
+  still the single most probable terminal outcome for any microstructure signal in this codebase.
+- **1s/5s remain unmeasured.** Structurally invalid at `ofiWindowMs=5000` regardless of day count —
+  a separate, understood limitation (needs a smaller window, decided before looking at any result).
+
+**Sign note, tentative:** a negative IC means higher net order-flow imbalance predicts a *lower*
+price move over the next 30-60s at this feed's cadence — the opposite of naive flow-following
+intuition. Plausible readings (not yet distinguished): retail/algo flow chasing that liquidity
+providers absorb and fade, or an artifact of futures-specific microstructure at this contract's
+current liquidity. Not investigated further here — first priority is replication, not explanation.

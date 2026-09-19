@@ -184,7 +184,8 @@ async function main(): Promise<void> {
       `refused -> warmup ${result.candidatesRefusedBeforeWarmup},`
       + ` out-of-session ${result.candidatesRefusedOutsideSession},`
       + ` stale-bar ${result.candidatesRefusedStaleBar},`
-      + ` unregistered ${result.candidatesRefusedUnregistered}`,
+      + ` unregistered ${result.candidatesRefusedUnregistered},`
+      + ` malformed-geometry ${result.candidatesRefusedMalformedGeometry}`,
       result.unregisteredDefinitionIds.length > 0
         ? `missing definitions: ${result.unregisteredDefinitionIds.join(", ")}` : null,
       result.familiesBlockedByDataReadiness.length > 0

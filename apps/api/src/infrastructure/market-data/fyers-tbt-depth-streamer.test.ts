@@ -5,12 +5,20 @@ import {
 } from "./fyers-tbt-depth-streamer.js";
 import type { DepthFrame } from "../../modules/market-data/domain/depth-frame.js";
 
+/** A protobuf.js `Long`-alike: stringifies to its decimal value, and is not a number or a string. */
+class FakeLong {
+  constructor(private readonly decimal: string) {}
+  toString(): string { return this.decimal; }
+}
+
 class FakeSocket implements FyersTbtSocketLike {
   readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
   readonly subscribed: Array<{ symbols: string[]; channel: string; mode: string }> = [];
   readonly resumedChannels: string[][] = [];
   connectCalls = 0;
   closed = false;
+  /** Set before `connect()` to exercise `installBookAssembler`'s SDK-datastore patch path. */
+  datastore?: { updateDepth: (packet: unknown, callback: unknown, diffOnly: unknown) => void };
   private connected = false;
 
   on(event: string, listener: (...args: unknown[]) => void): void {
@@ -73,6 +81,8 @@ function build(options: {
   tokenDelayMs?: number;
   levelsToStore?: number;
   token?: string;
+  /** Gives each created socket a fake SDK datastore, so `installBookAssembler` patches it. */
+  withDatastore?: boolean;
 } = {}) {
   const sockets: FakeSocket[] = [];
   const seenTokens: string[] = [];
@@ -89,6 +99,10 @@ function build(options: {
     createSocket: (accessToken) => {
       seenTokens.push(accessToken);
       const socket = new FakeSocket();
+      if (options.withDatastore) {
+        // The SDK's own default, overwritten by `installBookAssembler`; never expected to run.
+        socket.datastore = { updateDepth: () => { throw new Error("vendor updateDepth should have been overwritten"); } };
+      }
       sockets.push(socket);
       return socket;
     },
@@ -224,5 +238,110 @@ describe("FyersTbtDepthStreamer", () => {
 
     // Only the original activation; re-subscribing a held symbol would gap its series for no reason.
     expect(sockets[0]!.subscribed).toHaveLength(1);
+  });
+});
+
+describe("installBookAssembler's patched updateDepth", () => {
+  /** Fires the patched `datastore.updateDepth` exactly as the SDK would, re-emitting via `depth`. */
+  function fireUpdateDepth(socket: FakeSocket, packet: unknown): void {
+    socket.datastore!.updateDepth(packet, (ticker: unknown, depth: unknown) => {
+      socket.emit("depth", ticker, depth);
+    }, false);
+  }
+
+  function packetWith(feedOverrides: Record<string, unknown>) {
+    return {
+      snapshot: false,
+      feeds: {
+        "1": {
+          ticker: "NSE:X",
+          depth: {
+            bids: [{ price: 10000, qty: 10, nord: 1, num: 0 }],
+            asks: [{ price: 10100, qty: 15, nord: 1, num: 0 }],
+            tbq: 1_000,
+            tsq: 2_000,
+          },
+          feedTime: 1_787_300_311,
+          sendTime: 1_787_300_311,
+          sequenceNo: 5,
+          ...feedOverrides,
+        },
+      },
+    };
+  }
+
+  it("reads sequenceNo, feedTime/sendTime and tbq/tsq when the vendor sends plain numbers", async () => {
+    const { streamer, sockets } = build({ withDatastore: true });
+    const frames: DepthFrame[] = [];
+    streamer.on("frame", (frame: DepthFrame) => { frames.push(frame); });
+    streamer.subscribe(["NSE:X"]);
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1); });
+
+    fireUpdateDepth(sockets[0]!, packetWith({}));
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.sequenceNo).toBe(5);
+    expect(frames[0]!.exchangeFeedTime).toBe(1_787_300_311);
+    expect(frames[0]!.vendorSendTime).toBe(1_787_300_311);
+    expect(frames[0]!.totalBuyQty).toBe(1_000);
+    expect(frames[0]!.totalSellQty).toBe(2_000);
+  });
+
+  it("reads the same fields when the vendor sends a bare protobuf.js Long (regression)", async () => {
+    // The real shape observed live 2026-09-15/16: sequenceNo arrives as a bare Long with no
+    // `{value}` wrapper at all. Before the fix this silently stored 0 for every frame.
+    const { streamer, sockets } = build({ withDatastore: true });
+    const frames: DepthFrame[] = [];
+    streamer.on("frame", (frame: DepthFrame) => { frames.push(frame); });
+    streamer.subscribe(["NSE:X"]);
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1); });
+
+    fireUpdateDepth(sockets[0]!, packetWith({ sequenceNo: new FakeLong("45571") }));
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.sequenceNo).toBe(45_571);
+  });
+
+  it("reads the same fields when the vendor wraps a Long in a {value} object (regression)", async () => {
+    // The real shape observed live 2026-09-15/16 for feedTime/sendTime/tbq/tsq: a `UInt64Value`
+    // wrapper whose own `.value` is a Long, not a string or number. Before the fix this silently
+    // stored 0 for every frame -- both `feedTime` and `tbq` go through the exact same `unwrap`.
+    const { streamer, sockets } = build({ withDatastore: true });
+    const frames: DepthFrame[] = [];
+    streamer.on("frame", (frame: DepthFrame) => { frames.push(frame); });
+    streamer.subscribe(["NSE:X"]);
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1); });
+
+    fireUpdateDepth(sockets[0]!, packetWith({
+      feedTime: { value: new FakeLong("1789553399") },
+      sendTime: { value: new FakeLong("1789553399") },
+      depth: {
+        bids: [{ price: 10000, qty: 10, nord: 1, num: 0 }],
+        asks: [{ price: 10100, qty: 15, nord: 1, num: 0 }],
+        tbq: { value: new FakeLong("33450") },
+        tsq: { value: new FakeLong("41790") },
+      },
+    }));
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.exchangeFeedTime).toBe(1_789_553_399);
+    expect(frames[0]!.vendorSendTime).toBe(1_789_553_399);
+    expect(frames[0]!.totalBuyQty).toBe(33_450);
+    expect(frames[0]!.totalSellQty).toBe(41_790);
+  });
+
+  it("still defaults to 0 for a field that is genuinely absent, not merely Long-shaped", async () => {
+    const { streamer, sockets } = build({ withDatastore: true });
+    const frames: DepthFrame[] = [];
+    streamer.on("frame", (frame: DepthFrame) => { frames.push(frame); });
+    streamer.subscribe(["NSE:X"]);
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1); });
+
+    const packet = packetWith({});
+    delete (packet.feeds["1"] as Record<string, unknown>).sequenceNo;
+    fireUpdateDepth(sockets[0]!, packet);
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.sequenceNo).toBe(0);
   });
 });

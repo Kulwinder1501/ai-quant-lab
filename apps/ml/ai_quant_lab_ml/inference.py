@@ -166,6 +166,7 @@ def validate_production_artifact(
     timeframe: str,
     alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
     allow_candidate_pool_member: bool = False,
+    allow_archived_shadow_member: bool = False,
 ) -> ProductionInferenceContract:
     """Reject any artifact that cannot prove it matches the request and V1 contract.
 
@@ -173,9 +174,20 @@ def validate_production_artifact(
     daily model competition: its shadow predictions build the live track record
     the competition ranks on, and every other artifact integrity check below
     still applies to it unchanged.
+
+    ``allow_archived_shadow_member`` admits an ARCHIVED model that is sticky-
+    enrolled in the volatility shadow pool. Enrollment there deliberately keeps
+    evaluating the exact version it first enrolled, even after a later retrain
+    is promoted and the promotion lifecycle archives this one -- the shadow
+    competition's live track record is keyed to enrollment, not to the current
+    PRODUCTION stage, so archival must not silently stop its evaluation.
     """
 
-    allowed_stages = ("PRODUCTION", "CANDIDATE") if allow_candidate_pool_member else ("PRODUCTION",)
+    allowed_stages = ["PRODUCTION"]
+    if allow_candidate_pool_member:
+        allowed_stages.append("CANDIDATE")
+    if allow_archived_shadow_member:
+        allowed_stages.append("ARCHIVED")
     if model_version.stage not in allowed_stages:
         raise InferenceError("Only a PRODUCTION model may create a Phase 11 prediction.")
     if model_version.algorithm not in SUPPORTED_ALGORITHMS:

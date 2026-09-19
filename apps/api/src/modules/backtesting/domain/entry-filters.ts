@@ -1,6 +1,7 @@
 import type { ProposedTradeIdea, StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
 import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-registry.js";
 import { filterProposalsByLiquiditySweepBias } from "../../strategy-engine/domain/smc-liquidity-bias.js";
+import { applySmcConfluenceToProposal } from "../../strategy-engine/domain/smc-confluence.js";
 
 /**
  * Backtest-only entry filters: decorators that drop a strategy's proposals without touching it.
@@ -162,6 +163,148 @@ export class PatternConfluenceFilteredStrategy implements StrategyEvaluator {
     }
 
     return modifiedProposals;
+  }
+}
+
+/** Minutes since IST midnight, e.g. 09:15 IST -> 555. */
+export function istMinuteOfDay(instant: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(instant);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0") % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
+}
+
+/** A half-open [startMinute, endMinute) window of IST minute-of-day, entry blocked while inside it. */
+export interface BlockedIstWindow {
+  readonly startMinute: number;
+  readonly endMinute: number;
+}
+
+/**
+ * Admits a bar's proposal only when its own open time falls outside every blocked IST window.
+ *
+ * Registered as part of `docs/2026-09-16-scalp1m-time-of-day-falsification-v1.md`, configs A/B/C.
+ * Gates on the CANDLE's time, not the proposal's, so what is blocked is when the strategy is
+ * allowed to open a new position -- an already-open trade already reaching its bar-by-bar barrier
+ * check elsewhere in the engine is untouched by this filter.
+ */
+export class TimeWindowFilteredStrategy implements StrategyEvaluator {
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly blockedWindows: readonly BlockedIstWindow[],
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    const minuteOfDay = istMinuteOfDay(context.candle.openTime);
+    const blocked = this.blockedWindows.some(
+      (window) => minuteOfDay >= window.startMinute && minuteOfDay < window.endMinute,
+    );
+    return blocked ? [] : proposals;
+  }
+}
+
+/**
+ * Admits a bar only when its own volume is at least `multiple` times the mean of the prior
+ * `lookback` bars' volume, keyed per instrument+timeframe series.
+ *
+ * The baseline is built from bars STRICTLY BEFORE the signal bar -- the signal bar's own volume is
+ * never in its own denominator, which would inflate the ratio on exactly the bars a real breakout
+ * would want to admit. Fail-closed, matching `EmaStrengthFilteredStrategy`: fewer than `lookback`
+ * prior bars is an insufficient baseline, not a free pass, so the population under this filter's
+ * name is never larger than what it could actually evaluate.
+ */
+export class RelativeVolumeFilteredStrategy implements StrategyEvaluator {
+  static readonly DEFAULT_MULTIPLE = 1.5;
+  static readonly DEFAULT_LOOKBACK = 20;
+
+  private readonly recentVolumeBySeries = new Map<string, number[]>();
+
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly multiple: number = RelativeVolumeFilteredStrategy.DEFAULT_MULTIPLE,
+    private readonly lookback: number = RelativeVolumeFilteredStrategy.DEFAULT_LOOKBACK,
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    const seriesKey = `${context.candle.instrumentId}:${context.candle.timeframe}`;
+    const history = this.recentVolumeBySeries.get(seriesKey) ?? [];
+
+    let result: ProposedTradeIdea[] = [];
+    if (proposals.length > 0 && history.length >= this.lookback) {
+      const baseline = history.reduce((sum, value) => sum + value, 0) / history.length;
+      if (baseline > 0 && context.candle.volume >= this.multiple * baseline) result = proposals;
+    }
+
+    history.push(context.candle.volume);
+    if (history.length > this.lookback) history.shift();
+    this.recentVolumeBySeries.set(seriesKey, history);
+    return result;
+  }
+}
+
+/**
+ * Replays the live decision pipeline's SMC confidence gate: optionally applies the real
+ * `applySmcConfluenceToProposal` (the same function `generate-trade-ideas.ts` calls), then drops
+ * anything below the options-entry floor (`options-entry-validator.ts`'s literal `0.6`).
+ *
+ * Registered for `docs/2026-09-17-scalp1m-smc-gate-falsification-v1.md`. `applySmc: true` is the
+ * control -- the closest a backtest can get to today's live behaviour, since the generic backtest
+ * engine never calls `applySmcConfluenceToProposal` at all (only `generate-trade-ideas.ts` does).
+ * `applySmc: false` is the arm under test: does the strategy do any better if this confidence
+ * adjustment is skipped, still gated at the same floor.
+ */
+export class SmcConfidenceGatedStrategy implements StrategyEvaluator {
+  static readonly OPTIONS_ENTRY_MINIMUM_CONFIDENCE = 0.6;
+
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly applySmc: boolean,
+    private readonly minimumConfidence: number = SmcConfidenceGatedStrategy.OPTIONS_ENTRY_MINIMUM_CONFIDENCE,
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    const adjusted = this.applySmc
+      ? proposals.map((proposal) => applySmcConfluenceToProposal(context, proposal))
+      : proposals;
+    return adjusted.filter((proposal) => proposal.confidence >= this.minimumConfidence);
+  }
+}
+
+/**
+ * Drops a proposal when the bar's own candlestick pattern(s) agree with its direction.
+ *
+ * Registered for `docs/2026-09-17-scalp1m-pattern-alignment-falsification-v1.md`. Live-idea data
+ * (277 `momentum-scalp` ideas, deduplicated per idea across every pattern detected on its source
+ * bar) found the opposite of naive intuition: a bar whose only pattern(s) *agree* with the
+ * proposal's side hits target 33.8% of the time (n=66), against 49.1% when a pattern *contradicts*
+ * it (n=57) and 42.0% with no pattern at all (n=151) -- a confirming candlestick shape correlates
+ * with a *worse* outcome here, not a better one.
+ *
+ * A bar can carry several detected patterns at once (up to 4, in this data) with different
+ * directions; `hasAligned`/`hasContradicting` are independent booleans over the whole set, not a
+ * single verdict, so a bar with both an agreeing and a disagreeing pattern is neither silently
+ * dropped nor silently kept under one label.
+ */
+export class PatternAlignmentFilteredStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.filter((proposal) => {
+      const hasAligned = context.patterns.some((pattern) => (
+        (pattern.direction === "BULLISH" && proposal.side === "LONG")
+        || (pattern.direction === "BEARISH" && proposal.side === "SHORT")
+      ));
+      return !hasAligned;
+    });
   }
 }
 

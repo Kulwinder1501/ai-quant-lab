@@ -29,6 +29,11 @@ import {
   FreshSetupFilteredStrategy,
   LiquiditySweepBiasFilteredStrategy,
   PatternConfluenceFilteredStrategy,
+  RelativeVolumeFilteredStrategy,
+  PatternAlignmentFilteredStrategy,
+  SmcConfidenceGatedStrategy,
+  TimeWindowFilteredStrategy,
+  type BlockedIstWindow,
 } from "../../modules/backtesting/domain/entry-filters.js";
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
@@ -208,7 +213,13 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
   return parsed as Record<string, unknown>;
 }
 
-type BacktestEntryFilter = "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP" | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M";
+type BacktestEntryFilter =
+  | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP"
+  | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M"
+  | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
+  | "RVOL_1" | "RVOL_2" | "RVOL_3"
+  | "SMC_GATE_ON" | "SMC_GATE_OFF"
+  | "PATTERN_ALIGNMENT";
 
 function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
@@ -218,8 +229,42 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "pattern-confluence") return "PATTERN_CONFLUENCE";
   if (raw === "liquidity-sweep-bias-15m") return "LIQUIDITY_SWEEP_BIAS_15M";
   if (raw === "liquidity-sweep-bias-30m") return "LIQUIDITY_SWEEP_BIAS_30M";
-  throw new Error(`--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, liquidity-sweep-bias-15m, or liquidity-sweep-bias-30m, received "${raw}".`);
+  if (raw === "trading-window-a") return "TRADING_WINDOW_A";
+  if (raw === "trading-window-b") return "TRADING_WINDOW_B";
+  if (raw === "trading-window-c") return "TRADING_WINDOW_C";
+  if (raw === "rvol-1") return "RVOL_1";
+  if (raw === "rvol-2") return "RVOL_2";
+  if (raw === "rvol-3") return "RVOL_3";
+  if (raw === "smc-gate-on") return "SMC_GATE_ON";
+  if (raw === "smc-gate-off") return "SMC_GATE_OFF";
+  if (raw === "pattern-alignment") return "PATTERN_ALIGNMENT";
+  throw new Error(
+    "--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, "
+    + "liquidity-sweep-bias-15m, liquidity-sweep-bias-30m, trading-window-a, "
+    + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, "
+    + `smc-gate-off, or pattern-alignment, received "${raw}".`,
+  );
 }
+
+/**
+ * Configs 1/2/3 from `docs/2026-09-16-scalp1m-rvol-falsification-v1.md`. Fixed at registration
+ * time; do not add or edit a config after seeing a result.
+ */
+const RVOL_CONFIGS: Record<"RVOL_1" | "RVOL_2" | "RVOL_3", { multiple: number; lookback: number }> = {
+  RVOL_1: { multiple: 1.5, lookback: 20 }, // the originally proposed configuration
+  RVOL_2: { multiple: 2.0, lookback: 20 }, // stricter multiple, same lookback
+  RVOL_3: { multiple: 1.5, lookback: 10 }, // same multiple, shorter lookback
+};
+
+/**
+ * Configs A/B/C from `docs/2026-09-16-scalp1m-time-of-day-falsification-v1.md`. Fixed at
+ * registration time; do not add or edit a window after seeing a result.
+ */
+const TRADING_WINDOW_CONFIGS: Record<"TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C", BlockedIstWindow[]> = {
+  TRADING_WINDOW_A: [{ startMinute: 11 * 60, endMinute: 13 * 60 + 30 }], // 11:00-13:30, "lunch-block"
+  TRADING_WINDOW_B: [{ startMinute: 11 * 60 + 30, endMinute: 13 * 60 }], // 11:30-13:00, "narrow-lunch-block"
+  TRADING_WINDOW_C: [{ startMinute: 12 * 60 + 45, endMinute: 14 * 60 }], // 12:45-14:00, "post-downtime-block"
+};
 
 /** A decimal fraction in (0, 1], falling back to the engine default. */
 function parseFractionOption(argumentsList: string[], option: string, fallback: number): number {
@@ -295,7 +340,17 @@ async function main(): Promise<void> {
             ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "15m")
             : entryFilter === "LIQUIDITY_SWEEP_BIAS_30M"
               ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "30m")
-              : strategyEvaluator;
+              : entryFilter === "TRADING_WINDOW_A" || entryFilter === "TRADING_WINDOW_B" || entryFilter === "TRADING_WINDOW_C"
+                ? new TimeWindowFilteredStrategy(strategyEvaluator, TRADING_WINDOW_CONFIGS[entryFilter])
+                : entryFilter === "RVOL_1" || entryFilter === "RVOL_2" || entryFilter === "RVOL_3"
+                  ? new RelativeVolumeFilteredStrategy(
+                    strategyEvaluator, RVOL_CONFIGS[entryFilter].multiple, RVOL_CONFIGS[entryFilter].lookback,
+                  )
+                  : entryFilter === "SMC_GATE_ON" || entryFilter === "SMC_GATE_OFF"
+                    ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
+                    : entryFilter === "PATTERN_ALIGNMENT"
+                      ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
+                      : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,

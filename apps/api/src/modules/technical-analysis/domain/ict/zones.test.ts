@@ -120,6 +120,35 @@ describe("IctZoneLedger", () => {
     expect(snap4.lastZoneEvent?.event).toBe("INVALIDATED");
   });
 
+  it("never mutates an order block object already handed out (TOUCHED leak)", () => {
+    const ledger = new IctZoneLedger(1.5, 0.5);
+    const structTracker = new IctStructureTracker(2);
+
+    const candles: CausalCandle[] = [
+      makeCandle(0, 105, 106, 94, 95),
+      makeCandle(1, 95, 126, 94, 125),
+      makeCandle(2, 120, 130, 110, 128),
+    ];
+    let s0 = structTracker.processCandle(candles, 0);
+    ledger.processCandle(candles, 0, s0);
+    let s1 = structTracker.processCandle(candles, 1);
+    ledger.processCandle(candles, 1, s1);
+    let s2 = structTracker.processCandle(candles, 2);
+    const snap2 = ledger.processCandle(candles, 2, s2);
+
+    const obHandedOutAtBar2 = snap2.activeObs[0];
+    expect(obHandedOutAtBar2.state).toBe("FRESH");
+
+    // Candle 3 touches the block (see the OB invalidation test above) -> TOUCHED on the ledger's
+    // internal copy. The object captured at bar 2 must not follow it.
+    const c3 = makeCandle(3, 128, 129, 98, 102);
+    candles.push(c3);
+    const s3 = structTracker.processCandle(candles, 3);
+    ledger.processCandle(candles, 3, s3);
+
+    expect(obHandedOutAtBar2.state).toBe("FRESH");
+  });
+
   // Fixture: bars 0-2 create one Bullish FVG (100 -> 105); bars 3-4 fill and
   // then invert it. Used by the prefix-invariance and zoneId tests below.
   function fvgLifecycleCandles(): CausalCandle[] {
@@ -133,8 +162,7 @@ describe("IctZoneLedger", () => {
   }
 
   // Serialize the zone snapshot returned at `captureIndex` from a ledger fed
-  // bars 0..upToIndex. Serialization happens at the moment of the call so that
-  // later mutation of the (reference-shared) zone objects cannot alter it.
+  // bars 0..upToIndex.
   function snapshotJsonAt(
     candles: readonly CausalCandle[],
     captureIndex: number,
@@ -179,6 +207,37 @@ describe("IctZoneLedger", () => {
     // Derived from origin bar, not random: same across independent recomputation.
     expect(first.activeFvgs[0].id).toBe("fvg-bullish-2");
     expect(second.activeFvgs[0].id).toBe(first.activeFvgs[0].id);
+  });
+
+  it("never mutates a zone object already handed out in an earlier snapshot (the batch/replay leak)", () => {
+    // This is the defect the batch replay builder hit: it stores every bar's snapshot in an array
+    // before any of them is read, so if a zone object were mutated in place on a later bar, an
+    // EARLIER snapshot's own object -- the very same reference, not a copy -- would silently read
+    // the later bar's values once the whole run finished. Capturing the live object (not JSON) and
+    // re-checking it after the ledger keeps advancing is what would have caught that.
+    const candles = fvgLifecycleCandles();
+    const ledger = new IctZoneLedger(1.5, 0.5);
+    const structTracker = new IctStructureTracker(2);
+
+    let snapshotAtBar2!: ReturnType<IctZoneLedger["processCandle"]>;
+    for (let i = 0; i <= 2; i++) {
+      const s = structTracker.processCandle(candles, i);
+      snapshotAtBar2 = ledger.processCandle(candles, i, s);
+    }
+    const fvgHandedOutAtBar2 = snapshotAtBar2.activeFvgs[0];
+    expect(fvgHandedOutAtBar2.fillPercentage).toBe(0);
+    expect(fvgHandedOutAtBar2.state).toBe("FRESH");
+
+    // Bars 3-4 partially fill and then invert the same gap -- exactly the transitions that used to
+    // mutate the object in place.
+    for (let i = 3; i <= 4; i++) {
+      const s = structTracker.processCandle(candles, i);
+      ledger.processCandle(candles, i, s);
+    }
+
+    // The object reference captured at bar 2 must be untouched by everything that happened after.
+    expect(fvgHandedOutAtBar2.fillPercentage).toBe(0);
+    expect(fvgHandedOutAtBar2.state).toBe("FRESH");
   });
 
   it("gives overlapping same-direction FVGs with different origins distinct ids", () => {

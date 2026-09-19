@@ -177,14 +177,63 @@ export class PostgresTradeReviewRepository {
     ]);
   }
 
-  /** Tag counts across reviews -- the aggregate that may eventually justify an experiment. */
-  async countResearchTags(): Promise<Array<{ tag: string; tradeCount: number }>> {
+  /**
+   * Tag counts across reviews, optionally scoped to one instrument, one strategy, and/or the most
+   * recent N matching closed trades -- the aggregate that may eventually justify an experiment.
+   *
+   * Unscoped (the default, no arguments), this is exactly the prior all-time global behaviour. That
+   * matters here specifically: an online-adjustment rule reading "recent GAVE_BACK_FAVOURABLE_MOVE
+   * tags" against the unscoped count would blend momentum-scalp's tags with every other strategy
+   * this system has ever run, across all time -- a live risk decision has no business being moved by
+   * a volatility-path option trade from months ago. Scoping this at the query layer, rather than by
+   * adding columns to `trade_reviews`, reuses the FKs that already exist (`paper_trades.instrument_id`
+   * is NOT NULL; `trade_ideas.evidence->>'strategy'` is the label strategies like `momentum-scalp`
+   * already write -- see `momentum-scalp-strategy.ts`'s `evidence.strategy`) rather than duplicating
+   * data that can be joined.
+   */
+  async countResearchTags(scope: ResearchTagScope = {}): Promise<Array<{ tag: string; tradeCount: number }>> {
+    if (
+      scope.recentTradeLimit !== undefined
+      && (!Number.isInteger(scope.recentTradeLimit) || scope.recentTradeLimit <= 0)
+    ) {
+      throw new Error("recentTradeLimit must be a positive integer.");
+    }
+
     const result = await this.client.query<{ tag: string; trade_count: string }>(`
+      WITH scoped_reviews AS (
+        SELECT trade_reviews.proposed_research_tags
+        FROM trade_reviews
+        JOIN paper_trades ON paper_trades.id = trade_reviews.trade_id
+        LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+        WHERE ($1::uuid IS NULL OR paper_trades.instrument_id = $1)
+          -- A trade with no linked idea, or an idea with no evidence.strategy, never matches a
+          -- strategy filter: absence of the label stays absence rather than being silently included.
+          AND ($2::text IS NULL OR trade_ideas.evidence->>'strategy' = $2)
+        ORDER BY paper_trades.closed_at DESC
+        -- LIMIT NULL is Postgres for "no limit", confirmed directly rather than assumed, so an
+        -- omitted recentTradeLimit reproduces the prior unscoped, all-time behaviour exactly.
+        LIMIT $3
+      )
       SELECT tag, COUNT(*) AS trade_count
-      FROM trade_reviews, jsonb_array_elements_text(proposed_research_tags) AS tag
+      FROM scoped_reviews, jsonb_array_elements_text(proposed_research_tags) AS tag
       GROUP BY tag
       ORDER BY COUNT(*) DESC, tag ASC
-    `);
+    `, [scope.instrumentId ?? null, scope.strategy ?? null, scope.recentTradeLimit ?? null]);
     return result.rows.map((row) => ({ tag: row.tag, tradeCount: Number(row.trade_count) }));
   }
+}
+
+export interface ResearchTagScope {
+  /** Only trades on this instrument. Omit for every instrument. */
+  readonly instrumentId?: string;
+  /**
+   * Only trades whose linked trade idea's evidence names this strategy (e.g. `"momentum-scalp"`,
+   * the label `momentum-scalp-strategy.ts` writes into `evidence.strategy`). Omit for every strategy.
+   */
+  readonly strategy?: string;
+  /**
+   * Only the most recent N closed trades (by `paper_trades.closed_at`) matching the filters above.
+   * Omit for an all-time count.
+   */
+  readonly recentTradeLimit?: number;
 }

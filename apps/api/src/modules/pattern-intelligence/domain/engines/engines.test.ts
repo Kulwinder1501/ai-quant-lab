@@ -211,6 +211,93 @@ describe("Pattern Intelligence Engines", () => {
     expect(db!.necklineLevel).toBe(25050);
   });
 
+  it("ClassicalReversalEngine detects Head and Shoulders", () => {
+    const engine = new ClassicalReversalEngine();
+    const candles = [
+      makeCandle(new Date("2026-08-25T04:00:00.000Z"), 99, 100, 98, 99), // Left shoulder, high 100
+      makeCandle(new Date("2026-08-25T04:01:00.000Z"), 99, 100, 98, 99),
+      makeCandle(new Date("2026-08-25T04:02:00.000Z"), 95.5, 96, 95, 95.5), // Valley 1, low 95
+      makeCandle(new Date("2026-08-25T04:03:00.000Z"), 108, 110, 107, 109), // Head, high 110
+      makeCandle(new Date("2026-08-25T04:04:00.000Z"), 109, 110, 108, 109),
+      makeCandle(new Date("2026-08-25T04:05:00.000Z"), 96.5, 97, 96, 96.5), // Valley 2, low 96
+      makeCandle(new Date("2026-08-25T04:06:00.000Z"), 100, 101, 99, 100), // Right shoulder, high 101
+      makeCandle(new Date("2026-08-25T04:07:00.000Z"), 95, 96, 90, 91),
+      makeCandle(new Date("2026-08-25T04:08:00.000Z"), 91, 92, 88, 90), // Closes below neckline (95.5)
+    ];
+
+    const results = engine.detect(candles);
+    const hs = results.find((r) => r.subtype === "HEAD_AND_SHOULDERS");
+    expect(hs).toBeDefined();
+    expect(hs!.orientation).toBe("DOWN");
+    expect(hs!.patternHigh).toBe(110);
+    expect(hs!.patternLow).toBe(95);
+  });
+
+  /**
+   * Regression test for a real production defect (measured 2026-09-16, NIFTY50 1m 2026-09-11):
+   * the engine only checked the head against both shoulders, not against the valleys either side of
+   * it. A small-bodied head candle could clear both shoulders while still sitting below a valley's
+   * low, producing `patternHigh < patternLow` -- which later violated a NOT NULL/CHECK constraint on
+   * insert and aborted the whole detection run for every other family and instrument in the batch.
+   */
+  it("ClassicalReversalEngine refuses a Head and Shoulders whose head does not clear both valleys", () => {
+    const engine = new ClassicalReversalEngine();
+    const candles = [
+      makeCandle(new Date("2026-08-25T04:00:00.000Z"), 99, 100, 98, 99), // Left shoulder, high 100
+      makeCandle(new Date("2026-08-25T04:01:00.000Z"), 99, 100, 98, 99),
+      makeCandle(new Date("2026-08-25T04:02:00.000Z"), 115.5, 116, 115, 115.2), // Valley 1, low 115 -- above the head
+      makeCandle(new Date("2026-08-25T04:03:00.000Z"), 105, 110, 104, 106), // Head, high 110 -- clears both shoulders
+      makeCandle(new Date("2026-08-25T04:04:00.000Z"), 106, 108, 105, 107),
+      makeCandle(new Date("2026-08-25T04:05:00.000Z"), 112.5, 113, 112, 112.2), // Valley 2, low 112 -- also above the head
+      makeCandle(new Date("2026-08-25T04:06:00.000Z"), 100, 101, 99, 100), // Right shoulder, high 101
+      makeCandle(new Date("2026-08-25T04:07:00.000Z"), 95, 96, 89, 90),
+      makeCandle(new Date("2026-08-25T04:08:00.000Z"), 95, 96, 89, 90), // Closes below neckline (113.5)
+    ];
+
+    const results = engine.detect(candles);
+    expect(results.find((r) => r.subtype === "HEAD_AND_SHOULDERS")).toBeUndefined();
+  });
+
+  it("ClassicalReversalEngine detects Inverse Head and Shoulders", () => {
+    const engine = new ClassicalReversalEngine();
+    const candles = [
+      makeCandle(new Date("2026-08-25T04:00:00.000Z"), 100, 101, 100, 100.5), // Left shoulder, low 100
+      makeCandle(new Date("2026-08-25T04:01:00.000Z"), 100.5, 101, 100, 100.5),
+      makeCandle(new Date("2026-08-25T04:02:00.000Z"), 104.5, 105, 104, 104.5), // Peak 1, high 105
+      makeCandle(new Date("2026-08-25T04:03:00.000Z"), 91, 93, 90, 92), // Head, low 90
+      makeCandle(new Date("2026-08-25T04:04:00.000Z"), 92, 94, 91, 93),
+      makeCandle(new Date("2026-08-25T04:05:00.000Z"), 103.5, 104, 103, 103.5), // Peak 2, high 104
+      makeCandle(new Date("2026-08-25T04:06:00.000Z"), 101, 102, 100.8, 101.5), // Right shoulder, low 100.8
+      makeCandle(new Date("2026-08-25T04:07:00.000Z"), 108, 109, 107, 108.5),
+      makeCandle(new Date("2026-08-25T04:08:00.000Z"), 108, 112, 107, 110), // Closes above neckline (104.5)
+    ];
+
+    const results = engine.detect(candles);
+    const ihs = results.find((r) => r.subtype === "INVERSE_HEAD_AND_SHOULDERS");
+    expect(ihs).toBeDefined();
+    expect(ihs!.orientation).toBe("UP");
+    expect(ihs!.patternHigh).toBe(105);
+    expect(ihs!.patternLow).toBe(90);
+  });
+
+  it("ClassicalReversalEngine refuses an Inverse Head and Shoulders whose head does not undercut both peaks", () => {
+    const engine = new ClassicalReversalEngine();
+    const candles = [
+      makeCandle(new Date("2026-08-25T04:00:00.000Z"), 100, 101, 100, 100.5), // Left shoulder, low 100
+      makeCandle(new Date("2026-08-25T04:01:00.000Z"), 100.5, 101, 100, 100.5),
+      makeCandle(new Date("2026-08-25T04:02:00.000Z"), 84.5, 85, 84, 84.5), // Peak 1, high 85 -- below the head
+      makeCandle(new Date("2026-08-25T04:03:00.000Z"), 91, 93, 90, 92), // Head, low 90 -- still undercuts both shoulders
+      makeCandle(new Date("2026-08-25T04:04:00.000Z"), 92, 94, 91, 93),
+      makeCandle(new Date("2026-08-25T04:05:00.000Z"), 86.5, 87, 86, 86.5), // Peak 2, high 87 -- also below the head
+      makeCandle(new Date("2026-08-25T04:06:00.000Z"), 101, 102, 100.8, 101.5), // Right shoulder, low 100.8
+      makeCandle(new Date("2026-08-25T04:07:00.000Z"), 108, 109, 107, 108.5),
+      makeCandle(new Date("2026-08-25T04:08:00.000Z"), 108, 112, 107, 110),
+    ];
+
+    const results = engine.detect(candles);
+    expect(results.find((r) => r.subtype === "INVERSE_HEAD_AND_SHOULDERS")).toBeUndefined();
+  });
+
   it("ContinuationStructureEngine detects Bull Flag", () => {
     const engine = new ContinuationStructureEngine();
     const candles = [
