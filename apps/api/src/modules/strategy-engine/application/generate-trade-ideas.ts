@@ -15,7 +15,6 @@ import {
   strategySupportsTimeframe,
 } from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
-import { filterProposalsByLiquiditySweepBias } from "../domain/smc-liquidity-bias.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -192,9 +191,6 @@ export class GenerateTradeIdeas {
         let proposals = registration.strategyKey === "ict-structure-v1"
           ? rawProposals
           : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
-        if (registration.strategyKey !== "ict-structure-v1") {
-          proposals = filterProposalsByLiquiditySweepBias(context, proposals, "15m");
-        }
         /*
          * The strategy's own declared sides first, then the caller's optional narrowing.
          *
@@ -325,9 +321,6 @@ export class GenerateTradeIdeas {
           let proposals = registration.strategyKey === "ict-structure-v1"
             ? rawProposals
             : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
-          if (registration.strategyKey !== "ict-structure-v1") {
-            proposals = filterProposalsByLiquiditySweepBias(context, proposals, "15m");
-          }
           // Same rule as generation, so a scan cannot report candidates on a side production
           // would refuse to trade.
           proposals = proposals.filter((proposal) =>

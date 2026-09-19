@@ -29,8 +29,6 @@ import {
   DEFAULT_MAX_BAR_AGE_MINUTES,
 } from "../../paper-trading/domain/bot-data-freshness.js";
 import { measureSmcConfluence } from "../domain/smc-confluence.js";
-import { evaluateLiquiditySweepBias } from "../domain/smc-liquidity-bias.js";
-import { isStrictlyHigherTimeframe } from "../domain/timeframe-order.js";
 import { SMC_ALGORITHM_VERSION } from "../../technical-analysis/domain/technical-indicator.js";
 import type { MarketQuoteReader } from "../../market-data/domain/market-quote.js";
 
@@ -572,7 +570,7 @@ export class AiAutonomousAgent {
       return;
     }
 
-    let ctx = await this.marketContextRepo.findLatestCompleted({ instrumentId: instId, timeframe });
+    const ctx = await this.marketContextRepo.findLatestCompleted({ instrumentId: instId, timeframe });
     if (!ctx) {
       /*
        * Distinct from the staleness refusal below, and the distinction matters: that one means a bar
@@ -590,23 +588,6 @@ export class AiAutonomousAgent {
           timeframe },
       });
       return;
-    }
-
-    if (this.marketContextRepo.findCompletedBefore && isStrictlyHigherTimeframe(ctx.candle.timeframe, "15m")) {
-      const htf15m = await this.marketContextRepo.findCompletedBefore({
-        instrumentId: instId,
-        timeframe: "15m",
-        asOf: ctx.candle.closeTime,
-      });
-      if (htf15m && htf15m.candle.closeTime.getTime() <= ctx.candle.closeTime.getTime()) {
-        ctx = {
-          ...ctx,
-          higherTimeframeContexts: {
-            ...ctx.higherTimeframeContexts,
-            "15m": htf15m,
-          },
-        };
-      }
     }
 
     // Stops above were still evaluated from live prices. New proposals, however, must not mix a
@@ -913,7 +894,6 @@ export class AiAutonomousAgent {
      * project does not have -- see docs/pending-work.md 2.4.
      */
     const smcConfluence = measureSmcConfluence(ctx);
-    const htfLiquidityBias = evaluateLiquiditySweepBias(ctx, "15m");
     const scoreInputWithoutTape = {
       rsi: rsiVal,
       livePrice,
@@ -993,12 +973,6 @@ export class AiAutonomousAgent {
           short: smcConfluence.short,
           signals: smcConfluence.signals,
         },
-        htfLiquidityBias: {
-          timeframe: "15m",
-          bias: htfLiquidityBias.bias,
-          reason: htfLiquidityBias.reason,
-          signals: htfLiquidityBias.signals,
-        },
         reasoning,
       },
     };
@@ -1056,32 +1030,6 @@ export class AiAutonomousAgent {
           details: {
             gatedSide: setupScore.side,
             executableSides: [...AGENT_EXECUTABLE_SIDES],
-            longConfidence: setupScore.longConfidence,
-            shortConfidence: setupScore.shortConfidence,
-            reasoning,
-          },
-        });
-        return;
-      }
-
-      // HTF Liquidity Sweep Bias directional gate: do not open trades opposing the 15m sweep
-      if (
-        htfLiquidityBias.bias !== "NEUTRAL" &&
-        (
-          (setupScore.side === "LONG" && htfLiquidityBias.bias !== "BULLISH") ||
-          (setupScore.side === "SHORT" && htfLiquidityBias.bias !== "BEARISH")
-        )
-      ) {
-        this.recordThought({
-          id: this.thoughtId(symbol, "htf-liquidity-bias-opposed"),
-          timestamp: new Date().toISOString(),
-          symbol,
-          action: "MONITORING",
-          confidence,
-          message: `${setupScore.side} setup qualified at ${confidence}% but opposes 15m HTF liquidity sweep bias (${htfLiquidityBias.bias}): ${htfLiquidityBias.reason}. Recorded, not traded.`,
-          details: {
-            gatedSide: setupScore.side,
-            htfLiquidityBias,
             longConfidence: setupScore.longConfidence,
             shortConfidence: setupScore.shortConfidence,
             reasoning,
@@ -1223,12 +1171,6 @@ export class AiAutonomousAgent {
             // Recorded so a review can ask whether the losing thesis was nearly as strong.
             longConfidence: setupScore.longConfidence,
             shortConfidence: setupScore.shortConfidence,
-            htfLiquidityBias: {
-              timeframe: "15m",
-              bias: htfLiquidityBias.bias,
-              reason: htfLiquidityBias.reason,
-              signals: htfLiquidityBias.signals,
-            },
           },
           expiresAt: new Date(Date.now() + 3600000 * 4),
           evidenceItems: [],
