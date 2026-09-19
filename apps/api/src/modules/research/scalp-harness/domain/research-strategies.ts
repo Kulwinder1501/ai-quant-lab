@@ -35,12 +35,42 @@ export interface ResearchStrategyAdapter {
   evaluate(strategyContext: StrategyMarketContext, reference1mContext: StrategyMarketContext): ImmutableStrategyProposal[];
 }
 
-interface BaseEvaluator {
+export interface BaseEvaluator {
   evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[];
 }
 
+/**
+ * Content digests of the frozen source strategies, for DRIFT DETECTION only.
+ *
+ * Deliberately separate from `researchStrategySourceChecksums` below, which is the **provenance
+ * pin**: the value each research version declared and which feeds `strategyDefinitionHash`. The two
+ * answer different questions and must not be merged:
+ *
+ *  - this map: "has the file changed since we froze it?" -- must be machine-independent, so it is
+ *    the digest of LF-normalised CONTENT.
+ *  - that map: "what did version N declare it was measured against?" -- immutable history, whatever
+ *    bytes it was computed over.
+ *
+ * They disagree today, and that is the reason for the split rather than a bug to tidy. Measured
+ * 2026-09-09: the pins for `momentum-scalp-index-strategy.ts` and `momentum-scalp-pattern-strategy.ts`
+ * are CRLF digests (written on a Windows working tree), while `momentum-scalp-strategy.ts` is an LF
+ * digest. The old guard hashed raw bytes and threw on the FIRST entry, so it never reached the other
+ * two and nobody saw the inconsistency.
+ *
+ * **Do not "fix" the pins to match this map.** `implementationArtifactChecksum` is an input to
+ * `strategyDefinitionHash`, `index-v3-research` and the pattern versions have captured rows under
+ * their current hashes, and research definitions still THROW on payload divergence -- so re-pinning
+ * them would break the next harness tick. Freezing a wrong-flavoured digest costs nothing as long as
+ * it is stable; changing it costs the capture history.
+ */
+export const frozenSourceContentDigests = Object.freeze({
+  "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
+  "momentum-scalp-index-strategy.ts": "ecf9fe47c96ddce944c269757a292c5fc647e3d03364d3adab2339024a1f0396",
+  "momentum-scalp-pattern-strategy.ts": "dfccae9d5df2e0a7d702a2148bdb9e4108db774c2acd531495c9c7ffd5bc32d7",
+});
+
 export const researchStrategySourceChecksums = Object.freeze({
-  "momentum-scalp-strategy.ts": "d245e18d4d55d48cf38a715395b45b1916f3f469096950d81e70ec2d5746f093",
+  "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
   "momentum-scalp-index-strategy.ts": "e9a74bf002c7b66adacdd7400128a27d6cb03fc8bf0f4bf9d9654dfc64eeed4d",
   "momentum-scalp-pattern-strategy.ts": "b1146d24f53bc225832302486990e5f9aa5e299785305c26834d07e3cbeb01bd",
 });
@@ -214,6 +244,75 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
   }
 }
 
+/** V11 measures the fresh-setup entry policy without changing the production evaluator. */
+export class FreshSetupResearchAdapter implements ResearchStrategyAdapter {
+  private readonly previousSideBySeries = new Map<string, "LONG" | "SHORT">();
+
+  constructor(
+    readonly definition: ResearchStrategyDefinition,
+    readonly supportedTimeframes: readonly string[],
+    private readonly evaluator: BaseEvaluator,
+    private readonly setupFamily: string,
+    private readonly legacyGate: LegacyScoreGate,
+  ) {}
+
+  evaluate(strategyContext: StrategyMarketContext, reference1mContext: StrategyMarketContext): ImmutableStrategyProposal[] {
+    if (!this.supportedTimeframes.includes(strategyContext.candle.timeframe)) return [];
+    if (strategyContext.candle.instrumentId !== reference1mContext.candle.instrumentId) {
+      throw new Error("Strategy and reference contexts must belong to the same instrument.");
+    }
+    const proposals = this.evaluator.evaluate(strategyContext, this.definition.configuration);
+    const seriesKey = `${strategyContext.candle.instrumentId}:${strategyContext.candle.timeframe}`;
+    const proposal = proposals[0];
+    if (!proposal) {
+      this.previousSideBySeries.delete(seriesKey);
+      return [];
+    }
+    const previousSide = this.previousSideBySeries.get(seriesKey);
+    if (previousSide === proposal.side) return [];
+    this.previousSideBySeries.set(seriesKey, proposal.side);
+    if (!proposal.expiresAt) throw new Error(`${this.definition.strategyKey} emitted a proposal without native expiry.`);
+    const pattern = typeof proposal.evidence.pattern === "string" ? proposal.evidence.pattern : null;
+    const setupType = pattern === null ? this.setupFamily : `${this.setupFamily}:${pattern}`;
+    const evidenceReferences = proposal.evidenceItems
+      .map((item) => `${item.sourceType}:${item.sourceReference ?? ""}`)
+      .sort();
+    return [buildProposal({
+      definition: this.definition,
+      strategyContext,
+      referenceCandle: reference1mContext.candle,
+      direction: proposal.side,
+      setupType,
+      setupFingerprintParts: [proposal.side, setupType, evidenceReferences],
+      nativeGeometry: {
+        direction: proposal.side,
+        entryOrderType: "MARKET_AT_REFERENCE",
+        entryPrice: proposal.entryPrice,
+        stopLoss: proposal.stopLoss,
+        targetPrice: proposal.targetPrice,
+        expiresAt: proposal.expiresAt,
+        geometryPolicyVersion: `${this.definition.strategyKey.toUpperCase().replaceAll("-", "_")}_NATIVE_V1`,
+      },
+      rawContext: {
+        ...rawContext(strategyContext, proposal, this.legacyGate),
+        /*
+         * WHY this bar was fresh, not merely that it was.
+         *
+         * This recorded `passed: true`, which no row could ever contradict: a suppressed bar returns
+         * before any row is built, so the field was constant and carried no information at all. The
+         * two ways a setup becomes fresh behave differently -- a first entry into a new run of
+         * proposals is not the same event as a reversal -- and separating them gives the covariate
+         * variance to be analysed on, within V11's own rows rather than only against V10's.
+         */
+        freshSetup: {
+          policy: "NEW_OR_DIRECTION_CHANGE",
+          reason: previousSide === undefined ? "FIRST_PROPOSAL" : "DIRECTION_CHANGE",
+        },
+      },
+    })];
+  }
+}
+
 /**
  * Lifts the score-based filter so the research versions record the setups the gate used to discard.
  *
@@ -231,38 +330,73 @@ class FrozenResearchAdapter implements ResearchStrategyAdapter {
  * what a setup *is*. Removing those too would not be an ungated strategy, it would be no strategy —
  * and the every-bar baseline already exists in the matched control grid.
  */
+/**
+ * V7 and V8 carried forward against the V5 operational geometry, as V9 and V10.
+ *
+ * This is the third turn of the same handle, and it is the handle working rather than a defect.
+ * V5/V6 were superseded when the twin went to V4; V7/V8 are superseded now that the twin has been
+ * rolled back to V5 (atrStopMultiple 1.5 -> 1.0, rewardRiskMultiple 2.0 -> 1.5), which moved both
+ * the declared configuration and this file's checksum. A rollback is a geometry change like any
+ * other: the cohort cannot span two geometries just because the second one is a restoration of
+ * the first. V7/V8's rows stay theirs, and stay attributable.
+ *
+ * Note what is deliberately *not* done. V9 does not resume V5's cohort even though V5 ran on this
+ * exact geometry, because the two are separated by an implementation checksum -- the intervening
+ * file edits are real, and `sameGeometry` is not `sameStrategy`. Nor are V7/V8 repinned to the new
+ * hash; `assertRegisteredAndUnchanged` exists to refuse precisely that.
+ *
+ * The *pair* is preserved deliberately: V10 is to V9 exactly what V8 was to V7, a sibling capturing
+ * the same 1m setups with the closed 5m context recorded alongside. Collapsing them into one
+ * HTF-only cohort would have discarded a designed property the isolation tests pin.
+ *
+ * Both read the live configuration and checksum, as V5/V6 and V7/V8 did. That is deliberate: the
+ * next bump of the operational twin must break these pins too and be handled the same way, rather
+ * than hiding behind a frozen copy that drifts from the code that actually runs.
+ */
 const momentumDefinition = buildStrategyDefinition({
-  // v5 rather than v4: the configuration changed materially, and reusing a version string for two
-  // different definitions is the exact failure the settlement policy registry exists to prevent.
-  // The definition hash changes regardless, so old captures never collide with new ones.
-  strategyKey: "momentum-v5-research",
-  researchVersion: 5,
+  strategyKey: "momentum-v9-research",
+  researchVersion: 9,
   featureSchemaVersion: "scalp-raw-context-v2",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
 });
 
 /**
- * `momentum-v5-research` with slower-timeframe context recorded, and nothing else changed.
+ * `momentum-v9-research` with slower-timeframe context recorded, and nothing else changed.
  *
  * The candidate logic is byte-identical -- same `MomentumScalpStrategy`, same ungated configuration
- * -- so this REUSES V5's `implementationArtifactChecksum`. That is not an oversight to be "fixed"
- * with a new checksum: the checksum is the SHA-256 of `momentum-scalp-strategy.ts`, which V6 does
+ * -- so this REUSES V9's `implementationArtifactChecksum`. That is not an oversight to be "fixed"
+ * with a new checksum: the checksum is the SHA-256 of `momentum-scalp-strategy.ts`, which V10 does
  * not touch, and the isolation test refuses any checksum that is not the real file's hash. Reusing
- * it is the machine-checked proof that `v6_candidate_logic == v5_candidate_logic`.
- *
- * The two versions do not collide: `buildStrategyDefinition` hashes the strategy key, research
- * version, configuration and feature-schema version alongside the checksum, and V6 differs on the
- * first three. `scalp-raw-context-v3` records that the payload now carries the `htf5m` covariate
- * block the V5 schema did not. V6 is a *sibling* of V5, capturing the same setups with more recorded
- * about each -- the same relationship `pattern-v4-research-v2` has to `pattern-v4-research`.
+ * it is the machine-checked proof that `v10_candidate_logic == v9_candidate_logic`.
  */
 const momentumHtfDefinition = buildStrategyDefinition({
-  strategyKey: "momentum-v6-research",
-  researchVersion: 6,
+  strategyKey: "momentum-v10-research",
+  researchVersion: 10,
   featureSchemaVersion: "scalp-raw-context-v3",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
   configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
+});
+
+const momentumFreshSetupDefinition = buildStrategyDefinition({
+  strategyKey: "momentum-v11-research",
+  researchVersion: 11,
+  featureSchemaVersion: "scalp-raw-context-v4",
+  /*
+   * The shared lookup, not a literal.
+   *
+   * This was pinned to b541d4c..., the CRLF digest of momentum-scalp-strategy.ts on a Windows working
+   * tree -- the value the isolation guard reported as "actual" while it was still hashing raw bytes.
+   * It is not the digest of the file's content, so no LF checkout reproduces it, and the checksum
+   * travels into the definition hash and is persisted as provenance. V11 runs the same source
+   * artifact as V9 and V10, so it pins the same content hash they do.
+   */
+  implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
+  configuration: {
+    ...defaultMomentumScalpStrategyConfiguration,
+    minimumConfidence: 0,
+    freshSetupPolicy: "NEW_OR_DIRECTION_CHANGE",
+  } as Record<string, unknown>,
 });
 
 const indexDefinition = buildStrategyDefinition({
@@ -295,17 +429,36 @@ const patternDefinition = buildStrategyDefinition({
  * The V2 adapter emits nothing unless a caller has loaded `patternObservations` into the context, so
  * adding it here is inert until the detection pass runs alongside capture.
  */
-export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
+/**
+ * A FRESH set of adapters, because one of them carries state.
+ *
+ * `FreshSetupResearchAdapter` remembers the previous proposal's side per series, so a module-level
+ * array would have made that memory process-wide: every consumer in one process sharing one history.
+ * `verify-live-backfill-parity` rebuilds proposals from the same adapters the capture path has
+ * already advanced, so a rebuilt point would have been judged against state the original evaluation
+ * never saw -- and capture rows use KEEP_EXISTING on payload divergence, so the mismatch would not
+ * throw, it would silently keep the older row.
+ *
+ * Call this ONCE per run over a chronological series and hold the result: per bar resets the memory
+ * so nothing is ever suppressed, and per process shares it so results depend on what ran before.
+ * The stateful adapter is order-dependent by nature; that is the feature, and this is its scope.
+ */
+export function createResearchScalpStrategies(): readonly ResearchStrategyAdapter[] {
+  return [
   new FrozenResearchAdapter(
     momentumDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
   ),
   new FrozenResearchAdapter(
-    // Same evaluator, gate and setup family as V5 above; the only difference is the HTF extender, so
-    // V6 captures the same 1m setups with the most recent closed 5m context recorded alongside each.
+    // Same evaluator, gate and setup family as V7 above; the only difference is the HTF extender, so
+    // V8 captures the same 1m setups with the most recent closed 5m context recorded alongside each.
     momentumHtfDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
     confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
     extractHtfObservations,
+  ),
+  new FreshSetupResearchAdapter(
+    momentumFreshSetupDefinition, ["1m"], new MomentumScalpStrategy(), "MOMENTUM_CONTINUATION",
+    confidenceGate(defaultMomentumScalpStrategyConfiguration.minimumConfidence),
   ),
   new FrozenResearchAdapter(
     indexDefinition, ["5m"], new MomentumScalpIndexStrategy(), "INDEX_MOMENTUM",
@@ -318,7 +471,8 @@ export const researchScalpStrategies: readonly ResearchStrategyAdapter[] = [
     confluenceScoreGate(defaultMomentumScalpPatternStrategyConfiguration.scoreThreshold),
   ),
   new PatternIntelligenceResearchAdapter(),
-];
+  ];
+}
 
 /**
  * The 1m indicator set the three research strategies actually read, as (code, parameters) pairs.

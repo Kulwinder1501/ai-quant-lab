@@ -11,6 +11,20 @@
 # Probe scripts written beside the code they poke at rather than in scratch/. Only the
 # directory form was listed, so four of these were shipped into the image.
 **/scratch_*.ts
+# Ad-hoc probe/patch scripts written at a workspace root instead of scratch/. Eighteen of these
+# were sitting in the context with a plaintext DATABASE_URL, and three reached an image layer
+# (aiquantlab-api-v2 built 2026-09-07 09:01). Excluded by shape rather than by name so the next
+# one is covered without an edit here. Real CLIs live under apps/api/src/interfaces/cli/.
+check-*.mjs
+check-*.cjs
+activate-*.mjs
+activate-*.cjs
+deactivate-*.mjs
+fix-*.mjs
+patch-*.cjs
+test-*.cjs
+run-all.cjs
+precompute-*.mjs
 **/tmp
 **/__pycache__
 **/.pytest_cache

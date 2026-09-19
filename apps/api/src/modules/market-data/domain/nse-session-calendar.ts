@@ -31,3 +31,22 @@ export async function isNseHoliday(
     return { holiday: false, name: null };
   }
 }
+
+/**
+ * Every date in `nse_holidays`, as `YYYY-MM-DD` strings.
+ *
+ * For callers that need the whole set up front rather than a per-instant lookup --
+ * `NseMarketSession` takes a holiday set at construction. On lookup failure returns an empty
+ * list for the same reason `isNseHoliday` does: inventing "no holidays" is safer than inventing
+ * one that skips a real trading day silently.
+ */
+export async function loadNseHolidays(database: QueryableDatabase): Promise<string[]> {
+  try {
+    const result = await database.query<{ holiday_date: string }>(`
+      SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date FROM nse_holidays
+    `);
+    return result.rows.map((row) => row.holiday_date);
+  } catch {
+    return [];
+  }
+}

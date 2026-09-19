@@ -51,7 +51,18 @@ export interface BacktestConfiguration {
   invalidGapPolicy: "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET";
   exitPolicy: "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST";
   endOfDataExitPolicy: "CLOSE_AT_FINAL_COMPLETED_CANDLE_CLOSE";
-  maxConcurrentPositions: 1;
+  /**
+   * How many positions may be open at once. Integer >= 1; 1 is the default.
+   *
+   * Was the literal type `1`, which encoded "the engine only supports one" in the type system --
+   * honest while true, but it made the constraint invisible to callers who could otherwise have
+   * asked for more. The engine now admits N, so the type is the value's real domain and
+   * `assertConfiguration` enforces the bound.
+   *
+   * Raising it changes what a run measures, so it is recorded in the run's `configuration` jsonb:
+   * a concurrent run must never be comparable-by-accident with a sequential one.
+   */
+  maxConcurrentPositions: number;
 }
 
 export interface BacktestTrade {

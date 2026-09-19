@@ -13,6 +13,10 @@ import {
   momentumScalpPatternStrategyV2Registration,
 } from "./momentum-scalp-pattern-strategy.js";
 import { TrendBreakoutStrategy, trendBreakoutStrategyRegistration } from "./trend-breakout-strategy.js";
+import {
+  IctStructureStrategy,
+  ictStructureStrategyRegistration,
+} from "./ict-structure-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -47,6 +51,21 @@ export interface RegisteredStrategy {
    * generation instead of having to record a refusal per idea.
    */
   executableSides?: readonly TradeSide[];
+  /**
+   * Whether this strategy reads `StrategyMarketContext.ictSnapshot`.
+   *
+   * Declared rather than inferred, because assembling that snapshot is expensive: the composite
+   * engine rescans the causal window per decision point, and its liquidity pass is quadratic. The
+   * context repository asks the registry which timeframes have a consumer and skips the work
+   * entirely for the rest.
+   *
+   * Found 2026-09-07: `ict_state_snapshots` held 7,512 rows at 1m and was still growing, while the
+   * only consumer supports 5m and 15m only. Every one of those rows was computed, persisted and
+   * read by nothing. The alternative patch was a hardcoded `timeframe === "1m"` early return in the
+   * repository, which suppresses the symptom at one timeframe and silently goes stale the moment a
+   * consumer's supported set changes.
+   */
+  readsIctContext?: boolean;
   /**
    * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.
    *
@@ -100,6 +119,42 @@ export interface RegisteredStrategy {
   };
 }
 
+/**
+ * Whether a strategy may put up a LIVE trade idea.
+ *
+ * `operationalDisposition` recorded a verdict and gated nothing: `ict-structure-v1` and
+ * `trend-breakout` were both TERMINAL_UNOWNED, both `is_active = true`, and both timeframe-eligible
+ * for the paper bot, so the only thing standing between a measured-out strategy and a live proposal
+ * was its own gate never happening to pass. That is not a control.
+ *
+ * Registered is deliberately NOT the same as tradeable. A terminal strategy stays in the registry so
+ * backtests and the differential harness can still reach it through `requireRegisteredStrategy`
+ * -- which is exactly what `whyStillRegistered` is for -- and this predicate is what separates the
+ * two. Anything that produces live ideas filters on it; anything that measures does not.
+ *
+ * The switch is exhaustive so a new disposition cannot default into permission: adding a status
+ * fails the type check here, and the runtime arm refuses rather than guessing.
+ */
+export function mayProposeLiveTrades(strategy: RegisteredStrategy): boolean {
+  const disposition = strategy.operationalDisposition;
+  if (disposition === undefined) return true;
+  switch (disposition.status) {
+    case "TERMINAL_UNOWNED":
+      return false;
+    default: {
+      const unhandled: never = disposition.status;
+      throw new Error(
+        `Unhandled operational disposition "${String(unhandled)}": refusing to assume it may trade live.`,
+      );
+    }
+  }
+}
+
+/** The strategies a live path may propose from. Measurement paths use `registeredStrategies`. */
+export function liveTradableStrategies(): readonly RegisteredStrategy[] {
+  return registeredStrategies.filter(mayProposeLiveTrades);
+}
+
 /** Both sides unless the registration narrows them. */
 export function strategyExecutableSides(strategy: RegisteredStrategy): readonly TradeSide[] {
   return strategy.executableSides ?? ["LONG", "SHORT"];
@@ -146,9 +201,8 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "strategy. It is also traded by no bot already -- removed from Classic on 2026-08-17 as a "
         + "15m-and-slower trend strategy outside the scalp band -- so the registration is what keeps "
         + "its ideas available to research and backtesting (`run-backtest` still defaults to it). "
-        + "Nothing evaluates 30m, 60m or 1d at all: SCAN_TIMEFRAMES is 1m/5m/15m and the autonomous "
-        + "agent runs --timeframe=5m, so the intraday and swing work those comments assign to it was "
-        + "never wired.",
+        + "The autonomous agent owns 15m/30m/60m/1d while SCAN_TIMEFRAMES is the 1m/5m scalp band, "
+        + "so the intraday and swing work those comments assign to it is deliberately separate.",
     },
   },
   {
@@ -264,7 +318,61 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "TERMINAL: the generation-2 question is unanswered, not closed.",
     },
   },
+  {
+    registration: ictStructureStrategyRegistration,
+    StrategyClass: IctStructureStrategy,
+    supportedTimeframes: ["5m", "15m"],
+    readsIctContext: true,
+    operationalDisposition: {
+      status: "TERMINAL_UNOWNED",
+      since: "2026-09-08",
+      evidence:
+        "Closed on sign instability, not on a negative mean. Measured after four doctrinal fixes "
+        + "verified against the source lectures (farthest-ERL objective, bias sourced from the "
+        + "higher timeframe rather than local structure, daily HTF anchor, POI discrimination on "
+        + "mean threshold) and after the engine's quadratic state retention was fixed so runs could "
+        + "be continuous rather than chunked. Unchunked, 2bps slippage, concurrency 5: at 15m over "
+        + "20 months NIFTY50 is +18,342 (PF 2.46, 112 trades, 31.3%) while BANKNIFTY is -17,592 "
+        + "(PF 0.74, 184 trades, 13.6%); at 5m over a common continuous window the signs REVERSE, "
+        + "BANKNIFTY +1,175 (PF 1.15, 45 trades) against NIFTY50 -2,951 (PF 0.53, 57 trades). It "
+        + "also flips on window alone: NIFTY50 5m is +1,793 (PF 1.32) over 2026-02-27..09-05 and "
+        + "-2,951 over 2026-06-01..09-05, a SUBSET of that same period. Whichever cell looks "
+        + "profitable is the cell that was selected.",
+      whyStillRegistered:
+        "The four doctrinal fixes and the lecture-by-lecture conformance record are the asset here, "
+        + "not the strategy. Keeping it registered keeps that reasoning attached to running code "
+        + "rather than stranded in a commit message, and the remaining known gaps (fractal cascade, "
+        + "ITH/ITL/STH/STL hierarchy, killzones, CBDR) stay documented against something real. "
+        + "Owned by no bot: absent from every sandbox in bot-sandboxes.ts and referenced by no "
+        + "runner, so registration costs nothing. Do not resume by re-running a positive cell -- any "
+        + "cell can be made positive by moving a different axis.",
+    },
+  },
 ];
+
+/**
+ * The timeframes at which some registered strategy actually reads the ICT snapshot.
+ *
+ * Derived from the registry rather than listed separately, so it cannot drift from the
+ * `supportedTimeframes` of the strategies that consume it. A strategy that stops reading ICT, or
+ * narrows its timeframes, narrows this set with no other edit.
+ *
+ * Note this stays non-empty while `ict-structure-v1` is registered, even though that strategy is a
+ * measured negative wired to no runner. Retiring the ICT context entirely is a separate decision
+ * from not computing it where nothing can read it.
+ */
+export function ictContextTimeframes(): readonly string[] {
+  return [...new Set<string>(
+    registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes),
+  )].sort();
+}
+
+/** Whether assembling an ICT snapshot at `timeframe` can be read by anything. */
+export function ictContextConsumedAt(timeframe: string): boolean {
+  return ictContextTimeframes().includes(timeframe);
+}
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
   return strategy.supportedTimeframes.includes(timeframe);

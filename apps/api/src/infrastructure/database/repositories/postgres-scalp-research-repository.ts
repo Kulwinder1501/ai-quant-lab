@@ -25,6 +25,9 @@ export class IdempotencyPayloadConflictError extends Error {
   }
 }
 
+/** Keys already reported as diverged, so a busy catch-up warns once per key rather than per retry. */
+const reportedDivergentKeys = new Set<string>();
+
 async function insertImmutable(input: {
   client: Pick<PoolClient, "query">;
   insertSql: string;
@@ -32,12 +35,45 @@ async function insertImmutable(input: {
   lookupSql: string;
   logicalKeyValue: string;
   payloadHash: string;
+  /**
+   * What to do when the key is already captured with a DIFFERENT payload.
+   *
+   * `THROW` (default) treats it as the contradiction it usually is -- most notably for
+   * `strategy_definitions`, where the logical key IS the definition hash, so a differing payload
+   * under the same key cannot be legitimate.
+   *
+   * `KEEP_EXISTING` is for capture rows whose payload embeds volatile feature covariates. Those
+   * genuinely change under the harness: the pattern-intelligence layer is backfilled after capture,
+   * so re-deriving a decision point later yields a different payload for the same decision. Observed
+   * 2026-09-08 -- catch-up revisited a 09:16 1m proposal and every tick failed thereafter, taking
+   * live capture down until the harness stopped re-deriving captured points.
+   *
+   * The first capture stays authoritative and is never overwritten, which is the property the
+   * immutability guard exists to protect. What changes is that a later, differently-derived view of
+   * an already-captured point no longer aborts the run -- it is recorded and dropped.
+   */
+  onPayloadDivergence?: "THROW" | "KEEP_EXISTING";
 }): Promise<string> {
   const inserted = await input.client.query<ImmutableRow>(input.insertSql, input.insertValues as unknown[]);
   const row = inserted.rows[0] ?? (await input.client.query<ImmutableRow>(input.lookupSql, [input.logicalKeyValue])).rows[0];
   if (!row) throw new Error(`Immutable write for ${input.logicalKeyValue} returned no row.`);
   if (row.payload_hash !== input.payloadHash) {
-    throw new IdempotencyPayloadConflictError(input.logicalKeyValue, row.payload_hash, input.payloadHash);
+    if (input.onPayloadDivergence !== "KEEP_EXISTING") {
+      throw new IdempotencyPayloadConflictError(input.logicalKeyValue, row.payload_hash, input.payloadHash);
+    }
+    if (!reportedDivergentKeys.has(input.logicalKeyValue)) {
+      reportedDivergentKeys.add(input.logicalKeyValue);
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "Already-captured key re-derived with a different payload; keeping the original capture",
+        logicalKey: input.logicalKeyValue,
+        existingPayloadHash: row.payload_hash,
+        incomingPayloadHash: input.payloadHash,
+        hint: "Expected when a feature layer is backfilled after capture. The first capture is "
+          + "authoritative. A rising count here means catch-up is re-deriving points whose "
+          + "covariates moved, not that any stored row changed.",
+      }));
+    }
   }
   return row.id;
 }
@@ -94,6 +130,7 @@ export class PostgresScalpResearchRepository {
         proposal.setupType, proposal.setupFingerprint, proposal.nativeGeometry, proposal.rawContext],
       lookupSql: "SELECT id, payload_hash FROM research_scalp.proposals WHERE proposal_key = $1",
       logicalKeyValue: proposal.proposalKey,
+      onPayloadDivergence: "KEEP_EXISTING",
       payloadHash: proposal.payloadHash,
     });
     return { ...proposal, id };
@@ -115,6 +152,7 @@ export class PostgresScalpResearchRepository {
           opportunity.referencePolicyVersion],
         lookupSql: "SELECT id, payload_hash FROM research_scalp.opportunities WHERE opportunity_key = $1",
         logicalKeyValue: opportunity.opportunityKey,
+        onPayloadDivergence: "KEEP_EXISTING",
         payloadHash: opportunity.payloadHash,
       });
       for (const proposalId of opportunity.proposalIds) {
@@ -128,6 +166,7 @@ export class PostgresScalpResearchRepository {
           insertValues: [membershipKey, id, proposalId, payloadHash],
           lookupSql: "SELECT id, payload_hash FROM research_scalp.opportunity_memberships WHERE membership_key = $1",
           logicalKeyValue: membershipKey,
+          onPayloadDivergence: "KEEP_EXISTING",
           payloadHash,
         });
       }
@@ -150,6 +189,7 @@ export class PostgresScalpResearchRepository {
         control.ineligibleReason, control.controlPolicyVersion],
       lookupSql: "SELECT id, payload_hash FROM research_scalp.control_points WHERE control_point_key = $1",
       logicalKeyValue: control.controlPointKey,
+      onPayloadDivergence: "KEEP_EXISTING",
       payloadHash: control.payloadHash,
     });
     return { ...control, id };

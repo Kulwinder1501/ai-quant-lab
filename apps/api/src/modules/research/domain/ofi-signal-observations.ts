@@ -36,6 +36,16 @@ import type { FalsificationObservation } from "./falsification-harness.js";
  * `inspectPointInTime`, and violations are returned rather than thrown so a whole run can be audited
  * at once.
  *
+ * `labelEndAt` is stamped as the *forward frame's own* timestamp -- not `at + horizonMs` -- because
+ * the endpoint is the first frame at or after the horizon within tolerance, so its true resolution
+ * instant can sit anywhere inside that tolerance window. The harness's negative-lag probe uses this
+ * to reject a lag whose "past" label actually resolves after the current decision: at this feed's
+ * observed ~500ms frame cadence, a lag of a handful of observations covers barely more real time
+ * than `ofiWindowMs` itself, so without `labelEndAt` the probe was comparing the feature against a
+ * return that had barely finished resolving -- reading as "predicts the past" when it was really an
+ * artifact of comparable feature/label windows overlapping, not skew.
+ *
+
  * ## Horizon is in time, not in frames
  *
  * A frame-count horizon means different clock time depending on how busy the book was, so it
@@ -165,6 +175,12 @@ export function buildOfiObservations(input: BuildOfiObservationsInput): OfiObser
         featureAsOf,
         featureValue: windowSum,
         forwardReturn: (forwardPrice - basePrice) / basePrice,
+        // The forward frame's own timestamp, not `at + horizonMs`: the endpoint is the first frame
+        // AT OR AFTER the horizon within tolerance, so it can land anywhere in that tolerance window.
+        // The harness's negative-lag probe needs the true resolution instant to reject a lag whose
+        // "past" label actually resolves after the current decision -- leaving this unset (as this
+        // function did before) silently disables that guard for every OFI observation.
+        labelEndAt: input.frames[forwardIndex]!.receivedAt,
       });
     }
   }

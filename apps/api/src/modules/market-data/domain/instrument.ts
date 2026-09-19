@@ -39,5 +39,6 @@ export interface InstrumentRepository {
   upsert(input: UpsertInstrumentInput): Promise<Instrument>;
   findById(id: string): Promise<Instrument | null>;
   findByExchangeAndSymbol(exchange: Instrument["exchange"], symbol: string): Promise<Instrument | null>;
+  findByIsin(isin: string): Promise<Instrument[]>;
   listActive(): Promise<Instrument[]>;
 }

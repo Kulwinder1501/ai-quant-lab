@@ -68,6 +68,14 @@ export interface PaperTrade {
   remainingQuantity: number;
   entryPrice: number;
   stopLoss: number;
+  /**
+   * The stop the trade OPENED with, which never moves.
+   *
+   * `stopLoss` does move -- break-even advances it at +0.5R -- so anything that needs the trade's
+   * original geometry has to read this instead. The stall rule recomputed risk from the live stop
+   * and switched itself off the moment break-even fired; see migration 106.
+   */
+  initialStopLoss?: number;
   /** First instant at which the currently persisted stopLoss was active. */
   stopLossEffectiveAt?: Date;
   targetPrice: number;

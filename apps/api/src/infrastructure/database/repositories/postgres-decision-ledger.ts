@@ -59,9 +59,18 @@ export interface AppendResult {
   readonly deduplicated: boolean;
 }
 
+/**
+ * Anything that can run a statement: the pool, or a single client inside a transaction.
+ *
+ * The ledger took the pool, which meant every append ran on its own connection and a caller writing
+ * two events could not make them atomic. A shadow decision writes exactly two, and 12 of them on
+ * 2026-09-03 were left with an opening and no terminal when the job threw in between.
+ */
+export type LedgerExecutor = Pick<DatabasePool, "query">;
+
 export class PostgresDecisionLedger {
   constructor(
-    private readonly database: DatabasePool,
+    private readonly database: LedgerExecutor,
     /** The encoding that addresses this event's context snapshot. */
     private readonly contextEncodingVersion: string = researchIdentityEncodingVersion,
   ) {}
