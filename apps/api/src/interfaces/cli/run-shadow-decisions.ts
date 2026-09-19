@@ -40,6 +40,8 @@ import {
   strategyExecutableSides,
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
+import { filterProposalsByLiquiditySweepBias } from "../../modules/strategy-engine/domain/smc-liquidity-bias.js";
+import { isStrictlyHigherTimeframe } from "../../modules/strategy-engine/domain/timeframe-order.js";
 // V1's real context type, not an approximation of it. This CLI is the layer §6 allows to see both
 // sides, and a structural shim here would only invite drift from the type it stands in for.
 import type { StrategyMarketContext } from "../../modules/strategy-engine/domain/strategy.js";
@@ -153,7 +155,11 @@ function legacyOutcomeFor(input: {
     if (!strategySupportsTimeframe(strategy, input.context.candle.timeframe)) continue;
     const executable = strategyExecutableSides(strategy);
     const evaluator = new strategy.StrategyClass();
-    for (const proposal of evaluator.evaluate(input.context, strategy.registration.configuration)) {
+    const rawProposals = evaluator.evaluate(input.context, strategy.registration.configuration);
+    const filteredProposals = strategy.registration.strategyKey === "ict-structure-v1"
+      ? rawProposals
+      : filterProposalsByLiquiditySweepBias(input.context, rawProposals, "15m");
+    for (const proposal of filteredProposals) {
       // The measured side restrictions apply: a proposal V1 would not have traded must not appear as
       // one V1 made, or the comparison reports a decision that could never have happened.
       if (!executable.includes(proposal.side)) continue;
@@ -264,12 +270,29 @@ async function main(): Promise<void> {
       }
       for (const timeframe of [...new Set(timeframes)]) {
         const barIntervalMs = timeframeMs(timeframe);
-        const latest = await contextRepository.findLatestCompleted({
+        let latest = await contextRepository.findLatestCompleted({
           instrumentId: instrument.id, timeframe,
         });
         if (!latest) {
           records.push({ symbol, timeframe, skipped: "NO_COMPLETED_CONTEXT" });
           continue;
+        }
+
+        if (isStrictlyHigherTimeframe(latest.candle.timeframe, "15m")) {
+          const htf15m = await contextRepository.findCompletedBefore({
+            instrumentId: instrument.id,
+            timeframe: "15m",
+            asOf: latest.candle.closeTime,
+          });
+          if (htf15m && htf15m.candle.closeTime.getTime() <= latest.candle.closeTime.getTime()) {
+            latest = {
+              ...latest,
+              higherTimeframeContexts: {
+                ...latest.higherTimeframeContexts,
+                "15m": htf15m,
+              },
+            };
+          }
         }
 
         const barAgeMs = Date.now() - latest.candle.closeTime.getTime();

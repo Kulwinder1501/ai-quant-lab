@@ -15,6 +15,7 @@ import {
   type RegisteredStrategy,
 } from "../domain/strategy-registry.js";
 import type { ProposedTradeIdea, StrategyMarketContext } from "../domain/strategy.js";
+import { filterProposalsByLiquiditySweepBias } from "../domain/smc-liquidity-bias.js";
 
 /**
  * V1 publishing its entry rule into V2.2's thesis port, for differential analysis only.
@@ -109,7 +110,11 @@ function candidatesFor(
     if (!strategySupportsTimeframe(strategy, context.candle.timeframe)) continue;
     const executable = strategyExecutableSides(strategy);
     const evaluator = new strategy.StrategyClass();
-    for (const proposal of evaluator.evaluate(context, strategy.registration.configuration)) {
+    const rawProposals = evaluator.evaluate(context, strategy.registration.configuration);
+    const filteredProposals = strategy.registration.strategyKey === "ict-structure-v1"
+      ? rawProposals
+      : filterProposalsByLiquiditySweepBias(context, rawProposals, "15m");
+    for (const proposal of filteredProposals) {
       if (!executable.includes(proposal.side)) continue;
       candidates.push({ ruleId: `${strategy.registration.strategyKey}:v${strategy.registration.version}`, proposal });
     }

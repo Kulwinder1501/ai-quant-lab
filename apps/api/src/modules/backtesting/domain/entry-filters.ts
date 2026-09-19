@@ -1,5 +1,6 @@
 import type { ProposedTradeIdea, StrategyMarketContext } from "../../strategy-engine/domain/strategy.js";
 import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-registry.js";
+import { filterProposalsByLiquiditySweepBias } from "../../strategy-engine/domain/smc-liquidity-bias.js";
 
 /**
  * Backtest-only entry filters: decorators that drop a strategy's proposals without touching it.
@@ -92,5 +93,100 @@ export class FreshSetupFilteredStrategy implements StrategyEvaluator {
     if (this.previousSideBySeries.get(seriesKey) === proposal.side) return [];
     this.previousSideBySeries.set(seriesKey, proposal.side);
     return proposals;
+  }
+}
+
+/**
+ * Adjusts the proposal's stop-loss tightly around the entry candle if a confluent pattern is detected.
+ *
+ * If a momentum setup fires LONG and there is a coincident BULLISH candlestick pattern,
+ * the stop-loss is moved to exactly 1 tick below the candle's low. 
+ * If SHORT and BEARISH, the stop is moved to 1 tick above the candle's high.
+ * 
+ * This is designed to test if pattern-confluence can massively increase R-multiple by 
+ * validating much tighter risk parameters than standard ATR stops.
+ */
+export class PatternConfluenceFilteredStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+
+    const modifiedProposals: ProposedTradeIdea[] = [];
+
+    for (const proposal of proposals) {
+      // Find coincident patterns matching the proposal direction
+      const targetDirection = proposal.side === "LONG" ? "BULLISH" : "BEARISH";
+      const confluentPattern = context.patterns.find(p => p.direction === targetDirection);
+      const opposingPattern = context.patterns.find(p => p.direction === (proposal.side === "LONG" ? "BEARISH" : "BULLISH"));
+
+      // 1. Trap Avoidance: If a strong opposing pattern is present, we skip the trade.
+      if (opposingPattern) {
+        continue;
+      }
+
+      // 2. Confluence Boost: If a confluent pattern is present, tighten the stop.
+      if (confluentPattern) {
+        const tick = context.candle.tickSize > 0 ? context.candle.tickSize : 0.05;
+        const newStop = proposal.side === "LONG" 
+          ? context.candle.low - tick 
+          : context.candle.high + tick;
+        
+        // Ensure the new stop is actually tighter than the original ATR stop
+        const isTighter = proposal.side === "LONG" 
+          ? newStop > proposal.stopLoss 
+          : newStop < proposal.stopLoss;
+
+        if (isTighter) {
+          const risk = Math.abs(proposal.entryPrice - newStop);
+          const reward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+          const newRR = risk > 0 ? reward / risk : 0;
+          
+          modifiedProposals.push({
+            ...proposal,
+            stopLoss: newStop,
+            riskReward: newRR,
+            confidence: Math.min(1.0, proposal.confidence + 0.10), // Boost confidence
+            reasoning: [
+              ...proposal.reasoning, 
+              `Pattern confluence (${confluentPattern.code}): Boosted conf +10% and tightened stop to ${newStop}`
+            ]
+          });
+          continue;
+        }
+      }
+
+      // If no pattern modifications apply, pass the original proposal through
+      modifiedProposals.push(proposal);
+    }
+
+    return modifiedProposals;
+  }
+}
+
+/**
+ * Blocks proposals whose direction opposes the most recent HTF liquidity sweep or CHOCH.
+ *
+ * Reads LIQUIDITY_SWEEP and CHOCH signals from the nearest completed higher-timeframe context
+ * (e.g. 15m or 30m) and treats a BEARISH sweep as a bias to only allow SHORT entries, and a
+ * BULLISH sweep as a bias to only allow LONG entries.
+ *
+ * If no sweep or CHOCH is present on the HTF, the filter is a no-op and all proposals pass.
+ *
+ * The HTF timeframe to check is passed at construction time. It must match a key in
+ * `context.higherTimeframeContexts` — the same map the HTF confluence gate already uses.
+ */
+export class LiquiditySweepBiasFilteredStrategy implements StrategyEvaluator {
+  constructor(
+    private readonly inner: StrategyEvaluator,
+    private readonly htfTimeframe: string,
+  ) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    return filterProposalsByLiquiditySweepBias(context, proposals, this.htfTimeframe, {
+      enforceSameSession: false,
+    });
   }
 }

@@ -15,6 +15,7 @@ import {
   type HigherTimeframeResolverOptions,
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
+import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
 import {
   ICT_STRUCTURE_STRATEGY_KEY,
@@ -26,6 +27,8 @@ import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arg
 import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
+  LiquiditySweepBiasFilteredStrategy,
+  PatternConfluenceFilteredStrategy,
 } from "../../modules/backtesting/domain/entry-filters.js";
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
@@ -97,6 +100,57 @@ class IctDecoratedMarketData implements BacktestMarketDataRepository {
 }
 
 /**
+ * Replicates the live `generate-trade-ideas` HTF attachment path for backtesting.
+ *
+ * Unlike `HigherTimeframeDecoratedMarketData` (which synthesises HTF bars from OHLCV aggregation
+ * and therefore carries no precomputed indicators), this decorator queries the native stored candle
+ * rows via `findCompletedBefore`. Each stored candle already has its full indicator set attached —
+ * EMA, RSI, ATR, and critically the SMC signals (LIQUIDITY_SWEEP, CHOCH, ORDER_BLOCK, etc.) — so
+ * a liquidity-sweep bias filter can actually read them.
+ *
+ * Trade-off: fires one DB query per 1m base bar per HTF timeframe (~30k extra queries for a
+ * 3-month window). Meaningfully slower than the synthetic decorator but produces identical
+ * behaviour to what the live pipeline sees, which is the point.
+ */
+class NativeHtfDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly contextRepo: PostgresStrategyMarketContextRepository,
+    private readonly htfTimeframes: readonly string[],
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    const contexts = await this.inner.listContexts(input);
+    return Promise.all(contexts.map(async (ctx) => {
+      const attached: Record<string, unknown> = {};
+      for (const tf of this.htfTimeframes) {
+        const htf = await this.contextRepo.findCompletedBefore({
+          instrumentId: ctx.candle.instrumentId,
+          timeframe: tf,
+          asOf: ctx.candle.closeTime,
+        });
+        if (!htf) continue;
+        // Anti-lookahead: the stored bar must have closed before this 1m bar
+        if (htf.candle.closeTime.getTime() > ctx.candle.closeTime.getTime()) continue;
+        attached[tf] = htf;
+      }
+      return Object.keys(attached).length > 0
+        ? { ...ctx, higherTimeframeContexts: attached as never }
+        : ctx;
+    }));
+  }
+}
+
+/** Parses `--native-htf 15m` or `--native-htf 15m,30m` into a list of timeframe strings. */
+function parseNativeHtfTimeframes(argumentsList: string[]): readonly string[] | null {
+  const raw = getOption(argumentsList, "native-htf")?.trim();
+  if (!raw) return null;
+  const tfs = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (tfs.length === 0) throw new Error("--native-htf was empty.");
+  return tfs;
+}
+
+/**
  * The engine config for this run, which until now was always the default.
  *
  * `--ict-inverted-poi` is the one knob exposed, because it is the only engine setting whose effect
@@ -154,14 +208,17 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
   return parsed as Record<string, unknown>;
 }
 
-type BacktestEntryFilter = "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP";
+type BacktestEntryFilter = "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP" | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M";
 
 function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
   if (raw === "none") return "NONE";
   if (raw === "ema-strength-015") return "EMA_STRENGTH_015_ATR";
   if (raw === "fresh-setup") return "FRESH_SETUP";
-  throw new Error(`--entry-filter must be none, ema-strength-015, or fresh-setup, received "${raw}".`);
+  if (raw === "pattern-confluence") return "PATTERN_CONFLUENCE";
+  if (raw === "liquidity-sweep-bias-15m") return "LIQUIDITY_SWEEP_BIAS_15M";
+  if (raw === "liquidity-sweep-bias-30m") return "LIQUIDITY_SWEEP_BIAS_30M";
+  throw new Error(`--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, liquidity-sweep-bias-15m, or liquidity-sweep-bias-30m, received "${raw}".`);
 }
 
 /** A decimal fraction in (0, 1], falling back to the engine default. */
@@ -205,12 +262,22 @@ async function main(): Promise<void> {
 
     const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
+    const nativeHtfTimeframes = parseNativeHtfTimeframes(argumentsList);
+    
     let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
       : new HigherTimeframeDecoratedMarketData(
         new PostgresBacktestMarketDataRepository(database),
         higherTimeframeBuckets,
       );
+
+    if (nativeHtfTimeframes !== null) {
+      marketData = new NativeHtfDecoratedMarketData(
+        marketData,
+        new PostgresStrategyMarketContextRepository(database),
+        nativeHtfTimeframes,
+      );
+    }
     // The ICT strategy reads its four-pillar snapshot from the context; attach it
     // in the replay builder. Incumbent strategies never see this decoration.
     if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
@@ -222,7 +289,13 @@ async function main(): Promise<void> {
       ? new EmaStrengthFilteredStrategy(strategyEvaluator)
       : entryFilter === "FRESH_SETUP"
         ? new FreshSetupFilteredStrategy(strategyEvaluator)
-        : strategyEvaluator;
+        : entryFilter === "PATTERN_CONFLUENCE"
+          ? new PatternConfluenceFilteredStrategy(strategyEvaluator)
+          : entryFilter === "LIQUIDITY_SWEEP_BIAS_15M"
+            ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "15m")
+            : entryFilter === "LIQUIDITY_SWEEP_BIAS_30M"
+              ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "30m")
+              : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
