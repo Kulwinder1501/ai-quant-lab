@@ -271,6 +271,26 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
     return { decisionId: input.decisionId, context: input.context, lineage, outcome: thesisDead, stages };
   }
 
+  return continuePastThesis(input, thesis, lineage, stages);
+}
+
+/**
+ * P7-P10, given an already-formed thesis. Split out of `runDecisionPipeline` and exported so tests can
+ * drive this half of the pipeline directly: `evaluateSide` cannot produce an APPROVED side without a
+ * validated entry rule (see thesis-builder.ts's "No validated entry rule" section), so
+ * `runDecisionPipeline` itself cannot reach P7 today. This keeps P7-P10's own sequencing and
+ * lineage-tracking covered against a hand-built approved thesis -- the shape a validated rule will
+ * actually produce once one exists -- without weakening thesis-builder's honesty to make a test pass.
+ */
+export function continuePastThesis(
+  input: DecisionPipelineInput,
+  thesis: DualSidedThesis,
+  lineageIn: DecisionLineage,
+  stagesIn: DecisionPipelineStages,
+): DecisionPipelineRun {
+  let lineage = lineageIn;
+  const stages = { ...stagesIn };
+
   // P7: Edge Engine (always APPROVED)
   const edgeResult = assessEdge({ thesis, context: input.context, costBps: input.costBps });
   if (edgeResult.outcome !== "APPROVED") {

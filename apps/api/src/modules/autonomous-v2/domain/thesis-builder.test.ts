@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildThesis,
+  deriveSideGeometry,
   thesisBuilderPolicyVersion,
   toCandidateDatasetEntry,
   ThesisBuilderError,
@@ -83,18 +84,25 @@ function expectRejectedSide(side: SideResult) {
   return side.reasons;
 }
 
-describe("geometry correctness", () => {
+// deriveSideGeometry is what a validated entry rule plugs into (see thesis-builder.ts's "No validated
+// entry rule" section) -- evaluateSide/buildThesis cannot reach it today, but the math it will use is
+// still proven correct now.
+describe("geometry correctness (deriveSideGeometry, the not-yet-wired path)", () => {
   it("computes LONG stop below entry and target above, using ATR * 1.0 / 1.5x reward:risk", () => {
-    const thesis = approvedThesis({ candidates: [candidate({ orientation: "UP" })] });
-    const long = expectApprovedSide(thesis.long);
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
 
     expect(long.stopLoss).toBe(23950);
     expect(long.targetPrice).toBe(24075);
   });
 
   it("computes SHORT stop above entry and target below", () => {
-    const thesis = approvedThesis({ candidates: [candidate({ orientation: "DOWN" })] });
-    const short = expectApprovedSide(thesis.short);
+    const short = expectApprovedSide(deriveSideGeometry({
+      side: "SHORT", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "DOWN" }),
+    }));
 
     expect(short.stopLoss).toBe(24050);
     expect(short.targetPrice).toBe(23925);
@@ -102,49 +110,62 @@ describe("geometry correctness", () => {
 
   it("rounds the stop toward safety (further from entry) and the target toward the trade", () => {
     // ATR chosen so the raw stop distance falls between tick boundaries.
-    const thesis = approvedThesis({
-      candidates: [candidate({ orientation: "UP" })],
-      atrValue: 33, // stopDistance 33 -> entry-33=23967, not tick-aligned at 0.05... use a tick-misaligned entry instead
-      entryReference: 24000.02,
-      tickSize: 0.05,
-    });
-    const long = expectApprovedSide(thesis.long);
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000.02, atrValue: 33, tickSize: 0.05,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
     // stopLoss must round DOWN (away from entry, more conservative for a LONG stop).
     expect(long.stopLoss).toBeLessThanOrEqual(24000.02 - 33);
   });
 });
 
 describe("independent per-side evaluation", () => {
-  it("approves LONG and rejects SHORT when only UP-oriented candidates are present", () => {
+  it("rejects LONG with NO_VALIDATED_ENTRY_RULE (not NO_ORIENTATION_EVIDENCE) and SHORT with NO_ORIENTATION_EVIDENCE, when only UP-oriented candidates are present", () => {
     const thesis = approvedThesis({ candidates: [candidate({ orientation: "UP" })] });
 
-    expect(thesis.long.outcome).toBe("APPROVED");
+    expect(expectRejectedSide(thesis.long)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
     expect(expectRejectedSide(thesis.short)).toEqual(["NO_ORIENTATION_EVIDENCE"]);
   });
 
-  it("approves both sides when both UP and DOWN candidates are present, each citing its own supportingCandidateId", () => {
+  it("rejects both sides with NO_VALIDATED_ENTRY_RULE when both UP and DOWN candidates are present", () => {
     const up = candidate({ candidateId: "up-hash", orientation: "UP" });
     const down = candidate({ candidateId: "down-hash", orientation: "DOWN" });
     const thesis = approvedThesis({ candidates: [up, down] });
 
-    const long = expectApprovedSide(thesis.long);
-    const short = expectApprovedSide(thesis.short);
-    expect(long.supportingCandidateId).toBe("up-hash");
-    expect(short.supportingCandidateId).toBe("down-hash");
+    expect(expectRejectedSide(thesis.long)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
+    expect(expectRejectedSide(thesis.short)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
   });
 
-  it("a BIDIRECTIONAL candidate supports both sides", () => {
+  it("a BIDIRECTIONAL candidate gives both sides orientation support, so both are rejected with NO_VALIDATED_ENTRY_RULE rather than NO_ORIENTATION_EVIDENCE", () => {
     const thesis = approvedThesis({ candidates: [candidate({ orientation: "BIDIRECTIONAL", candidateId: "bidi-hash" })] });
 
-    expect(expectApprovedSide(thesis.long).supportingCandidateId).toBe("bidi-hash");
-    expect(expectApprovedSide(thesis.short).supportingCandidateId).toBe("bidi-hash");
+    expect(expectRejectedSide(thesis.long)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
+    expect(expectRejectedSide(thesis.short)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
   });
 
-  it("rejects both sides when only a NONE-oriented candidate is present", () => {
+  it("rejects both sides with NO_ORIENTATION_EVIDENCE when only a NONE-oriented candidate is present", () => {
     const thesis = approvedThesis({ candidates: [candidate({ orientation: "NONE" })] });
 
     expect(expectRejectedSide(thesis.long)).toEqual(["NO_ORIENTATION_EVIDENCE"]);
     expect(expectRejectedSide(thesis.short)).toEqual(["NO_ORIENTATION_EVIDENCE"]);
+  });
+});
+
+describe("no validated entry rule", () => {
+  it("evaluateSide (via buildThesis) can never return APPROVED today, the same property structuralGateThesisProducer already holds", () => {
+    const bidirectional = candidate({ orientation: "BIDIRECTIONAL" });
+    const thesis = approvedThesis({ candidates: [bidirectional] });
+
+    expect(thesis.long.outcome).not.toBe("APPROVED");
+    expect(thesis.short.outcome).not.toBe("APPROVED");
+  });
+
+  it("still distinguishes orientation-supported-but-unvalidated from no-orientation-evidence-at-all", () => {
+    const supported = approvedThesis({ candidates: [candidate({ orientation: "UP" })] });
+    const unsupported = approvedThesis({ candidates: [candidate({ orientation: "NONE" })] });
+
+    expect(expectRejectedSide(supported.long)).toEqual(["NO_VALIDATED_ENTRY_RULE"]);
+    expect(expectRejectedSide(unsupported.long)).toEqual(["NO_ORIENTATION_EVIDENCE"]);
   });
 });
 
@@ -172,8 +193,11 @@ describe("structural no-composite-score proof", () => {
     ]);
   });
 
-  it("pins an approved SideGeometry's exact key set", () => {
-    const long = expectApprovedSide(approvedThesis({ candidates: [candidate({ orientation: "UP" })] }).long);
+  it("pins an approved SideGeometry's exact key set (via deriveSideGeometry, the not-yet-wired path)", () => {
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
     expect(Object.keys(long).sort()).toEqual([
       "conviction",
       "entryReference",
@@ -185,9 +209,12 @@ describe("structural no-composite-score proof", () => {
     ]);
   });
 
-  it("invents no score/composite/confidence/rank/weight field anywhere on the thesis or its sides", () => {
+  it("invents no score/composite/confidence/rank/weight field anywhere on the thesis or an approved side", () => {
     const thesis = approvedThesis({ candidates: [candidate({ orientation: "BIDIRECTIONAL" })] });
-    const long = expectApprovedSide(thesis.long);
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "BIDIRECTIONAL" }),
+    }));
 
     for (const key of [...Object.keys(thesis), ...Object.keys(long)]) {
       expect(key).not.toMatch(/score|composite|confidence|rank|weight/i);
@@ -195,12 +222,18 @@ describe("structural no-composite-score proof", () => {
   });
 
   it("conviction is always one of the two declared labels, never a number", () => {
-    const long = expectApprovedSide(approvedThesis({ candidates: [candidate({ orientation: "UP" })] }).long);
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
     expect(["ORIENTATION_SUPPORTED", "NO_ORIENTATION_SUPPORT"]).toContain(long.conviction);
   });
 
   it("rationale is always a string array, never a number", () => {
-    const long = expectApprovedSide(approvedThesis({ candidates: [candidate({ orientation: "UP" })] }).long);
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
     expect(Array.isArray(long.rationale)).toBe(true);
     for (const reason of long.rationale) expect(typeof reason).toBe("string");
   });
@@ -223,14 +256,16 @@ describe("stage-level ATR gap", () => {
   });
 });
 
-describe("degenerate geometry", () => {
+describe("degenerate geometry (deriveSideGeometry, the not-yet-wired path)", () => {
   it("rejects a side with DEGENERATE_GEOMETRY rather than throwing when the stop distance overwhelms the entry", () => {
-    const thesis = approvedThesis({
-      candidates: [candidate({ orientation: "UP" })],
+    const long = deriveSideGeometry({
+      side: "LONG",
       entryReference: 10,
       atrValue: 50, // stop distance 50 > entry 10 -> LONG stop would go negative
+      tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
     });
-    expect(expectRejectedSide(thesis.long)).toEqual(["DEGENERATE_GEOMETRY"]);
+    expect(expectRejectedSide(long)).toEqual(["DEGENERATE_GEOMETRY"]);
   });
 });
 
@@ -257,10 +292,17 @@ describe("input validation", () => {
 });
 
 describe("freezing and determinism", () => {
-  it("freezes the thesis and each approved side", () => {
+  it("freezes the thesis", () => {
     const thesis = approvedThesis({ candidates: [candidate({ orientation: "UP" })] });
     expect(Object.isFrozen(thesis)).toBe(true);
-    expect(Object.isFrozen(thesis.long)).toBe(true);
+  });
+
+  it("freezes an approved side (via deriveSideGeometry, the not-yet-wired path)", () => {
+    const long = expectApprovedSide(deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    }));
+    expect(Object.isFrozen(long)).toBe(true);
   });
 
   it("produces an identical thesis for the same input twice", () => {
@@ -290,8 +332,12 @@ describe("Candidate Dataset mapping", () => {
   });
 
   it("throws if given an APPROVED side, since only rejected sides seed the dataset", () => {
-    const thesis = approvedThesis({ candidates: [candidate({ orientation: "UP" })] });
-    const approvedLong = thesis.long;
+    // buildThesis cannot produce an APPROVED side today (see "no validated entry rule" above), so this
+    // exercises the invariant via deriveSideGeometry directly, the shape a validated rule would return.
+    const approvedLong = deriveSideGeometry({
+      side: "LONG", entryReference: 24000, atrValue: 50, tickSize: NIFTY_TICK_SIZE,
+      supportingCandidate: candidate({ orientation: "UP" }),
+    });
     if (approvedLong.outcome !== "APPROVED") throw new Error("expected APPROVED");
 
     expect(() => toCandidateDatasetEntry({

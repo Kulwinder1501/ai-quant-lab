@@ -51,6 +51,20 @@ import {
  * `CandidateDatasetEntry` and `toCandidateDatasetEntry` are the documented target shape for what a
  * rejected side would seed -- not persistence. Matches the posture `CandidateResolved` and
  * `MarketStateInterpreted` already established: a typed target, fully tested, not wired to any store.
+ *
+ * ## No validated entry rule (found 2026-09-21, via P13)
+ *
+ * Orientation support alone used to be sufficient for `evaluateSide` to approve a side. It should not
+ * have been: this project has measured pattern-orientation, trend context, HTF confluence, chop
+ * filters and the ICT entry model against this exact instrument/timeframe universe and found no
+ * replicated edge in any of them (triple-barrier, 15m direction, HTF confluence, the tier sweep, RAG
+ * retrieval, pattern gating, chop filters, ICT entry model -- all refuted). Approving on orientation
+ * alone was this module quietly claiming a rule `structuralGateThesisProducer` has already measured
+ * and refused to claim. `HAS_VALIDATED_ENTRY_RULE` names that gap instead of hiding it, the same way
+ * `NO_ESTABLISHED_ENTRY_RULE` does in thesis-producer.ts -- `evaluateSide` cannot approve a side today,
+ * and won't until a rule clears the same bar this project already holds every other entry rule to.
+ * `deriveSideGeometry` stays exported and fully tested rather than deleted: it is what a validated rule
+ * plugs into, not dead code.
  */
 
 export const thesisBuilderPolicyVersion = "NATIVE_THESIS_BUILDER_POLICY_V1";
@@ -76,7 +90,15 @@ export interface SideGeometry {
   readonly supportingCandidateId: string;
 }
 
-export type SideRefusal = "NO_ORIENTATION_EVIDENCE" | "DEGENERATE_GEOMETRY";
+export type SideRefusal = "NO_ORIENTATION_EVIDENCE" | "NO_VALIDATED_ENTRY_RULE" | "DEGENERATE_GEOMETRY";
+
+/**
+ * Always false today. See the module docstring's "No validated entry rule" section -- named rather
+ * than silently omitted so the day a rule clears the same measurement bar every other entry rule in
+ * this project has been held to, it has exactly one place to plug in: flip this, wire the rule's own
+ * reference into `deriveSideGeometry`.
+ */
+const HAS_VALIDATED_ENTRY_RULE = false;
 export type SideResult = EvaluationResult<SideGeometry, SideRefusal>;
 
 export interface DualSidedThesis {
@@ -136,20 +158,18 @@ function roundToTick(value: number, tickSize: number, direction: "down" | "up" |
 const LONG_SUPPORTING_ORIENTATIONS: ReadonlySet<OpportunityCandidate["orientation"]> = new Set(["UP", "BIDIRECTIONAL"]);
 const SHORT_SUPPORTING_ORIENTATIONS: ReadonlySet<OpportunityCandidate["orientation"]> = new Set(["DOWN", "BIDIRECTIONAL"]);
 
-function evaluateSide(input: {
+/**
+ * The geometry a side WOULD have, given a candidate that already supports its orientation. Exported
+ * and independently tested rather than folded back into `evaluateSide`: this is the shape a validated
+ * entry rule plugs into once one exists (see `HAS_VALIDATED_ENTRY_RULE`), not dead code today.
+ */
+export function deriveSideGeometry(input: {
   readonly side: ThesisSide;
-  readonly candidates: readonly OpportunityCandidate[];
   readonly entryReference: number;
   readonly atrValue: number;
   readonly tickSize: number;
+  readonly supportingCandidate: OpportunityCandidate;
 }): SideResult {
-  const supporting = input.side === "LONG" ? LONG_SUPPORTING_ORIENTATIONS : SHORT_SUPPORTING_ORIENTATIONS;
-  const supportingCandidate = input.candidates.find((candidate) => supporting.has(candidate.orientation));
-
-  if (!supportingCandidate) {
-    return { outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] };
-  }
-
   const stopDistance = Math.max(input.tickSize, input.atrValue * atrStopMultiple);
   const stopLoss = input.side === "LONG"
     ? roundToTick(input.entryReference - stopDistance, input.tickSize, "down")
@@ -181,11 +201,38 @@ function evaluateSide(input: {
     targetPrice,
     conviction: "ORIENTATION_SUPPORTED" as const,
     rationale: Object.freeze([
-      `Candidate ${supportingCandidate.candidateId} carries orientation ${supportingCandidate.orientation}, `
-      + `which supports a ${input.side} side.`,
+      `Candidate ${input.supportingCandidate.candidateId} carries orientation `
+      + `${input.supportingCandidate.orientation}, which supports a ${input.side} side.`,
     ]),
-    supportingCandidateId: supportingCandidate.candidateId,
+    supportingCandidateId: input.supportingCandidate.candidateId,
   }));
+}
+
+function evaluateSide(input: {
+  readonly side: ThesisSide;
+  readonly candidates: readonly OpportunityCandidate[];
+  readonly entryReference: number;
+  readonly atrValue: number;
+  readonly tickSize: number;
+}): SideResult {
+  const supporting = input.side === "LONG" ? LONG_SUPPORTING_ORIENTATIONS : SHORT_SUPPORTING_ORIENTATIONS;
+  const supportingCandidate = input.candidates.find((candidate) => supporting.has(candidate.orientation));
+
+  if (!supportingCandidate) {
+    return { outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] };
+  }
+
+  if (!HAS_VALIDATED_ENTRY_RULE) {
+    return { outcome: "REJECTED", reasons: ["NO_VALIDATED_ENTRY_RULE"] };
+  }
+
+  return deriveSideGeometry({
+    side: input.side,
+    entryReference: input.entryReference,
+    atrValue: input.atrValue,
+    tickSize: input.tickSize,
+    supportingCandidate,
+  });
 }
 
 /**
