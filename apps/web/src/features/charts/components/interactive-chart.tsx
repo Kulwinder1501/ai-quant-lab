@@ -7,8 +7,8 @@ import type { ChartPayload } from "../domain";
 import { useAppStore } from "../../../stores/app-store";
 import { ZoneBoxesPrimitive, type ZoneBox } from "./zone-box-primitive";
 
-/** Per (FVG/OB x bullish/bearish) group -- see the `zoneBoxes` memo for why this exists. */
-const MAX_ZONES_PER_GROUP = 5;
+/** Across all FVG/OB zones combined -- see the `zoneBoxes` memo for why this is global, not per-group. */
+const MAX_ZONES_TOTAL = 8;
 
 interface InteractiveChartProps {
   payload: ChartPayload;
@@ -213,11 +213,13 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
    *
    * A symbol can carry 50+ active zones (NIFTY50 has shown 13 bullish + 36 bearish FVGs at once),
    * and drawing all of them turned the chart into a wall of overlapping boxes -- the complaint that
-   * prompted this cap. Each of the four groups (FVG bull/bear, OB bull/bear) is independently
-   * capped to the `MAX_ZONES_PER_GROUP` boxes nearest the last close, since a zone hundreds of
-   * points from the current price is the least actionable one to spend screen space on, not the
-   * most recently formed one -- an old zone the market walked back up through is still closer, and
-   * still more relevant, than last week's zone at a price nobody's near.
+   * prompted this cap. All FVG/OB candidates, both directions, are ranked together and only the
+   * `MAX_ZONES_TOTAL` nearest the last close survive, since a zone hundreds of points from the
+   * current price is the least actionable one to spend screen space on. Deliberately global rather
+   * than one quota per (FVG/OB x bull/bear) group: a per-group floor still drew a small wall for
+   * any group where every member happened to be far from price (every bearish Order Block sitting
+   * 400+ points above NIFTY50 after a pullback, for one) -- ranking globally means a group with
+   * nothing nearby contributes nothing, rather than contributing its least-bad candidate anyway.
    */
   const zoneBoxes = useMemo<ZoneBox[]>(() => {
     if (!showZones || ohlcData.length === 0) return [];
@@ -260,9 +262,14 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
 
     const distanceToClose = (box: ZoneBox) => Math.min(Math.abs(box.price1 - lastClose), Math.abs(box.price2 - lastClose));
 
-    return Object.values(groups).flatMap((group) =>
-      group.sort((a, b) => distanceToClose(a) - distanceToClose(b)).slice(0, MAX_ZONES_PER_GROUP),
-    );
+    // Global cap, not per-group: a per-group floor guaranteed every category its N slots even when
+    // an entire group (e.g. every bearish Order Block) sits hundreds of points from price, which
+    // still rendered as a small wall of its own. Ranking every candidate together means a group
+    // with nothing nearby simply contributes nothing, instead of contributing its least-bad zone.
+    return Object.values(groups)
+      .flat()
+      .sort((a, b) => distanceToClose(a) - distanceToClose(b))
+      .slice(0, MAX_ZONES_TOTAL);
   }, [showZones, ohlcData, indicators.FVG, indicators.ORDER_BLOCK]);
 
   useEffect(() => {
