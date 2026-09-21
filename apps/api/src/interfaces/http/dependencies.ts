@@ -142,6 +142,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     marketQuoteClient,
     streamingQuoteClient,
     instrumentRepository,
+    strategyContextRepository,
     createPaperAccount: new CreatePaperAccount(paperAccountRepository),
     getPaperAccountSummary: new GetPaperAccountSummary(paperTradeRepository),
     openPaperTrade: new OpenPaperTrade(paperTradeRepository),

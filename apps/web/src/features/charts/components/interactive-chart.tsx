@@ -205,7 +205,9 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
 
     if (indicators.ORDER_BLOCK) {
       indicators.ORDER_BLOCK.forEach((ob) => {
-        const isBullish = ob.type === "BULLISH_OB";
+        // Sourced from the ICT ledger now (see market-data.routes.ts's `loadIctZones`), which
+        // types a block "BULLISH"/"BEARISH" like every other zone, not "BULLISH_OB"/"BEARISH_OB".
+        const isBullish = ob.type === "BULLISH";
         allMarkers.push({
           time: (new Date(ob.timestamp).getTime() / 1000) as Time,
           position: isBullish ? "belowBar" : "aboveBar",
