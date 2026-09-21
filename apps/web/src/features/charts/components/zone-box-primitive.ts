@@ -1,10 +1,12 @@
 import type {
+  AutoscaleInfo,
   Coordinate,
   IChartApi,
   IPrimitivePaneRenderer,
   IPrimitivePaneView,
   ISeriesApi,
   ISeriesPrimitive,
+  Logical,
   SeriesAttachedParameter,
   SeriesType,
   Time,
@@ -121,5 +123,33 @@ export class ZoneBoxesPrimitive implements ISeriesPrimitive<Time> {
 
   paneViews(): readonly IPrimitivePaneView[] {
     return this.views;
+  }
+
+  /**
+   * Without this, the chart auto-scales its price axis from the visible candles alone, and a
+   * zone formed weeks ago at a price level the market hasn't revisited sits at a Y-coordinate
+   * outside the rendered pane -- drawn, but never on screen. This is the library's own documented
+   * hook for "expand the autoscale range to include visual elements drawn outside of the series'
+   * current visible price range" (see `ISeriesPrimitiveBase.autoscaleInfo`), which the shipped
+   * version never implemented. Real bug, not a styling nitpick: every bearish Order Block on
+   * NIFTY50 was invisible because the whole set was priced above the candles' own auto-scaled
+   * range during a sustained uptrend.
+   *
+   * Ignores the given logical range and spans every box unconditionally rather than only the
+   * ones overlapping it -- converting a `Logical` bar index back to one of our `Time` values
+   * would need the time scale's own lookup, and the box count here is small enough (tens, not
+   * thousands) that a slightly wider-than-strictly-needed axis is the right tradeoff against a
+   * zone silently going off-scale again the moment the visible window shifts.
+   */
+  autoscaleInfo(_startTimePoint: Logical, _endTimePoint: Logical): AutoscaleInfo | null {
+    if (this.boxes.length === 0) return null;
+    let minValue = Infinity;
+    let maxValue = -Infinity;
+    for (const box of this.boxes) {
+      minValue = Math.min(minValue, box.price1, box.price2);
+      maxValue = Math.max(maxValue, box.price1, box.price2);
+    }
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return null;
+    return { priceRange: { minValue, maxValue } };
   }
 }
