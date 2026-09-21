@@ -1,0 +1,125 @@
+import type {
+  Coordinate,
+  IChartApi,
+  IPrimitivePaneRenderer,
+  IPrimitivePaneView,
+  ISeriesApi,
+  ISeriesPrimitive,
+  SeriesAttachedParameter,
+  SeriesType,
+  Time,
+} from "lightweight-charts";
+import type { CanvasRenderingTarget2D } from "fancy-canvas";
+
+/**
+ * One price zone (an ICT Order Block or Fair Value Gap) to draw as a shaded, bordered
+ * rectangle on the candlestick pane -- lightweight-charts has no built-in "box", so this is a
+ * minimal custom primitive (the officially documented extension point for exactly this).
+ *
+ * `time2` is deliberately the last loaded candle's time, not the zone's own end: these are
+ * *active* zones (`activeFvgs`/`activeObs` from the ICT ledger already excludes anything
+ * CONSUMED/INVALIDATED), so "still active" is drawn as "still open on the right edge", the same
+ * way a trading terminal extends an untouched level to the current bar.
+ */
+export interface ZoneBox {
+  readonly time1: Time;
+  readonly time2: Time;
+  readonly price1: number;
+  readonly price2: number;
+  readonly fillColor: string;
+  readonly borderColor: string;
+  readonly label: string;
+}
+
+class ZoneBoxRenderer implements IPrimitivePaneRenderer {
+  constructor(
+    private readonly box: ZoneBox,
+    private readonly x1: Coordinate | null,
+    private readonly x2: Coordinate | null,
+    private readonly y1: Coordinate | null,
+    private readonly y2: Coordinate | null,
+  ) {}
+
+  draw(target: CanvasRenderingTarget2D): void {
+    const { x1, x2, y1, y2, box } = this;
+    if (x1 === null || x2 === null || y1 === null || y2 === null) return;
+
+    target.useMediaCoordinateSpace(({ context }) => {
+      const left = Math.min(x1, x2);
+      const width = Math.max(x1, x2) - left;
+      const top = Math.min(y1, y2);
+      const height = Math.max(y1, y2) - top;
+      if (width <= 0 || height <= 0) return;
+
+      context.save();
+      context.fillStyle = box.fillColor;
+      context.fillRect(left, top, width, height);
+      context.strokeStyle = box.borderColor;
+      context.lineWidth = 1;
+      context.setLineDash([4, 3]);
+      context.strokeRect(left, top, width, height);
+
+      context.setLineDash([]);
+      context.fillStyle = box.borderColor;
+      context.font = "10px 'Inter', sans-serif";
+      context.textBaseline = "bottom";
+      const labelY = top > 12 ? top - 2 : top + 12;
+      context.fillText(box.label, left + 4, labelY);
+      context.restore();
+    });
+  }
+}
+
+class ZoneBoxPaneView implements IPrimitivePaneView {
+  private x1: Coordinate | null = null;
+  private x2: Coordinate | null = null;
+  private y1: Coordinate | null = null;
+  private y2: Coordinate | null = null;
+
+  constructor(
+    private readonly box: ZoneBox,
+    private readonly chart: IChartApi,
+    private readonly series: ISeriesApi<SeriesType>,
+  ) {}
+
+  update(): void {
+    const timeScale = this.chart.timeScale();
+    this.x1 = timeScale.timeToCoordinate(this.box.time1);
+    this.x2 = timeScale.timeToCoordinate(this.box.time2);
+    this.y1 = this.series.priceToCoordinate(this.box.price1);
+    this.y2 = this.series.priceToCoordinate(this.box.price2);
+  }
+
+  renderer(): IPrimitivePaneRenderer | null {
+    return new ZoneBoxRenderer(this.box, this.x1, this.x2, this.y1, this.y2);
+  }
+}
+
+/** Draws a set of price zones as rectangles on whichever series it is attached to. */
+export class ZoneBoxesPrimitive implements ISeriesPrimitive<Time> {
+  private chart: IChartApi | null = null;
+  private series: ISeriesApi<SeriesType> | null = null;
+  private views: ZoneBoxPaneView[] = [];
+
+  constructor(private readonly boxes: readonly ZoneBox[]) {}
+
+  attached({ chart, series }: SeriesAttachedParameter<Time>): void {
+    this.chart = chart as IChartApi;
+    this.series = series as ISeriesApi<SeriesType>;
+    this.views = this.boxes.map((box) => new ZoneBoxPaneView(box, this.chart!, this.series!));
+  }
+
+  detached(): void {
+    this.chart = null;
+    this.series = null;
+    this.views = [];
+  }
+
+  updateAllViews(): void {
+    this.views.forEach((view) => view.update());
+  }
+
+  paneViews(): readonly IPrimitivePaneView[] {
+    return this.views;
+  }
+}

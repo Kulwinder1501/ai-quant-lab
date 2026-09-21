@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback, memo } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { InteractiveChart } from "../../charts/components/interactive-chart";
+import { ChartLegend } from "./chart-legend";
 import { postResearchJson } from "../../research/api";
 import type { ChartPayload } from "../../charts/domain";
 
@@ -105,10 +106,17 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
             payload={chartData}
             activeIndicators={mode === "Clean" ? [] : ["SMA", "BB", "RSI"]}
             showPatterns={mode === "Patterns"}
+            // FVG/Order Block live here, not in "Patterns": they're ICT-ledger indicator
+            // output with real fill-state tracking, not candlestick pattern markers.
+            showZones={mode === "Indicators"}
             className="h-full w-full"
           />
         )}
       </div>
+
+      {chartData && mode === "Indicators" && (
+        <ChartLegend indicators={chartData.indicators} timeframe={timeframe} />
+      )}
 
       <div className="shrink-0 border-t border-slate-700/40 px-3 py-1.5 text-[9px] text-slate-500">
         Stored completed OHLC bars — {timeframe} — Mode: {mode}

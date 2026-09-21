@@ -5,17 +5,21 @@ import { createChart, ColorType, IChartApi, LineStyle, Time, CandlestickSeries, 
 import type { CandlestickData, HistogramData, LineData, SeriesMarker } from "lightweight-charts";
 import type { ChartPayload } from "../domain";
 import { useAppStore } from "../../../stores/app-store";
+import { ZoneBoxesPrimitive, type ZoneBox } from "./zone-box-primitive";
 
 interface InteractiveChartProps {
   payload: ChartPayload;
   activeIndicators: string[];
   showPatterns: boolean;
+  /** Draws FVG/Order Block as shaded price zones. Separate from `showPatterns`: these are
+   *  ICT-ledger indicator output (real fill-state tracking), not candlestick pattern markers. */
+  showZones?: boolean;
   /** Sizing for the chart container. Defaults to a self-supporting height for
    *  callers that don't constrain it; pass "h-full w-full" inside a flex row. */
   className?: string;
 }
 
-export function InteractiveChart({ payload, activeIndicators, showPatterns, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
+export function InteractiveChart({ payload, activeIndicators, showPatterns, showZones = false, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const theme = useAppStore((state) => state.theme);
@@ -151,19 +155,6 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       });
     }
 
-    if (indicators.FVG) {
-      indicators.FVG.forEach((fvg) => {
-        const isBullish = fvg.type === "BULLISH";
-        allMarkers.push({
-          time: (new Date(fvg.timestamp).getTime() / 1000) as Time,
-          position: isBullish ? "belowBar" : "aboveBar",
-          color: isBullish ? "#10b981" : "#f43f5e",
-          shape: "circle",
-          text: "FVG",
-        });
-      });
-    }
-
     if (indicators.BOS) {
       indicators.BOS.forEach((bos) => {
         const isBullish = bos.type === "BULLISH_BOS";
@@ -203,23 +194,59 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       });
     }
 
-    if (indicators.ORDER_BLOCK) {
-      indicators.ORDER_BLOCK.forEach((ob) => {
-        // Sourced from the ICT ledger now (see market-data.routes.ts's `loadIctZones`), which
-        // types a block "BULLISH"/"BEARISH" like every other zone, not "BULLISH_OB"/"BEARISH_OB".
-        const isBullish = ob.type === "BULLISH";
-        allMarkers.push({
-          time: (new Date(ob.timestamp).getTime() / 1000) as Time,
-          position: isBullish ? "belowBar" : "aboveBar",
-          color: isBullish ? "#0ea5e9" : "#fb923c",
-          shape: "circle",
-          text: "OB",
-        });
-      });
-    }
-
     return allMarkers.sort((a, b) => (a.time as number) - (b.time as number));
-  }, [showPatterns, patterns, indicators.FVG, indicators.BOS, indicators.CHOCH, indicators.LIQUIDITY_SWEEP, indicators.ORDER_BLOCK]);
+  }, [showPatterns, patterns, indicators.BOS, indicators.CHOCH, indicators.LIQUIDITY_SWEEP]);
+
+  /**
+   * FVG/Order Block as shaded zones -- see `zone-box-primitive.ts`. Sourced from the ICT ledger
+   * (`loadIctZones` in market-data.routes.ts), which types a zone "BULLISH"/"BEARISH" like every
+   * other zone, not the old "BULLISH_OB"/"BEARISH_OB" naming.
+   *
+   * `activeFvgs`/`activeObs` are already filtered to zones that haven't been CONSUMED or
+   * INVALIDATED, so every box here is honestly still open -- there's no client-side re-filtering
+   * to get wrong. `time1` is clamped to the first loaded candle: a zone created weeks before the
+   * visible window would otherwise get a coordinate off the left edge and vanish outright, when
+   * what it actually means is "this has been active the whole time you can see".
+   */
+  const zoneBoxes = useMemo<ZoneBox[]>(() => {
+    if (!showZones || ohlcData.length === 0) return [];
+
+    const firstTime = ohlcData[0].time as number;
+    const lastTime = ohlcData[ohlcData.length - 1].time as number;
+    const boxes: ZoneBox[] = [];
+
+    (indicators.FVG ?? []).forEach((fvg) => {
+      if (fvg.top === undefined || fvg.bottom === undefined) return;
+      const isBullish = fvg.type === "BULLISH";
+      const createdAt = new Date(fvg.timestamp).getTime() / 1000;
+      boxes.push({
+        time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
+        time2: lastTime as Time,
+        price1: fvg.top,
+        price2: fvg.bottom,
+        fillColor: isBullish ? "rgba(16, 185, 129, 0.12)" : "rgba(244, 63, 94, 0.12)",
+        borderColor: isBullish ? "rgba(16, 185, 129, 0.55)" : "rgba(244, 63, 94, 0.55)",
+        label: `FVG ${(fvg.state ?? "").toLowerCase()}`.trim(),
+      });
+    });
+
+    (indicators.ORDER_BLOCK ?? []).forEach((ob) => {
+      if (ob.top === undefined || ob.bottom === undefined) return;
+      const isBullish = ob.type === "BULLISH";
+      const createdAt = new Date(ob.timestamp).getTime() / 1000;
+      boxes.push({
+        time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
+        time2: lastTime as Time,
+        price1: ob.top,
+        price2: ob.bottom,
+        fillColor: isBullish ? "rgba(14, 165, 233, 0.12)" : "rgba(251, 146, 60, 0.12)",
+        borderColor: isBullish ? "rgba(14, 165, 233, 0.6)" : "rgba(251, 146, 60, 0.6)",
+        label: `OB ${(ob.state ?? "").toLowerCase()}`.trim(),
+      });
+    });
+
+    return boxes;
+  }, [showZones, ohlcData, indicators.FVG, indicators.ORDER_BLOCK]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -288,9 +315,13 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       wickDownColor: chartColors.down,
     });
     mainSeries.setData(ohlcData);
-    
+
     if (markers.length > 0) {
       createSeriesMarkers(mainSeries, markers);
+    }
+
+    if (zoneBoxes.length > 0) {
+      mainSeries.attachPrimitive(new ZoneBoxesPrimitive(zoneBoxes));
     }
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -386,8 +417,8 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       chart.remove();
     };
   }, [
-    ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower, 
-    hasRsi, rsiData, markers, payload.timeframe, chartColors
+    ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower,
+    hasRsi, rsiData, markers, zoneBoxes, payload.timeframe, chartColors
   ]);
 
   if (candles.length === 0) {
