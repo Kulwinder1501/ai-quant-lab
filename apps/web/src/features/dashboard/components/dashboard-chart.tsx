@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, memo } from "react";
+import { createPortal } from "react-dom";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { InteractiveChart } from "../../charts/components/interactive-chart";
@@ -161,9 +162,17 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
   // margin, not edge-to-edge -- the point of expanding is more room for overlapping zone boxes to
   // spread apart, and losing the panel's own border/rounding at the very edge of the screen would
   // read as "broken layout" rather than "chart, bigger".
-  return (
+  //
+  // Portaled to document.body rather than rendered in place: GlassPanel applies backdrop-blur
+  // (a CSS filter), and a `filter` on any ancestor creates a new containing block for
+  // `position: fixed` descendants -- so nested normally, this "fullscreen" overlay was `fixed`
+  // relative to the nearest blurred ancestor, not the viewport, and the rest of the page kept
+  // scrolling underneath it instead of being covered. Verified live: without the portal, expanding
+  // grew the panel but "Institutional Cash Flows" was still visible and scrollable below it.
+  return createPortal(
     <div className="fixed inset-0 z-[100] bg-slate-950/95 p-4 backdrop-blur-sm">
       {panel}
-    </div>
+    </div>,
+    document.body,
   );
 });
