@@ -109,6 +109,7 @@ import { ictStructuralFeaturesMigration } from "./108-ict-structural-features.js
 import { ictRefinedOrderBlockMigration } from "./109-ict-refined-order-block.js";
 import { ictOteMigration } from "./110-ict-ote.js";
 import { ictSwingHierarchyMigration } from "./111-ict-swing-hierarchy.js";
+import { backtestOpposingSweepExitMigration } from "./112-backtest-opposing-sweep-exit.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -222,4 +223,5 @@ export const migrations = [
   ictRefinedOrderBlockMigration,
   ictOteMigration,
   ictSwingHierarchyMigration,
+  backtestOpposingSweepExitMigration,
 ];

@@ -35,6 +35,29 @@ import {
   TimeWindowFilteredStrategy,
   type BlockedIstWindow,
 } from "../../modules/backtesting/domain/entry-filters.js";
+import type { ProtectiveStopPolicy } from "../../modules/paper-trading/domain/protective-stop.js";
+
+/**
+ * `--protective-stop break-even` or `--protective-stop trail:<triggerR>:<distanceR>`.
+ *
+ * Measures the same break-even/trail mechanism `protective-stop.ts` ships live for momentum-scalp
+ * option-buyer trades, re-derived for underlying-index bars -- see
+ * `underlying-protective-stop.ts` for why. Omitted means off, byte-identical to every prior run.
+ */
+function parseProtectiveStopPolicy(argumentsList: string[]): ProtectiveStopPolicy | null {
+  const raw = getOption(argumentsList, "protective-stop")?.trim();
+  if (!raw) return null;
+  if (raw === "break-even") return { breakEvenTriggerR: 0.5, trail: null };
+  const trailMatch = /^trail:([\d.]+):([\d.]+)$/.exec(raw);
+  if (trailMatch) {
+    const triggerR = Number(trailMatch[1]);
+    const distanceR = Number(trailMatch[2]);
+    if (Number.isFinite(triggerR) && triggerR > 0 && Number.isFinite(distanceR) && distanceR > 0) {
+      return { breakEvenTriggerR: 0.5, trail: { triggerR, distanceR } };
+    }
+  }
+  throw new Error(`--protective-stop must be "break-even" or "trail:<triggerR>:<distanceR>", received "${raw}".`);
+}
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
@@ -354,7 +377,11 @@ async function main(): Promise<void> {
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
-      new BacktestEngine(replayStrategy),
+      new BacktestEngine(
+        replayStrategy,
+        argumentsList.includes("--exit-on-opposing-sweep"),
+        parseProtectiveStopPolicy(argumentsList),
+      ),
     ).execute({
       strategyVersionId: strategyVersion.id,
       strategyConfiguration: configurationOverride === null
@@ -391,6 +418,8 @@ async function main(): Promise<void> {
       dataCutoffAt: dataCutoffAt.toISOString(),
       // Recorded on the run so an arm cannot be mistaken for its control after the fact.
       higherTimeframes: higherTimeframeBuckets ?? null,
+      exitOnOpposingSweep: argumentsList.includes("--exit-on-opposing-sweep"),
+      protectiveStopPolicy: parseProtectiveStopPolicy(argumentsList),
       strategyConfigurationOverride: configurationOverride ?? null,
       ...result,
     }));

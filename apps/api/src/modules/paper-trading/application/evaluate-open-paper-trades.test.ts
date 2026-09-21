@@ -308,7 +308,11 @@ describe("EvaluateOpenPaperTrades", () => {
     });
   });
 
-  it("moves a 1m momentum scalp stop to break-even after +0.5R", async () => {
+  it("does not move the stop at all with the shipped default policy, even well past the old trigger", async () => {
+    // `momentumScalp1mStopPolicy` disabled break-even 2026-09-21 -- it backtested worse, not
+    // better (t=-2.63 on BANKNIFTY). This is the regression test for that being the real shipped
+    // default (no policy override passed), not just documentation: the two tests below inject
+    // break-even explicitly, since the shipped policy alone can no longer demonstrate the mechanism.
     const closings: ClosePaperTradeInput[] = [];
     const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
     const trade = optionBuyerTrade({
@@ -334,6 +338,44 @@ describe("EvaluateOpenPaperTrades", () => {
       candleRepository,
       new FixedImpliedVolatilitySource(0.12),
       denseReader(sample("2026-08-06T08:59:45.000Z", 210)),
+      // No fifth argument: exercises the real shipped default.
+    ).execute({
+      accountId: "account-1",
+      asOf: new Date("2026-08-06T09:00:00.000Z"),
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(stopUpdates).toHaveLength(0);
+  });
+
+  it("moves a 1m momentum scalp stop to break-even after +0.5R, with break-even explicitly enabled", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
+      timeframe: "1m",
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 225,
+    });
+    const paperTradeRepository = stubRepo(trade, closings);
+    paperTradeRepository.updateStopLoss = async (id, stop, reason) => {
+      stopUpdates.push({ id, stop, reason });
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      paperTradeRepository,
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(sample("2026-08-06T08:59:45.000Z", 210)),
+      { breakEvenTriggerR: 0.5, trail: null },
     ).execute({
       accountId: "account-1",
       asOf: new Date("2026-08-06T09:00:00.000Z"),
@@ -342,11 +384,13 @@ describe("EvaluateOpenPaperTrades", () => {
 
     expect(result.tradesClosed).toBe(0);
     expect(stopUpdates).toHaveLength(1);
-    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    // One tick below entry (180), not onto it: `paper_trades_check` forbids stop_loss >= entry_price
+    // for a LONG, so the closest the schema can persist is 179.95.
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 179.95 });
     expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
   });
 
-  it("moves a 1m momentum scalp stop to break-even from a peak seen in the tick history, even after price receded before the latest bid", async () => {
+  it("moves a 1m momentum scalp stop to break-even from a peak seen in the tick history, even after price receded before the latest bid, with break-even explicitly enabled", async () => {
     const closings: ClosePaperTradeInput[] = [];
     const stopUpdates: Array<{ id: string; stop: number; reason?: string }> = [];
     const trade = optionBuyerTrade({
@@ -382,6 +426,7 @@ describe("EvaluateOpenPaperTrades", () => {
           sample("2026-08-06T08:59:45.000Z", 190),
         ],
       ),
+      { breakEvenTriggerR: 0.5, trail: null },
     ).execute({
       accountId: "account-1",
       asOf: new Date("2026-08-06T09:00:00.000Z"),
@@ -390,7 +435,7 @@ describe("EvaluateOpenPaperTrades", () => {
 
     expect(result.tradesClosed).toBe(0);
     expect(stopUpdates).toHaveLength(1);
-    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 180 });
+    expect(stopUpdates[0]).toMatchObject({ id: "opt-1", stop: 179.95 });
     expect(stopUpdates[0]!.reason).toMatch(/\+0\.5R/);
   });
 
