@@ -22,6 +22,12 @@ import type { CanvasRenderingTarget2D } from "fancy-canvas";
  * *active* zones (`activeFvgs`/`activeObs` from the ICT ledger already excludes anything
  * CONSUMED/INVALIDATED), so "still active" is drawn as "still open on the right edge", the same
  * way a trading terminal extends an untouched level to the current bar.
+ *
+ * `label` is carried on the box (used for the marker in `interactive-chart.tsx`'s tooltip-style
+ * hover, if that's ever added) but deliberately NOT drawn inline on the canvas -- a symbol like
+ * NIFTY50 can carry 50+ active zones at once, and a text label per box turned the chart into a
+ * wall of overlapping text. Color alone (bullish/bearish, FVG/OB) plus the legend's counts is the
+ * whole visual vocabulary now; `interactive-chart.tsx` also caps how many boxes reach here at all.
  */
 export interface ZoneBox {
   readonly time1: Time;
@@ -58,15 +64,8 @@ class ZoneBoxRenderer implements IPrimitivePaneRenderer {
       context.fillRect(left, top, width, height);
       context.strokeStyle = box.borderColor;
       context.lineWidth = 1;
-      context.setLineDash([4, 3]);
+      context.setLineDash([3, 3]);
       context.strokeRect(left, top, width, height);
-
-      context.setLineDash([]);
-      context.fillStyle = box.borderColor;
-      context.font = "10px 'Inter', sans-serif";
-      context.textBaseline = "bottom";
-      const labelY = top > 12 ? top - 2 : top + 12;
-      context.fillText(box.label, left + 4, labelY);
       context.restore();
     });
   }

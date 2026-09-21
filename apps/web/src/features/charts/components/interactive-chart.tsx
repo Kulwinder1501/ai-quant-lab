@@ -7,6 +7,9 @@ import type { ChartPayload } from "../domain";
 import { useAppStore } from "../../../stores/app-store";
 import { ZoneBoxesPrimitive, type ZoneBox } from "./zone-box-primitive";
 
+/** Per (FVG/OB x bullish/bearish) group -- see the `zoneBoxes` memo for why this exists. */
+const MAX_ZONES_PER_GROUP = 5;
+
 interface InteractiveChartProps {
   payload: ChartPayload;
   activeIndicators: string[];
@@ -203,23 +206,33 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
    * other zone, not the old "BULLISH_OB"/"BEARISH_OB" naming.
    *
    * `activeFvgs`/`activeObs` are already filtered to zones that haven't been CONSUMED or
-   * INVALIDATED, so every box here is honestly still open -- there's no client-side re-filtering
-   * to get wrong. `time1` is clamped to the first loaded candle: a zone created weeks before the
-   * visible window would otherwise get a coordinate off the left edge and vanish outright, when
-   * what it actually means is "this has been active the whole time you can see".
+   * INVALIDATED, so every candidate here is honestly still open -- there's no client-side
+   * re-filtering to get wrong. `time1` is clamped to the first loaded candle: a zone created weeks
+   * before the visible window would otherwise get a coordinate off the left edge and vanish
+   * outright, when what it actually means is "this has been active the whole time you can see".
+   *
+   * A symbol can carry 50+ active zones (NIFTY50 has shown 13 bullish + 36 bearish FVGs at once),
+   * and drawing all of them turned the chart into a wall of overlapping boxes -- the complaint that
+   * prompted this cap. Each of the four groups (FVG bull/bear, OB bull/bear) is independently
+   * capped to the `MAX_ZONES_PER_GROUP` boxes nearest the last close, since a zone hundreds of
+   * points from the current price is the least actionable one to spend screen space on, not the
+   * most recently formed one -- an old zone the market walked back up through is still closer, and
+   * still more relevant, than last week's zone at a price nobody's near.
    */
   const zoneBoxes = useMemo<ZoneBox[]>(() => {
     if (!showZones || ohlcData.length === 0) return [];
 
     const firstTime = ohlcData[0].time as number;
     const lastTime = ohlcData[ohlcData.length - 1].time as number;
-    const boxes: ZoneBox[] = [];
+    const lastClose = ohlcData[ohlcData.length - 1].close;
+
+    const groups: Record<string, ZoneBox[]> = { fvgBull: [], fvgBear: [], obBull: [], obBear: [] };
 
     (indicators.FVG ?? []).forEach((fvg) => {
       if (fvg.top === undefined || fvg.bottom === undefined) return;
       const isBullish = fvg.type === "BULLISH";
       const createdAt = new Date(fvg.timestamp).getTime() / 1000;
-      boxes.push({
+      groups[isBullish ? "fvgBull" : "fvgBear"]!.push({
         time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
         time2: lastTime as Time,
         price1: fvg.top,
@@ -234,7 +247,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
       if (ob.top === undefined || ob.bottom === undefined) return;
       const isBullish = ob.type === "BULLISH";
       const createdAt = new Date(ob.timestamp).getTime() / 1000;
-      boxes.push({
+      groups[isBullish ? "obBull" : "obBear"]!.push({
         time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
         time2: lastTime as Time,
         price1: ob.top,
@@ -245,7 +258,11 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
       });
     });
 
-    return boxes;
+    const distanceToClose = (box: ZoneBox) => Math.min(Math.abs(box.price1 - lastClose), Math.abs(box.price2 - lastClose));
+
+    return Object.values(groups).flatMap((group) =>
+      group.sort((a, b) => distanceToClose(a) - distanceToClose(b)).slice(0, MAX_ZONES_PER_GROUP),
+    );
   }, [showZones, ohlcData, indicators.FVG, indicators.ORDER_BLOCK]);
 
   useEffect(() => {
