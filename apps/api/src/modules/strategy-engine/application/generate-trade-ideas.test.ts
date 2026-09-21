@@ -386,10 +386,14 @@ describe("the live-tradable gate", () => {
      * `operationalDisposition` recorded a verdict and gated nothing: `ict-structure-v1` and
      * `trend-breakout` were both TERMINAL_UNOWNED, both active, and both timeframe-eligible for the
      * paper bot, so only their own gates failing to pass kept them out of live proposals.
+     *
+     * `ict-structure-v1` was wired live 2026-09-21 (see strategy-registry.ts's comment on that
+     * entry and bot-sandboxes.ts's two ict bots) despite the evidence, not because it improved --
+     * so it drops out of this set while `trend-breakout` remains the one still-terminal strategy.
      */
     const terminal = registeredStrategies.filter((strategy) => !mayProposeLiveTrades(strategy));
     expect(terminal.map((strategy) => strategy.registration.strategyKey).sort())
-      .toEqual(["ict-structure-v1", "trend-breakout"]);
+      .toEqual(["trend-breakout"]);
   });
 
   it("keeps terminal strategies registered, so measurement paths can still reach them", () => {

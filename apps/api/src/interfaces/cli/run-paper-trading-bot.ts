@@ -129,16 +129,21 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * nothing more. Drop it if that noise ever obscures something real.
  */
 /*
- * 15m is gone, and its absence is the point.
+ * 15m restored 2026-09-21 to feed `ict-structure-v1`, scoped to NIFTY50 only via
+ * `AutoBot-IctNifty15m`'s `allowedSeries` -- see bot-sandboxes.ts.
  *
- * Only `ict-structure-v1` and `trend-breakout` ever supported it, and both are now TERMINAL_UNOWNED
- * -- so with `operationalDisposition` actually enforced there is no strategy that may trade 15m, and
- * `assertScannableTimeframes` refuses to start on it. Scanning it anyway would have built contexts
- * and ICT snapshots every five minutes to feed a generator that can no longer act on them.
- *
- * Restoring 15m means registering a 15m strategy that is not measured out, not re-adding the string.
+ * This is explicitly NOT "a 15m strategy that is not measured out" -- the bar this comment
+ * previously set. `ict-structure-v1` remains registered as `TERMINAL_UNOWNED` with the evidence
+ * that closed it still attached (see strategy-registry.ts): its 20-month backtest is sign-unstable
+ * across instrument, timeframe and even date window within the same cell, and the registry's own
+ * note says "do not resume by re-running a positive cell." It was wired anyway, on explicit
+ * instruction, after that evidence was presented and an out-of-sample check (2026-09-08..09-21,
+ * both target cells) came back with zero trades -- too little fresh data to confirm or refute it.
+ * Live paper trading here is the validation this project's usual gate would have required first,
+ * not confirmation the gate was cleared. Judge these trades by their own record, not by the
+ * pre-registered backtest that was already ruled unreliable.
  */
-const SCAN_TIMEFRAMES = ["1m", "5m"] as const;
+const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
@@ -397,8 +402,16 @@ async function main(): Promise<void> {
         const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
         if (!instrument) continue;
 
-        // Filter results to only strategies permitted for this specific bot
-        const botResults = results.filter((res) => botSpec.allowedStrategies.includes(res.strategyKey));
+        // Filter results to only strategies permitted for this specific bot, and (when the bot
+        // declares `allowedSeries`) only the symbol/timeframe combinations it owns. Needed because
+        // `allowedStrategies` alone is strategy-key-only: `ict-structure-v1` fires on both indices
+        // at both 5m and 15m, so two bots each meant to own one specific combination would otherwise
+        // both take every combination the strategy produces.
+        const seriesAllowed = botSpec.allowedSeries === undefined
+          || botSpec.allowedSeries.some((series) => series.symbol === symbol && series.timeframe === timeframe);
+        const botResults = seriesAllowed
+          ? results.filter((res) => botSpec.allowedStrategies.includes(res.strategyKey))
+          : [];
 
         for (const result of botResults) {
           if (result.skippedReason) {
