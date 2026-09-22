@@ -113,6 +113,7 @@ import { backtestOpposingSweepExitMigration } from "./112-backtest-opposing-swee
 import { twelveDataInstrumentSupportMigration } from "./113-twelvedata-instrument-support.js";
 import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.js";
 import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
+import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -230,4 +231,5 @@ export const migrations = [
   twelveDataInstrumentSupportMigration,
   xauUsdCandleProvenanceMigration,
   paperAccountsCurrencySupportMigration,
+  paperTradeSessionCloseExitReasonMigration,
 ];
