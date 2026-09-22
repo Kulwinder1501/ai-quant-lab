@@ -114,6 +114,7 @@ import { twelveDataInstrumentSupportMigration } from "./113-twelvedata-instrumen
 import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.js";
 import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
 import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
+import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-locking-stop.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -232,4 +233,5 @@ export const migrations = [
   xauUsdCandleProvenanceMigration,
   paperAccountsCurrencySupportMigration,
   paperTradeSessionCloseExitReasonMigration,
+  paperTradeProfitLockingStopMigration,
 ];

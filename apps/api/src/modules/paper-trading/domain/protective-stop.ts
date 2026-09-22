@@ -19,11 +19,12 @@
  * captures effectively all of the intended protection -- the residual risk is one tick's worth of
  * premium, not the full original stop distance.
  *
- * The same floor applies to the trail branch below, defensively: `trail` is off by default today, but
- * a trailed stop that reaches or passes `entryPrice` would hit the identical constraint the moment
- * trailing is ever enabled. Whether a LONG's stop should ever be allowed to sit *above* entry (a real
- * profit lock, not break-even) is a schema question for that future decision, not this fix -- until
- * then this floors at the same one-tick-below-entry ceiling break-even uses.
+ * That floor used to apply to the trail branch too, and **that was the bug, not a defensive choice**.
+ * A trailed stop clamped to one tick below entry is break-even with extra arithmetic: it can tighten
+ * toward entry and never past it, so it cannot lock in a single rupee of profit. Migration 117 moved
+ * the opening invariant onto `initial_stop_loss`, where it actually belongs, and `trail.lockProfit`
+ * now selects whether the clamp applies. It defaults to false, so every config written before that
+ * migration behaves exactly as it did.
  *
  * ## The trail is OFF by default, deliberately
  *
@@ -55,6 +56,21 @@
  * to lose, since they never reach +0.5R. On a book this lopsided it can only cost winners, never
  * save losers. `breakEvenTriggerR: null` below reflects that finding, not an oversight -- do not
  * re-enable it without a new registered result that overturns this one.
+ *
+ * ## The trail result on record was a break-even result (2026-09-22)
+ *
+ * The paragraph above says the trail config "never once activated". That is true and it was not a
+ * property of the data: with the entry-price clamp in force, a trail and a break-even are the same
+ * stop. Replaying the stored premium ticks of all 439 closed option trades, `trail 0.5R/0.25R`
+ * clamped and `break-even @0.5R` produce the identical book, +9,632.96 against the recorded
+ * baseline, to the rupee. So nothing measured here had ever tested trailing.
+ *
+ * The profit-locking arm has now been measured, and it does **not** clear either -- best config
+ * `trail 0.5R/0.5R lock` is +41.39/trade at t=2.33 against a Šidák threshold of ~3.10 over nine
+ * configurations, it is carried almost entirely by BANKNIFTY (+66.59, t=3.14) with NIFTY50 at
+ * +12.89 (t=0.47), and its top five winners are 51.5% of the whole effect. See
+ * `docs/exit-geometry-falsification-program-v1.md`, Amendment 1, for the full gate readout. It ships
+ * available and off, like everything else that did not clear.
  */
 
 import { OPTION_TICK_SIZE } from "../../pricing/domain/option-tick.js";
@@ -68,6 +84,17 @@ export interface ProtectiveStopPolicy {
     readonly triggerR: number;
     /** How far below the mark the trailed stop sits, in R. */
     readonly distanceR: number;
+    /**
+     * Whether the trailed stop may sit **above** entry, locking in profit rather than merely
+     * protecting against a loss. Omitted means false, which is the behaviour every existing config
+     * had and keeps them byte-identical.
+     *
+     * Until migration 117 this could not be expressed at all: `paper_trades_check` required a LONG's
+     * stop below entry, so the clamp below was not a policy choice but the only persistable value.
+     * See that migration for the measurement showing what the clamp cost -- with it, a trail and a
+     * plain break-even produce the same book to the rupee.
+     */
+    readonly lockProfit?: boolean;
   } | null;
 }
 
@@ -116,7 +143,10 @@ export function advanceProtectiveStop(input: {
   let candidate: number | null = null;
   let reason = "";
   if (policy.trail !== null && progressR >= policy.trail.triggerR) {
-    candidate = Math.min(markPremium - policy.trail.distanceR * risk, belowEntryCeiling);
+    const trailed = markPremium - policy.trail.distanceR * risk;
+    // The ceiling is what made a trail indistinguishable from break-even. `lockProfit` lifts it; the
+    // `candidate >= markPremium` guard below still refuses a stop at or above the mark either way.
+    candidate = policy.trail.lockProfit === true ? trailed : Math.min(trailed, belowEntryCeiling);
     reason = `trailed ${policy.trail.distanceR}R below the mark at +${progressR.toFixed(2)}R`;
   } else if (policy.breakEvenTriggerR !== null && progressR >= policy.breakEvenTriggerR) {
     candidate = belowEntryCeiling;

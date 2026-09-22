@@ -59,6 +59,40 @@ describe("advanceUnderlyingProtectiveStop, SHORT", () => {
   });
 });
 
+/*
+ * The backtester carried the same entry-price clamp as the live path, so every trailing arm this
+ * project has measured -- including the NO_EDGE verdict recorded against trailing -- was a result
+ * about break-even. See migration 117 for the replay that established that.
+ */
+describe("profit-locking trail", () => {
+  const lockTrail: ProtectiveStopPolicy = {
+    breakEvenTriggerR: 0.5,
+    trail: { triggerR: 1, distanceR: 0.5, lockProfit: true },
+  };
+
+  it("LONG: trails above entry instead of capping at one tick below it", () => {
+    expect(advanceUnderlyingProtectiveStop({ ...longBase, peakFavorable: 110, policy: lockTrail })).toBe(105);
+    // Identical geometry, flag omitted -- the capped value the same inputs produce today.
+    expect(advanceUnderlyingProtectiveStop({ ...longBase, peakFavorable: 110, policy: withTrail })).toBe(99.95);
+  });
+
+  it("SHORT: trails below entry, the mirror of the same lock", () => {
+    expect(advanceUnderlyingProtectiveStop({ ...shortBase, peakFavorable: 90, policy: lockTrail })).toBe(95);
+    expect(advanceUnderlyingProtectiveStop({ ...shortBase, peakFavorable: 90, policy: withTrail })).toBe(100.05);
+  });
+
+  it("clamps break-even even under a lock policy, since break-even IS entry by definition", () => {
+    // +0.6R: past the break-even trigger, short of the trail's 1R. The break-even branch still floors.
+    expect(advanceUnderlyingProtectiveStop({ ...longBase, peakFavorable: 106, policy: lockTrail })).toBe(99.95);
+  });
+
+  it("stays monotonic once above entry", () => {
+    expect(advanceUnderlyingProtectiveStop({
+      ...longBase, currentStopLoss: 106, peakFavorable: 110, policy: lockTrail,
+    })).toBeNull();
+  });
+});
+
 describe("refusals", () => {
   it("refuses a non-positive risk", () => {
     expect(advanceUnderlyingProtectiveStop({

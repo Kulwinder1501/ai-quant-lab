@@ -45,9 +45,18 @@ export function advanceUnderlyingProtectiveStop(input: {
   }
   if (candidate === null) return null;
 
-  candidate = side === "LONG"
-    ? Math.min(candidate, entryPrice - tickSize)
-    : Math.max(candidate, entryPrice + tickSize);
+  /*
+   * The entry-price clamp applies to break-even always, and to a trail only when it is not asked to
+   * lock profit. Leaving it on unconditionally is what made every trailing arm this project measured
+   * a restatement of break-even -- see migration 117. `lockProfit` is omitted by every existing
+   * config, so those arms are unchanged.
+   */
+  const locksProfit = policy.trail !== null && policy.trail.lockProfit === true && progressR >= policy.trail.triggerR;
+  if (!locksProfit) {
+    candidate = side === "LONG"
+      ? Math.min(candidate, entryPrice - tickSize)
+      : Math.max(candidate, entryPrice + tickSize);
+  }
 
   // Monotonic: never widen the stop already in force.
   if (side === "LONG" ? candidate <= currentStopLoss : candidate >= currentStopLoss) return null;

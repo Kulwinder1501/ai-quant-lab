@@ -120,6 +120,45 @@ describe("refusals", () => {
   });
 });
 
+/*
+ * Until migration 117 the trail could not lock profit, so `trail` and `breakEvenTriggerR` described
+ * the same stop. Measured over the stored premium ticks of all 439 closed option trades, a
+ * `trail 0.5R/0.25R` policy and a plain break-even produced the identical book: +9,632.96 against the
+ * recorded baseline, both, to the rupee. These tests pin the difference `lockProfit` makes.
+ */
+describe("profit-locking trail", () => {
+  const lockTrail: ProtectiveStopPolicy = {
+    breakEvenTriggerR: 0.5,
+    trail: { triggerR: 1, distanceR: 0.5, lockProfit: true },
+  };
+
+  it("places the stop above entry, where the clamped trail could not", () => {
+    // +2R at 120, trailing 0.5R behind => 115, genuinely above entry.
+    expect(advanceProtectiveStop({ ...base, markPremium: 120, policy: lockTrail })?.stopLoss).toBe(115);
+    // The same geometry without the flag is break-even and nothing more.
+    expect(advanceProtectiveStop({ ...base, markPremium: 120, policy: withTrail })?.stopLoss).toBe(99.95);
+  });
+
+  it("leaves an omitted lockProfit clamped, so every existing config is byte-identical", () => {
+    expect(withTrail.trail?.lockProfit).toBeUndefined();
+    expect(advanceProtectiveStop({ ...base, markPremium: 130, policy: withTrail })?.stopLoss).toBe(99.95);
+  });
+
+  it("still refuses a stop at or above the mark, which would fire on the tick that set it", () => {
+    const zeroDistance: ProtectiveStopPolicy = {
+      breakEvenTriggerR: 0.5,
+      trail: { triggerR: 1, distanceR: 0, lockProfit: true },
+    };
+    expect(advanceProtectiveStop({ ...base, markPremium: 120, policy: zeroDistance })).toBeNull();
+  });
+
+  it("stays monotonic above entry: a lower trail candidate cannot hand risk back", () => {
+    expect(advanceProtectiveStop({
+      ...base, currentStopLoss: 118, markPremium: 120, policy: lockTrail,
+    })).toBeNull();
+  });
+});
+
 describe("the shipped 1m policy", () => {
   it("is fully inert as of 2026-09-21: break-even backtested worse, not better", () => {
     // t=-1.86 (NIFTY50) / -2.63 (BANKNIFTY) against real cost. See the file docstring.
