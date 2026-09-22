@@ -298,6 +298,39 @@ Nothing further is buildable until sessions accumulate. The dense cells (`BANKNI
 
 Accumulation is unattended — see [The scheduled run](#the-scheduled-run). At one session per trading day the dense cells reach `PROVISIONAL` (5 sessions) inside a week and `DECISION_ELIGIBLE` (20 sessions) in roughly a month, assuming no collector outages.
 
+## Amendment 1 (2026-09-22) — every trailing result on record was a break-even result
+
+**The defect.** `paper_trades_check` required a LONG's `stop_loss` to sit strictly below `entry_price`. Both stop implementations — `paper-trading/domain/protective-stop.ts` live, `backtesting/domain/underlying-protective-stop.ts` in the harness — therefore clamped a trailed stop to one tick below entry. A trail that cannot cross entry is break-even with extra arithmetic.
+
+**The proof, not the inference.** Replaying the stored option premium ticks of all 439 closed option trades, `trail 0.5R/0.25R` (clamped) and `break-even @0.5R` return the identical book: **+9,632.96** against the recorded baseline, both, to the rupee. The clamped-trail row and the break-even row in that sweep are the same numbers in every column, per instrument and per era.
+
+This retro-scopes the NO_EDGE verdict recorded in `protective-stop.ts` (BANKNIFTY −63.08 → −64.03/trade, t = −2.63) and the note that the proposed trail "never once activated": both are findings about break-even. **A profit-locking trail had never been measured here.** Migration 117 moves the opening invariant onto `initial_stop_loss` and frees `stop_loss`; `ProtectiveStopPolicy.trail.lockProfit` (default false, so every prior arm is byte-identical) selects the behaviour, and `--protective-stop trail:A:B:lock` drives it.
+
+**First measurement of the new arm — `NOT CLEARED`, shipped default-off.**
+
+Paired same-trade replay, 439 closed option trades / 21 sessions / 2026-08-17 → 2026-09-22, entries held fixed, live fee model on both legs, session-clustered SE. The baseline reproduces the booked P&L exactly (−57,349.87 vs −57,349.87).
+
+| Arm | ALL /trade | t | BANKNIFTY /trade | t | NIFTY50 /trade | t |
+|---|---|---|---|---|---|---|
+| break-even @0.5R | +21.94 | 1.71 | +24.44 | 1.49 | +19.12 | 1.17 |
+| trail 0.5R/0.25R clamped | +21.94 | 1.71 | +24.44 | 1.49 | +19.12 | 1.17 |
+| trail 0.5R/0.25R **lock** | +43.29 | 1.79 | +83.95 | 3.05 | −2.69 | −0.07 |
+| trail 0.5R/0.5R **lock** | +41.39 | 2.33 | +66.59 | 3.14 | +12.89 | 0.47 |
+| trail 1.0R/0.5R **lock** | +7.14 | 0.50 | +14.68 | 1.11 | −1.40 | −0.05 |
+
+Gate readout for the best arm, `0.5R/0.5R lock`:
+
+- **Replication** — marginal pass. Same sign on both instruments, but NIFTY50 is +12.89 at t = 0.47; the effect is BANKNIFTY's.
+- **Noise floor** — fails correction. Nine configurations were examined, so the Šidák threshold at 20 df is |t| ≈ 3.10. ALL reaches 2.33. BANKNIFTY alone reaches 3.14 and would clear if BANKNIFTY alone were the pre-registered cell, which it was not.
+- **Era holdout** — sign-consistent (+25.66/trade before 2026-09-04, +149.01 after), but the second era is 56 trades at t = 1.24.
+- **Concentration** — the one that governs. The policy moves 185 of 439 trades, helping 109 and hurting 76, and **the top five winners are 51.5% of the entire effect**. Half the result is five trades.
+
+A book whose gain is one coin-flip in direction and five fat tails in magnitude is the shape a fitted artifact takes, not a durable edge. Shipped in-tree, default-off, measurable — the same disposition as every other arm that did not clear.
+
+**Scale-out (TP1) — `NO_EDGE`, negative at every level tested.** Selling half at a fixed R and letting the rest run: +0.25R → −8.62/trade, +0.5R → −7.54, +0.75R → −8.25, +1.0R → −14.54. Negative on NIFTY50 throughout (−22 to −29/trade) and roughly flat on BANKNIFTY. The mechanism is visible in the MFE distribution — only 56.5% of trades ever reach +0.5R and 33.7% reach +1.0R, while the median configured target is 1.43R, so a TP1 that fires often enough to matter fires mostly on trades that were going to reach target anyway, caps them, and pays a second ₹23.60 order fee for it. There is no level at which a partial exit is near-certain; +0.25R, the most-reached rung, is hit by 72.7%.
+
+Note also that scale-out is **not implemented on any live path**: `buildMultiTargetPlan` is imported by `evaluate-open-paper-trades.ts` and never called, `PartialExitPaperTrade` is constructed nowhere, and all 439 rows in `paper_trade_partial_exits` are full-size single slices written by the ordinary close. Measuring it in the backtester would require the engine to decrement `remainingQuantity`, which it never does. Given the result above, that work is not currently justified.
+
 ## Commands
 
 ```powershell

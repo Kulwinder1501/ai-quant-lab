@@ -109,6 +109,12 @@ import { ictStructuralFeaturesMigration } from "./108-ict-structural-features.js
 import { ictRefinedOrderBlockMigration } from "./109-ict-refined-order-block.js";
 import { ictOteMigration } from "./110-ict-ote.js";
 import { ictSwingHierarchyMigration } from "./111-ict-swing-hierarchy.js";
+import { backtestOpposingSweepExitMigration } from "./112-backtest-opposing-sweep-exit.js";
+import { twelveDataInstrumentSupportMigration } from "./113-twelvedata-instrument-support.js";
+import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.js";
+import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
+import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
+import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-locking-stop.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -222,4 +228,10 @@ export const migrations = [
   ictRefinedOrderBlockMigration,
   ictOteMigration,
   ictSwingHierarchyMigration,
+  backtestOpposingSweepExitMigration,
+  twelveDataInstrumentSupportMigration,
+  xauUsdCandleProvenanceMigration,
+  paperAccountsCurrencySupportMigration,
+  paperTradeSessionCloseExitReasonMigration,
+  paperTradeProfitLockingStopMigration,
 ];
