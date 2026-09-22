@@ -634,17 +634,29 @@ async function main(): Promise<void> {
    * check the real session themselves and no-op outside it, the same way every job here is
    * written to be a safe no-op off-session rather than relying on the cron pattern alone).
    *
-   * Every 5 minutes, every day: collect fresh 1m/5m candles first, then run the bot against
-   * them. `--skip-existing` makes the collection idempotent, and a 45-minute lookback window
-   * comfortably covers one tick's gap plus retry margin. Two `/time_series` requests well within
-   * Twelve Data's 8-credits/minute cap -- see `twelvedata-quote-client.ts` for where that cap was
-   * confirmed live.
+   * Every 5 minutes, every day: collect fresh 1m/5m candles, recompute indicators over them
+   * (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what `momentum-scalp-gold` reads -- and `smc-v2` --
+   * FVG/BOS/CHoCH/order-block/liquidity-sweep, the default `--family all` computes both), then
+   * run the bot. Without this step `indicator_snapshots` stays empty for XAU_USD and
+   * `momentum-scalp-gold` can never actually evaluate a bar -- confirmed live 2026-09-22: the
+   * first deploy ran clean but every tick's "RULES_NOT_MET" was indicators-absent, not
+   * conditions-failed, since nothing computed them. `applySmcConfluenceToProposal` in
+   * `generate-trade-ideas.ts` already runs unconditionally for every non-ICT strategy, so once
+   * `smc-v2` indicators exist here SMC confluence nudges gold's proposals with no further wiring.
+   *
+   * `--skip-existing` makes candle collection idempotent, and a 45-minute lookback window
+   * comfortably covers one tick's gap plus retry margin. `INDICATOR_WRITE_LOOKBACK_DAYS` bounds
+   * the indicator *write*, mirroring `collectIndicesIntraday`'s own reasoning above: computed
+   * over the full series, written only for the last few days, so a missed run heals on the next
+   * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
+   * `twelvedata-quote-client.ts` for where that cap was confirmed live.
    */
   cronSchedule("*/5 * * * *", () => {
     if (!process.env.TWELVEDATA_API_KEY) return;
     void schedule("XAU_CANDLE_COLLECTION", async () => {
       const to = new Date();
       const from = new Date(to.getTime() - 45 * 60 * 1000);
+      const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
       for (const timeframe of ["1m", "5m"]) {
         await runCommand("npm", [
           "run", "data:collect:historical", "--",
@@ -655,6 +667,13 @@ async function main(): Promise<void> {
           "--from", from.toISOString(),
           "--to", to.toISOString(),
           "--skip-existing",
+        ]);
+        await runCommand("npm", [
+          "run", "analysis:calculate-indicators", "--",
+          "--exchange", "TWELVEDATA",
+          "--instrument", "XAU_USD",
+          "--timeframe", timeframe,
+          "--from", indicatorsFrom.toISOString(),
         ]);
       }
     });

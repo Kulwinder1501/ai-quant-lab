@@ -7,7 +7,16 @@ import { PostgresIndicatorSnapshotRepository } from "../../infrastructure/databa
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { CalculateTechnicalIndicators } from "../../modules/technical-analysis/application/calculate-technical-indicators.js";
 import { defaultIndicatorDefinitions, SMC_ALGORITHM_VERSION } from "../../modules/technical-analysis/domain/technical-indicator.js";
+import type { Instrument } from "../../modules/market-data/domain/instrument.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
+
+function parseExchangeOption(value: string): Instrument["exchange"] {
+  const upper = value.toUpperCase();
+  if (upper === "NSE" || upper === "NFO" || upper === "BSE" || upper === "TWELVEDATA") {
+    return upper;
+  }
+  throw new Error(`Unsupported --exchange "${value}". Use NSE, NFO, BSE, or TWELVEDATA.`);
+}
 
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
@@ -25,9 +34,12 @@ async function main(): Promise<void> {
     const definitions = family === "smc"
       ? defaultIndicatorDefinitions.filter((definition) => definition.algorithmVersion === SMC_ALGORITHM_VERSION)
       : undefined;
-    const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
+    // Defaults to NSE, unchanged for every existing call site -- only a non-Indian instrument
+    // (e.g. `--exchange TWELVEDATA --instrument XAU_USD`) needs to pass this explicitly.
+    const exchange = parseExchangeOption(getOption(argumentsList, "exchange") ?? "NSE");
+    const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol(exchange, symbol);
     if (!instrument) {
-      throw new Error(`NSE instrument "${symbol}" is not registered.`);
+      throw new Error(`${exchange} instrument "${symbol}" is not registered.`);
     }
     const result = await new CalculateTechnicalIndicators(
       new PostgresCandleRepository(database),
