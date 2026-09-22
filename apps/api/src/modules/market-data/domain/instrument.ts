@@ -4,11 +4,13 @@ export type OptionType = "CE" | "PE";
 
 export interface Instrument {
   id: string;
-  exchange: "NSE" | "NFO" | "BSE";
+  exchange: "NSE" | "NFO" | "BSE" | "TWELVEDATA";
   symbol: string;
   displayName: string;
   instrumentType: InstrumentType;
   isin: string | null;
+  /** Every instrument was NSE/BSE-listed and INR-priced until OANDA's USD-quoted XAU_USD. */
+  currency: "INR" | "USD";
   tickSize: string;
   lotSize: number;
   isActive: boolean;
@@ -25,6 +27,8 @@ export interface UpsertInstrumentInput {
   displayName: string;
   instrumentType: InstrumentType;
   isin?: string | null;
+  /** Defaults to `"INR"` -- every instrument before OANDA's XAU_USD was Indian-exchange-listed. */
+  currency?: Instrument["currency"];
   tickSize?: string;
   lotSize?: number;
   isActive?: boolean;

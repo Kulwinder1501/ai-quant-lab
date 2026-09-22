@@ -6,10 +6,17 @@ import { instrumentTypes, type Instrument, type InstrumentType } from "../../mod
 import { getOption, requireOption } from "./arguments.js";
 
 function parseExchange(value: string): Instrument["exchange"] {
-  if (value === "NSE" || value === "NFO" || value === "BSE") {
+  if (value === "NSE" || value === "NFO" || value === "BSE" || value === "TWELVEDATA") {
     return value;
   }
-  throw new Error("Unsupported exchange. Use NSE, NFO, or BSE.");
+  throw new Error("Unsupported exchange. Use NSE, NFO, BSE, or TWELVEDATA.");
+}
+
+function parseCurrency(value: string): Instrument["currency"] {
+  if (value === "INR" || value === "USD") {
+    return value;
+  }
+  throw new Error("Unsupported currency. Use INR or USD.");
 }
 
 function parseInstrumentType(value: string): InstrumentType {
@@ -41,6 +48,7 @@ async function main(): Promise<void> {
       displayName: requireOption(argumentsList, "name"),
       instrumentType: parseInstrumentType((getOption(argumentsList, "type") ?? "EQUITY").toUpperCase()),
       isin: getOption(argumentsList, "isin") ?? null,
+      currency: parseCurrency((getOption(argumentsList, "currency") ?? "INR").toUpperCase()),
       tickSize: getOption(argumentsList, "tick-size") ?? "0.05",
       lotSize: parsePositiveInteger(getOption(argumentsList, "lot-size"), 1),
       metadata: getOption(argumentsList, "kite-quote-symbol")
