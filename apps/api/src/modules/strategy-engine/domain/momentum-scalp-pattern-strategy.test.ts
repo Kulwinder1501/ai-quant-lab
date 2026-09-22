@@ -168,6 +168,63 @@ describe("MomentumScalpPatternStrategy", () => {
     expect(ideas.length).toBe(0);
   });
 
+  /*
+   * `context.patterns` arrives `ORDER BY pattern_code ASC` from both the live and backtest
+   * repositories -- alphabetical, no doctrinal meaning. Before this fix, `.find()` over that array
+   * picked whichever candidate sorted first, not the one BULLISH_PATTERNS/BEARISH_PATTERNS'
+   * construction says should win. DRAGONFLY_DOJI < HAMMER alphabetically, so a candle carrying both
+   * used to trigger on the Doji, not the Hammer -- and the Doji's (lower) confidence, not the
+   * Hammer's, fed the 40%-weighted confidence score. Measured live 2026-09-22: alphabetical order
+   * picked the non-priority pattern on 49% of multi-pattern bullish candles.
+   */
+  it("selects the higher-priority pattern (HAMMER) over an alphabetically-earlier one (DRAGONFLY_DOJI) present on the same candle", () => {
+    const ctx = createContext({
+      close: 24_000,
+      supertrendTrend: "UP",
+      vwap: 23_990,
+      atr: 20,
+      priceActionEvents: [
+        {
+          eventCode: "SUPPORT",
+          algorithmVersion: "price-action-v2",
+          direction: "BULLISH",
+          level: 23_990,
+          confidence: 0.8,
+          details: {},
+        },
+      ],
+      patterns: [
+        // Alphabetically first, but last (weakest) in BULLISH_PATTERNS -- must NOT win.
+        {
+          code: "DRAGONFLY_DOJI",
+          algorithmVersion: "candlestick-v1",
+          direction: "BULLISH",
+          confidence: 0.55,
+          contextCandleIds: ["candle-1"],
+          details: {},
+        },
+        // First (strongest) in BULLISH_PATTERNS -- must win despite sorting after DRAGONFLY_DOJI.
+        {
+          code: "HAMMER",
+          algorithmVersion: "candlestick-v1",
+          direction: "BULLISH",
+          confidence: 0.9,
+          contextCandleIds: ["candle-1"],
+          details: {},
+        },
+      ],
+    });
+
+    const ideas = strategy.evaluate(ctx, CONFIGURATION);
+    expect(ideas.length).toBe(1);
+    expect(ideas[0].evidence).toMatchObject({ pattern: "HAMMER" });
+    expect(ideas[0].reasoning.join(" ")).toContain("HAMMER");
+    expect(ideas[0].reasoning.join(" ")).not.toContain("DRAGONFLY_DOJI");
+    // Confidence derives 40% from the selected pattern's own confidence (0.9, not DRAGONFLY_DOJI's 0.55).
+    const patternEvidence = ideas[0].evidenceItems.find((e) => e.sourceReference === "HAMMER");
+    expect(patternEvidence?.details).toMatchObject({ pattern: "HAMMER", confidence: 0.9 });
+  });
+
   it("rejects proposal when context score is below configured threshold", () => {
     const ctx = createContext({
       close: 24_000,
@@ -404,6 +461,59 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
     expect(downtrendIdeas.length).toBe(1);
     expect(downtrendIdeas[0].side).toBe("LONG");
     expect(downtrendIdeas[0].evidenceItems.some((e) => e.sourceReference === "INVERTED_HAMMER_SUPPORT")).toBe(true);
+  });
+
+  /*
+   * V2 has its own, independent bullishPattern/bearishPattern selection (separate call sites from
+   * V1) -- same fix, same coverage needed on the SHORT/bearish side. BEARISH_HARAMI sorts before
+   * TWEEZER_TOP alphabetically but is listed AFTER it in BEARISH_PATTERNS (weaker), which is the
+   * exact pairing measured live on 2026-09-22 as the single most common mismatch in the table.
+   */
+  it("selects the higher-priority pattern (TWEEZER_TOP) over an alphabetically-earlier one (BEARISH_HARAMI) in Strategy V2", () => {
+    const ctx = createContext({
+      close: 23_900,
+      supertrendTrend: "DOWN",
+      supertrendValue: 23_950,
+      emaFast: 23_920,
+      vwap: 23_910,
+      atr: 20,
+      priceActionEvents: [
+        {
+          eventCode: "RESISTANCE",
+          algorithmVersion: "price-action-v2",
+          direction: "BEARISH",
+          level: 23_910,
+          confidence: 0.8,
+          details: {},
+        },
+      ],
+      patterns: [
+        // Alphabetically first, but ranked BELOW TWEEZER_TOP in BEARISH_PATTERNS -- must NOT win.
+        {
+          code: "BEARISH_HARAMI",
+          algorithmVersion: "candlestick-v1",
+          direction: "BEARISH",
+          confidence: 0.5,
+          contextCandleIds: ["candle-1"],
+          details: {},
+        },
+        // Ranked ABOVE BEARISH_HARAMI in BEARISH_PATTERNS -- must win despite sorting later.
+        {
+          code: "TWEEZER_TOP",
+          algorithmVersion: "candlestick-v1",
+          direction: "BEARISH",
+          confidence: 0.88,
+          contextCandleIds: ["candle-1"],
+          details: {},
+        },
+      ],
+    });
+
+    const ideas = strategyV2.evaluate(ctx, CONFIGURATION);
+    expect(ideas.length).toBe(1);
+    expect(ideas[0].evidence).toMatchObject({ pattern: "TWEEZER_TOP" });
+    expect(ideas[0].reasoning.join(" ")).toContain("TWEEZER_TOP");
+    expect(ideas[0].reasoning.join(" ")).not.toContain("BEARISH_HARAMI");
   });
 
   it("awards +2 confluence points for confirming macro chart patterns (e.g. INVERSE_HEAD_AND_SHOULDERS)", () => {
