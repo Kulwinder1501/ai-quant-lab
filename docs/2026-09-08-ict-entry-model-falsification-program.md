@@ -223,3 +223,40 @@ could produce a different answer.
 
 `ict-structure-v1` stays `TERMINAL_UNOWNED`. The three arms stay in the tree behind their
 default-off switches with this measurement attached.
+
+## Amendment 3 — 2026-09-22, a fourth arm (swing-hierarchy protected level)
+
+`ict-structure-v1` was wired live on 2026-09-21 (`13a4888`), overriding the `TERMINAL_UNOWNED`
+verdict above as a deliberate unvalidated test on two bots -- `AutoBot-IctNifty15m` (NIFTY50 15m)
+and `AutoBot-IctBankNifty5m` (BANKNIFTY 5m). The two live cells are therefore NIFTY50 15m and
+BANKNIFTY 5m specifically, not the original program's uniform 15m/two-index design.
+
+Three correctness fixes landed on top of that live wiring (order-block POI scoping, the true
+order-block candle across multi-candle displacements, and the same doctrinal scoping extended to
+fair value gaps) -- each measured before/after on the two live cells and reported where they
+landed, not here; none of them changes this program's own control or verdict, since none is an
+entry-model arm.
+
+**`requireProtectedLevelIntact` is.** It rejects a trade if the ITH/ITL swing-hierarchy protected
+level (`swing-hierarchy.ts`, built 2026-09-15) is already breached at signal time -- the doctrine's
+own early warning that the current bias read may already be wrong. Registered as an arm the same
+day it was wired in: off by default, hypothesis to measure, not a gate to ship on doctrine alone.
+
+Measured 2026-09-22 on the two live cells, same params as the training-era table above
+(concurrency 5, 5,000,000 capital, 2bps slippage), control taken from the post-fix code (all three
+correctness fixes applied to both arm and control equally):
+
+| cell | control: trades, net | arm 4: trades, net | Δ net |
+|---|---|---|---|
+| NIFTY50 15m 2025 | 85, +9,483.50 | 73, +10,420.50 | **+937.00** |
+| NIFTY50 15m 2026 holdout | 114, -8,190.00 | 99, -7,897.60 | **+292.40** |
+| BANKNIFTY 5m 2026 | 102, +3,832.35 | 86, -537.90 | **-4,370.25** |
+
+Both NIFTY50 windows improve. BANKNIFTY does not merely fail to improve -- it flips from
+profitable to a loss, a -4,370.25 swing on a filter that cut its trade count 16%. Gate 1 (sign
+replication across both instruments) fails on this alone: the same non-replication signature that
+already closed killzone, OTE and poiPreference in the table above.
+
+**Verdict: NO_EDGE**, exactly the pre-registered expectation. The arm stays in the tree behind its
+default-off switch with this measurement attached, same as the other three, and is not deployed to
+either live bot.
