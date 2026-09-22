@@ -8,7 +8,7 @@ import { NseMarketSession } from "../domain/nse-market-session.js";
 
 const instrument: Instrument = {
   id: "instrument-1", exchange: "NSE", symbol: "RELIANCE", displayName: "Reliance",
-  instrumentType: "EQUITY", isin: null, tickSize: "0.05", lotSize: 1, isActive: true, metadata: {},
+  instrumentType: "EQUITY", isin: null, currency: "INR", tickSize: "0.05", lotSize: 1, isActive: true, metadata: {},
 };
 
 function candleRepository(): { repository: CandleRepository; saved: Map<string, PersistedCandle> } {

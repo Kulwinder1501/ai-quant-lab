@@ -32,12 +32,12 @@ import { SharedStreamPollerRegistry } from "../../application/shared-stream-poll
 const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [
   { label: "NIFTY50", symbol: "NIFTY50" },
   { label: "BANKNIFTY", symbol: "BANKNIFTY" },
+  { label: "GOLD", symbol: "GC=F" },
   { label: "FINNIFTY", symbol: "FINNIFTY" },
   { label: "SENSEX", symbol: "SENSEX" },
   { label: "HANG SENG", symbol: "^HSI" },
   { label: "NIKKEI 225", symbol: "^N225" },
   { label: "S&P 500", symbol: "^GSPC" },
-  { label: "GOLD", symbol: "GC=F" },
 ];
 
 export function registerStrategyRoutes(
