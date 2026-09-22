@@ -151,6 +151,39 @@ function classifyNewBlock(
   return "CLASSIC";
 }
 
+/**
+ * Walks backward from `searchFromIndex` to find the true order-block candle -- the LAST candle
+ * whose own direction opposes the displacement, per doctrine's "last down/up candle before the
+ * move." Fixing the search at exactly `searchFromIndex` (the FVG's own candle1) is only correct
+ * when the whole displacement fits in a single candle. When a rally or selloff builds over 2+
+ * candles before a fixed 2-bar lookback first clears a gap, candle1 of the triggering window is
+ * itself a same-direction continuation candle, not the block -- and the real one sits further
+ * back, unexamined.
+ *
+ * Reproduced directly against this engine: a bearish candle, a small bullish pause candle that
+ * does not clear its high, then a big bullish candle that does. The fair value gap fires correctly
+ * on the pause-to-breakout window, but without this search the order block is silently never
+ * created, because the pause candle (not the bearish one) sits exactly 2 bars back and fails the
+ * opposing-color test outright.
+ *
+ * Bounded at `maxLookback` bars so a long same-direction run -- a trend with no clean reversal
+ * candle in range -- fails closed (returns null) rather than scanning the whole history or
+ * anchoring on an arbitrarily distant, unrelated candle.
+ */
+function findOrderBlockCandle(
+  candles: readonly CausalCandle[],
+  searchFromIndex: number,
+  isBullishDisplacement: boolean,
+  maxLookback: number
+): { readonly candle: CausalCandle; readonly index: number } | null {
+  const opposes = (c: CausalCandle): boolean => (isBullishDisplacement ? c.close < c.open : c.close > c.open);
+  const floor = Math.max(0, searchFromIndex - maxLookback + 1);
+  for (let i = searchFromIndex; i >= floor; i -= 1) {
+    if (opposes(candles[i])) return { candle: candles[i], index: i };
+  }
+  return null;
+}
+
 export class IctZoneLedger {
   private fvgs: FairValueGap[] = [];
   private obs: OrderBlock[] = [];
@@ -168,7 +201,13 @@ export class IctZoneLedger {
   constructor(
     private readonly displacementThreshold: number = 1.5,
     private readonly meanThresholdFraction: number = 0.5,
-    private readonly invertedBlocksRemainPoi: boolean = false
+    private readonly invertedBlocksRemainPoi: boolean = false,
+    /**
+     * How far back `findOrderBlockCandle` may walk to find the true opposing candle. 10 bars,
+     * matching this codebase's existing `LIQUIDITY_LOOKBACK_BARS` precedent for the same kind of
+     * bound -- a deliberate, documented limit, not a value tuned against any result.
+     */
+    private readonly orderBlockLookbackBars: number = 10
   ) {}
 
   /**
@@ -359,63 +398,79 @@ export class IctZoneLedger {
     // 2. Detect Order Block
     if (currentIndex >= 2 && newlyCreatedFvg) {
       const displacementIndex = currentIndex - 1;
-      const obIndex = currentIndex - 2;
       const displacementCandle = candles[displacementIndex];
-      const obCandle = candles[obIndex];
+      const isBullishDisplacement = displacementCandle.close > displacementCandle.open;
+      const directionMatchesGap =
+        (isBullishDisplacement && newlyCreatedFvg.type === "BULLISH") ||
+        (!isBullishDisplacement && newlyCreatedFvg.type === "BEARISH");
 
-      const body = Math.abs(displacementCandle.close - displacementCandle.open);
-      const prevBody = Math.abs(obCandle.close - obCandle.open) || 1;
+      // Searches backward from the FVG's own candle1 rather than assuming it IS the order block --
+      // see `findOrderBlockCandle`'s docstring for the failure this closes.
+      const resolvedOb = directionMatchesGap
+        ? findOrderBlockCandle(candles, currentIndex - 2, isBullishDisplacement, this.orderBlockLookbackBars)
+        : null;
 
-      if (body >= prevBody * this.displacementThreshold) {
-        const isBullishDisplacement = displacementCandle.close > displacementCandle.open;
-        const wasBearish = obCandle.close < obCandle.open;
-        const wasBullish = obCandle.close > obCandle.open;
+      /*
+       * A second FVG originating from the same anchor candle is common -- a slow grind that opens a
+       * fresh 2-bar gap on several consecutive bars all walks back to the same true opposing candle,
+       * since nothing has happened since to invalidate it. The fixed `currentIndex - 2` anchor never
+       * had this problem (it moved in lockstep with `currentIndex`, so two triggers could not land on
+       * the same candle); the backward search does, unless guarded. Measured on real 2025 data before
+       * this guard: 164 of 628 unique BANKNIFTY anchor candles had spawned 2+ separate order-block
+       * objects, 216 of them pure duplicates of a still-active zone. An anchor stops blocking new
+       * duplicates once its own block is invalidated/consumed and pruned from `this.obs` -- see
+       * `failBlock` -- so a genuinely new block CAN reform there afterward; this only blocks a second
+       * FRESH/TOUCHED instance of the one that is already live.
+       */
+      const alreadyAnchoredHere = resolvedOb
+        ? this.obs.some(
+            (existing) =>
+              existing.obCandleIndex === resolvedOb.index &&
+              existing.type === (isBullishDisplacement ? "BULLISH" : "BEARISH")
+          )
+        : false;
 
-        if (isBullishDisplacement && wasBearish && newlyCreatedFvg.type === "BULLISH") {
+      if (resolvedOb && !alreadyAnchoredHere) {
+        const { candle: obCandle, index: obIndex } = resolvedOb;
+        const body = Math.abs(displacementCandle.close - displacementCandle.open);
+        const prevBody = Math.abs(obCandle.close - obCandle.open) || 1;
+
+        if (body >= prevBody * this.displacementThreshold) {
           const top = obCandle.high;
           const bottom = obCandle.low;
-          const ob: OrderBlock = {
-            id: `ob-bullish-${currentIndex}`,
-            type: "BULLISH",
-            top,
-            bottom,
-            meanThreshold: bottom + (top - bottom) * this.meanThresholdFraction,
-            createdAtBarIndex: currentIndex,
-            createdAtBarTime: current.openTime,
-            obCandleIndex: obIndex,
-            displacementCandleIndex: displacementIndex,
-            attachedFvgId: newlyCreatedFvg.id,
-            isExtreme: structure.lastHL ? obCandle.low <= structure.lastHL.price : true,
-            isIdmAdjacent: structure.idm ? Math.abs(obCandle.low - structure.idm.price) / obCandle.low < 0.005 : false,
-            kind: classifyNewBlock(obCandle, "BULLISH", true, structure),
-            state: "FRESH",
-          };
-          this.obs.push(ob);
-          this.lastEvent = {
-            zoneId: ob.id,
-            zoneKind: "OB",
-            event: "CREATED",
-            barIndex: currentIndex,
-          };
-        } else if (!isBullishDisplacement && wasBullish && newlyCreatedFvg.type === "BEARISH") {
-          const top = obCandle.high;
-          const bottom = obCandle.low;
-          const ob: OrderBlock = {
-            id: `ob-bearish-${currentIndex}`,
-            type: "BEARISH",
-            top,
-            bottom,
-            meanThreshold: bottom + (top - bottom) * this.meanThresholdFraction,
-            createdAtBarIndex: currentIndex,
-            createdAtBarTime: current.openTime,
-            obCandleIndex: obIndex,
-            displacementCandleIndex: displacementIndex,
-            attachedFvgId: newlyCreatedFvg.id,
-            isExtreme: structure.lastLH ? obCandle.high >= structure.lastLH.price : true,
-            isIdmAdjacent: structure.idm ? Math.abs(obCandle.high - structure.idm.price) / obCandle.high < 0.005 : false,
-            kind: classifyNewBlock(obCandle, "BEARISH", true, structure),
-            state: "FRESH",
-          };
+          const ob: OrderBlock = isBullishDisplacement
+            ? {
+                id: `ob-bullish-${currentIndex}`,
+                type: "BULLISH",
+                top,
+                bottom,
+                meanThreshold: bottom + (top - bottom) * this.meanThresholdFraction,
+                createdAtBarIndex: currentIndex,
+                createdAtBarTime: current.openTime,
+                obCandleIndex: obIndex,
+                displacementCandleIndex: displacementIndex,
+                attachedFvgId: newlyCreatedFvg.id,
+                isExtreme: structure.lastHL ? obCandle.low <= structure.lastHL.price : true,
+                isIdmAdjacent: structure.idm ? Math.abs(obCandle.low - structure.idm.price) / obCandle.low < 0.005 : false,
+                kind: classifyNewBlock(obCandle, "BULLISH", true, structure),
+                state: "FRESH",
+              }
+            : {
+                id: `ob-bearish-${currentIndex}`,
+                type: "BEARISH",
+                top,
+                bottom,
+                meanThreshold: bottom + (top - bottom) * this.meanThresholdFraction,
+                createdAtBarIndex: currentIndex,
+                createdAtBarTime: current.openTime,
+                obCandleIndex: obIndex,
+                displacementCandleIndex: displacementIndex,
+                attachedFvgId: newlyCreatedFvg.id,
+                isExtreme: structure.lastLH ? obCandle.high >= structure.lastLH.price : true,
+                isIdmAdjacent: structure.idm ? Math.abs(obCandle.high - structure.idm.price) / obCandle.high < 0.005 : false,
+                kind: classifyNewBlock(obCandle, "BEARISH", true, structure),
+                state: "FRESH",
+              };
           this.obs.push(ob);
           this.lastEvent = {
             zoneId: ob.id,
