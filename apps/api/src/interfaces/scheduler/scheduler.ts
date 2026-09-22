@@ -650,34 +650,47 @@ async function main(): Promise<void> {
    * over the full series, written only for the last few days, so a missed run heals on the next
    * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
    * `twelvedata-quote-client.ts` for where that cap was confirmed live.
+   *
+   * The two `schedule()` calls are sequenced with `await`, not fired as two independent
+   * `void schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
+   * are safe to run concurrently because they are temporally decoupled by construction --
+   * `INDICES_INTRADAY` runs on its own every-minute cron, so by the time `PAPER_TRADING_BOT` fires every
+   * five minutes the candles it reads are already several collections old and settled. This block
+   * folds collection and the bot into the *same* five-minute tick, so nothing separates them in
+   * time -- confirmed live 2026-09-22: firing both as `void schedule(...)` let
+   * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
+   * calculation was still running, which is exactly the read-before-write race this sequencing
+   * closes.
    */
   cronSchedule("*/5 * * * *", () => {
     if (!process.env.TWELVEDATA_API_KEY) return;
-    void schedule("XAU_CANDLE_COLLECTION", async () => {
-      const to = new Date();
-      const from = new Date(to.getTime() - 45 * 60 * 1000);
-      const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-      for (const timeframe of ["1m", "5m"]) {
-        await runCommand("npm", [
-          "run", "data:collect:historical", "--",
-          "--provider", "twelvedata",
-          "--exchange", "TWELVEDATA",
-          "--instrument", "XAU_USD",
-          "--timeframe", timeframe,
-          "--from", from.toISOString(),
-          "--to", to.toISOString(),
-          "--skip-existing",
-        ]);
-        await runCommand("npm", [
-          "run", "analysis:calculate-indicators", "--",
-          "--exchange", "TWELVEDATA",
-          "--instrument", "XAU_USD",
-          "--timeframe", timeframe,
-          "--from", indicatorsFrom.toISOString(),
-        ]);
-      }
-    });
-    void schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
+    void (async () => {
+      await schedule("XAU_CANDLE_COLLECTION", async () => {
+        const to = new Date();
+        const from = new Date(to.getTime() - 45 * 60 * 1000);
+        const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "data:collect:historical", "--",
+            "--provider", "twelvedata",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", from.toISOString(),
+            "--to", to.toISOString(),
+            "--skip-existing",
+          ]);
+          await runCommand("npm", [
+            "run", "analysis:calculate-indicators", "--",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", indicatorsFrom.toISOString(),
+          ]);
+        }
+      });
+      await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
+    })();
   });
 
   /**
