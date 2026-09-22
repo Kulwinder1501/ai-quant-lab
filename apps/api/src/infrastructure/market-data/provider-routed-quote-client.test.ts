@@ -43,6 +43,18 @@ describe("ProviderRoutedQuoteClient", () => {
     expect(result.get("^GSPC")?.provider).toBe("yahoo");
   });
 
+  it("routes an already-Yahoo-qualified futures/forex ticker to Yahoo, not Fyers", async () => {
+    const fyers = reader("fyers-api-v3");
+    const foreign = reader("yahoo");
+    const client = new ProviderRoutedQuoteClient(fyers, foreign);
+
+    const result = await client.quoteSymbols(["NIFTY50", "GC=F"]);
+
+    expect(fyers.quoteSymbols).toHaveBeenCalledWith(["NIFTY50"]);
+    expect(foreign.quoteSymbols).toHaveBeenCalledWith(["GC=F"]);
+    expect(result.get("GC=F")?.provider).toBe("yahoo");
+  });
+
   it("returns no Indian quote when Fyers is unconfigured and never calls Yahoo", async () => {
     const foreign = reader("yahoo");
     const client = new ProviderRoutedQuoteClient(null, foreign);

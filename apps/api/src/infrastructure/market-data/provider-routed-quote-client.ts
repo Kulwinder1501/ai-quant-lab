@@ -7,10 +7,17 @@ const yahooReader: MarketQuoteReader = {
 };
 
 /**
- * Indian exchange symbols are Fyers-only. Yahoo is retained solely for foreign indices whose
- * canonical keys begin with `^`; a Fyers outage therefore cannot silently change the provider
- * used by the bot, portfolio, or driver tape.
+ * Indian exchange symbols are Fyers-only. Yahoo is retained for symbols Fyers has no segment
+ * for: foreign indices, whose canonical keys begin with `^`, and already-Yahoo-qualified
+ * futures/forex tickers such as `XAUUSD=X`, which contain `=` -- the same escape hatch
+ * `resolveYahooSymbol` already recognizes as "not an NSE equity guess". A Fyers outage
+ * therefore cannot silently change the provider used by the bot, portfolio, or driver tape.
  */
+function isForeignSymbol(symbol: string): boolean {
+  const trimmed = symbol.trim();
+  return trimmed.startsWith("^") || trimmed.includes("=");
+}
+
 export class ProviderRoutedQuoteClient implements MarketQuoteReader {
   constructor(
     private readonly fyers: MarketQuoteReader | null,
@@ -22,8 +29,8 @@ export class ProviderRoutedQuoteClient implements MarketQuoteReader {
   }
 
   async quoteSymbols(symbols: readonly string[]): Promise<Map<string, MarketQuote>> {
-    const indian = symbols.filter((symbol) => !symbol.trim().startsWith("^"));
-    const foreign = symbols.filter((symbol) => symbol.trim().startsWith("^"));
+    const indian = symbols.filter((symbol) => !isForeignSymbol(symbol));
+    const foreign = symbols.filter((symbol) => isForeignSymbol(symbol));
     const [indianQuotes, foreignQuotes] = await Promise.all([
       this.fyers === null || indian.length === 0
         ? Promise.resolve(new Map<string, MarketQuote>())

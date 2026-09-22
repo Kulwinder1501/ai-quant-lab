@@ -20,6 +20,14 @@ import { SharedStreamPollerRegistry } from "../../application/shared-stream-poll
  * spelled Fin Nifty `FINNIFTY.NS` -- not a ticker -- so its quote rejected, the row was
  * dropped by the tile filter, and the panel rendered one tile short with nothing logged.
  * The resolver now owns every spelling in one place.
+ *
+ * GOLD is `GC=F` (COMEX gold futures, front month, USD-denominated) -- not an index, and Fyers
+ * has no live segment for it (India-only, NSE/BSE), so it is quoted reference-only through the
+ * same Yahoo path as the foreign indices. `ProviderRoutedQuoteClient` routes any `=`-qualified
+ * symbol there. `XAUUSD=X` (spot gold) was tried first and verified live against this Yahoo
+ * client on 2026-09-22: it throws (`Cannot read properties of undefined (reading 'symbol')`)
+ * while `GC=F` returns a real quote, so futures is the one actually available here, not a
+ * stylistic choice.
  */
 const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [
   { label: "NIFTY50", symbol: "NIFTY50" },
@@ -29,6 +37,7 @@ const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [
   { label: "HANG SENG", symbol: "^HSI" },
   { label: "NIKKEI 225", symbol: "^N225" },
   { label: "S&P 500", symbol: "^GSPC" },
+  { label: "GOLD", symbol: "GC=F" },
 ];
 
 export function registerStrategyRoutes(
