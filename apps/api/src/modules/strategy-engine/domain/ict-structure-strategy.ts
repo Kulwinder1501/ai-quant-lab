@@ -6,7 +6,8 @@ import type {
 } from "./strategy.js";
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
-import type { OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
+import { isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
+import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
 
 /**
@@ -70,6 +71,11 @@ export interface IctStructureStrategyConfiguration {
   requireKillzone: boolean;
   /** Entry-model arm 3. Requires the signal bar to sit inside the 62-79% retracement. */
   requireOte: boolean;
+  /**
+   * Entry-model arm 4: requires the ITH/ITL swing-hierarchy protected level (see swing-hierarchy.ts)
+   * to still be intact. Off by default -- see the docstring at its call site below.
+   */
+  requireProtectedLevelIntact: boolean;
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
@@ -84,6 +90,7 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   poiPreference: "SWEEP_FIRST",
   requireKillzone: false,
   requireOte: false,
+  requireProtectedLevelIntact: false,
 };
 
 /**
@@ -122,7 +129,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const ict = context.ictSnapshot;
     if (!ict) return [];
 
-    const { structure, zones, sessionLevels, bias, liquidity, coverage } = ict;
+    const { structure, zones, sessionLevels, bias, liquidity, coverage, swingHierarchy } = ict;
 
     // Pillar Gate 1: every coverage input must be COMPLETE. Both UNKNOWN
     // (evidence absent/ambiguous) and NOT_COVERED (engine never ran) fail
@@ -165,6 +172,32 @@ export class IctStructureStrategy implements StrategyEvaluator {
      * that the two can never disagree.
      */
     if (ict.htfBias && ict.htfBias !== bias.bias) return [];
+
+    /*
+     * Entry-model arm 4: swing-hierarchy protected level.
+     *
+     * `swingHierarchy` (see swing-hierarchy.ts) is computed on every bar via `IctCompositeEngine`
+     * but was, until now, never read here -- the doctrine's own early warning that a bias read may
+     * already be wrong (lecture 8: the current-trend Intermediate Term point is "protected" and
+     * should not break while that trend genuinely holds) played no role in trade approval.
+     *
+     * Off by default, exactly like `requireKillzone`/`requireOte`: this is a hypothesis to measure
+     * through the falsification program, not a gate to ship on the strength of doctrine alone. The
+     * covariates are recorded on every approved idea regardless, so the population needed to test it
+     * is available before the arm itself is ever turned on.
+     *
+     * Guarded on `swingHierarchy` being present rather than assumed: a hand-built snapshot (tests,
+     * or any future caller that predates this field) is missing evidence, not evidence of an intact
+     * level, so it is never gated on when absent.
+     */
+    let protectedSide: ProtectedSide | null = null;
+    let protectedLevelBreached = false;
+    if (swingHierarchy) {
+      const swingHierarchyFeature = computeSwingHierarchyFeature(swingHierarchy, structure.trend, context.candle.close);
+      protectedSide = swingHierarchyFeature.protectedSide;
+      protectedLevelBreached = swingHierarchyFeature.protectedLevelBreached;
+    }
+    if (config.requireProtectedLevelIntact && protectedLevelBreached) return [];
 
     // Pillar Gate 3: Liquidity Status
     if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];
@@ -259,7 +292,20 @@ export class IctStructureStrategy implements StrategyEvaluator {
        * future, because the ledger hands out live zone objects and the backtest builds every
        * snapshot before replaying any of it.
        */
-      const ob = zones.activeObs.find((o) => o.type === wantedZone && reached(o.meanThreshold));
+      /*
+       * Scoped to `isDoctrinallyValidOrderBlockCandidate` -- lecture 4 (and independently lectures 5
+       * and 6) is explicit that only the FIRST order block after IDM and the LAST one at the swing
+       * extreme are real candidates; whatever forms in between is declared irrelevant, not merely
+       * lower-priority. `isIdmAdjacent`/`isExtreme` were computed on every `OrderBlock` from the
+       * start and the predicate itself already existed for the ML feature-source track
+       * (`feature-extraction.ts`, `refined-order-block.ts`), but this strategy's own POI search took
+       * the first array match regardless -- so an in-between block the doctrine rules out could
+       * still supply a live entry. Unfiltered, this was the same "in-between order blocks don't
+       * work" gap the feature-source work already fixed on its own path.
+       */
+      const ob = zones.activeObs.find(
+        (o) => o.type === wantedZone && reached(o.meanThreshold) && isDoctrinallyValidOrderBlockCandidate(o)
+      );
       const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
 
       const takeBlock = (): boolean => {
@@ -347,7 +393,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached },
         });
       }
 
@@ -430,7 +476,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached },
         });
       }
 

@@ -205,3 +205,87 @@ describe("liquidity objective selection", () => {
     expect(snap.primaryTarget).toBeNull();
   });
 });
+
+describe("intermediate target: internal-range waypoint", () => {
+  /*
+   * `intermediateTarget` used to be the dealing-range equilibrium unconditionally, even though
+   * `irlPools` (FVGs/OBs) were already computed a few lines above it and simply never read for this
+   * purpose -- decorative, not a bug that changed any gate, but the "internal vs external liquidity"
+   * distinction this resolver computes was fictional for target selection. These pin the fix: a real
+   * IRL pool between price and the external objective is now reported, and the equilibrium fallback
+   * only fires when none exists (the pre-existing tests above, whose fixtures carry no zones, cover
+   * that fallback already).
+   */
+  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => ({
+    index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime: new Date(),
+  });
+  const bullBias = (equilibrium: number): IctBiasSnapshot => ({
+    bias: "BULLISH",
+    dailyTemplate: "OLHC",
+    dealingRange: {
+      rangeHigh: 120, rangeLow: 90, equilibrium,
+      isPremium: (price: number) => price >= equilibrium,
+      isDiscount: (price: number) => price < equilibrium,
+    },
+    reasons: ["Bullish bias"],
+  });
+  const session = (pdh: number, sessionHigh: number): SessionLevelsSnapshot => ({
+    levels: { sessionDate: "2026-01-06", priorSessionDate: "2026-01-05", pdh, pdl: 90, pdc: 100, pdo: 95, eq: 105 },
+    lastSweepEvent: null,
+    currentSessionHigh: sessionHigh,
+    currentSessionLow: 92,
+    currentSessionOpen: 96,
+    currentSessionDate: "2026-01-06",
+  });
+  const struct = (lastHH: number, lastHL: number): IctStructureSnapshot => ({
+    trend: "BULLISH",
+    lastHH: pivot(10, lastHH, "HIGH"),
+    lastHL: pivot(5, lastHL, "LOW"),
+    lastLH: null, lastLL: null, idm: null, bosLevel: null, chochLevel: null,
+    internalVsExternal: "EXTERNAL", lastEvent: null, confirmedPivotCount: 0,
+  });
+
+  it("reports the nearest unmitigated FVG between price and the external target, not equilibrium", () => {
+    const zonesWithFvg: IctZoneSnapshot = {
+      activeFvgs: [{
+        id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
+        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null,
+      }],
+      activeObs: [],
+      lastZoneEvent: null,
+    };
+    // Price 98, equilibrium 105, external objective 120 (swing high). FVG midpoint 102 sits between them.
+    const snap = new IctLiquidityResolver().resolve(98, bullBias(105), struct(120, 90), zonesWithFvg, session(108, 100));
+    expect(snap.primaryTarget?.price).toBe(120);
+    expect(snap.intermediateTarget).toBe(102);
+  });
+
+  it("falls back to equilibrium when no IRL pool sits between price and the external target", () => {
+    const zonesWithFarFvg: IctZoneSnapshot = {
+      activeFvgs: [{
+        id: "fvg-1", type: "BULLISH", top: 130, bottom: 128, midpoint: 129, // beyond the target itself
+        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null,
+      }],
+      activeObs: [],
+      lastZoneEvent: null,
+    };
+    const snap = new IctLiquidityResolver().resolve(98, bullBias(105), struct(120, 90), zonesWithFarFvg, session(108, 100));
+    expect(snap.intermediateTarget).toBe(105);
+  });
+
+  it("ignores a mitigated (already-consumed) IRL pool in the path", () => {
+    const zonesWithConsumedFvg: IctZoneSnapshot = {
+      activeFvgs: [{
+        id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
+        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        fillPercentage: 1, state: "CONSUMED", invertedAtBarIndex: null,
+      }],
+      activeObs: [],
+      lastZoneEvent: null,
+    };
+    const snap = new IctLiquidityResolver().resolve(98, bullBias(105), struct(120, 90), zonesWithConsumedFvg, session(108, 100));
+    expect(snap.intermediateTarget).toBe(105);
+  });
+});

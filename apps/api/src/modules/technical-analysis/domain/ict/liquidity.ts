@@ -268,7 +268,22 @@ export class IctLiquidityResolver {
         .sort((a, b) => b.price - a.price);
 
       const primaryTarget = buyTargets[0] || null;
-      const intermediateTarget = dealingRange.equilibrium;
+      /*
+       * The nearest unmitigated INTERNAL pool between price and the external objective -- doctrine's
+       * own framing of IRL as the draw ON THE WAY to ERL, not a second external target (lectures 6/9).
+       * `irlPools` (FVGs/OBs) were computed above and carried in `irlPoolCount`, but nothing ever read
+       * the pools themselves: this field was always the dealing-range equilibrium regardless of
+       * whether a real gap or block sat in the path, which made the internal/external distinction this
+       * resolver computes decorative for target selection.
+       *
+       * Falls back to equilibrium -- what every earlier version reported unconditionally -- when no
+       * IRL pool lies between price and the primary target, which is the common case: an internal pool
+       * is a zone formed on THIS leg, not a fixed feature of the range the way equilibrium is.
+       */
+      const irlWaypoint = irlPools
+        .filter((p) => !p.isMitigated && p.price > currentPrice && (primaryTarget === null || p.price < primaryTarget.price))
+        .sort((a, b) => a.price - b.price)[0] ?? null;
+      const intermediateTarget = irlWaypoint?.price ?? dealingRange.equilibrium;
 
       // Invalidation: structural swing low or rangeLow
       const invalidationLevel = structSnap.lastHL?.price ?? dealingRange.rangeLow;
@@ -303,7 +318,12 @@ export class IctLiquidityResolver {
         .sort((a, b) => a.price - b.price);
 
       const primaryTarget = sellTargets[0] || null;
-      const intermediateTarget = dealingRange.equilibrium;
+      // Mirror of the bullish branch's IRL waypoint above (descending, since the objective is below
+      // price here); see that branch for why this replaced an unconditional equilibrium fallback.
+      const irlWaypoint = irlPools
+        .filter((p) => !p.isMitigated && p.price < currentPrice && (primaryTarget === null || p.price > primaryTarget.price))
+        .sort((a, b) => b.price - a.price)[0] ?? null;
+      const intermediateTarget = irlWaypoint?.price ?? dealingRange.equilibrium;
 
       // Invalidation: structural swing high or rangeHigh
       const invalidationLevel = structSnap.lastLH?.price ?? dealingRange.rangeHigh;

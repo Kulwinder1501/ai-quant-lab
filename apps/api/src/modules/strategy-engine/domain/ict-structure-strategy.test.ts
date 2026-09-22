@@ -269,4 +269,67 @@ describe("IctStructureStrategy POI discrimination", () => {
     });
     expect(new IctStructureStrategy().evaluate(makeContext(deep), {})).toHaveLength(1);
   });
+
+  /*
+   * Pins the fix for the gap `ict-implementation-vs-source-doctrine` flagged as "not yet done": the
+   * strategy used to take the FIRST order block matching type + mean-threshold reach, with no check
+   * that it was one of the (at most) two the doctrine treats as real candidates (the one right after
+   * IDM, or the one at the swing extreme). A block that is neither is exactly the "in-between" case
+   * lecture 4 declares irrelevant.
+   */
+  it("refuses an order block traded into its mean threshold that is neither IDM-adjacent nor extreme", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: {
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: false, isIdmAdjacent: false }],
+        activeFvgs: [],
+      },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(0);
+  });
+
+  it("accepts an IDM-adjacent order block even when it is not the swing extreme", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: {
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: false, isIdmAdjacent: true }],
+        activeFvgs: [],
+      },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(1);
+  });
+});
+
+describe("IctStructureStrategy swing-hierarchy protected level (entry-model arm 4)", () => {
+  const validOb = { id: "ob-1", type: "BULLISH" as const, state: "TOUCHED" as const, meanThreshold: 98, isExtreme: true, isIdmAdjacent: false };
+
+  it("is off by default: an approved idea is unaffected even when the protected level is breached", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      // Bullish trend, price 100 (default close): a protected ITL at 105 is already breached.
+      swingHierarchy: { nearestIntermediateTermHigh: null, nearestIntermediateTermLow: { price: 105 }, nearestShortTermHigh: null, nearestShortTermLow: null },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(1);
+  });
+
+  it("rejects when the arm is on and the protected ITL is already breached", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      swingHierarchy: { nearestIntermediateTermHigh: null, nearestIntermediateTermLow: { price: 105 }, nearestShortTermHigh: null, nearestShortTermLow: null },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(0);
+  });
+
+  it("still approves when the arm is on and the protected ITL is intact", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      // ITL at 80, price 100: not breached.
+      swingHierarchy: { nearestIntermediateTermHigh: null, nearestIntermediateTermLow: { price: 80 }, nearestShortTermHigh: null, nearestShortTermLow: null },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(1);
+  });
+
+  it("never gates on a missing swingHierarchy field (absent evidence, not evidence of a breach)", () => {
+    const snapshot = alignedLongSnapshot({ zones: { activeObs: [validOb], activeFvgs: [] } });
+    delete snapshot.swingHierarchy;
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(1);
+  });
 });
