@@ -9,7 +9,7 @@ import { ChartLegend } from "./chart-legend";
 import { postResearchJson } from "../../research/api";
 import type { ChartPayload } from "../../charts/domain";
 
-const TIMEFRAMES = ["3m", "5m", "15m"] as const;
+const TIMEFRAMES = ["1m", "5m", "15m"] as const;
 const MODES = ["Clean", "Indicators", "Patterns"] as const;
 
 type Timeframe = (typeof TIMEFRAMES)[number];
