@@ -1197,6 +1197,12 @@ async function main(): Promise<void> {
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
+      // Gated on TWELVEDATA_API_KEY inside the cron callback itself, not on fyersTokenService --
+      // XAU_USD is a Twelve Data instrument, not a Fyers one. Listed unconditionally here since
+      // that gate is a runtime no-op, not a startup-time absence, the same treatment as
+      // SHADOW_DECISION above.
+      "XAU_CANDLE_COLLECTION",
+      "PAPER_TRADING_BOT_GOLD",
     ],
     timezone: IST,
   });
