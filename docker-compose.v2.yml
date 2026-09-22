@@ -38,6 +38,9 @@ services:
       # token lapses. It was absent, so the one command that can restore Fyers access failed
       # on a missing variable rather than on anything to do with the credential.
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
+      # Twelve Data: the market-data vendor behind XAU_USD, since Fyers/Kite are India-only
+      # brokers with no segment for it and OANDA does not accept Indian-resident accounts.
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       API_MUTATION_RATE_LIMIT: ${API_MUTATION_RATE_LIMIT:-120}
