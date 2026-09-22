@@ -4,6 +4,7 @@ import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
 import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
+import { TwelveDataQuoteClient } from "../../infrastructure/market-data/twelvedata-quote-client.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresDashboardQueryRepository } from "../../infrastructure/database/repositories/postgres-dashboard-query-repository.js";
 import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
@@ -74,10 +75,16 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       pin: process.env.FYERS_PIN ?? "",
     })
     : null;
+  const twelveDataApiKey = process.env.TWELVEDATA_API_KEY;
+  const twelveDataQuoteClient = twelveDataApiKey
+    ? new TwelveDataQuoteClient({ apiKey: twelveDataApiKey })
+    : null;
   const marketQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
       ? new FyersQuoteClient({ tokenService: fyersTokenService, appId })
       : null,
+    undefined,
+    twelveDataQuoteClient,
   );
 
   /**
@@ -95,6 +102,8 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     fyersTokenService && appId
       ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0 })
       : null,
+    undefined,
+    twelveDataQuoteClient,
   );
 
   const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(

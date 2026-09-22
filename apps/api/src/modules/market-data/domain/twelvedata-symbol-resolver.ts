@@ -26,3 +26,7 @@ export function resolveTwelveDataSymbol(symbol: string): string {
   if (upper.includes("/")) return upper;
   throw new Error(`No Twelve Data symbol mapping for "${symbol}". Add one to twelveDataSymbols.`);
 }
+
+/** The canonical symbols this resolver knows by name, for a quote router to decide "does
+ * Twelve Data own this symbol" without duplicating the map. */
+export const TWELVEDATA_MAPPED_SYMBOLS = Object.keys(twelveDataSymbols);
