@@ -7,11 +7,31 @@ import type { MarketQuote } from "../../modules/market-data/domain/market-quote.
  *
  * No volume: Twelve Data's forex/metals feed has no single consolidated tape for an OTC-style
  * instrument, the same gap `TwelveDataHistoricalDataProvider` already documents for candles.
+ *
+ * Caches per-symbol, with a minimum refresh interval, because the free tier is capped at 8 API
+ * credits/minute -- confirmed live on 2026-09-22: a 2.5s poll loop (this codebase's standard
+ * cadence, matching `MarketWatchBroadcaster`'s Fyers-sized interval) hit `code: 429, "You have
+ * run out of API credits for the current minute... limit being 8"` on its 5th request, well
+ * under a minute in. Multiple independent 2.5s pollers (the market-watch broadcaster and
+ * `/stream/live-agent`'s poller both go through `ProviderRoutedQuoteClient`, so both can reach
+ * this client) made it worse, not better -- credits are shared per key, not per caller. A cache
+ * shared across every caller of one instance is what makes the two problems the same fix:
+ * `dependencies.ts` constructs exactly one `TwelveDataQuoteClient` and reuses it for both
+ * `marketQuoteClient` and `streamingQuoteClient`.
  */
 export interface TwelveDataQuoteClientOptions {
   apiKey: string;
   fetch?: typeof fetch;
   baseUrl?: string;
+  /** Default leaves real headroom under the 8/minute cap even with more than one symbol mapped
+   * here later (today there is exactly one, `XAU_USD`). */
+  minRefreshIntervalMs?: number;
+  now?: () => number;
+}
+
+interface CacheEntry {
+  quote: MarketQuote | null;
+  fetchedAt: number;
 }
 
 interface TwelveDataQuoteResponse {
@@ -43,6 +63,12 @@ function numberOrNull(value: string | undefined): number | null {
 export class TwelveDataQuoteClient {
   private readonly fetch: typeof fetch;
   private readonly baseUrl: string;
+  private readonly minRefreshIntervalMs: number;
+  private readonly now: () => number;
+  private readonly cache = new Map<string, CacheEntry>();
+  /** De-dupes concurrent callers within the same refresh window onto one in-flight request,
+   * rather than each firing its own and spending the credit budget twice for one answer. */
+  private readonly inFlight = new Map<string, Promise<MarketQuote | null>>();
 
   constructor(private readonly options: TwelveDataQuoteClientOptions) {
     if (!options.apiKey.trim()) {
@@ -50,6 +76,8 @@ export class TwelveDataQuoteClient {
     }
     this.fetch = options.fetch ?? globalThis.fetch;
     this.baseUrl = options.baseUrl ?? "https://api.twelvedata.com";
+    this.minRefreshIntervalMs = options.minRefreshIntervalMs ?? 15_000;
+    this.now = options.now ?? (() => Date.now());
   }
 
   async quoteSymbol(symbol: string): Promise<MarketQuote | null> {
@@ -70,6 +98,19 @@ export class TwelveDataQuoteClient {
   }
 
   private async fetchOne(symbol: string): Promise<MarketQuote | null> {
+    const cached = this.cache.get(symbol);
+    if (cached && this.now() - cached.fetchedAt < this.minRefreshIntervalMs) {
+      return cached.quote;
+    }
+    const pending = this.inFlight.get(symbol);
+    if (pending) return pending;
+
+    const request = this.fetchFresh(symbol).finally(() => this.inFlight.delete(symbol));
+    this.inFlight.set(symbol, request);
+    return request;
+  }
+
+  private async fetchFresh(symbol: string): Promise<MarketQuote | null> {
     let providerSymbol: string;
     try {
       providerSymbol = resolveTwelveDataSymbol(symbol);
@@ -84,17 +125,23 @@ export class TwelveDataQuoteClient {
     try {
       const response = await this.fetch(endpoint);
       payload = await response.json().catch(() => undefined) as TwelveDataQuoteResponse | undefined;
-      if (!response.ok || payload?.status === "error") return null;
+      // A rate-limited or otherwise-failed refresh keeps serving the last good cached quote
+      // (if any) rather than dropping the tile -- the same "stale beats blank" reasoning
+      // `MarketWatchBroadcaster` already documents for its own poll failures. Only actually
+      // absent (never-fetched) data resolves to null here.
+      if (!response.ok || payload?.status === "error") {
+        return this.cache.get(symbol)?.quote ?? null;
+      }
     } catch {
-      return null;
+      return this.cache.get(symbol)?.quote ?? null;
     }
-    if (payload === undefined) return null;
+    if (payload === undefined) return this.cache.get(symbol)?.quote ?? null;
 
     const price = numberOrNull(payload.close);
-    if (price === null || price <= 0) return null;
+    if (price === null || price <= 0) return this.cache.get(symbol)?.quote ?? null;
 
     const observedAtEpoch = payload.last_quote_at ?? payload.timestamp;
-    return {
+    const quote: MarketQuote = {
       symbol,
       provider: "twelvedata",
       shortName: payload.name ?? null,
@@ -109,5 +156,7 @@ export class TwelveDataQuoteClient {
       regularMarketVolume: null,
       regularMarketTime: typeof observedAtEpoch === "number" ? new Date(observedAtEpoch * 1000) : null,
     };
+    this.cache.set(symbol, { quote, fetchedAt: this.now() });
+    return quote;
   }
 }
