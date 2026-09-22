@@ -250,7 +250,7 @@ describe("intermediate target: internal-range waypoint", () => {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
         createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
-        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null,
+        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],
       lastZoneEvent: null,
@@ -266,7 +266,7 @@ describe("intermediate target: internal-range waypoint", () => {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 130, bottom: 128, midpoint: 129, // beyond the target itself
         createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
-        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null,
+        fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],
       lastZoneEvent: null,
@@ -280,7 +280,7 @@ describe("intermediate target: internal-range waypoint", () => {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
         createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
-        fillPercentage: 1, state: "CONSUMED", invertedAtBarIndex: null,
+        fillPercentage: 1, state: "CONSUMED", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],
       lastZoneEvent: null,

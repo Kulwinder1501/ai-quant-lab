@@ -52,6 +52,18 @@ export interface FairValueGap {
   readonly fillPercentage: number;
   readonly state: ZoneLifecycleState;
   readonly invertedAtBarIndex: number | null;
+  /*
+   * Same doctrinal scoping as `OrderBlock.isIdmAdjacent`/`.isExtreme` -- see
+   * `isDoctrinallyValidOrderBlockCandidate`'s docstring, which cites lecture 4 grouping order blocks
+   * AND fair value gaps under the identical rule: only the first POI right after IDM and the last one
+   * at the swing extreme are real candidates, in a downtrend the range IDM -> LH, in an uptrend
+   * IDM -> HL. Computed at creation from the SAME `structure` snapshot the order-block branch already
+   * reads, using the gap's own boundary (`bottom` facing a bullish gap, `top` facing a bearish one) in
+   * place of `OrderBlock`'s candle low/high -- there is no candle to anchor on, a gap has no candle of
+   * its own the way a block does.
+   */
+  readonly isExtreme: boolean;
+  readonly isIdmAdjacent: boolean;
 }
 
 export interface OrderBlock {
@@ -114,6 +126,18 @@ export interface IctZoneSnapshot {
  */
 export function isDoctrinallyValidOrderBlockCandidate(ob: OrderBlock): boolean {
   return ob.isIdmAdjacent || ob.isExtreme;
+}
+
+/**
+ * The fair-value-gap counterpart to `isDoctrinallyValidOrderBlockCandidate` -- same rule, same
+ * lecture-4 citation, applied to the other POI type the doctrine names in the same breath. Was
+ * absent entirely until now: `FairValueGap` carried no `isIdmAdjacent`/`isExtreme` fields at all, so
+ * every active gap was an equally valid "nearest" candidate to the live strategy regardless of where
+ * it sat in the IDM-to-swing range -- exactly the gap `isDoctrinallyValidOrderBlockCandidate` closed
+ * for order blocks, just never built for the POI type that supplies the large majority of entries.
+ */
+export function isDoctrinallyValidFairValueGapCandidate(fvg: FairValueGap): boolean {
+  return fvg.isIdmAdjacent || fvg.isExtreme;
 }
 
 /**
@@ -356,6 +380,8 @@ export class IctZoneLedger {
           fillPercentage: 0,
           state: "FRESH",
           invertedAtBarIndex: null,
+          isExtreme: structure.lastHL ? bottom <= structure.lastHL.price : true,
+          isIdmAdjacent: structure.idm ? Math.abs(bottom - structure.idm.price) / bottom < 0.005 : false,
         };
         this.fvgs.push(fvg);
         newlyCreatedFvg = fvg;
@@ -383,6 +409,8 @@ export class IctZoneLedger {
           fillPercentage: 0,
           state: "FRESH",
           invertedAtBarIndex: null,
+          isExtreme: structure.lastLH ? top >= structure.lastLH.price : true,
+          isIdmAdjacent: structure.idm ? Math.abs(top - structure.idm.price) / top < 0.005 : false,
         };
         this.fvgs.push(fvg);
         newlyCreatedFvg = fvg;

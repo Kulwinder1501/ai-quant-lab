@@ -6,7 +6,7 @@ import type {
 } from "./strategy.js";
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
-import { isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
+import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
 import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
 
@@ -74,6 +74,14 @@ export interface IctStructureStrategyConfiguration {
   /**
    * Entry-model arm 4: requires the ITH/ITL swing-hierarchy protected level (see swing-hierarchy.ts)
    * to still be intact. Off by default -- see the docstring at its call site below.
+   *
+   * Measured 2026-09-22 against the two live cells (NIFTY50 15m 2025 + 2026 holdout, BANKNIFTY 5m
+   * 2026), same params as the falsification program (concurrency 5, 2bps slippage): both NIFTY50
+   * windows improve (+937.00 on 85->73 trades; +292.40 on 114->99, still net negative), but BANKNIFTY
+   * flips from +3,832.35 to -537.90 on 102->86 trades -- a -4,370.25 swing. Same non-replication
+   * signature that closed killzone, OTE and poiPreference: one instrument likes the filter, the other
+   * disagrees. Verdict NO_EDGE, matching the pre-registered expectation. Stays in the tree behind
+   * this default-off switch with the measurement attached, not deployed.
    */
   requireProtectedLevelIntact: boolean;
 }
@@ -185,6 +193,10 @@ export class IctStructureStrategy implements StrategyEvaluator {
      * through the falsification program, not a gate to ship on the strength of doctrine alone. The
      * covariates are recorded on every approved idea regardless, so the population needed to test it
      * is available before the arm itself is ever turned on.
+     *
+     * Measured 2026-09-22, verdict NO_EDGE -- see the full result on the `requireProtectedLevelIntact`
+     * field above. Both NIFTY50 windows improved but BANKNIFTY flipped from +3,832.35 to -537.90, the
+     * same cross-instrument non-replication that closed every other arm here.
      *
      * Guarded on `swingHierarchy` being present rather than assumed: a hand-built snapshot (tests,
      * or any future caller that predates this field) is missing evidence, not evidence of an intact
@@ -306,7 +318,17 @@ export class IctStructureStrategy implements StrategyEvaluator {
       const ob = zones.activeObs.find(
         (o) => o.type === wantedZone && reached(o.meanThreshold) && isDoctrinallyValidOrderBlockCandidate(o)
       );
-      const fvg = zones.activeFvgs.find((f) => f.type === wantedZone && reached(f.midpoint));
+      /*
+       * Scoped to `isDoctrinallyValidFairValueGapCandidate`, the same rule as the order-block search
+       * above -- lecture 4 groups fair value gaps under the identical "only first-after-IDM or
+       * last-at-extreme" restriction, not a separate one. `FairValueGap` never carried
+       * `isIdmAdjacent`/`isExtreme` at all until now, so every active gap was an equally valid
+       * "nearest" candidate regardless of where it sat in the IDM-to-swing range -- on the POI type
+       * that supplies the large majority of this strategy's entries.
+       */
+      const fvg = zones.activeFvgs.find(
+        (f) => f.type === wantedZone && reached(f.midpoint) && isDoctrinallyValidFairValueGapCandidate(f)
+      );
 
       const takeBlock = (): boolean => {
         if (!ob) return false;
@@ -319,6 +341,8 @@ export class IctStructureStrategy implements StrategyEvaluator {
       const takeGap = (): boolean => {
         if (!fvg) return false;
         poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
+        poiExtreme = fvg.isExtreme;
+        poiIdmAdjacent = fvg.isIdmAdjacent;
         poiKind = "FVG";
         return true;
       };

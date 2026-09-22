@@ -260,14 +260,34 @@ describe("IctStructureStrategy POI discrimination", () => {
 
   it("accepts a fair value gap only once its consequent encroachment is traded into", () => {
     const shallow = alignedLongSnapshot({
-      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 96, fillPercentage: 0.1 }] },
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 96, fillPercentage: 0.1, isExtreme: true, isIdmAdjacent: false }] },
     });
     expect(new IctStructureStrategy().evaluate(makeContext(shallow), {})).toHaveLength(0);
 
     const deep = alignedLongSnapshot({
-      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 98, fillPercentage: 0.6 }] },
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 98, fillPercentage: 0.6, isExtreme: true, isIdmAdjacent: false }] },
     });
     expect(new IctStructureStrategy().evaluate(makeContext(deep), {})).toHaveLength(1);
+  });
+
+  /*
+   * The fair-value-gap counterpart to the order-block scoping fix above: `FairValueGap` carried no
+   * `isIdmAdjacent`/`isExtreme` fields at all until now, so any active gap traded into its CE could
+   * supply a live entry regardless of where it sat in the IDM-to-swing range -- on the POI type that
+   * supplies the large majority of this strategy's entries.
+   */
+  it("refuses a fair value gap traded into its CE that is neither IDM-adjacent nor extreme", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 98, fillPercentage: 0.6, isExtreme: false, isIdmAdjacent: false }] },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(0);
+  });
+
+  it("accepts an IDM-adjacent fair value gap even when it is not the swing extreme", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 98, fillPercentage: 0.6, isExtreme: false, isIdmAdjacent: true }] },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(1);
   });
 
   /*
