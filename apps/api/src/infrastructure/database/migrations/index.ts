@@ -112,6 +112,7 @@ import { ictSwingHierarchyMigration } from "./111-ict-swing-hierarchy.js";
 import { backtestOpposingSweepExitMigration } from "./112-backtest-opposing-sweep-exit.js";
 import { twelveDataInstrumentSupportMigration } from "./113-twelvedata-instrument-support.js";
 import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.js";
+import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -228,4 +229,5 @@ export const migrations = [
   backtestOpposingSweepExitMigration,
   twelveDataInstrumentSupportMigration,
   xauUsdCandleProvenanceMigration,
+  paperAccountsCurrencySupportMigration,
 ];

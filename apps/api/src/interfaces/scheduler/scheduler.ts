@@ -238,6 +238,11 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
+    // Both on a 5-minute cron, same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
+    // to a faster tick: a dead claimant should not hold up more than one tick's worth of gold data
+    // or signal generation.
+    XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
+    PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
   };
 
   /**
@@ -619,6 +624,41 @@ async function main(): Promise<void> {
      * differential record on exactly the days the token lapses, which are the days worth comparing.
      */
     void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
+  });
+
+  /**
+   * XAU_USD (gold): a Twelve Data instrument, not an NSE one, so it runs on its own cron rather
+   * than joining the block above -- it is not gated on `fyersTokenService` (irrelevant to a
+   * non-Fyers instrument) and it is not restricted to `9-15 * * 1-5` (XAU_USD trades Sun 22:00
+   * UTC - Fri 22:00 UTC; `run-gold-paper-trading-bot.ts` and its collection window below both
+   * check the real session themselves and no-op outside it, the same way every job here is
+   * written to be a safe no-op off-session rather than relying on the cron pattern alone).
+   *
+   * Every 5 minutes, every day: collect fresh 1m/5m candles first, then run the bot against
+   * them. `--skip-existing` makes the collection idempotent, and a 45-minute lookback window
+   * comfortably covers one tick's gap plus retry margin. Two `/time_series` requests well within
+   * Twelve Data's 8-credits/minute cap -- see `twelvedata-quote-client.ts` for where that cap was
+   * confirmed live.
+   */
+  cronSchedule("*/5 * * * *", () => {
+    if (!process.env.TWELVEDATA_API_KEY) return;
+    void schedule("XAU_CANDLE_COLLECTION", async () => {
+      const to = new Date();
+      const from = new Date(to.getTime() - 45 * 60 * 1000);
+      for (const timeframe of ["1m", "5m"]) {
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "twelvedata",
+          "--exchange", "TWELVEDATA",
+          "--instrument", "XAU_USD",
+          "--timeframe", timeframe,
+          "--from", from.toISOString(),
+          "--to", to.toISOString(),
+          "--skip-existing",
+        ]);
+      }
+    });
+    void schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
   });
 
   /**
