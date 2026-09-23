@@ -62,6 +62,7 @@ describe("the shipped registry", () => {
       "pattern-v3-research",
       "pattern-v4-research",
       "pattern-v4-research-v2",
+      "pattern-v5-research",
     ]);
   });
 
@@ -248,9 +249,12 @@ describe("terminal strategies default to disabled", () => {
   it("excludes both terminal strategies when nothing is opted in", () => {
     const selection = selectCaptureStrategies(createResearchScalpStrategies(), { benchmarkStrategyKeys: [] });
 
-    expect([...selection.disabled].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
+    expect([...selection.disabled].sort()).toEqual(["index-v3-research"]);
     expect(selection.active.map((a) => a.definition.strategyKey).sort())
-      .toEqual(["momentum-v10-research", "momentum-v11-research", "momentum-v9-research", "pattern-v4-research-v2"]);
+      .toEqual([
+        "momentum-v10-research", "momentum-v11-research", "momentum-v9-research",
+        "pattern-v4-research-v2", "pattern-v5-research",
+      ]);
     expect(selection.benchmarkActivated).toEqual([]);
   });
 
@@ -265,8 +269,8 @@ describe("terminal strategies default to disabled", () => {
 
     expect(selection.active).toHaveLength(createResearchScalpStrategies().length);
     expect(selection.disabled).toEqual([]);
-    expect([...selection.benchmarkActivated].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
-    expect([...benchmarkResearchStrategyKeys].sort()).toEqual(["index-v3-research", "pattern-v4-research"]);
+    expect([...selection.benchmarkActivated].sort()).toEqual(["index-v3-research"]);
+    expect([...benchmarkResearchStrategyKeys].sort()).toEqual(["index-v3-research"]);
   });
 
   it("preserves adapter order among the active set, so capture order does not shift", () => {

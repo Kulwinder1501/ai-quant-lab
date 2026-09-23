@@ -66,13 +66,15 @@ export interface BaseEvaluator {
 export const frozenSourceContentDigests = Object.freeze({
   "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
   "momentum-scalp-index-strategy.ts": "ecf9fe47c96ddce944c269757a292c5fc647e3d03364d3adab2339024a1f0396",
-  "momentum-scalp-pattern-strategy.ts": "dfccae9d5df2e0a7d702a2148bdb9e4108db774c2acd531495c9c7ffd5bc32d7",
+  // Bumped 2026-09-22 when selectPriorityPattern replaced the alphabetical-arrival trigger pick.
+  // See the note on patternDefinition below for why that forced pattern-v5-research rather than a repin.
+  "momentum-scalp-pattern-strategy.ts": "851cb623c2677949d0d949e0008a896634db9883b5a24427513cc489c42fa8f9",
 });
 
 export const researchStrategySourceChecksums = Object.freeze({
   "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
   "momentum-scalp-index-strategy.ts": "e9a74bf002c7b66adacdd7400128a27d6cb03fc8bf0f4bf9d9654dfc64eeed4d",
-  "momentum-scalp-pattern-strategy.ts": "b1146d24f53bc225832302486990e5f9aa5e299785305c26834d07e3cbeb01bd",
+  "momentum-scalp-pattern-strategy.ts": "882697bfa87dd9cda8fb4d8e9486b861451997c132b0bbe28457227392011643",
 });
 
 /**
@@ -407,9 +409,28 @@ const indexDefinition = buildStrategyDefinition({
   configuration: { ...defaultMomentumScalpIndexStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
 });
 
+/**
+ * V5 carried forward against the corrected trigger-selection logic.
+ *
+ * `momentum-scalp-pattern-strategy.ts` changed on 2026-09-22 (`selectPriorityPattern`, applied at
+ * all four call sites) to select the priority-listed pattern rather than whichever the storage layer's
+ * `ORDER BY pattern_code ASC` happened to return first. `pattern-v4-research` wraps this exact
+ * evaluator (`MomentumScalpPatternStrategyV2`), so the fix moved
+ * `researchStrategySourceChecksums["momentum-scalp-pattern-strategy.ts"]` and, with it, V4's
+ * definition hash -- `assertRegisteredAndUnchanged` would refuse every capture under the old key.
+ *
+ * `pattern-v4-research` is TERMINAL ("degrades the base strategy monotonically on both deep
+ * ETFs"), but that verdict was measured against the pre-fix alphabetical selection:
+ * `evidence.pattern` and the confidence score it feeds with a 40% weight were wrong on the ~47% of
+ * multi-pattern candles the fix corrects. A verdict measured against wrong evidence cannot be assumed
+ * to still hold against corrected evidence, so this is not a repin -- it is a new cohort from zero,
+ * exactly the same shape as `pattern-v4-research-v2`'s generation-2 retry of the same TERMINAL
+ * parent: RESEARCH, carrying the parent's closure reason forward in its lineage as prior, not as its
+ * own verdict.
+ */
 const patternDefinition = buildStrategyDefinition({
-  strategyKey: "pattern-v4-research",
-  researchVersion: 4,
+  strategyKey: "pattern-v5-research",
+  researchVersion: 5,
   featureSchemaVersion: "scalp-raw-context-v2",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-pattern-strategy.ts"],
   // The pattern strategy gates on the raw confluence score, not on `minimumConfidence` — which it does
