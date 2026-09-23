@@ -87,6 +87,11 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Classic",
     allowedStrategies: ["momentum-scalp-index"],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
+    ],
     initialBalance: 1_000_000,
   },
   {
@@ -96,6 +101,13 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
     allowedStrategies: [
       "momentum-scalp-pattern",
       "momentum-scalp-pattern-v2",
+    ],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "3m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "3m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
     ],
     initialBalance: 1_000_000,
   },
@@ -135,6 +147,11 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Scalp1m",
     allowedStrategies: ["momentum-scalp"],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
+    ],
     initialBalance: 1_000_000,
   },
   /**
