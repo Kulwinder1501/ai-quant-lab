@@ -661,9 +661,16 @@ async function main(): Promise<void> {
    * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
    * calculation was still running, which is exactly the read-before-write race this sequencing
    * closes.
+   *
+   * Disabled 2026-09-23 by explicit user request, after `momentum-scalp-gold` had produced no
+   * ideas worth trusting yet and the user asked to pause the bot rather than let it keep running
+   * unmeasured. The application code (the strategy, `PrepareDirectEntry`, the runner script) is
+   * left intact -- only the schedule is turned off -- so re-enabling is flipping `XAU_BOT_ENABLED`
+   * back to `true`, not rebuilding anything.
    */
+  const XAU_BOT_ENABLED = false;
   cronSchedule("*/5 * * * *", () => {
-    if (!process.env.TWELVEDATA_API_KEY) return;
+    if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {
         const to = new Date();
@@ -1229,12 +1236,9 @@ async function main(): Promise<void> {
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
-      // Gated on TWELVEDATA_API_KEY inside the cron callback itself, not on fyersTokenService --
-      // XAU_USD is a Twelve Data instrument, not a Fyers one. Listed unconditionally here since
-      // that gate is a runtime no-op, not a startup-time absence, the same treatment as
-      // SHADOW_DECISION above.
-      "XAU_CANDLE_COLLECTION",
-      "PAPER_TRADING_BOT_GOLD",
+      // XAU_CANDLE_COLLECTION / PAPER_TRADING_BOT_GOLD deliberately absent: `XAU_BOT_ENABLED` is
+      // false, so neither actually runs -- listing them here would misreport the inventory the
+      // same way an omission would (see this array's own header comment on that point).
     ],
     timezone: IST,
   });
