@@ -96,9 +96,9 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
    * its own control and a paired same-bar delta is available for Gate 4.
    */
   poiPreference: "SWEEP_FIRST",
-  requireKillzone: false,
-  requireOte: false,
-  requireProtectedLevelIntact: false,
+  requireKillzone: true,
+  requireOte: true,
+  requireProtectedLevelIntact: true,
 };
 
 /**
