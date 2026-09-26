@@ -9,6 +9,7 @@ import type {
   StrategyMarketContext,
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
+import { ictContextConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
 import {
   deriveVolatilityRegime,
   regimeSourceIndicatorAlgorithmVersion,
@@ -19,6 +20,9 @@ import {
   type RegimeContext,
 } from "../../../modules/strategy-engine/domain/regime.js";
 import type { DatabaseQueryable } from "../database.js";
+import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
+import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
+
 
 interface CompletedCandleRow extends QueryResultRow {
   id: string;
@@ -84,6 +88,8 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
 }
 
 /** Reads only completed-candle evidence, so strategy decisions cannot use a forming bar. */
+let ictPersistGrantWarned = false;
+
 export class PostgresStrategyMarketContextRepository implements StrategyMarketContextRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
@@ -118,6 +124,119 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       return null;
     }
     return this.assembleContext(input, candle);
+  }
+
+  private async computeAndPersistIctSnapshot(
+    input: { instrumentId: string; timeframe: string },
+    targetCandle: CompletedCandleRow,
+    configHash: string,
+  ): Promise<IctStateCompositeSnapshot | undefined> {
+    const historyResult = await this.database.query<CompletedCandleRow>(`
+      SELECT
+        candles.id,
+        candles.instrument_id,
+        candles.timeframe,
+        candles.open_time,
+        candles.close_time,
+        candles.open,
+        candles.high,
+        candles.low,
+        candles.close,
+        candles.volume,
+        instruments.tick_size
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE candles.instrument_id = $1
+        AND candles.timeframe = $2
+        AND candles.is_complete = TRUE
+        AND candles.open_time <= $3
+      ORDER BY candles.open_time DESC
+      LIMIT 1000
+    `, [input.instrumentId, input.timeframe, targetCandle.open_time]);
+
+    if (historyResult.rows.length === 0) return undefined;
+
+    const rows = [...historyResult.rows].reverse();
+    const causalCandles = rows.map((r) => ({
+      id: r.id,
+      openTime: r.open_time,
+      open: toNumber(r.open, "open"),
+      high: toNumber(r.high, "high"),
+      low: toNumber(r.low, "low"),
+      close: toNumber(r.close, "close"),
+      volume: toNumber(r.volume, "volume"),
+    }));
+
+    const engine = new IctCompositeEngine(defaultIctEngineConfig);
+    let snapshot: IctStateCompositeSnapshot | undefined;
+
+    for (let i = 0; i < causalCandles.length; i++) {
+      snapshot = engine.processCandle(causalCandles, i);
+    }
+
+    if (snapshot) {
+      /*
+       * The persist is a lazy cache-fill, not the result. `scalp_research_writer` holds SELECT and
+       * only SELECT on this table by design (migration 076), so the research harness -- which calls
+       * `assembleContext` on the same path -- died with 42501 on every decision point and took the
+       * whole capture tick down with it.
+       *
+       * Only a missing write grant is tolerated, and only around the write. Anything else rethrows:
+       * a malformed payload or a broken constraint is a real defect and must not be swallowed. The
+       * computed snapshot is returned either way, so a reader without write access still gets the
+       * correct ICT context -- it just does not get to populate the cache for everyone else.
+       */
+      try {
+        await this.persistIctSnapshot(input, snapshot);
+      } catch (error) {
+        if ((error as { code?: string } | null)?.code !== "42501") throw error;
+        if (!ictPersistGrantWarned) {
+          ictPersistGrantWarned = true;
+          console.warn(JSON.stringify({
+            level: "warn",
+            message: "No write grant on ict_state_snapshots; computing ICT context without caching it",
+            hint: "Expected for the least-privilege scalp research role. Grant INSERT only if this "
+              + "role is meant to populate the cache, which would widen migration 076's boundary.",
+          }));
+        }
+      }
+    }
+
+    return snapshot;
+  }
+
+  private async persistIctSnapshot(
+    input: { instrumentId: string; timeframe: string },
+    snapshot: IctStateCompositeSnapshot,
+  ): Promise<void> {
+    {
+      await this.database.query(`
+        INSERT INTO ict_state_snapshots (
+          instrument_id, timeframe, engine_version, config_hash,
+          bar_index, bar_time, structure_trend, bias_direction, daily_template,
+          dealing_range_eq, primary_target_price, primary_target_kind,
+          invalidation_level, alignment_status, snapshot_payload
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+        ) ON CONFLICT (instrument_id, timeframe, bar_time, engine_version, config_hash) DO NOTHING
+      `, [
+        input.instrumentId,
+        input.timeframe,
+        snapshot.engineVersion,
+        snapshot.configHash,
+        snapshot.barIndex,
+        snapshot.barTime,
+        snapshot.structure.trend,
+        snapshot.bias.bias,
+        snapshot.bias.dailyTemplate,
+        snapshot.bias.dealingRange?.equilibrium ?? null,
+        snapshot.liquidity.primaryTarget?.price ?? null,
+        snapshot.liquidity.primaryTarget?.kind ?? null,
+        snapshot.liquidity.invalidationLevel ?? null,
+        snapshot.liquidity.alignmentStatus,
+        JSON.stringify(snapshot),
+      ]);
+    }
   }
 
   /** Exact historical boundary lookup used by bounded, idempotent research catch-up. */
@@ -209,7 +328,9 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<StrategyMarketContext> {
-    const [indicators, patterns, priceActionEvents] = await Promise.all([
+    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    const ictConsumed = ictContextConsumedAt(input.timeframe);
+    const [indicators, patterns, priceActionEvents, ictSnapshotRows] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT
           indicator_definitions.indicator_code,
@@ -245,9 +366,29 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id]),
+      /*
+       * Skipped outright at a timeframe no registered strategy reads ICT at -- not queried and then
+       * discarded. There is nothing to find there, and the miss would send us on to compute it.
+       */
+      ictConsumed
+        ? this.database.query<{ snapshot_payload: IctStateCompositeSnapshot }>(`
+            SELECT snapshot_payload
+            FROM ict_state_snapshots
+            WHERE instrument_id = $1
+              AND timeframe = $2
+              AND bar_time = $3
+              AND engine_version = $4
+              AND config_hash = $5
+          `, [input.instrumentId, input.timeframe, candle.open_time, ICT_STATE_ENGINE_VERSION, ictConfigHash])
+        : Promise.resolve({ rows: [] as { snapshot_payload: IctStateCompositeSnapshot }[] }),
     ]);
 
     const regime = await this.findRegime(input, candle) ?? undefined;
+
+    let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
+    if (!ictSnapshot && ictConsumed) {
+      ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
+    }
 
     return {
       candle: toCandle(candle),
@@ -274,6 +415,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         details: row.details,
       })),
       regime,
+      ...(ictSnapshot ? { ictSnapshot } : {}),
     };
   }
 
@@ -287,6 +429,37 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<RegimeContext | null> {
+    const raw = await this.findRawVix({
+      instrumentId: input.instrumentId,
+      timeframe: input.timeframe,
+      closeTime: candle.close_time,
+    });
+    return raw ? deriveVolatilityRegime(raw.vixClose, raw.vixSma20) : null;
+  }
+
+  /**
+   * The raw VIX close and its SMA(20), the same point-in-time lookup `findRegime` uses -- but
+   * returning the pair itself rather than folding it into `deriveVolatilityRegime`'s ratio.
+   *
+   * Public (unlike `findRegime`) because Brain V2.2's State Interpreter (`state-interpreter.ts`)
+   * threads `volatilityReading: {vixClose, vixSma20} | null` as a caller-supplied sibling input and
+   * derives its own regime reading itself -- it does not consume `RegimeContext`. Extracted as a
+   * shared private helper rather than duplicating the query, so this and `findRegime` cannot silently
+   * drift onto two different VIX readings for the same instant.
+   */
+  async findRawVolatilityReading(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
+    return this.findRawVix(input);
+  }
+
+  private async findRawVix(input: {
+    instrumentId: string;
+    timeframe: string;
+    closeTime: Date;
+  }): Promise<{ vixClose: number; vixSma20: number } | null> {
     const vixResult = await this.database.query<{ id: string }>(
       "SELECT id FROM instruments WHERE symbol = $1",
       [regimeSourceInstrumentSymbol],
@@ -304,7 +477,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     // The VIX bar must have closed no later than the target bar, so the regime is
     // knowable at decision time. The lower bound stops a long gap in the VIX series
     // from carrying a stale reading forward as if it were current.
-    const earliestAcceptableCloseTime = new Date(candle.close_time.getTime() - stalenessMilliseconds);
+    const earliestAcceptableCloseTime = new Date(input.closeTime.getTime() - stalenessMilliseconds);
     const vixCandleResult = await this.database.query<{ id: string; close: string }>(`
       SELECT id, close
       FROM candles
@@ -315,7 +488,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         AND close_time >= $4
       ORDER BY close_time DESC
       LIMIT 1
-    `, [vixInstrumentId, input.timeframe, candle.close_time, earliestAcceptableCloseTime]);
+    `, [vixInstrumentId, input.timeframe, input.closeTime, earliestAcceptableCloseTime]);
     const vixCandle = vixCandleResult.rows[0];
     if (!vixCandle) {
       return null;
@@ -343,6 +516,6 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       return null;
     }
 
-    return deriveVolatilityRegime(toNumber(vixCandle.close, "VIX close"), vixSma20);
+    return { vixClose: toNumber(vixCandle.close, "VIX close"), vixSma20 };
   }
 }

@@ -10,9 +10,19 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
 import { ImportHistoricalMarketData } from "../../modules/market-data/application/import-historical-market-data.js";
 import type { HistoricalMarketDataProvider } from "../../modules/market-data/domain/historical-data-provider.js";
+import type { Instrument } from "../../modules/market-data/domain/instrument.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 import { YahooHistoricalDataProvider } from "../../infrastructure/market-data/yahoo-historical-data-provider.js";
+import { TwelveDataHistoricalDataProvider } from "../../infrastructure/market-data/twelvedata-historical-data-provider.js";
+
+function parseExchangeOption(value: string): Instrument["exchange"] {
+  const upper = value.toUpperCase();
+  if (upper === "NSE" || upper === "NFO" || upper === "BSE" || upper === "TWELVEDATA") {
+    return upper;
+  }
+  throw new Error(`Unsupported --exchange "${value}". Use NSE, NFO, BSE, or TWELVEDATA.`);
+}
 
 function providerFromArguments(
   argumentsList: string[],
@@ -49,7 +59,14 @@ function providerFromArguments(
   if (provider === "yahoo") {
     return new YahooHistoricalDataProvider();
   }
-  throw new Error(`Unsupported provider "${provider}". Use csv, fyers, kite, or yahoo.`);
+  if (provider === "twelvedata") {
+    const apiKey = process.env.TWELVEDATA_API_KEY;
+    if (!apiKey) {
+      throw new Error("Twelve Data collection requires TWELVEDATA_API_KEY in .env.");
+    }
+    return new TwelveDataHistoricalDataProvider({ apiKey });
+  }
+  throw new Error(`Unsupported provider "${provider}". Use csv, fyers, kite, yahoo, or twelvedata.`);
 }
 
 /**
@@ -148,9 +165,12 @@ async function main(): Promise<void> {
   try {
     const instrumentRepository = new PostgresInstrumentRepository(database);
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
-    const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
+    // Defaults to NSE, unchanged for every existing call site -- only a non-Indian instrument
+    // (e.g. `--exchange TWELVEDATA --instrument XAU_USD`) needs to pass this explicitly.
+    const exchange = parseExchangeOption(getOption(argumentsList, "exchange") ?? "NSE");
+    const instrument = await instrumentRepository.findByExchangeAndSymbol(exchange, symbol);
     if (!instrument) {
-      throw new Error(`NSE instrument "${symbol}" is not registered. Run data:seed:core-instruments or register it first.`);
+      throw new Error(`${exchange} instrument "${symbol}" is not registered. Run data:seed:core-instruments or register it first.`);
     }
 
     const provider = providerFromArguments(argumentsList, database);

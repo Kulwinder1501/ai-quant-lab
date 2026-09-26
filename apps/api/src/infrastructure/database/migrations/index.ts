@@ -96,6 +96,25 @@ import { differentialClassificationsMigration } from "./095-differential-classif
 import { autonomousAgentStrategyIdentityMigration } from "./096-autonomous-agent-strategy-identity.js";
 import { oneActiveStrategyVersionMigration } from "./097-one-active-strategy-version.js";
 import { oneActiveStrategyVersionIndexMigration } from "./098-one-active-strategy-version-index.js";
+import { stockIntelligenceCanonicalModelMigration } from "./099-stock-intelligence-canonical-model.js";
+import { stockIntelligenceCorporateActionIdentityMigration } from "./100-stock-intelligence-corporate-action-identity.js";
+import { stockIntelligenceReplayHarnessMigration } from "./101-stock-intelligence-replay-harness.js";
+import { stockIntelligenceFeatureIdentityMigration } from "./102-stock-intelligence-feature-identity.js";
+import { stockIntelligenceSnapshotMigration } from "./103-stock-intelligence-prediction-snapshots.js";
+import { stockIntelligenceGate7ReportMigration } from "./104-stock-intelligence-gate7-reports.js";
+import { ictStateSnapshotsMigration } from "./105-ict-state-snapshots.js";
+import { paperTradeInitialStopLossMigration } from "./106-paper-trade-initial-stop-loss.js";
+import { candidateDatasetMigration } from "./107-candidate-dataset.js";
+import { ictStructuralFeaturesMigration } from "./108-ict-structural-features.js";
+import { ictRefinedOrderBlockMigration } from "./109-ict-refined-order-block.js";
+import { ictOteMigration } from "./110-ict-ote.js";
+import { ictSwingHierarchyMigration } from "./111-ict-swing-hierarchy.js";
+import { backtestOpposingSweepExitMigration } from "./112-backtest-opposing-sweep-exit.js";
+import { twelveDataInstrumentSupportMigration } from "./113-twelvedata-instrument-support.js";
+import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.js";
+import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
+import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
+import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-locking-stop.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -196,4 +215,23 @@ export const migrations = [
   autonomousAgentStrategyIdentityMigration,
   oneActiveStrategyVersionMigration,
   oneActiveStrategyVersionIndexMigration,
+  stockIntelligenceCanonicalModelMigration,
+  stockIntelligenceCorporateActionIdentityMigration,
+  stockIntelligenceReplayHarnessMigration,
+  stockIntelligenceFeatureIdentityMigration,
+  stockIntelligenceSnapshotMigration,
+  stockIntelligenceGate7ReportMigration,
+  ictStateSnapshotsMigration,
+  paperTradeInitialStopLossMigration,
+  candidateDatasetMigration,
+  ictStructuralFeaturesMigration,
+  ictRefinedOrderBlockMigration,
+  ictOteMigration,
+  ictSwingHierarchyMigration,
+  backtestOpposingSweepExitMigration,
+  twelveDataInstrumentSupportMigration,
+  xauUsdCandleProvenanceMigration,
+  paperAccountsCurrencySupportMigration,
+  paperTradeSessionCloseExitReasonMigration,
+  paperTradeProfitLockingStopMigration,
 ];

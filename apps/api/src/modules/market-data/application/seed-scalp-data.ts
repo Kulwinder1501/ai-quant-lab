@@ -27,6 +27,42 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
     // Matching the registration keeps the seed and the code on one version, and
     // the config is jsonb-equal to what `ensure` writes, so it will not trip the
     // immutable-configuration guard.
+    /*
+     * Stand every *other* version down first, in this same transaction.
+     *
+     * `ON CONFLICT (strategy_id, version)` only catches a clash on the same version. It cannot see
+     * the partial unique index `strategy_versions_one_active_per_strategy`, so activating the
+     * declared version while a *different* one is active raised a bare 23505 from inside the seed.
+     * The container's start command is `migrate && seed && server`, so that threw before
+     * `server.js` and the API crash-looped -- observed 2026-09-06 to 2026-09-07, restart count 11,
+     * for eighteen hours, after a v4 row was activated by hand while the code still declared v3.
+     * The failure was invisible from outside: the container reported "Restarting", and the cause was
+     * a duplicate-key error on a table nothing in the boot path obviously touches.
+     *
+     * Deactivating first makes the seed converge instead of colliding: after it runs, exactly one
+     * version is active and it is the one this code can actually parse and run, which is the
+     * invariant the rest of the system already assumes. It is deliberately *not* silent -- an
+     * operator who activated another version by hand needs to see that boot overrode them, because
+     * that is the situation that produced the outage.
+     */
+    const standDown = await client.query<{ version: number }>(`
+      UPDATE strategy_versions SET is_active = FALSE
+      WHERE strategy_id = $1 AND is_active = TRUE AND version <> $2
+      RETURNING version
+    `, [strategyId, momentumScalpStrategyVersion]);
+    for (const row of standDown.rows) {
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "Boot seed deactivated a non-declared active strategy version",
+        strategyKey: "momentum-scalp",
+        deactivatedVersion: row.version,
+        declaredVersion: momentumScalpStrategyVersion,
+        hint: "The code-declared version is the one that runs. To adopt another, bump the version "
+          + "in momentum-scalp-strategy.ts rather than flipping is_active in the database.",
+      }));
+    }
+
+    // Register the declared version itself. Safe now that nothing else holds the active slot.
     const verRes = await client.query<{ id: string }>(`
       INSERT INTO strategy_versions (strategy_id, version, configuration, is_active)
       VALUES ($1, $2, $3::jsonb, TRUE)

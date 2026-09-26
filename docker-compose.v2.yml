@@ -38,6 +38,9 @@ services:
       # token lapses. It was absent, so the one command that can restore Fyers access failed
       # on a missing variable rather than on anything to do with the credential.
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
+      # Twelve Data: the market-data vendor behind XAU_USD, since Fyers/Kite are India-only
+      # brokers with no segment for it and OANDA does not accept Indian-resident accounts.
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       API_MUTATION_RATE_LIMIT: ${API_MUTATION_RATE_LIMIT:-120}
@@ -73,6 +76,10 @@ services:
       FYERS_PIN: ${FYERS_PIN:-}
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+      # Twelve Data: powers XAU_USD candle collection (XAU_CANDLE_COLLECTION) and the gold paper
+      # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
+      # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
       # Keeps this process's own log lines on the bind mount below, where they survive the
       # container. Docker stores json-file logs under the container's directory and deletes them
       # with it, so `--force-recreate` destroys them -- and a skipped run writes nothing to

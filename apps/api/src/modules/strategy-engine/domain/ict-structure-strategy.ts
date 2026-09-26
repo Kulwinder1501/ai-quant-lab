@@ -1,0 +1,674 @@
+import type {
+  EnsureStrategyVersionInput,
+  ProposedTradeIdea,
+  StrategyMarketContext,
+  TradeIdeaEvidence,
+} from "./strategy.js";
+import type { StrategyEvaluator } from "./strategy-registry.js";
+import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
+import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
+import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
+import type { BalancedPriceRange } from "../../technical-analysis/domain/ict/bpr.js";
+import { LiquidityResponseResolver } from "../../technical-analysis/domain/ict/liquidity-response.js";
+import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
+
+/**
+ * Which point of interest wins when several are available on the same bar.
+ *
+ * `SWEEP_FIRST` is the incumbent and reaches an order block almost never: measured over
+ * 2025-01-01..2026-09-05 on BANKNIFTY 15m, 1,045 of 1,222 entries came from a fair value gap and
+ * 141 from a session sweep, leaving 36 from a block of any kind. `BLOCK_FIRST` puts the block ahead
+ * of the gap, which is the order the doctrine states.
+ */
+export type IctPoiPreference = "SWEEP_FIRST" | "BLOCK_FIRST";
+
+/**
+ * Killzone windows as IST minutes-of-day, half-open [from, to).
+ *
+ * Fixed in docs/2026-09-08-ict-entry-model-falsification-program.md BEFORE measurement, so they are
+ * not tunable here. The first two are contiguous by construction; together the three admit 225 of a
+ * 375-minute session and exclude 150 (40%).
+ */
+const KILLZONE_WINDOWS: readonly { readonly name: string; readonly from: number; readonly to: number }[] = [
+  { name: "OPEN_DRIVE", from: 9 * 60 + 15, to: 10 * 60 + 15 },
+  { name: "LATE_MORNING", from: 10 * 60 + 15, to: 11 * 60 + 30 },
+  { name: "AFTERNOON", from: 13 * 60, to: 14 * 60 + 30 },
+];
+
+function killzoneAt(instant: Date): string | null {
+  const minute = istMinuteOfDay(instant);
+  for (const w of KILLZONE_WINDOWS) {
+    if (minute >= w.from && minute < w.to) return w.name;
+  }
+  return null;
+}
+
+/**
+ * Whether price sits in the 62-79% retracement of the dealing range -- the optimal trade entry.
+ *
+ * For a long that is the DEEP end of discount: 62-79% back off the range high is 21-38% up from the
+ * range low. Mirrored for a short.
+ *
+ * Registered as `entryPlacement` and implemented as a FILTER, not as placement. See the amendment in
+ * the program document: the backtester enters at the next candle's open and cannot rest a limit
+ * order at a level, so "enter AT the OTE" is not expressible. This asks instead whether the signal
+ * bar is already inside the band, which is a strictly weaker claim.
+ */
+function isWithinOte(price: number, rangeLow: number, rangeHigh: number, isBullish: boolean): boolean {
+  const span = rangeHigh - rangeLow;
+  if (span <= 0) return false;
+  const near = isBullish ? rangeLow + span * 0.21 : rangeLow + span * 0.62;
+  const far = isBullish ? rangeLow + span * 0.38 : rangeLow + span * 0.79;
+  return price >= near && price <= far;
+}
+
+export interface IctStructureStrategyConfiguration {
+  minimumRiskReward: number;
+  minConfidence: number;
+  expiryCandles: number;
+  requirePoiReaction: boolean;
+  /** Entry-model arm 1. Defaults to the incumbent order, so an unconfigured run is unchanged. */
+  poiPreference: IctPoiPreference;
+  /** Entry-model arm 2. Restricts entries to the pre-registered killzone windows. */
+  requireKillzone: boolean;
+  /** Entry-model arm 3. Requires the signal bar to sit inside the 62-79% retracement. */
+  requireOte: boolean;
+  /**
+   * Entry-model arm 4: requires the ITH/ITL swing-hierarchy protected level (see swing-hierarchy.ts)
+   * to still be intact. Off by default -- see the docstring at its call site below.
+   *
+   * Measured 2026-09-22 against the two live cells (NIFTY50 15m 2025 + 2026 holdout, BANKNIFTY 5m
+   * 2026), same params as the falsification program (concurrency 5, 2bps slippage): both NIFTY50
+   * windows improve (+937.00 on 85->73 trades; +292.40 on 114->99, still net negative), but BANKNIFTY
+   * flips from +3,832.35 to -537.90 on 102->86 trades -- a -4,370.25 swing. Same non-replication
+   * signature that closed killzone, OTE and poiPreference: one instrument likes the filter, the other
+   * disagrees. Verdict NO_EDGE, matching the pre-registered expectation. Stays in the tree behind
+   * this default-off switch with the measurement attached, not deployed.
+   */
+  requireProtectedLevelIntact: boolean;
+  /**
+   * Entry-model arm 5: requires a recent Change in State of Delivery (see cisd.ts) in the trade's own
+   * direction, on top of the POI reaction arm 1 already requires. Off by default -- unmeasured, like
+   * every other arm here, following the same falsification-program discipline: shipped in-tree,
+   * covariates recorded on every approved idea regardless of this switch, so the population needed
+   * to test it exists before the arm is ever turned on.
+   *
+   * Both sources researched for cisd.ts are explicit that CISD alone is weak evidence and gains its
+   * conviction from exactly this pairing: "inside a tap of a daily or 4-hour PD Array, that same
+   * close is a high-probability reversal trigger." This strategy already requires a POI reaction
+   * (arm 1, `requirePoiReaction`) before this gate is even reached, which is the PD-Array tap the
+   * doctrine is describing -- so this arm asks whether *also* requiring the delivery-shift
+   * confirmation on top of that tap improves anything, not whether CISD works standalone.
+   *
+   * Measured 2026-09-23, verdict NO_EDGE -- see Amendment 4 in the falsification program doc. Both
+   * NIFTY50 windows improve (+192.80 on 85->45 trades; +3,850.10 on 114->59) but BANKNIFTY flips from
+   * +4,319.60 to -1,742.50 on 102->85 trades -- a -6,062.10 swing. The same cross-instrument
+   * non-replication signature that closed killzone, OTE, poiPreference and
+   * `requireProtectedLevelIntact` before it -- the fifth arm in a row to show it.
+   */
+  requireCisdConfirmation: boolean;
+  /**
+   * How many bars old a CISD event may be and still count as "recent" for arm 5. `cisd` on the
+   * composite snapshot is the most recently confirmed event ever, not per-bar, so an unbounded age
+   * would let a CISD from hundreds of bars ago silently satisfy the gate forever. 10 bars, matching
+   * this codebase's existing `orderBlockLookbackBars`/`LIQUIDITY_LOOKBACK_BARS` precedent for the
+   * same class of bound -- a deliberate, documented limit, not a value tuned against any result.
+   */
+  maxCisdAgeBars: number;
+  /**
+   * Entry-model arm 6: considers a Balanced Price Range (see bpr.ts -- the overlap of two opposing
+   * fair value gaps) as a POI candidate, checked ahead of the existing block/gap/sweep search when
+   * enabled. Off by default. Multiple retail sources describe it as ICT's "highest-probability entry
+   * zone" -- doctrine alone, not a measured claim, which is exactly why this shipped as a hypothesis
+   * rather than a default.
+   *
+   * Measured 2026-09-23, verdict NO_EDGE -- untestable by reordering, not merely unreplicated. See
+   * Amendment 5. Byte-identical trade count and P&L to control on all three cells: BPRs form on 87%
+   * of NIFTY50 2025 bars (up to 65 at once), so this is a near-constant descriptor rather than a rare
+   * high-conviction zone, and the 53 bars where a BPR was reached with no other POI also reached never
+   * additionally cleared this strategy's other gates in this sample. Same structural limitation
+   * Amendment 2 recorded for `poiPreference`/OTE: entry/stop/target never consult which POI type
+   * supplied the level, so reordering or adding a candidate can only matter by changing whether ANY
+   * POI was found -- which it did not, here.
+   */
+  considerBpr: boolean;
+}
+
+export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
+  minimumRiskReward: 1.2,
+  minConfidence: 0.7,
+  expiryCandles: 3,
+  requirePoiReaction: true,
+  /*
+   * All three entry-model arms default OFF, so every arm is exactly one configuration key away from
+   * its own control and a paired same-bar delta is available for Gate 4.
+   */
+  poiPreference: "SWEEP_FIRST",
+  requireKillzone: false,
+  requireOte: false,
+  requireProtectedLevelIntact: false,
+  requireCisdConfirmation: false,
+  maxCisdAgeBars: 10,
+  considerBpr: false,
+};
+
+/**
+ * What version 2 was REGISTERED with, pinned as its own literal.
+ *
+ * A stored version's configuration is immutable, and a partial unique index allows one active
+ * version per strategy -- so widening the default object made `ensure` refuse, and bumping to v3
+ * would have needed v2 deactivated, a write to a row live paper trading may reference. Neither is
+ * necessary: `evaluate` merges the stored configuration over the CODE defaults, so keys added later
+ * are supplied by the defaults and the stored record keeps saying exactly what v2 was created with.
+ *
+ * Do not "tidy" this back into a reference to `defaultIctStructureStrategyConfiguration`. The two
+ * are meant to drift: one is a historical record, the other is current code.
+ */
+const registeredV2Configuration = {
+  minimumRiskReward: 1.2,
+  minConfidence: 0.7,
+  expiryCandles: 3,
+  requirePoiReaction: true,
+};
+
+export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
+  strategyKey: ICT_STRUCTURE_STRATEGY_KEY,
+  name: "ICT Structural Alignment (V1)",
+  description: "Four-pillar structural strategy strictly trading in alignment with the higher-timeframe trend.",
+  version: 2,
+  configuration: registeredV2Configuration as unknown as Record<string, unknown>,
+};
+export class IctStructureStrategy implements StrategyEvaluator {
+  private readonly liquidityResponseResolver = new LiquidityResponseResolver();
+
+  evaluate(context: StrategyMarketContext, strategyConfiguration: Record<string, unknown> = {}): ProposedTradeIdea[] {
+    const config: IctStructureStrategyConfiguration = {
+      ...defaultIctStructureStrategyConfiguration,
+      ...strategyConfiguration,
+    };
+
+    const ict = context.ictSnapshot;
+    if (!ict) return [];
+
+    const { structure, zones, sessionLevels, bias, liquidity, coverage, swingHierarchy, cisd, balancedPriceRanges } = ict;
+
+    // Pillar Gate 1: every coverage input must be COMPLETE. Both UNKNOWN
+    // (evidence absent/ambiguous) and NOT_COVERED (engine never ran) fail
+    // closed — missing or ambiguous state is never treated as permission.
+    if (
+      coverage.structure !== "COMPLETE" ||
+      coverage.bias !== "COMPLETE" ||
+      coverage.zones !== "COMPLETE" ||
+      coverage.sessionLevels !== "COMPLETE" ||
+      coverage.liquidity !== "COMPLETE" ||
+      coverage.htf !== "COMPLETE"
+    ) {
+      return [];
+    }
+
+    // Pillar Gate 2: Directional Alignment (bias + structure agree)
+    const isBullish = bias.bias === "BULLISH" && structure.trend === "BULLISH";
+    const isBearish = bias.bias === "BEARISH" && structure.trend === "BEARISH";
+    if (!isBullish && !isBearish) return [];
+
+    /*
+     * There is no separate fractal-alignment gate any more, and its removal is the point.
+     *
+     * It compared `ict.htfBias` against `bias.bias`. Now that bias is SOURCED from the
+     * higher-timeframe read (see bias.ts), those two are the same value, so the comparison could
+     * only ever pass -- swapping a circular gate for a tautological one. Gate 2 above is the real
+     * alignment test: the higher-timeframe narrative against the execution-timeframe structure.
+     *
+     * The fractal pillar is still *required*: `coverage.htf` must be COMPLETE in Gate 1, so a bar
+     * with no higher-timeframe evidence produces nothing. What is gone is the redundant equality
+     * check, not the requirement.
+     *
+     * The dead `higherTimeframeContexts["15m"]` branch went with it. Nothing in production ever
+     * populated that key -- the research harness attaches "5m" and only to the 1m reference context.
+     *
+     * What remains below is a CONSISTENCY guard, not a pillar. Since bias is sourced from the
+     * higher-timeframe read and a sweep may now only confirm it, a snapshot whose bias contradicts
+     * its own `htfBias` is malformed and cannot be produced by the engine. Refusing it keeps the
+     * fail-closed invariant against a hand-built or future-constructed snapshot rather than trusting
+     * that the two can never disagree.
+     */
+    if (ict.htfBias && ict.htfBias !== bias.bias) return [];
+
+    /*
+     * Entry-model arm 4: swing-hierarchy protected level.
+     *
+     * `swingHierarchy` (see swing-hierarchy.ts) is computed on every bar via `IctCompositeEngine`
+     * but was, until now, never read here -- the doctrine's own early warning that a bias read may
+     * already be wrong (lecture 8: the current-trend Intermediate Term point is "protected" and
+     * should not break while that trend genuinely holds) played no role in trade approval.
+     *
+     * Off by default, exactly like `requireKillzone`/`requireOte`: this is a hypothesis to measure
+     * through the falsification program, not a gate to ship on the strength of doctrine alone. The
+     * covariates are recorded on every approved idea regardless, so the population needed to test it
+     * is available before the arm itself is ever turned on.
+     *
+     * Measured 2026-09-22, verdict NO_EDGE -- see the full result on the `requireProtectedLevelIntact`
+     * field above. Both NIFTY50 windows improved but BANKNIFTY flipped from +3,832.35 to -537.90, the
+     * same cross-instrument non-replication that closed every other arm here.
+     *
+     * Guarded on `swingHierarchy` being present rather than assumed: a hand-built snapshot (tests,
+     * or any future caller that predates this field) is missing evidence, not evidence of an intact
+     * level, so it is never gated on when absent.
+     */
+    let protectedSide: ProtectedSide | null = null;
+    let protectedLevelBreached = false;
+    if (swingHierarchy) {
+      const swingHierarchyFeature = computeSwingHierarchyFeature(swingHierarchy, structure.trend, context.candle.close);
+      protectedSide = swingHierarchyFeature.protectedSide;
+      protectedLevelBreached = swingHierarchyFeature.protectedLevelBreached;
+    }
+    if (config.requireProtectedLevelIntact && protectedLevelBreached) return [];
+
+    // Pillar Gate 3: Liquidity Status
+    if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];
+    if (isBearish && liquidity.alignmentStatus !== "ALIGNED_SHORT") return [];
+
+    const targetPool = liquidity.primaryTarget;
+    if (!targetPool) return [];
+
+    // POI interaction check (mitigation of OB, FVG, or session sweep)
+    const currentPrice = context.candle.close;
+    let poiEvidence: string | null = null;
+
+    /*
+     * The POI test used to accept ANY zone in state TOUCHED and ANY FVG with fillPercentage > 0,
+     * with no check that the zone even faced the right way. It therefore never rejected anything:
+     * measured over 45 days it passed every single pillar-aligned bar on both indices (`noPoi: 0`),
+     * so `requirePoiReaction` was free.
+     *
+     * The discriminators were already being computed and thrown away. `OrderBlock` carries
+     * `meanThreshold`, `isExtreme` and `isIdmAdjacent`; `FairValueGap` carries `midpoint`, the
+     * consequent encroachment. Lecture 7 is explicit that the entry is taken AT the mean threshold
+     * ("ये ऑर्डर ब्लॉक का मैं मीन थ्रेसहोल्ड लेता हूं"), not on first contact with the edge.
+     *
+     * Three requirements now, each straight from the source:
+     *   1. the zone must face the trade -- a BULLISH zone for a long. A touched bearish order block
+     *      is evidence against a long, and it used to count for one.
+     *   2. an order block must be traded INTO its mean threshold, not merely touched.
+     *   3. a fair value gap must be traded into its midpoint (CE), not merely broken by any amount.
+     *
+     * `isExtreme` and `isIdmAdjacent` are recorded rather than gated on. Lecture 7 pairs the extreme
+     * order block with the long targets, which is the pairing this strategy now takes after the
+     * liquidity-objective fix -- but that is a hypothesis to measure, so it travels as evidence
+     * instead of silently narrowing the population.
+     */
+    const wantedZone: "BULLISH" | "BEARISH" = isBullish ? "BULLISH" : "BEARISH";
+    const barLow = context.candle.low;
+    const barHigh = context.candle.high;
+    const reached = (level: number): boolean =>
+      isBullish ? barLow <= level : barHigh >= level;
+
+    /*
+     * Entry-model arm 2: killzone.
+     *
+     * Placed AFTER the pillar gates and BEFORE the point-of-interest search, deliberately. A time
+     * window is a property of the bar, not of the setup, so putting it here means the arm and its
+     * control see the same candidate bars and differ only in which of them are admitted -- the
+     * paired comparison Gate 4 asks for. Sited any later and it would be filtering an already
+     * filtered population.
+     */
+    const killzone = killzoneAt(context.candle.openTime);
+    if (config.requireKillzone && killzone === null) return [];
+
+    /*
+     * Entry-model arm 3: optimal trade entry.
+     *
+     * Needs the dealing range, and refuses when there is none rather than passing: an OTE band
+     * without a range is not a wide band, it is an unanswered question.
+     */
+    let oteOk = true;
+    if (config.requireOte) {
+      const range = bias.dealingRange;
+      oteOk = range !== null && isWithinOte(currentPrice, range.rangeLow, range.rangeHigh, isBullish);
+      if (!oteOk) return [];
+    }
+
+    let poiExtreme = false;
+    let poiIdmAdjacent = false;
+    /*
+     * Which lecture-7 block type supplied the entry, recorded but NOT gated on.
+     *
+     * The taxonomy claims these are different setups -- a mitigation block continues, a breaker
+     * reverses -- so the label has to be measurable per trade before any of that can be tested. It
+     * stays a covariate until it separates outcomes.
+     */
+    let poiKind: OrderBlockKind | "FVG" | "SESSION_SWEEP" | "BPR" | null = null;
+
+    if (config.requirePoiReaction) {
+      /*
+       * Entry-model arm 1: which point of interest wins.
+       *
+       * Both candidates are resolved before either is chosen, so the ordering is the only thing the
+       * arm changes. Resolving them is side-effect free, so `SWEEP_FIRST` remains byte-identical to
+       * the incumbent short-circuit.
+       */
+      const sweptSessionLevel = sessionLevels.lastSweepEvent?.eventType === "SWEEP"
+        ? sessionLevels.lastSweepEvent.levelType
+        : null;
+
+      const structuralSweep = structure.lastEvent?.type === "SWEEP" && structure.lastEvent.isWickOnly
+        ? structure.lastEvent
+        : null;
+      /*
+       * Matching on `type` is now correct for both zone kinds: a failed block and an inverted gap
+       * each re-enter the ledger as a NEW zone carrying the flipped type, dated to the bar the
+       * inversion happened on. Reading the mutable `state` to work the side out here would read the
+       * future, because the ledger hands out live zone objects and the backtest builds every
+       * snapshot before replaying any of it.
+       */
+      /*
+       * Scoped to `isDoctrinallyValidOrderBlockCandidate` -- lecture 4 (and independently lectures 5
+       * and 6) is explicit that only the FIRST order block after IDM and the LAST one at the swing
+       * extreme are real candidates; whatever forms in between is declared irrelevant, not merely
+       * lower-priority. `isIdmAdjacent`/`isExtreme` were computed on every `OrderBlock` from the
+       * start and the predicate itself already existed for the ML feature-source track
+       * (`feature-extraction.ts`, `refined-order-block.ts`), but this strategy's own POI search took
+       * the first array match regardless -- so an in-between block the doctrine rules out could
+       * still supply a live entry. Unfiltered, this was the same "in-between order blocks don't
+       * work" gap the feature-source work already fixed on its own path.
+       */
+      const ob = zones.activeObs.find(
+        (o) => o.type === wantedZone && reached(o.meanThreshold) && isDoctrinallyValidOrderBlockCandidate(o)
+      );
+      /*
+       * Scoped to `isDoctrinallyValidFairValueGapCandidate`, the same rule as the order-block search
+       * above -- lecture 4 groups fair value gaps under the identical "only first-after-IDM or
+       * last-at-extreme" restriction, not a separate one. `FairValueGap` never carried
+       * `isIdmAdjacent`/`isExtreme` at all until now, so every active gap was an equally valid
+       * "nearest" candidate regardless of where it sat in the IDM-to-swing range -- on the POI type
+       * that supplies the large majority of this strategy's entries.
+       */
+      const fvg = zones.activeFvgs.find(
+        (f) => f.type === wantedZone && reached(f.midpoint) && isDoctrinallyValidFairValueGapCandidate(f)
+      );
+      /*
+       * Entry-model arm 6's own candidate: no `isDoctrinallyValidOrderBlockCandidate`-style IDM/extreme
+       * scoping exists for a BPR, because no source material describes one -- unlike order blocks and
+       * fair value gaps, the doctrine for balanced price ranges never groups them under lecture 4's
+       * restriction. Scoping it there would be inventing a rule, not applying one.
+       *
+       * `?? []` rather than assuming presence: a hand-built snapshot (tests, or any caller predating
+       * this field) may omit the key entirely, and `.find()` on `undefined` throws unconditionally --
+       * there is no loose-equality equivalent for a missing array the way `cisd`'s `!= null` guard
+       * works for a missing object. Absent evidence reads as "no BPR candidate", not a crash.
+       */
+      const bpr: BalancedPriceRange | undefined = (balancedPriceRanges ?? []).find(
+        (b) => b.type === wantedZone && reached(b.meanThreshold)
+      );
+
+      const takeBlock = (): boolean => {
+        if (!ob) return false;
+        poiEvidence = `Order Block ${ob.id} traded into its mean threshold ${ob.meanThreshold}`;
+        poiExtreme = ob.isExtreme;
+        poiIdmAdjacent = ob.isIdmAdjacent;
+        poiKind = ob.kind;
+        return true;
+      };
+      const takeGap = (): boolean => {
+        if (!fvg) return false;
+        poiEvidence = `Fair Value Gap ${fvg.id} traded into its consequent encroachment ${fvg.midpoint}`;
+        poiExtreme = fvg.isExtreme;
+        poiIdmAdjacent = fvg.isIdmAdjacent;
+        poiKind = "FVG";
+        return true;
+      };
+      const takeSweep = (): boolean => {
+        // 1. Structural swing sweep (88-90% clean rejection rate)
+        if (structuralSweep && structuralSweep.direction === (isBullish ? "BULLISH" : "BEARISH")) {
+          poiEvidence = `Structural swing ${structuralSweep.brokenPivot.type} swept with wick and reclaimed`;
+          poiExtreme = true;
+          poiIdmAdjacent = true;
+          poiKind = "SESSION_SWEEP";
+          return true;
+        }
+
+        // 2. Session level sweep (PDH/PDL) - evaluated through LiquidityResponseResolver
+        if (sweptSessionLevel !== null) {
+          const response = this.liquidityResponseResolver.evaluate({
+            poolType: sweptSessionLevel,
+            side: isBullish ? "DOWN" : "UP",
+            penetrationBps: sessionLevels.lastSweepEvent?.penetrationBps ?? 0,
+            reclaimDistanceBps: sessionLevels.lastSweepEvent?.reclaimDistanceBps ?? 0,
+            isClosedBackInside: (sessionLevels.lastSweepEvent?.reclaimDistanceBps ?? 0) > 0,
+          });
+
+          // Only take session sweeps (PDH/PDL) when confirmed as high-probability sweep
+          if (!response.isFavorableForSweep) {
+            return false;
+          }
+
+          poiEvidence = `Session ${sweptSessionLevel} swept and reclaimed (${response.rationale})`;
+          poiKind = "SESSION_SWEEP";
+          return true;
+        }
+
+        return false;
+      };
+      const takeBpr = (): boolean => {
+        if (!bpr) return false;
+        poiEvidence = `Balanced Price Range ${bpr.id} traded into its mean threshold ${bpr.meanThreshold}`;
+        poiKind = "BPR";
+        return true;
+      };
+
+      const order = config.poiPreference === "BLOCK_FIRST"
+        ? [takeBlock, takeGap, takeSweep]
+        : [takeSweep, takeBlock, takeGap];
+      /*
+       * Checked ahead of the existing order when the arm is on, per the doctrine's own framing of a
+       * BPR as the highest-conviction of the three POI types -- not measured yet, so this is the
+       * hypothesis being tested, not an established priority.
+       */
+      if (config.considerBpr) order.unshift(takeBpr);
+      for (const take of order) {
+        if (take()) break;
+      }
+
+      if (!poiEvidence) {
+        return [];
+      }
+    }
+
+    /*
+     * Entry-model arm 5: CISD confirmation on top of the POI reaction just verified above.
+     *
+     * Computed unconditionally, gated only when the switch is on -- same convention as arm 4. `cisd`
+     * is the most recently confirmed event ever on this snapshot (see config.ts), so age is bounded
+     * by `maxCisdAgeBars` rather than trusted forever; `ict.barIndex` and `cisd.confirmingCandleIndex`
+     * come from the same underlying candle series, so the subtraction is a plain bar count, not a
+     * time delta across timeframes.
+     */
+    /*
+     * `cisd == null` (loose) rather than `!== null`, deliberately: a hand-built snapshot (tests, or
+     * any caller predating this field, same reasoning as `swingHierarchy` above) may omit the key
+     * entirely and leave it `undefined` rather than `null`. `undefined !== null` is true in JS, which
+     * would have read `.confirmingCandleIndex` off `undefined` and thrown instead of failing closed.
+     */
+    const cisdAgeBars = cisd != null ? ict.barIndex - cisd.confirmingCandleIndex : null;
+    const cisdConfirmed = cisd != null
+      && cisd.direction === wantedZone
+      && cisdAgeBars !== null
+      && cisdAgeBars >= 0
+      && cisdAgeBars <= config.maxCisdAgeBars;
+    if (config.requireCisdConfirmation && !cisdConfirmed) return [];
+
+    // Trade Geometry
+    const entryPrice = currentPrice;
+    let stopLoss: number;
+    let targetPrice: number;
+    let side: "LONG" | "SHORT";
+
+    if (isBullish) {
+      side = "LONG";
+      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 0.995);
+      stopLoss = rawStop * 0.9995; // 0.05% volatility buffer
+      targetPrice = targetPool.price;
+
+      if (stopLoss >= entryPrice || targetPrice <= entryPrice) return [];
+      const risk = entryPrice - stopLoss;
+      const reward = targetPrice - entryPrice;
+      const riskReward = Number((reward / risk).toFixed(2));
+      if (riskReward < config.minimumRiskReward) return [];
+
+      const evidence: TradeIdeaEvidence[] = [
+        {
+          sourceType: "STRATEGY",
+          sourceReference: "PILLAR_STACK",
+          label: "Four-Pillar ICT Long Alignment",
+          contribution: 0.4,
+          details: {
+            bias: bias.bias,
+            structureTrend: structure.trend,
+            dealingRangeEq: bias.dealingRange?.equilibrium,
+            template: bias.dailyTemplate,
+          },
+        },
+        {
+          sourceType: "STRATEGY",
+          sourceReference: "LIQUIDITY_TARGET",
+          label: `Targeting ERL ${targetPool.kind}`,
+          contribution: 0.35,
+          details: {
+            targetPrice: targetPool.price,
+            intermediateTarget: liquidity.intermediateTarget,
+          },
+        },
+      ];
+
+      if (poiEvidence) {
+        evidence.push({
+          sourceType: "STRATEGY",
+          sourceReference: "POI_CONFIRMATION",
+          label: poiEvidence,
+          contribution: 0.25,
+          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
+          // targets this strategy now takes, so these two flags are the covariates that
+          // hypothesis needs before anyone narrows the population on it.
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
+        });
+      }
+
+      const expiresAt = new Date(
+        context.candle.closeTime.getTime() + config.expiryCandles * 5 * 60_000
+      );
+
+      return [
+        {
+          side,
+          entryPrice,
+          stopLoss,
+          targetPrice,
+          riskReward,
+          confidence: Math.max(config.minConfidence, 0.75),
+          reasoning: [
+            `Four-Pillar ICT LONG alignment: ${bias.bias} bias, ${structure.trend} trend, ${bias.dailyTemplate} template.`,
+            `Targeting ERL ${targetPool.kind} at ${targetPrice.toFixed(2)}, invalidation beyond ${stopLoss.toFixed(2)}.`,
+            poiEvidence ? `POI confirmation: ${poiEvidence}.` : "POI reaction verified.",
+            `Risk-Reward ratio: ${riskReward.toFixed(2)}R.`,
+          ],
+          evidence: {
+            strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            engineVersion: ict.engineVersion,
+            configHash: ict.configHash,
+            bias: bias.bias,
+            structureTrend: structure.trend,
+            targetPoolKind: targetPool.kind,
+            targetPrice,
+            stopLoss,
+            poiEvidence,
+          },
+          expiresAt,
+          evidenceItems: evidence,
+        },
+      ];
+    } else {
+      side = "SHORT";
+      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 1.005);
+      stopLoss = rawStop * 1.0005; // 0.05% volatility buffer
+      targetPrice = targetPool.price;
+
+      if (stopLoss <= entryPrice || targetPrice >= entryPrice) return [];
+      const risk = stopLoss - entryPrice;
+      const reward = entryPrice - targetPrice;
+      const riskReward = Number((reward / risk).toFixed(2));
+      if (riskReward < config.minimumRiskReward) return [];
+
+      const evidence: TradeIdeaEvidence[] = [
+        {
+          sourceType: "STRATEGY",
+          sourceReference: "PILLAR_STACK",
+          label: "Four-Pillar ICT Short Alignment",
+          contribution: 0.4,
+          details: {
+            bias: bias.bias,
+            structureTrend: structure.trend,
+            dealingRangeEq: bias.dealingRange?.equilibrium,
+            template: bias.dailyTemplate,
+          },
+        },
+        {
+          sourceType: "STRATEGY",
+          sourceReference: "LIQUIDITY_TARGET",
+          label: `Targeting ERL ${targetPool.kind}`,
+          contribution: 0.35,
+          details: {
+            targetPrice: targetPool.price,
+            intermediateTarget: liquidity.intermediateTarget,
+          },
+        },
+      ];
+
+      if (poiEvidence) {
+        evidence.push({
+          sourceType: "STRATEGY",
+          sourceReference: "POI_CONFIRMATION",
+          label: poiEvidence,
+          contribution: 0.25,
+          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
+          // targets this strategy now takes, so these two flags are the covariates that
+          // hypothesis needs before anyone narrows the population on it.
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
+        });
+      }
+
+      const expiresAt = new Date(
+        context.candle.closeTime.getTime() + config.expiryCandles * 5 * 60_000
+      );
+
+      return [
+        {
+          side,
+          entryPrice,
+          stopLoss,
+          targetPrice,
+          riskReward,
+          confidence: Math.max(config.minConfidence, 0.75),
+          reasoning: [
+            `Four-Pillar ICT SHORT alignment: ${bias.bias} bias, ${structure.trend} trend, ${bias.dailyTemplate} template.`,
+            `Targeting ERL ${targetPool.kind} at ${targetPrice.toFixed(2)}, invalidation beyond ${stopLoss.toFixed(2)}.`,
+            poiEvidence ? `POI confirmation: ${poiEvidence}.` : "POI reaction verified.",
+            `Risk-Reward ratio: ${riskReward.toFixed(2)}R.`,
+          ],
+          evidence: {
+            strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            engineVersion: ict.engineVersion,
+            configHash: ict.configHash,
+            bias: bias.bias,
+            structureTrend: structure.trend,
+            targetPoolKind: targetPool.kind,
+            targetPrice,
+            stopLoss,
+            poiEvidence,
+          },
+          expiresAt,
+          evidenceItems: evidence,
+        },
+      ];
+    }
+  }
+}

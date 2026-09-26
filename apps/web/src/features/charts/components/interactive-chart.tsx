@@ -5,17 +5,24 @@ import { createChart, ColorType, IChartApi, LineStyle, Time, CandlestickSeries, 
 import type { CandlestickData, HistogramData, LineData, SeriesMarker } from "lightweight-charts";
 import type { ChartPayload } from "../domain";
 import { useAppStore } from "../../../stores/app-store";
+import { ZoneBoxesPrimitive, type ZoneBox } from "./zone-box-primitive";
+
+/** Across all FVG/OB zones combined -- see the `zoneBoxes` memo for why this is global, not per-group. */
+const MAX_ZONES_TOTAL = 8;
 
 interface InteractiveChartProps {
   payload: ChartPayload;
   activeIndicators: string[];
   showPatterns: boolean;
+  /** Draws FVG/Order Block as shaded price zones. Separate from `showPatterns`: these are
+   *  ICT-ledger indicator output (real fill-state tracking), not candlestick pattern markers. */
+  showZones?: boolean;
   /** Sizing for the chart container. Defaults to a self-supporting height for
    *  callers that don't constrain it; pass "h-full w-full" inside a flex row. */
   className?: string;
 }
 
-export function InteractiveChart({ payload, activeIndicators, showPatterns, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
+export function InteractiveChart({ payload, activeIndicators, showPatterns, showZones = false, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const theme = useAppStore((state) => state.theme);
@@ -151,19 +158,6 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       });
     }
 
-    if (indicators.FVG) {
-      indicators.FVG.forEach((fvg) => {
-        const isBullish = fvg.type === "BULLISH";
-        allMarkers.push({
-          time: (new Date(fvg.timestamp).getTime() / 1000) as Time,
-          position: isBullish ? "belowBar" : "aboveBar",
-          color: isBullish ? "#10b981" : "#f43f5e",
-          shape: "circle",
-          text: "FVG",
-        });
-      });
-    }
-
     if (indicators.BOS) {
       indicators.BOS.forEach((bos) => {
         const isBullish = bos.type === "BULLISH_BOS";
@@ -203,21 +197,80 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       });
     }
 
-    if (indicators.ORDER_BLOCK) {
-      indicators.ORDER_BLOCK.forEach((ob) => {
-        const isBullish = ob.type === "BULLISH_OB";
-        allMarkers.push({
-          time: (new Date(ob.timestamp).getTime() / 1000) as Time,
-          position: isBullish ? "belowBar" : "aboveBar",
-          color: isBullish ? "#0ea5e9" : "#fb923c",
-          shape: "circle",
-          text: "OB",
-        });
-      });
-    }
-
     return allMarkers.sort((a, b) => (a.time as number) - (b.time as number));
-  }, [showPatterns, patterns, indicators.FVG, indicators.BOS, indicators.CHOCH, indicators.LIQUIDITY_SWEEP, indicators.ORDER_BLOCK]);
+  }, [showPatterns, patterns, indicators.BOS, indicators.CHOCH, indicators.LIQUIDITY_SWEEP]);
+
+  /**
+   * FVG/Order Block as shaded zones -- see `zone-box-primitive.ts`. Sourced from the ICT ledger
+   * (`loadIctZones` in market-data.routes.ts), which types a zone "BULLISH"/"BEARISH" like every
+   * other zone, not the old "BULLISH_OB"/"BEARISH_OB" naming.
+   *
+   * `activeFvgs`/`activeObs` are already filtered to zones that haven't been CONSUMED or
+   * INVALIDATED, so every candidate here is honestly still open -- there's no client-side
+   * re-filtering to get wrong. `time1` is clamped to the first loaded candle: a zone created weeks
+   * before the visible window would otherwise get a coordinate off the left edge and vanish
+   * outright, when what it actually means is "this has been active the whole time you can see".
+   *
+   * A symbol can carry 50+ active zones (NIFTY50 has shown 13 bullish + 36 bearish FVGs at once),
+   * and drawing all of them turned the chart into a wall of overlapping boxes -- the complaint that
+   * prompted this cap. All FVG/OB candidates, both directions, are ranked together and only the
+   * `MAX_ZONES_TOTAL` nearest the last close survive, since a zone hundreds of points from the
+   * current price is the least actionable one to spend screen space on. Deliberately global rather
+   * than one quota per (FVG/OB x bull/bear) group: a per-group floor still drew a small wall for
+   * any group where every member happened to be far from price (every bearish Order Block sitting
+   * 400+ points above NIFTY50 after a pullback, for one) -- ranking globally means a group with
+   * nothing nearby contributes nothing, rather than contributing its least-bad candidate anyway.
+   */
+  const zoneBoxes = useMemo<ZoneBox[]>(() => {
+    if (!showZones || ohlcData.length === 0) return [];
+
+    const firstTime = ohlcData[0].time as number;
+    const lastTime = ohlcData[ohlcData.length - 1].time as number;
+    const lastClose = ohlcData[ohlcData.length - 1].close;
+
+    const groups: Record<string, ZoneBox[]> = { fvgBull: [], fvgBear: [], obBull: [], obBear: [] };
+
+    (indicators.FVG ?? []).forEach((fvg) => {
+      if (fvg.top === undefined || fvg.bottom === undefined) return;
+      const isBullish = fvg.type === "BULLISH";
+      const createdAt = new Date(fvg.timestamp).getTime() / 1000;
+      groups[isBullish ? "fvgBull" : "fvgBear"]!.push({
+        time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
+        time2: lastTime as Time,
+        price1: fvg.top,
+        price2: fvg.bottom,
+        fillColor: isBullish ? "rgba(16, 185, 129, 0.12)" : "rgba(244, 63, 94, 0.12)",
+        borderColor: isBullish ? "rgba(16, 185, 129, 0.55)" : "rgba(244, 63, 94, 0.55)",
+        label: `FVG ${(fvg.state ?? "").toLowerCase()}`.trim(),
+      });
+    });
+
+    (indicators.ORDER_BLOCK ?? []).forEach((ob) => {
+      if (ob.top === undefined || ob.bottom === undefined) return;
+      const isBullish = ob.type === "BULLISH";
+      const createdAt = new Date(ob.timestamp).getTime() / 1000;
+      groups[isBullish ? "obBull" : "obBear"]!.push({
+        time1: Math.min(Math.max(createdAt, firstTime), lastTime) as Time,
+        time2: lastTime as Time,
+        price1: ob.top,
+        price2: ob.bottom,
+        fillColor: isBullish ? "rgba(14, 165, 233, 0.12)" : "rgba(251, 146, 60, 0.12)",
+        borderColor: isBullish ? "rgba(14, 165, 233, 0.6)" : "rgba(251, 146, 60, 0.6)",
+        label: `OB ${(ob.state ?? "").toLowerCase()}`.trim(),
+      });
+    });
+
+    const distanceToClose = (box: ZoneBox) => Math.min(Math.abs(box.price1 - lastClose), Math.abs(box.price2 - lastClose));
+
+    // Global cap, not per-group: a per-group floor guaranteed every category its N slots even when
+    // an entire group (e.g. every bearish Order Block) sits hundreds of points from price, which
+    // still rendered as a small wall of its own. Ranking every candidate together means a group
+    // with nothing nearby simply contributes nothing, instead of contributing its least-bad zone.
+    return Object.values(groups)
+      .flat()
+      .sort((a, b) => distanceToClose(a) - distanceToClose(b))
+      .slice(0, MAX_ZONES_TOTAL);
+  }, [showZones, ohlcData, indicators.FVG, indicators.ORDER_BLOCK]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -286,9 +339,13 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       wickDownColor: chartColors.down,
     });
     mainSeries.setData(ohlcData);
-    
+
     if (markers.length > 0) {
       createSeriesMarkers(mainSeries, markers);
+    }
+
+    if (zoneBoxes.length > 0) {
+      mainSeries.attachPrimitive(new ZoneBoxesPrimitive(zoneBoxes));
     }
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -384,8 +441,8 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, clas
       chart.remove();
     };
   }, [
-    ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower, 
-    hasRsi, rsiData, markers, payload.timeframe, chartColors
+    ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower,
+    hasRsi, rsiData, markers, zoneBoxes, payload.timeframe, chartColors
   ]);
 
   if (candles.length === 0) {

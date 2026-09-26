@@ -14,6 +14,16 @@ export interface BotSandboxSpec {
   name: string;
   allowedStrategies: readonly string[];
   initialBalance: number;
+  /**
+   * Restricts this bot to specific (symbol, timeframe) series, beyond `allowedStrategies`.
+   *
+   * Every bot before 2026-09-21 was disjoint by strategy key alone, because each strategy in a
+   * roster ran on exactly one timeframe band of its own. `ict-structure-v1` breaks that assumption
+   * -- it fires on both NIFTY50 and BANKNIFTY at both 5m and 15m -- so two bots each meant to own
+   * one specific combination need a second axis to stay disjoint. Omitted means unrestricted
+   * (every existing bot), matching behaviour before this field existed.
+   */
+  allowedSeries?: readonly { symbol: string; timeframe: string }[];
 }
 
 /**
@@ -77,6 +87,11 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Classic",
     allowedStrategies: ["momentum-scalp-index"],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
+    ],
     initialBalance: 1_000_000,
   },
   {
@@ -86,6 +101,13 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
     allowedStrategies: [
       "momentum-scalp-pattern",
       "momentum-scalp-pattern-v2",
+    ],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "3m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "3m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
     ],
     initialBalance: 1_000_000,
   },
@@ -125,6 +147,39 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Scalp1m",
     allowedStrategies: ["momentum-scalp"],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
+    ],
+    initialBalance: 1_000_000,
+  },
+  /**
+   * `ict-structure-v1` wired live 2026-09-21, on explicit instruction, split across two
+   * series-scoped bots rather than one -- see run-paper-trading-bot.ts's SCAN_TIMEFRAMES comment
+   * and strategy-registry.ts's operationalDisposition note for the full evidence this overrides.
+   *
+   * The strategy's own 20-month backtest is sign-unstable: NIFTY50 wins at 15m (+18,342) while
+   * BANKNIFTY loses (-17,592) on that same timeframe, and the signs REVERSE at 5m (BANKNIFTY
+   * +1,175, NIFTY50 -2,951) -- and even NIFTY50-5m alone flips sign depending on the date window
+   * within the same period. Wiring "whichever cell looked positive" was flagged as the exact
+   * cherry-picking failure mode the registry's closure note warns against; it was done anyway,
+   * after an out-of-sample check (2026-09-08..09-21) came back with zero trades on both target
+   * cells -- too little fresh data to confirm or refute the historical result either way.
+   *
+   * Fresh accounts, not a reuse of an idle Classic/Sniper balance, so any result here is
+   * attributable to this decision alone.
+   */
+  {
+    name: "AutoBot-IctNifty15m",
+    allowedStrategies: ["ict-structure-v1"],
+    allowedSeries: [{ symbol: "NIFTY50", timeframe: "15m" }],
+    initialBalance: 1_000_000,
+  },
+  {
+    name: "AutoBot-IctBankNifty5m",
+    allowedStrategies: ["ict-structure-v1"],
+    allowedSeries: [{ symbol: "BANKNIFTY", timeframe: "5m" }],
     initialBalance: 1_000_000,
   },
 ];

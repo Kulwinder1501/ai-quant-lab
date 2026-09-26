@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { MomentumScalpPatternStrategy, MomentumScalpPatternStrategyV2 } from "./momentum-scalp-pattern-strategy.js";
 import { MomentumScalpStrategy } from "./momentum-scalp-strategy.js";
+import { MomentumScalpGoldStrategy } from "./momentum-scalp-gold-strategy.js";
 import { TrendBreakoutStrategy } from "./trend-breakout-strategy.js";
+import { IctStructureStrategy } from "./ict-structure-strategy.js";
 import {
   findRegisteredStrategy,
   registeredStrategies,
@@ -9,15 +11,27 @@ import {
   strategyExecutableSides,
   strategyKeys,
   strategySupportsTimeframe,
+  ictContextTimeframes,
+  ictContextConsumedAt,
 } from "./strategy-registry.js";
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
-    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2"]);
+    expect(strategyKeys()).toEqual([
+      "trend-breakout",
+      "momentum-scalp",
+      "momentum-scalp-index",
+      "momentum-scalp-gold",
+      "momentum-scalp-pattern",
+      "momentum-scalp-pattern-v2",
+      "ict-structure-v1",
+    ]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
+    expect(requireRegisteredStrategy("momentum-scalp-gold").StrategyClass).toBe(MomentumScalpGoldStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
+    expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {
@@ -41,17 +55,19 @@ describe("strategy registry", () => {
     expect(new StrategyClass()).not.toBe(new StrategyClass());
   });
 
-  it("disables the pattern confluence scalp entirely, on its full losing record", () => {
+  it("re-enables the pattern confluence scalp for a deliberate re-test, both sides", () => {
     /*
-     * Short-only from 2026-09-02, then both sides disabled 2026-09-03. The short cell that "nothing
-     * measured argued against" (+Rs 424 over 32 trades) turned: over the full live record the
-     * strategy is -Rs 10,209 (78 trades, all in AutoBot-Sniper), 23% of the account's total loss.
-     * Its sibling `momentum-scalp-index` was disabled the same day for the same structural cost
-     * reason, so keeping this near-identical strategy running would re-learn a known loss.
+     * Disabled entirely 2026-09-03 on a -Rs 10,209/78-trade record (23% of the account's total
+     * loss); re-enabled 2026-09-26 by explicit user decision, not by new evidence. The same-day
+     * `selectPriorityPattern` fix (alphabetical-vs-priority tie-break) only changes which pattern is
+     * credited in evidence/confidence -- the LONG/SHORT score gate never read which candidate was
+     * selected, so it could not have changed the entries/exits behind that -Rs 10,209 record. This
+     * re-enable carries no new evidence of its own; the next live record should be measured against
+     * that same baseline before trusting it.
      */
     const patternScalp = requireRegisteredStrategy("momentum-scalp-pattern");
 
-    expect(strategyExecutableSides(patternScalp)).toEqual([]);
+    expect(strategyExecutableSides(patternScalp)).toEqual(["LONG", "SHORT"]);
   });
 
   it("disables the v2 pattern scalp entirely, on asymmetric evidence", () => {
@@ -104,7 +120,7 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2",
+      "momentum-scalp-index", "momentum-scalp-pattern-v2",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
@@ -162,7 +178,8 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
       .map((strategy) => strategy.registration.strategyKey);
 
     expect(fifteenMinute).toContain("trend-breakout");
-    expect(fifteenMinute).toHaveLength(1);
+    expect(fifteenMinute).toContain("ict-structure-v1");
+    expect(fifteenMinute).toHaveLength(2);
   });
 
   it("owns every timeframe above the scalp band, and nothing evaluates them", () => {
@@ -174,5 +191,37 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
         .map((strategy) => strategy.registration.strategyKey);
       expect(owners, timeframe).toEqual(["trend-breakout"]);
     }
+  });
+});
+
+describe("ICT context consumption", () => {
+  it("reports exactly the timeframes of the strategies that declare they read it", () => {
+    // Derived, not listed. If it were listed it could drift from the consumer's own
+    // supportedTimeframes, which is how the repository ends up computing a snapshot nobody reads.
+    const declared = registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes);
+    expect(ictContextTimeframes()).toEqual([...new Set<string>(declared)].sort());
+  });
+
+  it("excludes 1m, where nothing reads ICT", () => {
+    // The measured waste this gate exists for: 7,512 ict_state_snapshots rows at 1m, computed and
+    // persisted by the writable context path and read by nothing.
+    expect(ictContextConsumedAt("1m")).toBe(false);
+    expect(ictContextConsumedAt("3m")).toBe(false);
+    expect(ictContextConsumedAt("1d")).toBe(false);
+  });
+
+  it("includes the timeframes the ICT strategy actually supports", () => {
+    expect(ictContextConsumedAt("5m")).toBe(true);
+    expect(ictContextConsumedAt("15m")).toBe(true);
+  });
+
+  it("stops consuming a timeframe when the only consumer stops reading ICT", () => {
+    // Guards the gate against the failure that matters in the other direction: a future strategy
+    // that reads ICT at a new timeframe must widen the set by declaring it, and nothing else.
+    const consumers = registeredStrategies.filter((s) => s.readsIctContext === true);
+    expect(consumers).toHaveLength(1);
+    expect(consumers[0].registration.strategyKey).toBe("ict-structure-v1");
   });
 });

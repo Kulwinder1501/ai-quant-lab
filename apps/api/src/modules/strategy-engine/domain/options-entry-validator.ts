@@ -2,53 +2,28 @@ import type { ProposedTradeIdea } from "./strategy.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import { largestOpenInterestStrikes } from "../../market-data/domain/option-chain.js";
 import { yearsToExpiry } from "@ai-quant-lab/pricing";
+import { evaluateOrderbookDirectionalGate } from "./orderbook-directional-gate.js";
 
 export interface OptionsValidationContext {
-  /**
-   * Only the three fields actually read. It used to demand a whole `StrategyMarketContext`
-   * and `ProposedTradeIdea` to reach one volume and three idea fields, which is why no
-   * caller could reasonably construct the input -- and why this went unwired.
-   */
   proposedIdea: Pick<ProposedTradeIdea, "side" | "confidence" | "reasoning">;
-  /**
-   * Volume of the bar the idea was raised on. Omit when unknown; it is then unchecked.
-   *
-   * Must be null rather than 0 when the series does not report volume at all. Measured
-   * 2026-08-05: every one of 1,069 stored 15m BANKNIFTY and NIFTY50 bars has zero or null
-   * volume -- not because intraday index volume is unavailable, but because 15m belongs to
-   * Yahoo under the provenance split and Yahoo carries none. The Fyers 5m series for the
-   * same index is 99.9% populated. Passing that 0 through would read as "nobody traded" and
-   * refuse essentially every 15m-sourced index entry, when the honest reading is "this
-   * series carries no volume".
-   */
   candleVolume?: number | null;
-  /**
-   * Why volume is absent, when it is. Without it "not reported by this series" and "nobody
-   * looked it up" produce the same unchecked line, and only one of those is worth acting on.
-   */
   volumeAbsenceReason?: string;
   optionChain?: OptionChainSnapshot;
   intendedStrike?: number;
   hasMacroEvent?: boolean;
-  /**
-   * Delta of the intended contract, supplied by the caller.
-   *
-   * It cannot be read off a chain quote: the provider returns no greeks, so a delta only
-   * exists once an IV has been solved from the mid. Passing it in keeps this function a
-   * pure check rather than a second pricing path that could disagree with the first.
-   *
-   * When absent the delta factor is reported as unchecked rather than passed. An entry
-   * validator that stays silent about a factor it could not evaluate is the failure this
-   * project has already paid for twice.
-   */
   intendedContractDelta?: number | null;
-  /**
-   * IV percentile of the underlying series (0-100).
-   * When null, allowed but recorded as unchecked/unavailable.
-   */
   ivPercentile?: number | null;
-  /** Configurable ceiling for IV percentile gate. Default is 85%. */
   ivPercentileCeiling?: number;
+  confluenceSignal?: {
+    is_level_proximate?: boolean;
+    nearest_level_type?: string | null;
+    nearest_level_price?: number | null;
+    distance_bps?: number | null;
+    raw_di?: number | null;
+    di_tilde?: number | null;
+    directional_bias?: string;
+    gate_action?: string;
+  } | null;
 }
 
 export interface OptionsValidationResult {
@@ -192,6 +167,21 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
     }
   } else {
     unchecked.push("IV percentile: IV percentile is unavailable; trade allowed but ivPercentileUnavailable is recorded.");
+  }
+
+  // 13: ORDERBOOK-01 Directional Gate
+  if (context.confluenceSignal != null) {
+    if (context.confluenceSignal.is_level_proximate) {
+      const obResult = evaluateOrderbookDirectionalGate(proposedIdea.side, context.confluenceSignal);
+      if (obResult.gateStatus === "BLOCK") {
+        isValid = false;
+        reasons.push(obResult.reasoning ?? "ORDERBOOK-01 Directional Gate BLOCKED entry.");
+      } else if (obResult.gateStatus === "PASS") {
+        reasons.push(obResult.reasoning ?? "ORDERBOOK-01 Directional Gate PASSED entry.");
+      }
+    } else {
+      unchecked.push("ORDERBOOK-01 Directional Gate: No structural level proximate within bandwidth.");
+    }
   }
 
   return {

@@ -16,6 +16,8 @@ import {
 import {
   assessCronStall,
   canaryCronExpression,
+  canaryShouldBeFiring,
+  canaryWindowOpenedAt,
 } from "../../modules/scheduling/domain/cron-liveness.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
@@ -236,6 +238,16 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
+    // Both on a 5-minute cron, same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
+    // to a faster tick: a dead claimant should not hold up more than one tick's worth of gold data
+    // or signal generation.
+    XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
+    PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
+    // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
+    // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
+    // stalled claimant just means the next day's run picks up everything since the last success.
+    LIQUIDITY_CANDIDATE_GENERATION: 30 * 60 * 1000,
+    LIQUIDITY_CONTACT_LABELING: 30 * 60 * 1000,
   };
 
   /**
@@ -347,6 +359,7 @@ async function main(): Promise<void> {
         "--from", todayIst,
       ]);
       await runCommand("npm", ["run", "ml:predict:volatility-shadow"]);
+      await runCommand("npm", ["run", "ml:predict", "--", "--competition-pool"]);
     });
   });
 
@@ -619,6 +632,121 @@ async function main(): Promise<void> {
   });
 
   /**
+   * XAU_USD (gold): a Twelve Data instrument, not an NSE one, so it runs on its own cron rather
+   * than joining the block above -- it is not gated on `fyersTokenService` (irrelevant to a
+   * non-Fyers instrument) and it is not restricted to `9-15 * * 1-5` (XAU_USD trades Sun 22:00
+   * UTC - Fri 22:00 UTC; `run-gold-paper-trading-bot.ts` and its collection window below both
+   * check the real session themselves and no-op outside it, the same way every job here is
+   * written to be a safe no-op off-session rather than relying on the cron pattern alone).
+   *
+   * Every 5 minutes, every day: collect fresh 1m/5m candles, recompute indicators over them
+   * (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what `momentum-scalp-gold` reads -- and `smc-v2` --
+   * FVG/BOS/CHoCH/order-block/liquidity-sweep, the default `--family all` computes both), then
+   * run the bot. Without this step `indicator_snapshots` stays empty for XAU_USD and
+   * `momentum-scalp-gold` can never actually evaluate a bar -- confirmed live 2026-09-22: the
+   * first deploy ran clean but every tick's "RULES_NOT_MET" was indicators-absent, not
+   * conditions-failed, since nothing computed them. `applySmcConfluenceToProposal` in
+   * `generate-trade-ideas.ts` already runs unconditionally for every non-ICT strategy, so once
+   * `smc-v2` indicators exist here SMC confluence nudges gold's proposals with no further wiring.
+   *
+   * `--skip-existing` makes candle collection idempotent, and a 45-minute lookback window
+   * comfortably covers one tick's gap plus retry margin. `INDICATOR_WRITE_LOOKBACK_DAYS` bounds
+   * the indicator *write*, mirroring `collectIndicesIntraday`'s own reasoning above: computed
+   * over the full series, written only for the last few days, so a missed run heals on the next
+   * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
+   * `twelvedata-quote-client.ts` for where that cap was confirmed live.
+   *
+   * The two `schedule()` calls are sequenced with `await`, not fired as two independent
+   * `void schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
+   * are safe to run concurrently because they are temporally decoupled by construction --
+   * `INDICES_INTRADAY` runs on its own every-minute cron, so by the time `PAPER_TRADING_BOT` fires every
+   * five minutes the candles it reads are already several collections old and settled. This block
+   * folds collection and the bot into the *same* five-minute tick, so nothing separates them in
+   * time -- confirmed live 2026-09-22: firing both as `void schedule(...)` let
+   * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
+   * calculation was still running, which is exactly the read-before-write race this sequencing
+   * closes.
+   *
+   * Disabled 2026-09-23 by explicit user request, after `momentum-scalp-gold` had produced no
+   * ideas worth trusting yet and the user asked to pause the bot rather than let it keep running
+   * unmeasured. The application code (the strategy, `PrepareDirectEntry`, the runner script) is
+   * left intact -- only the schedule is turned off -- so re-enabling is flipping `XAU_BOT_ENABLED`
+   * back to `true`, not rebuilding anything.
+   */
+  const XAU_BOT_ENABLED = false;
+  cronSchedule("*/5 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
+    void (async () => {
+      await schedule("XAU_CANDLE_COLLECTION", async () => {
+        const to = new Date();
+        const from = new Date(to.getTime() - 45 * 60 * 1000);
+        const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "data:collect:historical", "--",
+            "--provider", "twelvedata",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", from.toISOString(),
+            "--to", to.toISOString(),
+            "--skip-existing",
+          ]);
+          await runCommand("npm", [
+            "run", "analysis:calculate-indicators", "--",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", indicatorsFrom.toISOString(),
+          ]);
+        }
+      });
+      await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
+    })();
+  });
+
+  /**
+   * Liquidity Intelligence Engine v1 -- daily candidate + contact-label recompute for BANKNIFTY.
+   *
+   * `generate-liquidity-candidates.ts`/`generate-contact-labels.ts` were built and run once by
+   * hand on 2026-09-25 (see docs/2026-09-25-orderbook-directional-gate-confluence.md), producing
+   * a single generation/labeling run each, frozen at `known_at_time`/`contact_time` no later than
+   * 2026-09-24. Neither script was ever wired into anything that would rerun them, so BANKNIFTY's
+   * liquidity candidates and contact labels went stale from that one-off run while candles and
+   * depth_frames kept advancing normally underneath them. Both scripts are idempotent
+   * (`INSERT ... ON CONFLICT DO NOTHING` keyed on the candidate's/label's natural identity), so a
+   * full re-walk here only ever inserts what is new since the last run -- there is no `--since`
+   * flag to thread through instead.
+   *
+   * Runs at 16:25 IST, after CANDLE_GAP_CHECK (16:20) confirms the day's BANKNIFTY bars are final
+   * and before INDIA_VIX_EOD (16:30). Labels can only be generated for candidates that already
+   * exist, so the two are sequenced with `await` rather than fired independently -- the same
+   * reasoning as XAU_CANDLE_COLLECTION/PAPER_TRADING_BOT_GOLD directly above.
+   *
+   * `generate-contact-labels.ts` hardcodes its forward price-path lookup to BANKNIFTY 1m candles
+   * regardless of which timeframe's candidates it is labeling -- a pre-existing limitation of the
+   * script itself, not something this scheduling changes.
+   */
+  cronSchedule("25 16 * * 1-5", () => {
+    void (async () => {
+      await schedule("LIQUIDITY_CANDIDATE_GENERATION", async () => {
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "research:liquidity:candidates", "--",
+            "--symbol", "BANKNIFTY",
+            "--timeframe", timeframe,
+          ]);
+        }
+      });
+      await schedule("LIQUIDITY_CONTACT_LABELING", async () => {
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", ["run", "research:liquidity:labels", "--", "--timeframe", timeframe]);
+        }
+      });
+    })();
+  });
+
+  /**
    * The floor under tick-driven exit evaluation, not the primary path.
    *
    * `onTicksWritten` above evaluates exits within a flush of the quote that crossed the barrier,
@@ -668,6 +796,38 @@ async function main(): Promise<void> {
   cronSchedule("10 16 * * 1-5", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "5000"]);
+    });
+  });
+
+  /**
+   * Grades the volatility shadow predictions.
+   *
+   * `CANDIDATE_SETTLEMENT` above settles the research candidate ledger and nothing else. The
+   * volatility alphabet lives in its own table and has its own settler, and that settler was never
+   * scheduled -- `models:settle-auxiliary` existed as an npm script and ran only when somebody typed
+   * it. Measured 2026-09-08: 4,869 predictions written on a schedule, graded by hand, and the
+   * settled share varied 50%-95% BY MODEL according to when the command had last been run with a
+   * limit. Accuracy compared across models was therefore partly a comparison of who had been graded.
+   *
+   * Its own job type, not folded into `CANDIDATE_SETTLEMENT`: a stall in one must not be invisible
+   * behind the other's run rows, which is exactly how the `OPTION_CHAIN` stall hid.
+   *
+   * Same cadence as the candidate ledger, and for the same reason -- half-hourly picks up short
+   * horizons while they are fresh. The EOD pass is at :20 rather than :10 so it lands after the
+   * 16:06 shadow-predict write and does not contend with the candidate settlement at 16:10.
+   *
+   * Not gated on the Fyers token: it reads stored bars, so it works on a day the feed never
+   * authenticated, which is a day worth grading.
+   */
+  cronSchedule("15,45 9-15 * * 1-5", () => {
+    void schedule("AUXILIARY_PREDICTION_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "models:settle-auxiliary"]);
+    });
+  });
+
+  cronSchedule("20 16 * * 1-5", () => {
+    void schedule("AUXILIARY_PREDICTION_SETTLEMENT", async () => {
+      await runCommand("npm", ["run", "models:settle-auxiliary"]);
     });
   });
 
@@ -760,9 +920,28 @@ async function main(): Promise<void> {
    * the size of the journal. Stop and target evaluation still runs on every pass, which is the
    * part that wants to be prompt.
    */
+  /*
+   * 15m, which is the timeframe this agent was actually measured on.
+   *
+   * The arg said `5m` while the comment above described "a completed 15m bar", so the running
+   * configuration had drifted from its own documented design. 15m is the side that has evidence:
+   * `measure:directional-scorer` replayed the scorer on 15m and produced the table in
+   * `ai-autonomous-agent.ts` -- LONG at +0.005R on NIFTY50 (367) and +0.182R on BANKNIFTY (413),
+   * which is what justifies leaving LONG enabled and SHORT scored-but-not-traded. No equivalent
+   * measurement exists for 5m, so running there executed a gate validated somewhere else.
+   *
+   * Brackets follow automatically: the agent sizes from the ticked timeframe's own ATR
+   * (`AGENT_ATR_STOP_MULTIPLE`), and refuses the trade outright when that ATR is missing rather
+   * than falling back to the flat 1.5%/3% it used to use -- the version that produced a ~370-point
+   * NIFTY stop against a ~30-point 15m ATR. Verified 2026-09-07 that 15m ATR is present and current
+   * for both symbols before this switch.
+   *
+   * The every-two-minutes cadence stays. It is deliberately faster than the bar, because stop and
+   * target evaluation runs on every pass and that is the part that wants to be prompt.
+   */
   cronSchedule("*/2 9-15 * * 1-5", () => {
     void schedule("AI_AGENT_TICK", () => runCommand("npm", [
-      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=5m",
+      "run", "agent:tick", "--", "--symbols=NIFTY50,BANKNIFTY", "--timeframe=15m",
     ]));
   });
 
@@ -1061,6 +1240,13 @@ async function main(): Promise<void> {
     );
   }
 
+  /*
+   * Hand-maintained, and it drifts: this list gates nothing, so adding a `cronSchedule` without
+   * adding its name here leaves the scheduler running a job its own startup log denies. Caught on
+   * 2026-09-08 when AUXILIARY_PREDICTION_SETTLEMENT ran but the log advertised 24 jobs. That matters
+   * because the symptom of a stalled job is silence, and a job missing from the manifest is silent
+   * by construction.
+   */
   log("Scheduler started", {
     jobs: [
       "EOD_PIPELINE",
@@ -1082,6 +1268,7 @@ async function main(): Promise<void> {
       "DEPTH_FRAME_STALENESS",
       // Listed outside the Fyers-gated group: it reads stored bars, so it runs without a live feed.
       "CANDIDATE_SETTLEMENT",
+      "AUXILIARY_PREDICTION_SETTLEMENT",
       "CANDLE_GAP_CHECK",
       // Ungated for the same reason as the two above: it reads stored contexts and places no orders,
       // so it runs without a live feed. Listing it inside the Fyers-gated group below would
@@ -1095,6 +1282,11 @@ async function main(): Promise<void> {
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
+      "LIQUIDITY_CANDIDATE_GENERATION",
+      "LIQUIDITY_CONTACT_LABELING",
+      // XAU_CANDLE_COLLECTION / PAPER_TRADING_BOT_GOLD deliberately absent: `XAU_BOT_ENABLED` is
+      // false, so neither actually runs -- listing them here would misreport the inventory the
+      // same way an omission would (see this array's own header comment on that point).
     ],
     timezone: IST,
   });
@@ -1165,6 +1357,8 @@ async function main(): Promise<void> {
         now: new Date(),
         processStartedAt: processStartedAt,
         toleranceMs: CRON_STALL_TOLERANCE_MS,
+        window: { shouldBeFiring: canaryShouldBeFiring, windowOpenedAt: canaryWindowOpenedAt },
+        canaryLabel: canaryCronExpression,
       });
     } catch (error) {
       // A throw here must not take the scheduler down: the watchdog failing is not a stall.

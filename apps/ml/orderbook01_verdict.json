@@ -1,0 +1,79 @@
+{
+  "pre_registration": "ORDERBOOK-01",
+  "eval_mode": "oos",
+  "eval_start": "2026-09-25",
+  "eval_end": "2026-09-25",
+  "h1_r": {
+    "status": "FALSIFIED",
+    "n": 58,
+    "accuracy": 1.0,
+    "binomial_p": 0.0,
+    "levels_passed": 4,
+    "per_level": {
+      "SWING_HIGH": {
+        "n": 15,
+        "accuracy": 1.0,
+        "p_value": 3.1e-05,
+        "pass": true
+      },
+      "ITH": {
+        "n": 3,
+        "accuracy": 1.0,
+        "p_value": 0.125,
+        "pass": false
+      },
+      "SESSION_HIGH": {
+        "n": 17,
+        "accuracy": 1.0,
+        "p_value": 8e-06,
+        "pass": true
+      },
+      "ITL": {
+        "n": 4,
+        "accuracy": 1.0,
+        "p_value": 0.0625,
+        "pass": false
+      },
+      "SESSION_LOW": {
+        "n": 7,
+        "accuracy": 1.0,
+        "p_value": 0.007812,
+        "pass": true
+      },
+      "SWING_LOW": {
+        "n": 12,
+        "accuracy": 1.0,
+        "p_value": 0.000244,
+        "pass": true
+      }
+    },
+    "criteria_checks": {
+      "acc_ge_0_72": true,
+      "p_le_0_01": true,
+      "n_ge_3000": false,
+      "levels_ge_4": true
+    }
+  },
+  "h1_m": {
+    "status": "FALSIFIED",
+    "n": 39,
+    "accuracy": 0.1538,
+    "binomial_p": 0.999999,
+    "criteria_checks": {
+      "acc_ge_0_78": false,
+      "p_le_0_01": false,
+      "n_ge_1000": false
+    }
+  },
+  "h2": {
+    "status": "INSUFFICIENT_DATA",
+    "n": 97,
+    "quartiles": {},
+    "q4_minus_q1": 0.0,
+    "permutation_p": 1.0,
+    "reason": "Fewer than 100 events available for quartile test."
+  },
+  "verdict": "CASE E",
+  "verdict_description": "FALSIFIED. No robust directional edge found in OOS test.",
+  "executed_at": "2026-09-26T16:51:26.071010+05:30"
+}

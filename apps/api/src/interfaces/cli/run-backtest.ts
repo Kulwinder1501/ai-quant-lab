@@ -15,8 +15,64 @@ import {
   type HigherTimeframeResolverOptions,
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
+import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
+import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
+import {
+  ICT_STRUCTURE_STRATEGY_KEY,
+  defaultIctEngineConfig,
+  type IctEngineConfig,
+} from "../../modules/technical-analysis/domain/ict/config.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arguments.js";
+import {
+  EmaStrengthFilteredStrategy,
+  FreshSetupFilteredStrategy,
+  LiquiditySweepBiasFilteredStrategy,
+  PatternConfluenceFilteredStrategy,
+  RelativeVolumeFilteredStrategy,
+  PatternAlignmentFilteredStrategy,
+  PatternAnchoredStopStrategy,
+  LiquiditySweepAnchoredStopStrategy,
+  OrderBlockTargetStrategy,
+  LiquiditySweepLookbackStopStrategy,
+  OrderBlockLookbackTargetStrategy,
+  SmcConfidenceGatedStrategy,
+  TimeWindowFilteredStrategy,
+  type BlockedIstWindow,
+} from "../../modules/backtesting/domain/entry-filters.js";
+import type { ProtectiveStopPolicy } from "../../modules/paper-trading/domain/protective-stop.js";
+
+/**
+ * `--protective-stop break-even`, `trail:<triggerR>:<distanceR>`, or
+ * `trail:<triggerR>:<distanceR>:lock`.
+ *
+ * Measures the same break-even/trail mechanism `protective-stop.ts` ships live for momentum-scalp
+ * option-buyer trades, re-derived for underlying-index bars -- see
+ * `underlying-protective-stop.ts` for why. Omitted means off, byte-identical to every prior run.
+ *
+ * The `:lock` suffix is what distinguishes a trail from break-even at all. Without it the trailed
+ * stop is clamped one tick below entry and the two policies produce the same book -- verified to the
+ * rupee over 439 replayed trades, see migration 117. A run of `trail:A:B` and `trail:A:B:lock` is
+ * therefore the paired comparison worth making, not `trail:A:B` against nothing.
+ */
+function parseProtectiveStopPolicy(argumentsList: string[]): ProtectiveStopPolicy | null {
+  const raw = getOption(argumentsList, "protective-stop")?.trim();
+  if (!raw) return null;
+  if (raw === "break-even") return { breakEvenTriggerR: 0.5, trail: null };
+  const trailMatch = /^trail:([\d.]+):([\d.]+)(:lock)?$/.exec(raw);
+  if (trailMatch) {
+    const triggerR = Number(trailMatch[1]);
+    const distanceR = Number(trailMatch[2]);
+    const lockProfit = trailMatch[3] !== undefined;
+    if (Number.isFinite(triggerR) && triggerR > 0 && Number.isFinite(distanceR) && distanceR > 0) {
+      return { breakEvenTriggerR: 0.5, trail: { triggerR, distanceR, lockProfit } };
+    }
+  }
+  throw new Error(
+    `--protective-stop must be "break-even", "trail:<triggerR>:<distanceR>" or ` +
+      `"trail:<triggerR>:<distanceR>:lock", received "${raw}".`
+  );
+}
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
@@ -68,6 +124,102 @@ class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository
   }
 }
 
+/**
+ * Wraps the market-data repository to attach the causal ICT composite snapshot
+ * to every context after loading, so the `ict-structure-v1` strategy can read
+ * its four-pillar state. The snapshot state lives here in the replay builder,
+ * never in the strategy instance, exactly as the live path will persist it per
+ * source bar and load it back into the context.
+ */
+class IctDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly config: IctEngineConfig
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    return decorateContextsWithIct(await this.inner.listContexts(input), { config: this.config });
+  }
+}
+
+/**
+ * Replicates the live `generate-trade-ideas` HTF attachment path for backtesting.
+ *
+ * Unlike `HigherTimeframeDecoratedMarketData` (which synthesises HTF bars from OHLCV aggregation
+ * and therefore carries no precomputed indicators), this decorator queries the native stored candle
+ * rows via `findCompletedBefore`. Each stored candle already has its full indicator set attached —
+ * EMA, RSI, ATR, and critically the SMC signals (LIQUIDITY_SWEEP, CHOCH, ORDER_BLOCK, etc.) — so
+ * a liquidity-sweep bias filter can actually read them.
+ *
+ * Trade-off: fires one DB query per 1m base bar per HTF timeframe (~30k extra queries for a
+ * 3-month window). Meaningfully slower than the synthetic decorator but produces identical
+ * behaviour to what the live pipeline sees, which is the point.
+ */
+class NativeHtfDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly contextRepo: PostgresStrategyMarketContextRepository,
+    private readonly htfTimeframes: readonly string[],
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    const contexts = await this.inner.listContexts(input);
+    return Promise.all(contexts.map(async (ctx) => {
+      const attached: Record<string, unknown> = {};
+      for (const tf of this.htfTimeframes) {
+        const htf = await this.contextRepo.findCompletedBefore({
+          instrumentId: ctx.candle.instrumentId,
+          timeframe: tf,
+          asOf: ctx.candle.closeTime,
+        });
+        if (!htf) continue;
+        // Anti-lookahead: the stored bar must have closed before this 1m bar
+        if (htf.candle.closeTime.getTime() > ctx.candle.closeTime.getTime()) continue;
+        attached[tf] = htf;
+      }
+      return Object.keys(attached).length > 0
+        ? { ...ctx, higherTimeframeContexts: attached as never }
+        : ctx;
+    }));
+  }
+}
+
+/** Parses `--native-htf 15m` or `--native-htf 15m,30m` into a list of timeframe strings. */
+function parseNativeHtfTimeframes(argumentsList: string[]): readonly string[] | null {
+  const raw = getOption(argumentsList, "native-htf")?.trim();
+  if (!raw) return null;
+  const tfs = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (tfs.length === 0) throw new Error("--native-htf was empty.");
+  return tfs;
+}
+
+/**
+ * The engine config for this run, which until now was always the default.
+ *
+ * `--ict-inverted-poi` is the one knob exposed, because it is the only engine setting whose effect
+ * is an open question: it decides whether a failed order block survives as an opposite-side point of
+ * interest, per lecture 7, or is discarded as this engine has always discarded it. Two arms of the
+ * same run differ by that flag alone, and it lands in the config hash, so the two arms cannot share
+ * a cached snapshot.
+ */
+function parseIctEngineConfig(argumentsList: string[]): IctEngineConfig {
+  const raw = getOption(argumentsList, "ict-inverted-poi")?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return defaultIctEngineConfig;
+  if (raw !== "true" && raw !== "false") {
+    throw new Error(`--ict-inverted-poi must be true or false; received "${raw}".`);
+  }
+  return { ...defaultIctEngineConfig, invertedBlocksRemainPoi: raw === "true" };
+}
+
+function parseConcurrency(raw: string | undefined): number {
+  if (raw === undefined) return defaultBacktestConfiguration.maxConcurrentPositions;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`--max-concurrent-positions must be an integer >= 1; received "${raw}".`);
+  }
+  return value;
+}
+
 function parsePositionSizing(argumentsList: string[]): BacktestPositionSizing {
   const value = getOption(argumentsList, "position-sizing")?.trim().toUpperCase() || "FIXED_QUANTITY";
   if (value !== "FIXED_QUANTITY" && value !== "CONSTANT_RISK_FRACTION") {
@@ -98,6 +250,85 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
   }
   return parsed as Record<string, unknown>;
 }
+
+type BacktestEntryFilter =
+  | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP"
+  | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M"
+  | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
+  | "RVOL_1" | "RVOL_2" | "RVOL_3"
+  | "SMC_GATE_ON" | "SMC_GATE_OFF"
+  | "PATTERN_ALIGNMENT" | "PATTERN_ANCHORED_STOP"
+  | "LIQUIDITY_STOP" | "LIQUIDITY_TARGET" | "LIQUIDITY_BOTH"
+  | "LIQUIDITY_LOOKBACK_STOP" | "LIQUIDITY_LOOKBACK_TARGET" | "LIQUIDITY_LOOKBACK_BOTH"
+  | "LIQUIDITY_LOOKBACK_TARGET_20";
+
+/** Bars of trailing lookback for the loosened liquidity-geometry arms, fixed before any result is seen. */
+const LIQUIDITY_LOOKBACK_BARS = 10;
+/**
+ * Wider lookback for the target leg only, registered as a follow-up in
+ * `docs/2026-09-19-scalp1m-liquidity-geometry-falsification-v1.md`: the 10-bar target arm trended
+ * toward significance on a still-thin 3.2% population; 20 bars was chosen from the same pre-registered
+ * population table (33.5%) before this arm's outcome was seen. The stop leg is not re-tested here --
+ * its population growth from same-bar to 10 bars did not help it, so widening further is not expected
+ * to either, and this follow-up is scoped to the one leg the prior result actually motivated.
+ */
+const LIQUIDITY_LOOKBACK_BARS_WIDE = 20;
+
+function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
+  const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
+  if (raw === "none") return "NONE";
+  if (raw === "ema-strength-015") return "EMA_STRENGTH_015_ATR";
+  if (raw === "fresh-setup") return "FRESH_SETUP";
+  if (raw === "pattern-confluence") return "PATTERN_CONFLUENCE";
+  if (raw === "liquidity-sweep-bias-15m") return "LIQUIDITY_SWEEP_BIAS_15M";
+  if (raw === "liquidity-sweep-bias-30m") return "LIQUIDITY_SWEEP_BIAS_30M";
+  if (raw === "trading-window-a") return "TRADING_WINDOW_A";
+  if (raw === "trading-window-b") return "TRADING_WINDOW_B";
+  if (raw === "trading-window-c") return "TRADING_WINDOW_C";
+  if (raw === "rvol-1") return "RVOL_1";
+  if (raw === "rvol-2") return "RVOL_2";
+  if (raw === "rvol-3") return "RVOL_3";
+  if (raw === "smc-gate-on") return "SMC_GATE_ON";
+  if (raw === "smc-gate-off") return "SMC_GATE_OFF";
+  if (raw === "pattern-alignment") return "PATTERN_ALIGNMENT";
+  if (raw === "pattern-anchored-stop") return "PATTERN_ANCHORED_STOP";
+  if (raw === "liquidity-stop") return "LIQUIDITY_STOP";
+  if (raw === "liquidity-target") return "LIQUIDITY_TARGET";
+  if (raw === "liquidity-both") return "LIQUIDITY_BOTH";
+  if (raw === "liquidity-lookback-stop") return "LIQUIDITY_LOOKBACK_STOP";
+  if (raw === "liquidity-lookback-target") return "LIQUIDITY_LOOKBACK_TARGET";
+  if (raw === "liquidity-lookback-both") return "LIQUIDITY_LOOKBACK_BOTH";
+  if (raw === "liquidity-lookback-target-20") return "LIQUIDITY_LOOKBACK_TARGET_20";
+  throw new Error(
+    "--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, "
+    + "liquidity-sweep-bias-15m, liquidity-sweep-bias-30m, trading-window-a, "
+    + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, "
+    + "smc-gate-off, pattern-alignment, pattern-anchored-stop, liquidity-stop, "
+    + "liquidity-target, liquidity-both, liquidity-lookback-stop, "
+    + "liquidity-lookback-target, liquidity-lookback-both, or "
+    + `liquidity-lookback-target-20, received "${raw}".`,
+  );
+}
+
+/**
+ * Configs 1/2/3 from `docs/2026-09-16-scalp1m-rvol-falsification-v1.md`. Fixed at registration
+ * time; do not add or edit a config after seeing a result.
+ */
+const RVOL_CONFIGS: Record<"RVOL_1" | "RVOL_2" | "RVOL_3", { multiple: number; lookback: number }> = {
+  RVOL_1: { multiple: 1.5, lookback: 20 }, // the originally proposed configuration
+  RVOL_2: { multiple: 2.0, lookback: 20 }, // stricter multiple, same lookback
+  RVOL_3: { multiple: 1.5, lookback: 10 }, // same multiple, shorter lookback
+};
+
+/**
+ * Configs A/B/C from `docs/2026-09-16-scalp1m-time-of-day-falsification-v1.md`. Fixed at
+ * registration time; do not add or edit a window after seeing a result.
+ */
+const TRADING_WINDOW_CONFIGS: Record<"TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C", BlockedIstWindow[]> = {
+  TRADING_WINDOW_A: [{ startMinute: 11 * 60, endMinute: 13 * 60 + 30 }], // 11:00-13:30, "lunch-block"
+  TRADING_WINDOW_B: [{ startMinute: 11 * 60 + 30, endMinute: 13 * 60 }], // 11:30-13:00, "narrow-lunch-block"
+  TRADING_WINDOW_C: [{ startMinute: 12 * 60 + 45, endMinute: 14 * 60 }], // 12:45-14:00, "post-downtime-block"
+};
 
 /** A decimal fraction in (0, 1], falling back to the engine default. */
 function parseFractionOption(argumentsList: string[], option: string, fallback: number): number {
@@ -132,6 +363,7 @@ async function main(): Promise<void> {
     const { registration, StrategyClass } = requireRegisteredStrategy(
       getOption(argumentsList, "strategy")?.trim() || "trend-breakout",
     );
+    const entryFilter = parseEntryFilter(argumentsList);
     const strategyVersion = await new PostgresStrategyVersionRepository(database).ensure(registration);
     if (strategyVersion.isArchived || !strategyVersion.isActive) {
       throw new Error(`Strategy version ${strategyVersion.strategyKey}@${strategyVersion.version} is not active.`);
@@ -139,17 +371,77 @@ async function main(): Promise<void> {
 
     const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
-    const marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
+    const nativeHtfTimeframes = parseNativeHtfTimeframes(argumentsList);
+    
+    let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
       : new HigherTimeframeDecoratedMarketData(
         new PostgresBacktestMarketDataRepository(database),
         higherTimeframeBuckets,
       );
 
+    if (nativeHtfTimeframes !== null) {
+      marketData = new NativeHtfDecoratedMarketData(
+        marketData,
+        new PostgresStrategyMarketContextRepository(database),
+        nativeHtfTimeframes,
+      );
+    }
+    // The ICT strategy reads its four-pillar snapshot from the context; attach it
+    // in the replay builder. Incumbent strategies never see this decoration.
+    if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
+      marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList));
+    }
+
+    const strategyEvaluator = new StrategyClass();
+    const replayStrategy = entryFilter === "EMA_STRENGTH_015_ATR"
+      ? new EmaStrengthFilteredStrategy(strategyEvaluator)
+      : entryFilter === "FRESH_SETUP"
+        ? new FreshSetupFilteredStrategy(strategyEvaluator)
+        : entryFilter === "PATTERN_CONFLUENCE"
+          ? new PatternConfluenceFilteredStrategy(strategyEvaluator)
+          : entryFilter === "LIQUIDITY_SWEEP_BIAS_15M"
+            ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "15m")
+            : entryFilter === "LIQUIDITY_SWEEP_BIAS_30M"
+              ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "30m")
+              : entryFilter === "TRADING_WINDOW_A" || entryFilter === "TRADING_WINDOW_B" || entryFilter === "TRADING_WINDOW_C"
+                ? new TimeWindowFilteredStrategy(strategyEvaluator, TRADING_WINDOW_CONFIGS[entryFilter])
+                : entryFilter === "RVOL_1" || entryFilter === "RVOL_2" || entryFilter === "RVOL_3"
+                  ? new RelativeVolumeFilteredStrategy(
+                    strategyEvaluator, RVOL_CONFIGS[entryFilter].multiple, RVOL_CONFIGS[entryFilter].lookback,
+                  )
+                  : entryFilter === "SMC_GATE_ON" || entryFilter === "SMC_GATE_OFF"
+                    ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
+                    : entryFilter === "PATTERN_ALIGNMENT"
+                      ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
+                      : entryFilter === "PATTERN_ANCHORED_STOP"
+                        ? new PatternAnchoredStopStrategy(strategyEvaluator)
+                        : entryFilter === "LIQUIDITY_STOP"
+                          ? new LiquiditySweepAnchoredStopStrategy(strategyEvaluator)
+                          : entryFilter === "LIQUIDITY_TARGET"
+                            ? new OrderBlockTargetStrategy(strategyEvaluator)
+                            : entryFilter === "LIQUIDITY_BOTH"
+                              ? new OrderBlockTargetStrategy(new LiquiditySweepAnchoredStopStrategy(strategyEvaluator))
+                              : entryFilter === "LIQUIDITY_LOOKBACK_STOP"
+                                ? new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                                : entryFilter === "LIQUIDITY_LOOKBACK_TARGET"
+                                  ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                                  : entryFilter === "LIQUIDITY_LOOKBACK_BOTH"
+                                    ? new OrderBlockLookbackTargetStrategy(
+                                      new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS),
+                                      LIQUIDITY_LOOKBACK_BARS,
+                                    )
+                                    : entryFilter === "LIQUIDITY_LOOKBACK_TARGET_20"
+                                      ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS_WIDE)
+                                      : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
-      new BacktestEngine(new StrategyClass()),
+      new BacktestEngine(
+        replayStrategy,
+        argumentsList.includes("--exit-on-opposing-sweep"),
+        parseProtectiveStopPolicy(argumentsList),
+      ),
     ).execute({
       strategyVersionId: strategyVersion.id,
       strategyConfiguration: configurationOverride === null
@@ -168,6 +460,10 @@ async function main(): Promise<void> {
         positionSizing: parsePositionSizing(argumentsList),
         riskFractionPerTrade: parseFractionOption(argumentsList, "risk-fraction", defaultBacktestConfiguration.riskFractionPerTrade),
         marginFraction: parseFractionOption(argumentsList, "margin-fraction", defaultBacktestConfiguration.marginFraction),
+        // Defaults to 1, so an invocation that does not ask for concurrency reproduces the runs
+        // recorded before the engine supported it. Persisted in the run's `configuration` jsonb,
+        // so a concurrent run is never mistaken for a sequential one.
+        maxConcurrentPositions: parseConcurrency(getOption(argumentsList, "max-concurrent-positions")),
       },
     });
 
@@ -176,11 +472,14 @@ async function main(): Promise<void> {
       message: "Historical backtest complete",
       instrument: symbol,
       strategy: `${strategyVersion.strategyKey}@${strategyVersion.version}`,
+      entryFilter,
       dataWindowStart: dataWindowStart.toISOString(),
       dataWindowEnd: dataWindowEnd.toISOString(),
       dataCutoffAt: dataCutoffAt.toISOString(),
       // Recorded on the run so an arm cannot be mistaken for its control after the fact.
       higherTimeframes: higherTimeframeBuckets ?? null,
+      exitOnOpposingSweep: argumentsList.includes("--exit-on-opposing-sweep"),
+      protectiveStopPolicy: parseProtectiveStopPolicy(argumentsList),
       strategyConfigurationOverride: configurationOverride ?? null,
       ...result,
     }));

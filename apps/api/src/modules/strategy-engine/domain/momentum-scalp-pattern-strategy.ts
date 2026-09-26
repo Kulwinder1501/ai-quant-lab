@@ -5,7 +5,7 @@ import {
   type TradeIdeaEvidence,
   type TradeSide,
 } from "./strategy.js";
-import { type CandlestickPatternCode, type PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
+import { type CandlestickPatternCode, type PatternDirection, type PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
 import {
   calculateHtfSrConfluence,
   calculateHtfTrendAlignment,
@@ -129,6 +129,38 @@ const BEARISH_PATTERNS: readonly CandlestickPatternCode[] = [
   "HANGING_MAN",
 ];
 
+/**
+ * Picks the trigger pattern by the priority these arrays are written in -- Hammer and Engulfing
+ * before Doji-family patterns -- rather than by whatever order `candidates` happened to arrive in.
+ *
+ * That distinction is not academic: `candidates` is `context.patterns`, which both the live and
+ * backtest repositories return `ORDER BY pattern_definitions.pattern_code ASC` (alphabetical, a
+ * storage detail with no doctrinal meaning). `candidates.find((p) => priorityOrder.includes(p.code))`
+ * -- the code this replaces -- picks whichever candidate sorts first alphabetically among the ones
+ * present, not the one `priorityOrder`'s own construction says should win. Measured against the
+ * live `pattern_detections` table 2026-09-22: on candles where more than one bullish (or bearish)
+ * pattern code fired together, alphabetical order picked the non-priority one 49% (bullish) / 45%
+ * (bearish) of the time -- e.g. a candle carrying DRAGONFLY_DOJI, HAMMER and TWEEZER_BOTTOM
+ * together had DRAGONFLY_DOJI (last in the list, weakest) win over HAMMER (first, strongest) purely
+ * because 'D' < 'H'.
+ *
+ * This changes which pattern is credited in `evidence.pattern` / the `reasoning` text and, since
+ * `bullishPattern.confidence` carries a real 40% weight in the reported confidence score, changes
+ * that score too. It does not change whether a trade fires: the LONG/SHORT score gate below never
+ * reads which specific candidate was selected, only whether one was present.
+ */
+function selectPriorityPattern<T extends { code: CandlestickPatternCode; direction: PatternDirection }>(
+  candidates: readonly T[],
+  priorityOrder: readonly CandlestickPatternCode[],
+  direction: PatternDirection,
+): T | undefined {
+  for (const code of priorityOrder) {
+    const match = candidates.find((candidate) => candidate.code === code && candidate.direction === direction);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 function findIndicator(
   indicators: StrategyMarketContext["indicators"],
   code: string,
@@ -195,7 +227,7 @@ export class MomentumScalpPatternStrategy {
     const proposals: ProposedTradeIdea[] = [];
 
     // Evaluate LONG side
-    const bullishPattern = patterns.find((p) => BULLISH_PATTERNS.includes(p.code) && p.direction === "BULLISH");
+    const bullishPattern = selectPriorityPattern(patterns, BULLISH_PATTERNS, "BULLISH");
     if (bullishPattern) {
       let longScore = 0;
       const evidence: TradeIdeaEvidence[] = [];
@@ -304,7 +336,7 @@ export class MomentumScalpPatternStrategy {
     }
 
     // Evaluate SHORT side (symmetrical)
-    const bearishPattern = patterns.find((p) => BEARISH_PATTERNS.includes(p.code) && p.direction === "BEARISH");
+    const bearishPattern = selectPriorityPattern(patterns, BEARISH_PATTERNS, "BEARISH");
     if (bearishPattern) {
       let shortScore = 0;
       const evidence: TradeIdeaEvidence[] = [];
@@ -495,7 +527,7 @@ export class MomentumScalpPatternStrategyV2 {
     );
 
     // Evaluate LONG side
-    const bullishPattern = patterns.find((p) => BULLISH_PATTERNS.includes(p.code) && p.direction === "BULLISH");
+    const bullishPattern = selectPriorityPattern(patterns, BULLISH_PATTERNS, "BULLISH");
     if (bullishPattern) {
       // Inverted Hammer Strategy Rule: Mandatory preceding downtrend check
       const isDowntrend = (supertrendTrend === "DOWN" || (supertrend !== null && candle.close < supertrend))
@@ -648,7 +680,7 @@ export class MomentumScalpPatternStrategyV2 {
     }
 
     // Evaluate SHORT side (symmetrical)
-    const bearishPattern = patterns.find((p) => BEARISH_PATTERNS.includes(p.code) && p.direction === "BEARISH");
+    const bearishPattern = selectPriorityPattern(patterns, BEARISH_PATTERNS, "BEARISH");
     if (bearishPattern) {
       let shortScore = 0;
       const evidence: TradeIdeaEvidence[] = [];

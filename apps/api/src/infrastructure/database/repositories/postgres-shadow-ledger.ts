@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { DatabasePool } from "../database.js";
 import { PostgresDecisionLedger } from "./postgres-decision-ledger.js";
+import { PostgresSnapshotRegistry } from "./postgres-snapshot-registry.js";
+import type { SnapshotRegistry } from "../../../modules/platform/snapshot/snapshot-registry.js";
 import {
   decisionEventHash,
   type DecisionEventType,
@@ -57,10 +59,14 @@ function terminalFor(outcome: string): { readonly eventType: DecisionEventType; 
 }
 
 export class PostgresShadowLedger implements ShadowLedgerPort {
-  private readonly ledger: PostgresDecisionLedger;
+  private readonly registry: SnapshotRegistry;
 
-  constructor(private readonly database: DatabasePool, private readonly instanceId: string) {
-    this.ledger = new PostgresDecisionLedger(database);
+  constructor(
+    private readonly database: DatabasePool,
+    private readonly instanceId: string,
+    registry?: SnapshotRegistry,
+  ) {
+    this.registry = registry ?? new PostgresSnapshotRegistry(database);
   }
 
   async append(input: {
@@ -73,6 +79,27 @@ export class PostgresShadowLedger implements ShadowLedgerPort {
     const producer = { service: SERVICE, version: SERVICE_VERSION, instanceId: this.instanceId };
     const correlationId = input.decisionId;
     const occurredAt = new Date();
+
+    /*
+     * The reason, sealed as its own snapshot and referenced by the terminal event.
+     *
+     * `detail` used to arrive here and go nowhere: both events hardcoded `payloadSnapshotId: null`,
+     * so the ledger recorded THAT a decision refused and never WHY. Measured 2026-09-08: 2,204
+     * terminal events across three weeks of shadow operation, and not one could say whether it
+     * refused on the executable-window gate or on a real one -- which is the only question the
+     * shadow phase exists to answer. `terminalFor` collapses every outcome into four event types, so
+     * nothing downstream could recover it either.
+     *
+     * Sealed BEFORE the transaction below, deliberately. Snapshots are content-addressed and
+     * append-only, so a snapshot whose event never commits is unreferenced rather than wrong, and
+     * re-sealing the same reason yields the same id. Sealing inside the transaction would trade that
+     * harmless orphan for a longer write lock on the shared snapshot table.
+     */
+    const payload = await this.registry.seal({
+      kind: "SHADOW_DECISION_OUTCOME",
+      outcome: input.outcome,
+      detail: input.detail,
+    });
 
     const opening: DecisionLedgerEvent = {
       eventId: randomUUID(),
@@ -88,11 +115,14 @@ export class PostgresShadowLedger implements ShadowLedgerPort {
       policyVersions: input.policyVersions,
       correlationId,
       causationId: null,
+      /*
+       * The opening event carries no payload: it records that the decision existed, and at that
+       * point there is no outcome to explain. The reason belongs to the event that terminates it.
+       */
       payloadSnapshotId: null,
       previousEventHash: null,
       producer,
     };
-    await this.ledger.append({ aggregateId: input.decisionId, expectedVersion: 0, event: opening });
 
     const { eventType, stateTo } = terminalFor(input.outcome);
     const closing: DecisionLedgerEvent = {
@@ -103,8 +133,30 @@ export class PostgresShadowLedger implements ShadowLedgerPort {
       stateFrom: "CANDIDATE_RESOLVED",
       stateTo,
       causationId: opening.eventId,
+      payloadSnapshotId: payload.snapshotId,
       previousEventHash: decisionEventHash(opening),
     };
-    await this.ledger.append({ aggregateId: input.decisionId, expectedVersion: 1, event: closing });
+
+    /*
+     * Both events in one transaction, because a decision with an opening and no terminal is not a
+     * partial record -- it is a false one. It says a decision was opened and is still live.
+     *
+     * They were two independent appends on two pooled connections. `SHADOW_DECISION` failed 12 times
+     * on 2026-09-03 and left exactly 12 aggregates stranded at CANDIDATE_RESOLVED, which is still
+     * how they read today. Nothing has failed since, so this was dormant rather than fixed.
+     */
+    const client = await this.database.connect();
+    try {
+      await client.query("BEGIN");
+      const ledger = new PostgresDecisionLedger(client);
+      await ledger.append({ aggregateId: input.decisionId, expectedVersion: 0, event: opening });
+      await ledger.append({ aggregateId: input.decisionId, expectedVersion: 1, event: closing });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

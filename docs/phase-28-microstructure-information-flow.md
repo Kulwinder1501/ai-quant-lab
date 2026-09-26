@@ -1,8 +1,16 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS: PHASES 0, 1, 2 BUILT; PHASE 3 COMPUTATION BUILT BUT NOT EVALUATED. PHASE 1 GATE MET IN
-MINIATURE ONLY — a full session has not yet been captured, so no signal result may be claimed.
-PHASE 4 SHUT.**
+**STATUS (2026-09-15): FIRST CLEAN PHASE 4 PASS, ON TWO DAYS, ONE INSTRUMENT. §7's 2026-09-11
+single-day blind read reported NO_SIGNAL at 30s/60s, but that verdict rested on a broken placebo —
+`wrongDayMatchedTime` is a documented no-op when only one calendar day is present, and it happened to
+be the largest-magnitude placebo at both horizons, so it alone set a band that was never really
+active. Re-running the *same* capture session (which spans 2026-09-10 and 2026-09-11, both already
+post the 2026-09-09 pre-registration and never previously combined) gives the placebo two real days
+to swap between. Result: **PASS at 30s (IC −0.081, band 0.0044) and 60s (IC −0.078, band 0.0140)**,
+consistent in sign and magnitude with the earlier 6-session diagnostic. See §7's closing update for
+full detail and the caveats that still apply — this is one 2-day window on one instrument
+(BANKNIFTY futures; no NIFTY50 depth exists), not yet a replicated result, and Phase 5 (cost-aware
+gate) has not started.
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -401,3 +409,212 @@ Written before the data arrives, so they cannot be renegotiated afterwards.
 - **Does the volatility track want this data?** The one signal here with replicated skill is
   volatility expansion. Depth data may serve it better than it serves a new directional hunt. Worth
   asking before committing to Phases 3-6.
+
+---
+
+## 7. First real Phase 4 results (2026-09-09), and a bug they exposed
+
+The collector has been running continuously since 2026-08-21 (via `NSE:BANKNIFTY26SEPFUT`, rolling
+from `NSE:BANKNIFTY26AUGFUT`). By 2026-09-09 several full sessions clear `RECONSTRUCTIBLE` at session
+scale, so Phase 1's gate is finally met for real and Phase 4 was run for the first time.
+
+**Coverage is narrower than the plan envisioned:** depth is captured on `NSE:BANKNIFTY26SEPFUT` only
+(and its predecessor contract before the roll) — **no NIFTY50 depth exists at all**, and the one
+option strike captured (2026-08-21) is a one-day smoke test. Every result below is BANKNIFTY futures
+only. §5's "a result that holds on one index and not the other is drift" rule cannot even be checked
+yet — there is no second index to check it against.
+
+### A bug: every prior run was failing closed for the wrong reason
+
+The first real run (2026-09-08 session, all four horizons 1s/5s/30s/60s) returned
+`FAIL_NEGATIVE_LAG` on every horizon. `FalsificationObservation.labelEndAt` exists specifically so
+`alignAtLag` can reject a lag probe whose "past" label had not actually resolved yet by the current
+decision (documented in `falsification-harness.ts` as exactly this scenario) — but
+`buildOfiObservations` never set it. At this feed's measured **~500ms median frame cadence**, a lag
+of 10 observations covers only ~5000ms of real time — about one `ofiWindowMs` — so the probe was
+comparing the feature against a label that had barely finished resolving, or hadn't, and reading the
+resulting correlation as "predicts the past."
+
+**Fixed** in `ofi-signal-observations.ts`: `labelEndAt` is now stamped from the forward frame's own
+`receivedAt`, not a synthetic `at + horizonMs`. One new test (`ofi-signal-observations.test.ts`)
+asserts it is populated and later than the decision instant. No change to `falsification-harness.ts`
+itself — the guard already existed and was correctly designed; it just never received the field it
+needed.
+
+### Result after the fix: partial, not clean
+
+Re-running the same session, and five more (2026-09-01 through 2026-09-07), at the two horizons long
+enough relative to `ofiWindowMs` (5000ms) for the fix to fully apply:
+
+| session | 30s horizon | 60s horizon |
+|---|---|---|
+| 2026-09-01 | NO_SIGNAL (IC -0.088) | NO_SIGNAL (IC -0.068) |
+| 2026-09-02 | FAIL_NEGATIVE_LAG | NO_SIGNAL (IC -0.074) |
+| 2026-09-03 | FAIL_NEGATIVE_LAG | FAIL_NEGATIVE_LAG |
+| 2026-09-04 | NO_SIGNAL (IC -0.097) | NO_SIGNAL (IC -0.100) |
+| 2026-09-07 | FAIL_NEGATIVE_LAG | NO_SIGNAL (IC -0.073) |
+| 2026-09-08 | NO_SIGNAL (IC -0.113) | NO_SIGNAL (IC -0.116) |
+
+Before the fix, every horizon on every session failed closed. After it, 4/6 sessions clear at 60s and
+3/6 at 30s — a real improvement, but **not a clean pass rate**, and the residual failures are not
+explained yet. Every session that DOES clear reports a small negative IC (-0.07 to -0.12), which is
+suggestive but drawn from a diagnostic that is still failing on half the sessions tested — **not
+strong enough to call NO_INFORMATION_FLOW_SIGNAL** (§5's kill condition) and certainly not strong
+enough to move to Phase 5.
+
+**The two shortest horizons (1s, 5s) remain unmeasurable, for a different and better-understood
+reason.** With `ofiWindowMs=5000`, a horizon at or below that window means the feature and a
+lag-shifted "past" return describe overlapping ticks by construction — no `labelEndAt` guard fixes
+that, because the labels genuinely are resolved; the windows themselves overlap. Testing 1s/5s
+horizons validly needs a smaller `ofiWindowMs`, decided before looking at any result from it, not
+after.
+
+**Open, and the reason no verdict is claimed yet:** why do 2 of 6 sessions still fail at 30s (1 of 6
+at 60s) after a fix that clearly works elsewhere? Candidates, not yet distinguished: genuinely
+borderline sessions where a self-calibrated placebo band happens to sit close to a real small
+autocorrelation; a session-specific data quality issue the `RECONSTRUCTIBLE` gate doesn't catch;
+or a second, smaller instance of the same class of bug the `labelEndAt` fix addressed. Whichever it
+is, it should be diagnosed before any of this is read as a signal result — the pre-registered
+programme is explicit that a placebo/integrity failure outranks any IC claim.
+
+**Diagnosed, 2026-09-09.** In every one of the 3 residual failures, the failing lag was `-30` and
+nothing else, and its surviving sample was 0.4-1.2% of the full session (120-487 observations out of
+10,600-42,300) -- a tiny, non-random sliver left over after the overlap filters, producing a noisy
+rank-IC that occasionally cleared the harness's fixed `minimumSample=100` floor by chance. `-10`, by
+contrast, sat at 60-100% of the full session in every one of the 6 sessions and never failed after
+the `labelEndAt` fix. A fixed sample count cannot distinguish "a handful of edge-case pairs" (what
+100 was built for) from "a small but real fraction of a much larger session" -- exactly the gap
+between what the floor was designed to catch and what it was actually being asked to judge here.
+
+**Pre-registered 2026-09-09** (recorded in code at
+`NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION` in `evaluate-ofi-signal.ts`, not only here): a negative-lag
+probe must now clear both the harness's absolute floor of 100 **and** 5% of the full observation
+count. 5% sits with a wide margin above every failing sample seen so far (max 1.2%) and a wide margin
+below every passing one (60-100%) -- chosen for that margin, not fitted to land precisely between the
+two closest observed values. No change to `falsification-harness.ts`; `minimumSample` was already a
+caller-supplied option, so this is a call-site change only.
+
+**Disclosed rather than hidden: this fraction was chosen after inspecting the six sessions it now
+has to work on.** That is a real deviation from "never re-derive a threshold from the data being
+tested," and papering over it would be worse than naming it. The 2026-09-01 through 09-08 sessions
+already used to diagnose this are **not** to be re-evaluated under the new floor and reported as a
+confirming result -- that would just be re-fitting with extra steps. The next genuine read is
+whichever session is captured after 2026-09-09, on data no one had seen when 5% was chosen. Until
+that lands, this section's status is unchanged: no Phase 4/5 conclusion, diagnostic only.
+
+## 8. First clean pass (2026-09-15): the 2026-09-11 NO_SIGNAL verdict was a broken placebo, not a real one
+
+The genuinely blind 2026-09-11 read (above) reported `NO_SIGNAL` at 30s/60s, but with a flagged
+caveat: the real IC exactly equalled the `wrong-day-matched-time` placebo IC at both horizons,
+because that evaluation queried a single calendar day and the placebo is a documented no-op with
+nothing to swap with. Since it happened to be the largest placebo at both horizons, a no-op placebo
+was setting the pass/fail threshold.
+
+**Fix: no code change, only how the existing tool was invoked.** The capture session covering
+2026-09-11 (`5d2abf31-f85e-4b78-968d-10572840a676`) actually spans two full trading days —
+2026-09-10 (44,561 frames) and 2026-09-11 (45,523 frames) — because the collector's socket stayed
+open overnight. Both days are post-2026-09-09 and neither has been reported as a standalone result
+before, so evaluating the whole session (rather than isolating 2026-09-11 alone) is not re-deriving
+anything from inspected data — it is fixing a real methodological gap (one day is not enough for a
+day-swap placebo) using data that was already blind.
+
+```
+research:evaluate-ofi --symbol=NSE:BANKNIFTY26SEPFUT \
+  --session=5d2abf31-f85e-4b78-968d-10572840a676 --horizons=30000,60000
+```
+
+Sequence health: `RECONSTRUCTIBLE`, 90,084 frames, 0 missed sequences, 1 duplicate (flagged
+correctly), span 1,813.5 minutes.
+
+| horizon | verdict | IC | 95% CI | placebo band | negative-lag |
+|---|---|---|---|---|---|
+| 30s | **PASS** | −0.0807 | [−0.0894, −0.0722] | 0.0044 (wrong-day-matched-time, now real) | clears |
+| 60s | **PASS** | −0.0783 | [−0.0880, −0.0687] | 0.0140 (block-permutation) | clears |
+
+Both placebo bands are now genuine (four distinct, non-degenerate placebo ICs each, none dominated by
+a no-op), both confidence intervals exclude zero, and both negative-lag probes clear their
+(correctly floored) sample thresholds with zero `failures`. This is the programme's first clean
+Phase 4 `PASS` — not a diagnostic, not a placebo-compromised NO_SIGNAL.
+
+**What this is not, yet:**
+
+- **Not replicated across instruments.** BANKNIFTY futures only — no NIFTY50 depth exists (§0's
+  cross-instrument drift check, applied to every other signal in this codebase, cannot even be
+  attempted here).
+- **Not replicated across independent windows.** This is one 2-day joint evaluation. The direction
+  and rough magnitude (−0.07 to −0.12) match the earlier 6-session diagnostic, which is reassuring,
+  but that diagnostic ran under the broken-`labelEndAt` and pre-floor-fix code and is not a clean
+  confirmation either. A second, independent multi-day blind window (accumulating forward from here)
+  is the next honest check before treating the sign as established.
+- **futures, not options.** The system trades index options; this signal has not been translated
+  into an options-premium or execution-cost frame at all. Phase 5 (cost-aware gate) has not started,
+  and per §5's pre-registered kill conditions, a negative net expectancy on either index there is
+  still the single most probable terminal outcome for any microstructure signal in this codebase.
+- **1s/5s remain unmeasured.** Structurally invalid at `ofiWindowMs=5000` regardless of day count —
+  a separate, understood limitation (needs a smaller window, decided before looking at any result).
+
+**Sign note, tentative:** a negative IC means higher net order-flow imbalance predicts a *lower*
+price move over the next 30-60s at this feed's cadence — the opposite of naive flow-following
+intuition. Plausible readings (not yet distinguished): retail/algo flow chasing that liquidity
+providers absorb and fade, or an artifact of futures-specific microstructure at this contract's
+current liquidity. Not investigated further here — first priority is replication, not explanation.
+
+## 9. Second forward-blind window (2026-09-18): DOES NOT REPLICATE
+
+The second independent window §8 called for is now available: 2026-09-17 (38,583 frames) and
+2026-09-18 (39,602 frames), both genuinely clean under the Long-unwrap decode fix
+([[depth-collector-long-unwrap-bug]]) — confirmed via `count(distinct sequence_no)` ≈ frame count on
+both days, not just a frame-count floor (the 2026-09-15/09-16 gap in between was corrupted by that
+same bug and correctly excluded, never evaluated as if it were clean).
+
+```
+npx tsx src/interfaces/cli/evaluate-ofi-signal.ts --symbol=NSE:BANKNIFTY26SEPFUT \
+  --from=2026-09-17T03:38:11.848Z --to=2026-09-18T11:50:17.558Z --horizons=30000,60000 --seed=1
+```
+
+Sequence health: `RECONSTRUCTIBLE`, 78,185 frames, 0 duplicates, 0 missed sequences, span 1,932
+minutes (real trading ends at market close 10:00 UTC on 09-18; a single post-close straggler frame
+at 11:50 UTC does not affect the read).
+
+| horizon | verdict | IC | 95% CI | placebo band |
+|---|---|---|---|---|
+| 30s | PASS (on its own terms) | **+0.0764** | [0.0669, 0.0844] | 0.0242 (wrong-day-matched-time) |
+| 60s | PASS (on its own terms) | **+0.0724** | [0.0635, 0.0835] | 0.0271 (wrong-day-matched-time) |
+
+Compare to §8's first window: 30s −0.0807 [−0.0894, −0.0722], 60s −0.0783 [−0.0880, −0.0687].
+
+**Same rough magnitude (0.07-0.08 at both horizons), opposite sign, both individually statistically
+clean.** Per §5's own pre-registered kill condition and the explicit instruction that governed this
+check ("either horizon flips to NO_SIGNAL, FAIL_NEGATIVE_LAG, or reverses sign → the first window
+does NOT replicate. Say that plainly too — do not soften this or explain it away"): **this is a sign
+reversal on both horizons. Verdict: DOES NOT REPLICATE.**
+
+Each window individually clears its own internal placebo band, so within a single 2-day window this
+signal is not noise -- but *which* direction it points in is not stable across windows, which is a
+stronger disqualifier than a clean null would have been. A signal whose sign flips between two
+otherwise-clean measurements is not measuring a persistent property of this market; at best it is
+measuring something conditional on a variable this programme has not identified (a regime, a specific
+liquidity state, a rollover effect) and has not controlled for. Promoting the §8 result to
+"established" on the strength of one window, before this check ran, would have been exactly the
+mistake the programme's own kill-condition discipline exists to prevent.
+
+**Status: closed, not advanced.** Order-flow imbalance on `NSE:BANKNIFTY26SEPFUT` depth, at this
+harness's current 5s window and 1-level touch-only construction, is not an established signal.
+Re-opening this would need a *new* hypothesis about what the sign depends on (time of day, days to
+expiry, absolute volatility, direction of the underlying move) — pre-registered before looking at any
+further data — not a third window run the same way as the first two, which would just be sampling
+the same unresolved coin-flip a third time.
+
+**Checked, not assumed: the sign flip is not a pooling artifact.** The combined window contains
+several tiny broken capture fragments (`ad6ded29...`: 2 frames over 46 minutes, `e0604e6a...`: 1
+frame, `20d62a8b...`: 19 frames before the real 09-18 session took over) mixed in with the two
+dominant sessions -- these were checked directly against `depth_frames.capture_session_id`, not
+assumed absent from the earlier day-level `distinct_seq` ratio, which was too coarse to surface them
+(3+19 stray frames out of 78,185 don't move a day-level ratio). Each starts its own tiny OFI segment
+and contributes negligible observations regardless. More importantly, **09-17 and 09-18 were each
+re-evaluated standalone** (single-day, so the placebo band is degenerate there and the verdict is not
+trusted -- only the *real* IC's sign and magnitude are, which the degenerate placebo does not affect):
+09-17 alone gives +0.0850 (30s) / +0.0648 (60s); 09-18 alone gives +0.0653 (30s) / +0.0828 (60s). All
+four numbers agree in sign and sit in the same 0.065-0.085 range -- the positive window-2 result is
+not one unusual day dominating a pooled average, it is the same effect present on both days
+independently. That rules out the stray fragments and day-pooling as the explanation for the flip.
