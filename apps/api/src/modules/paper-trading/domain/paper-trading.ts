@@ -30,13 +30,16 @@ export interface PaperAccount {
   id: string;
   name: string;
   openingBalance: number;
-  currency: "INR";
+  /** Every account was INR until AutoBot-Gold's USD-quoted XAU_USD (Twelve Data, direct-fill). */
+  currency: "INR" | "USD";
   isActive: boolean;
 }
 
 export interface CreatePaperAccountInput {
   name: string;
   openingBalance: number;
+  /** Defaults to "INR" at the repository layer so every existing caller is unaffected. */
+  currency?: "INR" | "USD";
 }
 
 export interface PaperAccountRepository {

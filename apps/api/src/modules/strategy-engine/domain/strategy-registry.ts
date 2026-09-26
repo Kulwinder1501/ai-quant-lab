@@ -6,6 +6,7 @@ import type {
 } from "./strategy.js";
 import { MomentumScalpStrategy, momentumScalpStrategyRegistration } from "./momentum-scalp-strategy.js";
 import { MomentumScalpIndexStrategy, momentumScalpIndexStrategyRegistration } from "./momentum-scalp-index-strategy.js";
+import { MomentumScalpGoldStrategy, momentumScalpGoldStrategyRegistration } from "./momentum-scalp-gold-strategy.js";
 import {
   MomentumScalpPatternStrategy,
   MomentumScalpPatternStrategyV2,
@@ -256,6 +257,17 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "over 62). The research twin keeps measuring the population ungated, so the decision stays "
         + "falsifiable.",
     },
+  },
+  {
+    registration: momentumScalpGoldStrategyRegistration,
+    StrategyClass: MomentumScalpGoldStrategy,
+    // Same rule set as momentum-scalp-index (see that file's header) under its own key, so gold's
+    // live record accumulates independently and never re-arms the Indian-index verdict above.
+    // 1m/5m: what run-gold-paper-trading-bot.ts scans, matching the timeframes Twelve Data has
+    // backfilled for XAU_USD.
+    supportedTimeframes: ["1m", "5m"],
+    // No operationalDisposition, no executableSides restriction: unowned and unmeasured on this
+    // instrument, same starting position as momentum-scalp on AutoBot-Scalp1m.
   },
   {
     registration: momentumScalpPatternStrategyRegistration,

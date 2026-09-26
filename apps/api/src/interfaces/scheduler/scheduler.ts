@@ -238,6 +238,11 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
+    // Both on a 5-minute cron, same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
+    // to a faster tick: a dead claimant should not hold up more than one tick's worth of gold data
+    // or signal generation.
+    XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
+    PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
   };
 
   /**
@@ -619,6 +624,80 @@ async function main(): Promise<void> {
      * differential record on exactly the days the token lapses, which are the days worth comparing.
      */
     void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
+  });
+
+  /**
+   * XAU_USD (gold): a Twelve Data instrument, not an NSE one, so it runs on its own cron rather
+   * than joining the block above -- it is not gated on `fyersTokenService` (irrelevant to a
+   * non-Fyers instrument) and it is not restricted to `9-15 * * 1-5` (XAU_USD trades Sun 22:00
+   * UTC - Fri 22:00 UTC; `run-gold-paper-trading-bot.ts` and its collection window below both
+   * check the real session themselves and no-op outside it, the same way every job here is
+   * written to be a safe no-op off-session rather than relying on the cron pattern alone).
+   *
+   * Every 5 minutes, every day: collect fresh 1m/5m candles, recompute indicators over them
+   * (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what `momentum-scalp-gold` reads -- and `smc-v2` --
+   * FVG/BOS/CHoCH/order-block/liquidity-sweep, the default `--family all` computes both), then
+   * run the bot. Without this step `indicator_snapshots` stays empty for XAU_USD and
+   * `momentum-scalp-gold` can never actually evaluate a bar -- confirmed live 2026-09-22: the
+   * first deploy ran clean but every tick's "RULES_NOT_MET" was indicators-absent, not
+   * conditions-failed, since nothing computed them. `applySmcConfluenceToProposal` in
+   * `generate-trade-ideas.ts` already runs unconditionally for every non-ICT strategy, so once
+   * `smc-v2` indicators exist here SMC confluence nudges gold's proposals with no further wiring.
+   *
+   * `--skip-existing` makes candle collection idempotent, and a 45-minute lookback window
+   * comfortably covers one tick's gap plus retry margin. `INDICATOR_WRITE_LOOKBACK_DAYS` bounds
+   * the indicator *write*, mirroring `collectIndicesIntraday`'s own reasoning above: computed
+   * over the full series, written only for the last few days, so a missed run heals on the next
+   * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
+   * `twelvedata-quote-client.ts` for where that cap was confirmed live.
+   *
+   * The two `schedule()` calls are sequenced with `await`, not fired as two independent
+   * `void schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
+   * are safe to run concurrently because they are temporally decoupled by construction --
+   * `INDICES_INTRADAY` runs on its own every-minute cron, so by the time `PAPER_TRADING_BOT` fires every
+   * five minutes the candles it reads are already several collections old and settled. This block
+   * folds collection and the bot into the *same* five-minute tick, so nothing separates them in
+   * time -- confirmed live 2026-09-22: firing both as `void schedule(...)` let
+   * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
+   * calculation was still running, which is exactly the read-before-write race this sequencing
+   * closes.
+   *
+   * Disabled 2026-09-23 by explicit user request, after `momentum-scalp-gold` had produced no
+   * ideas worth trusting yet and the user asked to pause the bot rather than let it keep running
+   * unmeasured. The application code (the strategy, `PrepareDirectEntry`, the runner script) is
+   * left intact -- only the schedule is turned off -- so re-enabling is flipping `XAU_BOT_ENABLED`
+   * back to `true`, not rebuilding anything.
+   */
+  const XAU_BOT_ENABLED = false;
+  cronSchedule("*/5 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
+    void (async () => {
+      await schedule("XAU_CANDLE_COLLECTION", async () => {
+        const to = new Date();
+        const from = new Date(to.getTime() - 45 * 60 * 1000);
+        const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "data:collect:historical", "--",
+            "--provider", "twelvedata",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", from.toISOString(),
+            "--to", to.toISOString(),
+            "--skip-existing",
+          ]);
+          await runCommand("npm", [
+            "run", "analysis:calculate-indicators", "--",
+            "--exchange", "TWELVEDATA",
+            "--instrument", "XAU_USD",
+            "--timeframe", timeframe,
+            "--from", indicatorsFrom.toISOString(),
+          ]);
+        }
+      });
+      await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
+    })();
   });
 
   /**
@@ -1157,6 +1236,9 @@ async function main(): Promise<void> {
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
+      // XAU_CANDLE_COLLECTION / PAPER_TRADING_BOT_GOLD deliberately absent: `XAU_BOT_ENABLED` is
+      // false, so neither actually runs -- listing them here would misreport the inventory the
+      // same way an omission would (see this array's own header comment on that point).
     ],
     timezone: IST,
   });

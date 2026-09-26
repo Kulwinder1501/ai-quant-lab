@@ -36,6 +36,22 @@ function silent() {
 }
 
 describe("MarketWatchBroadcaster", () => {
+  it("carries the canonical symbol separately from the display label", async () => {
+    // GOLD's label ("GOLD") diverges from its canonical routing symbol ("XAU_USD"). A row that
+    // only carried `tile.label` under `symbol` would make the UI select "GOLD" -- a symbol no
+    // chart or strategy owns candles under -- instead of the real instrument.
+    const tiles = [{ label: "GOLD", symbol: "XAU_USD" }] as const;
+    const reader = countingReader();
+    const broadcaster = new MarketWatchBroadcaster({ quotes: reader, tiles, ...silent() });
+    const seen: MarketWatchRow[][] = [];
+    const release = broadcaster.subscribe((rows) => seen.push([...rows]));
+    await broadcaster.pollOnce();
+
+    expect(seen.at(-1)?.[0]).toMatchObject({ symbol: "XAU_USD", label: "GOLD" });
+    release();
+    broadcaster.stop();
+  });
+
   it("makes one provider call for many subscribers", async () => {
     /*
      * The reason this class exists. The interval used to live in the SSE route, so the provider was

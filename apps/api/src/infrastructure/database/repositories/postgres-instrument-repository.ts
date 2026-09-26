@@ -15,6 +15,7 @@ interface InstrumentRow extends QueryResultRow {
   display_name: string;
   instrument_type: Instrument["instrumentType"];
   isin: string | null;
+  currency: Instrument["currency"];
   tick_size: string;
   lot_size: number;
   is_active: boolean;
@@ -34,6 +35,7 @@ function toInstrument(row: InstrumentRow): Instrument {
     displayName: row.display_name,
     instrumentType: row.instrument_type,
     isin: row.isin,
+    currency: row.currency,
     tickSize: row.tick_size,
     lotSize: Number(row.lot_size),
     isActive: row.is_active,
@@ -46,7 +48,7 @@ function toInstrument(row: InstrumentRow): Instrument {
 }
 
 const returningColumns = `
-  id, exchange, symbol, display_name, instrument_type, isin,
+  id, exchange, symbol, display_name, instrument_type, isin, currency,
   tick_size, lot_size, is_active, metadata,
   underlying_symbol, strike_price, expiry_date, option_type
 `;
@@ -57,13 +59,14 @@ export class PostgresInstrumentRepository implements InstrumentRepository {
   async upsert(input: UpsertInstrumentInput): Promise<Instrument> {
     const result = await this.database.query<InstrumentRow>(`
       INSERT INTO instruments (
-        exchange, symbol, display_name, instrument_type, isin, tick_size, lot_size, is_active, metadata,
+        exchange, symbol, display_name, instrument_type, isin, currency, tick_size, lot_size, is_active, metadata,
         underlying_symbol, strike_price, expiry_date, option_type
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14)
       ON CONFLICT (exchange, symbol) DO UPDATE SET
         display_name = EXCLUDED.display_name,
         instrument_type = EXCLUDED.instrument_type,
         isin = EXCLUDED.isin,
+        currency = EXCLUDED.currency,
         tick_size = EXCLUDED.tick_size,
         /*
          * lot_size is preserved on conflict, not overwritten.
@@ -93,6 +96,7 @@ export class PostgresInstrumentRepository implements InstrumentRepository {
       input.displayName.trim(),
       input.instrumentType,
       input.isin ?? null,
+      input.currency ?? "INR",
       input.tickSize ?? "0.05",
       input.lotSize ?? 1,
       input.isActive ?? true,
