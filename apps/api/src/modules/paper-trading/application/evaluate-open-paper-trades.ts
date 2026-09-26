@@ -1,5 +1,5 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
-import { advanceProtectiveStop, momentumScalp1mStopPolicy } from "../domain/protective-stop.js";
+import { advanceProtectiveStop, momentumScalp1mStopPolicy, type ProtectiveStopPolicy } from "../domain/protective-stop.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
 import {
@@ -184,6 +184,11 @@ export class EvaluateOpenPaperTrades {
     private readonly candleRepository: CandleRepository,
     private readonly impliedVolatilitySource?: ImpliedVolatilitySource,
     private readonly densePremiums?: DenseOptionPremiumReader,
+    // Defaults to the real shipped policy so no caller has to know this exists. Injectable only so
+    // a test can exercise the peak-sampling mechanics below with break-even active, independent of
+    // whether the shipped policy currently has it enabled -- see `protective-stop.ts` for why it's
+    // off by default as of 2026-09-21.
+    private readonly momentumScalpStopPolicy: ProtectiveStopPolicy = momentumScalp1mStopPolicy,
   ) {}
 
   async execute(input: EvaluateOpenPaperTradesInput): Promise<EvaluateOpenPaperTradesResult> {
@@ -600,7 +605,7 @@ export class EvaluateOpenPaperTrades {
           initialStopLoss: trade.initialStopLoss ?? trade.stopLoss,
           currentStopLoss: trade.stopLoss,
           markPremium: peakBid,
-          policy: momentumScalp1mStopPolicy,
+          policy: this.momentumScalpStopPolicy,
         });
         if (advance && this.paperTradeRepository.updateStopLoss) {
           await this.paperTradeRepository.updateStopLoss(
