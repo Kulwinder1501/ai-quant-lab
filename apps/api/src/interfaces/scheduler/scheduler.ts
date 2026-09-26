@@ -243,6 +243,11 @@ async function main(): Promise<void> {
     // or signal generation.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
+    // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
+    // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
+    // stalled claimant just means the next day's run picks up everything since the last success.
+    LIQUIDITY_CANDIDATE_GENERATION: 30 * 60 * 1000,
+    LIQUIDITY_CONTACT_LABELING: 30 * 60 * 1000,
   };
 
   /**
@@ -697,6 +702,47 @@ async function main(): Promise<void> {
         }
       });
       await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
+    })();
+  });
+
+  /**
+   * Liquidity Intelligence Engine v1 -- daily candidate + contact-label recompute for BANKNIFTY.
+   *
+   * `generate-liquidity-candidates.ts`/`generate-contact-labels.ts` were built and run once by
+   * hand on 2026-09-25 (see docs/2026-09-25-orderbook-directional-gate-confluence.md), producing
+   * a single generation/labeling run each, frozen at `known_at_time`/`contact_time` no later than
+   * 2026-09-24. Neither script was ever wired into anything that would rerun them, so BANKNIFTY's
+   * liquidity candidates and contact labels went stale from that one-off run while candles and
+   * depth_frames kept advancing normally underneath them. Both scripts are idempotent
+   * (`INSERT ... ON CONFLICT DO NOTHING` keyed on the candidate's/label's natural identity), so a
+   * full re-walk here only ever inserts what is new since the last run -- there is no `--since`
+   * flag to thread through instead.
+   *
+   * Runs at 16:25 IST, after CANDLE_GAP_CHECK (16:20) confirms the day's BANKNIFTY bars are final
+   * and before INDIA_VIX_EOD (16:30). Labels can only be generated for candidates that already
+   * exist, so the two are sequenced with `await` rather than fired independently -- the same
+   * reasoning as XAU_CANDLE_COLLECTION/PAPER_TRADING_BOT_GOLD directly above.
+   *
+   * `generate-contact-labels.ts` hardcodes its forward price-path lookup to BANKNIFTY 1m candles
+   * regardless of which timeframe's candidates it is labeling -- a pre-existing limitation of the
+   * script itself, not something this scheduling changes.
+   */
+  cronSchedule("25 16 * * 1-5", () => {
+    void (async () => {
+      await schedule("LIQUIDITY_CANDIDATE_GENERATION", async () => {
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "research:liquidity:candidates", "--",
+            "--symbol", "BANKNIFTY",
+            "--timeframe", timeframe,
+          ]);
+        }
+      });
+      await schedule("LIQUIDITY_CONTACT_LABELING", async () => {
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", ["run", "research:liquidity:labels", "--", "--timeframe", timeframe]);
+        }
+      });
     })();
   });
 
@@ -1236,6 +1282,8 @@ async function main(): Promise<void> {
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",
       "RSS_NEWS_INGESTION",
+      "LIQUIDITY_CANDIDATE_GENERATION",
+      "LIQUIDITY_CONTACT_LABELING",
       // XAU_CANDLE_COLLECTION / PAPER_TRADING_BOT_GOLD deliberately absent: `XAU_BOT_ENABLED` is
       // false, so neither actually runs -- listing them here would misreport the inventory the
       // same way an omission would (see this array's own header comment on that point).

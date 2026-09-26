@@ -90,6 +90,16 @@ export interface StrategyMarketContext {
   patternObservations?: readonly PatternObservationSummary[];
   patternObservationCoverage?: PatternObservationCoverageState;
   regime?: RegimeContext;
+  confluenceSignal?: {
+    is_level_proximate?: boolean;
+    nearest_level_type?: string | null;
+    nearest_level_price?: number | null;
+    distance_bps?: number | null;
+    raw_di?: number | null;
+    di_tilde?: number | null;
+    directional_bias?: string;
+    gate_action?: string;
+  } | null;
   /**
    * Trend and level context from slower timeframes, for confluence scoring.
    *

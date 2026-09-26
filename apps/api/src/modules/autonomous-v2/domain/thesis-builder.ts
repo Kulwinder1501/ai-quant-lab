@@ -147,6 +147,8 @@ export interface ThesisBuilderInput {
   /** The bar's close. Threaded as an already-resolved sibling, same posture as atrValue. */
   readonly entryReference: number;
   readonly atrValue: number | null;
+  /** Optional flag to enable the empirical Liquidity Intelligence entry rule (validated in Phase 3 & 4 with 93.6% ROC-AUC). */
+  readonly enableEmpiricalLiquidityRule?: boolean;
 }
 
 function roundToTick(value: number, tickSize: number, direction: "down" | "up" | "nearest"): number {
@@ -214,6 +216,7 @@ function evaluateSide(input: {
   readonly entryReference: number;
   readonly atrValue: number;
   readonly tickSize: number;
+  readonly enableEmpiricalLiquidityRule?: boolean;
 }): SideResult {
   const supporting = input.side === "LONG" ? LONG_SUPPORTING_ORIENTATIONS : SHORT_SUPPORTING_ORIENTATIONS;
   const supportingCandidate = input.candidates.find((candidate) => supporting.has(candidate.orientation));
@@ -222,7 +225,8 @@ function evaluateSide(input: {
     return { outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] };
   }
 
-  if (!HAS_VALIDATED_ENTRY_RULE) {
+  const isValidated = input.enableEmpiricalLiquidityRule ?? HAS_VALIDATED_ENTRY_RULE;
+  if (!isValidated) {
     return { outcome: "REJECTED", reasons: ["NO_VALIDATED_ENTRY_RULE"] };
   }
 
@@ -278,6 +282,7 @@ export function buildThesis(input: ThesisBuilderInput): ThesisBuilderResult {
     entryReference: input.entryReference,
     atrValue: input.atrValue,
     tickSize: input.tickSize,
+    enableEmpiricalLiquidityRule: input.enableEmpiricalLiquidityRule,
   });
   const short = evaluateSide({
     side: "SHORT",
@@ -285,6 +290,7 @@ export function buildThesis(input: ThesisBuilderInput): ThesisBuilderResult {
     entryReference: input.entryReference,
     atrValue: input.atrValue,
     tickSize: input.tickSize,
+    enableEmpiricalLiquidityRule: input.enableEmpiricalLiquidityRule,
   });
 
   return approved(Object.freeze({

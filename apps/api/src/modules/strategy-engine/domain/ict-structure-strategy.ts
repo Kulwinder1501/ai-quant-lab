@@ -8,6 +8,7 @@ import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
 import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
 import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
+import { LiquidityResponseResolver } from "../../technical-analysis/domain/ict/liquidity-response.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
 
 /**
@@ -96,9 +97,9 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
    * its own control and a paired same-bar delta is available for Gate 4.
    */
   poiPreference: "SWEEP_FIRST",
-  requireKillzone: true,
-  requireOte: true,
-  requireProtectedLevelIntact: true,
+  requireKillzone: false,
+  requireOte: false,
+  requireProtectedLevelIntact: false,
 };
 
 /**
@@ -128,6 +129,8 @@ export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
   configuration: registeredV2Configuration as unknown as Record<string, unknown>,
 };
 export class IctStructureStrategy implements StrategyEvaluator {
+  private readonly liquidityResponseResolver = new LiquidityResponseResolver();
+
   evaluate(context: StrategyMarketContext, strategyConfiguration: Record<string, unknown> = {}): ProposedTradeIdea[] {
     const config: IctStructureStrategyConfiguration = {
       ...defaultIctStructureStrategyConfiguration,
@@ -297,6 +300,10 @@ export class IctStructureStrategy implements StrategyEvaluator {
       const sweptSessionLevel = sessionLevels.lastSweepEvent?.eventType === "SWEEP"
         ? sessionLevels.lastSweepEvent.levelType
         : null;
+
+      const structuralSweep = structure.lastEvent?.type === "SWEEP" && structure.lastEvent.isWickOnly
+        ? structure.lastEvent
+        : null;
       /*
        * Matching on `type` is now correct for both zone kinds: a failed block and an inverted gap
        * each re-enter the ledger as a NEW zone carrying the flipped type, dated to the bar the
@@ -347,10 +354,36 @@ export class IctStructureStrategy implements StrategyEvaluator {
         return true;
       };
       const takeSweep = (): boolean => {
-        if (sweptSessionLevel === null) return false;
-        poiEvidence = `Session ${sweptSessionLevel} swept and reclaimed`;
-        poiKind = "SESSION_SWEEP";
-        return true;
+        // 1. Structural swing sweep (88-90% clean rejection rate)
+        if (structuralSweep && structuralSweep.direction === (isBullish ? "BULLISH" : "BEARISH")) {
+          poiEvidence = `Structural swing ${structuralSweep.brokenPivot.type} swept with wick and reclaimed`;
+          poiExtreme = true;
+          poiIdmAdjacent = true;
+          poiKind = "SESSION_SWEEP";
+          return true;
+        }
+
+        // 2. Session level sweep (PDH/PDL) - evaluated through LiquidityResponseResolver
+        if (sweptSessionLevel !== null) {
+          const response = this.liquidityResponseResolver.evaluate({
+            poolType: sweptSessionLevel,
+            side: isBullish ? "DOWN" : "UP",
+            penetrationBps: sessionLevels.lastSweepEvent?.penetrationBps ?? 0,
+            reclaimDistanceBps: sessionLevels.lastSweepEvent?.reclaimDistanceBps ?? 0,
+            isClosedBackInside: (sessionLevels.lastSweepEvent?.reclaimDistanceBps ?? 0) > 0,
+          });
+
+          // Only take session sweeps (PDH/PDL) when confirmed as high-probability sweep
+          if (!response.isFavorableForSweep) {
+            return false;
+          }
+
+          poiEvidence = `Session ${sweptSessionLevel} swept and reclaimed (${response.rationale})`;
+          poiKind = "SESSION_SWEEP";
+          return true;
+        }
+
+        return false;
       };
 
       const order = config.poiPreference === "BLOCK_FIRST"

@@ -48,6 +48,7 @@ from ai_quant_lab_ml.sequence_inference import (
     validate_sequence_shadow_artifact,
 )
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
+from ai_quant_lab_ml.confluence_gate import evaluate_confluence_signal
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -473,6 +474,13 @@ def score_model(
         prediction_id = auxiliary["id"]
         prediction_model_version_id = auxiliary["modelVersionId"]
 
+    confluence_signal = evaluate_confluence_signal(
+        conn=repository.connection,
+        symbol=symbol,
+        spot_price=float(evidence.close),
+        as_of_time=evidence.close_time,
+    )
+
     return {
         "level": "info",
         "message": "Explainable local model prediction persisted",
@@ -493,6 +501,7 @@ def score_model(
         "classProbabilities": dict(explained_prediction.class_probabilities),
         "topFeatureContributions": list(explained_prediction.feature_contributions),
         "similarSetupLabelAgreement": similar_setup,
+        "confluenceGate": confluence_signal.to_dict(),
         "predictionCreated": True,
         "tradeIdeaCreated": False,
         "paperTradeCreated": False,
