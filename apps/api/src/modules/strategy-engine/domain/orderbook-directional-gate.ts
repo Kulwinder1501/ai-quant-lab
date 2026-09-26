@@ -9,7 +9,7 @@
 import type { ProposedTradeIdea, TradeSide } from "./strategy.js";
 
 export interface OrderbookGateResult {
-  isGateActive: bool;
+  isGateActive: boolean;
   nearestLevelType: string | null;
   nearestLevelPrice: number | null;
   distanceBps: number | null;
@@ -124,13 +124,10 @@ export function applyOrderbookGateToProposal(
   }
 
   const updatedConfidence = Math.max(0, Math.min(100, proposal.confidence + result.confidenceAdjustment));
-  const newReasoning = proposal.reasoning
-    ? `${proposal.reasoning} | ${result.reasoning}`
-    : result.reasoning || "";
 
   return {
     ...proposal,
     confidence: updatedConfidence,
-    reasoning: newReasoning,
+    reasoning: result.reasoning ? [...proposal.reasoning, result.reasoning] : proposal.reasoning,
   };
 }

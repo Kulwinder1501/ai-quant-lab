@@ -273,7 +273,10 @@ def main() -> int:
             random_state=args.random_state,
             validation_fraction=args.validation_fraction,
             shuffle_ceiling=RANDOM_BASELINE_MACRO_F1 + 0.15,
-            persistence_dominated=True,
+            # Not persistence-dominated: this labels with label_from_future_close, a transient
+            # direction target, exactly the case FEATURE_LAG is meant to catch real leakage on
+            # (per leakage.py's own docstring). persistence_dominated=True is reserved for a
+            # target like volatility where the signal genuinely persists bar-to-bar.
         )
 
     json_output({

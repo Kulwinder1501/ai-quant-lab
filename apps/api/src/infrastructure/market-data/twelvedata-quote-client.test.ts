@@ -129,4 +129,35 @@ describe("TwelveDataQuoteClient", () => {
 
     await expect(client.quoteSymbol("XAU_USD")).resolves.toBeNull();
   });
+
+  it("throttles retries during a sustained failure, the same as it throttles successes", async () => {
+    // A failed refresh must still advance `fetchedAt`, or a rate-limit/outage causes every poll
+    // to re-hit the network with no backoff -- spending the same 8-credits/minute budget this
+    // cache exists to protect re-asking a question that just failed.
+    let clock = 0;
+    const fetchFn = vi.fn(async () => rateLimitedBody());
+    const client = new TwelveDataQuoteClient({
+      apiKey: "key-100", fetch: fetchFn, minRefreshIntervalMs: 15_000, now: () => clock,
+    });
+
+    await client.quoteSymbol("XAU_USD");
+    clock = 5_000;
+    await client.quoteSymbol("XAU_USD");
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries again once the window has elapsed, even after a prior failure", async () => {
+    let clock = 0;
+    const fetchFn = vi.fn(async () => rateLimitedBody());
+    const client = new TwelveDataQuoteClient({
+      apiKey: "key-100", fetch: fetchFn, minRefreshIntervalMs: 15_000, now: () => clock,
+    });
+
+    await client.quoteSymbol("XAU_USD");
+    clock = 15_001;
+    await client.quoteSymbol("XAU_USD");
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
 });

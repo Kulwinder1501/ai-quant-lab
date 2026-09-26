@@ -58,6 +58,8 @@ function makeSnapshot(overrides: {
       nearestShortTermHigh: null,
       nearestShortTermLow: null,
     },
+    cisd: null,
+    balancedPriceRanges: [],
     zones: {
       activeFvgs: [],
       activeObs: overrides.activeObs ?? [],

@@ -111,11 +111,22 @@ export class TwelveDataQuoteClient {
   }
 
   private async fetchFresh(symbol: string): Promise<MarketQuote | null> {
+    const previousQuote = this.cache.get(symbol)?.quote ?? null;
+    // Every attempt below records `fetchedAt` -- success or failure -- so `minRefreshIntervalMs`
+    // throttles retries uniformly. Recording it only on success (the original shape) meant a
+    // sustained outage or a 429 never advanced the cache timestamp, so every poll during the
+    // failure kept re-hitting the network with no backoff: the same credit budget this cache
+    // exists to protect getting spent re-asking a question that just failed.
+    const recordAttempt = (quote: MarketQuote | null): MarketQuote | null => {
+      this.cache.set(symbol, { quote, fetchedAt: this.now() });
+      return quote;
+    };
+
     let providerSymbol: string;
     try {
       providerSymbol = resolveTwelveDataSymbol(symbol);
     } catch {
-      return null;
+      return previousQuote;
     }
     const endpoint = new URL("/quote", this.baseUrl);
     endpoint.searchParams.set("symbol", providerSymbol);
@@ -130,15 +141,15 @@ export class TwelveDataQuoteClient {
       // `MarketWatchBroadcaster` already documents for its own poll failures. Only actually
       // absent (never-fetched) data resolves to null here.
       if (!response.ok || payload?.status === "error") {
-        return this.cache.get(symbol)?.quote ?? null;
+        return recordAttempt(previousQuote);
       }
     } catch {
-      return this.cache.get(symbol)?.quote ?? null;
+      return recordAttempt(previousQuote);
     }
-    if (payload === undefined) return this.cache.get(symbol)?.quote ?? null;
+    if (payload === undefined) return recordAttempt(previousQuote);
 
     const price = numberOrNull(payload.close);
-    if (price === null || price <= 0) return this.cache.get(symbol)?.quote ?? null;
+    if (price === null || price <= 0) return recordAttempt(previousQuote);
 
     const observedAtEpoch = payload.last_quote_at ?? payload.timestamp;
     const quote: MarketQuote = {
@@ -156,7 +167,6 @@ export class TwelveDataQuoteClient {
       regularMarketVolume: null,
       regularMarketTime: typeof observedAtEpoch === "number" ? new Date(observedAtEpoch * 1000) : null,
     };
-    this.cache.set(symbol, { quote, fetchedAt: this.now() });
-    return quote;
+    return recordAttempt(quote);
   }
 }

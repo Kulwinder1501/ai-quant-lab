@@ -2,6 +2,7 @@ import type { ProposedTradeIdea, StrategyMarketContext } from "../../strategy-en
 import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-registry.js";
 import { filterProposalsByLiquiditySweepBias } from "../../strategy-engine/domain/smc-liquidity-bias.js";
 import { applySmcConfluenceToProposal } from "../../strategy-engine/domain/smc-confluence.js";
+import { SMC_ALGORITHM_VERSION } from "../../technical-analysis/domain/technical-indicator.js";
 
 /**
  * Backtest-only entry filters: decorators that drop a strategy's proposals without touching it.
@@ -305,6 +306,276 @@ export class PatternAlignmentFilteredStrategy implements StrategyEvaluator {
       ));
       return !hasAligned;
     });
+  }
+}
+
+/** True when any pattern on the bar agrees with the proposal's own side -- same test as {@link PatternAlignmentFilteredStrategy}. */
+function hasConfluentPattern(context: StrategyMarketContext, side: "LONG" | "SHORT"): boolean {
+  return context.patterns.some((pattern) => (
+    (pattern.direction === "BULLISH" && side === "LONG")
+    || (pattern.direction === "BEARISH" && side === "SHORT")
+  ));
+}
+
+/**
+ * Replaces a proposal's stop-loss with the signal bar's own high/low, one tick beyond it, whenever
+ * a confluent candlestick pattern is present -- literally what was proposed: anchor the stop to
+ * "the pattern's high" for a SHORT, or its low for a LONG, in place of the inner strategy's own
+ * (ATR-derived) stop. `targetPrice` is untouched, so `riskReward` moves with the new risk leg.
+ *
+ * Registered for `docs/2026-09-17-scalp1m-pattern-anchored-stop-falsification-v1.md`. Deliberately
+ * does NOT only apply when the anchored stop is tighter than the original -- the proposal on the
+ * table was to always anchor to the pattern's extreme, and silently skipping the bars where that
+ * comes out wider would test a different, hand-picked strategy while reporting it under the
+ * original's name.
+ *
+ * Fails closed only on the one case where "anchor to the bar's extreme" is not a coherent stop at
+ * all: if the computed level lands on the wrong side of the entry price (e.g. the bar's own low is
+ * above a LONG's entry), the original stop is kept rather than shipping a broken risk leg.
+ */
+export class PatternAnchoredStopStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.map((proposal) => this.anchorStop(context, proposal));
+  }
+
+  private anchorStop(context: StrategyMarketContext, proposal: ProposedTradeIdea): ProposedTradeIdea {
+    if (!hasConfluentPattern(context, proposal.side)) return proposal;
+
+    const tick = context.candle.tickSize;
+    const anchoredStop = proposal.side === "LONG"
+      ? context.candle.low - tick
+      : context.candle.high + tick;
+
+    const anchoredRisk = proposal.side === "LONG"
+      ? proposal.entryPrice - anchoredStop
+      : anchoredStop - proposal.entryPrice;
+    if (anchoredRisk <= 0) return proposal;
+
+    const reward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+    return { ...proposal, stopLoss: anchoredStop, riskReward: reward / anchoredRisk };
+  }
+}
+
+/** An SMC indicator's `values.type`, read the same way {@link measureSmcConfluence} does. */
+function smcIndicatorsOf(context: StrategyMarketContext, code: string) {
+  return context.indicators.filter(
+    (indicator) => indicator.algorithmVersion === SMC_ALGORITHM_VERSION && indicator.code === code,
+  );
+}
+
+/**
+ * Replaces a proposal's stop-loss with a same-bar `LIQUIDITY_SWEEP` level, one tick beyond it, when
+ * the sweep confirms the trade's own direction (a `BULLISH_SWEEP` -- sell-side liquidity taken out,
+ * then reversed -- for a LONG; `BEARISH_SWEEP` for a SHORT). The swept level is exactly the price the
+ * "stop hunt" ran through, so a real re-test of it invalidates the reversal thesis, not just the math.
+ *
+ * Registered for `docs/2026-09-19-scalp1m-liquidity-geometry-falsification-v1.md`. Same discipline as
+ * {@link PatternAnchoredStopStrategy}: applied literally, including when it comes out wider than the
+ * original ATR stop, and failing closed only when the swept level lands on the wrong side of entry.
+ */
+export class LiquiditySweepAnchoredStopStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.map((proposal) => this.anchorStop(context, proposal));
+  }
+
+  private anchorStop(context: StrategyMarketContext, proposal: ProposedTradeIdea): ProposedTradeIdea {
+    const confirmingType = proposal.side === "LONG" ? "BULLISH_SWEEP" : "BEARISH_SWEEP";
+    const sweep = smcIndicatorsOf(context, "LIQUIDITY_SWEEP").find(
+      (indicator) => indicator.values.type === confirmingType
+        && typeof indicator.values.level === "number",
+    );
+    if (!sweep) return proposal;
+
+    const level = sweep.values.level as number;
+    const tick = context.candle.tickSize;
+    const anchoredStop = proposal.side === "LONG" ? level - tick : level + tick;
+
+    const anchoredRisk = proposal.side === "LONG"
+      ? proposal.entryPrice - anchoredStop
+      : anchoredStop - proposal.entryPrice;
+    if (anchoredRisk <= 0) return proposal;
+
+    const reward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+    return { ...proposal, stopLoss: anchoredStop, riskReward: reward / anchoredRisk };
+  }
+}
+
+/**
+ * Replaces a proposal's target with the near edge of the nearest opposing-type `ORDER_BLOCK` ahead
+ * of price in the trade's direction (a `BEARISH_OB` above entry for a LONG's target -- supply price
+ * would first reach from below; a `BULLISH_OB` below entry for a SHORT's target), instead of the
+ * fixed reward:risk multiple. `stopLoss` is untouched; `riskReward` moves with the new reward leg.
+ *
+ * Registered for `docs/2026-09-19-scalp1m-liquidity-geometry-falsification-v1.md`. "Nearest" is the
+ * block whose near edge is closest to entry among every opposing-type block on the bar, since a
+ * momentum trade that cannot reach the closest opposing zone will not reach a farther one either.
+ * Leaves the proposal untouched when no qualifying block exists -- this cannot invent a target where
+ * ICT structure has not actually formed one.
+ */
+export class OrderBlockTargetStrategy implements StrategyEvaluator {
+  constructor(private readonly inner: StrategyEvaluator) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.map((proposal) => this.retarget(context, proposal));
+  }
+
+  private retarget(context: StrategyMarketContext, proposal: ProposedTradeIdea): ProposedTradeIdea {
+    const opposingType = proposal.side === "LONG" ? "BEARISH_OB" : "BULLISH_OB";
+    const nearEdges = smcIndicatorsOf(context, "ORDER_BLOCK")
+      .filter((indicator) => indicator.values.type === opposingType)
+      .map((indicator) => (proposal.side === "LONG" ? indicator.values.bottom : indicator.values.top))
+      .filter((edge): edge is number => typeof edge === "number")
+      .filter((edge) => (proposal.side === "LONG" ? edge > proposal.entryPrice : edge < proposal.entryPrice));
+    if (nearEdges.length === 0) return proposal;
+
+    const target = proposal.side === "LONG" ? Math.min(...nearEdges) : Math.max(...nearEdges);
+    const risk = Math.abs(proposal.entryPrice - proposal.stopLoss);
+    if (risk <= 0) return proposal;
+
+    const reward = Math.abs(target - proposal.entryPrice);
+    return { ...proposal, targetPrice: target, riskReward: reward / risk };
+  }
+}
+
+interface BufferedSweep {
+  readonly type: string;
+  readonly level: number;
+}
+
+interface BufferedOrderBlock {
+  readonly type: string;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+/**
+ * Replaces a proposal's stop-loss with the most recent confirming `LIQUIDITY_SWEEP` level seen in
+ * the trailing `lookbackBars` bars (this one included), one tick beyond it -- loosens
+ * {@link LiquiditySweepAnchoredStopStrategy}'s same-bar requirement.
+ *
+ * Registered for `docs/2026-09-19-scalp1m-liquidity-geometry-falsification-v1.md`'s follow-up: the
+ * same-bar version found a confirming sweep on only 1.1% of trades, too few to test the idea at all.
+ * The premise itself is sequential, not simultaneous -- a sweep happens, *then* momentum confirmation
+ * catches up a few bars later -- so requiring both on one bar was testing a stricter, arguably
+ * backwards version of the hypothesis. "Most recent" (not "nearest by price") is deliberate: the
+ * freshest stop-hunt is the one still relevant to the reversal thesis; an older sweep further back in
+ * the buffer may already be stale context.
+ */
+export class LiquiditySweepLookbackStopStrategy implements StrategyEvaluator {
+  /**
+   * One frame per bar, pushed every call regardless of whether that bar had a sweep -- eviction must
+   * track bars elapsed, not sweeps seen, or a rare signal would stay "in the lookback" indefinitely
+   * across however many quiet bars happen to separate two real sweeps.
+   */
+  private readonly bufferBySeries = new Map<string, BufferedSweep[][]>();
+
+  constructor(private readonly inner: StrategyEvaluator, private readonly lookbackBars: number) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const seriesKey = `${context.candle.instrumentId}:${context.candle.timeframe}`;
+    const buffer = this.bufferBySeries.get(seriesKey) ?? [];
+    const frame: BufferedSweep[] = [];
+    for (const indicator of smcIndicatorsOf(context, "LIQUIDITY_SWEEP")) {
+      if (typeof indicator.values.type === "string" && typeof indicator.values.level === "number") {
+        frame.push({ type: indicator.values.type, level: indicator.values.level });
+      }
+    }
+    buffer.push(frame);
+    while (buffer.length > this.lookbackBars) buffer.shift();
+    this.bufferBySeries.set(seriesKey, buffer);
+
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.map((proposal) => this.anchorStop(context, buffer, proposal));
+  }
+
+  private anchorStop(
+    context: StrategyMarketContext,
+    buffer: readonly BufferedSweep[][],
+    proposal: ProposedTradeIdea,
+  ): ProposedTradeIdea {
+    const confirmingType = proposal.side === "LONG" ? "BULLISH_SWEEP" : "BEARISH_SWEEP";
+    let mostRecent: BufferedSweep | null = null;
+    for (const frame of buffer) {
+      for (const sweep of frame) {
+        if (sweep.type === confirmingType) mostRecent = sweep;
+      }
+    }
+    if (!mostRecent) return proposal;
+
+    const tick = context.candle.tickSize;
+    const anchoredStop = proposal.side === "LONG" ? mostRecent.level - tick : mostRecent.level + tick;
+    const anchoredRisk = proposal.side === "LONG"
+      ? proposal.entryPrice - anchoredStop
+      : anchoredStop - proposal.entryPrice;
+    if (anchoredRisk <= 0) return proposal;
+
+    const reward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+    return { ...proposal, stopLoss: anchoredStop, riskReward: reward / anchoredRisk };
+  }
+}
+
+/**
+ * Replaces a proposal's target with the near edge of the nearest opposing-type `ORDER_BLOCK` ahead of
+ * price seen in the trailing `lookbackBars` bars (this one included) -- loosens
+ * {@link OrderBlockTargetStrategy}'s same-bar requirement the same way and for the same reason as
+ * {@link LiquiditySweepLookbackStopStrategy}. Unlike the stop's "most recent", this keeps "nearest by
+ * price" across the whole buffer -- an order block does not go stale by age alone the way a sweep's
+ * relevance does; what matters for a target is which zone price would reach first.
+ */
+export class OrderBlockLookbackTargetStrategy implements StrategyEvaluator {
+  /** One frame per bar, same reasoning as {@link LiquiditySweepLookbackStopStrategy}'s buffer. */
+  private readonly bufferBySeries = new Map<string, BufferedOrderBlock[][]>();
+
+  constructor(private readonly inner: StrategyEvaluator, private readonly lookbackBars: number) {}
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const seriesKey = `${context.candle.instrumentId}:${context.candle.timeframe}`;
+    const buffer = this.bufferBySeries.get(seriesKey) ?? [];
+    const frame: BufferedOrderBlock[] = [];
+    for (const indicator of smcIndicatorsOf(context, "ORDER_BLOCK")) {
+      if (
+        typeof indicator.values.type === "string"
+        && typeof indicator.values.top === "number"
+        && typeof indicator.values.bottom === "number"
+      ) {
+        frame.push({ type: indicator.values.type, top: indicator.values.top, bottom: indicator.values.bottom });
+      }
+    }
+    buffer.push(frame);
+    while (buffer.length > this.lookbackBars) buffer.shift();
+    this.bufferBySeries.set(seriesKey, buffer);
+
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+    return proposals.map((proposal) => this.retarget(buffer, proposal));
+  }
+
+  private retarget(buffer: readonly BufferedOrderBlock[][], proposal: ProposedTradeIdea): ProposedTradeIdea {
+    const opposingType = proposal.side === "LONG" ? "BEARISH_OB" : "BULLISH_OB";
+    const nearEdges = buffer
+      .flat()
+      .filter((block) => block.type === opposingType)
+      .map((block) => (proposal.side === "LONG" ? block.bottom : block.top))
+      .filter((edge) => (proposal.side === "LONG" ? edge > proposal.entryPrice : edge < proposal.entryPrice));
+    if (nearEdges.length === 0) return proposal;
+
+    const target = proposal.side === "LONG" ? Math.min(...nearEdges) : Math.max(...nearEdges);
+    const risk = Math.abs(proposal.entryPrice - proposal.stopLoss);
+    if (risk <= 0) return proposal;
+
+    const reward = Math.abs(target - proposal.entryPrice);
+    return { ...proposal, targetPrice: target, riskReward: reward / risk };
   }
 }
 

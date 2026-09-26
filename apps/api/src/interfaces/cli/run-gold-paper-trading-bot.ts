@@ -14,7 +14,7 @@ import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-tr
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
 import { OpenPaperTrade } from "../../modules/paper-trading/application/open-paper-trade.js";
-import { PrepareDirectEntry } from "../../modules/paper-trading/application/prepare-direct-entry.js";
+import { MAXIMUM_EXECUTABLE_QUOTE_AGE_MS, PrepareDirectEntry } from "../../modules/paper-trading/application/prepare-direct-entry.js";
 import {
   assessDataFreshness,
   barLengthMinutes,
@@ -220,11 +220,17 @@ async function main(): Promise<void> {
 
     // Live spot for stop/target evaluation, same freshness discipline as the entry path: a
     // stale or missing quote falls back to the completed-candle evaluator inside
-    // EvaluateOpenPaperTrades rather than being treated as a price.
+    // EvaluateOpenPaperTrades rather than being treated as a price. `quoteSymbol` can return a
+    // quote it only ever served from cache (TwelveDataQuoteClient's "stale beats blank" fallback
+    // during an outage or a 429), so price truthiness alone is not enough -- its age has to be
+    // checked the same way `PrepareDirectEntry` checks it before filling an entry.
     const quote = await quoteClient.quoteSymbol(XAU_SYMBOL).catch(() => null);
-    const livePrices = quote?.regularMarketPrice
-      ? { [XAU_SYMBOL]: quote.regularMarketPrice }
-      : undefined;
+    const quoteAgeMs = quote?.regularMarketTime ? now.getTime() - quote.regularMarketTime.getTime() : null;
+    const freshQuotePrice = quote?.regularMarketPrice && quote.regularMarketPrice > 0
+      && quoteAgeMs !== null && quoteAgeMs >= 0 && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
+      ? quote.regularMarketPrice
+      : null;
+    const livePrices = freshQuotePrice !== null ? { [XAU_SYMBOL]: freshQuotePrice } : undefined;
 
     const evaluation = await new EvaluateOpenPaperTrades(
       tradeRepository,

@@ -45,6 +45,11 @@ export interface IctEngineConfig {
    * Default `false`, which reproduces that pruning exactly. Turning it on ADDS points of interest
    * that never previously existed, so it is a behaviour change and is measured as one rather than
    * shipped as a bug fix.
+   *
+   * Measured 2026-09-23 on `ict-structure-v1`'s two live cells (`--ict-inverted-poi true`), verdict
+   * NO_EDGE -- see the falsification program doc, Amendment 5. Worse than every arm measured before
+   * it: NIFTY50 doesn't even agree with itself (2025 +753.65, 2026 holdout -210.60), and BANKNIFTY
+   * flips from +4,319.60 to -842.05.
    */
   readonly invertedBlocksRemainPoi: boolean;
 }
@@ -100,6 +105,21 @@ export interface IctStateCompositeSnapshot {
    * stream) from `structure`'s single most-recent HH/HL/LL/LH per role.
    */
   readonly swingHierarchy: import("./swing-hierarchy.js").SwingHierarchySnapshot;
+  /**
+   * The most recently confirmed Change in State of Delivery (see cisd.ts), persisted across bars
+   * like `zones.ts`'s own `lastSweep` -- not ephemeral like `structure.lastEvent`, which is null on
+   * every bar it doesn't fire on. A strategy asking "was there a recent CISD in my direction" needs
+   * the event to still be visible several bars after it confirmed, and can compute its own age from
+   * `confirmingCandleIndex` against the current bar. Null until the first leg transition confirms one.
+   */
+  readonly cisd: import("./cisd.js").CisdEvent | null;
+  /**
+   * Every currently-active overlapping opposing-FVG pair (see bpr.ts), recomputed fresh each bar --
+   * not persisted like `cisd`, because it needs no persistence: it derives entirely from
+   * `zones.activeFvgs`, which is already carried on this same snapshot, so it is automatically
+   * correct for exactly as long as its constituent gaps remain active and never goes stale.
+   */
+  readonly balancedPriceRanges: readonly import("./bpr.js").BalancedPriceRange[];
   /**
    * Direction of the higher-timeframe (fractal) bias supplied to the engine, or
    * null when no HTF projection was available. Carried separately from the local

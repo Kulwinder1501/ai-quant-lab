@@ -5,6 +5,11 @@ import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
   PatternAlignmentFilteredStrategy,
+  PatternAnchoredStopStrategy,
+  LiquiditySweepAnchoredStopStrategy,
+  OrderBlockTargetStrategy,
+  LiquiditySweepLookbackStopStrategy,
+  OrderBlockLookbackTargetStrategy,
   RelativeVolumeFilteredStrategy,
   SmcConfidenceGatedStrategy,
   TimeWindowFilteredStrategy,
@@ -388,5 +393,307 @@ describe("PatternAlignmentFilteredStrategy", () => {
   it("does not consult patterns when the strategy proposed nothing", () => {
     const filtered = new PatternAlignmentFilteredStrategy(new AlwaysProposes(null));
     expect(filtered.evaluate(withPatterns("c1", BULLISH_PATTERN), {})).toEqual([]);
+  });
+});
+
+describe("PatternAnchoredStopStrategy", () => {
+  function withPatterns(id: string, patterns: StrategyMarketContext["patterns"], candle: Partial<StrategyMarketContext["candle"]> = {}): StrategyMarketContext {
+    return { ...context(id, [], candle), patterns };
+  }
+
+  const BULLISH_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "BULLISH_ENGULFING", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+  const BEARISH_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "BEARISH_ENGULFING", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+  const NEUTRAL_PATTERN: StrategyMarketContext["patterns"] = [{
+    code: "DOJI", algorithmVersion: "candlestick-v1", direction: "NEUTRAL",
+    confidence: 0.8, contextCandleIds: [], details: {},
+  }];
+
+  it("anchors a LONG's stop to the bar's low, one tick beyond it, when a bullish pattern is present", () => {
+    // candle: low=99, tickSize=0.05 -> anchored stop 98.95. entryPrice=100, targetPrice=102.
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withPatterns("c1", BULLISH_PATTERN), {});
+    expect(result!.stopLoss).toBeCloseTo(98.95);
+    expect(result!.riskReward).toBeCloseTo(2 / 1.05); // reward 2, anchored risk 1.05
+  });
+
+  it("anchors a SHORT's stop to the bar's high, one tick beyond it, when a bearish pattern is present", () => {
+    // candle: high=101, tickSize=0.05 -> anchored stop 101.05. entryPrice=100, targetPrice=98.
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("SHORT"));
+    const [result] = anchored.evaluate(withPatterns("c1", BEARISH_PATTERN), {});
+    expect(result!.stopLoss).toBeCloseTo(101.05);
+    expect(result!.riskReward).toBeCloseTo(2 / 1.05); // reward 2, anchored risk 1.05
+  });
+
+  it("overrides even when the anchored stop is wider than the original, matching the proposal as stated", () => {
+    // Original LONG stop is 99 (risk 1). A wide bar (low=90) anchors to 89.95 (risk 10.05) -- wider, not tighter.
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withPatterns("c1", BULLISH_PATTERN, { low: 90 }), {});
+    expect(result!.stopLoss).toBeCloseTo(89.95);
+  });
+
+  it("leaves the proposal untouched when no confluent pattern is present", () => {
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withPatterns("c1", BEARISH_PATTERN), {}); // disagreeing
+    expect(result!.stopLoss).toBe(99); // original ATR stop, unchanged
+  });
+
+  it("leaves the proposal untouched when the only pattern present is neutral", () => {
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withPatterns("c1", NEUTRAL_PATTERN), {});
+    expect(result!.stopLoss).toBe(99);
+  });
+
+  it("leaves the proposal untouched when no pattern is present at all", () => {
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(context("c1"), {});
+    expect(result!.stopLoss).toBe(99);
+  });
+
+  it("fails closed when the anchored level would land on the wrong side of entry", () => {
+    // LONG entry=100, but the bar's low (100.5) is above entry -- anchoring there is incoherent.
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withPatterns("c1", BULLISH_PATTERN, { low: 100.5, high: 101.5 }), {});
+    expect(result!.stopLoss).toBe(99); // kept the original stop rather than a broken risk leg
+  });
+
+  it("does not consult patterns when the strategy proposed nothing", () => {
+    const anchored = new PatternAnchoredStopStrategy(new AlwaysProposes(null));
+    expect(anchored.evaluate(withPatterns("c1", BULLISH_PATTERN), {})).toEqual([]);
+  });
+});
+
+describe("LiquiditySweepAnchoredStopStrategy", () => {
+  function withIndicators(id: string, indicators: StrategyMarketContext["indicators"]): StrategyMarketContext {
+    return context(id, indicators);
+  }
+
+  function sweep(type: "BULLISH_SWEEP" | "BEARISH_SWEEP", level: number): StrategyMarketContext["indicators"] {
+    return [{ code: "LIQUIDITY_SWEEP", algorithmVersion: "smc-v2", parameters: {}, values: { type, level } }];
+  }
+
+  it("anchors a LONG's stop below a confirming BULLISH_SWEEP level, one tick beyond it", () => {
+    // level=97, tickSize=0.05 -> anchored stop 96.95. entryPrice=100, targetPrice=102.
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withIndicators("c1", sweep("BULLISH_SWEEP", 97)), {});
+    expect(result!.stopLoss).toBeCloseTo(96.95);
+    expect(result!.riskReward).toBeCloseTo(2 / 3.05);
+  });
+
+  it("anchors a SHORT's stop above a confirming BEARISH_SWEEP level, one tick beyond it", () => {
+    // level=103, tickSize=0.05 -> anchored stop 103.05. entryPrice=100, targetPrice=98.
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes("SHORT"));
+    const [result] = anchored.evaluate(withIndicators("c1", sweep("BEARISH_SWEEP", 103)), {});
+    expect(result!.stopLoss).toBeCloseTo(103.05);
+    expect(result!.riskReward).toBeCloseTo(2 / 3.05);
+  });
+
+  it("leaves the proposal untouched when the only sweep present disagrees with the trade's side", () => {
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withIndicators("c1", sweep("BEARISH_SWEEP", 97)), {});
+    expect(result!.stopLoss).toBe(99); // original ATR stop, unchanged
+  });
+
+  it("leaves the proposal untouched when no LIQUIDITY_SWEEP is present at all", () => {
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(context("c1"), {});
+    expect(result!.stopLoss).toBe(99);
+  });
+
+  it("fails closed when the swept level would land on the wrong side of entry", () => {
+    // LONG entry=100, but the sweep level (105) is above entry -- anchoring there is incoherent.
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes("LONG"));
+    const [result] = anchored.evaluate(withIndicators("c1", sweep("BULLISH_SWEEP", 105)), {});
+    expect(result!.stopLoss).toBe(99);
+  });
+
+  it("does not consult indicators when the strategy proposed nothing", () => {
+    const anchored = new LiquiditySweepAnchoredStopStrategy(new AlwaysProposes(null));
+    expect(anchored.evaluate(withIndicators("c1", sweep("BULLISH_SWEEP", 97)), {})).toEqual([]);
+  });
+});
+
+describe("OrderBlockTargetStrategy", () => {
+  function withIndicators(id: string, indicators: StrategyMarketContext["indicators"]): StrategyMarketContext {
+    return context(id, indicators);
+  }
+
+  function orderBlock(
+    type: "BULLISH_OB" | "BEARISH_OB",
+    top: number,
+    bottom: number,
+  ): StrategyMarketContext["indicators"][number] {
+    return { code: "ORDER_BLOCK", algorithmVersion: "smc-v2", parameters: {}, values: { type, top, bottom, blockBarOffset: 1 } };
+  }
+
+  it("retargets a LONG to the near edge of a BEARISH_OB ahead of price", () => {
+    // entry=100, stop=99 (risk 1). Block bottom=105 is ahead -> target 105, reward 5, riskReward 5.
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("LONG"));
+    const [result] = retargeted.evaluate(withIndicators("c1", [orderBlock("BEARISH_OB", 110, 105)]), {});
+    expect(result!.targetPrice).toBeCloseTo(105);
+    expect(result!.riskReward).toBeCloseTo(5);
+  });
+
+  it("retargets a SHORT to the near edge of a BULLISH_OB ahead of price", () => {
+    // entry=100, stop=101 (risk 1). Block top=95 is ahead -> target 95, reward 5, riskReward 5.
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("SHORT"));
+    const [result] = retargeted.evaluate(withIndicators("c1", [orderBlock("BULLISH_OB", 95, 90)]), {});
+    expect(result!.targetPrice).toBeCloseTo(95);
+    expect(result!.riskReward).toBeCloseTo(5);
+  });
+
+  it("picks the nearest of several qualifying blocks", () => {
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("LONG"));
+    const [result] = retargeted.evaluate(
+      withIndicators("c1", [orderBlock("BEARISH_OB", 130, 120), orderBlock("BEARISH_OB", 108, 103)]),
+      {},
+    );
+    expect(result!.targetPrice).toBeCloseTo(103);
+  });
+
+  it("leaves the proposal untouched when the only block present is behind price, not ahead", () => {
+    // A BEARISH_OB whose bottom (95) sits below a LONG's entry (100) is not a target ahead of price.
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("LONG"));
+    const [result] = retargeted.evaluate(withIndicators("c1", [orderBlock("BEARISH_OB", 98, 95)]), {});
+    expect(result!.targetPrice).toBe(102); // original R:R target, unchanged
+  });
+
+  it("leaves the proposal untouched when the only block present is the wrong (agreeing) type", () => {
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("LONG"));
+    const [result] = retargeted.evaluate(withIndicators("c1", [orderBlock("BULLISH_OB", 110, 105)]), {});
+    expect(result!.targetPrice).toBe(102);
+  });
+
+  it("leaves the proposal untouched when no ORDER_BLOCK is present at all", () => {
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes("LONG"));
+    const [result] = retargeted.evaluate(context("c1"), {});
+    expect(result!.targetPrice).toBe(102);
+  });
+
+  it("does not consult indicators when the strategy proposed nothing", () => {
+    const retargeted = new OrderBlockTargetStrategy(new AlwaysProposes(null));
+    expect(retargeted.evaluate(withIndicators("c1", [orderBlock("BEARISH_OB", 110, 105)]), {})).toEqual([]);
+  });
+});
+
+describe("LiquiditySweepLookbackStopStrategy", () => {
+  function sweep(type: "BULLISH_SWEEP" | "BEARISH_SWEEP", level: number): StrategyMarketContext["indicators"] {
+    return [{ code: "LIQUIDITY_SWEEP", algorithmVersion: "smc-v2", parameters: {}, values: { type, level } }];
+  }
+
+  it("anchors to a confirming sweep seen several bars before the proposal, within the lookback", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 5);
+    anchored.evaluate(context("c1", sweep("BULLISH_SWEEP", 97)), {}); // sweep, no proposal yet
+    anchored.evaluate(context("c2"), {});
+    anchored.evaluate(context("c3"), {});
+    inner.setSide("LONG");
+    const [result] = anchored.evaluate(context("c4"), {}); // 3 bars after the sweep, still within lookback=5
+    expect(result!.stopLoss).toBeCloseTo(96.95);
+  });
+
+  it("evicts a sweep older than the lookback window", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 2);
+    anchored.evaluate(context("c1", sweep("BULLISH_SWEEP", 97)), {});
+    anchored.evaluate(context("c2"), {});
+    anchored.evaluate(context("c3"), {}); // buffer (lookback=2) no longer contains c1's sweep
+    inner.setSide("LONG");
+    const [result] = anchored.evaluate(context("c4"), {});
+    expect(result!.stopLoss).toBe(99); // original ATR stop, sweep fell out of the window
+  });
+
+  it("uses the most recent of several confirming sweeps in the buffer", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 5);
+    anchored.evaluate(context("c1", sweep("BULLISH_SWEEP", 97)), {});
+    anchored.evaluate(context("c2", sweep("BULLISH_SWEEP", 95)), {}); // more recent
+    inner.setSide("LONG");
+    const [result] = anchored.evaluate(context("c3"), {});
+    expect(result!.stopLoss).toBeCloseTo(94.95); // anchored to 95, not 97
+  });
+
+  it("ignores a sweep whose direction disagrees with the trade's side", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 5);
+    anchored.evaluate(context("c1", sweep("BEARISH_SWEEP", 97)), {});
+    inner.setSide("LONG");
+    const [result] = anchored.evaluate(context("c2"), {});
+    expect(result!.stopLoss).toBe(99);
+  });
+
+  it("keys the buffer per series, so two instruments do not share sweeps", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 5);
+    anchored.evaluate(context("a1", sweep("BULLISH_SWEEP", 97), { instrumentId: "instrument-1" }), {});
+    inner.setSide("LONG");
+    const [other] = anchored.evaluate(context("b1", [], { instrumentId: "instrument-2" }), {});
+    expect(other!.stopLoss).toBe(99); // instrument-2 has no sweep history of its own
+  });
+
+  it("does not consult the buffer when the strategy proposed nothing, but still records the bar", () => {
+    const inner = new AlwaysProposes(null);
+    const anchored = new LiquiditySweepLookbackStopStrategy(inner, 5);
+    expect(anchored.evaluate(context("c1", sweep("BULLISH_SWEEP", 97)), {})).toEqual([]);
+  });
+});
+
+describe("OrderBlockLookbackTargetStrategy", () => {
+  function orderBlock(
+    type: "BULLISH_OB" | "BEARISH_OB",
+    top: number,
+    bottom: number,
+  ): StrategyMarketContext["indicators"][number] {
+    return { code: "ORDER_BLOCK", algorithmVersion: "smc-v2", parameters: {}, values: { type, top, bottom, blockBarOffset: 1 } };
+  }
+
+  it("retargets to a qualifying block seen several bars before the proposal, within the lookback", () => {
+    const inner = new AlwaysProposes(null);
+    const retargeted = new OrderBlockLookbackTargetStrategy(inner, 5);
+    retargeted.evaluate(context("c1", [orderBlock("BEARISH_OB", 110, 105)]), {});
+    retargeted.evaluate(context("c2"), {});
+    inner.setSide("LONG");
+    const [result] = retargeted.evaluate(context("c3"), {});
+    expect(result!.targetPrice).toBeCloseTo(105);
+  });
+
+  it("evicts a block older than the lookback window", () => {
+    const inner = new AlwaysProposes(null);
+    const retargeted = new OrderBlockLookbackTargetStrategy(inner, 1);
+    retargeted.evaluate(context("c1", [orderBlock("BEARISH_OB", 110, 105)]), {});
+    retargeted.evaluate(context("c2"), {}); // lookback=1: c1's block already evicted
+    inner.setSide("LONG");
+    const [result] = retargeted.evaluate(context("c3"), {});
+    expect(result!.targetPrice).toBe(102); // original R:R target
+  });
+
+  it("picks the nearest of several qualifying blocks across the buffer, not just the most recent", () => {
+    const inner = new AlwaysProposes(null);
+    const retargeted = new OrderBlockLookbackTargetStrategy(inner, 5);
+    retargeted.evaluate(context("c1", [orderBlock("BEARISH_OB", 108, 103)]), {}); // nearer
+    retargeted.evaluate(context("c2", [orderBlock("BEARISH_OB", 130, 120)]), {}); // farther, more recent
+    inner.setSide("LONG");
+    const [result] = retargeted.evaluate(context("c3"), {});
+    expect(result!.targetPrice).toBeCloseTo(103);
+  });
+
+  it("keys the buffer per series, so two instruments do not share blocks", () => {
+    const inner = new AlwaysProposes(null);
+    const retargeted = new OrderBlockLookbackTargetStrategy(inner, 5);
+    retargeted.evaluate(context("a1", [orderBlock("BEARISH_OB", 110, 105)], { instrumentId: "instrument-1" }), {});
+    inner.setSide("LONG");
+    const [other] = retargeted.evaluate(context("b1", [], { instrumentId: "instrument-2" }), {});
+    expect(other!.targetPrice).toBe(102);
+  });
+
+  it("does not consult the buffer when the strategy proposed nothing, but still records the bar", () => {
+    const inner = new AlwaysProposes(null);
+    const retargeted = new OrderBlockLookbackTargetStrategy(inner, 5);
+    expect(retargeted.evaluate(context("c1", [orderBlock("BEARISH_OB", 110, 105)]), {})).toEqual([]);
   });
 });
