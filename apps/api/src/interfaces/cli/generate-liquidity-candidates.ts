@@ -471,7 +471,7 @@ async function main(): Promise<void> {
 }
 
 // Only run when executed directly as a CLI script, not when imported by tests.
-if (process.argv[1]?.endsWith("generate-liquidity-candidates.js")) {
+if (process.argv[1]?.includes("generate-liquidity-candidates")) {
   main().catch((err) => {
     console.error(JSON.stringify({ level: "error", message: String(err) }));
     process.exit(1);

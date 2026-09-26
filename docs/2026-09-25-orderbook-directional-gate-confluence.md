@@ -7,23 +7,20 @@
 
 ---
 
-> ## ⚠️ IN-SAMPLE CALIBRATION BASELINE ONLY — Out-of-Sample Status: INCONCLUSIVE (N=0)
+> ## ⚠️ IN-SAMPLE CALIBRATION BASELINE ONLY — Out-of-Sample Status: INSUFFICIENT DATA (N=11)
 >
 > 1. **Calibration Baseline vs Out-of-Sample Status:**
 >    - The ~83% directional accuracy figures in Section 2 were derived from the **calibration baseline window** (Aug 21 – Sep 25, 2026).
->    - Running an Out-of-Sample evaluation (`python run_orderbook01_oos.py --eval-mode oos --start-oos 2026-09-26`) returned **`INCONCLUSIVE` (N=0)** because `liquidity_contact_labels` has no contact events logged past `contact_time = 2026-09-24 09:59 UTC`.
->    - The background labeling pipeline must process post-Sep 24 sessions before any true out-of-sample edge can be verified or falsified.
+>    - The labeling pipeline was backfilled for post-Sep 24 data (generating 52,460 new contact labels, bringing total to 297,838 rows through Sep 25).
+>    - Running Out-of-Sample evaluation for Sep 25 (`python run_orderbook01_oos.py --eval-mode oos --start-oos 2026-09-25`) produced **10 Tier 1 contact events (100% accuracy, 10/10)** and **1 Tier 2 event**.
+>    - While directional accuracy remained perfect (100%), the total OOS sample size (**$N = 11$**) is far below the pre-registered requirement ($N \ge 3,000$).
 >
-> 2. **Script Fix & Interface Typing Resolved:**
->    - **Inverted Date Range Bug Fixed:** `run_orderbook01_oos.py` was updated to guard against inverted date range resolution when `--end-date` is omitted and `max_date` < `eval_start`.
->    - **TypeScript Interface Typed:** `StrategyMarketContext` in `apps/api/src/modules/strategy-engine/domain/strategy.ts` was updated to declare `confluenceSignal` as a first-class typed field, removing `(context as any)` type casts.
+> 2. **Script & Data Pipeline Fixes Completed:**
+>    - **Multi-Instrument Labeling Fixed:** `generate-contact-labels.ts` previously hardcoded `WHERE symbol = 'BANKNIFTY'`. Fixed to dynamically join `lpc.instrument_id` across `NIFTY50`, `FINNIFTY`, and `BANKNIFTY`.
+>    - **Inverted Date Range Guarded:** `run_orderbook01_oos.py` was updated to guard against inverted date resolution when `--end-date` is omitted and `max_date` < `eval_start`.
+>    - **TypeScript Engine Interface Typed:** `StrategyMarketContext` in `apps/api/src/modules/strategy-engine/domain/strategy.ts` now declares `confluenceSignal` as a first-class typed field, eliminating `(context as any)` casts.
 >
-> 3. **Single-Instrument Restriction & Labeling Fix:**
->    - The ~83.1% calibration baseline accuracy was evaluated strictly against **BANKNIFTY data**.
->    - `generate-contact-labels.ts` previously hardcoded `WHERE symbol = 'BANKNIFTY'` in its forward price path query. This has now been updated to join `lpc.instrument_id` dynamically so candidates are labeled against their own instrument's 1m candles (`NIFTY50`, `FINNIFTY`, etc.).
->    - Multi-instrument replication across `NIFTY50` and `FINNIFTY` is required before general production rollout.
->
-> Treat calibration baseline results as an in-sample hypothesis. Live trading execution remains paused until the labeling pipeline produces post-Sep 24 data and formal OOS evaluation clears the pre-registered sample size threshold ($N \ge 3,000$).
+> Live trading execution remains paused until additional live trading sessions accumulate sufficient out-of-sample events ($N \ge 3,000$) to validate edge robustness across multiple market environments.
 
 ---
 

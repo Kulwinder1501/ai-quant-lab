@@ -317,7 +317,7 @@ function buildInsertQuery(
 
 // ─────────────────────────── Entry point ─────────────────────────────────────
 
-if (process.argv[1]?.endsWith("generate-contact-labels.js")) {
+if (process.argv[1]?.includes("generate-contact-labels")) {
   main().catch((err) => {
     console.error(JSON.stringify({ level: "error", message: String(err) }));
     process.exit(1);
