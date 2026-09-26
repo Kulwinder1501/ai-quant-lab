@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { runDecisionPipeline, type DecisionPipelineInput } from "./decision-pipeline.js";
+import {
+  continuePastThesis,
+  runDecisionPipeline,
+  type DecisionPipelineInput,
+  type DecisionPipelineStages,
+} from "./decision-pipeline.js";
+import { resolveOpportunityCandidates } from "./opportunity-resolver.js";
+import { interpretMarketState } from "./state-interpreter.js";
+import { deriveSideGeometry, thesisBuilderPolicyVersion, type DualSidedThesis } from "./thesis-builder.js";
+import { beginLineage, advanceLineage, type DecisionLineage } from "./decision-lineage.js";
+import { sha256CanonicalJson } from "../../platform/identity/identity.js";
 import type { LegacyPatternObservation, ObservationOrientation } from "../application/pattern-adapter.js";
 import type { InstrumentRiskSnapshot } from "../../platform/risk/risk-snapshot.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
@@ -135,9 +145,83 @@ function input(overrides: Partial<DecisionPipelineInput> = {}): DecisionPipeline
   };
 }
 
+/**
+ * P7-P10 tests can no longer reach that far through `runDecisionPipeline`: `evaluateSide` cannot
+ * produce an APPROVED side without a validated entry rule (thesis-builder.ts's "No validated entry
+ * rule" section), so P6b now always rejects. This rebuilds exactly what P5-P6b's real functions would
+ * have produced (same calls `runDecisionPipeline` makes, already proven correct by the still-passing
+ * "P5 stage-level outcomes"/"dies at P6b" tests below), then hand-builds the thesis via
+ * `deriveSideGeometry` -- the shape a validated rule will actually return -- so P7-P10's own sequencing
+ * and lineage-tracking stay covered via `continuePastThesis`.
+ */
+function approvedThesisFixture(overrides: Partial<DecisionPipelineInput> = {}): {
+  readonly pipelineInput: DecisionPipelineInput;
+  readonly thesis: DualSidedThesis;
+  readonly lineage: DecisionLineage;
+  readonly stages: DecisionPipelineStages;
+} {
+  const pipelineInput = input({ patternObservations: [patternObservation("BIDIRECTIONAL")], ...overrides });
+
+  const opportunityResult = resolveOpportunityCandidates({
+    observations: pipelineInput.patternObservations,
+    patternCoverage: pipelineInput.patternCoverage,
+    instrumentSymbol: pipelineInput.instrumentSymbol,
+    decisionAt: pipelineInput.context.decisionAt,
+  });
+  if (opportunityResult.outcome !== "APPROVED") throw new Error("fixture setup: expected candidates");
+  const candidates = opportunityResult.value;
+  let lineage = beginLineage({
+    decisionId: pipelineInput.decisionId,
+    candidateId: sha256CanonicalJson(candidates.map((candidate) => candidate.candidateId)),
+  });
+
+  const marketStateResult = interpretMarketState({
+    candidate: candidates[0]!,
+    context: pipelineInput.context,
+    volatilityReading: pipelineInput.volatilityReading,
+    institutionalFlow: pipelineInput.institutionalFlow,
+  });
+  if (marketStateResult.outcome !== "APPROVED") throw new Error("fixture setup: interpretMarketState is always APPROVED");
+  const marketState = marketStateResult.value;
+  lineage = advanceLineage({ lineage, to: "MARKET_STATE_INTERPRETED", artifactId: marketState.interpretationId });
+
+  // Mirrors evaluateSide's own orientation-matching exactly (thesis-builder.ts), for the side that HAS
+  // a supporting candidate -- the branch this fixture exists to exercise -- while a side with no
+  // supporting candidate stays NO_ORIENTATION_EVIDENCE, unchanged by whether a rule is validated.
+  const longSupport = candidates.find((c) => c.orientation === "UP" || c.orientation === "BIDIRECTIONAL");
+  const shortSupport = candidates.find((c) => c.orientation === "DOWN" || c.orientation === "BIDIRECTIONAL");
+  const long = longSupport
+    ? deriveSideGeometry({
+        side: "LONG", entryReference: pipelineInput.entryReference, atrValue: pipelineInput.atrValue!,
+        tickSize: pipelineInput.tickSize, supportingCandidate: longSupport,
+      })
+    : ({ outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] } as const);
+  const short = shortSupport
+    ? deriveSideGeometry({
+        side: "SHORT", entryReference: pipelineInput.entryReference, atrValue: pipelineInput.atrValue!,
+        tickSize: pipelineInput.tickSize, supportingCandidate: shortSupport,
+      })
+    : ({ outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] } as const);
+  const thesis: DualSidedThesis = Object.freeze({
+    instrumentSymbol: pipelineInput.instrumentSymbol,
+    decisionAt: pipelineInput.context.decisionAt,
+    observedIn,
+    long,
+    short,
+    policyVersion: thesisBuilderPolicyVersion,
+  });
+  lineage = advanceLineage({ lineage, to: "THESIS_FORMED", artifactId: sha256CanonicalJson(thesis) });
+
+  return { pipelineInput, thesis, lineage, stages: { candidates, marketState, thesis } };
+}
+
 describe("full happy path", () => {
   it("reaches EXECUTED with a complete lineage and a filled LONG side", () => {
-    const run = runDecisionPipeline(input());
+    const { pipelineInput, thesis, lineage, stages } = approvedThesisFixture({
+      patternObservations: [patternObservation("UP")],
+    });
+    const run = continuePastThesis(pipelineInput, thesis, lineage, stages);
+
     expect(run.outcome).toEqual({ kind: "EXECUTED" });
     expect(run.lineage?.entries.map((entry) => entry.state)).toEqual([
       "CANDIDATE_RESOLVED",
@@ -194,10 +278,10 @@ describe("dies at P6b", () => {
 
 describe("dies at P8 (risk gate)", () => {
   it("rejects both sides identically when the account is at the concurrent-position cap", () => {
-    const run = runDecisionPipeline(input({
-      patternObservations: [patternObservation("BIDIRECTIONAL")],
+    const { pipelineInput, thesis, lineage, stages } = approvedThesisFixture({
       accountSnapshot: accountSnapshot({ openPositionCount: 3 }),
-    }));
+    });
+    const run = continuePastThesis(pipelineInput, thesis, lineage, stages);
     expect(run.outcome).toEqual({
       kind: "REJECTED",
       reasons: ["MAX_CONCURRENT_POSITIONS", "MAX_CONCURRENT_POSITIONS"],
@@ -214,7 +298,8 @@ describe("dies at P8 (risk gate)", () => {
 
 describe("P9 stage-level deferral", () => {
   it("defers when no option chain is available, stopping at RISK_APPROVED", () => {
-    const run = runDecisionPipeline(input({ optionChain: null }));
+    const { pipelineInput, thesis, lineage, stages } = approvedThesisFixture({ optionChain: null });
+    const run = continuePastThesis(pipelineInput, thesis, lineage, stages);
     expect(run.outcome.kind).toBe("DEFERRED");
     expect(run.lineage?.entries.map((entry) => entry.state)).toEqual([
       "CANDIDATE_RESOLVED",
@@ -228,10 +313,10 @@ describe("P9 stage-level deferral", () => {
 
 describe("reaches EXECUTED with a mixed fill", () => {
   it("fills LONG while deferring SHORT when only LONG's contract has a fresh quote", () => {
-    const run = runDecisionPipeline(input({
-      patternObservations: [patternObservation("BIDIRECTIONAL")],
+    const { pipelineInput, thesis, lineage, stages } = approvedThesisFixture({
       executionChain: executionChain({ quotes: [quote({ strikePrice: 24_000, optionType: "CE", expiryDate: farExpiry })] }),
-    }));
+    });
+    const run = continuePastThesis(pipelineInput, thesis, lineage, stages);
     expect(run.outcome).toEqual({ kind: "EXECUTED" });
     expect(run.stages.execution?.long.outcome).toBe("APPROVED");
     expect(run.stages.execution?.short.outcome).toBe("DEFERRED");
@@ -240,7 +325,8 @@ describe("reaches EXECUTED with a mixed fill", () => {
 
 describe("both fills dead at P10", () => {
   it("defers even though the lineage reached EXECUTED", () => {
-    const run = runDecisionPipeline(input({ executionChain: null }));
+    const { pipelineInput, thesis, lineage, stages } = approvedThesisFixture({ executionChain: null });
+    const run = continuePastThesis(pipelineInput, thesis, lineage, stages);
     expect(run.outcome.kind).toBe("DEFERRED");
     expect(run.lineage?.entries.map((entry) => entry.state)).toEqual([
       "CANDIDATE_RESOLVED",

@@ -5,6 +5,8 @@ import {
 } from "./decision-pipeline-comparison.js";
 import { legacyThesisComparison } from "./thesis-adapter.js";
 import { runDecisionPipeline, type DecisionPipelineInput, type DecisionPipelineRun } from "../domain/decision-pipeline.js";
+import { deriveSideGeometry, type SideResult } from "../domain/thesis-builder.js";
+import type { OpportunityCandidate } from "../domain/opportunity-resolver.js";
 import type { LegacyPatternObservation, ObservationOrientation } from "./pattern-adapter.js";
 import type { InstrumentRiskSnapshot } from "../../platform/risk/risk-snapshot.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
@@ -159,11 +161,55 @@ describe("neither side approved", () => {
   });
 });
 
+/**
+ * `canonicalDecisionPipelineOutcome` only reads `run.stages.thesis` -- P7-P10/lineage/outcome.kind
+ * are irrelevant to it except as the no-approved-side fallback (see "neither side approved" above,
+ * already covered via the real `runDecisionPipeline`). `evaluateSide` cannot produce an APPROVED side
+ * without a validated entry rule (thesis-builder.ts's "No validated entry rule" section), so these
+ * tests build the thesis stage directly via `deriveSideGeometry` -- the shape a validated rule will
+ * actually return -- rather than through `runDecisionPipeline`.
+ */
+function approvedGeometry(side: "LONG" | "SHORT", overrides: Partial<{
+  entryReference: number; atrValue: number; tickSize: number;
+}> = {}): SideResult {
+  const candidate: OpportunityCandidate = Object.freeze({
+    candidateId: "candidate-hash",
+    instrumentSymbol: "NIFTY50",
+    decisionAt,
+    orientation: side === "LONG" ? "UP" : "DOWN",
+    observedIn,
+    memberObservationHashes: Object.freeze(["a".repeat(64)]),
+    members: Object.freeze([]),
+    groupingPolicyVersion: "OPPORTUNITY_GROUPING_POLICY_V1",
+  });
+  return deriveSideGeometry({
+    side,
+    entryReference: overrides.entryReference ?? 24_000,
+    atrValue: overrides.atrValue ?? 50,
+    tickSize: overrides.tickSize ?? 25,
+    supportingCandidate: candidate,
+  });
+}
+
+function runWithThesis(thesis: DecisionPipelineRun["stages"]["thesis"]): DecisionPipelineRun {
+  return {
+    decisionId: "cmp-fixture",
+    context: context("cmp-fixture"),
+    lineage: null,
+    outcome: { kind: "EXECUTED" },
+    stages: { thesis },
+  };
+}
+
 describe("exactly one side approved", () => {
   it("matches legacyThesisComparison's own output for identical geometry", () => {
-    const run = runDecisionPipeline(input("cmp-long-only"));
-    const long = run.stages.thesis!.long;
+    const long = approvedGeometry("LONG");
     if (long.outcome !== "APPROVED") throw new Error("expected LONG to be approved");
+    const run = runWithThesis({
+      instrumentSymbol: "NIFTY50", decisionAt, observedIn,
+      long, short: { outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] },
+      policyVersion: "TEST",
+    });
 
     const expected = legacyThesisComparison({
       instrumentSymbol: "NIFTY50",
@@ -187,14 +233,14 @@ describe("exactly one side approved", () => {
 
 describe("both sides approved", () => {
   it("labels the run APPROVED_BOTH_SIDES with each side's own canonical string", () => {
-    const run = runDecisionPipeline(input("cmp-both-sides", {
-      patternObservations: [patternObservation("BIDIRECTIONAL")],
-    }));
-    const long = run.stages.thesis!.long;
-    const short = run.stages.thesis!.short;
+    const long = approvedGeometry("LONG");
+    const short = approvedGeometry("SHORT");
     if (long.outcome !== "APPROVED" || short.outcome !== "APPROVED") {
       throw new Error("expected both sides to be approved for this fixture");
     }
+    const run = runWithThesis({
+      instrumentSymbol: "NIFTY50", decisionAt, observedIn, long, short, policyVersion: "TEST",
+    });
 
     const longExpected = legacyThesisComparison({
       instrumentSymbol: "NIFTY50",
@@ -215,13 +261,13 @@ describe("both sides approved", () => {
 
 describe("quantisation matches legacyThesisComparison's own rounding", () => {
   it("produces the identical string for geometry carrying float noise past 2 decimals", () => {
-    const run = runDecisionPipeline(input("cmp-quantised", {
-      entryReference: 24_000.126,
-      tickSize: 0.01,
-      atrValue: 49.987,
-    }));
-    const long = run.stages.thesis!.long;
+    const long = approvedGeometry("LONG", { entryReference: 24_000.126, tickSize: 0.01, atrValue: 49.987 });
     if (long.outcome !== "APPROVED") throw new Error("expected LONG to be approved");
+    const run = runWithThesis({
+      instrumentSymbol: "NIFTY50", decisionAt, observedIn,
+      long, short: { outcome: "REJECTED", reasons: ["NO_ORIENTATION_EVIDENCE"] },
+      policyVersion: "TEST",
+    });
 
     const independentlyRounded = legacyThesisComparison({
       instrumentSymbol: "NIFTY50",
