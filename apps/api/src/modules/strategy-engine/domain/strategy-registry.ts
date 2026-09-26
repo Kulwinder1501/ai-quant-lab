@@ -294,8 +294,16 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * identical sibling `momentum-scalp-index` was disabled the same day for the same structural cost
      * reason (74% of the loss); keeping this one running would be re-learning that loss on a second
      * account. Registered, so idea generation, the research twin and this reasoning survive.
+     *
+     * Re-enabled 2026-09-26, both sides, by explicit user decision -- a deliberate re-test, not a
+     * finding that overturns the -Rs 10,209 record above. `selectPriorityPattern`'s alphabetical-vs-
+     * priority tie-break fix (same file, above `BULLISH_PATTERNS`/`BEARISH_PATTERNS`) landed the same
+     * day, but per its own header comment it only changes which pattern is *credited* in evidence/
+     * confidence -- the LONG/SHORT score gate never read which candidate was selected, only whether
+     * one was present, so it could not have changed a single entry, exit, or the P&L above. This
+     * re-enable carries no new evidence of its own; the next live record should be measured against
+     * the same -Rs 10,209/78-trade baseline before trusting it.
      */
-    executableSides: [],
   },
   {
     registration: momentumScalpPatternStrategyV2Registration,

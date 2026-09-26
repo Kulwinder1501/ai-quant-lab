@@ -55,17 +55,19 @@ describe("strategy registry", () => {
     expect(new StrategyClass()).not.toBe(new StrategyClass());
   });
 
-  it("disables the pattern confluence scalp entirely, on its full losing record", () => {
+  it("re-enables the pattern confluence scalp for a deliberate re-test, both sides", () => {
     /*
-     * Short-only from 2026-09-02, then both sides disabled 2026-09-03. The short cell that "nothing
-     * measured argued against" (+Rs 424 over 32 trades) turned: over the full live record the
-     * strategy is -Rs 10,209 (78 trades, all in AutoBot-Sniper), 23% of the account's total loss.
-     * Its sibling `momentum-scalp-index` was disabled the same day for the same structural cost
-     * reason, so keeping this near-identical strategy running would re-learn a known loss.
+     * Disabled entirely 2026-09-03 on a -Rs 10,209/78-trade record (23% of the account's total
+     * loss); re-enabled 2026-09-26 by explicit user decision, not by new evidence. The same-day
+     * `selectPriorityPattern` fix (alphabetical-vs-priority tie-break) only changes which pattern is
+     * credited in evidence/confidence -- the LONG/SHORT score gate never read which candidate was
+     * selected, so it could not have changed the entries/exits behind that -Rs 10,209 record. This
+     * re-enable carries no new evidence of its own; the next live record should be measured against
+     * that same baseline before trusting it.
      */
     const patternScalp = requireRegisteredStrategy("momentum-scalp-pattern");
 
-    expect(strategyExecutableSides(patternScalp)).toEqual([]);
+    expect(strategyExecutableSides(patternScalp)).toEqual(["LONG", "SHORT"]);
   });
 
   it("disables the v2 pattern scalp entirely, on asymmetric evidence", () => {
@@ -118,7 +120,7 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2",
+      "momentum-scalp-index", "momentum-scalp-pattern-v2",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
