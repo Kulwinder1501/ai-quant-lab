@@ -15,6 +15,7 @@ import {
   strategySupportsTimeframe,
 } from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
+import { applyOrderbookGateToProposal } from "../domain/orderbook-directional-gate.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -188,9 +189,10 @@ export class GenerateTradeIdeas {
 
         const strategy = new StrategyClass();
         const rawProposals = strategy.evaluate(context, strategyVersion.configuration);
-        let proposals = registration.strategyKey === "ict-structure-v1"
-          ? rawProposals
-          : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
+        let proposals = rawProposals.map((proposal) => {
+          const withSmc = registration.strategyKey === "ict-structure-v1" ? proposal : applySmcConfluenceToProposal(context, proposal);
+          return applyOrderbookGateToProposal(withSmc, context.confluenceSignal);
+        });
         /*
          * The strategy's own declared sides first, then the caller's optional narrowing.
          *

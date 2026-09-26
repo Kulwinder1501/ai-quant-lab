@@ -15,6 +15,7 @@ import {
   type HigherTimeframeResolverOptions,
 } from "../../modules/strategy-engine/domain/higher-timeframe-resolver.js";
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
+import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
 import {
   ICT_STRUCTURE_STRATEGY_KEY,
@@ -26,6 +27,8 @@ import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arg
 import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
+  LiquiditySweepBiasFilteredStrategy,
+  PatternConfluenceFilteredStrategy,
   RelativeVolumeFilteredStrategy,
   PatternAlignmentFilteredStrategy,
   PatternAnchoredStopStrategy,
@@ -140,6 +143,57 @@ class IctDecoratedMarketData implements BacktestMarketDataRepository {
 }
 
 /**
+ * Replicates the live `generate-trade-ideas` HTF attachment path for backtesting.
+ *
+ * Unlike `HigherTimeframeDecoratedMarketData` (which synthesises HTF bars from OHLCV aggregation
+ * and therefore carries no precomputed indicators), this decorator queries the native stored candle
+ * rows via `findCompletedBefore`. Each stored candle already has its full indicator set attached —
+ * EMA, RSI, ATR, and critically the SMC signals (LIQUIDITY_SWEEP, CHOCH, ORDER_BLOCK, etc.) — so
+ * a liquidity-sweep bias filter can actually read them.
+ *
+ * Trade-off: fires one DB query per 1m base bar per HTF timeframe (~30k extra queries for a
+ * 3-month window). Meaningfully slower than the synthetic decorator but produces identical
+ * behaviour to what the live pipeline sees, which is the point.
+ */
+class NativeHtfDecoratedMarketData implements BacktestMarketDataRepository {
+  constructor(
+    private readonly inner: BacktestMarketDataRepository,
+    private readonly contextRepo: PostgresStrategyMarketContextRepository,
+    private readonly htfTimeframes: readonly string[],
+  ) {}
+
+  async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
+    const contexts = await this.inner.listContexts(input);
+    return Promise.all(contexts.map(async (ctx) => {
+      const attached: Record<string, unknown> = {};
+      for (const tf of this.htfTimeframes) {
+        const htf = await this.contextRepo.findCompletedBefore({
+          instrumentId: ctx.candle.instrumentId,
+          timeframe: tf,
+          asOf: ctx.candle.closeTime,
+        });
+        if (!htf) continue;
+        // Anti-lookahead: the stored bar must have closed before this 1m bar
+        if (htf.candle.closeTime.getTime() > ctx.candle.closeTime.getTime()) continue;
+        attached[tf] = htf;
+      }
+      return Object.keys(attached).length > 0
+        ? { ...ctx, higherTimeframeContexts: attached as never }
+        : ctx;
+    }));
+  }
+}
+
+/** Parses `--native-htf 15m` or `--native-htf 15m,30m` into a list of timeframe strings. */
+function parseNativeHtfTimeframes(argumentsList: string[]): readonly string[] | null {
+  const raw = getOption(argumentsList, "native-htf")?.trim();
+  if (!raw) return null;
+  const tfs = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (tfs.length === 0) throw new Error("--native-htf was empty.");
+  return tfs;
+}
+
+/**
  * The engine config for this run, which until now was always the default.
  *
  * `--ict-inverted-poi` is the one knob exposed, because it is the only engine setting whose effect
@@ -199,6 +253,7 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
 
 type BacktestEntryFilter =
   | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP"
+  | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M"
   | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
   | "RVOL_1" | "RVOL_2" | "RVOL_3"
   | "SMC_GATE_ON" | "SMC_GATE_OFF"
@@ -224,6 +279,9 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "none") return "NONE";
   if (raw === "ema-strength-015") return "EMA_STRENGTH_015_ATR";
   if (raw === "fresh-setup") return "FRESH_SETUP";
+  if (raw === "pattern-confluence") return "PATTERN_CONFLUENCE";
+  if (raw === "liquidity-sweep-bias-15m") return "LIQUIDITY_SWEEP_BIAS_15M";
+  if (raw === "liquidity-sweep-bias-30m") return "LIQUIDITY_SWEEP_BIAS_30M";
   if (raw === "trading-window-a") return "TRADING_WINDOW_A";
   if (raw === "trading-window-b") return "TRADING_WINDOW_B";
   if (raw === "trading-window-c") return "TRADING_WINDOW_C";
@@ -242,7 +300,8 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "liquidity-lookback-both") return "LIQUIDITY_LOOKBACK_BOTH";
   if (raw === "liquidity-lookback-target-20") return "LIQUIDITY_LOOKBACK_TARGET_20";
   throw new Error(
-    "--entry-filter must be none, ema-strength-015, fresh-setup, trading-window-a, "
+    "--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, "
+    + "liquidity-sweep-bias-15m, liquidity-sweep-bias-30m, trading-window-a, "
     + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, "
     + "smc-gate-off, pattern-alignment, pattern-anchored-stop, liquidity-stop, "
     + "liquidity-target, liquidity-both, liquidity-lookback-stop, "
@@ -312,12 +371,22 @@ async function main(): Promise<void> {
 
     const configurationOverride = parseStrategyConfigurationOverride(argumentsList);
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
+    const nativeHtfTimeframes = parseNativeHtfTimeframes(argumentsList);
+    
     let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
       ? new PostgresBacktestMarketDataRepository(database)
       : new HigherTimeframeDecoratedMarketData(
         new PostgresBacktestMarketDataRepository(database),
         higherTimeframeBuckets,
       );
+
+    if (nativeHtfTimeframes !== null) {
+      marketData = new NativeHtfDecoratedMarketData(
+        marketData,
+        new PostgresStrategyMarketContextRepository(database),
+        nativeHtfTimeframes,
+      );
+    }
     // The ICT strategy reads its four-pillar snapshot from the context; attach it
     // in the replay builder. Incumbent strategies never see this decoration.
     if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
@@ -329,36 +398,42 @@ async function main(): Promise<void> {
       ? new EmaStrengthFilteredStrategy(strategyEvaluator)
       : entryFilter === "FRESH_SETUP"
         ? new FreshSetupFilteredStrategy(strategyEvaluator)
-        : entryFilter === "TRADING_WINDOW_A" || entryFilter === "TRADING_WINDOW_B" || entryFilter === "TRADING_WINDOW_C"
-          ? new TimeWindowFilteredStrategy(strategyEvaluator, TRADING_WINDOW_CONFIGS[entryFilter])
-          : entryFilter === "RVOL_1" || entryFilter === "RVOL_2" || entryFilter === "RVOL_3"
-            ? new RelativeVolumeFilteredStrategy(
-              strategyEvaluator, RVOL_CONFIGS[entryFilter].multiple, RVOL_CONFIGS[entryFilter].lookback,
-            )
-            : entryFilter === "SMC_GATE_ON" || entryFilter === "SMC_GATE_OFF"
-              ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
-              : entryFilter === "PATTERN_ALIGNMENT"
-                ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
-                : entryFilter === "PATTERN_ANCHORED_STOP"
-                  ? new PatternAnchoredStopStrategy(strategyEvaluator)
-                  : entryFilter === "LIQUIDITY_STOP"
-                    ? new LiquiditySweepAnchoredStopStrategy(strategyEvaluator)
-                    : entryFilter === "LIQUIDITY_TARGET"
-                      ? new OrderBlockTargetStrategy(strategyEvaluator)
-                      : entryFilter === "LIQUIDITY_BOTH"
-                        ? new OrderBlockTargetStrategy(new LiquiditySweepAnchoredStopStrategy(strategyEvaluator))
-                        : entryFilter === "LIQUIDITY_LOOKBACK_STOP"
-                          ? new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
-                          : entryFilter === "LIQUIDITY_LOOKBACK_TARGET"
-                            ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
-                            : entryFilter === "LIQUIDITY_LOOKBACK_BOTH"
-                              ? new OrderBlockLookbackTargetStrategy(
-                                new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS),
-                                LIQUIDITY_LOOKBACK_BARS,
-                              )
-                              : entryFilter === "LIQUIDITY_LOOKBACK_TARGET_20"
-                                ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS_WIDE)
-                                : strategyEvaluator;
+        : entryFilter === "PATTERN_CONFLUENCE"
+          ? new PatternConfluenceFilteredStrategy(strategyEvaluator)
+          : entryFilter === "LIQUIDITY_SWEEP_BIAS_15M"
+            ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "15m")
+            : entryFilter === "LIQUIDITY_SWEEP_BIAS_30M"
+              ? new LiquiditySweepBiasFilteredStrategy(strategyEvaluator, "30m")
+              : entryFilter === "TRADING_WINDOW_A" || entryFilter === "TRADING_WINDOW_B" || entryFilter === "TRADING_WINDOW_C"
+                ? new TimeWindowFilteredStrategy(strategyEvaluator, TRADING_WINDOW_CONFIGS[entryFilter])
+                : entryFilter === "RVOL_1" || entryFilter === "RVOL_2" || entryFilter === "RVOL_3"
+                  ? new RelativeVolumeFilteredStrategy(
+                    strategyEvaluator, RVOL_CONFIGS[entryFilter].multiple, RVOL_CONFIGS[entryFilter].lookback,
+                  )
+                  : entryFilter === "SMC_GATE_ON" || entryFilter === "SMC_GATE_OFF"
+                    ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
+                    : entryFilter === "PATTERN_ALIGNMENT"
+                      ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
+                      : entryFilter === "PATTERN_ANCHORED_STOP"
+                        ? new PatternAnchoredStopStrategy(strategyEvaluator)
+                        : entryFilter === "LIQUIDITY_STOP"
+                          ? new LiquiditySweepAnchoredStopStrategy(strategyEvaluator)
+                          : entryFilter === "LIQUIDITY_TARGET"
+                            ? new OrderBlockTargetStrategy(strategyEvaluator)
+                            : entryFilter === "LIQUIDITY_BOTH"
+                              ? new OrderBlockTargetStrategy(new LiquiditySweepAnchoredStopStrategy(strategyEvaluator))
+                              : entryFilter === "LIQUIDITY_LOOKBACK_STOP"
+                                ? new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                                : entryFilter === "LIQUIDITY_LOOKBACK_TARGET"
+                                  ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                                  : entryFilter === "LIQUIDITY_LOOKBACK_BOTH"
+                                    ? new OrderBlockLookbackTargetStrategy(
+                                      new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS),
+                                      LIQUIDITY_LOOKBACK_BARS,
+                                    )
+                                    : entryFilter === "LIQUIDITY_LOOKBACK_TARGET_20"
+                                      ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS_WIDE)
+                                      : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,

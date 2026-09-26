@@ -1,0 +1,33 @@
+{
+  "pre_registration": "ORDERBOOK-01",
+  "eval_mode": "oos",
+  "eval_start": "2026-09-26",
+  "eval_end": "2026-09-26",
+  "h1_r": {
+    "status": "INSUFFICIENT_DATA",
+    "n": 0,
+    "accuracy": 0.0,
+    "binomial_p": 1.0,
+    "per_level": {},
+    "level_types_passed": 0,
+    "reason": "Zero matched Tier 1 contact events in period."
+  },
+  "h1_m": {
+    "status": "INSUFFICIENT_DATA",
+    "n": 0,
+    "accuracy": 0.0,
+    "binomial_p": 1.0,
+    "reason": "Zero matched Tier 2 (PDL) contact events in period."
+  },
+  "h2": {
+    "status": "INSUFFICIENT_DATA",
+    "n": 0,
+    "quartiles": {},
+    "q4_minus_q1": 0.0,
+    "permutation_p": 1.0,
+    "reason": "Fewer than 100 events available for quartile test."
+  },
+  "verdict": "INCONCLUSIVE",
+  "verdict_description": "OOS data incomplete or threshold sample size not yet reached.",
+  "executed_at": "2026-09-26T14:53:30.533319+05:30"
+}

@@ -481,3 +481,43 @@ describe("IctStructureStrategy Balanced Price Range consideration (entry-model a
     expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { considerBpr: true })).toHaveLength(1);
   });
 });
+
+describe("IctStructureStrategy Liquidity Response Discrimination", () => {
+  it("approves entry when a high-confidence structural swing sweep occurs", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [] }, // No OB, no FVG
+      structure: {
+        trend: "BULLISH",
+        lastHL: { price: 90 },
+        lastEvent: {
+          type: "SWEEP",
+          direction: "BULLISH",
+          isWickOnly: true,
+          brokenPivot: { type: "LOW" },
+        },
+      },
+    });
+
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), {});
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.evidence.poiEvidence).toContain("Structural swing");
+  });
+
+  it("rejects entry on a PDL sweep because PDL has a historical ~67% breakout bias", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [] },
+      sessionLevels: {
+        levels: { pdh: 120, pdl: 90 },
+        lastSweepEvent: {
+          eventType: "SWEEP",
+          levelType: "PDL",
+          penetrationBps: 25, // Deep penetration (> 15 bps) -> breakout favored
+          reclaimDistanceBps: 0,
+        },
+      },
+    });
+
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), {});
+    expect(proposals).toHaveLength(0);
+  });
+});

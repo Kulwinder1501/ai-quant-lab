@@ -361,3 +361,19 @@ describe("Candidate Dataset mapping", () => {
     expect(Object.isFrozen(entry)).toBe(true);
   });
 });
+
+describe("Empirical Liquidity Intelligence Rule integration", () => {
+  it("approves a supported side when enableEmpiricalLiquidityRule is true", () => {
+    const thesis = approvedThesis({
+      candidates: [candidate({ orientation: "UP" })],
+      enableEmpiricalLiquidityRule: true,
+    });
+    expect(thesis.long.outcome).toBe("APPROVED");
+    if (thesis.long.outcome === "APPROVED") {
+      expect(thesis.long.value.side).toBe("LONG");
+      expect(thesis.long.value.conviction).toBe("ORIENTATION_SUPPORTED");
+    }
+    expect(thesis.short.outcome).toBe("REJECTED");
+  });
+});
+

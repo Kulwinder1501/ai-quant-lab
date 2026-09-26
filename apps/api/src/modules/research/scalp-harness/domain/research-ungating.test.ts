@@ -25,10 +25,11 @@ describe("research strategy ungating", () => {
     // A version string must mean one definition forever; the gated captures live under the old keys.
     // `pattern-v4-research-v2` is the Pattern Intelligence sibling cohort: a separate key running in
     // parallel, deliberately not a replacement for `pattern-v4-research`, whose rows keep their
-    // meaning.
+    // meaning. Generation 1 itself now runs as `pattern-v5-research`, carried forward when
+    // momentum-scalp-pattern-strategy.ts's trigger-selection fix moved its implementation checksum.
     expect(Object.keys(byKey).sort()).toEqual([
       "index-v3-research", "momentum-v10-research", "momentum-v11-research", "momentum-v9-research",
-      "pattern-v4-research", "pattern-v4-research-v2",
+      "pattern-v4-research-v2", "pattern-v5-research",
     ]);
   });
 
@@ -53,8 +54,8 @@ describe("research strategy ungating", () => {
     // wrong key would leave its 5-of-9 confluence gate fully active while looking ungated.
     expect(byKey["momentum-v9-research"]!.definition.configuration.minimumConfidence).toBe(0);
     expect(byKey["index-v3-research"]!.definition.configuration.minimumConfidence).toBe(0);
-    expect(byKey["pattern-v4-research"]!.definition.configuration.scoreThreshold).toBe(0);
-    expect(byKey["pattern-v4-research"]!.definition.configuration.minimumConfidence).toBeUndefined();
+    expect(byKey["pattern-v5-research"]!.definition.configuration.scoreThreshold).toBe(0);
+    expect(byKey["pattern-v5-research"]!.definition.configuration.minimumConfidence).toBeUndefined();
   });
 
   it("keeps the trigger conditions that define a setup", () => {

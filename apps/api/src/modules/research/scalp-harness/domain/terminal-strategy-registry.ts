@@ -402,6 +402,29 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
     },
   },
   {
+    /*
+     * V5 carried forward against the corrected trigger-selection logic in
+     * momentum-scalp-pattern-strategy.ts (selectPriorityPattern, 2026-09-22), exactly the shape
+     * pattern-v4-research-v2 already established for a generation-2 retry of a TERMINAL parent: the
+     * parent's verdict was measured against evidence the fix shows was wrong on ~47% of multi-pattern
+     * candles, so it cannot be assumed to still hold, and this is a new cohort from zero rather than a
+     * repin. RESEARCH until it accumulates enough rows to reach its own verdict.
+     */
+    strategyKey: "pattern-v5-research",
+    // Wraps MomentumScalpPatternStrategyV2, so the twin is the v2 operational key.
+    operationalStrategyKey: "momentum-scalp-pattern-v2",
+    researchVersion: 5,
+    researchStatus: "RESEARCH",
+    productionEligibility: "NOT_YET_ELIGIBLE",
+    closureReason: null,
+    pinnedDefinitionHash: "408f2aa9dd8528e6143f21055036e2919ff834006f07aadec0d7bd66ac59c2b0",
+    lineage: {
+      parentStrategyKey: "pattern-v4-research",
+      parentResearchVersion: 4,
+      parentTerminalReason: PATTERN_V4_TERMINAL_REASON,
+    },
+  },
+  {
     strategyKey: "momentum-v4-research",
     operationalStrategyKey: null,
     researchVersion: 4,
@@ -436,14 +459,18 @@ export const researchStrategyRegistry: readonly RegisteredResearchStrategy[] = [
 /**
  * The explicit per-strategy benchmark opt-in §2 requires.
  *
- * Both terminal strategies are listed, so capture behaviour is unchanged by the introduction of this
- * registry. That is intentional: a registry that silently removed 60% of opportunities on the day it
- * landed would be indistinguishable from a regression, and §2 requires the change to happen on a
- * recorded session boundary.
+ * Both terminal strategies were listed when this registry landed, so capture behaviour was unchanged
+ * by its introduction. That is intentional: a registry that silently removed 60% of opportunities on
+ * the day it landed would be indistinguishable from a regression, and §2 requires the change to happen
+ * on a recorded session boundary.
+ *
+ * `pattern-v4-research` dropped off this list when momentum-scalp-pattern-strategy.ts's trigger-selection
+ * fix forced it to continue as `pattern-v5-research` (RESEARCH, not TERMINAL) -- see the note on
+ * `patternDefinition` in research-strategies.ts. It has no adapter under its old key any more, so
+ * listing it here would opt in a strategy that can never run.
  */
 export const benchmarkResearchStrategyKeys: readonly string[] = [
   "index-v3-research",
-  "pattern-v4-research",
 ];
 
 export function registryEntryFor(strategyKey: string): RegisteredResearchStrategy | null {
