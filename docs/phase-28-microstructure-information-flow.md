@@ -558,3 +558,63 @@ price move over the next 30-60s at this feed's cadence — the opposite of naive
 intuition. Plausible readings (not yet distinguished): retail/algo flow chasing that liquidity
 providers absorb and fade, or an artifact of futures-specific microstructure at this contract's
 current liquidity. Not investigated further here — first priority is replication, not explanation.
+
+## 9. Second forward-blind window (2026-09-18): DOES NOT REPLICATE
+
+The second independent window §8 called for is now available: 2026-09-17 (38,583 frames) and
+2026-09-18 (39,602 frames), both genuinely clean under the Long-unwrap decode fix
+([[depth-collector-long-unwrap-bug]]) — confirmed via `count(distinct sequence_no)` ≈ frame count on
+both days, not just a frame-count floor (the 2026-09-15/09-16 gap in between was corrupted by that
+same bug and correctly excluded, never evaluated as if it were clean).
+
+```
+npx tsx src/interfaces/cli/evaluate-ofi-signal.ts --symbol=NSE:BANKNIFTY26SEPFUT \
+  --from=2026-09-17T03:38:11.848Z --to=2026-09-18T11:50:17.558Z --horizons=30000,60000 --seed=1
+```
+
+Sequence health: `RECONSTRUCTIBLE`, 78,185 frames, 0 duplicates, 0 missed sequences, span 1,932
+minutes (real trading ends at market close 10:00 UTC on 09-18; a single post-close straggler frame
+at 11:50 UTC does not affect the read).
+
+| horizon | verdict | IC | 95% CI | placebo band |
+|---|---|---|---|---|
+| 30s | PASS (on its own terms) | **+0.0764** | [0.0669, 0.0844] | 0.0242 (wrong-day-matched-time) |
+| 60s | PASS (on its own terms) | **+0.0724** | [0.0635, 0.0835] | 0.0271 (wrong-day-matched-time) |
+
+Compare to §8's first window: 30s −0.0807 [−0.0894, −0.0722], 60s −0.0783 [−0.0880, −0.0687].
+
+**Same rough magnitude (0.07-0.08 at both horizons), opposite sign, both individually statistically
+clean.** Per §5's own pre-registered kill condition and the explicit instruction that governed this
+check ("either horizon flips to NO_SIGNAL, FAIL_NEGATIVE_LAG, or reverses sign → the first window
+does NOT replicate. Say that plainly too — do not soften this or explain it away"): **this is a sign
+reversal on both horizons. Verdict: DOES NOT REPLICATE.**
+
+Each window individually clears its own internal placebo band, so within a single 2-day window this
+signal is not noise -- but *which* direction it points in is not stable across windows, which is a
+stronger disqualifier than a clean null would have been. A signal whose sign flips between two
+otherwise-clean measurements is not measuring a persistent property of this market; at best it is
+measuring something conditional on a variable this programme has not identified (a regime, a specific
+liquidity state, a rollover effect) and has not controlled for. Promoting the §8 result to
+"established" on the strength of one window, before this check ran, would have been exactly the
+mistake the programme's own kill-condition discipline exists to prevent.
+
+**Status: closed, not advanced.** Order-flow imbalance on `NSE:BANKNIFTY26SEPFUT` depth, at this
+harness's current 5s window and 1-level touch-only construction, is not an established signal.
+Re-opening this would need a *new* hypothesis about what the sign depends on (time of day, days to
+expiry, absolute volatility, direction of the underlying move) — pre-registered before looking at any
+further data — not a third window run the same way as the first two, which would just be sampling
+the same unresolved coin-flip a third time.
+
+**Checked, not assumed: the sign flip is not a pooling artifact.** The combined window contains
+several tiny broken capture fragments (`ad6ded29...`: 2 frames over 46 minutes, `e0604e6a...`: 1
+frame, `20d62a8b...`: 19 frames before the real 09-18 session took over) mixed in with the two
+dominant sessions -- these were checked directly against `depth_frames.capture_session_id`, not
+assumed absent from the earlier day-level `distinct_seq` ratio, which was too coarse to surface them
+(3+19 stray frames out of 78,185 don't move a day-level ratio). Each starts its own tiny OFI segment
+and contributes negligible observations regardless. More importantly, **09-17 and 09-18 were each
+re-evaluated standalone** (single-day, so the placebo band is degenerate there and the verdict is not
+trusted -- only the *real* IC's sign and magnitude are, which the degenerate placebo does not affect):
+09-17 alone gives +0.0850 (30s) / +0.0648 (60s); 09-18 alone gives +0.0653 (30s) / +0.0828 (60s). All
+four numbers agree in sign and sit in the same 0.065-0.085 range -- the positive window-2 result is
+not one unusual day dominating a pooled average, it is the same effect present on both days
+independently. That rules out the stray fragments and day-pooling as the explanation for the flip.

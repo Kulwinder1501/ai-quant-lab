@@ -260,3 +260,100 @@ already closed killzone, OTE and poiPreference in the table above.
 **Verdict: NO_EDGE**, exactly the pre-registered expectation. The arm stays in the tree behind its
 default-off switch with this measurement attached, same as the other three, and is not deployed to
 either live bot.
+
+## Amendment 4 — 2026-09-23, a fifth arm (CISD: Change in State of Delivery)
+
+`requireCisdConfirmation` (`cisd.ts`, `ict-structure-strategy.ts`) rejects a trade unless a Change in
+State of Delivery -- a candle closing beyond the *open of the immediately preceding same-direction
+candle run* -- confirmed in the trade's own direction within the last `maxCisdAgeBars` (10) bars.
+Doctrine researched against two independent sources before implementation, not inferred from
+memory: [innercircletrader.net](https://innercircletrader.net/tutorials/ict-change-in-the-state-of-delivery/),
+[liquidityscan.io](https://liquidityscan.io/blog/what-is-cisd-change-in-state-of-delivery-ict). Both
+are explicit that CISD alone is weak evidence and gains conviction specifically from being checked
+inside an existing PD-Array tap -- which `requirePoiReaction` (arm 1, already required) already is,
+so this arm asks whether requiring the delivery-shift confirmation *on top of* that tap improves
+anything, not whether CISD works standalone. 11 unit tests in `cisd.test.ts` pin the algorithm
+against hand-verified scenarios (leg-open vs last-candle-open, wick-only rejection, single-generation
+tracking, delayed multi-candle confirmation, prefix invariance) before this measurement was run.
+
+Measured 2026-09-23 on the same two live cells and the same params as Amendment 3 (concurrency 5,
+5,000,000 capital, 2bps slippage), control re-run fresh rather than reused from Amendment 3's table --
+see the note on control drift below:
+
+| cell | control: trades, net | CISD arm: trades, net | Δ net | population cut |
+|---|---|---|---|---|
+| NIFTY50 15m 2025 | 85, +9,483.50 | 45, +9,676.30 | **+192.80** | 47% |
+| NIFTY50 15m 2026 holdout | 114, -5,346.00 | 59, -1,495.90 | **+3,850.10** | 48% |
+| BANKNIFTY 5m 2026 | 102, +4,319.60 | 85, -1,742.50 | **-6,062.10** | 17% |
+
+Both NIFTY50 windows improve, one substantially. BANKNIFTY flips from profitable to a loss, a
+-6,062.10 swing. **Gate 1 (sign replication across instruments) fails** -- the identical
+non-replication signature as killzone, OTE, poiPreference, and `requireProtectedLevelIntact` before
+it. This is now the fifth arm registered against these two live cells and the fifth to show the same
+shape: NIFTY50 likes the filter, BANKNIFTY does not, and nothing about the filter's own doctrine
+predicts which cell should win. That regularity is itself evidence about the cells, not about any
+one arm -- five different, doctrinally unrelated filters cannot all coincidentally target
+BANKNIFTY's genuine losers and NIFTY50's genuine winners; far more likely each arm is just
+re-partitioning a book too thin to have a stable sign in the first place, exactly Amendment 3's
+"binding constraint is power, not the doctrine" finding restated a fifth time.
+
+**Verdict: NO_EDGE.** Stays in the tree behind its default-off switch, not deployed to either live
+bot, same disposition as every arm before it.
+
+**A note on control drift.** This amendment's freshly re-run control does not exactly match
+Amendment 3's control table a day later: NIFTY50 2026 holdout was -8,190.00 there and is -5,346.00
+here on the identical 114 trades; BANKNIFTY 2026 was +3,832.35 there and is +4,319.60 here on the
+identical 102 trades. Same signals, different P&L -- consistent with ordinary overnight candle-gap
+healing revising a handful of historical bars between the two measurement dates, not with anything
+in this arm's own wiring (the `cisd` field is purely additive to the composite snapshot and this
+arm's own code path is a no-op whenever `requireCisdConfirmation` is unset). Reported rather than
+smoothed over: the paired control-vs-arm comparison within this same session is internally
+consistent regardless, but a table compared across dates should not be read to the rupee.
+
+
+## Amendment 5 -- 2026-09-23, two more arms in the same session (breaker/mitigation POI, Balanced Price Range)
+
+**`invertedBlocksRemainPoi` was already fully built** (`zones.ts`s `failBlock`, the `MITIGATION`/`BREAKER`
+`OrderBlockKind` split, "swing was taken" distinguishing the two) but had never been measured as its own
+entry-model arm -- only exposed as an engine-level CLI flag (`--ict-inverted-poi`). Measured on the same
+three cells, same params as Amendments 3-4:
+
+| cell | control: trades, net | inverted-POI: trades, net | Delta net |
+|---|---|---|---|
+| NIFTY50 15m 2025 | 85, +9,483.50 | 94, +10,237.15 | **+753.65** |
+| NIFTY50 15m 2026 holdout | 114, -5,346.00 | 118, -5,556.60 | **-210.60** |
+| BANKNIFTY 5m 2026 | 102, +4,319.60 | 106, -842.05 | **-5,161.65** |
+
+Worse than every arm before it: this one does not even get internal NIFTY50 agreement (2025 improves,
+the 2026 holdout worsens slightly), and BANKNIFTY again flips to a loss. **Verdict: NO_EDGE**, sixth arm
+in a row against these two cells.
+
+**`considerBpr`** (`bpr.ts`) adds a Balanced Price Range -- the overlap of two opposing fair value gaps,
+doctrine researched and cited in the module -- as a fourth POI candidate, checked ahead of the existing
+block/gap/sweep search when enabled. Measured on the same three cells:
+
+| cell | control | BPR arm |
+|---|---|---|
+| NIFTY50 15m 2025 | 85 trades, +9,483.50 | 85 trades, +9,483.50 (identical) |
+| NIFTY50 15m 2026 holdout | 114 trades, -5,346.00 | 114 trades, -5,346.00 (identical) |
+| BANKNIFTY 5m 2026 | 102 trades, +4,319.60 | 102 trades, +4,319.60 (identical) |
+
+Byte-identical on all three cells -- confirmed not a wiring bug by direct instrumentation: BPRs form
+constantly (present on 5,409 of 6,180 NIFTY50 2025 bars, up to 65 simultaneously on one bar -- this is
+not a rare, high-conviction zone in practice, it is close to always-on, the same "descriptor, not an
+event" shape the scalp-research harness already found for `CANDLE_GEOMETRY` at 80% of bars). Of the
+bars where a BPR was reached in the wanted direction, 53 had no order block or fair value gap also
+reached at the same bar -- so BPR genuinely can supply a POI nothing else would have. None of those 53
+bars also cleared this strategy own other gates (directional alignment, liquidity alignment) in this
+sample, which a population this restrictive (85-118 trades from ~6,000-13,500 bars, 1-2%) does not make
+implausible on its own. This also reproduces the SAME structural limitation Amendment 2 already
+recorded for `poiPreference`/OTE: entry, stop and target are read from `currentPrice`,
+`liquidity.invalidationLevel` and `targetPool.price`, none of which consult which POI type supplied the
+evidence -- so reordering candidates, or adding a new one, can only move the result by changing whether
+ANY POI was found, never by changing which one wins. **Verdict: NO_EDGE (untestable-by-reordering, same
+class as OTE/BLOCK_FIRST)** on this sample; a real test of BPR own actual claim -- a higher-conviction
+*placement*, not merely another way to clear the same gate -- needs the entry model to enter AT a POI own
+level rather than at the next candle open, which this backtester does not do for any POI type.
+
+Both stay in the tree behind their default-off switches, not deployed to either live bot. Seventh and
+eighth arms measured against these two cells; none has replicated.

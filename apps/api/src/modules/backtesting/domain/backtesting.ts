@@ -1,7 +1,9 @@
 import type { StrategyMarketContext, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
 export type BacktestRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
-export type BacktestExitReason = "STOP_LOSS" | "TARGET" | "SIGNAL" | "END_OF_DATA" | "TRAP_DETECTED";
+export type BacktestExitReason =
+  | "STOP_LOSS" | "TARGET" | "SIGNAL" | "END_OF_DATA" | "TRAP_DETECTED"
+  | "OPPOSING_LIQUIDITY_SWEEP";
 
 /**
  * How many units a signal is filled with.

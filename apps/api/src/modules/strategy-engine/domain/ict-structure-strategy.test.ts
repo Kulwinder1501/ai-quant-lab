@@ -353,3 +353,131 @@ describe("IctStructureStrategy swing-hierarchy protected level (entry-model arm 
     expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(1);
   });
 });
+
+describe("IctStructureStrategy CISD confirmation (entry-model arm 5)", () => {
+  const validOb = { id: "ob-1", type: "BULLISH" as const, state: "TOUCHED" as const, meanThreshold: 98, isExtreme: true, isIdmAdjacent: false };
+  const freshBullishCisd = {
+    direction: "BULLISH" as const, triggerLevel: 96, legStartIndex: 10, legEndIndex: 11,
+    confirmingCandleIndex: 15, confirmingCandleTime: new Date("2026-01-06T03:40:00.000Z"),
+  };
+
+  it("is off by default: an approved idea is unaffected with no CISD evidence at all", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] }, barIndex: 20, cisd: null,
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(1);
+  });
+
+  it("rejects when the arm is on and there is no CISD at all", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] }, barIndex: 20, cisd: null,
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireCisdConfirmation: true })).toHaveLength(0);
+  });
+
+  it("rejects when the arm is on and the only CISD confirmed points the wrong way", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] }, barIndex: 20,
+      cisd: { ...freshBullishCisd, direction: "BEARISH" },
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireCisdConfirmation: true })).toHaveLength(0);
+  });
+
+  it("rejects when the arm is on and the matching CISD is older than maxCisdAgeBars", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      barIndex: 30, // 30 - 15 = 15 bars old, past the default maxCisdAgeBars of 10
+      cisd: freshBullishCisd,
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireCisdConfirmation: true })).toHaveLength(0);
+  });
+
+  it("approves when the arm is on and a fresh, direction-matching CISD is present", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      barIndex: 20, // 20 - 15 = 5 bars old, within the default maxCisdAgeBars of 10
+      cisd: freshBullishCisd,
+    });
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), { requireCisdConfirmation: true });
+    expect(proposals).toHaveLength(1);
+    const poiConfirmation = proposals[0].evidenceItems?.find((e) => e.sourceReference === "POI_CONFIRMATION");
+    expect(poiConfirmation?.details).toMatchObject({ cisdConfirmed: true, cisdAgeBars: 5 });
+  });
+
+  it("respects a widened maxCisdAgeBars", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] },
+      barIndex: 30, // 15 bars old
+      cisd: freshBullishCisd,
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {
+      requireCisdConfirmation: true, maxCisdAgeBars: 20,
+    })).toHaveLength(1);
+  });
+
+  it("never gates on a missing cisd field (absent evidence, not evidence of no confirmation)", () => {
+    const snapshot = alignedLongSnapshot({ zones: { activeObs: [validOb], activeFvgs: [] }, barIndex: 20 });
+    delete snapshot.cisd;
+    // The field is genuinely absent (not null): the loose-equality guard must not throw, and with the
+    // arm OFF this must still approve exactly like the other "missing evidence" tests in this file.
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(1);
+  });
+
+  it("records cisdConfirmed=false and cisdAgeBars=null as covariates even with the arm off", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] }, barIndex: 20, cisd: null,
+    });
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), {});
+    expect(proposals).toHaveLength(1);
+    const poiConfirmation = proposals[0].evidenceItems?.find((e) => e.sourceReference === "POI_CONFIRMATION");
+    expect(poiConfirmation?.details).toMatchObject({ cisdConfirmed: false, cisdAgeBars: null });
+  });
+});
+
+describe("IctStructureStrategy Balanced Price Range consideration (entry-model arm 6)", () => {
+  const validOb = { id: "ob-1", type: "BULLISH" as const, state: "TOUCHED" as const, meanThreshold: 98, isExtreme: true, isIdmAdjacent: false };
+  const bullishBpr = { id: "bpr-1", type: "BULLISH" as const, top: 99, bottom: 97, meanThreshold: 98, olderGapId: "a", newerGapId: "b", formedAtBarIndex: 10 };
+
+  it("is off by default: a BPR present with no other POI does not produce a proposal", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [] }, balancedPriceRanges: [bullishBpr],
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), {})).toHaveLength(0);
+  });
+
+  it("takes a BPR as the POI when the arm is on and no block or gap is available", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [] }, balancedPriceRanges: [bullishBpr],
+    });
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), { considerBpr: true });
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].evidence).toMatchObject({ poiEvidence: expect.stringContaining("Balanced Price Range bpr-1") });
+    const poiConfirmation = proposals[0].evidenceItems?.find((e) => e.sourceReference === "POI_CONFIRMATION");
+    expect(poiConfirmation?.details).toMatchObject({ poiKind: "BPR" });
+  });
+
+  it("refuses a BPR of the wrong direction, same as any other zone", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [], activeFvgs: [] },
+      balancedPriceRanges: [{ ...bullishBpr, type: "BEARISH" }],
+    });
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { considerBpr: true })).toHaveLength(0);
+  });
+
+  it("prefers the existing order block/gap/sweep search over a BPR only by array position, not by exclusion -- a BPR is checked first when the arm is on", () => {
+    const snapshot = alignedLongSnapshot({
+      zones: { activeObs: [validOb], activeFvgs: [] }, // a valid order block is ALSO available
+      balancedPriceRanges: [bullishBpr],
+    });
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), { considerBpr: true });
+    expect(proposals).toHaveLength(1);
+    const poiConfirmation = proposals[0].evidenceItems?.find((e) => e.sourceReference === "POI_CONFIRMATION");
+    expect(poiConfirmation?.details).toMatchObject({ poiKind: "BPR" });
+  });
+
+  it("never gates on a missing balancedPriceRanges field (absent evidence, not a crash)", () => {
+    const snapshot = alignedLongSnapshot({ zones: { activeObs: [validOb], activeFvgs: [] } });
+    delete snapshot.balancedPriceRanges;
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { considerBpr: true })).toHaveLength(1);
+  });
+});

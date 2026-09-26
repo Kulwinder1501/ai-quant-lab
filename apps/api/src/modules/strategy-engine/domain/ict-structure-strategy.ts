@@ -8,6 +8,7 @@ import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
 import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
 import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
+import type { BalancedPriceRange } from "../../technical-analysis/domain/ict/bpr.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
 
 /**
@@ -84,6 +85,52 @@ export interface IctStructureStrategyConfiguration {
    * this default-off switch with the measurement attached, not deployed.
    */
   requireProtectedLevelIntact: boolean;
+  /**
+   * Entry-model arm 5: requires a recent Change in State of Delivery (see cisd.ts) in the trade's own
+   * direction, on top of the POI reaction arm 1 already requires. Off by default -- unmeasured, like
+   * every other arm here, following the same falsification-program discipline: shipped in-tree,
+   * covariates recorded on every approved idea regardless of this switch, so the population needed
+   * to test it exists before the arm is ever turned on.
+   *
+   * Both sources researched for cisd.ts are explicit that CISD alone is weak evidence and gains its
+   * conviction from exactly this pairing: "inside a tap of a daily or 4-hour PD Array, that same
+   * close is a high-probability reversal trigger." This strategy already requires a POI reaction
+   * (arm 1, `requirePoiReaction`) before this gate is even reached, which is the PD-Array tap the
+   * doctrine is describing -- so this arm asks whether *also* requiring the delivery-shift
+   * confirmation on top of that tap improves anything, not whether CISD works standalone.
+   *
+   * Measured 2026-09-23, verdict NO_EDGE -- see Amendment 4 in the falsification program doc. Both
+   * NIFTY50 windows improve (+192.80 on 85->45 trades; +3,850.10 on 114->59) but BANKNIFTY flips from
+   * +4,319.60 to -1,742.50 on 102->85 trades -- a -6,062.10 swing. The same cross-instrument
+   * non-replication signature that closed killzone, OTE, poiPreference and
+   * `requireProtectedLevelIntact` before it -- the fifth arm in a row to show it.
+   */
+  requireCisdConfirmation: boolean;
+  /**
+   * How many bars old a CISD event may be and still count as "recent" for arm 5. `cisd` on the
+   * composite snapshot is the most recently confirmed event ever, not per-bar, so an unbounded age
+   * would let a CISD from hundreds of bars ago silently satisfy the gate forever. 10 bars, matching
+   * this codebase's existing `orderBlockLookbackBars`/`LIQUIDITY_LOOKBACK_BARS` precedent for the
+   * same class of bound -- a deliberate, documented limit, not a value tuned against any result.
+   */
+  maxCisdAgeBars: number;
+  /**
+   * Entry-model arm 6: considers a Balanced Price Range (see bpr.ts -- the overlap of two opposing
+   * fair value gaps) as a POI candidate, checked ahead of the existing block/gap/sweep search when
+   * enabled. Off by default. Multiple retail sources describe it as ICT's "highest-probability entry
+   * zone" -- doctrine alone, not a measured claim, which is exactly why this shipped as a hypothesis
+   * rather than a default.
+   *
+   * Measured 2026-09-23, verdict NO_EDGE -- untestable by reordering, not merely unreplicated. See
+   * Amendment 5. Byte-identical trade count and P&L to control on all three cells: BPRs form on 87%
+   * of NIFTY50 2025 bars (up to 65 at once), so this is a near-constant descriptor rather than a rare
+   * high-conviction zone, and the 53 bars where a BPR was reached with no other POI also reached never
+   * additionally cleared this strategy's other gates in this sample. Same structural limitation
+   * Amendment 2 recorded for `poiPreference`/OTE: entry/stop/target never consult which POI type
+   * supplied the level, so reordering or adding a candidate can only matter by changing whether ANY
+   * POI was found -- which it did not, here.
+   */
+  considerBpr: boolean;
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
@@ -99,6 +146,9 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   requireKillzone: false,
   requireOte: false,
   requireProtectedLevelIntact: false,
+  requireCisdConfirmation: false,
+  maxCisdAgeBars: 10,
+  considerBpr: false,
 };
 
 /**
@@ -137,7 +187,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const ict = context.ictSnapshot;
     if (!ict) return [];
 
-    const { structure, zones, sessionLevels, bias, liquidity, coverage, swingHierarchy } = ict;
+    const { structure, zones, sessionLevels, bias, liquidity, coverage, swingHierarchy, cisd, balancedPriceRanges } = ict;
 
     // Pillar Gate 1: every coverage input must be COMPLETE. Both UNKNOWN
     // (evidence absent/ambiguous) and NOT_COVERED (engine never ran) fail
@@ -284,7 +334,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
      * reverses -- so the label has to be measurable per trade before any of that can be tested. It
      * stays a covariate until it separates outcomes.
      */
-    let poiKind: OrderBlockKind | "FVG" | "SESSION_SWEEP" | null = null;
+    let poiKind: OrderBlockKind | "FVG" | "SESSION_SWEEP" | "BPR" | null = null;
 
     if (config.requirePoiReaction) {
       /*
@@ -329,6 +379,20 @@ export class IctStructureStrategy implements StrategyEvaluator {
       const fvg = zones.activeFvgs.find(
         (f) => f.type === wantedZone && reached(f.midpoint) && isDoctrinallyValidFairValueGapCandidate(f)
       );
+      /*
+       * Entry-model arm 6's own candidate: no `isDoctrinallyValidOrderBlockCandidate`-style IDM/extreme
+       * scoping exists for a BPR, because no source material describes one -- unlike order blocks and
+       * fair value gaps, the doctrine for balanced price ranges never groups them under lecture 4's
+       * restriction. Scoping it there would be inventing a rule, not applying one.
+       *
+       * `?? []` rather than assuming presence: a hand-built snapshot (tests, or any caller predating
+       * this field) may omit the key entirely, and `.find()` on `undefined` throws unconditionally --
+       * there is no loose-equality equivalent for a missing array the way `cisd`'s `!= null` guard
+       * works for a missing object. Absent evidence reads as "no BPR candidate", not a crash.
+       */
+      const bpr: BalancedPriceRange | undefined = (balancedPriceRanges ?? []).find(
+        (b) => b.type === wantedZone && reached(b.meanThreshold)
+      );
 
       const takeBlock = (): boolean => {
         if (!ob) return false;
@@ -352,10 +416,22 @@ export class IctStructureStrategy implements StrategyEvaluator {
         poiKind = "SESSION_SWEEP";
         return true;
       };
+      const takeBpr = (): boolean => {
+        if (!bpr) return false;
+        poiEvidence = `Balanced Price Range ${bpr.id} traded into its mean threshold ${bpr.meanThreshold}`;
+        poiKind = "BPR";
+        return true;
+      };
 
       const order = config.poiPreference === "BLOCK_FIRST"
         ? [takeBlock, takeGap, takeSweep]
         : [takeSweep, takeBlock, takeGap];
+      /*
+       * Checked ahead of the existing order when the arm is on, per the doctrine's own framing of a
+       * BPR as the highest-conviction of the three POI types -- not measured yet, so this is the
+       * hypothesis being tested, not an established priority.
+       */
+      if (config.considerBpr) order.unshift(takeBpr);
       for (const take of order) {
         if (take()) break;
       }
@@ -364,6 +440,29 @@ export class IctStructureStrategy implements StrategyEvaluator {
         return [];
       }
     }
+
+    /*
+     * Entry-model arm 5: CISD confirmation on top of the POI reaction just verified above.
+     *
+     * Computed unconditionally, gated only when the switch is on -- same convention as arm 4. `cisd`
+     * is the most recently confirmed event ever on this snapshot (see config.ts), so age is bounded
+     * by `maxCisdAgeBars` rather than trusted forever; `ict.barIndex` and `cisd.confirmingCandleIndex`
+     * come from the same underlying candle series, so the subtraction is a plain bar count, not a
+     * time delta across timeframes.
+     */
+    /*
+     * `cisd == null` (loose) rather than `!== null`, deliberately: a hand-built snapshot (tests, or
+     * any caller predating this field, same reasoning as `swingHierarchy` above) may omit the key
+     * entirely and leave it `undefined` rather than `null`. `undefined !== null` is true in JS, which
+     * would have read `.confirmingCandleIndex` off `undefined` and thrown instead of failing closed.
+     */
+    const cisdAgeBars = cisd != null ? ict.barIndex - cisd.confirmingCandleIndex : null;
+    const cisdConfirmed = cisd != null
+      && cisd.direction === wantedZone
+      && cisdAgeBars !== null
+      && cisdAgeBars >= 0
+      && cisdAgeBars <= config.maxCisdAgeBars;
+    if (config.requireCisdConfirmation && !cisdConfirmed) return [];
 
     // Trade Geometry
     const entryPrice = currentPrice;
@@ -417,7 +516,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
 
@@ -500,7 +599,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
           // targets this strategy now takes, so these two flags are the covariates that
           // hypothesis needs before anyone narrows the population on it.
-          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached },
+          details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
 

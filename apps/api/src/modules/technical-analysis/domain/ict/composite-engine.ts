@@ -13,6 +13,8 @@ import { IctSessionLevelTracker } from "./session-levels.js";
 import { IctBiasTracker, type IctBiasDirection } from "./bias.js";
 import { IctLiquidityResolver } from "./liquidity.js";
 import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
+import { CisdTracker, type CisdEvent } from "./cisd.js";
+import { computeBalancedPriceRanges } from "./bpr.js";
 
 export class IctCompositeEngine {
   private readonly structTracker: IctStructureTracker;
@@ -20,6 +22,8 @@ export class IctCompositeEngine {
   private readonly sessionTracker: IctSessionLevelTracker;
   private readonly biasTracker: IctBiasTracker;
   private readonly liquidityResolver: IctLiquidityResolver;
+  private readonly cisdTracker: CisdTracker;
+  private lastCisdEvent: CisdEvent | null = null;
   private readonly configHash: string;
 
   constructor(private readonly config: IctEngineConfig = defaultIctEngineConfig) {
@@ -32,6 +36,7 @@ export class IctCompositeEngine {
     this.sessionTracker = new IctSessionLevelTracker();
     this.biasTracker = new IctBiasTracker();
     this.liquidityResolver = new IctLiquidityResolver();
+    this.cisdTracker = new CisdTracker();
     this.configHash = computeIctConfigHash(config);
   }
 
@@ -55,6 +60,10 @@ export class IctCompositeEngine {
       ? sweep.levelType
       : undefined;
     const struct = this.structTracker.processCandle(candles, currentIndex, sweptPriorDayLevel);
+    // Independent of structure: CISD is candle-to-candle delivery, not swing-pivot driven. See
+    // cisd.ts's own docstring for why it is not folded into the structure tracker.
+    const cisdEvent = this.cisdTracker.processCandle(candles, currentIndex);
+    if (cisdEvent !== null) this.lastCisdEvent = cisdEvent;
     // Reads the same confirmed-pivot stream `struct` was just derived from, transiently -- see
     // `confirmedPivotsView()`'s own "use it and drop it" rule, followed here exactly as the
     // liquidity resolver below already does with the same accessor.
@@ -102,6 +111,8 @@ export class IctCompositeEngine {
       barTime: current.openTime,
       structure: struct,
       swingHierarchy,
+      cisd: this.lastCisdEvent,
+      balancedPriceRanges: computeBalancedPriceRanges(zones.activeFvgs),
       zones,
       sessionLevels,
       bias,

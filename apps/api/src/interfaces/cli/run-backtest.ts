@@ -28,10 +28,48 @@ import {
   FreshSetupFilteredStrategy,
   RelativeVolumeFilteredStrategy,
   PatternAlignmentFilteredStrategy,
+  PatternAnchoredStopStrategy,
+  LiquiditySweepAnchoredStopStrategy,
+  OrderBlockTargetStrategy,
+  LiquiditySweepLookbackStopStrategy,
+  OrderBlockLookbackTargetStrategy,
   SmcConfidenceGatedStrategy,
   TimeWindowFilteredStrategy,
   type BlockedIstWindow,
 } from "../../modules/backtesting/domain/entry-filters.js";
+import type { ProtectiveStopPolicy } from "../../modules/paper-trading/domain/protective-stop.js";
+
+/**
+ * `--protective-stop break-even`, `trail:<triggerR>:<distanceR>`, or
+ * `trail:<triggerR>:<distanceR>:lock`.
+ *
+ * Measures the same break-even/trail mechanism `protective-stop.ts` ships live for momentum-scalp
+ * option-buyer trades, re-derived for underlying-index bars -- see
+ * `underlying-protective-stop.ts` for why. Omitted means off, byte-identical to every prior run.
+ *
+ * The `:lock` suffix is what distinguishes a trail from break-even at all. Without it the trailed
+ * stop is clamped one tick below entry and the two policies produce the same book -- verified to the
+ * rupee over 439 replayed trades, see migration 117. A run of `trail:A:B` and `trail:A:B:lock` is
+ * therefore the paired comparison worth making, not `trail:A:B` against nothing.
+ */
+function parseProtectiveStopPolicy(argumentsList: string[]): ProtectiveStopPolicy | null {
+  const raw = getOption(argumentsList, "protective-stop")?.trim();
+  if (!raw) return null;
+  if (raw === "break-even") return { breakEvenTriggerR: 0.5, trail: null };
+  const trailMatch = /^trail:([\d.]+):([\d.]+)(:lock)?$/.exec(raw);
+  if (trailMatch) {
+    const triggerR = Number(trailMatch[1]);
+    const distanceR = Number(trailMatch[2]);
+    const lockProfit = trailMatch[3] !== undefined;
+    if (Number.isFinite(triggerR) && triggerR > 0 && Number.isFinite(distanceR) && distanceR > 0) {
+      return { breakEvenTriggerR: 0.5, trail: { triggerR, distanceR, lockProfit } };
+    }
+  }
+  throw new Error(
+    `--protective-stop must be "break-even", "trail:<triggerR>:<distanceR>" or ` +
+      `"trail:<triggerR>:<distanceR>:lock", received "${raw}".`
+  );
+}
 
 function optionalDate(argumentsList: string[], option: string, fallback: Date): Date {
   const value = getOption(argumentsList, option);
@@ -164,7 +202,22 @@ type BacktestEntryFilter =
   | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
   | "RVOL_1" | "RVOL_2" | "RVOL_3"
   | "SMC_GATE_ON" | "SMC_GATE_OFF"
-  | "PATTERN_ALIGNMENT";
+  | "PATTERN_ALIGNMENT" | "PATTERN_ANCHORED_STOP"
+  | "LIQUIDITY_STOP" | "LIQUIDITY_TARGET" | "LIQUIDITY_BOTH"
+  | "LIQUIDITY_LOOKBACK_STOP" | "LIQUIDITY_LOOKBACK_TARGET" | "LIQUIDITY_LOOKBACK_BOTH"
+  | "LIQUIDITY_LOOKBACK_TARGET_20";
+
+/** Bars of trailing lookback for the loosened liquidity-geometry arms, fixed before any result is seen. */
+const LIQUIDITY_LOOKBACK_BARS = 10;
+/**
+ * Wider lookback for the target leg only, registered as a follow-up in
+ * `docs/2026-09-19-scalp1m-liquidity-geometry-falsification-v1.md`: the 10-bar target arm trended
+ * toward significance on a still-thin 3.2% population; 20 bars was chosen from the same pre-registered
+ * population table (33.5%) before this arm's outcome was seen. The stop leg is not re-tested here --
+ * its population growth from same-bar to 10 bars did not help it, so widening further is not expected
+ * to either, and this follow-up is scoped to the one leg the prior result actually motivated.
+ */
+const LIQUIDITY_LOOKBACK_BARS_WIDE = 20;
 
 function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   const raw = getOption(argumentsList, "entry-filter")?.trim().toLowerCase() ?? "none";
@@ -180,10 +233,21 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "smc-gate-on") return "SMC_GATE_ON";
   if (raw === "smc-gate-off") return "SMC_GATE_OFF";
   if (raw === "pattern-alignment") return "PATTERN_ALIGNMENT";
+  if (raw === "pattern-anchored-stop") return "PATTERN_ANCHORED_STOP";
+  if (raw === "liquidity-stop") return "LIQUIDITY_STOP";
+  if (raw === "liquidity-target") return "LIQUIDITY_TARGET";
+  if (raw === "liquidity-both") return "LIQUIDITY_BOTH";
+  if (raw === "liquidity-lookback-stop") return "LIQUIDITY_LOOKBACK_STOP";
+  if (raw === "liquidity-lookback-target") return "LIQUIDITY_LOOKBACK_TARGET";
+  if (raw === "liquidity-lookback-both") return "LIQUIDITY_LOOKBACK_BOTH";
+  if (raw === "liquidity-lookback-target-20") return "LIQUIDITY_LOOKBACK_TARGET_20";
   throw new Error(
     "--entry-filter must be none, ema-strength-015, fresh-setup, trading-window-a, "
     + "trading-window-b, trading-window-c, rvol-1, rvol-2, rvol-3, smc-gate-on, "
-    + `smc-gate-off, or pattern-alignment, received "${raw}".`,
+    + "smc-gate-off, pattern-alignment, pattern-anchored-stop, liquidity-stop, "
+    + "liquidity-target, liquidity-both, liquidity-lookback-stop, "
+    + "liquidity-lookback-target, liquidity-lookback-both, or "
+    + `liquidity-lookback-target-20, received "${raw}".`,
   );
 }
 
@@ -275,11 +339,34 @@ async function main(): Promise<void> {
               ? new SmcConfidenceGatedStrategy(strategyEvaluator, entryFilter === "SMC_GATE_ON")
               : entryFilter === "PATTERN_ALIGNMENT"
                 ? new PatternAlignmentFilteredStrategy(strategyEvaluator)
-                : strategyEvaluator;
+                : entryFilter === "PATTERN_ANCHORED_STOP"
+                  ? new PatternAnchoredStopStrategy(strategyEvaluator)
+                  : entryFilter === "LIQUIDITY_STOP"
+                    ? new LiquiditySweepAnchoredStopStrategy(strategyEvaluator)
+                    : entryFilter === "LIQUIDITY_TARGET"
+                      ? new OrderBlockTargetStrategy(strategyEvaluator)
+                      : entryFilter === "LIQUIDITY_BOTH"
+                        ? new OrderBlockTargetStrategy(new LiquiditySweepAnchoredStopStrategy(strategyEvaluator))
+                        : entryFilter === "LIQUIDITY_LOOKBACK_STOP"
+                          ? new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                          : entryFilter === "LIQUIDITY_LOOKBACK_TARGET"
+                            ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS)
+                            : entryFilter === "LIQUIDITY_LOOKBACK_BOTH"
+                              ? new OrderBlockLookbackTargetStrategy(
+                                new LiquiditySweepLookbackStopStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS),
+                                LIQUIDITY_LOOKBACK_BARS,
+                              )
+                              : entryFilter === "LIQUIDITY_LOOKBACK_TARGET_20"
+                                ? new OrderBlockLookbackTargetStrategy(strategyEvaluator, LIQUIDITY_LOOKBACK_BARS_WIDE)
+                                : strategyEvaluator;
     const result = await new RunBacktest(
       new PostgresBacktestRepository(database),
       marketData,
-      new BacktestEngine(replayStrategy),
+      new BacktestEngine(
+        replayStrategy,
+        argumentsList.includes("--exit-on-opposing-sweep"),
+        parseProtectiveStopPolicy(argumentsList),
+      ),
     ).execute({
       strategyVersionId: strategyVersion.id,
       strategyConfiguration: configurationOverride === null
@@ -316,6 +403,8 @@ async function main(): Promise<void> {
       dataCutoffAt: dataCutoffAt.toISOString(),
       // Recorded on the run so an arm cannot be mistaken for its control after the fact.
       higherTimeframes: higherTimeframeBuckets ?? null,
+      exitOnOpposingSweep: argumentsList.includes("--exit-on-opposing-sweep"),
+      protectiveStopPolicy: parseProtectiveStopPolicy(argumentsList),
       strategyConfigurationOverride: configurationOverride ?? null,
       ...result,
     }));
