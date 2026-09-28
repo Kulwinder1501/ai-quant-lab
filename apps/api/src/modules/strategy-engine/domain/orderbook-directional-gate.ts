@@ -157,3 +157,121 @@ export function applyOrderbookGateToProposal(
     },
   };
 }
+
+export interface DepthFrameLevelData {
+  bidPrice?: number[];
+  bidQty?: number[];
+  askPrice?: number[];
+  askQty?: number[];
+  totalBuyQty?: number;
+  totalSellQty?: number;
+}
+
+/**
+ * Computes Distance-Weighted Decaying Depth Imbalance (DI_decay) across L2 orderbook levels.
+ * Uses exponential distance decay lambda = 0.05 per basis point from mid-price.
+ */
+export function calculateDecayingDepthImbalance(
+  depth: DepthFrameLevelData,
+  lambdaBps: number = 0.05,
+): { rawDi: number; decayingDi: number } {
+  const totalBuy = depth.totalBuyQty ?? 0;
+  const totalSell = depth.totalSellQty ?? 0;
+  const rawDi = (totalBuy + totalSell) > 0 ? (totalBuy - totalSell) / (totalBuy + totalSell) : 0;
+
+  const bidsP = depth.bidPrice ?? [];
+  const bidsQ = depth.bidQty ?? [];
+  const asksP = depth.askPrice ?? [];
+  const asksQ = depth.askQty ?? [];
+
+  if (bidsP.length === 0 || asksP.length === 0 || bidsQ.length === 0 || asksQ.length === 0) {
+    return { rawDi, decayingDi: rawDi };
+  }
+
+  const bestBid = Number(bidsP[0]);
+  const bestAsk = Number(asksP[0]);
+  const midPrice = (bestBid + bestAsk) / 2;
+
+  if (midPrice <= 0) return { rawDi, decayingDi: rawDi };
+
+  let weightedBuySum = 0;
+  let weightedSellSum = 0;
+
+  for (let i = 0; i < Math.min(bidsP.length, bidsQ.length); i++) {
+    const p = Number(bidsP[i]);
+    const q = Number(bidsQ[i]);
+    const distBps = (Math.abs(midPrice - p) / midPrice) * 10000;
+    const w = Math.exp(-lambdaBps * distBps);
+    weightedBuySum += q * w;
+  }
+
+  for (let j = 0; j < Math.min(asksP.length, asksQ.length); j++) {
+    const p = Number(asksP[j]);
+    const q = Number(asksQ[j]);
+    const distBps = (Math.abs(p - midPrice) / midPrice) * 10000;
+    const w = Math.exp(-lambdaBps * distBps);
+    weightedSellSum += q * w;
+  }
+
+  const totalWeighted = weightedBuySum + weightedSellSum;
+  const decayingDi = totalWeighted > 0 ? (weightedBuySum - weightedSellSum) / totalWeighted : rawDi;
+
+  return { rawDi, decayingDi };
+}
+
+/** Resolves confluenceSignal from depth frame data and nearest structural level. */
+export function resolveConfluenceSignalFromDepth(input: {
+  nearestLevelType: string;
+  nearestLevelPrice: number;
+  distanceBps: number;
+  depth: DepthFrameLevelData;
+  bandwidthBps?: number;
+}) {
+  const bandwidthBps = input.bandwidthBps ?? 20.0;
+  if (input.distanceBps > bandwidthBps) {
+    return {
+      is_level_proximate: false,
+      nearest_level_type: input.nearestLevelType,
+      nearest_level_price: input.nearestLevelPrice,
+      distance_bps: input.distanceBps,
+      raw_di: null,
+      di_tilde: null,
+      directional_bias: "NONE",
+      gate_action: "NO_ACTION",
+    };
+  }
+
+  const { rawDi, decayingDi } = calculateDecayingDepthImbalance(input.depth);
+  const isTier1 = ["SWING_HIGH", "SWING_LOW", "ITH", "ITL", "SESSION_HIGH", "SESSION_LOW"].includes(input.nearestLevelType);
+  const diTilde = isTier1 ? -decayingDi : decayingDi;
+
+  let directional_bias = "NONE";
+  let gate_action = "NO_ACTION";
+
+  if (diTilde > 0) {
+    if (isTier1) {
+      if (input.nearestLevelType.includes("HIGH") || input.nearestLevelType === "ITH") {
+        directional_bias = "BEARISH_REJECTION";
+        gate_action = "BUY_PUT_OR_SHORT";
+      } else {
+        directional_bias = "BULLISH_REJECTION";
+        gate_action = "BUY_CALL_OR_LONG";
+      }
+    } else {
+      directional_bias = "BEARISH_SWEEP";
+      gate_action = "BUY_PUT_OR_SHORT";
+    }
+  }
+
+  return {
+    is_level_proximate: true,
+    nearest_level_type: input.nearestLevelType,
+    nearest_level_price: input.nearestLevelPrice,
+    distance_bps: input.distanceBps,
+    raw_di: rawDi,
+    decaying_di: decayingDi,
+    di_tilde: diTilde,
+    directional_bias,
+    gate_action,
+  };
+}

@@ -28,6 +28,7 @@ Evaluation Logic:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -99,12 +100,40 @@ def fetch_contact_events(
         ]
 
 
+def compute_decaying_di(bid_p, bid_q, ask_p, ask_q, raw_di: float, lambda_bps: float = 0.05) -> float:
+    if not bid_p or not ask_p or not bid_q or not ask_q:
+        return raw_di
+    try:
+        best_bid = float(bid_p[0])
+        best_ask = float(ask_p[0])
+        mid_price = (best_bid + best_ask) / 2.0
+        if mid_price <= 0:
+            return raw_di
+
+        wb_sum = 0.0
+        for p, q in zip(bid_p, bid_q):
+            dist_bps = (abs(mid_price - float(p)) / mid_price) * 10000.0
+            w = math.exp(-lambda_bps * dist_bps)
+            wb_sum += float(q) * w
+
+        wa_sum = 0.0
+        for p, q in zip(ask_p, ask_q):
+            dist_bps = (abs(float(p) - mid_price) / mid_price) * 10000.0
+            w = math.exp(-lambda_bps * dist_bps)
+            wa_sum += float(q) * w
+
+        tot = wb_sum + wa_sum
+        return (wb_sum - wa_sum) / tot if tot > 0 else raw_di
+    except Exception:
+        return raw_di
+
+
 def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> tuple[list[datetime], list[float]]:
-    """Fetch all depth frames for a single day, sorted by received_at."""
+    """Fetch all depth frames for a single day, sorted by received_at, calculating decaying DI."""
     start_dt = datetime.combine(day, datetime.min.time(), tzinfo=INDIA_TZ)
     end_dt = start_dt + timedelta(days=1)
     query = """
-        SELECT received_at, total_buy_qty, total_sell_qty
+        SELECT received_at, total_buy_qty, total_sell_qty, bid_price, bid_qty, ask_price, ask_qty
         FROM depth_frames
         WHERE received_at >= %s AND received_at < %s
         ORDER BY received_at ASC;
@@ -117,12 +146,15 @@ def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> tuple[lis
     dis = []
     for r in rows:
         t = r[0].astimezone(INDIA_TZ) if r[0].tzinfo else r[0].replace(tzinfo=INDIA_TZ)
-        tb = float(r[1])
-        ts = float(r[2])
-        if tb + ts > 0:
-            di = (tb - ts) / (tb + ts)
-            times.append(t)
-            dis.append(di)
+        tb = float(r[1]) if r[1] is not None else 0.0
+        ts = float(r[2]) if r[2] is not None else 0.0
+        raw_di = (tb - ts) / (tb + ts) if (tb + ts > 0) else 0.0
+
+        bid_p, bid_q, ask_p, ask_q = r[3], r[4], r[5], r[6]
+        decaying_di = compute_decaying_di(bid_p, bid_q, ask_p, ask_q, raw_di)
+
+        times.append(t)
+        dis.append(decaying_di)
     return times, dis
 
 

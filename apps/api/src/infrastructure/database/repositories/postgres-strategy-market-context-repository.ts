@@ -23,6 +23,7 @@ import type { DatabaseQueryable } from "../database.js";
 import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
 import { deriveHtfBiasSeriesFromCandles } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
+import { resolveConfluenceSignalFromDepth } from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
 
 
 interface CompletedCandleRow extends QueryResultRow {
@@ -395,6 +396,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     ]);
 
     const regime = await this.findRegime(input, candle) ?? undefined;
+    const confluenceSignal = await this.resolveConfluenceSignal(input, candle) ?? undefined;
 
     let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
     if (!ictSnapshot && ictConsumed) {
@@ -426,8 +428,87 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         details: row.details,
       })),
       regime,
+      ...(confluenceSignal ? { confluenceSignal } : {}),
       ...(ictSnapshot ? { ictSnapshot } : {}),
     };
+  }
+
+  private async resolveConfluenceSignal(
+    input: { instrumentId: string; timeframe: string },
+    candle: CompletedCandleRow,
+  ): Promise<StrategyMarketContext["confluenceSignal"]> {
+    try {
+      const instResult = await this.database.query<{ symbol: string }>(
+        `SELECT symbol FROM instruments WHERE id = $1`,
+        [input.instrumentId]
+      );
+      const symbol = instResult.rows[0]?.symbol;
+      if (!symbol) return undefined;
+
+      const candResult = await this.database.query<{ pool_type: string; price: string }>(`
+        SELECT pool_type, price
+        FROM liquidity_pool_candidates
+        WHERE symbol = $1
+          AND known_at_time <= $2
+          AND (invalidated_at_time IS NULL OR invalidated_at_time > $2)
+        ORDER BY abs(price::numeric - $3::numeric) ASC
+        LIMIT 1
+      `, [symbol, candle.close_time, candle.close]);
+
+      const level = candResult.rows[0];
+      if (!level) return undefined;
+
+      const levelPrice = Number(level.price);
+      const candleClose = Number(candle.close);
+      const distanceBps = (Math.abs(candleClose - levelPrice) / levelPrice) * 10000;
+
+      if (distanceBps > 20.0) {
+        return {
+          is_level_proximate: false,
+          nearest_level_type: level.pool_type,
+          nearest_level_price: levelPrice,
+          distance_bps: distanceBps,
+          raw_di: null,
+          di_tilde: null,
+          directional_bias: "NONE",
+          gate_action: "NO_ACTION",
+        };
+      }
+
+      const depthResult = await this.database.query<{
+        bid_price: string[];
+        bid_qty: string[];
+        ask_price: string[];
+        ask_qty: string[];
+        total_buy_qty: string;
+        total_sell_qty: string;
+      }>(`
+        SELECT bid_price, bid_qty, ask_price, ask_qty, total_buy_qty, total_sell_qty
+        FROM depth_frames
+        WHERE provider_symbol = $1 AND received_at <= $2
+        ORDER BY received_at DESC, sequence_no DESC
+        LIMIT 1
+      `, [symbol.toUpperCase(), candle.close_time]);
+
+      const df = depthResult.rows[0];
+      const depthData = {
+        bidPrice: df?.bid_price ? df.bid_price.map(Number) : [],
+        bidQty: df?.bid_qty ? df.bid_qty.map(Number) : [],
+        askPrice: df?.ask_price ? df.ask_price.map(Number) : [],
+        askQty: df?.ask_qty ? df.ask_qty.map(Number) : [],
+        totalBuyQty: df?.total_buy_qty ? Number(df.total_buy_qty) : 0,
+        totalSellQty: df?.total_sell_qty ? Number(df.total_sell_qty) : 0,
+      };
+
+      return resolveConfluenceSignalFromDepth({
+        nearestLevelType: level.pool_type,
+        nearestLevelPrice: levelPrice,
+        distanceBps,
+        depth: depthData,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   /**
