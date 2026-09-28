@@ -18,6 +18,10 @@ import {
   IctStructureStrategy,
   ictStructureStrategyRegistration,
 } from "./ict-structure-strategy.js";
+import {
+  HybridLiquidityConfluenceStrategy,
+  hybridLiquidityConfluenceStrategyRegistration,
+} from "./hybrid-liquidity-confluence-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -377,6 +381,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * the live record is attributable to this decision and judged on its own trades -- not on the
      * backtest that was already ruled unreliable.
      */
+  },
+  {
+    registration: hybridLiquidityConfluenceStrategyRegistration,
+    StrategyClass: HybridLiquidityConfluenceStrategy,
+    supportedTimeframes: ["1m", "3m", "5m"],
   },
 ];
 

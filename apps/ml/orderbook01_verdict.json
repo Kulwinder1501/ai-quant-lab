@@ -1,93 +1,93 @@
 {
   "pre_registration": "ORDERBOOK-01",
   "eval_mode": "oos",
-  "eval_start": "2026-09-26",
+  "eval_start": "2026-09-25",
   "eval_end": "2026-09-28",
   "h1_r": {
     "status": "FALSIFIED",
-    "n": 201,
-    "accuracy": 0.9104,
-    "binomial_p": 0.0,
-    "levels_passed": 5,
+    "n": 360,
+    "accuracy": 0.35,
+    "binomial_p": 1.0,
+    "levels_passed": 0,
     "per_level": {
-      "ITL": {
+      "ITH": {
         "n": 22,
-        "accuracy": 0.9091,
-        "p_value": 6.1e-05,
-        "pass": true
-      },
-      "SESSION_LOW": {
-        "n": 100,
-        "accuracy": 0.89,
-        "p_value": 0.0,
-        "pass": true
-      },
-      "SESSION_HIGH": {
-        "n": 4,
-        "accuracy": 1.0,
-        "p_value": 0.0625,
+        "accuracy": 0.5,
+        "p_value": 0.584094,
         "pass": false
       },
       "SWING_HIGH": {
-        "n": 33,
-        "accuracy": 0.9394,
-        "p_value": 0.0,
-        "pass": true
+        "n": 76,
+        "accuracy": 0.3289,
+        "p_value": 0.999119,
+        "pass": false
+      },
+      "ITL": {
+        "n": 39,
+        "accuracy": 0.2821,
+        "p_value": 0.998311,
+        "pass": false
+      },
+      "SESSION_HIGH": {
+        "n": 38,
+        "accuracy": 0.0789,
+        "p_value": 1.0,
+        "pass": false
+      },
+      "SESSION_LOW": {
+        "n": 112,
+        "accuracy": 0.5,
+        "p_value": 0.537612,
+        "pass": false
       },
       "SWING_LOW": {
-        "n": 33,
-        "accuracy": 0.9394,
-        "p_value": 0.0,
-        "pass": true
-      },
-      "ITH": {
-        "n": 9,
-        "accuracy": 0.8889,
-        "p_value": 0.019531,
-        "pass": true
+        "n": 73,
+        "accuracy": 0.274,
+        "p_value": 0.999975,
+        "pass": false
       }
     },
     "criteria_checks": {
-      "acc_ge_0_72": true,
-      "p_le_0_01": true,
+      "acc_ge_0_72": false,
+      "p_le_0_01": false,
       "n_ge_3000": false,
-      "levels_ge_4": true
+      "levels_ge_4": false
     }
   },
   "h1_m": {
     "status": "FALSIFIED",
-    "n": 598,
-    "accuracy": 1.0,
-    "binomial_p": 0.0,
+    "n": 658,
+    "accuracy": 0.5775,
+    "binomial_p": 4e-05,
     "criteria_checks": {
-      "acc_ge_0_78": true,
+      "acc_ge_0_78": false,
       "p_le_0_01": true,
       "n_ge_1000": false
     }
   },
   "h2": {
-    "status": "FALSIFIED",
-    "n": 799,
-    "q4_minus_q1": 0.0152,
-    "permutation_p": 0.097,
+    "status": "PASS",
+    "n": 1018,
+    "q4_minus_q1": 0.117,
+    "permutation_p": 0.01,
     "quartile_accs": [
-      0.9698,
-      0.97,
-      0.985,
-      0.985
+      0.4516,
+      0.4943,
+      0.4724,
+      0.5686
     ],
     "quartile_counts": [
-      199,
-      200,
-      200,
-      200
+      248,
+      261,
+      254,
+      255
     ],
     "criteria_checks": {
-      "diff_ge_0_08": false,
-      "p_le_0_05": false
+      "diff_ge_0_08": true,
+      "p_le_0_05": true
     }
   },
   "verdict": "CASE E",
   "verdict_description": "FALSIFIED. No robust directional edge found in OOS test.",
-  "executed_at": "2026-09-28T17:00:28.396229+05:30"
+  "executed_at": "2026-09-28T19:40:14.472656+05:30"
 }

@@ -4,6 +4,7 @@ import { MomentumScalpStrategy } from "./momentum-scalp-strategy.js";
 import { MomentumScalpGoldStrategy } from "./momentum-scalp-gold-strategy.js";
 import { TrendBreakoutStrategy } from "./trend-breakout-strategy.js";
 import { IctStructureStrategy } from "./ict-structure-strategy.js";
+import { HybridLiquidityConfluenceStrategy } from "./hybrid-liquidity-confluence-strategy.js";
 import {
   findRegisteredStrategy,
   registeredStrategies,
@@ -25,6 +26,7 @@ describe("strategy registry", () => {
       "momentum-scalp-pattern",
       "momentum-scalp-pattern-v2",
       "ict-structure-v1",
+      "hybrid-liquidity-confluence-v1",
     ]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
@@ -32,6 +34,7 @@ describe("strategy registry", () => {
     expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
     expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
+    expect(requireRegisteredStrategy("hybrid-liquidity-confluence-v1").StrategyClass).toBe(HybridLiquidityConfluenceStrategy);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {
