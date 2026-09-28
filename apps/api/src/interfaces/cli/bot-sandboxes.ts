@@ -182,4 +182,16 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
     allowedSeries: [{ symbol: "BANKNIFTY", timeframe: "5m" }],
     initialBalance: 1_000_000,
   },
+  {
+    name: "AutoBot-HybridConfluence",
+    allowedStrategies: ["hybrid-liquidity-confluence-v1"],
+    allowedSeries: [
+      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "BANKNIFTY", timeframe: "3m" },
+      { symbol: "BANKNIFTY", timeframe: "5m" },
+      { symbol: "NIFTY50", timeframe: "3m" },
+      { symbol: "NIFTY50", timeframe: "5m" },
+    ],
+    initialBalance: 1_000_000,
+  },
 ];
