@@ -4,12 +4,33 @@ import type { EnsureStrategyVersionInput, ProposedTradeIdea, StrategyMarketConte
 export const hybridLiquidityConfluenceStrategyKey = "hybrid-liquidity-confluence-v1";
 export const hybridLiquidityConfluenceStrategyVersion = 1;
 
+export interface HybridLiquidityConfluenceConfiguration {
+  /** Pillar A minimum Decaying Depth Imbalance magnitude (default 0.15). */
+  minDiDecay: number;
+  /** Pillar B minimum Order Flow Imbalance magnitude (default 0.05). */
+  minRawDiOfi: number;
+  /** Pillar C minimum Put-Call Ratio for LONG trades (default 1.2). */
+  minLongPcr: number;
+  /** Pillar C maximum Put-Call Ratio for SHORT trades (default 0.8). */
+  maxShortPcr: number;
+  /** Pillar C minimum Implied Volatility Percentile threshold (default 15.0). */
+  minIvPercentile: number;
+}
+
+export const defaultHybridLiquidityConfluenceConfiguration: HybridLiquidityConfluenceConfiguration = {
+  minDiDecay: 0.15,
+  minRawDiOfi: 0.05,
+  minLongPcr: 1.2,
+  maxShortPcr: 0.8,
+  minIvPercentile: 15.0,
+};
+
 export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: hybridLiquidityConfluenceStrategyKey,
   name: "Hybrid Liquidity Confluence Strategy",
   description: "3-Pillar institutional engine combining L2 depth imbalance, Cont-Kukanov-Stoikov OFI, and Option Chain OI walls.",
   version: hybridLiquidityConfluenceStrategyVersion,
-  configuration: {},
+  configuration: { ...defaultHybridLiquidityConfluenceConfiguration } as Record<string, unknown>,
 };
 
 /**
@@ -17,14 +38,23 @@ export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersio
  *
  * 3-Pillar Institutional Trading Strategy:
  * 1. Pillar A: Structural Liquidity Level Sweep (PDH/PDL, Swing High/Low, Session High/Low)
- *              + Decaying L2 Depth Imbalance (DI_decay > 0.15).
- * 2. Pillar B: Cont-Kukanov-Stoikov Order Flow Imbalance (OFI) Aggressor Flow.
- * 3. Pillar C: Option Chain Open Interest (OI) Support/Resistance Walls (PCR >= 1.2 for LONG, <= 0.8 for SHORT).
+ *              + Decaying L2 Depth Imbalance (|DI_decay| >= 0.15).
+ * 2. Pillar B: Cont-Kukanov-Stoikov Order Flow Imbalance (OFI) Aggressor Flow (|raw_di| >= 0.05).
+ * 3. Pillar C: Option Chain Open Interest (OI) Support/Resistance Walls (PCR >= 1.2 for LONG, <= 0.8 for SHORT)
+ *              & Volatility Regime (IV Percentile >= 15%).
  */
 export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
   readonly strategyKey = hybridLiquidityConfluenceStrategyKey;
 
-  evaluate(context: StrategyMarketContext, _configuration: Record<string, unknown>): ProposedTradeIdea[] {
+  evaluate(context: StrategyMarketContext, rawConfiguration: Record<string, unknown>): ProposedTradeIdea[] {
+    const config: HybridLiquidityConfluenceConfiguration = {
+      minDiDecay: typeof rawConfiguration.minDiDecay === "number" ? rawConfiguration.minDiDecay : defaultHybridLiquidityConfluenceConfiguration.minDiDecay,
+      minRawDiOfi: typeof rawConfiguration.minRawDiOfi === "number" ? rawConfiguration.minRawDiOfi : defaultHybridLiquidityConfluenceConfiguration.minRawDiOfi,
+      minLongPcr: typeof rawConfiguration.minLongPcr === "number" ? rawConfiguration.minLongPcr : defaultHybridLiquidityConfluenceConfiguration.minLongPcr,
+      maxShortPcr: typeof rawConfiguration.maxShortPcr === "number" ? rawConfiguration.maxShortPcr : defaultHybridLiquidityConfluenceConfiguration.maxShortPcr,
+      minIvPercentile: typeof rawConfiguration.minIvPercentile === "number" ? rawConfiguration.minIvPercentile : defaultHybridLiquidityConfluenceConfiguration.minIvPercentile,
+    };
+
     const candle = context.candle;
     const confluence = context.confluenceSignal;
 
@@ -33,7 +63,7 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
     const nearestLevelType = confluence?.nearest_level_type ?? null;
     const diTilde = confluence?.di_tilde ?? null;
 
-    if (!isLevelProximate || diTilde === null || diTilde <= 0.10) {
+    if (!isLevelProximate || diTilde === null || Math.abs(diTilde) < config.minDiDecay) {
       return [];
     }
 
@@ -41,27 +71,67 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
     const bias = confluence?.directional_bias ?? "NONE";
 
     let proposedSide: "LONG" | "SHORT" | null = null;
-    if (action === "BUY_CALL_OR_LONG") proposedSide = "LONG";
-    else if (action === "BUY_PUT_OR_SHORT") proposedSide = "SHORT";
+    if (action === "BUY_CALL_OR_LONG" && diTilde >= config.minDiDecay) {
+      proposedSide = "LONG";
+    } else if (action === "BUY_PUT_OR_SHORT" && diTilde <= -config.minDiDecay) {
+      proposedSide = "SHORT";
+    }
 
     if (!proposedSide) return [];
 
     // Pillar B: Institutional Order Flow Imbalance (OFI Aggressor Flow)
-    // Check price action / indicator flow or raw_di confirmation
     const rawDi = confluence?.raw_di ?? 0;
-    const isOfiAligned = proposedSide === "LONG" ? rawDi >= 0.05 : rawDi <= -0.05;
+    const isOfiAligned = proposedSide === "LONG" ? rawDi >= config.minRawDiOfi : rawDi <= -config.minRawDiOfi;
 
-    // Pillar C: Option Chain Open Interest (OI) Support/Resistance Wall Check
+    if (!isOfiAligned) {
+      return [];
+    }
+
+    // Pillar C: Option Chain Open Interest (OI) & Volatility Regime
+    // 1. Search for PCR indicator in indicators or priceActionEvents
+    let pcrValue: number | null = null;
+    const pcrInd = context.indicators.find(ind => ind.code === "PCR" || ind.code === "OPTION_PCR");
+    if (pcrInd && typeof pcrInd.values.value === "number") {
+      pcrValue = pcrInd.values.value;
+    }
+
+    // 2. Search for IV Percentile indicator
+    let ivpVal: number | null = null;
+    const ivpInd = context.indicators.find(ind => ind.code === "IV_PERCENTILE");
+    if (ivpInd && typeof ivpInd.values.value === "number") {
+      ivpVal = ivpInd.values.value;
+    }
+
+    // Check PA events for OI walls if indicator not provided directly
     const paEvents = context.priceActionEvents ?? [];
     let oiWallConfirmed = true;
     for (const pa of paEvents) {
-      if (pa.details?.oiSupport === false || pa.details?.oiResistance === false) {
+      if (proposedSide === "LONG" && pa.details?.oiSupport === false) {
+        oiWallConfirmed = false;
+        break;
+      }
+      if (proposedSide === "SHORT" && pa.details?.oiResistance === false) {
         oiWallConfirmed = false;
         break;
       }
     }
 
-    if (!isOfiAligned || !oiWallConfirmed) {
+    // Evaluate Pillar C Rules
+    let pillarCPassed = oiWallConfirmed;
+
+    if (pcrValue !== null) {
+      if (proposedSide === "LONG" && pcrValue < config.minLongPcr) {
+        pillarCPassed = false;
+      } else if (proposedSide === "SHORT" && pcrValue > config.maxShortPcr) {
+        pillarCPassed = false;
+      }
+    }
+
+    if (ivpVal !== null && ivpVal < config.minIvPercentile) {
+      pillarCPassed = false;
+    }
+
+    if (!pillarCPassed) {
       return [];
     }
 
@@ -79,12 +149,12 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
       ? Number((entryPrice + rewardDistance).toFixed(2))
       : Number((entryPrice - rewardDistance).toFixed(2));
 
-    const confidence = Math.min(95, Math.round(85 + diTilde * 10));
+    const confidence = Math.min(95, Math.round(85 + Math.abs(diTilde) * 10));
 
     const reasoning = [
-      `[Pillar A PASS] Structural sweep at ${nearestLevelType} with Decaying Depth Imbalance DI_tilde=${diTilde.toFixed(4)}.`,
+      `[Pillar A PASS] Structural sweep at ${nearestLevelType} with Decaying Depth Imbalance DI_tilde=${diTilde.toFixed(4)} (Threshold: |DI| >= ${config.minDiDecay}).`,
       `[Pillar B PASS] Order Flow Aggressor flow confirmed (raw_di=${rawDi.toFixed(4)}).`,
-      `[Pillar C PASS] Option Chain Open Interest wall & volatility regime confirmed for ${proposedSide}.`,
+      `[Pillar C PASS] Option Chain Open Interest wall & volatility regime confirmed for ${proposedSide}${pcrValue !== null ? ` (PCR=${pcrValue.toFixed(2)})` : ""}${ivpVal !== null ? ` (IVP=${ivpVal.toFixed(1)}%)` : ""}.`,
     ];
 
     const proposal: ProposedTradeIdea = {
@@ -99,7 +169,7 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
         strategyKey: this.strategyKey,
         pillarA: { nearestLevelType, diTilde, bias },
         pillarB: { rawDi, isOfiAligned },
-        pillarC: { oiWallConfirmed },
+        pillarC: { oiWallConfirmed, pcrValue, ivpVal },
       },
       expiresAt: new Date(candle.closeTime.getTime() + 15 * 60 * 1000), // 15-minute expiration
       evidenceItems: [
@@ -108,7 +178,7 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
           sourceReference: this.strategyKey,
           label: "Hybrid Institutional Confluence",
           contribution: confidence,
-          details: { nearestLevelType, diTilde, rawDi },
+          details: { nearestLevelType, diTilde, rawDi, pcrValue, ivpVal },
         },
       ],
     };

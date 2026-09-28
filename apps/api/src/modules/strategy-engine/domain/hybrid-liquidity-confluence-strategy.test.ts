@@ -48,15 +48,15 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(proposals).toEqual([]);
   });
 
-  it("returns no proposals when di_tilde is weak or non-positive", () => {
+  it("enforces strict Pillar A minDiDecay threshold of 0.15 (rejects 0.14)", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
         nearest_level_type: "SWING_LOW",
         nearest_level_price: 54575,
         distance_bps: 1,
-        raw_di: 0.02,
-        di_tilde: 0.05,
+        raw_di: 0.14,
+        di_tilde: 0.14,
         directional_bias: "BULLISH_REJECTION",
         gate_action: "BUY_CALL_OR_LONG",
       },
@@ -65,7 +65,24 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(proposals).toEqual([]);
   });
 
-  it("emits LONG proposal when all 3 institutional pillars pass", () => {
+  it("rejects LONG proposal when DI_decay is negative (-0.20 for LONG)", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_LOW",
+        nearest_level_price: 54575,
+        distance_bps: 1,
+        raw_di: -0.20,
+        di_tilde: -0.20,
+        directional_bias: "BULLISH_REJECTION",
+        gate_action: "BUY_CALL_OR_LONG",
+      },
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
+  });
+
+  it("emits LONG proposal when all 3 institutional pillars pass with di_tilde >= 0.15", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
@@ -91,7 +108,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(p.reasoning[2]).toContain("[Pillar C PASS]");
   });
 
-  it("emits SHORT proposal when all 3 institutional pillars pass for sell side", () => {
+  it("emits SHORT proposal when all 3 institutional pillars pass for sell side (di_tilde <= -0.15)", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
@@ -99,7 +116,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
         nearest_level_price: 54585,
         distance_bps: 1,
         raw_di: -0.30,
-        di_tilde: 0.30,
+        di_tilde: -0.30,
         directional_bias: "BEARISH_REJECTION",
         gate_action: "BUY_PUT_OR_SHORT",
       },
@@ -111,5 +128,55 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(p.entryPrice).toBe(54580);
     expect(p.stopLoss).toBeGreaterThan(54580);
     expect(p.targetPrice).toBeLessThan(54580);
+  });
+
+  it("enforces Pillar C Option Chain PCR gate (rejects LONG when PCR < 1.2)", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_LOW",
+        nearest_level_price: 54575,
+        distance_bps: 1,
+        raw_di: 0.35,
+        di_tilde: 0.35,
+        directional_bias: "BULLISH_REJECTION",
+        gate_action: "BUY_CALL_OR_LONG",
+      },
+      indicators: [
+        {
+          code: "PCR",
+          algorithmVersion: "1.0",
+          parameters: {},
+          values: { value: 0.95 },
+        },
+      ],
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
+  });
+
+  it("enforces Pillar C IV Percentile gate (rejects when IVP < 15.0%)", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_LOW",
+        nearest_level_price: 54575,
+        distance_bps: 1,
+        raw_di: 0.35,
+        di_tilde: 0.35,
+        directional_bias: "BULLISH_REJECTION",
+        gate_action: "BUY_CALL_OR_LONG",
+      },
+      indicators: [
+        {
+          code: "IV_PERCENTILE",
+          algorithmVersion: "1.0",
+          parameters: {},
+          values: { value: 10.0 },
+        },
+      ],
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
   });
 });
