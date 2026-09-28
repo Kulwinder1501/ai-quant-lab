@@ -170,11 +170,23 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
   }
 
   // 13: ORDERBOOK-01 Directional Gate
+  //
+  // Kill switch: apps/ml/orderbook01_verdict.json (run 2026-09-28) recorded CASE E --
+  // "FALSIFIED. No robust directional edge found in OOS test." -- the same day this gate was
+  // wired into the live entry path. ORDERBOOK01_LIVE_GATE_ENABLED defaults OFF pending that
+  // resolution: the shadow verdict below is still computed and still pushed into `reasons`
+  // unchanged (shadow-trade logging in generate-trade-ideas.ts / orderbook-directional-gate.ts
+  // is untouched and keeps measuring would-have-happened P&L), it just no longer flips
+  // `isValid` and rejects a real paper trade entry. Set it to exactly "true" to restore the
+  // blocking behaviour.
+  const orderbook01LiveGateEnabled = process.env.ORDERBOOK01_LIVE_GATE_ENABLED === "true";
   if (context.confluenceSignal != null) {
     if (context.confluenceSignal.is_level_proximate) {
       const obResult = evaluateOrderbookDirectionalGate(proposedIdea.side, context.confluenceSignal);
       if (obResult.gateStatus === "BLOCK") {
-        isValid = false;
+        if (orderbook01LiveGateEnabled) {
+          isValid = false;
+        }
         reasons.push(obResult.reasoning ?? "ORDERBOOK-01 Directional Gate BLOCKED entry.");
       } else if (obResult.gateStatus === "PASS") {
         reasons.push(obResult.reasoning ?? "ORDERBOOK-01 Directional Gate PASSED entry.");
