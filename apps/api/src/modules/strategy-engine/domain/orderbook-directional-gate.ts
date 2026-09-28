@@ -113,14 +113,36 @@ export function evaluateOrderbookDirectionalGate(
   }
 }
 
-/** Applies ORDERBOOK-01 Directional Gate to a trade proposal. */
+/** Applies ORDERBOOK-01 Directional Gate to a trade proposal and records shadow metadata. */
 export function applyOrderbookGateToProposal(
   proposal: ProposedTradeIdea,
   confluenceSignal?: Parameters<typeof evaluateOrderbookDirectionalGate>[1],
 ): ProposedTradeIdea {
   const result = evaluateOrderbookDirectionalGate(proposal.side, confluenceSignal);
+  const shadowVerdict = result.gateStatus === "PASS" ? "ALLOWED" : result.gateStatus === "BLOCK" ? "BLOCKED" : "NEUTRAL";
+  
+  const shadowGateData = {
+    isGateActive: result.isGateActive,
+    gateStatus: result.gateStatus,
+    shadowVerdict,
+    nearestLevelType: result.nearestLevelType,
+    nearestLevelPrice: result.nearestLevelPrice,
+    distanceBps: result.distanceBps,
+    rawDi: result.rawDi,
+    diTilde: result.diTilde,
+    directionalBias: result.directionalBias,
+    recommendedSide: result.recommendedSide,
+    confidenceAdjustment: result.confidenceAdjustment,
+  };
+
   if (!result.isGateActive || result.gateStatus === "NEUTRAL") {
-    return proposal;
+    return {
+      ...proposal,
+      evidence: {
+        ...proposal.evidence,
+        orderbookGate: shadowGateData,
+      },
+    };
   }
 
   const updatedConfidence = Math.max(0, Math.min(100, proposal.confidence + result.confidenceAdjustment));
@@ -129,5 +151,9 @@ export function applyOrderbookGateToProposal(
     ...proposal,
     confidence: updatedConfidence,
     reasoning: result.reasoning ? [...proposal.reasoning, result.reasoning] : proposal.reasoning,
+    evidence: {
+      ...proposal.evidence,
+      orderbookGate: shadowGateData,
+    },
   };
 }

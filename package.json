@@ -65,6 +65,7 @@
     "research:directional:audit": "npm run research:directional:audit --workspace @ai-quant-lab/api --",
     "research:directional:study": "npm run research:directional:study --workspace @ai-quant-lab/api --",
     "research:directional:d2": "npm run research:directional:d2 --workspace @ai-quant-lab/api --",
+    "research:orderbook:shadow-audit": "node scripts/run-python.mjs apps/ml/shadow_orderbook_audit.py",
     "backtest:run": "npm run backtest:run --workspace @ai-quant-lab/api --",
     "models:settle-predictions": "npm run models:settle-predictions --workspace @ai-quant-lab/api",
     "models:settle-auxiliary": "npm run models:settle-auxiliary --workspace @ai-quant-lab/api --",

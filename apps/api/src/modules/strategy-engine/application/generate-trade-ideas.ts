@@ -320,9 +320,10 @@ export class GenerateTradeIdeas {
 
         for (const context of contexts) {
           const rawProposals = strategy.evaluate(context, strategyVersion.configuration);
-          let proposals = registration.strategyKey === "ict-structure-v1"
-            ? rawProposals
-            : rawProposals.map((proposal) => applySmcConfluenceToProposal(context, proposal));
+          let proposals = rawProposals.map((proposal) => {
+            const withSmc = registration.strategyKey === "ict-structure-v1" ? proposal : applySmcConfluenceToProposal(context, proposal);
+            return applyOrderbookGateToProposal(withSmc, context.confluenceSignal);
+          });
           // Same rule as generation, so a scan cannot report candidates on a side production
           // would refuse to trade.
           proposals = proposals.filter((proposal) =>
