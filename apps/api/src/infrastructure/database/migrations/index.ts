@@ -115,6 +115,7 @@ import { xauUsdCandleProvenanceMigration } from "./114-xauusd-candle-provenance.
 import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-currency-support.js";
 import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
 import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-locking-stop.js";
+import { backtestMomentumStallExitMigration } from "./118-backtest-momentum-stall-exit.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -234,4 +235,5 @@ export const migrations = [
   paperAccountsCurrencySupportMigration,
   paperTradeSessionCloseExitReasonMigration,
   paperTradeProfitLockingStopMigration,
+  backtestMomentumStallExitMigration,
 ];

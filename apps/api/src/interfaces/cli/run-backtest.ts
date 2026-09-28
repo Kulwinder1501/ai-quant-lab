@@ -41,6 +41,7 @@ import {
   type BlockedIstWindow,
 } from "../../modules/backtesting/domain/entry-filters.js";
 import type { ProtectiveStopPolicy } from "../../modules/paper-trading/domain/protective-stop.js";
+import type { MomentumStallPolicy } from "../../modules/backtesting/domain/momentum-stall-exit.js";
 
 /**
  * `--protective-stop break-even`, `trail:<triggerR>:<distanceR>`, or
@@ -71,6 +72,33 @@ function parseProtectiveStopPolicy(argumentsList: string[]): ProtectiveStopPolic
   throw new Error(
     `--protective-stop must be "break-even", "trail:<triggerR>:<distanceR>" or ` +
       `"trail:<triggerR>:<distanceR>:lock", received "${raw}".`
+  );
+}
+
+/**
+ * `--momentum-stall <cutoffMinutes>:<minimumProgressR>`, e.g. `--momentum-stall 10:0.5` -- the exact
+ * live policy configured for 5m in `MOMENTUM_STALL_POLICIES`
+ * (`paper-trading/application/evaluate-open-paper-trades.ts`).
+ *
+ * Measures the same time-and-progress stall rule the live evaluator applies to option-buyer scalps,
+ * re-derived for underlying-index bars -- see `momentum-stall-exit.ts` for why. Omitted means off,
+ * byte-identical to every prior run: this rule currently exists only in the live evaluator, and this
+ * flag is what lets a backtest ask "what would this rule have done to this strategy's trades" without
+ * touching that live path at all.
+ */
+function parseMomentumStallPolicy(argumentsList: string[]): MomentumStallPolicy | null {
+  const raw = getOption(argumentsList, "momentum-stall")?.trim();
+  if (!raw) return null;
+  const match = /^([\d.]+):([\d.]+)$/.exec(raw);
+  if (match) {
+    const cutoffMinutes = Number(match[1]);
+    const minimumProgressR = Number(match[2]);
+    if (Number.isFinite(cutoffMinutes) && cutoffMinutes > 0 && Number.isFinite(minimumProgressR) && minimumProgressR > 0) {
+      return { cutoffMinutes, minimumProgressR };
+    }
+  }
+  throw new Error(
+    `--momentum-stall must be "<cutoffMinutes>:<minimumProgressR>", received "${raw}".`,
   );
 }
 
@@ -441,6 +469,7 @@ async function main(): Promise<void> {
         replayStrategy,
         argumentsList.includes("--exit-on-opposing-sweep"),
         parseProtectiveStopPolicy(argumentsList),
+        parseMomentumStallPolicy(argumentsList),
       ),
     ).execute({
       strategyVersionId: strategyVersion.id,
@@ -480,6 +509,7 @@ async function main(): Promise<void> {
       higherTimeframes: higherTimeframeBuckets ?? null,
       exitOnOpposingSweep: argumentsList.includes("--exit-on-opposing-sweep"),
       protectiveStopPolicy: parseProtectiveStopPolicy(argumentsList),
+      momentumStallPolicy: parseMomentumStallPolicy(argumentsList),
       strategyConfigurationOverride: configurationOverride ?? null,
       ...result,
     }));

@@ -860,6 +860,7 @@ describe("EvaluateOpenPaperTrades", () => {
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
     const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
       timeframe: "5m",
       openedAt,
       entryPrice: 180,
@@ -897,6 +898,46 @@ describe("EvaluateOpenPaperTrades", () => {
   });
 
   /*
+   * The allowlist is scoped to the strategies this rule was actually measured against, not to
+   * timeframe alone. Regression guard for the exact bug that let `momentum-scalp-pattern` silently
+   * inherit this policy on 2026-09-26: same timeframe, same scalp geometry, same stalled-past-cutoff
+   * conditions as the first test in this block -- the only difference is `strategyKey` -- and this
+   * one must NOT stall.
+   */
+  it("does not stall a momentum-scalp-pattern trade on 5m, even though every other stall condition is met", async () => {
+    const closings: ClosePaperTradeInput[] = [];
+    const openedAt = new Date("2026-08-06T09:15:00.000Z");
+    const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
+    const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp-pattern",
+      timeframe: "5m",
+      openedAt,
+      entryPrice: 180,
+      stopLoss: 150, // Risk = 30; +0.5R threshold = 195
+      targetPrice: 225, // 1.5R, inside the <= 1.6 scalp band
+    });
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    // Same stalled bid as the momentum-scalp fixture above (185 < 195 threshold).
+    const densePremiums = denseReader(sample("2026-08-06T09:35:45.000Z", 185));
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      densePremiums,
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toEqual([]);
+  });
+
+  /*
    * The cutoff itself, pinned from both sides.
    *
    * The two tests around this one use 21 elapsed minutes, which satisfies the old 20-minute cutoff
@@ -910,6 +951,7 @@ describe("EvaluateOpenPaperTrades", () => {
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:27:00.000Z"); // 12 minutes later
     const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
       timeframe: "5m", openedAt, entryPrice: 180, stopLoss: 150, targetPrice: 225,
     });
     const candleRepository: CandleRepository = {
@@ -1034,6 +1076,7 @@ describe("EvaluateOpenPaperTrades", () => {
     const openedAt = new Date("2026-08-06T09:15:00.000Z");
     const asOf = new Date("2026-08-06T09:36:00.000Z"); // 21 minutes later
     const trade = optionBuyerTrade({
+      strategyKey: "momentum-scalp",
       timeframe: "5m",
       openedAt,
       entryPrice: 180,

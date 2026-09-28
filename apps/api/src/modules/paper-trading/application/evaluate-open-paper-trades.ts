@@ -48,6 +48,20 @@ const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | und
   "5m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
 });
 
+/**
+ * The only strategies this rule has ever been measured against. Keying the policy by timeframe
+ * alone meant any other strategy trading the same timeframe silently inherited it the moment it
+ * went live -- which happened for real: `momentum-scalp-pattern` was re-enabled on AutoBot-Sniper
+ * on 2026-09-26 and immediately started inheriting this exact policy on its own 5m trades. A
+ * same-day backtest comparison (`momentum-stall-exit.ts`, `run-backtest.ts --momentum-stall`) found
+ * the rule roughly DOUBLES momentum-scalp-pattern's net loss on BANKNIFTY 5m (-Rs 15,227 ->
+ * -Rs 27,984 over 236/446 trades) by driving far higher trade turnover at an unchanged per-trade
+ * expectancy -- the opposite of this rule's measured effect on the strategy it was built for.
+ * `momentum-scalp-pattern-v2` shares the same architecture and is excluded for the same reason,
+ * even though it is not currently live.
+ */
+const MOMENTUM_STALL_ELIGIBLE_STRATEGIES = new Set(["momentum-scalp", "momentum-scalp-index"]);
+
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
   asOf?: Date;
@@ -709,7 +723,9 @@ export class EvaluateOpenPaperTrades {
       //
       // This reduces a loss, it does not create edge: cohort fees are ~17,130 against a best
       // achievable gross of +6,427, so the book stays net-negative either way.
-      const stallPolicy = trade.timeframe ? MOMENTUM_STALL_POLICIES[trade.timeframe] : undefined;
+      const stallPolicy = trade.timeframe && trade.strategyKey && MOMENTUM_STALL_ELIGIBLE_STRATEGIES.has(trade.strategyKey)
+        ? MOMENTUM_STALL_POLICIES[trade.timeframe]
+        : undefined;
       if (stallPolicy) {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
         /*

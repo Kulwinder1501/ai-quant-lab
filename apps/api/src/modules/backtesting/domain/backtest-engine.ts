@@ -7,6 +7,7 @@ import type { BacktestConfiguration, BacktestEvaluationResult, BacktestExitReaso
 import { detectOpposingLiquiditySweep } from "./opposing-sweep-exit.js";
 import { advanceUnderlyingProtectiveStop } from "./underlying-protective-stop.js";
 import type { ProtectiveStopPolicy } from "../../paper-trading/domain/protective-stop.js";
+import { isMomentumStalled, type MomentumStallPolicy } from "./momentum-stall-exit.js";
 
 export const defaultBacktestConfiguration: BacktestConfiguration = {
   quantity: 1,
@@ -263,15 +264,16 @@ function proposalFor(context: StrategyMarketContext, strategy: BacktestStrategyE
  */
 export class BacktestEngine {
   /**
-   * `earlyExitOnOpposingSweep` and `protectiveStopPolicy` are both off by default so every existing
-   * run stays byte-identical; a caller has to ask for either, the same posture as
-   * `--native-htf`/`--higher-timeframes`. See `opposing-sweep-exit.ts` and
-   * `underlying-protective-stop.ts` for what each measures and why.
+   * `earlyExitOnOpposingSweep`, `protectiveStopPolicy` and `momentumStallPolicy` are all off by
+   * default so every existing run stays byte-identical; a caller has to ask for any of them, the
+   * same posture as `--native-htf`/`--higher-timeframes`. See `opposing-sweep-exit.ts`,
+   * `underlying-protective-stop.ts` and `momentum-stall-exit.ts` for what each measures and why.
    */
   constructor(
     private readonly strategy: BacktestStrategyEvaluator = new TrendBreakoutStrategy(),
     private readonly earlyExitOnOpposingSweep: boolean = false,
     private readonly protectiveStopPolicy: ProtectiveStopPolicy | null = null,
+    private readonly momentumStallPolicy: MomentumStallPolicy | null = null,
   ) {}
 
   run(
@@ -346,6 +348,38 @@ export class BacktestEngine {
             exitReason: decision ? decision.reason : "OPPOSING_LIQUIDITY_SWEEP",
             exitTime: exitTime ?? context.candle.closeTime,
             fillRule: decision ? decision.fillRule : "OPPOSING_SWEEP_EXIT",
+            configuration,
+          });
+          trades.push(trade);
+          realisedEquity += trade.pnl;
+          committedMargin -= marginFor(position);
+          openPositions.splice(slot, 1);
+          slot -= 1;
+        } else if (
+          // Same priority as the branch above, checked only after a real stop/target/sweep exit
+          // has already had first refusal this bar -- mirroring the live evaluator's own ordering
+          // comment: the stall rule sits "below the barrier decision... on purpose -- a stop or
+          // target reached at this instant is a real exit and must keep its own reason, or the
+          // ledger would attribute a genuine stop to the clock."
+          this.momentumStallPolicy !== null
+          && isMomentumStalled({
+            side: position.paperTrade.side,
+            entryPrice: position.paperTrade.entryPrice,
+            initialStopLoss: position.paperTrade.initialStopLoss ?? position.paperTrade.stopLoss,
+            targetPrice: position.paperTrade.targetPrice,
+            openedAt: position.paperTrade.openedAt,
+            asOf: context.candle.closeTime,
+            currentPrice: context.candle.close,
+            policy: this.momentumStallPolicy,
+          })
+        ) {
+          const trade = closePosition({
+            position,
+            exitContext: context,
+            rawExitPrice: context.candle.close,
+            exitReason: "MOMENTUM_STALL",
+            exitTime: context.candle.closeTime,
+            fillRule: "MOMENTUM_STALL_EXIT",
             configuration,
           });
           trades.push(trade);

@@ -3,7 +3,7 @@ import type { StrategyMarketContext, TradeSide } from "../../strategy-engine/dom
 export type BacktestRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 export type BacktestExitReason =
   | "STOP_LOSS" | "TARGET" | "SIGNAL" | "END_OF_DATA" | "TRAP_DETECTED"
-  | "OPPOSING_LIQUIDITY_SWEEP";
+  | "OPPOSING_LIQUIDITY_SWEEP" | "MOMENTUM_STALL";
 
 /**
  * How many units a signal is filled with.
