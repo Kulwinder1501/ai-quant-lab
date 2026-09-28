@@ -386,6 +386,35 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: hybridLiquidityConfluenceStrategyRegistration,
     StrategyClass: HybridLiquidityConfluenceStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
+    /*
+     * Disabled entirely 2026-09-28 -- both sides, not a side restriction. Same pattern as
+     * `momentum-scalp-pattern-v2` above: registered so idea generation, lineage and this
+     * reasoning survive, but nothing may act on it yet.
+     *
+     * This strategy shipped 2026-09-28 with two real defects, both fixed the same day:
+     * Pillar A's threshold disagreed with its own docstring and backtest script (code gated at
+     * 0.10, docs said 0.15 -- a sensitivity sweep at 0.10/0.125/0.15 settled which value ships,
+     * see docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md), and Pillar C was a stub
+     * that read a `priceActionEvents[].details.oiSupport/oiResistance` flag nothing ever set, so
+     * it defaulted to a silent pass on every proposal. Pillar C is now a real as-of PCR join
+     * against `option_chain_snapshots`.
+     *
+     * Fixing those defects is not the same as validating the strategy. The one test built to
+     * distinguish "this confluence logic adds something" from "this is equivalent to randomly
+     * dropping most of the population" is the random-subsample null comparison recorded in the
+     * doc above -- read it before enabling either side. A single backtest run, in-sample-adjacent
+     * to the data these defects were found in, is not grounds to go live per this project's own
+     * discipline (train -> shadow -> settle -> compete, OOS validation, walk-forward), regardless
+     * of which way that comparison came out.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here (see `terminal-verdict-propagation.test.ts`). This strategy has no research twin and no
+    // TERMINAL verdict -- inventing one to attach a disposition here would misrepresent the record
+    // the same way `trend-breakout`'s comment warns against. `operationalDisposition` does not fit
+    // either: its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this
+    // is not. The plain comment above is the honest record for a "pending validation" disable.
   },
 ];
 

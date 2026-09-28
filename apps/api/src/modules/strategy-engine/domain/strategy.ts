@@ -101,6 +101,25 @@ export interface StrategyMarketContext {
     gate_action?: string;
   } | null;
   /**
+   * Whole-chain put/call ratio (put OI / call OI, nearest un-expired expiry) resolved as-of this
+   * candle's close, for strategies that gate on an option-chain OI wall (e.g.
+   * `hybrid-liquidity-confluence-v1` Pillar C).
+   *
+   * `pcr: null` means "not measurable right now" -- either no snapshot has been observed yet
+   * (`option_chain_snapshots` is forward-accumulating from 2026-08-04, see migration 037) or the
+   * nearest one is older than `PCR_MAX_SNAPSHOT_AGE_MINUTES`. A consumer must treat null as "the
+   * wall cannot be confirmed", never as a default pass -- the same rule
+   * `apps/ml/oi_pcr_signal_check.py` uses for its as-of join, so the live gate and the offline
+   * gap-analysis check can't silently drift onto two different "unmeasured" conventions.
+   */
+  optionChainSignal?: {
+    pcr: number | null;
+    callOpenInterest: number | null;
+    putOpenInterest: number | null;
+    observedAt: Date | null;
+    ageMinutes: number | null;
+  };
+  /**
    * Trend and level context from slower timeframes, for confluence scoring.
    *
    * Optional because absence is a legitimate state, not an error: `calculateHtfTrendAlignment`

@@ -77,6 +77,13 @@ describe("HybridLiquidityConfluenceStrategy", () => {
         directional_bias: "BULLISH_REJECTION",
         gate_action: "BUY_CALL_OR_LONG",
       },
+      optionChainSignal: {
+        pcr: 1.4,
+        callOpenInterest: 100_000,
+        putOpenInterest: 140_000,
+        observedAt: new Date("2026-09-28T10:02:00Z"),
+        ageMinutes: 3,
+      },
     });
     const proposals = strategy.evaluate(ctx, {});
     expect(proposals).toHaveLength(1);
@@ -89,6 +96,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(p.reasoning[0]).toContain("[Pillar A PASS]");
     expect(p.reasoning[1]).toContain("[Pillar B PASS]");
     expect(p.reasoning[2]).toContain("[Pillar C PASS]");
+    expect(p.evidence.pillarC).toEqual({ pcr: 1.4, oiWallConfirmed: true });
   });
 
   it("emits SHORT proposal when all 3 institutional pillars pass for sell side", () => {
@@ -103,6 +111,13 @@ describe("HybridLiquidityConfluenceStrategy", () => {
         directional_bias: "BEARISH_REJECTION",
         gate_action: "BUY_PUT_OR_SHORT",
       },
+      optionChainSignal: {
+        pcr: 0.6,
+        callOpenInterest: 140_000,
+        putOpenInterest: 84_000,
+        observedAt: new Date("2026-09-28T10:02:00Z"),
+        ageMinutes: 3,
+      },
     });
     const proposals = strategy.evaluate(ctx, {});
     expect(proposals).toHaveLength(1);
@@ -111,5 +126,73 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(p.entryPrice).toBe(54580);
     expect(p.stopLoss).toBeGreaterThan(54580);
     expect(p.targetPrice).toBeLessThan(54580);
+  });
+
+  it("rejects a LONG setup when PCR is unmeasured, rather than defaulting to a pass", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_LOW",
+        nearest_level_price: 54575,
+        distance_bps: 1,
+        raw_di: 0.35,
+        di_tilde: 0.35,
+        directional_bias: "BULLISH_REJECTION",
+        gate_action: "BUY_CALL_OR_LONG",
+      },
+      // No optionChainSignal at all -- the pre-2026-09-28 stub would have passed this
+      // silently (nothing ever set priceActionEvents[].details.oiSupport/oiResistance to
+      // false). The real gate must refuse instead of defaulting to a pass.
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
+  });
+
+  it("rejects a LONG setup when PCR is measured but on the wrong side of the wall", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_LOW",
+        nearest_level_price: 54575,
+        distance_bps: 1,
+        raw_di: 0.35,
+        di_tilde: 0.35,
+        directional_bias: "BULLISH_REJECTION",
+        gate_action: "BUY_CALL_OR_LONG",
+      },
+      optionChainSignal: {
+        pcr: 0.95, // below the 1.2 LONG floor
+        callOpenInterest: 100_000,
+        putOpenInterest: 95_000,
+        observedAt: new Date("2026-09-28T10:02:00Z"),
+        ageMinutes: 3,
+      },
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
+  });
+
+  it("rejects a SHORT setup when PCR is measured but on the wrong side of the wall", () => {
+    const ctx = mockContext({
+      confluenceSignal: {
+        is_level_proximate: true,
+        nearest_level_type: "SWING_HIGH",
+        nearest_level_price: 54585,
+        distance_bps: 1,
+        raw_di: -0.30,
+        di_tilde: 0.30,
+        directional_bias: "BEARISH_REJECTION",
+        gate_action: "BUY_PUT_OR_SHORT",
+      },
+      optionChainSignal: {
+        pcr: 0.9, // above the 0.8 SHORT ceiling
+        callOpenInterest: 100_000,
+        putOpenInterest: 90_000,
+        observedAt: new Date("2026-09-28T10:02:00Z"),
+        ageMinutes: 3,
+      },
+    });
+    const proposals = strategy.evaluate(ctx, {});
+    expect(proposals).toEqual([]);
   });
 });

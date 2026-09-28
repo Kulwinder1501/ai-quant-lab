@@ -92,6 +92,14 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
 /** Reads only completed-candle evidence, so strategy decisions cannot use a forming bar. */
 let ictPersistGrantWarned = false;
 
+/**
+ * How stale the most recent option-chain snapshot may be and still count as "known at decision
+ * time" for `optionChainSignal`. Matches `apps/ml/oi_pcr_signal_check.py`'s
+ * MAXIMUM_SNAPSHOT_AGE_MINUTES -- same collector, same ~7-8 minute polling cadence, no reason to
+ * invent a different tolerance for the live path than the one already validated offline.
+ */
+const OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES = 60;
+
 export class PostgresStrategyMarketContextRepository implements StrategyMarketContextRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
@@ -397,6 +405,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
 
     const regime = await this.findRegime(input, candle) ?? undefined;
     const confluenceSignal = await this.resolveConfluenceSignal(input, candle) ?? undefined;
+    const optionChainSignal = await this.resolveOptionChainSignal(input, candle) ?? undefined;
 
     let ictSnapshot: IctStateCompositeSnapshot | undefined = ictSnapshotRows.rows[0]?.snapshot_payload;
     if (!ictSnapshot && ictConsumed) {
@@ -429,8 +438,74 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       })),
       regime,
       ...(confluenceSignal ? { confluenceSignal } : {}),
+      ...(optionChainSignal ? { optionChainSignal } : {}),
       ...(ictSnapshot ? { ictSnapshot } : {}),
     };
+  }
+
+  /**
+   * Whole-chain PCR (put OI / call OI, nearest un-expired expiry) as of `candle.close_time`.
+   *
+   * Reuses the same as-of join pattern as `resolveConfluenceSignal` below: resolve the
+   * instrument's canonical symbol, then look up the option-chain side by symbol rather than
+   * `instrument_id` (the chain collector keys snapshots by the lab's canonical symbol, not the
+   * instruments table's UUID). Errors degrade to "no signal" rather than failing the whole
+   * context, matching every other optional-evidence resolver on this class.
+   */
+  private async resolveOptionChainSignal(
+    input: { instrumentId: string; timeframe: string },
+    candle: CompletedCandleRow,
+  ): Promise<StrategyMarketContext["optionChainSignal"]> {
+    try {
+      const instResult = await this.database.query<{ symbol: string }>(
+        `SELECT symbol FROM instruments WHERE id = $1`,
+        [input.instrumentId],
+      );
+      const symbol = instResult.rows[0]?.symbol;
+      if (!symbol) return undefined;
+
+      const latestResult = await this.database.query<{ observed_at: Date }>(`
+        SELECT observed_at
+        FROM option_chain_snapshots
+        WHERE underlying_symbol = $1 AND observed_at <= $2
+        ORDER BY observed_at DESC
+        LIMIT 1
+      `, [symbol, candle.close_time]);
+      const observedAt = latestResult.rows[0]?.observed_at;
+      if (!observedAt) {
+        return { pcr: null, callOpenInterest: null, putOpenInterest: null, observedAt: null, ageMinutes: null };
+      }
+
+      const ageMinutes = (candle.close_time.getTime() - observedAt.getTime()) / 60_000;
+      if (ageMinutes > OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES) {
+        return { pcr: null, callOpenInterest: null, putOpenInterest: null, observedAt: null, ageMinutes: null };
+      }
+
+      // Nearest un-expired expiry at that snapshot, same aggregate definition
+      // `apps/ml/oi_pcr_signal_check.py` and `run_hybrid_confluence_backtest.py` use, so the live
+      // gate and the offline research checks can't silently drift onto two different PCR
+      // definitions.
+      const aggResult = await this.database.query<{ call_oi: string | null; put_oi: string | null }>(`
+        WITH nearest_expiry AS (
+          SELECT MIN(expiry_date) AS expiry_date
+          FROM option_chain_snapshots
+          WHERE underlying_symbol = $1 AND observed_at = $2 AND expiry_date >= observed_at::date
+        )
+        SELECT
+          SUM(CASE WHEN s.option_type = 'CE' THEN s.open_interest ELSE 0 END) AS call_oi,
+          SUM(CASE WHEN s.option_type = 'PE' THEN s.open_interest ELSE 0 END) AS put_oi
+        FROM option_chain_snapshots s, nearest_expiry ne
+        WHERE s.underlying_symbol = $1 AND s.observed_at = $2 AND s.expiry_date = ne.expiry_date
+      `, [symbol, observedAt]);
+
+      const callOi = aggResult.rows[0]?.call_oi != null ? Number(aggResult.rows[0].call_oi) : 0;
+      const putOi = aggResult.rows[0]?.put_oi != null ? Number(aggResult.rows[0].put_oi) : 0;
+      const pcr = callOi > 0 ? putOi / callOi : null;
+
+      return { pcr, callOpenInterest: callOi, putOpenInterest: putOi, observedAt, ageMinutes };
+    } catch {
+      return undefined;
+    }
   }
 
   private async resolveConfluenceSignal(
