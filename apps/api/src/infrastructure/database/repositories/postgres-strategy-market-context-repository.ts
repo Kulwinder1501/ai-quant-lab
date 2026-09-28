@@ -22,6 +22,7 @@ import {
 import type { DatabaseQueryable } from "../database.js";
 import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
+import { deriveHtfBiasSeriesFromCandles } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
 
 
 interface CompletedCandleRow extends QueryResultRow {
@@ -160,6 +161,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     const causalCandles = rows.map((r) => ({
       id: r.id,
       openTime: r.open_time,
+      closeTime: r.close_time,
       open: toNumber(r.open, "open"),
       high: toNumber(r.high, "high"),
       low: toNumber(r.low, "low"),
@@ -167,11 +169,20 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       volume: toNumber(r.volume, "volume"),
     }));
 
+    /*
+     * The live path's own HTF bias derivation, ported from the replay builder: without this, Gate 1
+     * (`ict-structure-strategy.ts`) demands `coverage.htf === "COMPLETE"` on every bar and never gets
+     * it, because `engine.processCandle` below would otherwise never receive a bias at all --
+     * `coverage.htf` would be NOT_COVERED on every single call, permanently. See
+     * `deriveHtfBiasSeriesFromCandles`'s own doc comment for the session-bucketing rule itself.
+     */
+    const htfBiasSeries = deriveHtfBiasSeriesFromCandles(causalCandles, defaultIctEngineConfig);
+
     const engine = new IctCompositeEngine(defaultIctEngineConfig);
     let snapshot: IctStateCompositeSnapshot | undefined;
 
     for (let i = 0; i < causalCandles.length; i++) {
-      snapshot = engine.processCandle(causalCandles, i);
+      snapshot = engine.processCandle(causalCandles, i, htfBiasSeries[i]);
     }
 
     if (snapshot) {

@@ -183,3 +183,142 @@ describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository.findRawVo
     expect(reading).toBeNull();
   });
 });
+
+/**
+ * `computeAndPersistIctSnapshot`'s HTF pillar, against a real database.
+ *
+ * Before this fix, `engine.processCandle(causalCandles, i)` never received a third `htfBias`
+ * argument on the live path, so `coverage.htf` was `NOT_COVERED` on every single call regardless of
+ * how much daily-session history existed -- the two live ICT bots (`AutoBot-IctNifty15m`,
+ * `AutoBot-IctBankNifty5m`) could never clear Gate 1's `coverage.htf === "COMPLETE"` requirement.
+ * This seeds enough synthetic daily-session history (a dedicated, isolated test instrument so it
+ * cannot collide with real market data) to prove the live path now derives and threads a real HTF
+ * bias through, the same way the replay/backtest path always has.
+ */
+describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository ICT HTF coverage (live DB)", () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  let client: PoolClient;
+
+  beforeEach(async () => {
+    client = await pool.connect();
+    await client.query("BEGIN");
+  });
+
+  afterEach(async () => {
+    await client.query("ROLLBACK");
+    client.release();
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  const scoped = (): DatabasePool => client as unknown as DatabasePool;
+
+  async function seedTargetInstrument(symbol: string): Promise<string> {
+    const instrument = await new PostgresInstrumentRepository(scoped()).upsert({
+      exchange: "NSE",
+      symbol,
+      displayName: symbol,
+      instrumentType: "INDEX",
+      isin: null,
+      tickSize: "0.05",
+      lotSize: 1,
+      isActive: true,
+      metadata: {},
+      underlyingSymbol: null,
+      strikePrice: null,
+      expiryDate: null,
+      optionType: null,
+    });
+    return instrument.id;
+  }
+
+  /**
+   * A synthetic ascending "staircase": a 6-bar up-leg followed by a 4-bar pullback, repeated, each
+   * cycle's swing high/low strictly above the previous cycle's. One 5m candle per IST session (so
+   * each session IS its own daily HTF bucket), starting from a fixed past date so every close_time
+   * is safely `<= CURRENT_TIMESTAMP`. This exact shape confirms an IctStructureTracker(pivotLength=3)
+   * trend to BULLISH by session index 8 (proven directly against the tracker before being reused
+   * here), which is what carries `coverage.htf` to "COMPLETE" rather than "UNKNOWN": OWN_STRUCTURE
+   * bias reads `structure.trend` once it has resolved off NEUTRAL, per `bias.ts`.
+   */
+  function staircaseSessionCandles(sessions: number): Array<{
+    openTime: Date; closeTime: Date; open: number; high: number; low: number; close: number;
+  }> {
+    const out: Array<{ openTime: Date; closeTime: Date; open: number; high: number; low: number; close: number }> = [];
+    let price = 100;
+    let dayOffset = 0;
+    const upLen = 6;
+    const downLen = 4;
+    while (out.length < sessions) {
+      for (let i = 0; i < upLen && out.length < sessions; i += 1) {
+        price += 4;
+        out.push(sessionCandle(dayOffset, price - 4, price + 2, price - 5, price));
+        dayOffset += 1;
+      }
+      for (let i = 0; i < downLen && out.length < sessions; i += 1) {
+        price -= 2;
+        out.push(sessionCandle(dayOffset, price + 2, price + 3, price - 2, price));
+        dayOffset += 1;
+      }
+    }
+    return out;
+  }
+
+  /** One 5m bar at 09:15 IST, `dayOffset` days after a fixed 2020-01-01 anchor (safely in the past). */
+  function sessionCandle(
+    dayOffset: number,
+    open: number,
+    high: number,
+    low: number,
+    close: number,
+  ): { openTime: Date; closeTime: Date; open: number; high: number; low: number; close: number } {
+    const openTime = new Date(Date.UTC(2020, 0, 1 + dayOffset, 3, 45)); // 09:15 IST = 03:45 UTC
+    const closeTime = new Date(openTime.getTime() + 5 * 60_000);
+    return { openTime, closeTime, open, high, low, close };
+  }
+
+  it("carries coverage.htf to COMPLETE once enough daily-session history exists", async () => {
+    const database = scoped();
+    const targetId = await seedTargetInstrument("TEST_TARGET_HTF_COVERAGE");
+    const timeframe = "5m"; // AutoBot-IctBankNifty5m's own timeframe; ictContextConsumedAt("5m") is true.
+
+    // A brand-new (instrument, timeframe) pair has no declared provenance yet -- migration 043's FK
+    // requires one before any candle can be inserted, so this test declares its own.
+    await database.query(
+      "INSERT INTO candle_series_provenance (instrument_id, timeframe, source) VALUES ($1, $2, 'test')",
+      [targetId, timeframe],
+    );
+
+    const candleRepository = new PostgresCandleRepository(database);
+    const sessions = staircaseSessionCandles(40);
+    for (const session of sessions) {
+      await candleRepository.upsert({
+        instrumentId: targetId,
+        ingestionId: null,
+        timeframe,
+        openTime: session.openTime,
+        closeTime: session.closeTime,
+        open: String(session.open),
+        high: String(session.high),
+        low: String(session.low),
+        close: String(session.close),
+        volume: "1000",
+        isComplete: true,
+        source: "test",
+        sourceMetadata: {},
+      });
+    }
+
+    const repository = new PostgresStrategyMarketContextRepository(database);
+    const context = await repository.findLatestCompleted({ instrumentId: targetId, timeframe });
+
+    expect(context).not.toBeNull();
+    // The defect this fix closes: coverage.htf was NOT_COVERED on every live call, unconditionally,
+    // no matter how much daily-session history existed. With that many completed sessions behind it
+    // and a resolved (non-NEUTRAL) own-structure trend, it must now be COMPLETE.
+    expect(context?.ictSnapshot?.coverage.htf).toBe("COMPLETE");
+    expect(context?.ictSnapshot?.htfBias).toBe("BULLISH");
+  });
+});

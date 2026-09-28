@@ -48,13 +48,21 @@ function contextToCausalCandle(context: StrategyMarketContext): CausalCandle {
   };
 }
 
+/**
+ * What `deriveHtfBiasSeriesFromCandles` needs beyond `CausalCandle`: the bar's own close time, to
+ * decide when a session -- and therefore its HTF bucket -- has actually closed.
+ */
+export interface HtfSourceCandle extends CausalCandle {
+  readonly closeTime: Date;
+}
+
 interface HtfBucket {
   readonly candle: CausalCandle;
   readonly closeTime: Date;
 }
 
 /**
- * Aggregates the base contexts into complete, session-contained HTF buckets.
+ * Aggregates a candle series into complete, session-contained HTF buckets.
  *
  * A bucket accumulates base bars of one IST session until it reaches
  * the session boundary, at which point it is emitted. A bucket that is still partial
@@ -69,8 +77,8 @@ interface HtfBucket {
  * is the same anti-lookahead property the count-based bucketing had, obtained here for free from the
  * session boundary rather than from a bar count that had to be tuned per timeframe.
  */
-function aggregateSessionHtfBuckets(
-  contexts: readonly StrategyMarketContext[],
+function aggregateSessionHtfBucketsFromCandles(
+  candles: readonly HtfSourceCandle[],
 ): HtfBucket[] {
   const buckets: HtfBucket[] = [];
   let acc:
@@ -95,8 +103,7 @@ function aggregateSessionHtfBuckets(
     }
   };
 
-  for (const context of contexts) {
-    const c = context.candle;
+  for (const c of candles) {
     const sessionDate = istSessionDate(c.openTime);
 
     if (acc && acc.sessionDate !== sessionDate) {
@@ -130,6 +137,12 @@ function aggregateSessionHtfBuckets(
   return buckets;
 }
 
+function aggregateSessionHtfBuckets(
+  contexts: readonly StrategyMarketContext[],
+): HtfBucket[] {
+  return aggregateSessionHtfBucketsFromCandles(contexts.map((c) => c.candle));
+}
+
 /**
  * The HTF bias visible to each base bar, or `undefined` when none has closed yet.
  *
@@ -138,11 +151,11 @@ function aggregateSessionHtfBuckets(
  * the anti-lookahead rule: a bucket closing at the same instant is visible, a
  * later one is not.
  */
-export function deriveHtfBiasSeries(
-  contexts: readonly StrategyMarketContext[],
+export function deriveHtfBiasSeriesFromCandles(
+  candles: readonly HtfSourceCandle[],
   config: IctEngineConfig = defaultIctEngineConfig,
 ): (IctBiasDirection | undefined)[] {
-  const buckets = aggregateSessionHtfBuckets(contexts);
+  const buckets = aggregateSessionHtfBucketsFromCandles(candles);
   /*
    * The HTF engine sits at the top of this chain, so it reads its bias from its own swing sequence.
    * Left on the default it would demand a bias from a level above it, find none, resolve UNKNOWN,
@@ -155,13 +168,13 @@ export function deriveHtfBiasSeries(
     return { closeTime: bucket.closeTime, bias: snap.bias.bias };
   });
 
-  // Two ordered pointers: buckets are chronological and so are contexts, so the
+  // Two ordered pointers: buckets are chronological and so are candles, so the
   // latest visible bucket only ever moves forward.
-  const series: (IctBiasDirection | undefined)[] = new Array(contexts.length).fill(undefined);
+  const series: (IctBiasDirection | undefined)[] = new Array(candles.length).fill(undefined);
   let bucketIdx = 0;
   let latest: IctBiasDirection | undefined;
-  for (let i = 0; i < contexts.length; i += 1) {
-    const barClose = contexts[i].candle.closeTime.getTime();
+  for (let i = 0; i < candles.length; i += 1) {
+    const barClose = candles[i].closeTime.getTime();
     while (bucketIdx < bucketBias.length && bucketBias[bucketIdx].closeTime.getTime() <= barClose) {
       latest = bucketBias[bucketIdx].bias;
       bucketIdx += 1;
@@ -169,6 +182,13 @@ export function deriveHtfBiasSeries(
     series[i] = latest;
   }
   return series;
+}
+
+export function deriveHtfBiasSeries(
+  contexts: readonly StrategyMarketContext[],
+  config: IctEngineConfig = defaultIctEngineConfig,
+): (IctBiasDirection | undefined)[] {
+  return deriveHtfBiasSeriesFromCandles(contexts.map((c) => c.candle), config);
 }
 
 /**
