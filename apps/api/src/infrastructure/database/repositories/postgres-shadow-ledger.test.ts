@@ -122,6 +122,29 @@ describe.skipIf(!databaseUrl)("PostgresShadowLedger (live DB)", () => {
     expect(stored.detail).toBe("OUTSIDE_EXECUTABLE_WINDOW");
   });
 
+  it("records an approved shadow decision as CANDIDATE_RESOLVED -> THESIS_FORMED, not a throw", async () => {
+    // The bug this guards: terminalFor("APPROVED") maps to stateTo THESIS_FORMED, and the closing event's
+    // stateFrom is hardcoded to CANDIDATE_RESOLVED -- assertAppendable used to reject that transition
+    // outright because the live transition table requires MARKET_STATE_INTERPRETED in between. Shadow has
+    // no such stage to skip (see DecisionTransitionMode), so this must now succeed end to end.
+    const decisionId = randomUUID();
+    const context = await sealedContext(decisionId);
+    const contextSnapshotId = context.snapshotId;
+
+    await expect(ledgerFor().append({
+      decisionId,
+      contextSnapshotId,
+      policyVersions: { thesis: "test" },
+      outcome: "APPROVED",
+      detail: "thesis-approved",
+    })).resolves.not.toThrow();
+
+    const events = await eventsFor(decisionId);
+    expect(events).toHaveLength(2);
+    expect(events[1].state_to).toBe("THESIS_FORMED");
+    expect(events[1].event_type).toBe("STAGE_COMPLETED");
+  });
+
   it("distinguishes two refusals that share an event type", async () => {
     // The point of keeping the reason: `terminalFor` collapses every outcome into four event types,
     // so without the payload these two rows would be indistinguishable.

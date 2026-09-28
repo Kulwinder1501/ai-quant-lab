@@ -1,5 +1,5 @@
 import { sha256CanonicalJson } from "../../platform/identity/identity.js";
-import { assertDecisionTransition, type DecisionState } from "./decision-lifecycle.js";
+import { assertDecisionTransition, type DecisionState, type DecisionTransitionMode } from "./decision-lifecycle.js";
 
 /**
  * The append-only decision ledger: the record everything else is reconstructed from (I13, I15).
@@ -88,6 +88,13 @@ export interface DecisionLedgerEvent {
   readonly previousEventHash: string | null;
   readonly producer: EventProducer;
 }
+
+/**
+ * The `producer.service` value every shadow-mode ledger event carries. `postgres-shadow-ledger.ts` tags
+ * its writes with this; `assertAppendable` below reads it back to permit shadow's one structurally-safe
+ * shortcut (CANDIDATE_RESOLVED -> THESIS_FORMED) without loosening the rule for the live pipeline.
+ */
+export const SHADOW_LEDGER_PRODUCER_SERVICE = "autonomous-v2-shadow";
 
 export class LedgerAppendError extends Error {
   constructor(message: string) {
@@ -184,7 +191,11 @@ export function assertAppendable(input: {
     );
   }
   // The transition table owns legality, so a stage that can be skipped stays impossible here too (I17).
-  assertDecisionTransition(event.stateFrom, event.stateTo);
+  // Shadow-produced events get the one narrow exception the table itself documents (see
+  // DecisionTransitionMode); everything else -- including every live-pipeline write -- is exactly as
+  // strict as before.
+  const mode: DecisionTransitionMode = event.producer.service === SHADOW_LEDGER_PRODUCER_SERVICE ? "shadow" : "live";
+  assertDecisionTransition(event.stateFrom, event.stateTo, mode);
 
   const expectedType: DecisionEventType = event.stateTo === "REJECTED"
     ? "DECISION_REJECTED"

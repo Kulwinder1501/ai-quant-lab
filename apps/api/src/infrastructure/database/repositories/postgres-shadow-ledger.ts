@@ -5,6 +5,7 @@ import { PostgresSnapshotRegistry } from "./postgres-snapshot-registry.js";
 import type { SnapshotRegistry } from "../../../modules/platform/snapshot/snapshot-registry.js";
 import {
   decisionEventHash,
+  SHADOW_LEDGER_PRODUCER_SERVICE,
   type DecisionEventType,
   type DecisionLedgerEvent,
 } from "../../../modules/autonomous-v2/domain/decision-ledger.js";
@@ -38,7 +39,7 @@ import type { ShadowLedgerPort } from "../../../modules/autonomous-v2/applicatio
  * context nobody stored would replay as an empty decision rather than as a missing dependency.
  */
 
-const SERVICE = "autonomous-v2-shadow";
+const SERVICE = SHADOW_LEDGER_PRODUCER_SERVICE;
 const SERVICE_VERSION = "1";
 
 /** How a thesis outcome lands in the ledger's vocabulary. */
