@@ -104,6 +104,48 @@ describe("IngestOptionChain tradable-expiry coverage", () => {
     expect(result.failures[0]?.underlyingSymbol).toContain("tradable expiry");
   });
 
+  it("records a failure, without attempting a fetch, when the provider lists the tradable expiry but gives it no token", async () => {
+    // The 2026-08-24 failure mode recurring upstream of the try/catch: the provider's own header
+    // says the rolled expiry exists, but does not hand back a token that could fetch its book.
+    const requested: Array<string | null | undefined> = [];
+    const saved: string[] = [];
+    const source = {
+      async fetchChain(input: { underlyingSymbol: string; strikeCount?: number; expiryToken?: string | null }) {
+        requested.push(input.expiryToken);
+        return {
+          ...snapshot(FRONT, null),
+          listedExpiries: [
+            { expiryDate: new Date(`${FRONT}T10:00:00.000Z`), expiryKind: "MONTHLY" as const, providerExpiryToken: "1756108800" },
+            // No token for the rolled expiry, even though the provider still lists it.
+            { expiryDate: new Date(`${ROLLED}T10:00:00.000Z`), expiryKind: "MONTHLY" as const, providerExpiryToken: null },
+          ],
+        };
+      },
+    };
+    const store = {
+      async saveSnapshot(value: OptionChainSnapshot) {
+        saved.push(value.quotes[0]!.expiryDate.toISOString().slice(0, 10));
+        return { inserted: value.quotes.length, skipped: 0 };
+      },
+      async saveExpiryCalendar() { return { inserted: 2 }; },
+    };
+
+    const result = await new IngestOptionChain(source, store).execute({
+      underlyingSymbols: ["BANKNIFTY"], now: new Date("2026-08-24T04:00:00.000Z"),
+    });
+
+    // Only the front expiry was ever requested -- no attempt was made with a null token.
+    expect(requested).toEqual([undefined]);
+    expect(saved).toEqual([FRONT]);
+    expect(result.tradableExpiries).toEqual([]);
+    // The front observation itself is untouched.
+    expect(result.chains).toHaveLength(1);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.underlyingSymbol).toContain("tradable expiry");
+    expect(result.failures[0]?.reason).toContain("no");
+    expect(result.failures[0]?.reason).toContain("token");
+  });
+
   it("can be switched back to front-expiry-only collection", async () => {
     const { ingest, requested } = harness();
     await ingest.execute({
