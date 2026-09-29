@@ -238,6 +238,7 @@ async function main(): Promise<void> {
         negativeLagThreshold: report.negativeLagThreshold,
         negativeLagIcs: report.negativeLagIcs,
         placeboIcs: report.placeboIcs,
+        matchedTimeDiversity: report.matchedTimeDiversity,
         failures: report.failures,
       };
     });

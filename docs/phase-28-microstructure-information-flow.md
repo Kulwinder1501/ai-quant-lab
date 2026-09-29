@@ -1,16 +1,17 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS (2026-09-15): FIRST CLEAN PHASE 4 PASS, ON TWO DAYS, ONE INSTRUMENT. §7's 2026-09-11
-single-day blind read reported NO_SIGNAL at 30s/60s, but that verdict rested on a broken placebo —
-`wrongDayMatchedTime` is a documented no-op when only one calendar day is present, and it happened to
-be the largest-magnitude placebo at both horizons, so it alone set a band that was never really
-active. Re-running the *same* capture session (which spans 2026-09-10 and 2026-09-11, both already
-post the 2026-09-09 pre-registration and never previously combined) gives the placebo two real days
-to swap between. Result: **PASS at 30s (IC −0.081, band 0.0044) and 60s (IC −0.078, band 0.0140)**,
-consistent in sign and magnitude with the earlier 6-session diagnostic. See §7's closing update for
-full detail and the caveats that still apply — this is one 2-day window on one instrument
-(BANKNIFTY futures; no NIFTY50 depth exists), not yet a replicated result, and Phase 5 (cost-aware
-gate) has not started.
+**STATUS (2026-09-29): PLACEBO DEGENERACY WAS RECURRING SILENTLY, NOW GUARDED IN CODE. §9's
+"closed, not advanced" verdict was reached on two windows. Since then, 5 more forward-blind windows
+accumulated (2026-09-21 through 2026-09-28) and — unnoticed until now — the *exact same*
+`wrongDayMatchedTime` no-op that corrupted §7's first 2026-09-11 read had recurred on 4 of those 5
+(including 2026-09-21, which §9-era informal review had wrongly cleared as a genuine null; see §10).
+The harness now measures the placebo's own day-diversity and refuses to report a real verdict when it
+is degenerate (`INCONCLUSIVE`, not `NO_SIGNAL`/`PASS`) instead of silently letting a fake tied IC set
+the bar. **Re-reading all 7 windows to date under the fix: 3 are genuinely clean (2026-09-10/11 PASS
+negative, 2026-09-17/18 PASS positive, 2026-09-22/23 PASS positive — 2 positive vs 1 negative), and 4
+are `INCONCLUSIVE`** (placebo untrustworthy, verdict withheld) though every one of their raw point
+estimates is also positive. See §10 for the full corrected table and the honest read on where that
+leaves the programme: not reopened, but no longer flatly "closed" either.
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -618,3 +619,126 @@ trusted -- only the *real* IC's sign and magnitude are, which the degenerate pla
 four numbers agree in sign and sit in the same 0.065-0.085 range -- the positive window-2 result is
 not one unusual day dominating a pooled average, it is the same effect present on both days
 independently. That rules out the stray fragments and day-pooling as the explanation for the flip.
+
+## 10. The placebo degeneracy recurred silently on 4 of 5 fresh windows, and is now guarded in code (2026-09-29)
+
+§8 diagnosed the `wrongDayMatchedTime` no-op as a one-off methodological gap in *how the tool was
+invoked* and fixed it by hand: evaluate a window that genuinely spans two trading days. §9 did the
+same for the second window. Neither section changed the harness itself, because at the time it looked
+like an invocation mistake, not a code defect worth guarding against.
+
+It was not a one-off. Five more forward-blind windows have accumulated since §9
+(2026-09-21, 09-22/23, 09-23/24, 09-25, 09-28), and **four of the five silently hit the exact same
+no-op** — including 2026-09-21, which an informal same-day review had marked as a genuine null,
+distinct from the other three. It was not: at *both* horizons, 09-21's real IC exactly ties the
+degenerate `wrongDayMatchedTime` placebo's IC (30s: −0.000225 vs −0.000225; 60s: +0.034114 vs
++0.034114), identical in kind to 09-23/24, 09-25 and 09-28. At 30s the tie happens not to matter for
+the verdict either way (`circular-shift` alone already dominates the band at 0.0344, and the real
+signal is genuinely negligible there), which may be why an eyeballed check moved on. At 60s it matters
+a great deal: the tied wrong-day IC (0.0341) *is* the largest of the four placebos, so it alone sets
+the band the real IC has to clear — and a real IC tied exactly to the number it must exceed fails by
+construction, every time, regardless of what the market did. That is the textbook shape of this bug,
+present at 60s on 09-21 exactly as it is on the other three windows. Why the informal pass called this
+one clean is not reconstructed here; measuring the placebo's own day-diversity directly, rather than
+eyeballing whether a tied number happens to be the reported band, is what catches it reliably going
+forward.
+
+### The fix
+
+`matchedTimeDiversity` (`apps/api/src/modules/research/domain/placebos.ts:151`) measures, for the same
+bucketing `wrongDayMatchedTime` itself uses, what fraction of observations sit in a 15-minute
+time-of-day bucket that actually has two or more distinct calendar days to swap between. Below 20%
+(`DEFAULT_MINIMUM_SWAPPABLE_FRACTION`, `placebos.ts:149`) the placebo is DEGENERATE: not enough of the
+window could actually be shuffled for its IC to mean anything, independent of whether that IC happens
+to tie the real one.
+
+`runFalsificationHarness` (`apps/api/src/modules/research/domain/falsification-harness.ts:307-330`)
+computes this diagnostic before running any placebo, excludes a degenerate wrong-day IC from
+`placeboBand` (so it can no longer silently set or inflate the bar), and — at
+`falsification-harness.ts:407-432` — short-circuits to a new verdict, **`INCONCLUSIVE`**, whenever the
+placebo is degenerate. This sits after the two pipeline-fault checks (`FAIL_PLACEBO`: no measurable
+band at all, or a constant real IC) but before the negative-lag check and the `NO_SIGNAL`/`PASS`
+checks, because those assume a trustworthy band and a degenerate day-placebo means one of the four
+inputs to that band cannot be trusted. `INCONCLUSIVE` is distinct from `NO_SIGNAL`: the latter says the
+signal was measured and found wanting against a trustworthy bar; the former says the bar itself could
+not be trusted on this window, so no verdict is reported at all — the same "unmeasured must stay
+unmeasured, never default to a pass/fail" rule already applied elsewhere in this codebase (e.g. the
+same day's Pillar C fix). `PlaceboIc.degenerate` and `FalsificationReport.matchedTimeDiversity` surface
+the underlying numbers so a caller can see *why*, not just that the verdict was withheld.
+
+Covered by new tests: `placebos.test.ts` (`matchedTimeDiversity` — fully degenerate single-day input,
+fully diverse 8-day input, a mixed case with one diverse bucket among many single-day ones, and a
+custom threshold) and `falsification-harness.test.ts` (`wrong-day-matched-time degeneracy guard` — a
+single-day window now reports `INCONCLUSIVE` even for injected perfect foresight that would otherwise
+`PASS`, the pre-existing multi-day `PASS`/`NO_SIGNAL` tests are unaffected, and a caller-supplied
+threshold of 0 restores the old behaviour). Full suite: 444 passed, 2 skipped (pre-existing,
+unrelated), `tsc --noEmit` clean.
+
+### Corrected re-run, all 7 windows to date
+
+Re-run against real `depth_frames` (989,266+ rows through 2026-09-29), `NSE:BANKNIFTY26SEPFUT`,
+`--horizons=30000,60000 --seed=1`, with the fix applied:
+
+| window | source | 30s IC | 30s CI | 30s verdict | 60s IC | 60s CI | 60s verdict |
+|---|---|---|---|---|---|---|---|
+| 2026-09-10/11 | `--session=5d2abf31…` | −0.0807 | [−0.0894, −0.0722] | **PASS** | −0.0783 | [−0.0880, −0.0687] | **PASS** |
+| 2026-09-17/18 | `--from/--to` (§9's exact command) | +0.0764 | [0.0669, 0.0844] | **PASS** | +0.0724 | [0.0635, 0.0835] | **PASS** |
+| 2026-09-21 | `--from/--to`, full day | −0.0002 | — | **INCONCLUSIVE** | +0.0341 | — | **INCONCLUSIVE** |
+| 2026-09-22/23 | `--session=70b3d1d5…` | +0.0485 | [0.0205, 0.0638] | **PASS** | +0.0465 | [0.0171, 0.0599] | **PASS** |
+| 2026-09-23/24 | `--session=6f0adc74…` | +0.0430 | — | **INCONCLUSIVE** | +0.0531 | — | **INCONCLUSIVE** |
+| 2026-09-25 | `--session=256846d3…` | +0.0198 | — | **INCONCLUSIVE** | +0.0275 | — | **INCONCLUSIVE** |
+| 2026-09-28 | `--session=3f0d0d67…` | +0.0403 | — | **INCONCLUSIVE** | +0.0327 | — | **INCONCLUSIVE** |
+
+The first two rows (2026-09-10/11, 2026-09-17/18) are the sanity check: numbers are byte-identical to
+§8/§9's originally reported values, confirming the fix does not disturb an already-valid multi-day
+`PASS`. Sequence health was `RECONSTRUCTIBLE` on all 7 windows; none were refused by the Phase 1 gate.
+A `null` CI on an `INCONCLUSIVE` row is `informationCoefficient`'s own day-block bootstrap declining to
+form an interval on single-day input — a second, independent signal that these windows cannot support a
+full measurement, not something this fix introduced.
+
+**2026-09-21 is a correction, not a footnote.** The background briefing for this work (and, before
+that, an informal same-day check) treated 2026-09-21 as a "real NO_SIGNAL, not a bug" — distinct from
+the three windows (09-23/24, 09-25, 09-28) that visibly tied their real IC to the day-placebo's IC. It
+does not survive the code-level check: at 60s, +0.0341 ties the degenerate placebo exactly and that
+tied value is the largest of the four placebos, so it alone sets the band the real IC then fails to
+clear — the same mechanical shape as the other three windows. (At 30s the tie is present too, −0.0002
+vs −0.0002, but doesn't change the outcome either way, since `circular-shift` alone already dominates
+the band there and the real signal is negligible regardless.) This is exactly the failure mode a
+diversity measurement over the bucketing itself, rather than an eyeballed comparison, is supposed to
+catch, and did.
+
+### Honest read: more positive-leaning than a coin-flip, still short of actionable
+
+Restricting to the three windows whose placebo integrity is fully trustworthy: **2 PASS positive
+(09-17/18, 09-22/23) vs 1 PASS negative (09-10/11)**. That is a shift from §9's exact 1-1 tie, but it is
+two more data points, not ten -- on its own this is still consistent with a coin flip that happened to
+land heads twice.
+
+What tips this past "shrug" territory is the pattern in the four `INCONCLUSIVE` windows: every one of
+them has a **positive** raw point estimate at both horizons (+0.020 to +0.053), the same direction as
+both of the trustworthy positive windows, and none is negative. Their placebo band cannot be trusted,
+so none of them counts as a result -- but if the true state of the world were "no persistent
+directional bias" (the null this whole section is testing), four more independent coin flips landing
+the same way as the two most recent trustworthy ones would itself be a mildly notable coincidence.
+Read plainly and without spin: this is **suggestive of the same regime persisting since roughly
+2026-09-17** (positive short-horizon OFI-return relationship, opposite the original 2026-09-10/11
+window), **not yet a validated result**, because four of the seven readings behind it cannot clear
+their own integrity check.
+
+**What this is not:** a reopening of the programme. §9's kill condition ("re-opening this would need a
+*new* hypothesis... not a third window run the same way") still applies, and nothing here supplies that
+hypothesis -- it supplies more of the same window type, most of which turned out unmeasurable for a
+reason that has nothing to do with the market.
+
+**What this does change:** the practical reason the placebo keeps going degenerate is now visible and
+actionable on its own terms, separate from any signal question. The collector's capture sessions have
+mostly been single-day since 2026-09-21 (`b0826523…`, `256846d3…`, `3f0d0d67…` etc. each start fresh
+each morning), where the two multi-day sessions that produced valid reads (5d2abf31, and the
+70b3d1d5 window covering 09-22/23) happened to span a socket that stayed open overnight. **Recommended
+next step, not undertaken here:** either evaluate windows spanning two-or-more calendar days by
+construction (e.g. combine two adjacent single-day sessions explicitly, the way §8 did by hand, now
+that the degeneracy check will refuse a combination that still doesn't have enough real diversity), or
+lower `matchedTimeBucketMinutes`/loosen the bucket structure so a single very long single-day session
+can supply its own within-day time-of-day diversity check some other way. Either is infrastructure work
+on the harness, not a new strategy, and should happen before the next forward-blind window is spent on
+another likely-single-day capture.

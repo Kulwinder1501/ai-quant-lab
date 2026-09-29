@@ -5,8 +5,11 @@ import {
 import {
   blockPermuted,
   circularShifted,
+  DEFAULT_MINIMUM_SWAPPABLE_FRACTION,
+  matchedTimeDiversity,
   signFlipped,
   wrongDayMatchedTime,
+  type MatchedTimeDiversity,
 } from "./placebos.js";
 import {
   findLookaheadViolations,
@@ -66,6 +69,27 @@ import {
  * downstream number meaningless, so it short-circuits. A placebo breach means the harness itself
  * cannot be trusted, so it must be resolved before any signal claim is entertained — reporting
  * "PASS, but note the placebos also fired" would be reporting a result from a broken instrument.
+ *
+ * ## The wrong-day-matched-time placebo can go silently degenerate, and must not be trusted then
+ *
+ * `wrongDayMatchedTime` (placebos.ts) leaves a time-of-day bucket untouched when it has fewer than
+ * two distinct calendar days to swap between — correct for one bucket, but a documented no-op when
+ * it happens to *every* bucket in the window (a capture that, in effect, only spans one real trading
+ * day). When that happens the placebo returns the input essentially unchanged, so its "IC" is really
+ * the real IC measured a second time — an exact tie that then silently sets (or dominates) the
+ * placebo band, making a possibly-genuine signal read as `NO_SIGNAL` for a reason that has nothing to
+ * do with the market. This was found live: three fresh capture windows (2026-09-23/24, 09-25, 09-28)
+ * each reported `NO_SIGNAL` with the real IC exactly equal to this placebo's IC to full float
+ * precision.
+ *
+ * `matchedTimeDiversity` (placebos.ts) measures what fraction of observations actually sat in a
+ * bucket with real day-to-day diversity to shuffle. Below `minimumSwappableFraction` the placebo is
+ * excluded from the placebo band (an untrustworthy number must not silently set the bar), and the
+ * whole window's verdict becomes `INCONCLUSIVE` rather than `NO_SIGNAL` or `PASS` — the same
+ * "unmeasured must stay unmeasured, never default to a pass/fail" principle applied elsewhere in this
+ * codebase. `INCONCLUSIVE` is distinct from a genuine `NO_SIGNAL`: the latter says the signal was
+ * measured and found wanting; the former says one of the measuring instruments could not be trusted
+ * on this window at all.
  */
 
 export interface FalsificationObservation {
@@ -106,12 +130,21 @@ export interface FalsificationOptions {
    * with realised history is expected and is not evidence of timestamp leakage.
    */
   readonly negativeLagMode?: "hard" | "diagnostic";
+  /** Bucket width, in minutes, for the wrong-day-matched-time placebo and its diversity check. */
+  readonly matchedTimeBucketMinutes?: number;
+  /**
+   * Below this fraction of observations sitting in a time-of-day bucket with real day-to-day
+   * diversity, the wrong-day-matched-time placebo is treated as degenerate (see the header) and the
+   * verdict becomes `INCONCLUSIVE` rather than `NO_SIGNAL`/`PASS`.
+   */
+  readonly matchedTimeMinimumSwappableFraction?: number;
 }
 
 export type FalsificationVerdict =
   | "PASS"
   | "NO_SIGNAL"
   | "INSUFFICIENT_SAMPLE"
+  | "INCONCLUSIVE"
   | "FAIL_LOOKAHEAD"
   | "FAIL_PLACEBO"
   | "FAIL_NEGATIVE_LAG";
@@ -126,6 +159,12 @@ export interface PlaceboIc {
   readonly placebo: string;
   readonly ic: number | null;
   readonly sampleSize: number;
+  /**
+   * True when this placebo's own bucketing/shuffling had too little real diversity to trust its IC
+   * — currently only possible for `wrong-day-matched-time` (see the header). A degenerate placebo is
+   * excluded from `placeboBand` and forces the whole verdict to `INCONCLUSIVE`.
+   */
+  readonly degenerate?: boolean;
 }
 
 export interface FalsificationReport {
@@ -144,6 +183,8 @@ export interface FalsificationReport {
   readonly verdict: FalsificationVerdict;
   /** Human-readable reasons, empty on PASS. */
   readonly failures: readonly string[];
+  /** Diagnostics for the wrong-day-matched-time placebo's own day-diversity, null before it runs. */
+  readonly matchedTimeDiversity: MatchedTimeDiversity | null;
 }
 
 const DEFAULT_NEGATIVE_LAGS = [-1, -3, -10, -30] as const;
@@ -235,6 +276,7 @@ export function runFalsificationHarness(
         + `point-in-time (first: ${lookaheadViolations[0]!.message}). No IC is reported as `
         + "meaningful, because evidence from the future corrupts every lag equally.",
       ],
+      matchedTimeDiversity: null,
     };
   }
 
@@ -252,6 +294,7 @@ export function runFalsificationHarness(
         `${real.sampleSize} usable pairs is below the pre-declared minimum of ${minimumSample}. `
         + "Reporting an IC here would be a peek, not a measurement.",
       ],
+      matchedTimeDiversity: null,
     };
   }
 
@@ -261,25 +304,42 @@ export function runFalsificationHarness(
     value: observation.featureValue,
   }));
 
-  const placeboSeries: Array<{ placebo: string; feature: number[] }> = [
+  const matchedTimeBucketMinutes = options.matchedTimeBucketMinutes ?? 15;
+  const matchedTimeMinimumSwappableFraction = options.matchedTimeMinimumSwappableFraction
+    ?? DEFAULT_MINIMUM_SWAPPABLE_FRACTION;
+  // Measured on the same timestamped series the placebo itself shuffles, so the diagnostic and the
+  // shuffle can never disagree about which buckets had a day to swap with.
+  const dayDiversity = matchedTimeDiversity(
+    timestamped,
+    matchedTimeBucketMinutes,
+    matchedTimeMinimumSwappableFraction,
+  );
+
+  const placeboSeries: Array<{ placebo: string; feature: number[]; degenerate?: boolean }> = [
     { placebo: "sign-flip", feature: signFlipped(natural.feature, seed + 11) },
     { placebo: "block-permutation", feature: blockPermuted(natural.feature, blockSize, seed + 22) },
     { placebo: "circular-shift", feature: circularShifted(natural.feature, circularShift) },
     {
       placebo: "wrong-day-matched-time",
-      feature: wrongDayMatchedTime(timestamped, seed + 33).slice(0, natural.feature.length),
+      feature: wrongDayMatchedTime(timestamped, seed + 33, matchedTimeBucketMinutes)
+        .slice(0, natural.feature.length),
+      degenerate: dayDiversity.isDegenerate,
     },
   ];
 
-  const placeboIcs: PlaceboIc[] = placeboSeries.map(({ placebo, feature }) => {
+  const placeboIcs: PlaceboIc[] = placeboSeries.map(({ placebo, feature, degenerate }) => {
     const measured = informationCoefficient(feature, natural.forwardReturn, {
       bootstrapSamples: 0,
       seed,
     });
-    return { placebo, ic: measured.ic, sampleSize: measured.sampleSize };
+    return { placebo, ic: measured.ic, sampleSize: measured.sampleSize, degenerate };
   });
 
+  // A degenerate placebo's IC is not a placebo result -- it must not silently set or inflate the
+  // band the real IC has to clear. See the header on why this forces INCONCLUSIVE below rather than
+  // being dropped quietly.
   const measurableBands = placeboIcs
+    .filter((entry) => !entry.degenerate)
     .map((entry) => absOrNull(entry.ic))
     .filter((value): value is number => value !== null);
   const placeboBand = measurableBands.length === 0 ? null : Math.max(...measurableBands);
@@ -320,6 +380,7 @@ export function runFalsificationHarness(
       negativeLagThreshold,
       verdict: "FAIL_PLACEBO",
       failures,
+      matchedTimeDiversity: dayDiversity,
     };
   }
 
@@ -339,6 +400,34 @@ export function runFalsificationHarness(
       negativeLagThreshold,
       verdict: "FAIL_PLACEBO",
       failures,
+      matchedTimeDiversity: dayDiversity,
+    };
+  }
+
+  // The wrong-day-matched-time placebo could not be trusted on this window (see the header). Every
+  // downstream check below assumes a trustworthy placebo band, so this must be decided before any of
+  // them -- an untrustworthy instrument does not get to hand out a NO_SIGNAL or a PASS.
+  if (dayDiversity.isDegenerate) {
+    failures.push(
+      `The wrong-day-matched-time placebo is degenerate: only `
+      + `${(dayDiversity.swappableFraction * 100).toFixed(1)}% of observations sat in a `
+      + `${matchedTimeBucketMinutes}-minute time-of-day bucket with at least 2 distinct calendar days `
+      + `to swap between (minimum ${(matchedTimeMinimumSwappableFraction * 100).toFixed(0)}%, `
+      + `${dayDiversity.distinctDays} distinct day(s) seen overall). Its IC is not a placebo result -- `
+      + "it is the real IC measured again on an unshuffled series -- so this window's verdict is "
+      + "withheld rather than reported as a real NO_SIGNAL or PASS.",
+    );
+    return {
+      sampleSize: real.sampleSize,
+      lookaheadViolations: [],
+      real,
+      negativeLagIcs,
+      placeboIcs,
+      placeboBand,
+      negativeLagThreshold,
+      verdict: "INCONCLUSIVE",
+      failures,
+      matchedTimeDiversity: dayDiversity,
     };
   }
 
@@ -372,6 +461,7 @@ export function runFalsificationHarness(
       negativeLagThreshold,
       verdict: "FAIL_NEGATIVE_LAG",
       failures,
+      matchedTimeDiversity: dayDiversity,
     };
   }
 
@@ -391,6 +481,7 @@ export function runFalsificationHarness(
       negativeLagThreshold,
       verdict: "NO_SIGNAL",
       failures,
+      matchedTimeDiversity: dayDiversity,
     };
   }
 
@@ -412,6 +503,7 @@ export function runFalsificationHarness(
       negativeLagThreshold,
       verdict: "NO_SIGNAL",
       failures,
+      matchedTimeDiversity: dayDiversity,
     };
   }
 
@@ -425,5 +517,6 @@ export function runFalsificationHarness(
     negativeLagThreshold,
     verdict: "PASS",
     failures: [],
+    matchedTimeDiversity: dayDiversity,
   };
 }
