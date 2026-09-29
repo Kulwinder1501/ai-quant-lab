@@ -34,26 +34,6 @@ export const eventReversalStrategyRegistration: EnsureStrategyVersionInput = {
   description:
     "Trades major HTF liquidity reversals (Daily/Weekly/4H extremes) when swept and confirmed by LTF CISD delivery shift.",
   configuration: defaultEventReversalStrategyConfiguration as unknown as Record<string, unknown>,
-  parametersSchema: {
-    type: "object",
-    properties: {
-      minimumRiskReward: { type: "number", default: 2.5 },
-      minConfidence: { type: "number", default: 0.75 },
-      expiryCandles: { type: "number", default: 24 },
-      requireHtfSweep: { type: "boolean", default: true },
-      requireCisdConfirmation: { type: "boolean", default: true },
-      maxCisdAgeBars: { type: "number", default: 10 },
-    },
-    required: [
-      "minimumRiskReward",
-      "minConfidence",
-      "expiryCandles",
-      "requireHtfSweep",
-      "requireCisdConfirmation",
-      "maxCisdAgeBars",
-    ],
-  },
-  status: "ACTIVE",
 };
 
 export class EventReversalStrategy implements StrategyEvaluator {
@@ -79,12 +59,15 @@ export class EventReversalStrategy implements StrategyEvaluator {
     let isHtfBearishSweep = false;
 
     if (config.requireHtfSweep) {
-      const htfSweeps = snapshot.liquidity?.unmitigatedSweeps ?? [];
-      if (htfSweeps.length > 0) {
-        const lastSweep = htfSweeps[htfSweeps.length - 1];
-        if (lastSweep.levelType === "PDH" || lastSweep.levelType === "PWH" || lastSweep.levelType === "SWING_HIGH") {
+      // `IctLiquiditySnapshot` no longer carries a list of pool sweeps (pruned for memory reasons --
+      // see that type's own docstring). The only currently-tracked "a session extreme was just swept"
+      // signal is `sessionLevels.lastSweepEvent` (PDH/PDL only; weekly/4H/swing-high sweeps are not
+      // wired into any snapshot today), the same field `bias.ts` reads for its own sweep-driven bias.
+      const lastSweep = snapshot.sessionLevels?.lastSweepEvent;
+      if (lastSweep && lastSweep.eventType === "SWEEP") {
+        if (lastSweep.levelType === "PDH") {
           isHtfBearishSweep = true;
-        } else if (lastSweep.levelType === "PDL" || lastSweep.levelType === "PWL" || lastSweep.levelType === "SWING_LOW") {
+        } else if (lastSweep.levelType === "PDL") {
           isHtfBullishSweep = true;
         }
       }
@@ -97,7 +80,9 @@ export class EventReversalStrategy implements StrategyEvaluator {
     // 2. Check for LTF CISD Confirmation
     if (config.requireCisdConfirmation) {
       const cisd = snapshot.cisd;
-      if (!cisd || cisd.ageBars > config.maxCisdAgeBars) {
+      // `CisdEvent` carries no `ageBars` field. Per `IctStateCompositeSnapshot.cisd`'s own docstring,
+      // a consumer computes age from `confirmingCandleIndex` against the current bar.
+      if (!cisd || snapshot.barIndex - cisd.confirmingCandleIndex > config.maxCisdAgeBars) {
         return proposals;
       }
       if (isHtfBullishSweep && cisd.direction !== "BULLISH") {

@@ -37,28 +37,6 @@ export const trendContinuationStrategyRegistration: EnsureStrategyVersionInput =
   description:
     "Trades lower timeframe trend continuation following a minor liquidity sweep while the major swing protected level stays intact, confirmed by CISD.",
   configuration: defaultTrendContinuationStrategyConfiguration as unknown as Record<string, unknown>,
-  parametersSchema: {
-    type: "object",
-    properties: {
-      minimumRiskReward: { type: "number", default: 1.5 },
-      minConfidence: { type: "number", default: 0.7 },
-      expiryCandles: { type: "number", default: 12 },
-      requireProtectedLevelIntact: { type: "boolean", default: true },
-      requireMinorSweep: { type: "boolean", default: true },
-      requireCisdConfirmation: { type: "boolean", default: true },
-      maxCisdAgeBars: { type: "number", default: 10 },
-    },
-    required: [
-      "minimumRiskReward",
-      "minConfidence",
-      "expiryCandles",
-      "requireProtectedLevelIntact",
-      "requireMinorSweep",
-      "requireCisdConfirmation",
-      "maxCisdAgeBars",
-    ],
-  },
-  status: "ACTIVE",
 };
 
 export class TrendContinuationStrategy implements StrategyEvaluator {
@@ -112,7 +90,9 @@ export class TrendContinuationStrategy implements StrategyEvaluator {
     // 4. CISD Confirmation Gate
     if (config.requireCisdConfirmation) {
       const cisd = snapshot.cisd;
-      if (!cisd || cisd.ageBars > config.maxCisdAgeBars) {
+      // `CisdEvent` carries no `ageBars` field. Per `IctStateCompositeSnapshot.cisd`'s own docstring,
+      // a consumer computes age from `confirmingCandleIndex` against the current bar.
+      if (!cisd || snapshot.barIndex - cisd.confirmingCandleIndex > config.maxCisdAgeBars) {
         return proposals;
       }
       if (isBullishTrend && cisd.direction !== "BULLISH") {

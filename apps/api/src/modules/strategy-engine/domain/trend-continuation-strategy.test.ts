@@ -27,7 +27,8 @@ function buildMockContext(trend: "BULLISH" | "BEARISH" = "BULLISH"): StrategyMar
       { code: "ATR", algorithmVersion: "v1", parameters: {}, values: { value: 20 } },
     ],
     ictSnapshot: {
-      timestamp: closeTime,
+      barIndex: 100,
+      barTime: closeTime,
       structure: {
         trend,
       } as any,
@@ -40,18 +41,24 @@ function buildMockContext(trend: "BULLISH" | "BEARISH" = "BULLISH"): StrategyMar
       } as any,
       cisd: {
         direction: trend,
-        ageBars: 2,
+        triggerLevel: 50000,
+        legStartIndex: 97,
+        legEndIndex: 98,
+        confirmingCandleIndex: 99,
+        confirmingCandleTime: closeTime,
       } as any,
     } as any,
   } as unknown as StrategyMarketContext;
 }
+
+const CONFIGURATION = { ...defaultTrendContinuationStrategyConfiguration } as Record<string, unknown>;
 
 describe("TrendContinuationStrategy", () => {
   it("evaluates trend continuation signals when gates align", () => {
     const strategy = new TrendContinuationStrategy();
     const context = buildMockContext("BULLISH");
     const config = {
-      ...defaultTrendContinuationStrategyConfiguration,
+      ...CONFIGURATION,
       requireMinorSweep: false,
     };
 
@@ -67,7 +74,7 @@ describe("TrendContinuationStrategy", () => {
     const context = buildMockContext("BULLISH");
     (context.ictSnapshot as any).structure.trend = "NEUTRAL";
 
-    const ideas = strategy.evaluate(context, defaultTrendContinuationStrategyConfiguration);
+    const ideas = strategy.evaluate(context, CONFIGURATION);
     expect(ideas).toEqual([]);
   });
 });

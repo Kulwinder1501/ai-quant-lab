@@ -27,29 +27,43 @@ function buildMockContext(sweepLevelType: "PDH" | "PDL" = "PDH"): StrategyMarket
       { code: "ATR", algorithmVersion: "v1", parameters: {}, values: { value: 30 } },
     ],
     ictSnapshot: {
-      timestamp: closeTime,
-      liquidity: {
-        unmitigatedSweeps: [
-          {
-            levelType: sweepLevelType,
-            sweptAt: closeTime,
-            sweptPrice: 50100,
-          },
-        ],
+      barIndex: 100,
+      barTime: closeTime,
+      sessionLevels: {
+        levels: null,
+        lastSweepEvent: {
+          barIndex: 100,
+          barTime: closeTime,
+          levelType: sweepLevelType,
+          levelPrice: 50100,
+          eventType: "SWEEP",
+          penetrationBps: 20,
+          reclaimDistanceBps: 10,
+        },
+        currentSessionHigh: 50100,
+        currentSessionLow: 49900,
+        currentSessionOpen: 50000,
+        currentSessionDate: "2026-09-29",
       },
       cisd: {
         direction: sweepLevelType === "PDH" ? "BEARISH" : "BULLISH",
-        ageBars: 1,
+        triggerLevel: 50000,
+        legStartIndex: 98,
+        legEndIndex: 99,
+        confirmingCandleIndex: 100,
+        confirmingCandleTime: closeTime,
       },
     } as any,
   } as unknown as StrategyMarketContext;
 }
 
+const CONFIGURATION = { ...defaultEventReversalStrategyConfiguration } as Record<string, unknown>;
+
 describe("EventReversalStrategy", () => {
   it("generates a sell proposal on macro PDH sweep confirmed by bearish CISD", () => {
     const strategy = new EventReversalStrategy();
     const context = buildMockContext("PDH");
-    const ideas = strategy.evaluate(context, defaultEventReversalStrategyConfiguration);
+    const ideas = strategy.evaluate(context, CONFIGURATION);
 
     expect(ideas.length).toBe(1);
     expect(ideas[0].side).toBe("SHORT");
@@ -59,7 +73,7 @@ describe("EventReversalStrategy", () => {
   it("generates a buy proposal on macro PDL sweep confirmed by bullish CISD", () => {
     const strategy = new EventReversalStrategy();
     const context = buildMockContext("PDL");
-    const ideas = strategy.evaluate(context, defaultEventReversalStrategyConfiguration);
+    const ideas = strategy.evaluate(context, CONFIGURATION);
 
     expect(ideas.length).toBe(1);
     expect(ideas[0].side).toBe("LONG");
