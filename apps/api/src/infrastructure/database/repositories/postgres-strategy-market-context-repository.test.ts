@@ -322,3 +322,151 @@ describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository ICT HTF c
     expect(context?.ictSnapshot?.htfBias).toBe("BULLISH");
   });
 });
+
+/**
+ * `resolveOptionChainSignal`'s real PCR as-of join, against a real database.
+ *
+ * Added 2026-09-28 alongside `hybrid-liquidity-confluence-v1` Pillar C, which used to read a
+ * `priceActionEvents[].details.oiSupport/oiResistance` flag that nothing ever set -- a silent,
+ * permanent pass. This proves the replacement actually measures a PCR from `option_chain_snapshots`
+ * rather than defaulting to one, and that it refuses (null) rather than guessing when nothing has
+ * been observed yet or the nearest observation is stale.
+ */
+describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository.optionChainSignal (live DB)", () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  let client: PoolClient;
+
+  beforeEach(async () => {
+    client = await pool.connect();
+    await client.query("BEGIN");
+  });
+
+  afterEach(async () => {
+    await client.query("ROLLBACK");
+    client.release();
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  const scoped = (): DatabasePool => client as unknown as DatabasePool;
+
+  async function seedTargetInstrument(symbol: string): Promise<string> {
+    const instrument = await new PostgresInstrumentRepository(scoped()).upsert({
+      exchange: "NSE",
+      symbol,
+      displayName: symbol,
+      instrumentType: "INDEX",
+      isin: null,
+      tickSize: "0.05",
+      lotSize: 1,
+      isActive: true,
+      metadata: {},
+      underlyingSymbol: null,
+      strikePrice: null,
+      expiryDate: null,
+      optionType: null,
+    });
+    return instrument.id;
+  }
+
+  async function seedCompletedCandle(
+    instrumentId: string,
+    timeframe: string,
+    closeTime: Date,
+  ): Promise<void> {
+    const database = scoped();
+    await database.query(
+      "INSERT INTO candle_series_provenance (instrument_id, timeframe, source) VALUES ($1, $2, 'test') "
+      + "ON CONFLICT DO NOTHING",
+      [instrumentId, timeframe],
+    );
+    await new PostgresCandleRepository(database).upsert({
+      instrumentId,
+      ingestionId: null,
+      timeframe,
+      openTime: new Date(closeTime.getTime() - 5 * 60_000),
+      closeTime,
+      open: "100",
+      high: "100",
+      low: "100",
+      close: "100",
+      volume: "1000",
+      isComplete: true,
+      source: "test",
+      sourceMetadata: {},
+    });
+  }
+
+  /** One CE row and one PE row for the same snapshot, nearest un-expired expiry. */
+  async function seedChainSnapshot(input: {
+    underlyingSymbol: string;
+    observedAt: Date;
+    callOi: number;
+    putOi: number;
+  }): Promise<void> {
+    const database = scoped();
+    const expiryDate = new Date(input.observedAt.getTime() + 7 * 24 * 60 * 60_000).toISOString().slice(0, 10);
+    for (const [optionType, oi] of [["CE", input.callOi], ["PE", input.putOi]] as const) {
+      await database.query(`
+        INSERT INTO option_chain_snapshots (
+          underlying_symbol, provider, observed_at, expiry_date, expiry_kind,
+          strike_price, option_type, provider_symbol, open_interest
+        ) VALUES ($1, 'test', $2, $3, 'WEEKLY', 100, $4, $5, $6)
+      `, [input.underlyingSymbol, input.observedAt, expiryDate, optionType, `TEST-100-${optionType}`, oi]);
+    }
+  }
+
+  it("resolves a real PCR from option_chain_snapshots, not a default pass", async () => {
+    const symbol = "TEST_TARGET_PCR_MEASURED";
+    const targetId = await seedTargetInstrument(symbol);
+    const closeTime = new Date(Date.UTC(2020, 0, 1, 3, 50));
+    await seedCompletedCandle(targetId, "5m", closeTime);
+    await seedChainSnapshot({
+      underlyingSymbol: symbol,
+      observedAt: new Date(closeTime.getTime() - 5 * 60_000),
+      callOi: 100_000,
+      putOi: 140_000,
+    });
+
+    const repository = new PostgresStrategyMarketContextRepository(scoped());
+    const context = await repository.findLatestCompleted({ instrumentId: targetId, timeframe: "5m" });
+
+    expect(context?.optionChainSignal?.pcr).toBeCloseTo(1.4, 6);
+    expect(context?.optionChainSignal?.callOpenInterest).toBe(100_000);
+    expect(context?.optionChainSignal?.putOpenInterest).toBe(140_000);
+  });
+
+  it("returns pcr: null when no snapshot has been observed yet, rather than defaulting to a pass", async () => {
+    const symbol = "TEST_TARGET_PCR_UNMEASURED";
+    const targetId = await seedTargetInstrument(symbol);
+    const closeTime = new Date(Date.UTC(2020, 0, 1, 3, 50));
+    await seedCompletedCandle(targetId, "5m", closeTime);
+    // No option_chain_snapshots rows for this symbol at all.
+
+    const repository = new PostgresStrategyMarketContextRepository(scoped());
+    const context = await repository.findLatestCompleted({ instrumentId: targetId, timeframe: "5m" });
+
+    expect(context?.optionChainSignal?.pcr).toBeNull();
+  });
+
+  it("returns pcr: null when the nearest snapshot is older than the staleness ceiling", async () => {
+    const symbol = "TEST_TARGET_PCR_STALE";
+    const targetId = await seedTargetInstrument(symbol);
+    const closeTime = new Date(Date.UTC(2020, 0, 1, 3, 50));
+    await seedCompletedCandle(targetId, "5m", closeTime);
+    await seedChainSnapshot({
+      underlyingSymbol: symbol,
+      // 90 minutes stale -- past the 60-minute ceiling `resolveOptionChainSignal` enforces.
+      observedAt: new Date(closeTime.getTime() - 90 * 60_000),
+      callOi: 100_000,
+      putOi: 140_000,
+    });
+
+    const repository = new PostgresStrategyMarketContextRepository(scoped());
+    const context = await repository.findLatestCompleted({ instrumentId: targetId, timeframe: "5m" });
+
+    expect(context?.optionChainSignal?.pcr).toBeNull();
+  });
+});

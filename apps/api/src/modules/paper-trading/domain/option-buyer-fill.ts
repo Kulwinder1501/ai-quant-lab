@@ -31,6 +31,17 @@ export interface OptionBuyerFillInput {
    * a price threshold, so the caller supplies the contract specification.
    */
   strikeStep: number;
+  /**
+   * Backtest-only escape hatch: prices the position at this exact strike instead of
+   * `nearestStrike(underlyingEntry, strikeStep)`.
+   *
+   * No production caller sets this -- `PrepareOptionEntry` never passes it, so the live ATM
+   * selection is unchanged. It exists for `run-atm-vs-itm-strike-backtest.ts`, which needs to
+   * reprice the *same* historical idea at ATM-1/ATM+1 (the ITM neighbour) using the identical
+   * fill/geometry/risk-reward-distortion checks this function already enforces, rather than
+   * duplicating them in a second, unreviewed copy.
+   */
+  strikeOverride?: number;
   /** Optional options entry validation result (11-factor checklist). */
   validationResult?: { isValid: boolean; reasons: string[] };
   /**
@@ -126,7 +137,11 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     throw new Error("Strike step must be a positive number; read it from instruments.strike_step.");
   }
   const optionType: OptionType = input.ideaSide === "LONG" ? "CE" : "PE";
-  const strike = nearestStrike(input.underlyingEntry, step);
+  const strike = input.strikeOverride ?? nearestStrike(input.underlyingEntry, step);
+  if (input.strikeOverride !== undefined
+    && (!Number.isFinite(input.strikeOverride) || input.strikeOverride <= 0)) {
+    throw new Error("strikeOverride must be a positive finite number.");
+  }
   const T = yearsToExpiry(now, input.expiryDate);
 
   // One volatility for entry, stop and target. When the chain has been solved, that is the

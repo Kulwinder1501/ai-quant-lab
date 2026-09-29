@@ -766,6 +766,12 @@ export class AiAutonomousAgent {
           // Zero: `exit.premium` is already the bid where one was observed, so the spread has
           // been crossed. A slippage estimate on top charges for crossing it twice.
           exitSlippage: 0,
+          // `livePrice` is the underlying's own observed tick (the tick this method was called
+          // with), independent of how the option premium beside it was resolved -- same
+          // reasoning as OPTION_LIVE_MARK_EVALUATOR. It was already being recorded in
+          // `details.underlyingAtExit` below; this is the same value threaded to the column
+          // the rest of the book reads it from.
+          underlyingExitPrice: livePrice,
           details: {
             reason: "EMERGENCY_PANIC_CIRCUIT_BREAKER",
             newsSentiment,

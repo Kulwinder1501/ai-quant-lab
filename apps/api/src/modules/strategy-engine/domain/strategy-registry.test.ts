@@ -118,11 +118,15 @@ describe("strategy registry", () => {
     expect(indexScalp.terminalResearchAcknowledgement?.disposition).toMatch(/^DISABLED/);
   });
 
-  it("restricts exactly the two strategies with a measured losing long side, and no others", () => {
+  it("restricts exactly the three strategies gated off, and no others", () => {
     /*
      * Pinned as an exact set rather than a per-strategy check. The restriction is per strategy on
      * purpose -- a global side filter would silence that side everywhere -- so the risk worth
      * guarding is a restriction spreading to a strategy whose evidence never justified one.
+     *
+     * `hybrid-liquidity-confluence-v1` joined this set 2026-09-28, the same day it shipped -- not
+     * for a measured losing side like the other two, but gated pending the random-subsample
+     * validation recorded in docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md.
      */
     const restricted = registeredStrategies
       .filter((strategy) => strategy.executableSides !== undefined)
@@ -130,13 +134,22 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "momentum-scalp-index", "momentum-scalp-pattern-v2",
+      "hybrid-liquidity-confluence-v1", "momentum-scalp-index", "momentum-scalp-pattern-v2",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
       expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)
         .toEqual(["LONG", "SHORT"]);
     }
+  });
+
+  it("gates hybrid-liquidity-confluence-v1 off pending validation, not on a measured verdict", () => {
+    const hybrid = requireRegisteredStrategy("hybrid-liquidity-confluence-v1");
+
+    expect(strategyExecutableSides(hybrid)).toEqual([]);
+    // Deliberately no terminalResearchAcknowledgement: it has no research twin and no TERMINAL
+    // verdict, so attaching one would misrepresent the record (see the registry comment).
+    expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
   });
 });
 

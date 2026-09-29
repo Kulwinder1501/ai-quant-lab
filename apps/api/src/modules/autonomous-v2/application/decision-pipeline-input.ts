@@ -65,16 +65,49 @@ export function placeholderAccountSnapshot(): InstrumentRiskSnapshot<unknown> {
 }
 
 /**
- * A placeholder transaction-cost assumption, not a considered options-cost model.
+ * A measured transaction-cost summary statistic -- not a considered options-cost model, and not a
+ * fresh guess either. Replaces the earlier flat `2` (borrowed from `canonical-friction.ts`'s
+ * underlying-notional research ladder) with a number actually derived from real data, per
+ * `docs/2026-09-29-brain-v22-cost-model.md`.
  *
- * No live, authoritative bps figure exists for *option* execution anywhere in this codebase: paper
- * trading's real cost model is itemised (`brokerage-calculator.ts`), not bps-based, and the only bps
- * constant that exists (`canonical-friction.ts`'s `canonicalFrictionRungsBps`) is explicitly documented
- * as an *underlying*-notional research sensitivity ladder, not an options cost estimate. The middle rung
- * is reused here as a starting value for the same reason the account snapshot is synthetic: it only
- * feeds P7/P8, downstream of the thesis stage P13 actually grades.
+ * ## Derivation
+ *
+ * `run-brain-v22-cost-adjusted-grading.ts` repriced all 118 of the 110 accumulated native-pipeline
+ * approvals (2026-09-15 through 2026-09-21, 100% real-data coverage) as real ATM option-buyer fills:
+ * `nearestStrike`/`mapIdeaToOptionBuyerFill` (the same functions `prepare-option-entry.ts` and
+ * `run-atm-vs-itm-strike-backtest.ts` use) against real historical `option_premium_ticks`, with real
+ * brokerage/STT/exchange/GST/stamp fees (`brokerage-calculator.ts`) and the real observed bid/ask
+ * spread (entry at the ask, exit at the bid, matching V1's live convention). The mean one-way
+ * round-trip cost (fees + spread) across all 118, expressed as basis points of **underlying**
+ * notional -- the same basis `roundTripCostR` charges `costBps` against in `edge-assessor.ts` -- came
+ * to approximately 0.32 bps.
+ *
+ * ## Why this number is smaller than the placeholder it replaces, and what that does NOT mean
+ *
+ * It does not mean options got cheaper to trade. The same repricing found the cost is a real ~30 bps
+ * of *premium* turnover (fees alone; the spread adds more) -- a meaningful drag, consistent with this
+ * project's other findings that spread is the dominant real options cost
+ * (`premium-target-unreachable-at-index-target`). The bps-of-underlying-notional basis this constant
+ * has to use, though, is `canonical-friction.ts`'s Track A -- built for an equity/index-proxy
+ * *underlying* bracket, where cost naturally scales with the underlying's own notional. An option's
+ * premium is a small, convex fraction of that notional, so any real per-trade options cost, when
+ * forced into this unit, reads as a tiny number by construction, however large it actually is against
+ * the premium the position is sized in. Restated: **this constant's unit is structurally unsuited to
+ * representing option execution cost**, and a future cost-aware gate for options must be built on
+ * Track B (premium-space cost, `d2-premium-cost-gate`'s territory) rather than trusting this slot to
+ * mean what it means for `canonical-friction.ts`'s own underlying brackets.
+ *
+ * ## What changing this number does today: nothing
+ *
+ * `assessEdge` (P7) is the only consumer (`decision-pipeline.ts`; P8's `approveRisk` never received
+ * `costBps` at all, correcting an earlier version of this comment that claimed otherwise). P7 is
+ * uninhabited-refusal by design (I5) -- it always approves and only *records*
+ * `costAdjustedBreakEvenHitRate` for later review. Nothing downstream reads that field to gate
+ * anything yet, so this replacement changes zero pass/fail outcomes across the 110 decisions graded.
+ * It matters only once a future gate is wired to read it -- and when that happens, whoever wires it
+ * should read the derivation above before trusting this number to mean "options got safer."
  */
-export const placeholderCostBps = 2;
+export const placeholderCostBps = 0.32;
 
 export interface DecisionPipelineInputFacts {
   readonly decisionId: string;

@@ -68,6 +68,23 @@ describe("mapIdeaToOptionBuyerFill", () => {
     expect(fill.entryGreeks.premium).toBeGreaterThan(0);
   });
 
+  it("prices at strikeOverride instead of the nearest ATM strike when supplied", () => {
+    const atm = mapIdeaToOptionBuyerFill(niftyIdea());
+    const itm1 = mapIdeaToOptionBuyerFill(niftyIdea({ strikeOverride: atm.strike - 50 }));
+
+    expect(atm.strike).not.toBe(itm1.strike);
+    expect(itm1.strike).toBe(atm.strike - 50);
+    // No override still snaps to ATM -- the live call site never passes one.
+    expect(mapIdeaToOptionBuyerFill(niftyIdea()).strike).toBe(atm.strike);
+  });
+
+  it("refuses a non-positive strikeOverride", () => {
+    for (const strikeOverride of [0, -50, Number.NaN]) {
+      expect(() => mapIdeaToOptionBuyerFill(niftyIdea({ strikeOverride })))
+        .toThrow(/strikeOverride/);
+    }
+  });
+
   it("rejects an idea whose stop and target are not on opposite sides of the entry", () => {
     // A long whose stop sits above the entry is not a long.
     expect(() => mapIdeaToOptionBuyerFill(niftyIdea({ underlyingStop: 24_500 })))

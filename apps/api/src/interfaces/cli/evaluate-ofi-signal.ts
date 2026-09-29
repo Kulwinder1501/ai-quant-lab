@@ -3,6 +3,10 @@ import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresDepthFrameRepository } from "../../infrastructure/database/repositories/postgres-depth-frame-repository.js";
 import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-frame-sequencing.js";
+import {
+  findOverlappingSessions,
+  summariseCaptureSessions,
+} from "../../modules/market-data/domain/capture-session-window.js";
 import { buildOfiObservations } from "../../modules/research/domain/ofi-signal-observations.js";
 import { runFalsificationHarness } from "../../modules/research/domain/falsification-harness.js";
 
@@ -52,10 +56,32 @@ const NEGATIVE_LAG_MINIMUM_SAMPLE_FRACTION = 0.05;
  *   refusals, and so is `INSUFFICIENT_SAMPLE`.
  * - the window must span at least `--min-session-minutes` (default 300, roughly a full NSE session).
  * - no foreign rows may sit in the window when a capture session is named.
+ * - when no single `--session` is named (a `--from`/`--to` range, or the whole table for a symbol),
+ *   no two of the capture sessions the window actually contains may **overlap in time** -- see
+ *   `capture-session-window.ts`. Sequential sessions (one collector run ends, a gap, the next begins)
+ *   are exactly what this evaluation is meant to pool; two overlapping ones mean two collectors wrote
+ *   the same contract concurrently, and pooling them would interleave two streams the same way a
+ *   foreign row would inside a single named session.
  *
  * When it refuses it prints exactly what failed and stops. That is a feature: the most likely way
  * this programme produces a false positive is not a subtle statistical error, it is looking at a
  * three-minute midday capture, seeing an IC of 0.08, and deciding the gate was pedantic.
+ *
+ * ## Why `--from`/`--to` exists at all: the collector does not give you multi-day sessions for free
+ *
+ * A `captureSessionId` is minted once per collector *process* lifetime (`collect-depth-frames.ts`),
+ * not once per calendar day or per trading session -- so a capture session's length is however long
+ * the container happened to stay up, not a research-meaningful boundary. On this deployment that has
+ * mostly meant one session per trading day since 2026-09-21 (daily deploys and this host's Modern
+ * Standby both restart the container), which starves the falsification harness's wrong-day-matched-
+ * time placebo of the multiple calendar days it needs (see `matchedTimeDiversity` in `placebos.ts`
+ * and Phase 28 doc §10). `--from`/`--to` lets an evaluation pool several sequential sessions into one
+ * population that genuinely has day-to-day diversity, without needing the collector to ever hold one
+ * session open across midnight. The gap-safety this relies on already existed before this command did:
+ * `order-flow-imbalance.ts` breaks its running sum at every session's opening snapshot frame, and
+ * `ofi-signal-observations.ts`'s forward-return search refuses any endpoint outside
+ * `horizonToleranceMs`, which a multi-hour collector-restart gap always is. Pooling sessions this way
+ * does not need to invent any new gap logic -- only the overlap check above, which is new.
  *
  * Usage:
  *   evaluate-ofi-signal --symbol=NSE:BANKNIFTY26AUGFUT [--session=UUID | --from=ISO --to=ISO]
@@ -162,6 +188,13 @@ async function main(): Promise<void> {
       })
       : null;
 
+    // A range query (no single --session named) can legitimately pool several sequential capture
+    // sessions -- that is the whole point of --from/--to. What it must not pool is two sessions whose
+    // time ranges overlap, which means two collectors wrote the same contract concurrently rather
+    // than one restarting after the other. See capture-session-window.ts.
+    const sessionsInWindow = options.captureSessionId ? null : summariseCaptureSessions(frames);
+    const overlappingSessions = sessionsInWindow ? findOverlappingSessions(sessionsInWindow) : [];
+
     // --- The gate. Refusals happen before any IC is computed. -------------------------------
     const refusals: string[] = [];
     if (health.verdict !== "RECONSTRUCTIBLE") {
@@ -182,6 +215,14 @@ async function main(): Promise<void> {
       refusals.push(
         `${foreignRows} rows in this window belong to another capture session, so the series mixes `
         + "two writers.",
+      );
+    }
+    if (overlappingSessions.length > 0) {
+      const first = overlappingSessions[0]!;
+      refusals.push(
+        `${overlappingSessions.length} pair(s) of capture sessions overlap in time within this window `
+        + `(e.g. ${first.sessionA} and ${first.sessionB} both wrote between ${first.overlapFrom.toISOString()} `
+        + `and ${first.overlapTo.toISOString()}), so the pooled series mixes two concurrent writers.`,
       );
     }
 
@@ -210,6 +251,8 @@ async function main(): Promise<void> {
         window: { from: firstAt.toISOString(), to: lastAt.toISOString(), spanMinutes: Number(spanMinutes.toFixed(1)) },
         framesRead: frames.length,
         foreignRowsInWindow: foreignRows,
+        sessionsInWindow,
+        overlappingSessions,
         sequenceHealth: health,
         refusals,
         plumbing,
@@ -238,6 +281,7 @@ async function main(): Promise<void> {
         negativeLagThreshold: report.negativeLagThreshold,
         negativeLagIcs: report.negativeLagIcs,
         placeboIcs: report.placeboIcs,
+        matchedTimeDiversity: report.matchedTimeDiversity,
         failures: report.failures,
       };
     });
@@ -249,6 +293,9 @@ async function main(): Promise<void> {
       captureSessionId: options.captureSessionId,
       window: { from: firstAt.toISOString(), to: lastAt.toISOString(), spanMinutes: Number(spanMinutes.toFixed(1)) },
       framesRead: frames.length,
+      // Transparency for a pooled range read: exactly which collector runs were combined, so a reader
+      // never has to guess whether a "PASS" came from one long session or several stitched together.
+      sessionsInWindow,
       sequenceHealth: health,
       ofiWindowMs: options.ofiWindowMs,
       levels: options.levels,

@@ -851,7 +851,47 @@ describe("EvaluateOpenPaperTrades", () => {
       paperTradeId: "opt-1",
       exitReason: "EXPIRED",
       exitPrice: 0,
+      // A genuinely observed live spot was supplied (`livePrices`), so it must be threaded
+      // through to the persisted column, not just used to price the intrinsic settlement mark.
+      underlyingExitPrice: 23900,
       details: expect.objectContaining({ source: "OPTION_EXPIRY_SETTLEMENT", eventType: "EXPIRED" }),
+    });
+  });
+
+  it("leaves underlying_exit_price null at expiry settlement when the spot is only a candle-close reconstruction", async () => {
+    // No `livePrices` supplied, so `resolveLiveSpot` cannot answer and the settlement mark falls
+    // back to the latest completed candle's close -- a reconstruction, not an observation at the
+    // exit instant. Migration 090 documents this path as deliberately null; recording the
+    // reconstructed value would be indistinguishable from a real observation.
+    const closings: ClosePaperTradeInput[] = [];
+    const expiry = new Date("2026-08-07T10:00:00.000Z");
+    const trade = optionBuyerTrade({ optionExpiry: expiry, optionStrike: 24000, timeframe: "1d" });
+    const asOf = new Date("2026-08-07T10:05:00.000Z");
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [
+        candle("candle-1", "2026-08-06T10:00:00.000Z", "2026-08-06T15:30:00.000Z", 23800, 23950, 23750, 23900),
+      ],
+    };
+
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+    ).execute({
+      accountId: "account-1",
+      asOf,
+      exitFees: 0,
+    });
+
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({
+      paperTradeId: "opt-1",
+      exitReason: "EXPIRED",
+      underlyingExitPrice: null,
     });
   });
 

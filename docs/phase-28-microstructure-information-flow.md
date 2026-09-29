@@ -1,16 +1,27 @@
 # Phase 28 — Microstructure & Information Flow
 
-**STATUS (2026-09-15): FIRST CLEAN PHASE 4 PASS, ON TWO DAYS, ONE INSTRUMENT. §7's 2026-09-11
-single-day blind read reported NO_SIGNAL at 30s/60s, but that verdict rested on a broken placebo —
-`wrongDayMatchedTime` is a documented no-op when only one calendar day is present, and it happened to
-be the largest-magnitude placebo at both horizons, so it alone set a band that was never really
-active. Re-running the *same* capture session (which spans 2026-09-10 and 2026-09-11, both already
-post the 2026-09-09 pre-registration and never previously combined) gives the placebo two real days
-to swap between. Result: **PASS at 30s (IC −0.081, band 0.0044) and 60s (IC −0.078, band 0.0140)**,
-consistent in sign and magnitude with the earlier 6-session diagnostic. See §7's closing update for
-full detail and the caveats that still apply — this is one 2-day window on one instrument
-(BANKNIFTY futures; no NIFTY50 depth exists), not yet a replicated result, and Phase 5 (cost-aware
-gate) has not started.
+**STATUS (2026-09-29): THE 4 INCONCLUSIVE WINDOWS ARE RESOLVED BY POOLING ACROSS SESSIONS. §9's
+"closed, not advanced" verdict was reached on two windows. Since then, 5 more forward-blind windows
+accumulated (2026-09-21 through 2026-09-28) and — unnoticed until now — the *exact same*
+`wrongDayMatchedTime` no-op that corrupted §7's first 2026-09-11 read had recurred on 4 of those 5
+(including 2026-09-21, which §9-era informal review had wrongly cleared as a genuine null; see §10).
+The harness now measures the placebo's own day-diversity and refuses to report a real verdict when it
+is degenerate (`INCONCLUSIVE`, not `NO_SIGNAL`/`PASS`) instead of silently letting a fake tied IC set
+the bar. §10 re-read all 7 windows individually under that fix: 3 genuinely clean (2026-09-10/11 PASS
+negative, 2026-09-17/18 PASS positive, 2026-09-22/23 PASS positive), 4 `INCONCLUSIVE` because
+depth-collector-v2 has restarted roughly daily since 09-21 (see §11 for why) and a single-day session
+starves the placebo of a second calendar day to shuffle against.
+
+**§11 closes that gap**: `evaluate-ofi-signal.ts` can now pool several sequential capture sessions from
+a `--from`/`--to` range into one population (the plumbing already existed; what was missing was an
+overlap guard against concurrent writers, now added), and doing so across all of 2026-09-21 through
+2026-09-28 in one query — 6 distinct calendar days, 269,770+ observations — resolves every one of the
+4 `INCONCLUSIVE` windows at once: **PASS at both horizons, positive sign** (30s +0.0324 [0.0145,
+0.0473]; 60s +0.0387 [0.0287, 0.0493]), consistent with the positive regime §10 already suspected from
+the four raw point estimates it could not otherwise trust. **Read across all trustworthy windows to
+date: 3 PASS positive (2026-09-17/18, 2026-09-22/23, and now 2026-09-21 through 2026-09-28 combined)
+vs 1 PASS negative (2026-09-10/11).** Still not a reopening of the programme — see §11's own caveats
+before treating this as more than a replication count.
 
 This is a **research programme, not a production strategy**. Its goal is to discover whether
 short-horizon order-flow information exists on the instruments this system trades, is *incremental*
@@ -618,3 +629,264 @@ trusted -- only the *real* IC's sign and magnitude are, which the degenerate pla
 four numbers agree in sign and sit in the same 0.065-0.085 range -- the positive window-2 result is
 not one unusual day dominating a pooled average, it is the same effect present on both days
 independently. That rules out the stray fragments and day-pooling as the explanation for the flip.
+
+## 10. The placebo degeneracy recurred silently on 4 of 5 fresh windows, and is now guarded in code (2026-09-29)
+
+§8 diagnosed the `wrongDayMatchedTime` no-op as a one-off methodological gap in *how the tool was
+invoked* and fixed it by hand: evaluate a window that genuinely spans two trading days. §9 did the
+same for the second window. Neither section changed the harness itself, because at the time it looked
+like an invocation mistake, not a code defect worth guarding against.
+
+It was not a one-off. Five more forward-blind windows have accumulated since §9
+(2026-09-21, 09-22/23, 09-23/24, 09-25, 09-28), and **four of the five silently hit the exact same
+no-op** — including 2026-09-21, which an informal same-day review had marked as a genuine null,
+distinct from the other three. It was not: at *both* horizons, 09-21's real IC exactly ties the
+degenerate `wrongDayMatchedTime` placebo's IC (30s: −0.000225 vs −0.000225; 60s: +0.034114 vs
++0.034114), identical in kind to 09-23/24, 09-25 and 09-28. At 30s the tie happens not to matter for
+the verdict either way (`circular-shift` alone already dominates the band at 0.0344, and the real
+signal is genuinely negligible there), which may be why an eyeballed check moved on. At 60s it matters
+a great deal: the tied wrong-day IC (0.0341) *is* the largest of the four placebos, so it alone sets
+the band the real IC has to clear — and a real IC tied exactly to the number it must exceed fails by
+construction, every time, regardless of what the market did. That is the textbook shape of this bug,
+present at 60s on 09-21 exactly as it is on the other three windows. Why the informal pass called this
+one clean is not reconstructed here; measuring the placebo's own day-diversity directly, rather than
+eyeballing whether a tied number happens to be the reported band, is what catches it reliably going
+forward.
+
+### The fix
+
+`matchedTimeDiversity` (`apps/api/src/modules/research/domain/placebos.ts:151`) measures, for the same
+bucketing `wrongDayMatchedTime` itself uses, what fraction of observations sit in a 15-minute
+time-of-day bucket that actually has two or more distinct calendar days to swap between. Below 20%
+(`DEFAULT_MINIMUM_SWAPPABLE_FRACTION`, `placebos.ts:149`) the placebo is DEGENERATE: not enough of the
+window could actually be shuffled for its IC to mean anything, independent of whether that IC happens
+to tie the real one.
+
+`runFalsificationHarness` (`apps/api/src/modules/research/domain/falsification-harness.ts:307-330`)
+computes this diagnostic before running any placebo, excludes a degenerate wrong-day IC from
+`placeboBand` (so it can no longer silently set or inflate the bar), and — at
+`falsification-harness.ts:407-432` — short-circuits to a new verdict, **`INCONCLUSIVE`**, whenever the
+placebo is degenerate. This sits after the two pipeline-fault checks (`FAIL_PLACEBO`: no measurable
+band at all, or a constant real IC) but before the negative-lag check and the `NO_SIGNAL`/`PASS`
+checks, because those assume a trustworthy band and a degenerate day-placebo means one of the four
+inputs to that band cannot be trusted. `INCONCLUSIVE` is distinct from `NO_SIGNAL`: the latter says the
+signal was measured and found wanting against a trustworthy bar; the former says the bar itself could
+not be trusted on this window, so no verdict is reported at all — the same "unmeasured must stay
+unmeasured, never default to a pass/fail" rule already applied elsewhere in this codebase (e.g. the
+same day's Pillar C fix). `PlaceboIc.degenerate` and `FalsificationReport.matchedTimeDiversity` surface
+the underlying numbers so a caller can see *why*, not just that the verdict was withheld.
+
+Covered by new tests: `placebos.test.ts` (`matchedTimeDiversity` — fully degenerate single-day input,
+fully diverse 8-day input, a mixed case with one diverse bucket among many single-day ones, and a
+custom threshold) and `falsification-harness.test.ts` (`wrong-day-matched-time degeneracy guard` — a
+single-day window now reports `INCONCLUSIVE` even for injected perfect foresight that would otherwise
+`PASS`, the pre-existing multi-day `PASS`/`NO_SIGNAL` tests are unaffected, and a caller-supplied
+threshold of 0 restores the old behaviour). Full suite: 444 passed, 2 skipped (pre-existing,
+unrelated), `tsc --noEmit` clean.
+
+### Corrected re-run, all 7 windows to date
+
+Re-run against real `depth_frames` (989,266+ rows through 2026-09-29), `NSE:BANKNIFTY26SEPFUT`,
+`--horizons=30000,60000 --seed=1`, with the fix applied:
+
+| window | source | 30s IC | 30s CI | 30s verdict | 60s IC | 60s CI | 60s verdict |
+|---|---|---|---|---|---|---|---|
+| 2026-09-10/11 | `--session=5d2abf31…` | −0.0807 | [−0.0894, −0.0722] | **PASS** | −0.0783 | [−0.0880, −0.0687] | **PASS** |
+| 2026-09-17/18 | `--from/--to` (§9's exact command) | +0.0764 | [0.0669, 0.0844] | **PASS** | +0.0724 | [0.0635, 0.0835] | **PASS** |
+| 2026-09-21 | `--from/--to`, full day | −0.0002 | — | **INCONCLUSIVE** | +0.0341 | — | **INCONCLUSIVE** |
+| 2026-09-22/23 | `--session=70b3d1d5…` | +0.0485 | [0.0205, 0.0638] | **PASS** | +0.0465 | [0.0171, 0.0599] | **PASS** |
+| 2026-09-23/24 | `--session=6f0adc74…` | +0.0430 | — | **INCONCLUSIVE** | +0.0531 | — | **INCONCLUSIVE** |
+| 2026-09-25 | `--session=256846d3…` | +0.0198 | — | **INCONCLUSIVE** | +0.0275 | — | **INCONCLUSIVE** |
+| 2026-09-28 | `--session=3f0d0d67…` | +0.0403 | — | **INCONCLUSIVE** | +0.0327 | — | **INCONCLUSIVE** |
+
+The first two rows (2026-09-10/11, 2026-09-17/18) are the sanity check: numbers are byte-identical to
+§8/§9's originally reported values, confirming the fix does not disturb an already-valid multi-day
+`PASS`. Sequence health was `RECONSTRUCTIBLE` on all 7 windows; none were refused by the Phase 1 gate.
+A `null` CI on an `INCONCLUSIVE` row is `informationCoefficient`'s own day-block bootstrap declining to
+form an interval on single-day input — a second, independent signal that these windows cannot support a
+full measurement, not something this fix introduced.
+
+**2026-09-21 is a correction, not a footnote.** The background briefing for this work (and, before
+that, an informal same-day check) treated 2026-09-21 as a "real NO_SIGNAL, not a bug" — distinct from
+the three windows (09-23/24, 09-25, 09-28) that visibly tied their real IC to the day-placebo's IC. It
+does not survive the code-level check: at 60s, +0.0341 ties the degenerate placebo exactly and that
+tied value is the largest of the four placebos, so it alone sets the band the real IC then fails to
+clear — the same mechanical shape as the other three windows. (At 30s the tie is present too, −0.0002
+vs −0.0002, but doesn't change the outcome either way, since `circular-shift` alone already dominates
+the band there and the real signal is negligible regardless.) This is exactly the failure mode a
+diversity measurement over the bucketing itself, rather than an eyeballed comparison, is supposed to
+catch, and did.
+
+### Honest read: more positive-leaning than a coin-flip, still short of actionable
+
+Restricting to the three windows whose placebo integrity is fully trustworthy: **2 PASS positive
+(09-17/18, 09-22/23) vs 1 PASS negative (09-10/11)**. That is a shift from §9's exact 1-1 tie, but it is
+two more data points, not ten -- on its own this is still consistent with a coin flip that happened to
+land heads twice.
+
+What tips this past "shrug" territory is the pattern in the four `INCONCLUSIVE` windows: every one of
+them has a **positive** raw point estimate at both horizons (+0.020 to +0.053), the same direction as
+both of the trustworthy positive windows, and none is negative. Their placebo band cannot be trusted,
+so none of them counts as a result -- but if the true state of the world were "no persistent
+directional bias" (the null this whole section is testing), four more independent coin flips landing
+the same way as the two most recent trustworthy ones would itself be a mildly notable coincidence.
+Read plainly and without spin: this is **suggestive of the same regime persisting since roughly
+2026-09-17** (positive short-horizon OFI-return relationship, opposite the original 2026-09-10/11
+window), **not yet a validated result**, because four of the seven readings behind it cannot clear
+their own integrity check.
+
+**What this is not:** a reopening of the programme. §9's kill condition ("re-opening this would need a
+*new* hypothesis... not a third window run the same way") still applies, and nothing here supplies that
+hypothesis -- it supplies more of the same window type, most of which turned out unmeasurable for a
+reason that has nothing to do with the market.
+
+**What this does change:** the practical reason the placebo keeps going degenerate is now visible and
+actionable on its own terms, separate from any signal question. The collector's capture sessions have
+mostly been single-day since 2026-09-21 (`b0826523…`, `256846d3…`, `3f0d0d67…` etc. each start fresh
+each morning), where the two multi-day sessions that produced valid reads (5d2abf31, and the
+70b3d1d5 window covering 09-22/23) happened to span a socket that stayed open overnight. **Recommended
+next step, not undertaken here:** either evaluate windows spanning two-or-more calendar days by
+construction (e.g. combine two adjacent single-day sessions explicitly, the way §8 did by hand, now
+that the degeneracy check will refuse a combination that still doesn't have enough real diversity), or
+lower `matchedTimeBucketMinutes`/loosen the bucket structure so a single very long single-day session
+can supply its own within-day time-of-day diversity check some other way. Either is infrastructure work
+on the harness, not a new strategy, and should happen before the next forward-blind window is spent on
+another likely-single-day capture.
+
+## 11. Root cause of the single-day sessions, and pooling across them to close all 4 `INCONCLUSIVE` windows (2026-09-29)
+
+§10 named the practical cause in passing ("each start fresh each morning") without establishing why,
+and left "evaluate windows spanning two-or-more calendar days by construction" as a recommended next
+step. This section does both: finds the actual cause, and implements the fix.
+
+### Root cause: a capture session is a collector *process lifetime*, not a calendar concept
+
+`captureSessionId` is minted exactly once, in `collect-depth-frames.ts`'s `main()`, via
+`randomUUID()` immediately before the socket opens — never re-minted on WebSocket reconnect, at
+market open, or at midnight (migration 071's own column comment: "the collector run that wrote this
+row"). So a session's length is however long that OS process stays up, full stop.
+
+`docker-compose.v2.yml`'s `depth-collector-v2` block has carried `restart: unless-stopped` since
+2026-08-27 (`040c8e7`) and has not changed since — **there was no 09-21 code change** to session
+lifecycle; `git log` over the collector, market-data domain/infra, the repository and the compose file
+between 09-14 and 09-24 touches only a decode fix (`b69abda`, 09-16), the ATM band (`e1a1bcd`, 09-17)
+and a chart overlay (`9957a1e`, 09-22), none of which are session-boundary logic. `restart:
+unless-stopped` only *re-creates* the container when something else has already killed it, and two
+things do that on this deployment roughly daily: Windows Modern Standby suspending the Docker VM
+(`host-standby-kills-scheduler-crons`, `d2-coverage-lost-to-daily-server-downtime` — a *daily*
+mid-session event since at least 08-12) and ordinary `docker compose up -d` deploys (17-24 commits/day
+around 09-21/09-22, two of which touched `docker-compose.v2.yml` itself). The two multi-day sessions
+that *did* produce valid reads (`5d2abf31…` covering 09-10/11, `70b3d1d5…` covering 09-22/23) were not
+a different regime — they were the same daily-restart-risk deployment on nights the host or a deploy
+happened not to interrupt it. **Single-day sessions since 09-21 are a pre-existing structural property
+of this deployment made newly visible by the placebo-degeneracy fix, not a regression introduced on
+09-21 or afterward.**
+
+That determines the choice between the two options this work was framed around. Option A (fix the
+collector so sessions span multiple days again) is not available: there is nothing to fix in the
+collector's own code, and the two things that actually restart it — host standby and routine deploys —
+are not going away and are not this programme's to control. **Option B — decouple the evaluation from
+session boundaries entirely — is the only one that matches the actual cause.**
+
+### What changed
+
+`evaluate-ofi-signal.ts` already accepted `--from`/`--to` as an alternative to `--session` (it has since
+the command was first written, `af25884`) and `listFrames`'s own doc comment already described this as
+"a window-scoped read... for analysing a whole trading day across several collector restarts" — the
+plumbing to pool sessions was already there. Two things were missing:
+
+1. **A contamination guard for range queries.** `countForeignRowsInWindow`, the single-session gate's
+   check for a second writer in the window, is only meaningful when exactly one `captureSessionId` is
+   expected — it would flag *every* row as foreign in a query that is deliberately pooling several
+   sessions. Nothing filled that gap for the range-query path, so two collectors running concurrently
+   against the same contract (a bad deploy that didn't tear the old container down first, say) could
+   have silently interleaved two streams with no check at all.
+
+   New module `apps/api/src/modules/market-data/domain/capture-session-window.ts`:
+   `summariseCaptureSessions` groups the already-fetched frames by `captureSessionId` (now a field
+   `listFrames` returns, `postgres-depth-frame-repository.ts`) into `{firstAt, lastAt, frames}` per
+   session — no extra query — and `findOverlappingSessions` flags any two *distinct* sessions whose
+   `[firstAt, lastAt]` intervals intersect. Sequential sessions (one ends, a gap, the next begins) are
+   exactly what a range query is meant to pool and produce zero overlaps; two sessions writing the same
+   interval do not survive the gate, in either the refusal path or the success path's output
+   (`sessionsInWindow`, printed either way, for transparency about exactly which collector runs a
+   verdict pooled).
+
+2. **Nothing.** `order-flow-imbalance.ts`'s segment breaks (triggered by each session's own opening
+   `isSnapshot` frame) and `ofi-signal-observations.ts`'s `horizonToleranceMs` forward-frame search
+   already made it structurally impossible for a feature window or a forward return to reach across a
+   multi-hour collector-restart gap — a session boundary just needed to look, to that code, like any
+   other snapshot-triggered break, which it already does. No change was needed there; this was verified
+   with new tests (below), not assumed.
+
+Covered by new tests: `capture-session-window.test.ts` (grouping, sequential-sessions-no-overlap,
+overlapping-pair detection including a nested case and a boundary-touch case, single-session and
+empty-input edges); a new describe block in `ofi-signal-observations.test.ts` building a synthetic
+two-session, two-calendar-day dataset with a 24-hour collector-restart gap between them, verifying the
+OFI chain starts a fresh segment at the second session's opening snapshot and that no observation's
+forward return crosses the gap (the tail of session 1 is dropped via `NO_FORWARD_FRAME_IN_TOLERANCE`
+rather than silently paired with session 2); and a new test in `falsification-harness.test.ts`
+("recovers a genuine verdict by pooling two single-day sessions that are each INCONCLUSIVE alone")
+that builds two independently-seeded single-day sessions a calendar day apart, confirms each is
+`INCONCLUSIVE` alone, then confirms the pooled population reaches a genuine `PASS` with the
+`wrong-day-matched-time` placebo no longer degenerate. Full suite: 2,982 passed, 63 skipped
+(pre-existing, unrelated), `tsc --noEmit` clean.
+
+### Corrected re-run: all 4 `INCONCLUSIVE` windows resolved by one combined query
+
+```
+npx tsx src/interfaces/cli/evaluate-ofi-signal.ts --symbol=NSE:BANKNIFTY26SEPFUT \
+  --from=2026-09-21T00:00:00.000Z --to=2026-09-28T23:59:59.000Z --horizons=30000,60000 --seed=1
+```
+
+This single range query spans everything between the two dates -- both originally-`INCONCLUSIVE`
+sessions (`941a1456…`+`93e5c93b…`+`a98ddfe1…` on 09-21; `256846d3…` on 09-25; `3f0d0d67…` on 09-28;
+the originally-`INCONCLUSIVE` `6f0adc74…` spanning 09-23/24) *and* the two windows already known clean
+(`70b3d1d5…` covering 09-22/23) -- there is no reason to exclude already-good data when the tool can
+now honestly pool everything between two dates in one query, and doing so gives the placebo the widest
+possible day-diversity to work with. `sessionsInWindow` in the tool's own output lists all 11 sessions
+found (9 real + 2 sub-5-frame stray fragments from restart churn, each contributing negligible
+observations); `overlappingSessions` is empty, so no two of them wrote concurrently.
+
+Sequence health: `RECONSTRUCTIBLE`, 270,796 frames read, missed-sequence rate 0.00038%, 0 look-ahead
+violations. Window spans 2026-09-21T03:38:41Z to 2026-09-28T10:09:56Z (10,471 minutes) across **6
+distinct IST calendar days**.
+
+| horizon | verdict | IC | 95% CI | placebo band | wrong-day-matched-time degenerate? |
+|---|---|---|---|---|---|
+| 30s | **PASS** | **+0.0324** | [0.0145, 0.0473] | 0.0024 | No (swappable fraction 100%, 6 distinct days) |
+| 60s | **PASS** | **+0.0387** | [0.0287, 0.0493] | 0.0047 | No (swappable fraction 100%, 6 distinct days) |
+
+Both horizons clear the placebo band comfortably, both confidence intervals exclude zero, and the sign
+is positive at both — the same direction as §9's second window (09-17/18) and §10's 09-22/23 window,
+and the direction every one of the four now-resolved raw point estimates was already leaning before
+this fix (§10's "honest read" section). The small-sample negative-lag probes at `lag=-1,-3,-10` show
+large point-estimate ICs (up to 0.40) but every one sits far below its own `negativeLagMinimumSample`
+floor (12-193 pairs against a required ~13,489) and is correctly excluded from the
+`FAIL_NEGATIVE_LAG` check for exactly the reason `evaluate-ofi-signal.ts`'s own pre-registered fraction
+exists — this is the harness working as designed, not a new caveat.
+
+### Honest read: three positive replications now, still not a reopening
+
+**Read across every window whose placebo integrity is trustworthy: 3 PASS positive (2026-09-17/18,
+2026-09-22/23, and 09-21-through-09-28 combined) vs 1 PASS negative (2026-09-10/11).** That is a
+stronger positive lean than §10's 2-vs-1, but two important caveats keep this from being a clean
+replication count:
+
+- **The combined window is not independent of the two windows already counted inside it.** `70b3d1d5…`
+  (09-22/23) is literally a subset of the 09-21-09-28 range and contributes roughly a third of its
+  269,770 observations. Treating "09-21-09-28 combined" as a fourth independent data point alongside
+  09-22/23 double-counts that session's contribution to the tally above. The honest way to read this
+  is: **one wide combined measurement (09-21 through 09-28) that happens to agree in sign and rough
+  magnitude with the 09-22/23 sub-window already inside it**, not four independent coin flips.
+- **This still is not the new hypothesis §9's kill condition calls for.** §9: "re-opening this would
+  need a *new* hypothesis about what the sign depends on... not a third window run the same way as the
+  first two." Pooling sessions is infrastructure that makes existing windows *measurable*; it is not a
+  new hypothesis about the market, and does not by itself license treating the programme as reopened.
+
+**What this section actually establishes**, without overclaiming: the specific defect blocking
+measurement since 09-21 (single-day sessions starving the day-placebo) is now fixed at the tool level,
+permanently, for any future window regardless of collector uptime — not a one-off hand-combination the
+way §8/§9 needed. The next genuinely new forward-blind window, whenever depth-collector-v2 next
+restarts mid-capture, is now measurable by construction rather than a coin flip on whether that night's
+container happened to survive.

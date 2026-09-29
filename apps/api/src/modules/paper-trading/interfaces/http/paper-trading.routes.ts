@@ -656,6 +656,11 @@ export function registerPaperTradingRoutes(
       let appliedExitPrice = exitPrice;
       let exitPriceSource: "MANUAL_INPUT" | "SERVER_OPTION_MARK" = "MANUAL_INPUT";
       let valuationDetails: Record<string, unknown> | undefined;
+      // The underlying level `valuePaperTrade` resolved below, when this is an option-buyer
+      // close. It stays observed regardless of how the option premium beside it was derived
+      // (chain mid or model mark) -- same reasoning as OPTION_LIVE_MARK_EVALUATOR. A bare
+      // manual close of a non-option trade never sets this, and the column stays null.
+      let underlyingExitPrice: number | null | undefined;
 
       if (hasAnyOptionContractField(openTrade)) {
         if (!isOptionBuyerTrade(openTrade)) {
@@ -700,6 +705,7 @@ export function registerPaperTradingRoutes(
           ? observedQuote.bid
           : valuation.markPrice;
         exitPriceSource = "SERVER_OPTION_MARK";
+        underlyingExitPrice = valuation.underlyingPrice;
         valuationDetails = {
           requestedExitPrice: exitPrice,
           appliedExitPrice,
@@ -725,6 +731,7 @@ export function registerPaperTradingRoutes(
         notes: notes || "Manually closed from UI",
         exitPriceSource,
         valuationDetails,
+        underlyingExitPrice,
       });
       response.status(200).json({
         data: trade,
