@@ -48,15 +48,15 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(proposals).toEqual([]);
   });
 
-  it("enforces strict Pillar A minDiDecay threshold of 0.15 (rejects 0.14)", () => {
+  it("enforces strict Pillar A minDiDecay threshold of 0.10 (rejects 0.09)", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
         nearest_level_type: "SWING_LOW",
         nearest_level_price: 54575,
         distance_bps: 1,
-        raw_di: 0.14,
-        di_tilde: 0.14,
+        raw_di: 0.09,
+        di_tilde: 0.09,
         directional_bias: "BULLISH_REJECTION",
         gate_action: "BUY_CALL_OR_LONG",
       },
@@ -82,7 +82,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(proposals).toEqual([]);
   });
 
-  it("emits LONG proposal when all 3 institutional pillars pass with di_tilde >= 0.15", () => {
+  it("emits LONG proposal when all 3 institutional pillars pass with di_tilde >= 0.10", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
@@ -108,7 +108,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
     expect(p.reasoning[2]).toContain("[Pillar C PASS]");
   });
 
-  it("emits SHORT proposal when all 3 institutional pillars pass for sell side (di_tilde <= -0.15)", () => {
+  it("emits SHORT proposal when all 3 institutional pillars pass for sell side (di_tilde <= -0.10)", () => {
     const ctx = mockContext({
       confluenceSignal: {
         is_level_proximate: true,
@@ -144,7 +144,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
       },
       indicators: [
         {
-          code: "PCR",
+          code: "PCR" as any,
           algorithmVersion: "1.0",
           parameters: {},
           values: { value: 0.95 },
@@ -169,7 +169,7 @@ describe("HybridLiquidityConfluenceStrategy", () => {
       },
       indicators: [
         {
-          code: "IV_PERCENTILE",
+          code: "IV_PERCENTILE" as any,
           algorithmVersion: "1.0",
           parameters: {},
           values: { value: 10.0 },

@@ -415,9 +415,10 @@ async function main(): Promise<void> {
         nativeHtfTimeframes,
       );
     }
-    // The ICT strategy reads its four-pillar snapshot from the context; attach it
+    // The ICT-reading strategies read their four-pillar snapshot from the context; attach it
     // in the replay builder. Incumbent strategies never see this decoration.
-    if (registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY) {
+    const selectedStrategy = requireRegisteredStrategy(getOption(argumentsList, "strategy")?.trim() || "trend-breakout");
+    if (selectedStrategy.readsIctContext === true) {
       marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList));
     }
 

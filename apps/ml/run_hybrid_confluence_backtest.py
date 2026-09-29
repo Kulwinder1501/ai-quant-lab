@@ -141,9 +141,9 @@ def run_backtest():
                     is_up_level = pool_type in ("PDH", "SWING_HIGH", "SESSION_HIGH", "ITH")
                     
                     hybrid_signal = False
-                    if is_up_level and di_decay <= -0.15:
+                    if is_up_level and di_decay <= -0.10:
                         hybrid_signal = True
-                    elif not is_up_level and di_decay >= 0.15:
+                    elif not is_up_level and di_decay >= 0.10:
                         hybrid_signal = True
 
                     if hybrid_signal:

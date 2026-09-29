@@ -5,7 +5,7 @@ export const hybridLiquidityConfluenceStrategyKey = "hybrid-liquidity-confluence
 export const hybridLiquidityConfluenceStrategyVersion = 1;
 
 export interface HybridLiquidityConfluenceConfiguration {
-  /** Pillar A minimum Decaying Depth Imbalance magnitude (default 0.15). */
+  /** Pillar A minimum Decaying Depth Imbalance magnitude (default 0.10). */
   minDiDecay: number;
   /** Pillar B minimum Order Flow Imbalance magnitude (default 0.05). */
   minRawDiOfi: number;
@@ -18,7 +18,7 @@ export interface HybridLiquidityConfluenceConfiguration {
 }
 
 export const defaultHybridLiquidityConfluenceConfiguration: HybridLiquidityConfluenceConfiguration = {
-  minDiDecay: 0.15,
+  minDiDecay: 0.10,
   minRawDiOfi: 0.05,
   minLongPcr: 1.2,
   maxShortPcr: 0.8,
@@ -38,7 +38,7 @@ export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersio
  *
  * 3-Pillar Institutional Trading Strategy:
  * 1. Pillar A: Structural Liquidity Level Sweep (PDH/PDL, Swing High/Low, Session High/Low)
- *              + Decaying L2 Depth Imbalance (|DI_decay| >= 0.15).
+ *              + Decaying L2 Depth Imbalance (|DI_decay| >= 0.10).
  * 2. Pillar B: Cont-Kukanov-Stoikov Order Flow Imbalance (OFI) Aggressor Flow (|raw_di| >= 0.05).
  * 3. Pillar C: Option Chain Open Interest (OI) Support/Resistance Walls (PCR >= 1.2 for LONG, <= 0.8 for SHORT)
  *              & Volatility Regime (IV Percentile >= 15%).
@@ -90,14 +90,14 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
     // Pillar C: Option Chain Open Interest (OI) & Volatility Regime
     // 1. Search for PCR indicator in indicators or priceActionEvents
     let pcrValue: number | null = null;
-    const pcrInd = context.indicators.find(ind => ind.code === "PCR" || ind.code === "OPTION_PCR");
+    const pcrInd = context.indicators.find(ind => (ind.code as string) === "PCR" || (ind.code as string) === "OPTION_PCR");
     if (pcrInd && typeof pcrInd.values.value === "number") {
       pcrValue = pcrInd.values.value;
     }
 
     // 2. Search for IV Percentile indicator
     let ivpVal: number | null = null;
-    const ivpInd = context.indicators.find(ind => ind.code === "IV_PERCENTILE");
+    const ivpInd = context.indicators.find(ind => (ind.code as string) === "IV_PERCENTILE");
     if (ivpInd && typeof ivpInd.values.value === "number") {
       ivpVal = ivpInd.values.value;
     }

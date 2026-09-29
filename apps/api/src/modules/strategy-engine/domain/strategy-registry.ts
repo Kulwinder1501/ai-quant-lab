@@ -22,6 +22,14 @@ import {
   HybridLiquidityConfluenceStrategy,
   hybridLiquidityConfluenceStrategyRegistration,
 } from "./hybrid-liquidity-confluence-strategy.js";
+import {
+  TrendContinuationStrategy,
+  trendContinuationStrategyRegistration,
+} from "./trend-continuation-strategy.js";
+import {
+  EventReversalStrategy,
+  eventReversalStrategyRegistration,
+} from "./event-reversal-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -386,6 +394,18 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     registration: hybridLiquidityConfluenceStrategyRegistration,
     StrategyClass: HybridLiquidityConfluenceStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
+  },
+  {
+    registration: trendContinuationStrategyRegistration,
+    StrategyClass: TrendContinuationStrategy,
+    supportedTimeframes: ["1m", "5m", "15m"],
+    readsIctContext: true,
+  },
+  {
+    registration: eventReversalStrategyRegistration,
+    StrategyClass: EventReversalStrategy,
+    supportedTimeframes: ["5m", "15m", "60m", "1d"],
+    readsIctContext: true,
   },
 ];
 

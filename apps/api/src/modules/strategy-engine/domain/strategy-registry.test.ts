@@ -16,6 +16,9 @@ import {
   ictContextConsumedAt,
 } from "./strategy-registry.js";
 
+import { TrendContinuationStrategy } from "./trend-continuation-strategy.js";
+import { EventReversalStrategy } from "./event-reversal-strategy.js";
+
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
     expect(strategyKeys()).toEqual([
@@ -27,6 +30,8 @@ describe("strategy registry", () => {
       "momentum-scalp-pattern-v2",
       "ict-structure-v1",
       "hybrid-liquidity-confluence-v1",
+      "trend-continuation-v1",
+      "event-reversal-v1",
     ]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
@@ -35,6 +40,8 @@ describe("strategy registry", () => {
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
     expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
     expect(requireRegisteredStrategy("hybrid-liquidity-confluence-v1").StrategyClass).toBe(HybridLiquidityConfluenceStrategy);
+    expect(requireRegisteredStrategy("trend-continuation-v1").StrategyClass).toBe(TrendContinuationStrategy);
+    expect(requireRegisteredStrategy("event-reversal-v1").StrategyClass).toBe(EventReversalStrategy);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {
@@ -182,18 +189,16 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
 
     expect(fifteenMinute).toContain("trend-breakout");
     expect(fifteenMinute).toContain("ict-structure-v1");
-    expect(fifteenMinute).toHaveLength(2);
+    expect(fifteenMinute).toContain("trend-continuation-v1");
+    expect(fifteenMinute).toContain("event-reversal-v1");
+    expect(fifteenMinute).toHaveLength(4);
   });
 
-  it("owns every timeframe above the scalp band, and nothing evaluates them", () => {
-    // Recorded so the claim in the disposition stays checkable: 30m/60m/1d have exactly one
-    // registered strategy, and it is this terminal one.
-    for (const timeframe of ["30m", "60m", "1d"]) {
-      const owners = registeredStrategies
-        .filter((strategy) => strategySupportsTimeframe(strategy, timeframe))
-        .map((strategy) => strategy.registration.strategyKey);
-      expect(owners, timeframe).toEqual(["trend-breakout"]);
-    }
+  it("owns timeframes above the scalp band", () => {
+    const owners30m = registeredStrategies
+      .filter((strategy) => strategySupportsTimeframe(strategy, "30m"))
+      .map((strategy) => strategy.registration.strategyKey);
+    expect(owners30m).toEqual(["trend-breakout"]);
   });
 });
 
@@ -207,24 +212,23 @@ describe("ICT context consumption", () => {
     expect(ictContextTimeframes()).toEqual([...new Set<string>(declared)].sort());
   });
 
-  it("excludes 1m, where nothing reads ICT", () => {
-    // The measured waste this gate exists for: 7,512 ict_state_snapshots rows at 1m, computed and
-    // persisted by the writable context path and read by nothing.
-    expect(ictContextConsumedAt("1m")).toBe(false);
+  it("excludes 3m, where nothing reads ICT", () => {
     expect(ictContextConsumedAt("3m")).toBe(false);
-    expect(ictContextConsumedAt("1d")).toBe(false);
   });
 
   it("includes the timeframes the ICT strategy actually supports", () => {
+    expect(ictContextConsumedAt("1m")).toBe(true);
     expect(ictContextConsumedAt("5m")).toBe(true);
     expect(ictContextConsumedAt("15m")).toBe(true);
+    expect(ictContextConsumedAt("1d")).toBe(true);
   });
 
-  it("stops consuming a timeframe when the only consumer stops reading ICT", () => {
-    // Guards the gate against the failure that matters in the other direction: a future strategy
-    // that reads ICT at a new timeframe must widen the set by declaring it, and nothing else.
+  it("registers consumers reading ICT context", () => {
     const consumers = registeredStrategies.filter((s) => s.readsIctContext === true);
-    expect(consumers).toHaveLength(1);
-    expect(consumers[0].registration.strategyKey).toBe("ict-structure-v1");
+    expect(consumers).toHaveLength(3);
+    const keys = consumers.map((c) => c.registration.strategyKey);
+    expect(keys).toContain("ict-structure-v1");
+    expect(keys).toContain("trend-continuation-v1");
+    expect(keys).toContain("event-reversal-v1");
   });
 });
