@@ -113,4 +113,90 @@ describe("IctBiasTracker", () => {
     expect(snap.dealingRange?.isDiscount(97)).toBe(true);
     expect(snap.dealingRange?.isPremium(105)).toBe(true);
   });
+
+  /*
+   * Investigated concern: bias.ts picks `structure.lastHH && structure.lastHL` unconditionally,
+   * ahead of `lastLH && lastLL`, with no check on `structure.trend`. The worry was that after a
+   * bullish->bearish CHoCH, a stale (pre-reversal) `lastHH`/`lastHL` pair could still both be
+   * non-null and get picked over the fresh `lastLH`/`lastLL` pair that actually describes the new
+   * downtrend -- silently mispricing premium/discount during exactly the transition that matters
+   * most.
+   *
+   * Traced through `IctStructureTracker.processCandle` (structure.ts): a bullish->bearish CHoCH
+   * (the `lastHL` break) unconditionally nulls `this.lastHL` in the same branch that flips
+   * `trend` to BEARISH, and nothing in the BEARISH branches ever sets `lastHL` again (every
+   * assignment site is gated on `trend === "BULLISH"` or `"NEUTRAL"`). So for the entire lifetime
+   * of a bearish trend, `structure.lastHL` is provably null -- bias.ts's first condition can never
+   * fire, and it always falls through to `lastLH && lastLL`, which is exactly the pair the current
+   * downtrend maintains. `lastHH` *does* persist unchanged through the whole bearish trend (a
+   * separate, already-documented quirk -- see market-data.routes.ts's `toChartIctStructure` doc
+   * comment -- kept deliberately because other consumers, e.g. liquidity.ts's external-liquidity
+   * levels, treat an untapped prior high as a live liquidity pool regardless of current trend), but
+   * because its partner `lastHL` is null, bias.ts never combines the two. The hypothesized failure
+   * mode does not occur; this locks that invariant in.
+   */
+  it("does not let a stale bullish HH/HL pair leak into the dealing range once structure has flipped bearish", () => {
+    const biasTracker = new IctBiasTracker();
+    const structTracker = new IctStructureTracker(1);
+    const sessionTracker = new IctSessionLevelTracker();
+
+    function candle(index: number, open: number, high: number, low: number, close: number): CausalCandle {
+      return {
+        id: `c-${index}`,
+        openTime: new Date(Date.UTC(2026, 0, 1, 9, 15 + index * 5)),
+        open,
+        high,
+        low,
+        close,
+        volume: 100,
+      };
+    }
+
+    // A slow directional drift (0.6/bar) with a wide (+/-4) alternating zigzag layered on top, so
+    // pivots keep confirming every other bar while the overall level still trends. Up for bars
+    // 0-40 (establishes a HH/HL pair), down for 40-90 (drives a bullish->bearish CHoCH, then a
+    // genuine downtrend), up again from 91 (drives the mirror bearish->bullish CHoCH).
+    function coarseDrift(i: number): number {
+      if (i <= 40) return 0.6 * i;
+      if (i <= 90) return 0.6 * 40 - 0.6 * (i - 40);
+      return 0.6 * 40 - 0.6 * 50 + 0.6 * (i - 90);
+    }
+
+    const candles: CausalCandle[] = [];
+    for (let i = 0; i < 100; i++) {
+      const base = 100 + coarseDrift(i) + (i % 2 === 0 ? 0 : 6);
+      candles.push(candle(i, base, base + 4, base - 4, base + (i % 2 === 0 ? -1 : 1)));
+    }
+
+    let lastStruct;
+    let lastBias;
+    for (let i = 0; i < candles.length; i++) {
+      lastStruct = structTracker.processCandle(candles, i);
+      const sess = sessionTracker.processCandle(candles, i);
+      lastBias = biasTracker.processCandle(candles, i, lastStruct, sess, "OWN_STRUCTURE");
+
+      // Snapshot the still-bullish state right before the reversal (bar 78): HH/HL both set and
+      // correctly driving the range.
+      if (i === 78) {
+        expect(lastStruct.trend).toBe("BULLISH");
+        expect(lastStruct.lastHH?.price).toBe(113);
+        expect(lastStruct.lastHL?.price).toBe(99.6);
+        expect(lastBias.dealingRange?.rangeHigh).toBe(113);
+        expect(lastBias.dealingRange?.rangeLow).toBe(99.6);
+      }
+
+      // Bar 91: solidly bearish, well past the CHoCH at bar 80. The stale bullish lastHH (113)
+      // persists (the documented quirk), but its partner lastHL is null -- so the dealing range
+      // must come from the current-trend lastLH/lastLL pair, not from lastHH.
+      if (i === 99) {
+        expect(lastStruct.trend).toBe("BEARISH");
+        expect(lastStruct.lastHH?.price).toBe(113); // stale, but harmless: see below
+        expect(lastStruct.lastHL).toBeNull(); // <- the invariant that makes it harmless
+        expect(lastStruct.lastLH?.price).toBe(113);
+        expect(lastStruct.lastLL?.price).toBe(93.6);
+        expect(lastBias.dealingRange?.rangeHigh).toBe(lastStruct.lastLH?.price);
+        expect(lastBias.dealingRange?.rangeLow).toBe(93.6);
+      }
+    }
+  });
 });
