@@ -146,6 +146,63 @@ describe("IngestOptionChain tradable-expiry coverage", () => {
     expect(result.failures[0]?.reason).toContain("token");
   });
 
+  it("picks the tradable expiry up on a later poll once the provider starts supplying its token -- no code path change needed, since each poll re-derives everything from the front chain it is handed that call", async () => {
+    // Every past NIFTY50 weekly rollover shows this exact shape in the live data: the provider
+    // omits the token for several days after the roll is first needed, then starts including it
+    // roughly a week before that contract's own expiry (see `option_chain_snapshots`'s
+    // `first_seen` column across 2026-09-01 through 2026-09-29 -- every single rollover). Nothing
+    // in `IngestOptionChain` persists "already tried and failed", so the very next scheduled poll
+    // (every 15 minutes in production) is already a fresh, independent attempt against whatever
+    // `listedExpiries` the provider hands back that call. This test is the proof: the same
+    // instance, called twice, recovers on the second call purely because the second call's
+    // fixture supplies a token the first call's did not.
+    let tokenAvailable = false;
+    const requested: Array<string | null | undefined> = [];
+    const saved: string[] = [];
+    const source = {
+      async fetchChain(input: { underlyingSymbol: string; strikeCount?: number; expiryToken?: string | null }) {
+        requested.push(input.expiryToken);
+        if (input.expiryToken) return snapshot(ROLLED, input.expiryToken);
+        return {
+          ...snapshot(FRONT, null),
+          listedExpiries: [
+            { expiryDate: new Date(`${FRONT}T10:00:00.000Z`), expiryKind: "MONTHLY" as const, providerExpiryToken: "1756108800" },
+            {
+              expiryDate: new Date(`${ROLLED}T10:00:00.000Z`),
+              expiryKind: "MONTHLY" as const,
+              providerExpiryToken: tokenAvailable ? "1759132800" : null,
+            },
+          ],
+        };
+      },
+    };
+    const store = {
+      async saveSnapshot(value: OptionChainSnapshot) {
+        saved.push(value.quotes[0]!.expiryDate.toISOString().slice(0, 10));
+        return { inserted: value.quotes.length, skipped: 0 };
+      },
+      async saveExpiryCalendar() { return { inserted: 2 }; },
+    };
+    const ingest = new IngestOptionChain(source, store);
+    const now = new Date("2026-08-24T04:00:00.000Z");
+
+    const firstPoll = await ingest.execute({ underlyingSymbols: ["BANKNIFTY"], now });
+    expect(firstPoll.tradableExpiries).toEqual([]);
+    expect(firstPoll.failures).toHaveLength(1);
+
+    // The next scheduled poll: nothing about the caller or the instance changed, only what the
+    // provider now supplies -- exactly what a real 15-minutes-later invocation would look like.
+    tokenAvailable = true;
+    const secondPoll = await ingest.execute({ underlyingSymbols: ["BANKNIFTY"], now });
+
+    expect(secondPoll.failures).toEqual([]);
+    expect(secondPoll.tradableExpiries).toEqual([
+      { underlyingSymbol: "BANKNIFTY", expiryDate: ROLLED, contracts: 4, inserted: 4 },
+    ]);
+    expect(requested).toEqual([undefined, undefined, "1759132800"]);
+    expect(saved).toEqual([FRONT, FRONT, ROLLED]);
+  });
+
   it("can be switched back to front-expiry-only collection", async () => {
     const { ingest, requested } = harness();
     await ingest.execute({
