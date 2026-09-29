@@ -134,7 +134,8 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "hybrid-liquidity-confluence-v1", "momentum-scalp-index", "momentum-scalp-pattern-v2",
+      "event-reversal-v1", "hybrid-liquidity-confluence-v1", "momentum-scalp-index",
+      "momentum-scalp-pattern-v2", "trend-continuation-v1",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
@@ -150,6 +151,25 @@ describe("strategy registry", () => {
     // Deliberately no terminalResearchAcknowledgement: it has no research twin and no TERMINAL
     // verdict, so attaching one would misrepresent the record (see the registry comment).
     expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
+  });
+
+  it("gates trend-continuation-v1 and event-reversal-v1 off pending validation, not on a measured verdict", () => {
+    /*
+     * Both shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation. The
+     * same-day follow-up fix (commit cherry-picked as part of this gate) corrected 8 typecheck
+     * errors in both files, but that only makes the code compile and run -- it is not evidence the
+     * logic has edge. Same pattern as `hybrid-liquidity-confluence-v1`: gated pending validation,
+     * not on a measured losing verdict.
+     */
+    const trendContinuation = requireRegisteredStrategy("trend-continuation-v1");
+    const eventReversal = requireRegisteredStrategy("event-reversal-v1");
+
+    expect(strategyExecutableSides(trendContinuation)).toEqual([]);
+    expect(strategyExecutableSides(eventReversal)).toEqual([]);
+    // Deliberately no terminalResearchAcknowledgement for either: neither has a research twin or a
+    // TERMINAL verdict, so attaching one would misrepresent the record (see the registry comment).
+    expect(trendContinuation.terminalResearchAcknowledgement).toBeUndefined();
+    expect(eventReversal.terminalResearchAcknowledgement).toBeUndefined();
   });
 });
 

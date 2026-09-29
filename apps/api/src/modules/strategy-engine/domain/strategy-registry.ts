@@ -429,12 +429,51 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     StrategyClass: TrendContinuationStrategy,
     supportedTimeframes: ["1m", "5m", "15m"],
     readsIctContext: true,
+    /*
+     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
+     * `hybrid-liquidity-confluence-v1` above: registered so idea generation, lineage and this
+     * reasoning survive, but nothing may act on it yet.
+     *
+     * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
+     * follow-up fix corrected 8 typecheck errors caused by both new strategies being written against
+     * an imagined snapshot shape (see that commit message for the field-level detail). Fixing those
+     * defects only makes the code compile and run; it says nothing about whether the logic has edge.
+     * No research twin, no CPCV/walk-forward result, no live record exists for this strategy. Per
+     * this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
+     * going live), a strategy with no measurement at all does not get to trade.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here. This strategy has no research twin and no TERMINAL verdict -- there is nothing to
+    // acknowledge yet, only an absence of validation. `operationalDisposition` does not fit either:
+    // its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this is not.
   },
   {
     registration: eventReversalStrategyRegistration,
     StrategyClass: EventReversalStrategy,
     supportedTimeframes: ["5m", "15m", "60m", "1d"],
     readsIctContext: true,
+    /*
+     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
+     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` above: registered so idea
+     * generation, lineage and this reasoning survive, but nothing may act on it yet.
+     *
+     * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
+     * follow-up fix corrected 8 typecheck errors caused by both new strategies being written against
+     * an imagined snapshot shape (see that commit message for the field-level detail, including the
+     * behavioural narrowing on the HTF-sweep gate this strategy's `maxCisdAgeBars` inherited). Fixing
+     * those defects only makes the code compile and run; it says nothing about whether the logic has
+     * edge. No research twin, no CPCV/walk-forward result, no live record exists for this strategy.
+     * Per this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
+     * going live), a strategy with no measurement at all does not get to trade.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here. This strategy has no research twin and no TERMINAL verdict -- there is nothing to
+    // acknowledge yet, only an absence of validation. `operationalDisposition` does not fit either:
+    // its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this is not.
   },
 ];
 
