@@ -217,4 +217,91 @@ describe("buildOfiObservations", () => {
     expect(result.framesExamined).toBe(12);
     expect(result.segmentsUsed).toBe(1);
   });
+
+  describe("a two-session, two-calendar-day dataset with a clean collector-restart gap", () => {
+    // The real shape depth_frames sessions have taken since 2026-09-21 (see capture-session-window.ts
+    // and Phase 28 doc §10): one collector run captures a full trading day, the container restarts
+    // overnight (deploy or host standby), and a fresh session -- opening with its own snapshot frame,
+    // exactly like a genuine capture start -- picks up the next trading day. A `--from`/`--to` range
+    // query pools both into one `frames` array with a ~16-hour gap in the middle and nothing marking
+    // where session 1 ends and session 2 begins except that gap and the snapshot flag.
+    const STEP = 2_000; // 2s cadence
+    const BARS_PER_SESSION = 200;
+    const SESSION_GAP_MS = 16 * 60 * 60_000; // overnight restart
+    const DAY1_OPEN = Date.UTC(2026, 8, 21, 3, 45, 0); // 2026-09-21 09:15 IST
+    const DAY2_OPEN = DAY1_OPEN + 24 * 60 * 60_000; // 2026-09-22 09:15 IST -- a full day later, not
+    // merely `SESSION_GAP_MS` later, matching how a real overnight restart lands on the next trading
+    // day's open rather than exactly N hours after the previous close.
+
+    function twoSessionFrames(): OfiFrame[] {
+      const frames: OfiFrame[] = [];
+      let bidQty = 10;
+      let askPrice = 101;
+
+      const appendSession = (sessionOpen: number) => {
+        for (let index = 0; index < BARS_PER_SESSION; index += 1) {
+          bidQty += 10;
+          // A slow drift so the microprice actually moves within a session -- a constant price would
+          // make every forward return exactly 0 and hide a bug that pairs the wrong endpoints.
+          if (index > 0 && index % 20 === 0) askPrice += 0.1;
+          frames.push({
+            sequenceNo: null,
+            receivedAt: new Date(sessionOpen + index * STEP),
+            // The opening frame of each session is a real snapshot, exactly as the collector emits
+            // one on every process start (collect-depth-frames.ts) -- this is what actually breaks
+            // the OFI chain at the session boundary, not the gap in timestamps by itself.
+            isSnapshot: index === 0,
+            isDuplicate: false,
+            gapBefore: index === 0 ? null : 0,
+            bidPrice: [100],
+            bidQty: [bidQty],
+            askPrice: [askPrice],
+            askQty: [10],
+          });
+        }
+      };
+
+      appendSession(DAY1_OPEN);
+      appendSession(DAY2_OPEN);
+      return frames;
+    }
+
+    it("starts a new OFI segment at the second session's opening snapshot, not the gap alone", () => {
+      const result = buildOfiObservations({
+        frames: twoSessionFrames(), ofiWindowMs: 10_000, horizonMs: 6_000, horizonToleranceMs: 3_000,
+      });
+
+      expect(result.segmentsUsed).toBe(2);
+    });
+
+    it("does not let a feature window or a forward return reach across the collector-restart gap", () => {
+      const frames = twoSessionFrames();
+      const day1CloseMs = DAY1_OPEN + (BARS_PER_SESSION - 1) * STEP;
+      const result = buildOfiObservations({
+        frames, ofiWindowMs: 10_000, horizonMs: 6_000, horizonToleranceMs: 3_000,
+      });
+
+      // Every observation still standing must have a forward endpoint within horizon+tolerance of its
+      // own decision instant -- the invariant that makes cross-gap pairing structurally impossible.
+      for (const observation of result.observations) {
+        const gapMs = observation.labelEndAt!.getTime() - observation.at.getTime();
+        expect(gapMs).toBeLessThanOrEqual(6_000 + 3_000);
+      }
+
+      // Concretely: the tail of session 1, close enough to its own end that only session 2 (16+ hours
+      // away) could supply a forward frame at all, must be dropped rather than silently paired with
+      // it -- not merely thinned in count, but absent as observations by construction.
+      const tailOfSession1 = result.observations.filter((observation) =>
+        observation.at.getTime() > day1CloseMs - 6_000 && observation.at.getTime() <= day1CloseMs);
+      expect(tailOfSession1).toHaveLength(0);
+      expect(result.skipped.NO_FORWARD_FRAME_IN_TOLERANCE).toBeGreaterThan(0);
+
+      // And no observation that DID survive resolves its label on the far side of the gap.
+      for (const observation of result.observations) {
+        if (observation.at.getTime() <= day1CloseMs) {
+          expect(observation.labelEndAt!.getTime()).toBeLessThanOrEqual(day1CloseMs);
+        }
+      }
+    });
+  });
 });

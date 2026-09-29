@@ -289,6 +289,57 @@ describe("falsification harness", () => {
       expect(noiseReport.matchedTimeDiversity?.isDegenerate).toBe(false);
     });
 
+    it("recovers a genuine verdict by pooling two single-day sessions that are each INCONCLUSIVE alone", () => {
+      // The real bug found live (Phase 28 doc §10): depth-collector-v2 restarts roughly daily (a
+      // deploy, or the host's Modern Standby suspending the Docker VM), so a capture session has
+      // mostly been one calendar day since 2026-09-21. Two single-day sessions evaluated separately
+      // both go INCONCLUSIVE; a --from/--to range query that pools them into one population is the
+      // fix. Each session gets its own seed (not a shifted copy of the other) so the two days carry
+      // genuinely different values -- a placebo that shuffles two IDENTICAL numbers between "days"
+      // would be exactly as tautological as the single-day bug this guards against, just disguised.
+      const barsPerDay = 400;
+      const minutesPerBar = 2;
+      const singleDaySession = (seed: number, dayOffset: number): FalsificationObservation[] => {
+        const random = createSeededRandom(seed);
+        const observations: FalsificationObservation[] = [];
+        for (let index = 0; index < barsPerDay; index += 1) {
+          // 04:00Z is 09:30 IST; stays inside the session at 2-minute bars for 400 bars.
+          const at = new Date(Date.UTC(2026, 7, 3 + dayOffset, 4, 0, 0) + index * minutesPerBar * 60_000);
+          const forwardReturn = random() - 0.5;
+          observations.push({ at, featureAsOf: at, featureValue: forwardReturn, forwardReturn });
+        }
+        return observations;
+      };
+
+      const sessionA = singleDaySession(11, 0);
+      const reportA = runFalsificationHarness(sessionA, { seed: 4, bootstrapSamples: 200 });
+      expect(reportA.verdict).toBe("INCONCLUSIVE");
+      expect(reportA.matchedTimeDiversity!.distinctDays).toBe(1);
+
+      // Session B: a second collector run, a calendar day later -- same time-of-day shape (a fresh
+      // session picks up the next trading day at roughly the same market-open instant), a different
+      // day's actual market realisation, and independently also single-day hence INCONCLUSIVE alone.
+      const sessionB = singleDaySession(22, 1);
+      const reportB = runFalsificationHarness(sessionB, { seed: 4, bootstrapSamples: 200 });
+      expect(reportB.verdict).toBe("INCONCLUSIVE");
+
+      // Pooled -- exactly what a --from/--to query spanning both collector-restart sessions returns --
+      // now has two genuinely distinct calendar days per time-of-day bucket, so the wrong-day placebo
+      // is no longer a no-op and a real verdict is reachable.
+      const pooled = [...sessionA, ...sessionB];
+      const pooledReport = runFalsificationHarness(pooled, { seed: 4, bootstrapSamples: 200 });
+
+      expect(pooledReport.verdict).not.toBe("INCONCLUSIVE");
+      expect(pooledReport.verdict).toBe("PASS");
+      expect(pooledReport.matchedTimeDiversity!.isDegenerate).toBe(false);
+      expect(pooledReport.matchedTimeDiversity!.distinctDays).toBe(2);
+      const dayPlacebo = pooledReport.placeboIcs.find(
+        (entry) => entry.placebo === "wrong-day-matched-time",
+      );
+      expect(dayPlacebo?.degenerate).toBe(false);
+      expect(dayPlacebo?.ic).not.toBe(pooledReport.real.ic);
+    });
+
     it("honours a caller-supplied minimum swappable fraction", () => {
       // With the bar dropped to 0, even single-day data is accepted as non-degenerate (fraction 0
       // always clears >= 0), so the pre-existing NO_SIGNAL/PASS behaviour is reachable again.
