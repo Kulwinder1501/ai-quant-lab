@@ -482,7 +482,8 @@ export class EvaluateOpenPaperTrades {
 
     // Force-close at/after expiry using intrinsic settlement mark.
     if (asOf.getTime() >= expiry.getTime()) {
-      const spot = resolveLiveSpot(trade, livePrices)
+      const liveSpotAtExpiry = resolveLiveSpot(trade, livePrices);
+      const spot = liveSpotAtExpiry
         ?? await this.latestCompletedClose(trade, asOf);
       if (spot === undefined) {
         return null;
@@ -494,6 +495,12 @@ export class EvaluateOpenPaperTrades {
         exitReason: "EXPIRED",
         closedAt: asOf.getTime() > expiry.getTime() ? asOf : expiry,
         exercisedIntrinsic: mark.greeks.intrinsicValue,
+        // Only when `spot` is a genuinely observed live quote (`resolveLiveSpot`), never the
+        // candle-close fallback above -- that is a reconstruction, not an observation at the
+        // exit instant, so it must stay null. Same convention as OPTION_LIVE_MARK_EVALUATOR:
+        // an observed underlying level is recorded regardless of how the premium beside it
+        // (here, the intrinsic settlement mark) was derived.
+        underlyingExitPrice: liveSpotAtExpiry ?? null,
         details: {
           source: "OPTION_EXPIRY_SETTLEMENT",
           spot,

@@ -439,6 +439,10 @@ describe("AiAutonomousAgent.tick", () => {
     // Fees from the brokerage model on the premium, not a flat constant.
     expect(Number(closed.exitFees)).toBeGreaterThan(0);
     expect(Number(closed.exitFees)).toBeLessThan(500);
+    // The underlying's own observed tick (independent of the modelled/observed premium beside
+    // it) must reach the persisted column, not just the details blob -- it was being dropped
+    // silently before this test existed.
+    expect(closed.underlyingExitPrice).toBe(24_050);
   });
 
   it("leaves an unpriceable position open rather than closing it at a guess", async () => {

@@ -12,6 +12,16 @@ export interface ClosePaperTradeRequest {
   applyBrokerageFees?: boolean;
   exitPriceSource?: "MANUAL_INPUT" | "SERVER_OPTION_MARK";
   valuationDetails?: Record<string, unknown>;
+  /**
+   * The underlying's observed level at the exit instant, when the caller resolved one.
+   *
+   * Optional because a bare manual close (an operator-typed exit price with no accompanying
+   * valuation) has no such observation. When the caller marked the position via
+   * `valuePaperTrade` first -- the UI's "close" action does -- the live spot it resolved is
+   * a genuine observation and is threaded through here rather than left in the details blob
+   * alone, matching the convention every other close path uses.
+   */
+  underlyingExitPrice?: number | null;
 }
 
 function assertPositiveFinite(value: number, field: string): void {
@@ -58,6 +68,7 @@ export class ClosePaperTrade {
       exitFees,
       exitSlippage,
       feeBreakdown: exitBreakdown ? { ...exitBreakdown } : undefined,
+      underlyingExitPrice: input.underlyingExitPrice ?? null,
       details: {
         source: input.exitPriceSource ?? "MANUAL_INPUT",
         notes: input.notes?.trim() ?? "",
