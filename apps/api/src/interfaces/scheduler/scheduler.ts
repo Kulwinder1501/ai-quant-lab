@@ -1284,9 +1284,13 @@ async function main(): Promise<void> {
       "RSS_NEWS_INGESTION",
       "LIQUIDITY_CANDIDATE_GENERATION",
       "LIQUIDITY_CONTACT_LABELING",
-      // XAU_CANDLE_COLLECTION / PAPER_TRADING_BOT_GOLD deliberately absent: `XAU_BOT_ENABLED` is
-      // false, so neither actually runs -- listing them here would misreport the inventory the
-      // same way an omission would (see this array's own header comment on that point).
+      // Mirrors the runtime gate at this job's own `cronSchedule` callback (`!XAU_BOT_ENABLED ||
+      // !process.env.TWELVEDATA_API_KEY`) so the inventory can't drift the way it did when
+      // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
+      // same class of silent lie the array's own header comment warns about.
+      ...(XAU_BOT_ENABLED && process.env.TWELVEDATA_API_KEY
+        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD"]
+        : []),
     ],
     timezone: IST,
   });
