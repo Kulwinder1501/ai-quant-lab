@@ -321,6 +321,99 @@ describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository ICT HTF c
     expect(context?.ictSnapshot?.coverage.htf).toBe("COMPLETE");
     expect(context?.ictSnapshot?.htfBias).toBe("BULLISH");
   });
+
+  /**
+   * Same staircase shape as `staircaseSessionCandles` above (proven to carry OWN_STRUCTURE trend
+   * to BULLISH by session index 8), except each session's daily bucket is now represented by MANY
+   * intraday candles instead of one -- one candle carrying the session's real
+   * open/high/low/close, the rest flat dojis pinned to the session's close so the aggregated
+   * daily bucket is byte-identical to the single-candle version. This is the shape production
+   * data actually has: NIFTY50 15m/BANKNIFTY 5m carry dozens of intraday bars per session, not
+   * one, which is exactly why the OLD row-capped derivation (1000 rows, ~13-40 calendar days)
+   * could never gather enough calendar days to resolve a swing.
+   */
+  function bulkInsertManyPerSessionStaircase(
+    sessions: number,
+    candlesPerSession: number,
+  ): { openTimes: Date[]; closeTimes: Date[]; opens: string[]; highs: string[]; lows: string[]; closes: string[] } {
+    const dailyTargets = staircaseSessionCandles(sessions);
+    const openTimes: Date[] = [];
+    const closeTimes: Date[] = [];
+    const opens: string[] = [];
+    const highs: string[] = [];
+    const lows: string[] = [];
+    const closes: string[] = [];
+    for (const target of dailyTargets) {
+      for (let i = 0; i < candlesPerSession; i += 1) {
+        // 1 minute apart, well inside a single IST trading day (0..candlesPerSession minutes past
+        // the session's 09:15 open) -- spacing is irrelevant to the aggregation rule, which groups
+        // by IST calendar date, not by a fixed bar interval.
+        const openTime = new Date(target.openTime.getTime() + i * 60_000);
+        const closeTime = new Date(openTime.getTime() + 60_000);
+        openTimes.push(openTime);
+        closeTimes.push(closeTime);
+        if (i === 0) {
+          opens.push(String(target.open));
+          highs.push(String(target.high));
+          lows.push(String(target.low));
+          closes.push(String(target.close));
+        } else {
+          // A flat doji at the session's close: never extends the bucket's high/low or moves its
+          // close away from the target, so the aggregated daily OHLC is unchanged.
+          opens.push(String(target.close));
+          highs.push(String(target.close));
+          lows.push(String(target.close));
+          closes.push(String(target.close));
+        }
+      }
+    }
+    return { openTimes, closeTimes, opens, highs, lows, closes };
+  }
+
+  it("resolves coverage.htf to COMPLETE from calendar-day history even when the 1000-row cap covers too few sessions to ever confirm a pivot", async () => {
+    const database = scoped();
+    const targetId = await seedTargetInstrument("TEST_TARGET_HTF_MANY_CANDLES_PER_SESSION");
+    const timeframe = "5m";
+
+    await database.query(
+      "INSERT INTO candle_series_provenance (instrument_id, timeframe, source) VALUES ($1, $2, 'test')",
+      [targetId, timeframe],
+    );
+
+    // 12 sessions x 250 candles/session = 3000 rows. The OLD row-capped derivation only ever saw
+    // the trailing LIMIT-1000 rows -- exactly 4 sessions here (1000 / 250) -- and
+    // `findConfirmedPivotAt` with pivotLength=3 needs at least 7 buckets to confirm ANY pivot at
+    // all (candidateIndex = knownAtIndex - pivotLength must be >= pivotLength). With only 4
+    // buckets visible, it was mathematically impossible for coverage.htf to ever resolve out of
+    // UNKNOWN under the old query, regardless of what the price data looked like. The new,
+    // calendar-bounded HTF fetch sees all 12 sessions (12 calendar days, far inside the 400-day
+    // window) and resolves trend to BULLISH by session index 8, same as the single-candle-per-
+    // session test above.
+    const bulk = bulkInsertManyPerSessionStaircase(12, 250);
+    await database.query(
+      `INSERT INTO candles (
+         instrument_id, timeframe, open_time, close_time, open, high, low, close, volume,
+         is_complete, source, source_metadata
+       )
+       SELECT $1, $2, o, c, op, hi, lo, cl, 1000, TRUE, 'test', '{}'::jsonb
+       FROM unnest($3::timestamptz[], $4::timestamptz[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[])
+         AS t(o, c, op, hi, lo, cl)`,
+      [targetId, timeframe, bulk.openTimes, bulk.closeTimes, bulk.opens, bulk.highs, bulk.lows, bulk.closes],
+    );
+
+    const rowCount = await database.query<{ count: string }>(
+      "SELECT count(*) FROM candles WHERE instrument_id = $1 AND timeframe = $2",
+      [targetId, timeframe],
+    );
+    expect(Number(rowCount.rows[0]!.count)).toBe(12 * 250);
+
+    const repository = new PostgresStrategyMarketContextRepository(database);
+    const context = await repository.findLatestCompleted({ instrumentId: targetId, timeframe });
+
+    expect(context).not.toBeNull();
+    expect(context?.ictSnapshot?.coverage.htf).toBe("COMPLETE");
+    expect(context?.ictSnapshot?.htfBias).toBe("BULLISH");
+  });
 });
 
 /**

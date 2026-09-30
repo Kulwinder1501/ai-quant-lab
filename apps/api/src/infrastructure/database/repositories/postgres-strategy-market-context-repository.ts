@@ -22,7 +22,7 @@ import {
 import type { DatabaseQueryable } from "../database.js";
 import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
-import { deriveHtfBiasSeriesFromCandles } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
+import { computeHtfBucketBiases, mapBarsToHtfBias, type HtfSourceCandle } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
 import { resolveConfluenceSignalFromDepth } from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
 
 
@@ -100,6 +100,46 @@ let ictPersistGrantWarned = false;
  */
 const OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES = 60;
 
+/**
+ * How many calendar days of trailing history feed the daily HTF-bias derivation
+ * (`computeHtfBucketBiases`'s daily engine), independent of `computeAndPersistIctSnapshot`'s
+ * 1000-row cap below.
+ *
+ * The 1000-row cap exists for the EXECUTION-timeframe pillars (structure/zones/session-levels/
+ * liquidity), which need BARS, not calendar days. The HTF pillar aggregates into DAILY session
+ * buckets and needs enough CALENDAR DAYS for `IctStructureTracker(pivotLength: 3)` to confirm its
+ * first swing high and leave NEUTRAL -- 1000 base-timeframe rows is only ~40 calendar days for
+ * NIFTY50 15m and ~13 for BANKNIFTY 5m, which measured live (2026-09-21 .. 2026-09-30) as
+ * `coverage.htf === "COMPLETE"` on only 22-25% of bars for NIFTY50 and 0/587 for BANKNIFTY --
+ * most of that trailing window never reached far enough into a calendar-day series to resolve a
+ * swing at all.
+ *
+ * 400 is empirically derived, not guessed: replaying the real daily-bucketed OWN_STRUCTURE engine
+ * against every NIFTY50 15m and BANKNIFTY 5m candle in the live database (2023-01-02 ..
+ * 2026-09-30), from 13 different sliding-window start points spanning that whole history,
+ * resolved out of NEUTRAL within 11-39 calendar days every single time (worst case: BANKNIFTY, 39
+ * days). 400 is roughly 10x that worst case -- a real margin, not a round number -- while staying
+ * well short of "fetch the entire multi-year history on every live bar", which profiled at a real
+ * but needless ~250ms (query + daily-engine replay) against NIFTY50's full 929-bucket, 3.75-year
+ * history vs. ~30-50ms for a 400-day window. Recomputed from scratch on every call rather than
+ * cached: `computeAndPersistIctSnapshot` only runs once per NEW completed candle (a cache-fill --
+ * see the class doc comment above `persistIctSnapshot`), so at NIFTY50's 15m/BANKNIFTY's 5m
+ * cadence that is at most ~25-75 calls/day, each comfortably sub-100ms end to end. That call
+ * volume and per-call cost don't justify a stateful memoization layer; see the falsification
+ * program notes for the real profiling numbers this constant is based on.
+ */
+const HTF_BIAS_LOOKBACK_CALENDAR_DAYS = 400;
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * A defensive ceiling on the HTF-bias history fetch, unrelated to the 400-day calendar window
+ * above: it exists only so a future registered ICT strategy at a much finer timeframe (e.g. 1m)
+ * cannot turn "400 calendar days" into an unbounded row scan. 50,000 rows is already far more
+ * than 400 days could produce even at 1m granessularity during regular NSE hours (~375 bars/day
+ * x 400 = 150,000 bars would exceed it -- and no ICT strategy is registered at 1m today).
+ */
+const HTF_BIAS_HISTORY_ROW_CEILING = 50_000;
+
 export class PostgresStrategyMarketContextRepository implements StrategyMarketContextRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
@@ -141,28 +181,61 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     targetCandle: CompletedCandleRow,
     configHash: string,
   ): Promise<IctStateCompositeSnapshot | undefined> {
-    const historyResult = await this.database.query<CompletedCandleRow>(`
-      SELECT
-        candles.id,
-        candles.instrument_id,
-        candles.timeframe,
-        candles.open_time,
-        candles.close_time,
-        candles.open,
-        candles.high,
-        candles.low,
-        candles.close,
-        candles.volume,
-        instruments.tick_size
-      FROM candles
-      INNER JOIN instruments ON instruments.id = candles.instrument_id
-      WHERE candles.instrument_id = $1
-        AND candles.timeframe = $2
-        AND candles.is_complete = TRUE
-        AND candles.open_time <= $3
-      ORDER BY candles.open_time DESC
-      LIMIT 1000
-    `, [input.instrumentId, input.timeframe, targetCandle.open_time]);
+    const htfCutoff = new Date(targetCandle.open_time.getTime() - HTF_BIAS_LOOKBACK_CALENDAR_DAYS * MILLISECONDS_PER_DAY);
+
+    const [historyResult, htfHistoryResult] = await Promise.all([
+      this.database.query<CompletedCandleRow>(`
+        SELECT
+          candles.id,
+          candles.instrument_id,
+          candles.timeframe,
+          candles.open_time,
+          candles.close_time,
+          candles.open,
+          candles.high,
+          candles.low,
+          candles.close,
+          candles.volume,
+          instruments.tick_size
+        FROM candles
+        INNER JOIN instruments ON instruments.id = candles.instrument_id
+        WHERE candles.instrument_id = $1
+          AND candles.timeframe = $2
+          AND candles.is_complete = TRUE
+          AND candles.open_time <= $3
+        ORDER BY candles.open_time DESC
+        LIMIT 1000
+      `, [input.instrumentId, input.timeframe, targetCandle.open_time]),
+      /*
+       * Decoupled from the 1000-row cap above: see HTF_BIAS_LOOKBACK_CALENDAR_DAYS's doc comment
+       * for why the HTF pillar needs its own, calendar-bounded (not row-bounded) history. Bounded
+       * by DATE RANGE rather than row count, because calendar days -- not bar count -- is what the
+       * daily-bucket structure classifier actually needs to mature.
+       */
+      this.database.query<CompletedCandleRow>(`
+        SELECT
+          candles.id,
+          candles.instrument_id,
+          candles.timeframe,
+          candles.open_time,
+          candles.close_time,
+          candles.open,
+          candles.high,
+          candles.low,
+          candles.close,
+          candles.volume,
+          instruments.tick_size
+        FROM candles
+        INNER JOIN instruments ON instruments.id = candles.instrument_id
+        WHERE candles.instrument_id = $1
+          AND candles.timeframe = $2
+          AND candles.is_complete = TRUE
+          AND candles.open_time <= $3
+          AND candles.open_time >= $4
+        ORDER BY candles.open_time ASC
+        LIMIT $5
+      `, [input.instrumentId, input.timeframe, targetCandle.open_time, htfCutoff, HTF_BIAS_HISTORY_ROW_CEILING]),
+    ]);
 
     if (historyResult.rows.length === 0) return undefined;
 
@@ -178,14 +251,31 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       volume: toNumber(r.volume, "volume"),
     }));
 
+    const htfSourceCandles: HtfSourceCandle[] = htfHistoryResult.rows.map((r) => ({
+      id: r.id,
+      openTime: r.open_time,
+      closeTime: r.close_time,
+      open: toNumber(r.open, "open"),
+      high: toNumber(r.high, "high"),
+      low: toNumber(r.low, "low"),
+      close: toNumber(r.close, "close"),
+      volume: toNumber(r.volume, "volume"),
+    }));
+
     /*
      * The live path's own HTF bias derivation, ported from the replay builder: without this, Gate 1
      * (`ict-structure-strategy.ts`) demands `coverage.htf === "COMPLETE"` on every bar and never gets
      * it, because `engine.processCandle` below would otherwise never receive a bias at all --
-     * `coverage.htf` would be NOT_COVERED on every single call, permanently. See
-     * `deriveHtfBiasSeriesFromCandles`'s own doc comment for the session-bucketing rule itself.
+     * `coverage.htf` would be NOT_COVERED on every single call, permanently.
+     *
+     * Bucket biases come from `htfSourceCandles` (the wide, calendar-bounded set); they are then
+     * mapped onto `causalCandles` (the narrow, 1000-row-capped set) by close time. The two arrays
+     * are not the same series and do not share indices, so alignment must go through `closeTime`,
+     * never array position -- `mapBarsToHtfBias` does exactly that. See `computeHtfBucketBiases`
+     * and `mapBarsToHtfBias`'s own doc comments for the session-bucketing rule itself.
      */
-    const htfBiasSeries = deriveHtfBiasSeriesFromCandles(causalCandles, defaultIctEngineConfig);
+    const htfBucketBiases = computeHtfBucketBiases(htfSourceCandles, defaultIctEngineConfig);
+    const htfBiasSeries = mapBarsToHtfBias(causalCandles, htfBucketBiases);
 
     const engine = new IctCompositeEngine(defaultIctEngineConfig);
     let snapshot: IctStateCompositeSnapshot | undefined;

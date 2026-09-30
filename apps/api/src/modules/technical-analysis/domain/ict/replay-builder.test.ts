@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { StrategyMarketContext } from "../../../strategy-engine/domain/strategy.js";
 import {
+  computeHtfBucketBiases,
   computeIctSnapshotsForContexts,
   decorateContextsWithIct,
   deriveHtfBiasSeries,
   deriveHtfBiasSeriesFromCandles,
+  mapBarsToHtfBias,
   type HtfSourceCandle,
 } from "./replay-builder.js";
 
@@ -243,5 +245,94 @@ describe("deriveHtfBiasSeriesFromCandles (candle-array input, no StrategyMarketC
     const viaContexts = deriveHtfBiasSeries(contexts);
     const viaCandles = deriveHtfBiasSeriesFromCandles(contexts.map((c) => c.candle));
     expect(viaCandles).toEqual(viaContexts);
+  });
+});
+
+describe("computeHtfBucketBiases / mapBarsToHtfBias (decoupled bucket computation from bar mapping)", () => {
+  it("deriveHtfBiasSeriesFromCandles is exactly the composition of the two", () => {
+    const candles = [
+      candle("2026-01-05", 9, 15, 100, 101, 99, 100),
+      candle("2026-01-05", 9, 20, 100, 102, 99, 101),
+      candle("2026-01-06", 9, 15, 101, 103, 100, 102),
+      candle("2026-01-06", 9, 20, 102, 104, 101, 103),
+      candle("2026-01-07", 9, 15, 103, 105, 102, 104),
+    ];
+    const composed = mapBarsToHtfBias(candles, computeHtfBucketBiases(candles));
+    const direct = deriveHtfBiasSeriesFromCandles(candles);
+    expect(composed).toEqual(direct);
+  });
+
+  it("lets a caller source bucket biases from a WIDER candle series than the one bars are mapped against", () => {
+    // The live path's actual shape: a wide, calendar-bounded candle set feeds the daily HTF
+    // engine, while a separate, narrower (row-capped) candle set is what bars are mapped onto.
+    // The two series are not the same array and share no indices -- alignment must go through
+    // closeTime alone.
+    const wideHistory = [
+      candle("2026-01-05", 9, 15, 100, 101, 99, 100),
+      candle("2026-01-05", 9, 20, 100, 102, 99, 101),
+      candle("2026-01-06", 9, 15, 101, 103, 100, 102),
+      candle("2026-01-06", 9, 20, 102, 104, 101, 103),
+      candle("2026-01-07", 9, 15, 103, 105, 102, 104),
+      candle("2026-01-07", 9, 20, 104, 106, 103, 105),
+    ];
+    const bucketBiases = computeHtfBucketBiases(wideHistory);
+    // A DIFFERENT (here: a strict subset) narrow bar series covering only the tail of the same
+    // history -- exactly what the 1000-row-capped local query returns while the HTF query sees
+    // further back.
+    const narrowBars = wideHistory.slice(-2);
+
+    const mapped = mapBarsToHtfBias(narrowBars, bucketBiases);
+    const fullSeries = mapBarsToHtfBias(wideHistory, bucketBiases);
+
+    // The narrow series' bars must see exactly what the full series' corresponding tail bars saw:
+    // the visible bucket bias is a function of the bar's own close time, not of array position or
+    // of what else happens to be in the array passed to mapBarsToHtfBias.
+    expect(mapped).toEqual(fullSeries.slice(-2));
+    // And it must actually be resolved (not undefined) -- otherwise this proves nothing about
+    // sourcing from a wider array than the one being mapped.
+    expect(mapped[0]).toBeDefined();
+    expect(mapped[1]).toBeDefined();
+  });
+
+  it("bucket biases computed from extra LEADING history change what an otherwise-identical narrow bar series sees", () => {
+    // Directly demonstrates the fix's premise: the same trailing bars resolve HTF bias differently
+    // depending on how much calendar history fed the bucket computation -- which is exactly why a
+    // row-capped fetch (too little calendar history) and a calendar-bounded fetch (enough) can
+    // disagree on the same live bar.
+    const trailingBars = [
+      candle("2026-02-10", 9, 15, 200, 201, 199, 200),
+      candle("2026-02-10", 9, 20, 200, 202, 199, 201),
+    ];
+
+    // Too little leading history: only the trailing session itself is visible to the daily
+    // engine, so no bucket has even closed yet -- undefined (NOT_COVERED), not a resolved bias.
+    const tooLittleHistory = computeHtfBucketBiases(trailingBars);
+    expect(mapBarsToHtfBias(trailingBars, tooLittleHistory).every((b) => b === undefined)).toBe(true);
+
+    // Enough leading calendar history resolves the daily OWN_STRUCTURE trend to BULLISH well
+    // before the trailing session -- so the exact same trailing bars now see a resolved bias. A
+    // strictly monotonic run would never confirm a swing pivot at all (a pivot high needs LOWER
+    // highs on both sides), so this uses a staircase -- an up-leg followed by a pullback, net
+    // ascending -- which is what a real swing sequence looks like.
+    const leadingSessions: HtfSourceCandle[] = [];
+    let price = 100;
+    let day = 1;
+    const nextDate = () => `2026-01-${String(day++).padStart(2, "0")}`;
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        price += 4;
+        leadingSessions.push(candle(nextDate(), 9, 15, price - 4, price + 2, price - 5, price));
+      }
+      for (let i = 0; i < 4; i += 1) {
+        price -= 2;
+        leadingSessions.push(candle(nextDate(), 9, 15, price + 2, price + 3, price - 2, price));
+      }
+    }
+    const wideHistory = [...leadingSessions, ...trailingBars];
+    const wideBucketBiases = computeHtfBucketBiases(wideHistory);
+    const withHistory = mapBarsToHtfBias(trailingBars, wideBucketBiases);
+
+    expect(withHistory[0]).toBe("BULLISH");
+    expect(withHistory[1]).toBe("BULLISH");
   });
 });

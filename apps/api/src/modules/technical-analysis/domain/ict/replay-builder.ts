@@ -143,18 +143,27 @@ function aggregateSessionHtfBuckets(
   return aggregateSessionHtfBucketsFromCandles(contexts.map((c) => c.candle));
 }
 
+/** One completed daily HTF bucket's resolved directional bias. */
+export interface HtfBucketBias {
+  readonly closeTime: Date;
+  readonly bias: IctBiasDirection;
+}
+
 /**
- * The HTF bias visible to each base bar, or `undefined` when none has closed yet.
+ * Aggregates a candle series into daily HTF buckets and runs the OWN_STRUCTURE daily engine over
+ * them, returning each completed bucket's resolved bias in chronological order.
  *
- * Bias is computed once per HTF bucket (in bucket order) and then assigned to a
- * base bar only if the bucket closed at or before that bar's close, enforcing
- * the anti-lookahead rule: a bucket closing at the same instant is visible, a
- * later one is not.
+ * Split out of `deriveHtfBiasSeriesFromCandles` so a caller that needs to feed a DIFFERENT
+ * (typically wider, calendar-bounded) candle set into the daily engine than the one it maps bars
+ * against can do so -- see `postgres-strategy-market-context-repository.ts`'s
+ * `computeAndPersistIctSnapshot`, which derives bucket biases from a calendar-day-bounded history
+ * fetch and then maps them onto a separate, row-capped execution-timeframe bar series via
+ * `mapBarsToHtfBias`. Pure and side-effect-free like the function it was extracted from.
  */
-export function deriveHtfBiasSeriesFromCandles(
+export function computeHtfBucketBiases(
   candles: readonly HtfSourceCandle[],
   config: IctEngineConfig = defaultIctEngineConfig,
-): (IctBiasDirection | undefined)[] {
+): HtfBucketBias[] {
   const buckets = aggregateSessionHtfBucketsFromCandles(candles);
   /*
    * The HTF engine sits at the top of this chain, so it reads its bias from its own swing sequence.
@@ -163,11 +172,26 @@ export function deriveHtfBiasSeriesFromCandles(
    */
   const htfEngine = new IctCompositeEngine({ ...config, biasSource: "OWN_STRUCTURE" });
   const htfCandles = buckets.map((b) => b.candle);
-  const bucketBias: { closeTime: Date; bias: IctBiasDirection }[] = buckets.map((bucket, i) => {
+  return buckets.map((bucket, i) => {
     const snap = htfEngine.processCandle(htfCandles, i);
     return { closeTime: bucket.closeTime, bias: snap.bias.bias };
   });
+}
 
+/**
+ * The HTF bias visible to each base bar, or `undefined` when none has closed yet.
+ *
+ * Bias is assigned from `bucketBiases` (in bucket order) to a base bar only if the bucket closed
+ * at or before that bar's close, enforcing the anti-lookahead rule: a bucket closing at the same
+ * instant is visible, a later one is not. `candles` and the candle series `bucketBiases` was
+ * derived from need not be the same array -- alignment is by close time, not by index -- which is
+ * what lets a caller source bucket biases from a wider history window than the bar series it maps
+ * them onto.
+ */
+export function mapBarsToHtfBias(
+  candles: readonly HtfSourceCandle[],
+  bucketBiases: readonly HtfBucketBias[],
+): (IctBiasDirection | undefined)[] {
   // Two ordered pointers: buckets are chronological and so are candles, so the
   // latest visible bucket only ever moves forward.
   const series: (IctBiasDirection | undefined)[] = new Array(candles.length).fill(undefined);
@@ -175,13 +199,27 @@ export function deriveHtfBiasSeriesFromCandles(
   let latest: IctBiasDirection | undefined;
   for (let i = 0; i < candles.length; i += 1) {
     const barClose = candles[i].closeTime.getTime();
-    while (bucketIdx < bucketBias.length && bucketBias[bucketIdx].closeTime.getTime() <= barClose) {
-      latest = bucketBias[bucketIdx].bias;
+    while (bucketIdx < bucketBiases.length && bucketBiases[bucketIdx].closeTime.getTime() <= barClose) {
+      latest = bucketBiases[bucketIdx].bias;
       bucketIdx += 1;
     }
     series[i] = latest;
   }
   return series;
+}
+
+/**
+ * The HTF bias visible to each base bar, or `undefined` when none has closed yet.
+ *
+ * A thin composition of `computeHtfBucketBiases` and `mapBarsToHtfBias` over the SAME candle
+ * series -- kept as one function for every caller that doesn't need the two decoupled (the
+ * backtest/replay path, and this module's own tests).
+ */
+export function deriveHtfBiasSeriesFromCandles(
+  candles: readonly HtfSourceCandle[],
+  config: IctEngineConfig = defaultIctEngineConfig,
+): (IctBiasDirection | undefined)[] {
+  return mapBarsToHtfBias(candles, computeHtfBucketBiases(candles, config));
 }
 
 export function deriveHtfBiasSeries(
