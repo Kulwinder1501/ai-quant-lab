@@ -9,12 +9,17 @@ import type { IctStateCompositeSnapshot } from "./config.js";
 
 function makeOb(overrides: Partial<OrderBlock> & Pick<OrderBlock, "id" | "type" | "top" | "bottom">): OrderBlock {
   const meanThreshold = overrides.meanThreshold ?? (overrides.top + overrides.bottom) / 2;
+  const createdAtBarTime = new Date();
   return {
     meanThreshold,
     createdAtBarIndex: 0,
-    createdAtBarTime: new Date(),
+    createdAtBarTime,
     obCandleIndex: 0,
     displacementCandleIndex: 1,
+    // Mirrors zones.ts's own OB construction: confirmedAt/availableAt default to the block's own
+    // creation instant.
+    confirmedAt: createdAtBarTime.getTime(),
+    availableAt: createdAtBarTime.getTime(),
     attachedFvgId: null,
     isExtreme: false,
     isIdmAdjacent: false,

@@ -246,10 +246,14 @@ describe("intermediate target: internal-range waypoint", () => {
   });
 
   it("reports the nearest unmitigated FVG between price and the external target, not equilibrium", () => {
+    const fvg1BarTime = new Date();
     const zonesWithFvg: IctZoneSnapshot = {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
-        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        createdAtBarIndex: 1, createdAtBarTime: fvg1BarTime, candle1Index: 0, candle3Index: 1,
+        // Mirrors zones.ts's own FVG construction: confirmedAt/availableAt default to the gap's
+        // own creation instant (candle3's open time).
+        confirmedAt: fvg1BarTime.getTime(), availableAt: fvg1BarTime.getTime(),
         fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],
@@ -262,10 +266,12 @@ describe("intermediate target: internal-range waypoint", () => {
   });
 
   it("falls back to equilibrium when no IRL pool sits between price and the external target", () => {
+    const fvg1BarTime = new Date();
     const zonesWithFarFvg: IctZoneSnapshot = {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 130, bottom: 128, midpoint: 129, // beyond the target itself
-        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        createdAtBarIndex: 1, createdAtBarTime: fvg1BarTime, candle1Index: 0, candle3Index: 1,
+        confirmedAt: fvg1BarTime.getTime(), availableAt: fvg1BarTime.getTime(),
         fillPercentage: 0, state: "FRESH", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],
@@ -276,10 +282,12 @@ describe("intermediate target: internal-range waypoint", () => {
   });
 
   it("ignores a mitigated (already-consumed) IRL pool in the path", () => {
+    const fvg1BarTime = new Date();
     const zonesWithConsumedFvg: IctZoneSnapshot = {
       activeFvgs: [{
         id: "fvg-1", type: "BULLISH", top: 103, bottom: 101, midpoint: 102,
-        createdAtBarIndex: 1, createdAtBarTime: new Date(), candle1Index: 0, candle3Index: 1,
+        createdAtBarIndex: 1, createdAtBarTime: fvg1BarTime, candle1Index: 0, candle3Index: 1,
+        confirmedAt: fvg1BarTime.getTime(), availableAt: fvg1BarTime.getTime(),
         fillPercentage: 1, state: "CONSUMED", invertedAtBarIndex: null, isExtreme: false, isIdmAdjacent: false,
       }],
       activeObs: [],

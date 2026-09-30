@@ -3,11 +3,16 @@ import type { FairValueGap } from "./zones.js";
 import { computeBalancedPriceRanges } from "./bpr.js";
 
 function makeFvg(overrides: Partial<FairValueGap> & { id: string; type: "BULLISH" | "BEARISH"; top: number; bottom: number; createdAtBarIndex: number }): FairValueGap {
+  const createdAtBarTime = new Date(Date.UTC(2026, 0, 1, 9, 15 + overrides.createdAtBarIndex * 5));
   return {
     midpoint: (overrides.top + overrides.bottom) / 2,
-    createdAtBarTime: new Date(Date.UTC(2026, 0, 1, 9, 15 + overrides.createdAtBarIndex * 5)),
+    createdAtBarTime,
     candle1Index: overrides.createdAtBarIndex - 2,
     candle3Index: overrides.createdAtBarIndex,
+    // Mirrors zones.ts's own FVG construction: confirmedAt/availableAt default to candle3's open
+    // time, i.e. the same instant the gap is created (`createdAtBarTime`).
+    confirmedAt: createdAtBarTime.getTime(),
+    availableAt: createdAtBarTime.getTime(),
     fillPercentage: 0,
     state: "FRESH",
     invertedAtBarIndex: null,

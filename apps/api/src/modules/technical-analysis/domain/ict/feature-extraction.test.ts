@@ -6,13 +6,19 @@ import { IctCompositeEngine } from "./composite-engine.js";
 import type { CausalCandle } from "./causal-pivot.js";
 
 function makeOb(overrides: Partial<OrderBlock> & Pick<OrderBlock, "id" | "type" | "meanThreshold">): OrderBlock {
+  const createdAtBarTime = new Date();
   return {
     top: overrides.meanThreshold + 5,
     bottom: overrides.meanThreshold - 5,
     createdAtBarIndex: 0,
-    createdAtBarTime: new Date(),
+    createdAtBarTime,
     obCandleIndex: 0,
     displacementCandleIndex: 1,
+    // Mirrors zones.ts's own OB construction: confirmedAt/availableAt default to the same instant
+    // the block was created (both candle indices are 0/1 here, so there is no separate ob-vs-
+    // displacement timestamp to model).
+    confirmedAt: createdAtBarTime.getTime(),
+    availableAt: createdAtBarTime.getTime(),
     attachedFvgId: null,
     isExtreme: false,
     isIdmAdjacent: false,
