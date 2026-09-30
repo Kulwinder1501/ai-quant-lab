@@ -54,6 +54,19 @@ const GOLD_INITIAL_BALANCE_USD = 100_000;
 /** A signal this close to the weekly close has no session left to manage before the weekend gap. */
 const WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30;
 
+/**
+ * Kill switch, same shape as `ORDERBOOK01_LIVE_GATE_ENABLED`
+ * (options-entry-validator.ts): `ict-structure-v1`'s only real evidence is being
+ * TERMINAL_UNOWNED for sign-instability on NIFTY50/BANKNIFTY, and it was re-enabled here
+ * (2026-09-30, alongside `XAU_BOT_ENABLED`) for XAU_USD specifically with zero validation on
+ * that instrument. Trade-idea generation and the ICT reasoning below run unconditionally --
+ * this only gates the last step, actually opening a real (paper) position -- so the bot still
+ * scans, still logs what it would have done, and every signal is still recorded on the
+ * candidate ledger as a decision, just as REFUSED rather than EXECUTED while this is off.
+ * Defaults OFF; set to exactly "true" to let the bot open positions on gold.
+ */
+const GOLD_ICT_LIVE_ENTRIES_ENABLED = process.env.GOLD_ICT_LIVE_ENTRIES_ENABLED === "true";
+
 function isUserOperatingWindow(now: Date): boolean {
   const minute = istMinuteOfDay(now);
   return minute >= 9 * 60 && minute < 21 * 60; // 09:00 AM - 09:00 PM IST
@@ -209,6 +222,20 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
             }
 
             const entry = prepared.entry;
+
+            if (!GOLD_ICT_LIVE_ENTRIES_ENABLED) {
+              // Shadow mode: the signal cleared every gate up to and including sizing, but
+              // GOLD_ICT_LIVE_ENTRIES_ENABLED is off, so no real (paper) position is opened for
+              // an as-yet-unvalidated instrument. Still recorded on the candidate ledger --
+              // as REFUSED, the closest fit the ledger's decision type offers -- so the "would
+              // have opened" signal isn't lost, and still fully logged below.
+              refused.push({
+                tradeIdeaId, timeframe, reason: "GOLD_ICT_LIVE_ENTRIES_DISABLED",
+                explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); GOLD_ICT_LIVE_ENTRIES_ENABLED is not "true".`,
+              });
+              continue;
+            }
+
             let trade;
             try {
               trade = await openTrade.execute({
@@ -317,6 +344,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       message: "Gold paper trading bot run complete",
       timestamp: now.toISOString(),
       accountId: account.id,
+      goldIctLiveEntriesEnabled: GOLD_ICT_LIVE_ENTRIES_ENABLED,
       decisionsRecorded,
       skippedSeries,
       strategyOutcomes,

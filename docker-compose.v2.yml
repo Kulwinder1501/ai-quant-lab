@@ -90,6 +90,13 @@ services:
       # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
       # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      # Kill switch for the gold bot's live entries, same shape as ORDERBOOK01_LIVE_GATE_ENABLED
+      # above: `ict-structure-v1` has zero validation on XAU_USD (its only evidence is
+      # TERMINAL_UNOWNED sign-instability on NIFTY50/BANKNIFTY). Default false: PAPER_TRADING_BOT_GOLD
+      # (a child process `npm run trading:paper:bot:gold` inheriting this environment) still
+      # scans and logs every signal it would have acted on, it just does not open a real (paper)
+      # position while this is off. Set to "true" once the instrument has been validated.
+      GOLD_ICT_LIVE_ENTRIES_ENABLED: ${GOLD_ICT_LIVE_ENTRIES_ENABLED:-false}
       # Keeps this process's own log lines on the bind mount below, where they survive the
       # container. Docker stores json-file logs under the container's directory and deletes them
       # with it, so `--force-recreate` destroys them -- and a skipped run writes nothing to
