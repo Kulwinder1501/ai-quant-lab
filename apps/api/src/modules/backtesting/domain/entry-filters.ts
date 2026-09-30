@@ -99,6 +99,35 @@ export class FreshSetupFilteredStrategy implements StrategyEvaluator {
 }
 
 /**
+ * Enforces a mandatory 60-minute intra-symbol cool-off delay following an entry on the same symbol.
+ * Prevents rapid-fire emotional revenge trade clustering on the same instrument.
+ */
+export class IntraSymbolCoolOffFilteredStrategy implements StrategyEvaluator {
+  private readonly lastEntryTimestampBySeries = new Map<string, number>();
+  private readonly coolOffMs: number;
+
+  constructor(private readonly inner: StrategyEvaluator, coolOffMinutes: number = 60) {
+    this.coolOffMs = coolOffMinutes * 60_000;
+  }
+
+  evaluate(context: StrategyMarketContext, configuration: Record<string, unknown>): ProposedTradeIdea[] {
+    const proposals = this.inner.evaluate(context, configuration);
+    if (proposals.length === 0) return [];
+
+    const seriesKey = `${context.candle.instrumentId}`;
+    const currentMs = context.candle.closeTime.getTime();
+    const lastMs = this.lastEntryTimestampBySeries.get(seriesKey);
+
+    if (lastMs !== undefined && currentMs - lastMs < this.coolOffMs) {
+      return []; // Suppress entry during 60-minute cool-off window
+    }
+
+    this.lastEntryTimestampBySeries.set(seriesKey, currentMs);
+    return proposals;
+  }
+}
+
+/**
  * Adjusts the proposal's stop-loss tightly around the entry candle if a confluent pattern is detected.
  *
  * If a momentum setup fires LONG and there is a coincident BULLISH candlestick pattern,

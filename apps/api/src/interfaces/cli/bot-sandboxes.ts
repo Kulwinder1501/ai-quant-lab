@@ -194,4 +194,10 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
     ],
     initialBalance: 1_000_000,
   },
+  {
+    name: "AutoBot-Nifty5mTrendCont",
+    allowedStrategies: ["trend-continuation-v1"],
+    allowedSeries: [{ symbol: "NIFTY50", timeframe: "5m" }],
+    initialBalance: 1_000_000,
+  },
 ];

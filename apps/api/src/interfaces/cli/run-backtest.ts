@@ -27,6 +27,7 @@ import { parseNonNegativeNumber, parsePositiveNumber } from "./paper-trading-arg
 import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
+  IntraSymbolCoolOffFilteredStrategy,
   LiquiditySweepBiasFilteredStrategy,
   PatternConfluenceFilteredStrategy,
   RelativeVolumeFilteredStrategy,
@@ -280,7 +281,7 @@ function parseStrategyConfigurationOverride(argumentsList: string[]): Record<str
 }
 
 type BacktestEntryFilter =
-  | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP"
+  | "NONE" | "EMA_STRENGTH_015_ATR" | "FRESH_SETUP" | "INTRA_SYMBOL_COOL_OFF_60M"
   | "PATTERN_CONFLUENCE" | "LIQUIDITY_SWEEP_BIAS_15M" | "LIQUIDITY_SWEEP_BIAS_30M"
   | "TRADING_WINDOW_A" | "TRADING_WINDOW_B" | "TRADING_WINDOW_C"
   | "RVOL_1" | "RVOL_2" | "RVOL_3"
@@ -326,6 +327,7 @@ function parseEntryFilter(argumentsList: string[]): BacktestEntryFilter {
   if (raw === "liquidity-lookback-stop") return "LIQUIDITY_LOOKBACK_STOP";
   if (raw === "liquidity-lookback-target") return "LIQUIDITY_LOOKBACK_TARGET";
   if (raw === "liquidity-lookback-both") return "LIQUIDITY_LOOKBACK_BOTH";
+  if (raw === "cool-off-60m") return "INTRA_SYMBOL_COOL_OFF_60M";
   if (raw === "liquidity-lookback-target-20") return "LIQUIDITY_LOOKBACK_TARGET_20";
   throw new Error(
     "--entry-filter must be none, ema-strength-015, fresh-setup, pattern-confluence, "
@@ -427,6 +429,8 @@ async function main(): Promise<void> {
       ? new EmaStrengthFilteredStrategy(strategyEvaluator)
       : entryFilter === "FRESH_SETUP"
         ? new FreshSetupFilteredStrategy(strategyEvaluator)
+        : entryFilter === "INTRA_SYMBOL_COOL_OFF_60M"
+          ? new IntraSymbolCoolOffFilteredStrategy(strategyEvaluator, 60)
         : entryFilter === "PATTERN_CONFLUENCE"
           ? new PatternConfluenceFilteredStrategy(strategyEvaluator)
           : entryFilter === "LIQUIDITY_SWEEP_BIAS_15M"

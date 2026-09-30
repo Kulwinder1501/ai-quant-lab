@@ -4,6 +4,7 @@ import type { StrategyEvaluator } from "../../strategy-engine/domain/strategy-re
 import {
   EmaStrengthFilteredStrategy,
   FreshSetupFilteredStrategy,
+  IntraSymbolCoolOffFilteredStrategy,
   PatternAlignmentFilteredStrategy,
   PatternAnchoredStopStrategy,
   LiquiditySweepAnchoredStopStrategy,
@@ -174,6 +175,21 @@ describe("FreshSetupFilteredStrategy", () => {
     const inner = new AlwaysProposes("LONG");
     expect(new FreshSetupFilteredStrategy(inner).evaluate(context("c1"), {})).toHaveLength(1);
     expect(new FreshSetupFilteredStrategy(inner).evaluate(context("c1"), {})).toHaveLength(1);
+  });
+});
+
+describe("IntraSymbolCoolOffFilteredStrategy", () => {
+  it("suppresses proposals within the 60-minute cool-off window", () => {
+    const inner = new AlwaysProposes("LONG");
+    const filtered = new IntraSymbolCoolOffFilteredStrategy(inner, 60);
+
+    const c1 = context("c1", [], { closeTime: new Date("2026-09-09T09:15:00.000Z") });
+    const c2 = context("c2", [], { closeTime: new Date("2026-09-09T09:30:00.000Z") });
+    const c3 = context("c3", [], { closeTime: new Date("2026-09-09T10:20:00.000Z") });
+
+    expect(filtered.evaluate(c1, {})).toHaveLength(1);
+    expect(filtered.evaluate(c2, {})).toEqual([]);
+    expect(filtered.evaluate(c3, {})).toHaveLength(1);
   });
 });
 
