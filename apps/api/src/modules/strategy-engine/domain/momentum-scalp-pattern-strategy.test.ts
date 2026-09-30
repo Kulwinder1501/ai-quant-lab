@@ -312,6 +312,174 @@ describe("MomentumScalpPatternStrategy", () => {
     expect(ideas[0].reasoning[0]).toContain("Score: 7/9");
     expect(ideas[0].evidenceItems.some((e) => e.sourceReference === "HTF_CONFLUENCE")).toBe(true);
   });
+
+  describe("requireStrictTrendAlignment (2026-09-30 loss review, flaw #1)", () => {
+    // Supertrend DOWN, but this bar's close sits above the fast EMA -- the counter-trend
+    // micro-bounce the OR logic let through.
+    function counterTrendBounceContext() {
+      return createContext({
+        close: 24_000,
+        supertrendTrend: "DOWN",
+        supertrendValue: 24_050, // close (24000) is NOT above supertrend value either
+        emaFast: 23_985, // close IS above fast EMA -- the lone signal the OR accepted
+        vwap: 23_990,
+        atr: 20,
+        patterns: [{
+          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+    }
+
+    it("defaults to false and reproduces the original OR behaviour: a macro downtrend still gets trend points from the EMA bounce alone", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const ideas = strategy.evaluate(counterTrendBounceContext(), CONFIGURATION);
+
+      expect(ideas.length).toBe(1);
+      expect(ideas[0].reasoning[0]).toContain("Score: 5/9");
+      const trendEvidence = ideas[0].evidenceItems.find((e) => e.sourceReference === "SUPERTREND/EMA");
+      expect(trendEvidence?.details).toMatchObject({ supertrendTrend: "DOWN", emaFast: 23_985 });
+    });
+
+    it("when true, refuses trend points for the same bar because Supertrend disagrees, dropping the score below threshold", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, requireStrictTrendAlignment: true };
+      const ideas = strategy.evaluate(counterTrendBounceContext(), config);
+
+      // VWAP (+2) + volume (+1) = 3, below the 5 threshold without the trend's +2.
+      expect(ideas.length).toBe(0);
+    });
+
+    it("when true, still awards trend points once Supertrend and EMA genuinely agree", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, requireStrictTrendAlignment: true };
+      const ctx = createContext({
+        close: 24_000,
+        supertrendTrend: "UP",
+        supertrendValue: 23_950,
+        emaFast: 23_985,
+        vwap: 23_990,
+        atr: 20,
+        patterns: [{
+          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+
+      const ideas = strategy.evaluate(ctx, config);
+      expect(ideas.length).toBe(1);
+      expect(ideas[0].reasoning[0]).toContain("Score: 5/9");
+    });
+
+    it("applies the same AND requirement symmetrically on the SHORT side", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, requireStrictTrendAlignment: true };
+      // Supertrend UP (disagrees), but close below fast EMA -- the SHORT-side mirror bounce.
+      const ctx = createContext({
+        close: 23_900,
+        supertrendTrend: "UP",
+        supertrendValue: 23_850,
+        emaFast: 23_920,
+        vwap: 23_910,
+        atr: 20,
+        patterns: [{
+          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+
+      expect(strategy.evaluate(ctx, config).length).toBe(0);
+    });
+  });
+
+  describe("enableSrVeto (2026-09-30 loss review, flaw #3)", () => {
+    function longNearResistanceContext() {
+      return createContext({
+        close: 24_000,
+        supertrendTrend: "UP",
+        emaFast: 23_985,
+        vwap: 23_990,
+        atr: 20,
+        priceActionEvents: [{
+          eventCode: "RESISTANCE",
+          algorithmVersion: "price-action-v2",
+          direction: "BEARISH",
+          level: 24_005, // 5 / 20 = 0.25 ATR away -- well inside maxSrDistanceAtr (1.5)
+          confidence: 0.8,
+          details: {},
+        }],
+        patterns: [{
+          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+    }
+
+    it("defaults to false: a LONG still fires directly under an unbroken resistance ceiling", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const ideas = strategy.evaluate(longNearResistanceContext(), CONFIGURATION);
+      expect(ideas.length).toBe(1);
+      expect(ideas[0].side).toBe("LONG");
+    });
+
+    it("when true, refuses the same LONG proposal even though its score clears the threshold", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, enableSrVeto: true };
+      expect(strategy.evaluate(longNearResistanceContext(), config).length).toBe(0);
+    });
+
+    it("when true, does not veto a LONG once resistance is far enough away", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, enableSrVeto: true };
+      const ctx = createContext({
+        close: 24_000,
+        supertrendTrend: "UP",
+        emaFast: 23_985,
+        vwap: 23_990,
+        atr: 20,
+        priceActionEvents: [{
+          eventCode: "RESISTANCE",
+          algorithmVersion: "price-action-v2",
+          direction: "BEARISH",
+          level: 24_100, // 100 / 20 = 5 ATR away -- outside maxSrDistanceAtr (1.5)
+          confidence: 0.8,
+          details: {},
+        }],
+        patterns: [{
+          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+
+      expect(strategy.evaluate(ctx, config).length).toBe(1);
+    });
+
+    it("applies the same veto symmetrically to a SHORT sitting directly over unbroken support", () => {
+      const strategy = new MomentumScalpPatternStrategy();
+      const config = { ...CONFIGURATION, enableSrVeto: true };
+      const ctx = createContext({
+        close: 23_900,
+        supertrendTrend: "DOWN",
+        emaFast: 23_920,
+        vwap: 23_910,
+        atr: 20,
+        priceActionEvents: [{
+          eventCode: "SUPPORT",
+          algorithmVersion: "price-action-v2",
+          direction: "BULLISH",
+          level: 23_895, // 5 / 20 = 0.25 ATR away
+          confidence: 0.8,
+          details: {},
+        }],
+        patterns: [{
+          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+          confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
+        }],
+      });
+
+      expect(strategy.evaluate(ctx, config).length).toBe(0);
+    });
+  });
 });
 
 describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
