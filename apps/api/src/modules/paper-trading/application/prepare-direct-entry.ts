@@ -13,13 +13,15 @@ export interface PreparedDirectEntry {
   targetPriceOverride: number;
   entryFees: number;
   feeBreakdown: Record<string, unknown>;
+  requiredMargin?: number;
+  leverage?: number;
 }
 
 export type PrepareDirectEntryResult =
   | { approved: true; entry: PreparedDirectEntry }
   | {
     approved: false;
-    reason: "IDEA_NOT_FOUND" | "NO_FRESH_QUOTE" | "INVALID_GEOMETRY";
+    reason: "IDEA_NOT_FOUND" | "NO_FRESH_QUOTE" | "INVALID_GEOMETRY" | "INSUFFICIENT_MARGIN";
     explanation: string;
   };
 
@@ -28,6 +30,11 @@ export interface PrepareDirectEntryInput {
   lots?: number;
   quantity?: number;
   now?: Date;
+  leverage?: number;
+  availableMargin?: number;
+  accountEquity?: number;
+  riskPercent?: number;
+  dynamicSizing?: boolean;
 }
 
 interface QueryableDatabase {
@@ -93,9 +100,6 @@ export class PrepareDirectEntry {
 
     const symbol = String(idea.symbol).toUpperCase();
     const lotSize = Number(idea.lot_size) > 0 ? Number(idea.lot_size) : 1;
-    const quantity = typeof input.quantity === "number" && input.quantity > 0
-      ? input.quantity
-      : Math.max(1, Math.round(input.lots ?? 1)) * lotSize;
     const tickSize = Number(idea.tick_size);
 
     const quote = await this.quoteReader.quoteSymbol(symbol).catch(() => null);
@@ -135,28 +139,63 @@ export class PrepareDirectEntry {
       };
     }
 
+    const leverage = typeof input.leverage === "number" && input.leverage > 0 ? input.leverage : undefined;
+    let finalQuantity = typeof input.quantity === "number" && input.quantity > 0
+      ? input.quantity
+      : Math.max(1, Math.round(input.lots ?? 1)) * lotSize;
+
+    if (input.dynamicSizing && typeof input.accountEquity === "number" && input.accountEquity > 0) {
+      const riskPercent = typeof input.riskPercent === "number" && input.riskPercent > 0 ? input.riskPercent : 1.0;
+      const riskBudget = input.accountEquity * (riskPercent / 100);
+      const desiredQty = riskDistance > 0 ? riskBudget / riskDistance : lotSize;
+
+      let maxLeverageQty = Infinity;
+      if (typeof input.availableMargin === "number" && input.availableMargin > 0 && leverage) {
+        maxLeverageQty = (input.availableMargin * leverage) / entry;
+      }
+
+      const rawQty = Math.min(desiredQty, maxLeverageQty);
+      const calculatedLots = Math.max(1, Math.floor(rawQty / lotSize));
+      finalQuantity = calculatedLots * lotSize;
+    }
+
+    let requiredMargin: number | undefined;
+    if (leverage && leverage > 0) {
+      requiredMargin = (entry * finalQuantity) / leverage;
+      if (typeof input.availableMargin === "number" && requiredMargin > input.availableMargin) {
+        return {
+          approved: false,
+          reason: "INSUFFICIENT_MARGIN",
+          explanation: `Required margin of $${requiredMargin.toFixed(2)} (${finalQuantity} unit(s) at ${leverage}x leverage) `
+            + `exceeds available free margin of $${input.availableMargin.toFixed(2)}.`,
+        };
+      }
+    }
+
     return {
       approved: true,
       entry: {
         tradeIdeaId: idea.id,
         side,
-        quantity,
+        quantity: finalQuantity,
         fillPrice: entry,
         stopLossOverride: stopLoss,
         targetPriceOverride: targetPrice,
-        // No Zerodha-style cost schedule exists for a USD spot instrument with no local broker of
-        // record -- brokerage-calculator.ts is an Indian F&O schedule end to end and does not
-        // apply here. Left at zero and documented rather than fabricated.
         entryFees: 0,
+        requiredMargin,
+        leverage,
         feeBreakdown: {
           entryChecks: {
             fillSource: "TWELVEDATA_QUOTE",
             observedPrice,
             quoteObservedAt: quote?.regularMarketTime?.toISOString() ?? null,
             costModel: "NONE_MODELLED",
+            leverage: leverage ?? null,
+            requiredMargin: requiredMargin ?? null,
           },
         },
       },
     };
   }
 }
+

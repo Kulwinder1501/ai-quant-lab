@@ -673,7 +673,7 @@ async function main(): Promise<void> {
    * left intact -- only the schedule is turned off -- so re-enabling is flipping `XAU_BOT_ENABLED`
    * back to `true`, not rebuilding anything.
    */
-  const XAU_BOT_ENABLED = false;
+  const XAU_BOT_ENABLED = true;
   cronSchedule("*/5 * * * *", () => {
     if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
     void (async () => {
@@ -681,7 +681,7 @@ async function main(): Promise<void> {
         const to = new Date();
         const from = new Date(to.getTime() - 45 * 60 * 1000);
         const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-        for (const timeframe of ["1m", "5m"]) {
+        for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
             "run", "data:collect:historical", "--",
             "--provider", "twelvedata",

@@ -21,6 +21,7 @@ import {
   DEFAULT_MAX_BAR_AGE_MINUTES,
 } from "../../modules/paper-trading/domain/bot-data-freshness.js";
 import { isNearXauWeeklyClose, isXauSessionOpen } from "../../modules/platform/calendar/continuous-weekly-session.js";
+import { istMinuteOfDay } from "../../modules/platform/calendar/trading-session.js";
 
 /**
  * A single, standalone paper-trading bot for XAU_USD -- deliberately not folded into
@@ -44,14 +45,19 @@ import { isNearXauWeeklyClose, isXauSessionOpen } from "../../modules/platform/c
 
 const XAU_EXCHANGE = "TWELVEDATA" as const;
 const XAU_SYMBOL = "XAU_USD";
-const SCAN_TIMEFRAMES = ["1m", "5m"] as const;
-const GOLD_STRATEGY_KEY = "momentum-scalp-gold";
+const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
+const GOLD_STRATEGY_KEY = "ict-structure-v1";
 const MAX_CONCURRENT_POSITIONS = 1;
 const GOLD_ACCOUNT_NAME = "AutoBot-Gold";
 /** Arbitrary, illustrative paper balance -- not derived from any real account. */
 const GOLD_INITIAL_BALANCE_USD = 100_000;
 /** A signal this close to the weekly close has no session left to manage before the weekend gap. */
 const WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30;
+
+function isUserOperatingWindow(now: Date): boolean {
+  const minute = istMinuteOfDay(now);
+  return minute >= 9 * 60 && minute < 21 * 60; // 09:00 AM - 09:00 PM IST
+}
 
 async function assertScannableSymbol(
   repository: { findByExchangeAndSymbol(exchange: typeof XAU_EXCHANGE, symbol: string): Promise<{ isActive: boolean } | null> },
@@ -69,6 +75,10 @@ async function main(): Promise<void> {
   const now = new Date();
   if (!isXauSessionOpen(now)) {
     console.info(JSON.stringify({ level: "info", message: "XAU_USD session closed; gold bot skipped." }));
+    return;
+  }
+  if (!isUserOperatingWindow(now)) {
+    console.info(JSON.stringify({ level: "info", message: "Outside operating window (09:00 - 21:00 IST); gold bot skipped." }));
     return;
   }
 
@@ -118,8 +128,23 @@ async function main(): Promise<void> {
     const refused: Array<Record<string, unknown>> = [];
     const skippedSeries: Array<Record<string, unknown>> = [];
 
+const GOLD_LEVERAGE = 20;
+const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
+
     const existingOpen = await tradeRepository.listOpenByAccount(account.id);
     let openPositions = existingOpen.length;
+
+    const closedPnlResult = await database.query<{ total_pnl: string }>(
+      `SELECT COALESCE(SUM(realized_pnl), 0) AS total_pnl FROM paper_trades WHERE account_id = $1 AND status = 'CLOSED'`,
+      [account.id],
+    );
+    const realizedPnl = Number(closedPnlResult.rows[0]?.total_pnl ?? 0);
+    const accountEquity = account.openingBalance + realizedPnl;
+    const lockedMargin = existingOpen.reduce(
+      (sum, trade) => sum + (trade.entryPrice * trade.quantity) / GOLD_LEVERAGE,
+      0,
+    );
+    const availableMargin = Math.max(0, accountEquity - lockedMargin);
 
     if (!isNearXauWeeklyClose(now, WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE)) {
       for (const timeframe of SCAN_TIMEFRAMES) {
@@ -169,7 +194,15 @@ async function main(): Promise<void> {
               continue;
             }
 
-            const prepared = await prepareEntry.execute({ tradeIdeaId, lots: 1, now });
+            const prepared = await prepareEntry.execute({
+              tradeIdeaId,
+              now,
+              leverage: GOLD_LEVERAGE,
+              accountEquity,
+              availableMargin,
+              riskPercent: GOLD_RISK_PER_TRADE_PERCENT,
+              dynamicSizing: true,
+            });
             if (!prepared.approved) {
               refused.push({ tradeIdeaId, timeframe, reason: prepared.reason, explanation: prepared.explanation });
               continue;
@@ -186,7 +219,7 @@ async function main(): Promise<void> {
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal.`,
+                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal. Required margin: $${entry.requiredMargin?.toFixed(2) ?? "N/A"} (${entry.leverage ?? 20}x leverage).`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,
@@ -211,7 +244,7 @@ async function main(): Promise<void> {
             opened.push({
               paperTradeId: trade.id, tradeIdeaId, timeframe,
               fillPrice: entry.fillPrice, stopLoss: entry.stopLossOverride, targetPrice: entry.targetPriceOverride,
-              quantity: entry.quantity,
+              quantity: entry.quantity, requiredMargin: entry.requiredMargin, leverage: entry.leverage,
             });
           }
         }

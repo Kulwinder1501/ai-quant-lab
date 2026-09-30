@@ -25,7 +25,17 @@ export type ZoneLifecycleState = "FRESH" | "TOUCHED" | "PARTIALLY_FILLED" | "CON
  */
 export type OrderBlockKind = "CLASSIC" | "ADVANCE" | "REJECTION" | "MITIGATION" | "BREAKER" | "RECLAIM";
 
-export interface FairValueGap {
+export interface IctEventLifecycle {
+  readonly candidateAt?: number;
+  readonly formedAt?: number;
+  readonly confirmedAt: number;
+  readonly availableAt: number;
+  readonly testedAt?: number;
+  readonly mitigatedAt?: number;
+  readonly invalidatedAt?: number;
+}
+
+export interface FairValueGap extends IctEventLifecycle {
   readonly id: string;
   readonly type: "BULLISH" | "BEARISH";
   readonly top: number;
@@ -66,7 +76,7 @@ export interface FairValueGap {
   readonly isIdmAdjacent: boolean;
 }
 
-export interface OrderBlock {
+export interface OrderBlock extends IctEventLifecycle {
   readonly id: string;
   readonly type: "BULLISH" | "BEARISH";
   readonly top: number;
@@ -255,13 +265,20 @@ export class IctZoneLedger {
     currentIndex: number,
     currentTime: Date
   ): { readonly updatedOriginal: FairValueGap; readonly flipped: FairValueGap } {
-    const updatedOriginal: FairValueGap = { ...fvg, state: "INVALIDATED", invertedAtBarIndex: currentIndex };
+    const updatedOriginal: FairValueGap = { ...fvg, state: "INVALIDATED", invertedAtBarIndex: currentIndex, invalidatedAt: currentTime.getTime() };
     const flipped: FairValueGap = {
       ...fvg,
       id: `${fvg.id}-inv`,
       type: fvg.type === "BULLISH" ? "BEARISH" : "BULLISH",
       createdAtBarIndex: currentIndex,
       createdAtBarTime: currentTime,
+      candidateAt: undefined,
+      formedAt: undefined,
+      confirmedAt: currentTime.getTime(),
+      availableAt: currentTime.getTime(),
+      testedAt: undefined,
+      mitigatedAt: undefined,
+      invalidatedAt: undefined,
       fillPercentage: 0,
       state: "FRESH",
       invertedAtBarIndex: null,
@@ -300,7 +317,7 @@ export class IctZoneLedger {
     currentIndex: number,
     currentTime: Date
   ): { readonly updatedOriginal: OrderBlock; readonly flipped: OrderBlock | null } {
-    const updatedOriginal: OrderBlock = { ...ob, state: "INVALIDATED" };
+    const updatedOriginal: OrderBlock = { ...ob, state: "INVALIDATED", invalidatedAt: currentTime.getTime() };
     this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "INVALIDATED", barIndex: currentIndex };
     if (!this.invertedBlocksRemainPoi) return { updatedOriginal, flipped: null };
 
@@ -327,6 +344,13 @@ export class IctZoneLedger {
       kind: swingWasTaken ? "BREAKER" : "MITIGATION",
       createdAtBarIndex: currentIndex,
       createdAtBarTime: currentTime,
+      candidateAt: undefined,
+      formedAt: undefined,
+      confirmedAt: currentTime.getTime(),
+      availableAt: currentTime.getTime(),
+      testedAt: undefined,
+      mitigatedAt: undefined,
+      invalidatedAt: undefined,
       state: "FRESH",
     };
     this.lastEvent = { zoneId: flipped.id, zoneKind: "OB", event: "INVERTED", barIndex: currentIndex };
@@ -377,6 +401,10 @@ export class IctZoneLedger {
           createdAtBarTime: c3.openTime,
           candle1Index: currentIndex - 2,
           candle3Index: currentIndex,
+          candidateAt: c1.openTime.getTime(),
+          formedAt: c3.openTime.getTime(),
+          confirmedAt: c3.openTime.getTime(),
+          availableAt: c3.openTime.getTime(),
           fillPercentage: 0,
           state: "FRESH",
           invertedAtBarIndex: null,
@@ -406,6 +434,10 @@ export class IctZoneLedger {
           createdAtBarTime: c3.openTime,
           candle1Index: currentIndex - 2,
           candle3Index: currentIndex,
+          candidateAt: c1.openTime.getTime(),
+          formedAt: c3.openTime.getTime(),
+          confirmedAt: c3.openTime.getTime(),
+          availableAt: c3.openTime.getTime(),
           fillPercentage: 0,
           state: "FRESH",
           invertedAtBarIndex: null,
@@ -477,6 +509,10 @@ export class IctZoneLedger {
                 createdAtBarTime: current.openTime,
                 obCandleIndex: obIndex,
                 displacementCandleIndex: displacementIndex,
+                candidateAt: obCandle.openTime.getTime(),
+                formedAt: obCandle.openTime.getTime(),
+                confirmedAt: current.openTime.getTime(),
+                availableAt: current.openTime.getTime(),
                 attachedFvgId: newlyCreatedFvg.id,
                 isExtreme: structure.lastHL ? obCandle.low <= structure.lastHL.price : true,
                 isIdmAdjacent: structure.idm ? Math.abs(obCandle.low - structure.idm.price) / obCandle.low < 0.005 : false,
@@ -493,6 +529,10 @@ export class IctZoneLedger {
                 createdAtBarTime: current.openTime,
                 obCandleIndex: obIndex,
                 displacementCandleIndex: displacementIndex,
+                candidateAt: obCandle.openTime.getTime(),
+                formedAt: obCandle.openTime.getTime(),
+                confirmedAt: current.openTime.getTime(),
+                availableAt: current.openTime.getTime(),
                 attachedFvgId: newlyCreatedFvg.id,
                 isExtreme: structure.lastLH ? obCandle.high >= structure.lastLH.price : true,
                 isIdmAdjacent: structure.idm ? Math.abs(obCandle.high - structure.idm.price) / obCandle.high < 0.005 : false,
@@ -545,7 +585,17 @@ export class IctZoneLedger {
           bornThisBar.push(flipped);
         } else {
           const nextState: ZoneLifecycleState = pct >= 1.0 ? "CONSUMED" : pct > 0 ? "PARTIALLY_FILLED" : fvg.state;
-          nextFvgs.push(pct === fvg.fillPercentage && nextState === fvg.state ? fvg : { ...fvg, fillPercentage: pct, state: nextState });
+          const isNewlyTouched = pct > 0 && fvg.fillPercentage === 0;
+          const isNewlyMitigated = pct >= 0.5 && fvg.fillPercentage < 0.5;
+          const isNewlyConsumed = pct >= 1.0 && fvg.fillPercentage < 1.0;
+          nextFvgs.push(pct === fvg.fillPercentage && nextState === fvg.state ? fvg : { 
+            ...fvg, 
+            fillPercentage: pct, 
+            state: nextState,
+            testedAt: isNewlyTouched ? current.openTime.getTime() : fvg.testedAt,
+            mitigatedAt: isNewlyMitigated ? current.openTime.getTime() : fvg.mitigatedAt,
+            invalidatedAt: isNewlyConsumed ? current.openTime.getTime() : fvg.invalidatedAt
+          });
         }
       }
       this.fvgs = [...nextFvgs, ...bornThisBar];
@@ -573,7 +623,12 @@ export class IctZoneLedger {
           nextObs.push(updatedOriginal);
           if (flipped) bornThisBar.push(flipped);
         } else {
-          nextObs.push(ob.state === "TOUCHED" ? ob : { ...ob, state: "TOUCHED" });
+          const isNewlyTouched = ob.state === "FRESH";
+          nextObs.push(ob.state === "TOUCHED" ? ob : { 
+            ...ob, 
+            state: "TOUCHED",
+            testedAt: isNewlyTouched ? current.openTime.getTime() : ob.testedAt
+          });
           this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "TOUCHED", barIndex: currentIndex };
         }
       }

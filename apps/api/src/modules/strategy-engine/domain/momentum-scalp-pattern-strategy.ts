@@ -621,8 +621,11 @@ export class MomentumScalpPatternStrategyV2 {
         const evidence: TradeIdeaEvidence[] = [];
 
         // 1. Trend confirmation (+2)
-        const trendBullish = (supertrendTrend === "UP" || (supertrend !== null && candle.close > supertrend))
-          || (emaFast !== null && candle.close > emaFast);
+        const supertrendBullish = supertrendTrend === "UP" || (supertrend !== null && candle.close > supertrend);
+        const emaBullish = emaFast !== null && candle.close > emaFast;
+        const trendBullish = config.requireStrictTrendAlignment
+          ? (supertrendBullish && emaBullish)
+          : (supertrendBullish || emaBullish);
         if (trendBullish) {
           longScore += 2;
           evidence.push({
@@ -764,8 +767,11 @@ export class MomentumScalpPatternStrategyV2 {
       const evidence: TradeIdeaEvidence[] = [];
 
       // 1. Trend confirmation (+2)
-      const trendBearish = (supertrendTrend === "DOWN" || (supertrend !== null && candle.close < supertrend))
-        || (emaFast !== null && candle.close < emaFast);
+      const supertrendBearish = supertrendTrend === "DOWN" || (supertrend !== null && candle.close < supertrend);
+      const emaBearish = emaFast !== null && candle.close < emaFast;
+      const trendBearish = config.requireStrictTrendAlignment
+        ? (supertrendBearish && emaBearish)
+        : (supertrendBearish || emaBearish);
       if (trendBearish) {
         shortScore += 2;
         evidence.push({

@@ -130,4 +130,61 @@ describe("PrepareDirectEntry", () => {
     expect(result.approved).toBe(false);
     if (!result.approved) expect(result.reason).toBe("INVALID_GEOMETRY");
   });
+
+  it("calculates required margin at 20x leverage and approves when available margin is sufficient", async () => {
+    const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(freshQuote()));
+    // fill 4302.5, lots 1, qty 1. Notional 4302.5. 20x margin = 215.125
+    const result = await prepare.execute({
+      tradeIdeaId: "idea-1",
+      lots: 1,
+      now: NOW,
+      leverage: 20,
+      availableMargin: 1000,
+    });
+    expect(result.approved).toBe(true);
+    if (result.approved) {
+      expect(result.entry.leverage).toBe(20);
+      expect(result.entry.requiredMargin).toBeCloseTo(4302.5 / 20, 2);
+    }
+  });
+
+  it("refuses with INSUFFICIENT_MARGIN when required margin exceeds free margin", async () => {
+    const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(freshQuote()));
+    // fill 4302.5, lots 1, qty 1. 20x margin = 215.125. Available free margin = 100
+    const result = await prepare.execute({
+      tradeIdeaId: "idea-1",
+      lots: 1,
+      now: NOW,
+      leverage: 20,
+      availableMargin: 100,
+    });
+    expect(result.approved).toBe(false);
+    if (!result.approved) {
+      expect(result.reason).toBe("INSUFFICIENT_MARGIN");
+      expect(result.explanation).toContain("Required margin of $215.13");
+    }
+  });
+
+  it("calculates dynamic lots based on account equity and 20x leverage cap", async () => {
+    // entry 4300, stop 4290 -> risk distance 10
+    // equity 100,000, 1% risk budget = 1,000. Desired qty = 1,000 / 10 = 100 units.
+    // free margin 10,000 at 20x leverage -> max leverage qty = 10,000 * 20 / 4302.5 = 46.48 units.
+    // min(100, 46.48) = 46 units.
+    const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(freshQuote()));
+    const result = await prepare.execute({
+      tradeIdeaId: "idea-1",
+      now: NOW,
+      leverage: 20,
+      accountEquity: 100_000,
+      availableMargin: 10_000,
+      riskPercent: 1.0,
+      dynamicSizing: true,
+    });
+    expect(result.approved).toBe(true);
+    if (result.approved) {
+      expect(result.entry.quantity).toBe(46);
+      expect(result.entry.requiredMargin).toBeCloseTo((4302.5 * 46) / 20, 2);
+    }
+  });
 });
+
