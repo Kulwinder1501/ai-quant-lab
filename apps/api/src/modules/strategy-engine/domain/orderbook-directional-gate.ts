@@ -4,6 +4,16 @@
  * Enforces the frozen pre-registered ORDERBOOK-01 directional rules (Case A Verdict: 83.1% accuracy).
  * Evaluates whether proposed LONG or SHORT trade proposals align with L2 Depth Imbalance (DI_tilde > 0)
  * at structural levels.
+ *
+ * `confidenceAdjustment` is on the same 0-1 scale as `ProposedTradeIdea.confidence` (see
+ * `momentum-scalp-strategy.ts`, `momentum-scalp-pattern-strategy.ts`, etc. -- every strategy in
+ * this codebase clamps confidence to [0, 1]). It was previously +15/-30, sized as if confidence
+ * were 0-100, and `applyOrderbookGateToProposal` clamped the result to [0, 100] to match --
+ * meaning a live PASS or BLOCK verdict would have added or subtracted 15/30 *whole points* to a
+ * score that lives between 0 and 1, and the clamp would not have caught it (0.63 - 30 clamps to 0,
+ * not back to a sane fraction). Found 2026-09-30 while reviewing a momentum-scalp-pattern loss;
+ * never yet triggered live because every recorded verdict so far has been NEUTRAL, which this
+ * scale bug also produced 0 for, by coincidence rather than correctness.
  */
 
 import type { ProposedTradeIdea, TradeSide } from "./strategy.js";
@@ -18,7 +28,7 @@ export interface OrderbookGateResult {
   directionalBias: "BULLISH_REJECTION" | "BEARISH_REJECTION" | "BEARISH_SWEEP" | "BULLISH_SWEEP" | "NONE";
   recommendedSide: "LONG" | "SHORT" | "NONE";
   gateStatus: "PASS" | "BLOCK" | "NEUTRAL";
-  confidenceAdjustment: number; // e.g. +15 for aligned, -30 for conflicting
+  confidenceAdjustment: number; // 0-1 scale, matching ProposedTradeIdea.confidence: e.g. +0.15 for aligned, -0.30 for conflicting
   reasoning: string | null;
 }
 
@@ -93,7 +103,7 @@ export function evaluateOrderbookDirectionalGate(
       directionalBias: bias,
       recommendedSide,
       gateStatus: "PASS",
-      confidenceAdjustment: 15,
+      confidenceAdjustment: 0.15,
       reasoning: `[ORDERBOOK-01 PASS] ${side} trade aligned with ${bias} at ${levelType} (${distBps} bps, DI_tilde=${diTilde}).`,
     };
   } else {
@@ -107,7 +117,7 @@ export function evaluateOrderbookDirectionalGate(
       directionalBias: bias,
       recommendedSide,
       gateStatus: "BLOCK",
-      confidenceAdjustment: -30,
+      confidenceAdjustment: -0.30,
       reasoning: `[ORDERBOOK-01 BLOCK] ${side} trade conflicts with orderbook ${bias} at ${levelType} (recommended: ${recommendedSide}).`,
     };
   }
@@ -145,7 +155,7 @@ export function applyOrderbookGateToProposal(
     };
   }
 
-  const updatedConfidence = Math.max(0, Math.min(100, proposal.confidence + result.confidenceAdjustment));
+  const updatedConfidence = Math.max(0, Math.min(1, proposal.confidence + result.confidenceAdjustment));
 
   return {
     ...proposal,
