@@ -77,6 +77,7 @@
     "test": "vitest run",
     "lint": "tsc --noEmit",
     "paper:trades:review": "tsx src/interfaces/cli/review-closed-trades.ts",
+    "paper:trades:backfill-underlying-fill-price": "tsx src/interfaces/cli/backfill-underlying-fill-price.ts",
     "shadow:decisions": "tsx src/interfaces/cli/run-shadow-decisions.ts",
     "classify:divergence": "tsx src/interfaces/cli/classify-divergence.ts",
     "review:divergences": "tsx src/interfaces/cli/review-divergences.ts",
