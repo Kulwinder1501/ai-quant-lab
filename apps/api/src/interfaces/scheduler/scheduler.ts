@@ -681,24 +681,26 @@ async function main(): Promise<void> {
         const to = new Date();
         const from = new Date(to.getTime() - 45 * 60 * 1000);
         const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-        for (const timeframe of ["1m", "5m", "15m"]) {
-          await runCommand("npm", [
-            "run", "data:collect:historical", "--",
-            "--provider", "twelvedata",
-            "--exchange", "TWELVEDATA",
-            "--instrument", "XAU_USD",
-            "--timeframe", timeframe,
-            "--from", from.toISOString(),
-            "--to", to.toISOString(),
-            "--skip-existing",
-          ]);
-          await runCommand("npm", [
-            "run", "analysis:calculate-indicators", "--",
-            "--exchange", "TWELVEDATA",
-            "--instrument", "XAU_USD",
-            "--timeframe", timeframe,
-            "--from", indicatorsFrom.toISOString(),
-          ]);
+        for (const instrument of ["XAU_USD", "DXY"]) {
+          for (const timeframe of ["1m", "5m", "15m"]) {
+            await runCommand("npm", [
+              "run", "data:collect:historical", "--",
+              "--provider", "twelvedata",
+              "--exchange", "TWELVEDATA",
+              "--instrument", instrument,
+              "--timeframe", timeframe,
+              "--from", from.toISOString(),
+              "--to", to.toISOString(),
+              "--skip-existing",
+            ]);
+            await runCommand("npm", [
+              "run", "analysis:calculate-indicators", "--",
+              "--exchange", "TWELVEDATA",
+              "--instrument", instrument,
+              "--timeframe", timeframe,
+              "--from", indicatorsFrom.toISOString(),
+            ]);
+          }
         }
       });
       await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));

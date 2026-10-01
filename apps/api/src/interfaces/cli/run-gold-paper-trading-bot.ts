@@ -202,8 +202,14 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
           for (const tradeIdeaId of result.tradeIdeaIds) {
             // Evaluate DXY_INTERMARKET_V1 observational metadata in SHADOW mode
             try {
+              const ideaRes = await database.query<{ side: "LONG" | "SHORT" }>(
+                `SELECT side FROM trade_ideas WHERE id = $1`,
+                [tradeIdeaId]
+              );
+              const proposalSide = ideaRes.rows[0]?.side ?? "LONG";
+
               const dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
-                proposalSide: "LONG", // Default or fetch idea side
+                proposalSide,
                 proposalTimeframe: timeframe,
                 candidateAt: now.toISOString(),
                 dataCutoff: now.toISOString(),
