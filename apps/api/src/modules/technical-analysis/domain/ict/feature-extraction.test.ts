@@ -103,6 +103,12 @@ function makeSnapshot(overrides: {
       liquidity: "NOT_COVERED",
       htf: "NOT_COVERED",
     },
+    drawOnLiquidityState: {
+      selectedPool: null,
+      candidatePoolCount: 0,
+      direction: 0,
+      selectionRuleVersion: "LIQUIDITY_TARGET_SELECTION_V1",
+    },
   };
 }
 

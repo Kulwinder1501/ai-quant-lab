@@ -77,6 +77,21 @@ export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineC
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
+/**
+ * Shadow-only observation of `computeDrawOnLiquidity`'s target selection (see liquidity.ts),
+ * recorded for future comparison against `liquidity.primaryTarget` -- never read by
+ * `ict-structure-v1`, the gold bot, or any other live decision path. See the
+ * `drawOnLiquidityState` docstring on `IctStateCompositeSnapshot` below for why this carries only
+ * the selected pool and a count rather than the full `DrawOnLiquidityState.candidatePools` array
+ * the plan's own type specifies.
+ */
+export interface DrawOnLiquidityObservation {
+  readonly selectedPool: import("./liquidity.js").LiquidityPool | null;
+  readonly candidatePoolCount: number;
+  readonly direction: -1 | 0 | 1;
+  readonly selectionRuleVersion: string;
+}
+
 export type PillarCoverageState = "COMPLETE" | "NOT_COVERED" | "UNKNOWN";
 
 export interface PillarCoverage {
@@ -128,4 +143,23 @@ export interface IctStateCompositeSnapshot {
    */
   readonly htfBias: import("./bias.js").IctBiasDirection | null;
   readonly coverage: PillarCoverage;
+  /**
+   * Shadow observation of `computeDrawOnLiquidity`'s own target selection, computed from the same
+   * pool catalog `liquidity.primaryTarget` is drawn from (`buildIctLiquidityPools`) but entirely
+   * independent of it -- nothing here feeds `liquidity`, and nothing in `liquidity` feeds this.
+   * Exists purely so the algorithm is instrumented into real `ict_state_snapshots` rows going
+   * forward, enabling a future backtest/comparison against the existing resolver's track record,
+   * without changing a single thing about what `ict-structure-v1` (NIFTY50 15m, BANKNIFTY 5m) or the
+   * gold bot's shadow-gated entries actually do today.
+   *
+   * Deliberately NOT the plan's own `DrawOnLiquidityState` shape verbatim: that interface's
+   * `candidatePools` is a full `LiquidityPool[]`, and this snapshot is persisted whole via
+   * `JSON.stringify` into `ict_state_snapshots` on every bar (see
+   * `postgres-strategy-market-context-repository.ts`). `IctLiquiditySnapshot` right above already
+   * carries this exact scar: its own docstring records a 10GB-heap OOM from embedding a pool list
+   * that grows with the number of distinct confirmed-pivot price levels into every persisted
+   * snapshot. Carrying only the one selected pool plus a count reproduces that fix rather than
+   * undoing it.
+   */
+  readonly drawOnLiquidityState: DrawOnLiquidityObservation;
 }

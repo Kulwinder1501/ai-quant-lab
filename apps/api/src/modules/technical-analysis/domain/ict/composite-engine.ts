@@ -3,6 +3,7 @@ import {
   ICT_STATE_ENGINE_VERSION,
   computeIctConfigHash,
   defaultIctEngineConfig,
+  type DrawOnLiquidityObservation,
   type IctEngineConfig,
   type IctStateCompositeSnapshot,
   type PillarCoverage,
@@ -11,10 +12,11 @@ import { IctStructureTracker } from "./structure.js";
 import { IctZoneLedger } from "./zones.js";
 import { IctSessionLevelTracker } from "./session-levels.js";
 import { IctBiasTracker, type IctBiasDirection } from "./bias.js";
-import { IctLiquidityResolver } from "./liquidity.js";
+import { IctLiquidityResolver, buildIctLiquidityPools, computeDrawOnLiquidity } from "./liquidity.js";
 import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
 import { CisdTracker, type CisdEvent } from "./cisd.js";
 import { computeBalancedPriceRanges } from "./bpr.js";
+import { IctAtrTracker } from "./atr-tracker.js";
 
 export class IctCompositeEngine {
   private readonly structTracker: IctStructureTracker;
@@ -25,6 +27,12 @@ export class IctCompositeEngine {
   private readonly cisdTracker: CisdTracker;
   private lastCisdEvent: CisdEvent | null = null;
   private readonly configHash: string;
+  /**
+   * Feeds the shadow `drawOnLiquidityState` observation only (see its docstring on
+   * `IctStateCompositeSnapshot`). O(1) per bar by construction -- see `IctAtrTracker`'s own
+   * docstring for why that matters here specifically.
+   */
+  private readonly atrTracker: IctAtrTracker;
 
   constructor(private readonly config: IctEngineConfig = defaultIctEngineConfig) {
     this.structTracker = new IctStructureTracker(config.pivotLength);
@@ -37,6 +45,7 @@ export class IctCompositeEngine {
     this.biasTracker = new IctBiasTracker();
     this.liquidityResolver = new IctLiquidityResolver();
     this.cisdTracker = new CisdTracker();
+    this.atrTracker = new IctAtrTracker(14);
     this.configHash = computeIctConfigHash(config);
   }
 
@@ -85,6 +94,40 @@ export class IctCompositeEngine {
       this.structTracker.confirmedPivotsView()
     );
 
+    /*
+     * Shadow-only: computeDrawOnLiquidity's own target selection, observed alongside `liquidity`
+     * but feeding nothing and fed nothing by it. See `drawOnLiquidityState`'s docstring on
+     * `IctStateCompositeSnapshot` for why this exists and why it is NOT wired into any gate.
+     *
+     * Pools come from the exact same `buildIctLiquidityPools` call `liquidityResolver.resolve()`
+     * makes internally (computed a second time here, independently -- see that function's own
+     * docstring for why duplicating the CALL, not the LOGIC, is the safe way to give a second
+     * consumer the identical pool catalog).
+     */
+    const { erlPools, irlPools } = buildIctLiquidityPools(
+      current.close,
+      struct,
+      zones,
+      sessionLevels,
+      this.structTracker.confirmedPivotsView()
+    );
+    const atr14 = this.atrTracker.processCandle(current);
+    const htfDirection: -1 | 0 | 1 = htfBias === "BULLISH" ? 1 : htfBias === "BEARISH" ? -1 : 0;
+    const drawOnLiquidity = computeDrawOnLiquidity(
+      [...erlPools, ...irlPools],
+      current.openTime.getTime(),
+      current.close,
+      atr14 ?? 0, // computeDrawOnLiquidity itself falls back to an effective ATR of 1 when <= 0
+      htfDirection,
+      current.close >= current.open
+    );
+    const drawOnLiquidityState: DrawOnLiquidityObservation = {
+      selectedPool: drawOnLiquidity.selectedPool ?? null,
+      candidatePoolCount: drawOnLiquidity.candidatePools.length,
+      direction: drawOnLiquidity.direction ?? 0,
+      selectionRuleVersion: drawOnLiquidity.selectionRuleVersion,
+    };
+
     // Coverage is evidence sufficiency, carried independently of directional
     // value (invariant: UNKNOWN != NEUTRAL). NEUTRAL is a value the engine
     // reached on sufficient evidence and stays COMPLETE so it can reach the
@@ -119,6 +162,7 @@ export class IctCompositeEngine {
       liquidity,
       htfBias: htfBias ?? null,
       coverage,
+      drawOnLiquidityState,
     };
   }
 }
