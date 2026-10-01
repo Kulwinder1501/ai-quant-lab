@@ -109,8 +109,32 @@ function movingBlockBootstrap(
   };
 }
 
+/**
+ * Minimum real `trade_ideas` rows required before this harness will produce a verdict.
+ * Chosen to match criterion 4 below (N >= 100 per cohort): if the raw pull can't even
+ * clear 100 total, no cohort split of it can ever satisfy the sample-size gate, so there
+ * is no point pretending a verdict computed from fewer is meaningful.
+ */
+const MIN_REAL_PROPOSALS_FOR_VERDICT = 100;
+
+function generateSyntheticProposals(count: number): ProposalRow[] {
+  const startMs = new Date("2026-09-01T09:00:00.000Z").getTime();
+  return Array.from({ length: count }, (_, i): ProposalRow => {
+    const candidateTime = new Date(startMs + i * 15 * 60 * 1000).toISOString();
+    return {
+      id: `synth-${i + 1}`,
+      candidate_at: new Date(candidateTime),
+      data_cutoff: new Date(candidateTime),
+      side: i % 2 === 0 ? "LONG" : "SHORT",
+      timeframe: "15m",
+    };
+  });
+}
+
 async function main(): Promise<void> {
   console.info("=== DXY_INTERMARKET_V1 Counterfactual Replay Harness ===");
+
+  const allowSyntheticData = process.argv.includes("--allow-synthetic-data");
 
   const environment = loadEnvironment();
   const db = createDatabasePool(environment.DATABASE_URL);
@@ -123,20 +147,33 @@ async function main(): Promise<void> {
     );
 
     let proposals = proposalsRes.rows;
-    if (proposals.length === 0) {
-      console.info("No trade_ideas found in DB; generating synthetic historical evaluation sequence for audit.");
-      // Generate synthetic proposal stream for verification
-      const startMs = new Date("2026-09-01T09:00:00.000Z").getTime();
-      proposals = Array.from({ length: 150 }, (_, i) => {
-        const candidateTime = new Date(startMs + i * 15 * 60 * 1000).toISOString();
-        return {
-          id: `synth-${i + 1}`,
-          candidate_at: new Date(candidateTime),
-          data_cutoff: new Date(candidateTime),
-          side: i % 2 === 0 ? "LONG" : "SHORT",
-          timeframe: "15m",
-        };
-      });
+    let usedSyntheticData = false;
+
+    if (proposals.length < MIN_REAL_PROPOSALS_FOR_VERDICT) {
+      if (!allowSyntheticData) {
+        console.error(
+          `Insufficient real trade_ideas data (N=${proposals.length}, need >=${MIN_REAL_PROPOSALS_FOR_VERDICT}), ` +
+            "cannot produce a valid verdict -- rerun with --allow-synthetic-data to test the statistical " +
+            "machinery itself on synthetic data."
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      console.info(
+        `Real trade_ideas data too thin (N=${proposals.length}, need >=${MIN_REAL_PROPOSALS_FOR_VERDICT}); ` +
+          "--allow-synthetic-data was passed, generating a synthetic historical evaluation sequence instead."
+      );
+      proposals = generateSyntheticProposals(150);
+      usedSyntheticData = true;
+    }
+
+    if (usedSyntheticData) {
+      console.info("\n#########################################################");
+      console.info("# SYNTHETIC DATA RUN -- this exercises the statistical  #");
+      console.info("# machinery only. It is NOT a real result and must NOT  #");
+      console.info("# be used to qualify or disqualify DXY_INTERMARKET_V1.  #");
+      console.info("#########################################################\n");
     }
 
     console.info(`Replaying ${proposals.length} proposal observations...`);
@@ -231,8 +268,17 @@ async function main(): Promise<void> {
     console.info(` 6. Availability Audit (< 10% unavailable rate):    ${availabilityPass ? "PASS ✅" : "FAIL ❌"}`);
     console.info(` 7. Zero PIT/leakage violations detected:           ${zeroLeakagePass ? "PASS ✅" : "FAIL ❌"}`);
     console.info("-------------------------------------------------------");
-    console.info(`FINAL VERDICT: ${activeQualified ? "ACTIVE CANDIDATE QUALIFIED ✅" : "OBSERVATIONAL SHADOW MODE (Not Qualified for Active)"}`);
+    const verdictPrefix = usedSyntheticData ? "SYNTHETIC-DATA VERDICT (NOT A REAL RESULT): " : "";
+    console.info(`FINAL VERDICT: ${verdictPrefix}${activeQualified ? "ACTIVE CANDIDATE QUALIFIED ✅" : "OBSERVATIONAL SHADOW MODE (Not Qualified for Active)"}`);
     console.info("=======================================================\n");
+
+    if (usedSyntheticData) {
+      console.info("#########################################################");
+      console.info("# SYNTHETIC DATA RUN -- the summary above was computed   #");
+      console.info("# from fabricated proposals, NOT real trade_ideas data.  #");
+      console.info("# It proves nothing about DXY_INTERMARKET_V1's real edge.#");
+      console.info("#########################################################\n");
+    }
 
   } finally {
     await db.end();
