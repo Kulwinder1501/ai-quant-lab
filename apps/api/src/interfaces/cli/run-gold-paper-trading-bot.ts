@@ -22,6 +22,7 @@ import {
 } from "../../modules/paper-trading/domain/bot-data-freshness.js";
 import { isNearXauWeeklyClose, isXauSessionOpen } from "../../modules/platform/calendar/continuous-weekly-session.js";
 import { istMinuteOfDay } from "../../modules/platform/calendar/trading-session.js";
+import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/application/dxy-intermarket-helper.js";
 
 /**
  * A single, standalone paper-trading bot for XAU_USD -- deliberately not folded into
@@ -199,6 +200,31 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
           });
 
           for (const tradeIdeaId of result.tradeIdeaIds) {
+            // Evaluate DXY_INTERMARKET_V1 observational metadata in SHADOW mode
+            try {
+              const dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
+                proposalSide: "LONG", // Default or fetch idea side
+                proposalTimeframe: timeframe,
+                candidateAt: now.toISOString(),
+                dataCutoff: now.toISOString(),
+                decisionAt: now.toISOString(),
+              });
+              console.info(JSON.stringify({
+                level: "info",
+                message: "DXY_INTERMARKET_V1 Shadow Observation",
+                tradeIdeaId,
+                timeframe,
+                dxyPayload,
+              }));
+            } catch (err) {
+              console.error(JSON.stringify({
+                level: "error",
+                message: "Failed evaluating DXY_INTERMARKET_V1 shadow observation",
+                tradeIdeaId,
+                error: String(err),
+              }));
+            }
+
             if (openPositions >= MAX_CONCURRENT_POSITIONS) {
               refused.push({
                 tradeIdeaId, timeframe, reason: "POSITION_LIMIT",

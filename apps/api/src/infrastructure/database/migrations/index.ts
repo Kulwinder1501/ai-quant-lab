@@ -116,6 +116,7 @@ import { paperAccountsCurrencySupportMigration } from "./115-paper-accounts-curr
 import { paperTradeSessionCloseExitReasonMigration } from "./116-paper-trade-session-close-exit-reason.js";
 import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-locking-stop.js";
 import { backtestMomentumStallExitMigration } from "./118-backtest-momentum-stall-exit.js";
+import { dxyTwelveDataSupportMigration } from "./119-dxy-twelvedata-support.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -236,4 +237,5 @@ export const migrations = [
   paperTradeSessionCloseExitReasonMigration,
   paperTradeProfitLockingStopMigration,
   backtestMomentumStallExitMigration,
+  dxyTwelveDataSupportMigration,
 ];

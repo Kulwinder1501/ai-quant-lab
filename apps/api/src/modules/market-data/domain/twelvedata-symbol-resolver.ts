@@ -10,6 +10,7 @@
  */
 const twelveDataSymbols: Record<string, string> = {
   XAU_USD: "XAU/USD",
+  DXY: "DXY",
 };
 
 export function resolveTwelveDataSymbol(symbol: string): string {
