@@ -387,6 +387,8 @@ export function registerPaperTradingRoutes(
         optionType: "CE" | "PE";
         underlyingSymbol: string;
         underlyingEntryPrice: number;
+        underlyingFillPrice: number | null;
+        underlyingFillPriceSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null;
         entryIv: number;
       } | undefined;
 
@@ -550,11 +552,19 @@ export function registerPaperTradingRoutes(
        * chosen from; a live quote is the fallback.
        */
       let underlyingEntryPrice: number | null = null;
+      // A manual open has no antecedent idea, so there is no separate signal-time level to
+      // record: the chain snapshot/live quote resolved here *is* the fill-moment observation,
+      // taken server-side in the same request that books the fill. Carried onto both
+      // underlyingEntryPrice (for consumers that read the "signal-time" column) and
+      // underlyingFillPrice (migration 120) -- for this path the two happen to be the same
+      // real observation, not two different numbers.
+      let underlyingFillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null = null;
       try {
         const snapshot = await dependencies.optionChainRepository.latestSnapshot({
           underlyingSymbol: String(underlyingSymbol).toUpperCase(),
         });
         underlyingEntryPrice = snapshot?.underlyingValue ?? null;
+        if (underlyingEntryPrice !== null) underlyingFillSource = "OPTION_CHAIN_QUOTE";
       } catch {
         underlyingEntryPrice = null;
       }
@@ -575,6 +585,13 @@ export function registerPaperTradingRoutes(
         // skips trap detection without an anchor, so the position simply keeps its ordinary
         // stop and target -- a wrong anchor would instead produce confident wrong exits.
         ...(underlyingEntryPrice === null ? {} : { underlyingEntryPrice }),
+        // Only carried onto underlyingFillPrice when it came from the chain snapshot: that is the
+        // one source here with a recognized provenance tag. The generic live-quote fallback has
+        // none, and a price with no provenance is exactly what underlying_fill_price_source exists
+        // to rule out -- so it is left null there rather than mislabelled.
+        ...(underlyingEntryPrice === null || underlyingFillSource === null
+          ? {}
+          : { underlyingFillPrice: underlyingEntryPrice, underlyingFillPriceSource: underlyingFillSource }),
         entryIv: iv,
       };
 

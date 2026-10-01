@@ -67,6 +67,9 @@ export interface PreparedOptionEntry {
     optionType: "CE" | "PE";
     underlyingSymbol: string;
     underlyingEntryPrice: number;
+    /** The underlying's real observed level at the fill instant, or null. See migration 120. */
+    underlyingFillPrice: number | null;
+    underlyingFillPriceSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null;
     entryIv: number;
   };
   feeBreakdown: Record<string, unknown>;
@@ -266,6 +269,9 @@ export class PrepareOptionEntry {
         impliedVolatility: chainGreeks.impliedVolatility,
         source: "OPTION_CHAIN_QUOTE" as const,
         observedAt: entryChain.observedAt,
+        // The chain snapshot's own underlying read, from the same observation the strike and
+        // premium were taken from -- carried onto underlying_fill_price (migration 120).
+        underlyingValue: entryChain.underlyingValue,
       }
       : null;
 
@@ -290,6 +296,9 @@ export class PrepareOptionEntry {
         impliedVolatility: denseIv.impliedVolatility,
         source: "OPTION_PREMIUM_TICK_ASK" as const,
         observedAt: denseQuote.observedAt,
+        // The same dense tick's underlying read -- carried onto underlying_fill_price
+        // (migration 120) rather than re-derived.
+        underlyingValue: denseQuote.underlyingValue,
       }
       : null;
 
@@ -395,6 +404,8 @@ export class PrepareOptionEntry {
           optionType: mapped.optionType,
           underlyingSymbol: idea.symbol,
           underlyingEntryPrice: mapped.underlyingEntryPrice,
+          underlyingFillPrice: mapped.underlyingFillPrice,
+          underlyingFillPriceSource: mapped.underlyingFillPriceSource,
           entryIv: mapped.impliedVolatility,
         },
         entryFees: entryFees.total,

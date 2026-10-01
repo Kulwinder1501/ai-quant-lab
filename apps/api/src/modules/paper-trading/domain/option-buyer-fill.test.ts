@@ -210,6 +210,35 @@ describe("mapIdeaToOptionBuyerFill with an observed chain fill", () => {
     expect(modelled.fillPremium).not.toBe(observed.fillPremium);
   });
 
+  it("carries the observed quote's underlying value as underlyingFillPrice, separate from underlyingEntryPrice", () => {
+    // underlyingEntry (base.underlyingEntry) is the idea's signal-time level; the observed
+    // quote's underlyingValue is a different, later observation -- the real spot at the fill.
+    const observed = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: {
+        premium: 752.75, impliedVolatility: 0.12983,
+        source: "OPTION_PREMIUM_TICK_ASK", underlyingValue: 57_797,
+      },
+    });
+
+    expect(observed.underlyingEntryPrice).toBe(base.underlyingEntry);
+    expect(observed.underlyingFillPrice).toBe(57_797);
+    expect(observed.underlyingFillPriceSource).toBe("OPTION_PREMIUM_TICK_ASK");
+  });
+
+  it("leaves underlyingFillPrice null when there is no observed fill, or the observed quote carried no underlying value", () => {
+    const modelled = mapIdeaToOptionBuyerFill(base);
+    expect(modelled.underlyingFillPrice).toBeNull();
+    expect(modelled.underlyingFillPriceSource).toBeNull();
+
+    const noUnderlyingValue = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 752.75, impliedVolatility: 0.12983 },
+    });
+    expect(noUnderlyingValue.underlyingFillPrice).toBeNull();
+    expect(noUnderlyingValue.underlyingFillPriceSource).toBeNull();
+  });
+
   it("reprices stop and target on the observed IV, not the caller's estimate", () => {
     // Entry from the market and exits from a different volatility would put the two ends of
     // the same trade on different surfaces. A wider stop keeps the geometry valid across

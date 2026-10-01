@@ -234,6 +234,30 @@ describe("PrepareOptionEntry - pricing the entry", () => {
     expect(result.entry.lotSize).toBe(15);
     expect(result.entry.entryFees).toBeGreaterThan(0);
   });
+
+  it("carries the dense tick's real underlying value as underlyingFillPrice, distinct from the idea's signal-time entry", async () => {
+    // The idea's entry_price (57720) is the signal-candle level; the dense tick observed at the
+    // actual fill moment shows the underlying has since moved to 57_797 -- the kind of
+    // signal-to-fill lag that produced a 19-158 point gap on real BANKNIFTY trades.
+    const result = await service({
+      premiumTick: { observedAt: NOW, bid: 745, ask: 752, lastPrice: 748, underlyingValue: 57_797 },
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.underlyingEntryPrice).toBe(57_720);
+    expect(result.entry.optionContract.underlyingFillPrice).toBe(57_797);
+    expect(result.entry.optionContract.underlyingFillPriceSource).toBe("OPTION_PREMIUM_TICK_ASK");
+  });
+
+  it("falls back to the chain snapshot's underlying value as underlyingFillPrice when no dense tick is usable", async () => {
+    const result = await service({ premiumTick: null }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.underlyingFillPrice).toBe(57_720);
+    expect(result.entry.optionContract.underlyingFillPriceSource).toBe("OPTION_CHAIN_QUOTE");
+  });
 });
 
 describe("PrepareOptionEntry - the pre-trade gate", () => {

@@ -69,6 +69,8 @@ interface PaperTradeRow extends QueryResultRow {
   option_type: "CE" | "PE" | null;
   underlying_symbol: string | null;
   underlying_entry_price: string | null;
+  underlying_fill_price: string | null;
+  underlying_fill_price_source: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
   underlying_exit_price: string | null;
   entry_iv: string | null;
   regime_observation_id: string | null;
@@ -137,6 +139,8 @@ const tradeColumns = `
   paper_trades.option_type,
   paper_trades.underlying_symbol,
   paper_trades.underlying_entry_price,
+  paper_trades.underlying_fill_price,
+  paper_trades.underlying_fill_price_source,
   paper_trades.underlying_exit_price,
   paper_trades.entry_iv,
   paper_trades.regime_observation_id
@@ -198,6 +202,10 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     underlyingEntryPrice: row.underlying_entry_price === null || row.underlying_entry_price === undefined
       ? null
       : toNumber(row.underlying_entry_price, "underlying entry price"),
+    underlyingFillPrice: row.underlying_fill_price === null || row.underlying_fill_price === undefined
+      ? null
+      : toNumber(row.underlying_fill_price, "underlying fill price"),
+    underlyingFillPriceSource: row.underlying_fill_price_source ?? null,
     underlyingExitPrice: row.underlying_exit_price === null || row.underlying_exit_price === undefined
       ? null
       : toNumber(row.underlying_exit_price, "underlying exit price"),
@@ -529,10 +537,10 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
         entry_price, stop_loss, initial_stop_loss, stop_loss_effective_at, target_price, opened_at,
         fees, fee_breakdown, slippage, notes,
         option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv,
-        regime_observation_id
+        regime_observation_id, underlying_fill_price, underlying_fill_price_source
       ) VALUES (
         $1, $2, $3, $4, $14, $5, $5, $6, $7, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
-        $15, $16, $17, $18, $19, $20, $21
+        $15, $16, $17, $18, $19, $20, $21, $22, $23
       ) RETURNING id
     `, [
       input.accountId, idea.id, idea.instrument_id, side, input.quantity,
@@ -542,6 +550,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       contract?.optionType ?? null, contract?.underlyingSymbol ?? null,
       contract?.underlyingEntryPrice ?? null, contract?.entryIv ?? null,
       input.regimeObservationId ?? null,
+      contract?.underlyingFillPrice ?? null, contract?.underlyingFillPriceSource ?? null,
     ]);
     const paperTradeId = inserted.rows[0]?.id;
     if (!paperTradeId) {

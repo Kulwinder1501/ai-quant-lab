@@ -101,6 +101,33 @@ export interface PaperTrade {
   underlyingSymbol?: string | null;
   underlyingEntryPrice?: number | null;
   /**
+   * The underlying's real observed level at the instant this position actually filled, and null
+   * when none was observed.
+   *
+   * Distinct from `underlyingEntryPrice`: that is the idea's signal-candle level, recorded at the
+   * moment the trade idea was generated. Acceptance checks, sizing and cadence put real lag
+   * between a signal and its fill, and the underlying moves in that window -- a gap of 19 to 158
+   * points was measured across 8 recent BANKNIFTY trades. Use this field, not
+   * `underlyingEntryPrice`, for any "did the underlying move during the hold" question; keep using
+   * `underlyingEntryPrice` for anything anchored to the thesis/decision (stop and target distances,
+   * `UnderlyingOutcome.entryReference`, and similar), since those are computed from the signal
+   * candle by construction.
+   *
+   * Populated going forward from the same real-time quote that fills the option leg
+   * (`option_premium_ticks.underlying_value`, or the chain snapshot's `underlying_value` as a
+   * fallback). A historical trade may instead carry a value reconstructed by a one-off backfill
+   * from the nearest tick within tolerance -- see `underlyingFillPriceSource` to tell the two
+   * apart. See migration 120.
+   */
+  underlyingFillPrice?: number | null;
+  /**
+   * Provenance for `underlyingFillPrice`. 'OPTION_CHAIN_QUOTE' / 'OPTION_PREMIUM_TICK_ASK' mean
+   * observed in real time, from the same quote that filled the option. 'BACKFILLED_NEAREST_TICK'
+   * means reconstructed after the fact from the nearest `option_premium_ticks` row -- a weaker
+   * claim. Null exactly when `underlyingFillPrice` is null.
+   */
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  /**
    * The underlying's level observed at the exit instant, and null on an open position.
    *
    * Populated only by the observed-tick exit path, from the crossing sample itself. Null on a close
@@ -135,7 +162,12 @@ export interface OptionContractSpec {
   optionType: OptionContractType;
   underlyingSymbol: string;
   /**
-   * Spot when the contract was bought, the anchor trap detection measures divergence from.
+   * The idea's signal-candle spot, not necessarily when the contract was actually bought.
+   *
+   * Trap detection (`decideOptionBuyerExit` / `decideOptionBuyerLiveExit`) prefers
+   * `underlyingFillPrice` as its divergence anchor and falls back to this field only when no fill
+   * price was captured -- see migration 120. This field remains the right anchor for anything tied
+   * to the thesis rather than the fill (stop/target distances, `UnderlyingOutcome.entryReference`).
    *
    * Optional because "not known" is a real state and the honest encoding of it. The column is
    * already nullable and `decideOptionBuyerLiveExit` skips trap detection without an anchor,
@@ -143,6 +175,10 @@ export interface OptionContractSpec {
    * spot-shaped instead — the strike, say — produces confident wrong exits.
    */
   underlyingEntryPrice?: number;
+  /** See `PaperTrade.underlyingFillPrice`. Carried through at open time via migration 120. */
+  underlyingFillPrice?: number | null;
+  /** See `PaperTrade.underlyingFillPriceSource`. */
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
   entryIv: number;
 }
 

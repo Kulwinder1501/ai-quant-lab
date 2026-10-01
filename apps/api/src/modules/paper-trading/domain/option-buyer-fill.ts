@@ -76,6 +76,16 @@ export interface OptionBuyerFillInput {
      * and the old asymmetry returns, which `exitBasisOffset` in the result makes explicit.
      */
     bid?: number | null;
+    /**
+     * The underlying's real spot carried on the same quote that supplied `premium`.
+     *
+     * This is what `underlying_fill_price` (migration 120) is populated from. It is a different
+     * number from `underlyingEntry` above: `underlyingEntry` is the idea's signal-candle level,
+     * while this is the level observed at the instant this fill was actually priced -- the two can
+     * differ by a material amount whenever acceptance checks, sizing or cadence put lag between
+     * signal and fill. Null/undefined when the observed quote carried no underlying value.
+     */
+    underlyingValue?: number | null;
   };
 }
 
@@ -118,6 +128,15 @@ export interface OptionBuyerFill {
   entryGreeks: OptionGreeks;
   timeToExpiryYears: number;
   underlyingEntryPrice: number;
+  /**
+   * The underlying's real observed level at the fill instant, or null when no observed quote
+   * carried one (an `OPTION_MODEL` fallback fill, or an observed quote with no underlying value).
+   *
+   * Distinct from `underlyingEntryPrice`, which is the idea's signal-time level. See migration 120.
+   */
+  underlyingFillPrice: number | null;
+  /** Provenance for `underlyingFillPrice`. Null exactly when that value is null. */
+  underlyingFillPriceSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null;
 }
 
 /**
@@ -257,6 +276,17 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     }
   }
 
+  // The real fill-moment spot, carried from the same observed quote that priced the option --
+  // never derived from `input.underlyingEntry`, which is the idea's signal-time level and the
+  // exact number this field exists to be measured independently of.
+  const observedUnderlyingValue = input.observedFill?.underlyingValue;
+  const underlyingFillPrice = observedUnderlyingValue != null && Number.isFinite(observedUnderlyingValue)
+    ? observedUnderlyingValue
+    : null;
+  const underlyingFillPriceSource = underlyingFillPrice === null
+    ? null
+    : (input.observedFill?.source ?? "OPTION_CHAIN_QUOTE");
+
   return {
     optionType,
     side: "LONG",
@@ -272,6 +302,8 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
     entryGreeks,
     timeToExpiryYears: T,
     underlyingEntryPrice: input.underlyingEntry,
+    underlyingFillPrice,
+    underlyingFillPriceSource,
   };
 }
 
