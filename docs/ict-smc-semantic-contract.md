@@ -13,7 +13,7 @@ This document serves as the single source of truth for all Inner Circle Trader (
 The primary mandate of this specification is to:
 1. **Normalize Vocabulary, Preserve Evidence**: Ensure one detector per underlying market event while preserving raw primitive state vectors (`ob_present`, `sweep_distance_atr`, `mss_present`, `bpr_present`) for Machine Learning feature extraction.
 2. **Distinguish ICT Semantics from Operationalization**: Separate *what* ICT defines conceptually (`CANONICAL`) from *how* AI Quant Lab quantifies it deterministically (`AIQL_OPERATIONAL`).
-3. **Enforce Causal Zero-Lookahead**: Establish strict lifecycle timestamp tracking (`candidateAt?`, `formedAt?`, `confirmedAt`, `availableAt`, `testedAt?`, `mitigatedAt?`, `invalidatedAt?`) where `availableAt` is the **only** timestamp accessible to downstream strategy and feature pipelines.
+3. **Enforce Causal Zero-Lookahead**: Establish causal lifecycle models separating single structural events (`IctCausalEvent`: `candidateAt?`, `formedAt?`, `confirmedAt?`, `availableAt`) from persistent POI zones (`IctZoneLifecycle`: `testedAt?`, `mitigatedAt?`, `invalidatedAt?`), where `availableAt` is the **only** timestamp accessible to downstream strategy and feature pipelines.
 4. **Formalize Replay Invariants**: Specify exact mathematical constraints for Prefix Invariance and Future Perturbation Invariance testing.
 5. **Prevent Ambiguous Implementations**: Quarantine non-frozen concept variants (`Reclaimed OB`, `Propulsion Block`, `Vacuum Block`) into an explicit `NOT_REGISTERED` tier.
 
@@ -30,8 +30,8 @@ All concepts within the ICT/SMC domain are categorized into a **Structural Ontol
               │                       │
         SEMANTIC ONTOLOGY        DUAL STATUS SYSTEM
               │                       │
-       CORE / DERIVED /          SEMANTIC STATUS:
-       CONTEXT / MODEL /         REGISTERED | EXPERIMENTAL |
+       LEVEL / EVENT / ZONE /    SEMANTIC STATUS:
+       STATE / CONTEXT / MODEL / REGISTERED | EXPERIMENTAL |
        NOT_REGISTERED            DEPRECATED | NOT_REGISTERED
               │
               │                  EMPIRICAL STATUS:
@@ -45,24 +45,38 @@ All concepts within the ICT/SMC domain are categorized into a **Structural Ontol
        EVENT LIFECYCLES (availableAt cutoff)
               │
               ▼
-       DERIVED CONTEXT
+       DERIVED CONTEXT & STATES
               │
               ▼
-     CAUSAL SNAPSHOT @ T
+      CAUSAL SNAPSHOT @ T
               │
               ▼
-   RAW SCALE-NORMALIZED FEATURES
+    RAW ATR-NORMALIZED FEATURES
               │
               ▼
-      RESEARCH / ML LAYER
+       RESEARCH / ML LAYER
 ```
 
-### 2.1 Structural Ontology Tiers
-- **`CORE`**: Swings, BSL, SSL, FVG, Bullish/Bearish OB, ICT Supply/Demand Zones (distinct from OBs), BOS, CHoCH, MSS, Displacement, Premium/Discount.
-- **`DERIVED`**: Balanced Price Range (BPR), Inverted FVG (IFVG), Breaker Block.
-- **`CONTEXT`**: Sessions, Killzones, Dealing Range, `DrawOnLiquidityState`.
-- **`MODEL`**: PO3/AMD, Silver Bullet, Turtle Soup, CRT, MMXM.
+### 2.1 Structural Ontology Tiers & Concept Families
+
+Domain objects are classified along two orthogonal axes: **Structural Ontology Tier** (object semantics) and **Concept Family** (functional domain).
+
+#### Structural Ontology Tiers:
+- **`LEVEL`**: Buy-Side Liquidity (BSL), Sell-Side Liquidity (SSL), Equal Highs/Lows (EQH/EQL), Previous Day/Week/Month High/Low (PDH/PDL/PWH/PWL/PMH/PML).
+- **`EVENT`**: Market Structure Shift (MSS), Break of Structure (BOS), Change of Character (CHoCH), Liquidity Sweep, Change in State of Delivery (CISD).
+- **`ZONE`**: Fair Value Gap (FVG), Bullish/Bearish Order Block (OB), Breaker Block, Rejection Block, Balanced Price Range (BPR), ICT Supply/Demand Zones (distinct from OBs).
+- **`STATE`**: Candidate Target Liquidity State (`DrawOnLiquidityState`).
+- **`CONTEXT`**: Premium/Discount State, Dealing Range, Sessions, Killzones.
+- **`MODEL`**: Power of 3 (PO3/AMD), Silver Bullet, Turtle Soup, Classic Reversal Template (CRT), Market Maker Execution Model (MMXM).
 - **`NOT_REGISTERED`**: Reclaimed OB, Propulsion Block, Vacuum Block (quarantined).
+
+#### Concept Families:
+- **`Structure`** (`family = STRUCTURE`): Swings (`ontology = LEVEL`), MSS (`ontology = EVENT`), BOS (`ontology = EVENT`), CHoCH (`ontology = EVENT`).
+- **`Liquidity`** (`family = LIQUIDITY`): BSL/SSL pools (`ontology = LEVEL`), Sweeps/Breakouts (`ontology = EVENT`), Equal Highs/Lows (`ontology = LEVEL`).
+- **`Imbalance`** (`family = IMBALANCE`): Fair Value Gap (`ontology = ZONE`), Balanced Price Range (`ontology = ZONE`), Inverted FVG (`ontology = ZONE`).
+- **`PD Arrays`** (`family = PD_ARRAYS`): Order Block (`ontology = ZONE`), Breaker Block (`ontology = ZONE`), Rejection Block (`ontology = ZONE`), ICT Supply/Demand (`ontology = ZONE`).
+- **`Valuation`** (`family = VALUATION`): Dealing Range (`ontology = CONTEXT`), Premium/Discount (`ontology = CONTEXT`), OTE Retracement (`ontology = CONTEXT`).
+- **`Time`** (`family = TIME`): Sessions (`ontology = CONTEXT`), Killzones (`ontology = CONTEXT`), Macro windows (`ontology = CONTEXT`).
 
 *Note: Order Blocks (last opposite-color candle) and ICT Supply/Demand Zones (same-direction origin candle) are structurally distinct concepts and are not collapsed into a single detector.*
 
@@ -77,9 +91,11 @@ Every concept entry tracks:
 ## 3. Global Causal Invariants & Evaluation Clock
 
 ### 3.1 Evaluation Clock & Availability
-Let $T$ represent the **evaluation instant** (current clock time or backtest step timestamp).
-
-- **Bar Timestamps**: A candle $C$ has `barOpenTimestamp` and `barCloseTimestamp = barOpenTimestamp + timeframe`.
+Let $T$ represent the **evaluation timestamp** (current clock instant or backtest evaluation time), which is strictly distinguished from candle timestamps:
+- **Bar Timestamps**: A candle $i$ has `barOpenTimestamp(i)` and `barCloseTimestamp(i) = barOpenTimestamp(i) + timeframe`.
+- **Closed-Bar Evaluation Rule**: For the OHLCV domain engine, evaluation timestamps $T$ are strictly restricted to completed bar close timestamps:
+  $$T \in \{ \text{barCloseTimestamp}(i) \}$$
+  *All ICT/SMC feature snapshots are evaluated at completed-bar close unless a detector explicitly declares support for partial-bar intrabar observations.*
 - **Causal Availability Theorem**: An event $E$ is completely invisible to downstream feature extraction and trading strategy logic unless:
   $$E.\text{availableAt} \le T$$
 
@@ -87,7 +103,7 @@ Let $T$ represent the **evaluation instant** (current clock time or backtest ste
 $$X_T = f(D_{\le T})$$
 No feature value $X_T$ computed for evaluation instant $T$ may consume market data $D_{T + \Delta}$ for any $\Delta > 0$.
 
-### 3.3 Scale-Free Volatility Normalization
+### 3.3 ATR-Normalized Volatility Scaling
 Spatial distance metrics use ATR normalization to reduce instrument and volatility-scale dependence:
 $$d_{\text{ATR}}(P_T, Z) = \begin{cases} 0 & \text{if } P_T \in [Z_{\text{low}}, Z_{\text{high}}] \\ \frac{\min(|P_T - Z_{\text{low}}|, |P_T - Z_{\text{high}}|)}{\text{ATR}_{14}(T)} & \text{otherwise} \end{cases}$$
 *Note: ATR normalization reduces instrument and volatility-scale dependence; it does not by itself guarantee statistical stationarity.*
@@ -96,21 +112,30 @@ $$d_{\text{ATR}}(P_T, Z) = \begin{cases} 0 & \text{if } P_T \in [Z_{\text{low}},
 
 ## 4. Timestamp Lifecycle Model
 
-Domain events implement the extended `IctEventLifecycle` interface:
+Domain objects separate event causality from zone lifecycles via `IctCausalEvent` and `IctZoneLifecycle`:
 
 ```typescript
-export interface IctEventLifecycle {
+// Applicable to all single point-in-time structural events (MSS, BOS, CHoCH, Sweep, CISD, Session)
+export interface IctCausalEvent {
   candidateAt?: number;    // Visual candidate appearance timestamp
   formedAt?: number;       // Structural formation completion timestamp
-  confirmedAt: number;     // Rule requirements confirmation timestamp
-  availableAt: number;     // MANDATORY cutoff timestamp for downstream strategy/ML usage
+  confirmedAt?: number;    // Rule requirements confirmation timestamp
+  availableAt: number;     // MANDATORY downstream cutoff timestamp
+}
+
+// Applicable only to persistent structural POI zones (OB, FVG, Breaker, BPR, Rejection Block)
+export interface IctZoneLifecycle extends IctCausalEvent {
   testedAt?: number;       // First zone re-entry/test timestamp
   mitigatedAt?: number;    // 50% CE penetration / mitigation timestamp
   invalidatedAt?: number;  // Zone structural breach timestamp
 }
 ```
 
-### 4.1 Invariant Timestamp Rules
+### 4.1 Categorized Domain Interface Mapping
+- **`IctCausalEvent`**: `MSS`, `BOS`, `CHoCH`, `Liquidity Sweep`, `CISD`, `Session`.
+- **`IctZoneLifecycle`**: `Order Block (OB)`, `Fair Value Gap (FVG)`, `Breaker Block`, `Rejection Block`, `Balanced Price Range (BPR)`.
+
+### 4.2 Invariant Timestamp Rules
 - `availableAt` is the **only** timestamp downstream feature extraction and execution logic may query.
 - For a 5-minute bar opening at 10:00 (close at 10:05), an FVG confirmed on bar close has `confirmedAt = 10:05` and `availableAt = 10:05`. It cannot be accessed at evaluation instant $T = 10:00$.
 
@@ -142,7 +167,15 @@ export interface InstrumentSessionCalendar {
 ## 6. Market Structure Definitions
 
 ### 6.1 Swing High & Swing Low (`ICT-STR-01`)
-- **Canonical Definition**: Local extremum flanked by $L$ lower highs to the left and $R$ lower highs to the right.
+- **Canonical Definition**:
+  - **Swing High at bar $i$**: A local maximum high flanked by $L$ bars to the left and $R$ bars to the right satisfying:
+    $$H_i > H_j \quad \forall j \in [i-L, i+R], \; j \neq i$$
+    Equivalently: $H_i = \max(H_{i-L}, \ldots, H_{i+R})$ with strict inequality flanking.
+  - **Swing Low at bar $i$**: A local minimum low flanked by $L$ bars to the left and $R$ bars to the right satisfying:
+    $$L_i < L_j \quad \forall j \in [i-L, i+R], \; j \neq i$$
+    Equivalently: $L_i = \min(L_{i-L}, \ldots, L_{i+R})$ with strict inequality flanking.
+- **Equal Highs / Equal Lows Handling**:
+  If two adjacent highs $H_i$ and $H_k$ ($|i-k| \le 2$) satisfy $|H_i - H_k| / H_i \le 0.0005$ and both clear flanking bounds, they are classified as **Equal Highs (EQH)** liquidity levels rather than a single distinct swing high.
 - **Operationalization**:
   - `candidateAt` = timestamp of swing peak candle $i$.
   - `confirmedAt` = timestamp of bar $i + R$.
@@ -176,18 +209,47 @@ export interface InstrumentSessionCalendar {
 - **Breakout**: Candle close beyond level ($P_{\text{close}} > \text{Level}$).
 - **Availability**: `availableAt = barCloseTimestamp(sweepBar)`.
 
-### 7.3 Draw on Liquidity State (`DrawOnLiquidityState`)
-- **Definition**: Contextual state representing candidate target liquidity pools toward which price is expected to gravitate based on distance and HTF bias.
-- **Deterministic Selection Rule**:
+### 7.3 Candidate Target Liquidity State (`DrawOnLiquidityState`)
+- **Definition**: Contextual state representing candidate target liquidity pools toward which price is expected to move based on distance and HTF bias.
+- **Deterministic Selection Schema**:
 
 ```typescript
 export interface DrawOnLiquidityState {
   candidatePools: LiquidityPool[];
   selectedPool?: LiquidityPool;
   direction?: -1 | 0 | 1;
-  selectionRuleVersion: string; // e.g. "MIN_ATR_DISTANCE_WITH_HTF_BIAS_v1"
+  selectionRuleVersion: string; // e.g. "LIQUIDITY_TARGET_SELECTION_V1"
 }
 ```
+
+*Operationalization Note: `DrawOnLiquidityState` is an `AIQL_OPERATIONAL` state representation of candidate target liquidity pools for feature tracking, not an empirical assertion that market price is guaranteed to move toward the selected pool.*
+
+### 7.4 Formal 8-Step Deterministic Selection Algorithm
+
+Given evaluation instant $T$, price $P_T$, ATR $\text{ATR}_{14}(T)$, pool history $\mathcal{H}_{\text{pools}}$, and HTF directional bias $\text{direction}_{\text{HTF}} \in \{-1, 0, 1\}$:
+
+1. **Step 1: Pool Identification**: Gather all structural liquidity pools from $\mathcal{H}_{\text{pools}}$.
+2. **Step 2: Causal Availability Gate**: Keep strictly pools satisfying $\text{pool}.\text{availableAt} \le T$.
+3. **Step 3: Exclude Invalid/Expired Pools**: Filter out pools with `state === 'INVALIDATED'` or `state === 'BREACHED'`.
+4. **Step 4: Pool Eligibility Rules**: Filter by recognized level types (`PWH`, `PWL`, `PDH`, `PDL`, `ITH`, `ITL`, `SWING_HIGH`, `SWING_LOW`, `SESSION_HIGH`, `SESSION_LOW`, `EQH`, `EQL`).
+5. **Step 5: Directional & HTF-Bias Policy**:
+   - If $\text{direction}_{\text{HTF}} = 1$ (Bullish): Keep only Buy-Side Liquidity (BSL) target pools ($\text{level} > P_T$).
+   - If $\text{direction}_{\text{HTF}} = -1$ (Bearish): Keep only Sell-Side Liquidity (SSL) target pools ($\text{level} < P_T$).
+   - If $\text{direction}_{\text{HTF}} = 0$ (Neutral): Keep both BSL and SSL pools.
+6. **Step 6: ATR-Normalized Distance Calculation**:
+   For each candidate pool, compute:
+   $$d_{\text{ATR}}(P_T, \text{pool}) = \frac{|\text{pool}.\text{price} - P_T|}{\text{ATR}_{14}(T)}$$
+7. **Step 7: Candidate Ranking & Deterministic Tie-Break**:
+   Sort qualified candidate pools ascending by $d_{\text{ATR}}(P_T, \text{pool})$. If two candidate pools $\text{pool}_A$ and $\text{pool}_B$ satisfy $|d_{\text{ATR}}(\text{pool}_A) - d_{\text{ATR}}(\text{pool}_B)| < 0.01$:
+   - **Tie-Break 7a (Priority Tier)**: Select pool with higher structural priority tier:
+     - Tier 1: `PWH`, `PWL`, `PDH`, `PDL`, `PMH`, `PML`
+     - Tier 2: `ITH`, `ITL`, `SWING_HIGH`, `SWING_LOW`
+     - Tier 3: `SESSION_HIGH`, `SESSION_LOW`, `EQH`, `EQL`
+   - **Tie-Break 7b (Recency)**: If priority tiers are equal, select pool with larger `availableAt` timestamp descending.
+   - **Tie-Break 7c (Lexicographical ID)**: If still tied, sort by pool string `id` ascending.
+8. **Step 8: No-Candidate Behavior & Opposing Equidistance Resolution**:
+   - If no pool qualifies, return `selectedPool = undefined`, `direction = 0`, `candidatePools = []`.
+   - When $\text{direction}_{\text{HTF}} = 0$, if top BSL and top SSL pools are tied in $d_{\text{ATR}}$ ($< 0.01$), select the pool matching current bar directional expansion ($P_{\text{close}} > P_{\text{open}} \rightarrow \text{BSL}$; $P_{\text{close}} < P_{\text{open}} \rightarrow \text{SSL}$).
 
 ---
 
@@ -242,10 +304,13 @@ To eliminate circularity, OB definition is decoupled into three stages:
 Order Blocks and FVGs transition across 4 formal states:
 
 ```
-  [FRESH] ──(test)──> [TESTED] ──(50% CE)──> [MITIGATED] ──(close through)──> [INVALIDATED]
+  [FRESH] ──(test)──> [TESTED] ──(mitigation rule)──> [MITIGATED] ──(close through)──> [INVALIDATED]
 ```
 
 Each state transition emits a lifecycle record with its own `availableAt` timestamp.
+
+*Operationalization Rule (`AIQL_OPERATIONAL`)*:  
+Zone mitigation is quantified using operational rule `ZONE_MITIGATION_RULE = CE_50_V1`, defining mitigation as price penetration reaching $\ge 50\%$ Consequent Encroachment (CE) / Mean Threshold. Canonical ICT semantics define mitigation conceptually as price returning into a zone's rebalancing area, while 50% CE is AI Quant Lab's explicit operationalization threshold.
 
 ---
 

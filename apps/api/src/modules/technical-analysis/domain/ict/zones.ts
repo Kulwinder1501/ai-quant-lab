@@ -25,17 +25,23 @@ export type ZoneLifecycleState = "FRESH" | "TOUCHED" | "PARTIALLY_FILLED" | "CON
  */
 export type OrderBlockKind = "CLASSIC" | "ADVANCE" | "REJECTION" | "MITIGATION" | "BREAKER" | "RECLAIM";
 
-export interface IctEventLifecycle {
+export interface IctCausalEvent {
   readonly candidateAt?: number;
   readonly formedAt?: number;
-  readonly confirmedAt: number;
+  readonly confirmedAt?: number;
   readonly availableAt: number;
+}
+
+export interface IctZoneLifecycle extends IctCausalEvent {
   readonly testedAt?: number;
   readonly mitigatedAt?: number;
   readonly invalidatedAt?: number;
 }
 
-export interface FairValueGap extends IctEventLifecycle {
+/** Backwards-compatible alias for zone lifecycle objects */
+export type IctEventLifecycle = IctZoneLifecycle;
+
+export interface FairValueGap extends IctZoneLifecycle {
   readonly id: string;
   readonly type: "BULLISH" | "BEARISH";
   readonly top: number;
@@ -76,7 +82,7 @@ export interface FairValueGap extends IctEventLifecycle {
   readonly isIdmAdjacent: boolean;
 }
 
-export interface OrderBlock extends IctEventLifecycle {
+export interface OrderBlock extends IctZoneLifecycle {
   readonly id: string;
   readonly type: "BULLISH" | "BEARISH";
   readonly top: number;

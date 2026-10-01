@@ -1,3 +1,5 @@
+import type { IctCausalEvent } from "./zones.js";
+
 export interface CausalCandle {
   readonly id: string;
   readonly openTime: Date;
@@ -8,13 +10,14 @@ export interface CausalCandle {
   readonly volume: number;
 }
 
-export interface ConfirmedPivot {
+export interface ConfirmedPivot extends IctCausalEvent {
   readonly index: number; // Index of the candle where the pivot occurred
   readonly time: Date;
   readonly price: number;
   readonly type: "HIGH" | "LOW";
   readonly confirmedAtIndex: number; // The bar index at which the pivot was confirmed strictly causally
   readonly confirmedAtTime: Date;
+  readonly availableAt: number;
 }
 
 export interface ConfirmedPivotPair {
@@ -69,6 +72,10 @@ export function findConfirmedPivotAt(
           type: "HIGH",
           confirmedAtIndex: knownAtIndex,
           confirmedAtTime: confirmedBar.openTime,
+          candidateAt: candidate.openTime.getTime(),
+          formedAt: candidate.openTime.getTime(),
+          confirmedAt: confirmedBar.openTime.getTime(),
+          availableAt: confirmedBar.openTime.getTime(),
         }
       : null,
     low: isSwingLow
@@ -79,6 +86,10 @@ export function findConfirmedPivotAt(
           type: "LOW",
           confirmedAtIndex: knownAtIndex,
           confirmedAtTime: confirmedBar.openTime,
+          candidateAt: candidate.openTime.getTime(),
+          formedAt: candidate.openTime.getTime(),
+          confirmedAt: confirmedBar.openTime.getTime(),
+          availableAt: confirmedBar.openTime.getTime(),
         }
       : null,
   };

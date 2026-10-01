@@ -21,6 +21,120 @@ export interface LiquidityPool {
   readonly top?: number;
   readonly bottom?: number;
   readonly isMitigated: boolean;
+  readonly availableAt?: number;
+  readonly state?: "ACTIVE" | "INVALIDATED" | "BREACHED" | "MITIGATED";
+}
+
+export interface DrawOnLiquidityState {
+  readonly candidatePools: readonly LiquidityPool[];
+  readonly selectedPool?: LiquidityPool;
+  readonly direction?: -1 | 0 | 1;
+  readonly selectionRuleVersion: string; // e.g. "LIQUIDITY_TARGET_SELECTION_V1"
+}
+
+function getPriorityTier(kind: string): number {
+  switch (kind) {
+    case "PWH": case "PWL": case "PDH": case "PDL": case "PMH": case "PML":
+    case "ERL_PDH": case "ERL_PDL":
+      return 1;
+    case "ITH": case "ITL": case "SWING_HIGH": case "SWING_LOW":
+    case "ERL_SWING_HIGH": case "ERL_SWING_LOW":
+      return 2;
+    case "SESSION_HIGH": case "SESSION_LOW": case "EQH": case "EQL":
+    case "ERL_EQH": case "ERL_EQL": case "IRL_FVG": case "IRL_OB":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+/**
+ * Formal 8-Step Deterministic Selection Algorithm: LIQUIDITY_TARGET_SELECTION_V1
+ */
+export function computeDrawOnLiquidity(
+  pools: readonly LiquidityPool[],
+  evalInstant: number,
+  currentPrice: number,
+  atr14: number,
+  htfDirection: -1 | 0 | 1,
+  isBullishBar: boolean = true
+): DrawOnLiquidityState {
+  const effectiveAtr = atr14 > 0 ? atr14 : 1;
+
+  // Step 1, 2, 3: Identification, Causal Gate, Exclude Invalid/Expired
+  const availablePools = pools.filter((p) => {
+    if (p.availableAt !== undefined && p.availableAt > evalInstant) return false;
+    if (p.isMitigated || p.state === "INVALIDATED" || p.state === "BREACHED") return false;
+    return true;
+  });
+
+  // Step 5: Directional & HTF-Bias Policy
+  const qualifiedPools = availablePools.filter((p) => {
+    if (htfDirection === 1) return p.price > currentPrice; // BSL target
+    if (htfDirection === -1) return p.price < currentPrice; // SSL target
+    return true; // Neutral: both BSL and SSL
+  });
+
+  if (qualifiedPools.length === 0) {
+    return {
+      candidatePools: [],
+      selectedPool: undefined,
+      direction: 0,
+      selectionRuleVersion: "LIQUIDITY_TARGET_SELECTION_V1",
+    };
+  }
+
+  // Step 6 & 7: ATR-Normalized Distance Calculation & Candidate Ranking
+  const candidates = qualifiedPools.map((pool) => ({
+    pool,
+    dATR: Math.abs(pool.price - currentPrice) / effectiveAtr,
+  }));
+
+  candidates.sort((a, b) => {
+    const dDiff = Math.abs(a.dATR - b.dATR);
+    if (dDiff >= 0.01) {
+      return a.dATR - b.dATR; // Ascending ATR distance
+    }
+
+    // Step 7a: Priority Tier
+    const tierA = getPriorityTier(a.pool.kind);
+    const tierB = getPriorityTier(b.pool.kind);
+    if (tierA !== tierB) {
+      return tierA - tierB;
+    }
+
+    // Step 7b: Recency (availableAt descending)
+    const timeA = a.pool.availableAt ?? 0;
+    const timeB = b.pool.availableAt ?? 0;
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+
+    // Step 7c: Lexicographical ID ascending
+    return a.pool.id.localeCompare(b.pool.id);
+  });
+
+  let selectedPool = candidates[0].pool;
+
+  // Step 8: Opposing Equidistance Resolution when HTF Direction is 0
+  if (htfDirection === 0 && candidates.length > 1) {
+    const topBSL = candidates.find((c) => c.pool.price > currentPrice);
+    const topSSL = candidates.find((c) => c.pool.price < currentPrice);
+
+    if (topBSL && topSSL && Math.abs(topBSL.dATR - topSSL.dATR) < 0.01) {
+      selectedPool = isBullishBar ? topBSL.pool : topSSL.pool;
+    }
+  }
+
+  const direction: -1 | 0 | 1 =
+    selectedPool.price > currentPrice ? 1 : selectedPool.price < currentPrice ? -1 : 0;
+
+  return {
+    candidatePools: candidates.map((c) => c.pool),
+    selectedPool,
+    direction,
+    selectionRuleVersion: "LIQUIDITY_TARGET_SELECTION_V1",
+  };
 }
 
 export type FourPillarAlignmentStatus =

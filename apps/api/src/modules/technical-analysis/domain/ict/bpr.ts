@@ -1,4 +1,4 @@
-import type { FairValueGap } from "./zones.js";
+import type { FairValueGap, IctZoneLifecycle } from "./zones.js";
 
 /**
  * BPR -- Balanced Price Range.
@@ -36,7 +36,7 @@ import type { FairValueGap } from "./zones.js";
  * assume.
  */
 
-export interface BalancedPriceRange {
+export interface BalancedPriceRange extends IctZoneLifecycle {
   readonly id: string;
   /** The more recently formed gap's direction -- see the file docstring for why. */
   readonly type: "BULLISH" | "BEARISH";
@@ -48,6 +48,7 @@ export interface BalancedPriceRange {
   readonly newerGapId: string;
   /** The newer gap's own creation bar -- when this specific overlap came into existence. */
   readonly formedAtBarIndex: number;
+  readonly availableAt: number;
 }
 
 /**
@@ -77,6 +78,13 @@ export function computeBalancedPriceRanges(activeFvgs: readonly FairValueGap[]):
         olderGapId: older.id,
         newerGapId: newer.id,
         formedAtBarIndex: newer.createdAtBarIndex,
+        candidateAt: newer.candidateAt ?? newer.availableAt,
+        formedAt: newer.formedAt ?? newer.availableAt,
+        confirmedAt: newer.confirmedAt ?? newer.availableAt,
+        availableAt: newer.availableAt,
+        testedAt: newer.testedAt,
+        mitigatedAt: newer.mitigatedAt,
+        invalidatedAt: newer.invalidatedAt,
       });
     }
   }

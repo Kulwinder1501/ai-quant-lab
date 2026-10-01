@@ -145,6 +145,30 @@ describe("ICT replay builder", () => {
     expect(JSON.stringify(longRun[2])).toBe(JSON.stringify(shortRun[2]));
   });
 
+  it("is future-perturbation invariant: modifying future candles does not affect snapshot at bar i", () => {
+    const originalContexts = [
+      ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
+      ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
+      ctx("2026-01-06", 9, 15, 101, 103, 100, 102),
+      ctx("2026-01-06", 9, 20, 102, 104, 101, 103),
+      ctx("2026-01-07", 9, 15, 103, 105, 102, 104),
+    ];
+    const perturbedContexts = [
+      ctx("2026-01-05", 9, 15, 100, 101, 99, 100),
+      ctx("2026-01-05", 9, 20, 100, 102, 99, 101),
+      ctx("2026-01-06", 9, 15, 101, 103, 100, 102),
+      // Perturb future candles (bars 3 & 4)
+      ctx("2026-01-06", 9, 20, 500, 600, 400, 550),
+      ctx("2026-01-07", 9, 15, 550, 700, 300, 450),
+    ];
+
+    const originalSnaps = computeIctSnapshotsForContexts(originalContexts);
+    const perturbedSnaps = computeIctSnapshotsForContexts(perturbedContexts);
+
+    // Snapshot at bar 2 (index 2) must be identical despite future bar modifications
+    expect(JSON.stringify(perturbedSnaps[2])).toBe(JSON.stringify(originalSnaps[2]));
+  });
+
   it("leaves the HTF pillar uncovered when the window holds fewer than two sessions", () => {
     // Replaces the old "no 60m mapping" case. Bucketing is no longer keyed on the base timeframe at
     // all, so the only way to have no daily candle is to have no completed session.

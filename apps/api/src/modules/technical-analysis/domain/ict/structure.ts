@@ -1,9 +1,10 @@
 import type { CausalCandle, ConfirmedPivot } from "./causal-pivot.js";
 import { findConfirmedPivotAt } from "./causal-pivot.js";
+import type { IctCausalEvent } from "./zones.js";
 
 export type TrendDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
 
-export interface StructureEvent {
+export interface StructureEvent extends IctCausalEvent {
   readonly type: "BOS" | "CHOCH" | "IDM_CONFIRMED" | "SWEEP";
   readonly direction: "BULLISH" | "BEARISH";
   readonly level: number;
@@ -11,6 +12,7 @@ export interface StructureEvent {
   readonly candleTime: Date;
   readonly brokenPivot: ConfirmedPivot;
   readonly isWickOnly: boolean; // true = sweep, false = confirmed body close
+  readonly availableAt: number;
 }
 
 export interface IctStructureSnapshot {
@@ -198,6 +200,7 @@ export class IctStructureTracker {
             this.lastHH = this.unconfirmedHigh;
             this.unconfirmedHigh = null;
           }
+          const eventTs = current.openTime.getTime();
           currentEvent = {
             type: "IDM_CONFIRMED",
             direction: "BULLISH",
@@ -206,6 +209,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.activeIdm,
             isWickOnly: current.close > this.activeIdm.price,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.activeIdm = null;
         }
@@ -215,6 +222,7 @@ export class IctStructureTracker {
             this.lastLL = this.unconfirmedLow;
             this.unconfirmedLow = null;
           }
+          const eventTs = current.openTime.getTime();
           currentEvent = {
             type: "IDM_CONFIRMED",
             direction: "BEARISH",
@@ -223,6 +231,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.activeIdm,
             isWickOnly: current.close < this.activeIdm.price,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.activeIdm = null;
         }
@@ -232,6 +244,7 @@ export class IctStructureTracker {
     // 4. Check BOS / CHoCH / Sweeps
     if (this.trend === "BULLISH") {
       if (this.lastHH && current.high > this.lastHH.price) {
+        const eventTs = current.openTime.getTime();
         if (current.close > this.lastHH.price) {
           if (this.lastInternalLow) {
             this.lastHL = this.lastInternalLow;
@@ -244,6 +257,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastHH,
             isWickOnly: false,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.lastHH = null;
         } else {
@@ -255,11 +272,16 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastHH,
             isWickOnly: true,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
         }
       }
 
       if (this.lastHL && current.low < this.lastHL.price) {
+        const eventTs = current.openTime.getTime();
         if (current.close < this.lastHL.price) {
           this.trend = "BEARISH";
           this.lastLH = this.lastHH;
@@ -271,6 +293,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastHL,
             isWickOnly: false,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.lastHL = null;
         } else {
@@ -282,11 +308,16 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastHL,
             isWickOnly: true,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
         }
       }
     } else if (this.trend === "BEARISH") {
       if (this.lastLL && current.low < this.lastLL.price) {
+        const eventTs = current.openTime.getTime();
         if (current.close < this.lastLL.price) {
           if (this.lastInternalHigh) {
             this.lastLH = this.lastInternalHigh;
@@ -299,6 +330,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastLL,
             isWickOnly: false,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.lastLL = null;
         } else {
@@ -310,11 +345,16 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastLL,
             isWickOnly: true,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
         }
       }
 
       if (this.lastLH && current.high > this.lastLH.price) {
+        const eventTs = current.openTime.getTime();
         if (current.close > this.lastLH.price) {
           this.trend = "BULLISH";
           this.lastHL = this.lastLL;
@@ -326,6 +366,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastLH,
             isWickOnly: false,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
           this.lastLH = null;
         } else {
@@ -337,6 +381,10 @@ export class IctStructureTracker {
             candleTime: current.openTime,
             brokenPivot: this.lastLH,
             isWickOnly: true,
+            candidateAt: eventTs,
+            formedAt: eventTs,
+            confirmedAt: eventTs,
+            availableAt: eventTs,
           };
         }
       }

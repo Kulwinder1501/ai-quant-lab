@@ -1,4 +1,5 @@
 import type { CausalCandle } from "./causal-pivot.js";
+import type { IctCausalEvent } from "./zones.js";
 
 /**
  * CISD -- Change in State of Delivery.
@@ -66,7 +67,7 @@ import type { CausalCandle } from "./causal-pivot.js";
  * measured "CISD leg as its own zone" construction has what it needs without touching zones.ts.
  */
 
-export interface CisdEvent {
+export interface CisdEvent extends IctCausalEvent {
   /** Direction of the NEW delivery this event confirms -- i.e. which side just started, not the leg that broke. */
   readonly direction: "BULLISH" | "BEARISH";
   /** The violated leg's own opening price -- its first candle's open, never its last. */
@@ -77,6 +78,7 @@ export interface CisdEvent {
   readonly legEndIndex: number;
   readonly confirmingCandleIndex: number;
   readonly confirmingCandleTime: Date;
+  readonly availableAt: number;
 }
 
 interface PendingLeg {
@@ -131,6 +133,8 @@ export class CisdTracker {
         ? current.close > this.pendingLeg.openPrice
         : current.close < this.pendingLeg.openPrice;
       if (crossed) {
+        const candidateTime = candles[this.pendingLeg.startIndex].openTime.getTime();
+        const confirmingTime = current.openTime.getTime();
         const event: CisdEvent = {
           direction: this.pendingLeg.direction === "DOWN" ? "BULLISH" : "BEARISH",
           triggerLevel: this.pendingLeg.openPrice,
@@ -138,6 +142,10 @@ export class CisdTracker {
           legEndIndex: this.pendingLeg.endIndex,
           confirmingCandleIndex: currentIndex,
           confirmingCandleTime: current.openTime,
+          candidateAt: candidateTime,
+          formedAt: candidateTime,
+          confirmedAt: confirmingTime,
+          availableAt: confirmingTime,
         };
         this.pendingLeg = null; // fires at most once per leg transition
         return event;

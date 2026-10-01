@@ -155,3 +155,156 @@ export function extractIctStructuralFeatures(
     swingHierarchy: computeSwingHierarchyFeature(snapshot.swingHierarchy, snapshot.structure.trend, currentPrice),
   };
 }
+
+export interface IctRawPrimitiveFeatureVector {
+  evaluationInstant: number;
+
+  // Market Structure
+  mss_present: boolean;
+  mss_direction: -1 | 0 | 1;
+  mss_age_bars: number;
+  cisd_present: boolean;
+  cisd_age_bars: number;
+
+  // Liquidity
+  liquidity_sweep_present: boolean;
+  liquidity_sweep_direction: -1 | 0 | 1;
+  liquidity_sweep_age_bars: number;
+  liquidity_sweep_distance_atr: number;
+
+  // Imbalance
+  fvg_present: boolean;
+  fvg_direction: -1 | 0 | 1;
+  fvg_distance_atr: number;
+  fvg_age_bars: number;
+  bpr_present: boolean;
+  bpr_distance_atr: number;
+
+  // PD Arrays
+  ob_present: boolean;
+  ob_direction: -1 | 0 | 1;
+  ob_distance_atr: number;
+  ob_age_bars: number;
+  ob_mitigation_count_at_T: number;
+
+  // Valuation & Context
+  premium_discount_state: -1 | 0 | 1;
+  ote_zone_active: boolean;
+  session_killzone_active: boolean;
+  body_expansion_atr: number;
+  fvg_created: boolean;
+  displacement_confirmed: boolean;
+}
+
+export function extractIctRawPrimitiveFeatureVector(
+  snapshot: IctStateCompositeSnapshot,
+  currentPrice: number,
+  candle: { readonly open: number; readonly close: number },
+  atr14: number
+): IctRawPrimitiveFeatureVector {
+  const effectiveAtr = atr14 > 0 ? atr14 : 1;
+  const lastEvent = snapshot.structure.lastEvent;
+
+  const isMss = lastEvent?.type === "CHOCH" || lastEvent?.type === "BOS";
+  const mss_present = isMss;
+  const mss_direction: -1 | 0 | 1 = isMss
+    ? lastEvent.direction === "BULLISH" ? 1 : -1
+    : 0;
+  const mss_age_bars = isMss ? snapshot.barIndex - lastEvent.candleIndex : -1;
+
+  const cisd_present = snapshot.cisd !== null;
+  const cisd_age_bars = snapshot.cisd !== null ? snapshot.barIndex - snapshot.cisd.confirmingCandleIndex : -1;
+
+  const isSweep = lastEvent?.type === "SWEEP";
+  const liquidity_sweep_present = isSweep;
+  const liquidity_sweep_direction: -1 | 0 | 1 = isSweep
+    ? lastEvent.direction === "BULLISH" ? 1 : -1
+    : 0;
+  const liquidity_sweep_age_bars = isSweep ? snapshot.barIndex - lastEvent.candleIndex : -1;
+  const liquidity_sweep_distance_atr = isSweep
+    ? Math.abs(currentPrice - lastEvent.level) / effectiveAtr
+    : -1;
+
+  // Imbalance: FVG
+  const activeFvgs = snapshot.zones.activeFvgs;
+  const nearestFvg = activeFvgs.reduce<{ gap: FairValueGap; dist: number } | null>((best, gap) => {
+    const dist = Math.abs(currentPrice - gap.midpoint);
+    return best === null || dist < best.dist ? { gap, dist } : best;
+  }, null);
+
+  const fvg_present = activeFvgs.length > 0;
+  const fvg_direction: -1 | 0 | 1 = nearestFvg
+    ? nearestFvg.gap.type === "BULLISH" ? 1 : -1
+    : 0;
+  const fvg_distance_atr = nearestFvg ? nearestFvg.dist / effectiveAtr : -1;
+  const fvg_age_bars = nearestFvg ? snapshot.barIndex - nearestFvg.gap.createdAtBarIndex : -1;
+
+  // BPR
+  const bprs = snapshot.balancedPriceRanges ?? [];
+  const nearestBpr = bprs.reduce<{ bpr: import("./bpr.js").BalancedPriceRange; dist: number } | null>((best, bpr) => {
+    const dist = Math.abs(currentPrice - bpr.meanThreshold);
+    return best === null || dist < best.dist ? { bpr, dist } : best;
+  }, null);
+
+  const bpr_present = bprs.length > 0;
+  const bpr_distance_atr = nearestBpr ? nearestBpr.dist / effectiveAtr : -1;
+
+  // PD Arrays: OB
+  const activeObs = snapshot.zones.activeObs;
+  const nearestOb = activeObs.reduce<{ ob: OrderBlock; dist: number } | null>((best, ob) => {
+    const dist = Math.abs(currentPrice - ob.meanThreshold);
+    return best === null || dist < best.dist ? { ob, dist } : best;
+  }, null);
+
+  const ob_present = activeObs.length > 0;
+  const ob_direction: -1 | 0 | 1 = nearestOb
+    ? nearestOb.ob.type === "BULLISH" ? 1 : -1
+    : 0;
+  const ob_distance_atr = nearestOb ? nearestOb.dist / effectiveAtr : -1;
+  const ob_age_bars = nearestOb ? snapshot.barIndex - nearestOb.ob.createdAtBarIndex : -1;
+  const ob_mitigation_count_at_T = nearestOb ? nearestOb.ob.mitigationCount : 0;
+
+  // Valuation & Context
+  const dealingRange = snapshot.bias.dealingRange;
+  const premium_discount_state: -1 | 0 | 1 =
+    dealingRange === null ? 0 : dealingRange.isPremium(currentPrice) ? 1 : -1;
+
+  const ote = computeOte(dealingRange, snapshot.structure.trend, currentPrice);
+  const ote_zone_active = ote !== null && ote.isInOteZone;
+  const session_killzone_active = snapshot.sessionLevels.inKillzone;
+  const body_expansion_atr = Math.abs(candle.close - candle.open) / effectiveAtr;
+
+  const fvg_created = activeFvgs.some((f) => f.createdAtBarIndex === snapshot.barIndex);
+  const displacement_confirmed =
+    activeObs.some((o) => o.createdAtBarIndex === snapshot.barIndex) || fvg_created;
+
+  return {
+    evaluationInstant: snapshot.barTime.getTime(),
+    mss_present,
+    mss_direction,
+    mss_age_bars,
+    cisd_present,
+    cisd_age_bars,
+    liquidity_sweep_present,
+    liquidity_sweep_direction,
+    liquidity_sweep_age_bars,
+    liquidity_sweep_distance_atr,
+    fvg_present,
+    fvg_direction,
+    fvg_distance_atr,
+    fvg_age_bars,
+    bpr_present,
+    bpr_distance_atr,
+    ob_present,
+    ob_direction,
+    ob_distance_atr,
+    ob_age_bars,
+    ob_mitigation_count_at_T,
+    premium_discount_state,
+    ote_zone_active,
+    session_killzone_active,
+    body_expansion_atr,
+    fvg_created,
+    displacement_confirmed,
+  };
+}
