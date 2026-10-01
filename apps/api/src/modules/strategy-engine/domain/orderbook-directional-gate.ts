@@ -253,7 +253,7 @@ export function resolveConfluenceSignalFromDepth(input: {
 
   const { rawDi, decayingDi } = calculateDecayingDepthImbalance(input.depth);
   const isTier1 = ["SWING_HIGH", "SWING_LOW", "ITH", "ITL", "SESSION_HIGH", "SESSION_LOW"].includes(input.nearestLevelType);
-  const diTilde = isTier1 ? -decayingDi : decayingDi;
+  const diTilde = isTier1 ? -rawDi : rawDi;
 
   let directional_bias = "NONE";
   let gate_action = "NO_ACTION";

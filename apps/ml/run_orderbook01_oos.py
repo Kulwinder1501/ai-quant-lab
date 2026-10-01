@@ -150,11 +150,8 @@ def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> tuple[lis
         ts = float(r[2]) if r[2] is not None else 0.0
         raw_di = (tb - ts) / (tb + ts) if (tb + ts > 0) else 0.0
 
-        bid_p, bid_q, ask_p, ask_q = r[3], r[4], r[5], r[6]
-        decaying_di = compute_decaying_di(bid_p, bid_q, ask_p, ask_q, raw_di)
-
         times.append(t)
-        dis.append(decaying_di)
+        dis.append(raw_di)
     return times, dis
 
 
@@ -163,26 +160,25 @@ def match_events_to_depth(
     depth_times: list[datetime],
     depth_dis: list[float],
 ) -> list[dict]:
-    """Match each contact event to the nearest past depth_frame (received_at <= contact_time + 1s)."""
+    """Match each contact event to the nearest past depth_frame (received_at <= contact_time)."""
     if not depth_times:
         return []
 
     matched = []
     for ev in events:
         ctime = ev["contact_time"]
-        max_allowed_time = ctime + timedelta(seconds=1)
         min_allowed_time = ctime - timedelta(seconds=5)
 
-        idx = bisect_left(depth_times, max_allowed_time)
+        idx = bisect_left(depth_times, ctime)
         best_idx = None
-        best_diff = timedelta(days=999)
+        best_diff = 999.0
 
-        for check_idx in range(max(0, idx - 20), min(len(depth_times), idx + 2)):
+        for check_idx in range(max(0, idx - 20), min(len(depth_times), idx + 1)):
             dt_time = depth_times[check_idx]
-            if dt_time <= max_allowed_time and dt_time >= min_allowed_time:
-                diff = abs((dt_time - ctime).total_seconds())
-                if diff < best_diff.total_seconds():
-                    best_diff = timedelta(seconds=diff)
+            if dt_time <= ctime and dt_time >= min_allowed_time:
+                diff = (ctime - dt_time).total_seconds()
+                if diff < best_diff:
+                    best_diff = diff
                     best_idx = check_idx
 
         if best_idx is not None:
