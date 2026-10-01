@@ -257,14 +257,21 @@ Given evaluation instant $T$, price $P_T$, ATR $\text{ATR}_{14}(T)$, pool histor
 
 ### 8.1 Fair Value Gap (FVG) Boundary Configurations
 
-- **`FVG_BOUNDARY = WICK`**:
+- **`FVG_BOUNDARY = WICK`** (the only mode this codebase implements -- see `zones.ts`'s FVG
+  detection; there is no `FVG_BOUNDARY` config knob or BODY/WICK mode switch anywhere in code):
   - Bullish: $\text{Low}_{\text{bar } 3} > \text{High}_{\text{bar } 1}$. Boundary = $[\text{High}_{\text{bar } 1}, \text{Low}_{\text{bar } 3}]$.
   - Bearish: $\text{High}_{\text{bar } 3} < \text{Low}_{\text{bar } 1}$. Boundary = $[\text{High}_{\text{bar } 3}, \text{Low}_{\text{bar } 1}]$.
-- **`FVG_BOUNDARY = BODY`**:
+- **`FVG_BOUNDARY = BODY`** (aspirational -- documented as a possible future variant, not
+  implemented; no code path in this repo has ever constructed or used it):
   - Bullish: $\min(\text{Open}_3, \text{Close}_3) > \max(\text{Open}_1, \text{Close}_1)$. Boundary = $[\max(\text{Open}_1, \text{Close}_1), \min(\text{Open}_3, \text{Close}_3)]$.
   - Bearish: $\max(\text{Open}_3, \text{Close}_3) < \min(\text{Open}_1, \text{Close}_1)$. Boundary = $[\max(\text{Open}_3, \text{Close}_3), \min(\text{Open}_1, \text{Close}_1)]$.
 
-*Bug Fix Note: In Bearish BODY mode, $\max(\text{Open}_3, \text{Close}_3) < \min(\text{Open}_1, \text{Close}_1)$, so the lower boundary is $\max(\text{Open}_3, \text{Close}_3)$ and the upper boundary is $\min(\text{Open}_1, \text{Close}_1)$.*
+*Note: the boundary ordering above (lower = $\max(\text{Open}_3, \text{Close}_3)$, upper =
+$\min(\text{Open}_1, \text{Close}_1)$ in bearish BODY mode) is correct by construction from the
+gap condition on the line above it -- it was never a runtime bug. An earlier revision of this
+document framed it as a "Bug Fix Note" describing a defect in bearish BODY-mode detection; no such
+code path has ever existed to contain that defect (only WICK-mode detection has ever been
+implemented), so that framing was corrected here rather than carried forward.*
 
 ---
 
