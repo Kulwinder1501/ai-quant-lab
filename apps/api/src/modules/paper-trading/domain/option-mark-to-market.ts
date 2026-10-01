@@ -300,14 +300,23 @@ export function decideOptionBuyerExit(
     };
   }
 
-  // Trap Detection at candle close
-  if (trade.underlyingEntryPrice) {
+  // Trap Detection at candle close.
+  //
+  // Anchored on `underlyingFillPrice` (the real spot when the contract was bought) rather than
+  // `underlyingEntryPrice` (the idea's signal-candle level), falling back to the latter only for
+  // trades opened before migration 120 captured the former. The two can differ by a material
+  // amount whenever acceptance checks, sizing or cadence put lag between signal and fill -- using
+  // the signal-time level here would count that pre-fill move as part of "how far the underlying
+  // has moved since the contract was bought", understating or overstating the divergence this
+  // check exists to catch.
+  const trapEntryAnchor = trade.underlyingFillPrice ?? trade.underlyingEntryPrice;
+  if (trapEntryAnchor) {
     const favorableMove = trade.optionType === "CE"
-      ? candle.close - trade.underlyingEntryPrice
-      : trade.underlyingEntryPrice - candle.close;
-    
-    const minFavorableMove = trade.underlyingEntryPrice * 0.0005;
-    
+      ? candle.close - trapEntryAnchor
+      : trapEntryAnchor - candle.close;
+
+    const minFavorableMove = trapEntryAnchor * 0.0005;
+
     if (favorableMove >= minFavorableMove
       && marks.close < trapPremiumFloor(trade.entryPrice, options?.premiumToleranceFraction)) {
       return {
@@ -368,14 +377,18 @@ export function decideOptionBuyerLiveExit(
     return { reason: "TARGET", eventType: "TARGET_HIT", exitPrice: markPremium };
   }
 
-  // Trap Detection: Divergence between underlying movement and option premium
-  if (liveSpot !== undefined && trade.underlyingEntryPrice) {
+  // Trap Detection: Divergence between underlying movement and option premium.
+  //
+  // Same anchor choice as the candle-close path above: `underlyingFillPrice` first, falling back
+  // to `underlyingEntryPrice` for trades opened before migration 120.
+  const liveTrapEntryAnchor = trade.underlyingFillPrice ?? trade.underlyingEntryPrice;
+  if (liveSpot !== undefined && liveTrapEntryAnchor) {
     const favorableMove = trade.optionType === "CE"
-      ? liveSpot - trade.underlyingEntryPrice
-      : trade.underlyingEntryPrice - liveSpot;
-    
+      ? liveSpot - liveTrapEntryAnchor
+      : liveTrapEntryAnchor - liveSpot;
+
     // Require at least a 0.05% favorable move in the underlying
-    const minFavorableMove = trade.underlyingEntryPrice * 0.0005;
+    const minFavorableMove = liveTrapEntryAnchor * 0.0005;
     
     // Strictly below the floor, so a mark sitting exactly at the entry mid -- which is where
     // every position starts -- is not read as a premium that failed to rise.
