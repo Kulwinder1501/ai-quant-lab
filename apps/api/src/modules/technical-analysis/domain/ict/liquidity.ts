@@ -68,8 +68,26 @@ export function computeDrawOnLiquidity(
     return true;
   });
 
+  /*
+   * Step 4: Pool Eligibility Rules.
+   *
+   * The plan (docs/ict-smc-semantic-contract.md §7.4 Step 4) requires candidacy to be restricted to
+   * recognized level types -- PWH/PWL/PDH/PDL/PMH/PML, ITH/ITL/SWING_HIGH/SWING_LOW,
+   * SESSION_HIGH/SESSION_LOW/EQH/EQL -- rather than letting an unrecognized kind fall through into
+   * Step 7's tie-break with a default priority tier as if it were a real, if low-priority, pool.
+   * This was previously missing entirely: every pool that survived Steps 1-3 went straight to Step 5.
+   *
+   * `getPriorityTier` already enumerates exactly that recognized set across tiers 1-3, AND this
+   * codebase's own concrete `LiquidityPoolKind` strings (the `ERL_*`/`IRL_*` values `LiquidityPool`
+   * objects actually carry, e.g. from `IctLiquidityResolver`) alongside them in the same tier
+   * branches -- so "not tier 4" is precisely the eligibility test the plan specifies, for either
+   * vocabulary. A kind reaching the default branch is genuinely unrecognized and is excluded here
+   * rather than silently ranked as tier 4.
+   */
+  const eligiblePools = availablePools.filter((p) => getPriorityTier(p.kind) !== 4);
+
   // Step 5: Directional & HTF-Bias Policy
-  const qualifiedPools = availablePools.filter((p) => {
+  const qualifiedPools = eligiblePools.filter((p) => {
     if (htfDirection === 1) return p.price > currentPrice; // BSL target
     if (htfDirection === -1) return p.price < currentPrice; // SSL target
     return true; // Neutral: both BSL and SSL
