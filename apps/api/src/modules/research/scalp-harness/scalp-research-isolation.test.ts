@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
-import { researchStrategySourceChecksums } from "./domain/research-strategies.js";
+import { frozenSourceContentDigests } from "./domain/research-strategies.js";
 
 function filesBelow(directory: string): string[] {
   return readdirSync(directory).flatMap((entry) => {
@@ -54,7 +54,7 @@ describe("scalp research physical isolation", () => {
   it("is absent from the operational strategy registry", () => {
     const registry = readFileSync(join(sourceRoot, "modules", "strategy-engine", "domain", "strategy-registry.ts"), "utf8");
     expect(registry).not.toContain("scalp-harness");
-    expect(registry).not.toContain("researchScalpStrategies");
+    expect(registry).not.toContain("createResearchScalpStrategies()");
   });
 
   it("has no execution imports or order-opening symbols", () => {
@@ -142,9 +142,23 @@ describe("scalp research physical isolation", () => {
   });
 
   it("fails visibly when a frozen source strategy changes without a research version bump", () => {
+    /*
+     * Hashes CONTENT, not line endings.
+     *
+     * This hashed raw bytes, and `core.autocrlf=true` gives a CRLF working tree while the committed
+     * blob is LF -- so on every Windows checkout it computed a digest the map could never hold and
+     * failed for a reason that had nothing to do with a strategy changing. It then misled someone
+     * into pinning the CRLF digest into a research definition, a value no LF checkout of that file
+     * will ever reproduce.
+     *
+     * Normalising here rather than storing the CRLF digest is what keeps the pins portable: the map
+     * holds the hash of the file's CONTENT, which is what "the artifact this version was measured
+     * against" has to mean if it is to travel between machines.
+     */
     const strategyRoot = join(sourceRoot, "modules", "strategy-engine", "domain");
-    for (const [file, expected] of Object.entries(researchStrategySourceChecksums)) {
-      const actual = createHash("sha256").update(readFileSync(join(strategyRoot, file))).digest("hex");
+    for (const [file, expected] of Object.entries(frozenSourceContentDigests)) {
+      const content = readFileSync(join(strategyRoot, file), "utf8").split("\r\n").join("\n");
+      const actual = createHash("sha256").update(content, "utf8").digest("hex");
       expect(actual, `${file} changed; create a new research strategy version and checksum`).toBe(expected);
     }
   });

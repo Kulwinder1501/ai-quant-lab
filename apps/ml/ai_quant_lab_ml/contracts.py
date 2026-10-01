@@ -114,6 +114,34 @@ FEATURE_SCHEMA_VERSION_SCALP_V2 = "ml-feature-scalp-v2"
 #: key, and an ablated artifact must be impossible to confuse with a production one.
 FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
 
+#: v9 (Model D: 75 columns) plus the ICT structural covariates -- HTF bias, premium/discount zone,
+#: distance to the nearest order block, and BOS/CHoCH presence/distance. Registered as its own
+#: version, not patched into v9 in place, for the same reason v7-nopattern is: this is the
+#: feature-vs-signal experiment the ICT engine's own close-out doc named as unproven ("plausible as
+#: features, unproven as signal"), and a model trained on it must be impossible to confuse with a
+#: production v9 artifact.
+FEATURE_SCHEMA_VERSION_V_ICT = "ml-feature-v-ict"
+
+#: v-ict plus the cross-timeframe "Refined Order Block" columns (see `refined-order-block.ts` and
+#: `_ICT_REFINED_ORDER_BLOCK_COLUMNS` in features.py) -- the doctrine-faithful construction, checked
+#: directly against the source transcripts, that v-ict's naive same-timeframe order-block distance
+#: was found NOT to be.
+FEATURE_SCHEMA_VERSION_V_ICT_REFINED = "ml-feature-v-ict-refined"
+
+#: v-ict-refined plus "Optimal Trade Entry" (see `ote.ts` and `_ICT_OTE_COLUMNS` in features.py) --
+#: the 62-79% Fibonacci retracement band of the current dealing range, lecture 10's "OTE". Reuses
+#: `bias.ts`'s `DealingRange` as the doctrine's swing leg rather than a new abstraction; already
+#: exists as a strategy-layer FILTER (`ict-structure-strategy.ts`'s `requireOte`) but never as a
+#: covariate before this version.
+FEATURE_SCHEMA_VERSION_V_ICT_OTE = "ml-feature-v-ict-ote"
+
+#: v-ict-ote plus the ITH/ITL/STH/STL "swing hierarchy" (see `swing-hierarchy.ts` and
+#: `_ICT_SWING_HIERARCHY_COLUMNS` in features.py) -- lecture 8's nested "swing of swings"
+#: classification over the same confirmed pivots `structure` is derived from, plus the doctrine's
+#: directional "which side is protected" rule, checked directly against the source transcript and
+#: previously the largest documented gap after the fractal cascade itself.
+FEATURE_SCHEMA_VERSION_V_ICT_SWING = "ml-feature-v-ict-swing"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -126,6 +154,10 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,
@@ -414,6 +446,67 @@ class PriceActionEvidence:
 
 
 @dataclass(frozen=True)
+class IctEvidence:
+    """One bar's ICT structural read, as covariates -- not a trading signal.
+
+    Mirrors ``IctStructuralFeatures`` from
+    ``apps/api/src/modules/technical-analysis/domain/ict/feature-extraction.ts`` field for field, so
+    the two stay in lockstep by inspection rather than by a generated contract. Point-in-time safety
+    is inherited from that extractor: it is a pure function of one already-sealed
+    ``IctStateCompositeSnapshot``, which is itself immune to the batch-replay mutable-zone leak fixed
+    alongside it. Distances are raw price units here; ``build_feature_vector`` normalises them by ATR
+    the same way it does every other level-distance column, so this dataclass carries the unscaled
+    fact rather than a value tied to one instrument's price scale.
+
+    ``None`` fields mean the underlying structural read was unavailable on this bar (no dealing range
+    formed, no active order block, no confirmed swing to derive a BOS/CHoCH level from) -- the same
+    "missing evidence, not a learned zero" convention every other optional field on ``CandleEvidence``
+    already follows.
+    """
+
+    htf_bias: str | None  # "BULLISH" | "BEARISH" | "NEUTRAL" | "UNKNOWN" | None
+    premium_discount_zone: str  # "PREMIUM" | "DISCOUNT" | "UNKNOWN"
+    distance_to_nearest_order_block: float | None
+    nearest_order_block_side: str | None  # "BULLISH" | "BEARISH" | None
+    has_bos_level: bool
+    has_choch_level: bool
+    distance_to_bos_level: float | None
+    distance_to_choch_level: float | None
+    # Cross-timeframe "Refined Order Block" (see refined-order-block.ts): distance_to_nearest_order_block
+    # above is the naive, same-timeframe approximation checked against source doctrine and found
+    # incomplete -- lecture 4/lecture 3 both describe order blocks and structure as read top-down,
+    # anchored to a higher-timeframe zone, not detected independently per timeframe. These four fields
+    # are that construction. None when no HTF pairing was backfilled for this row, or (for the refined
+    # pair specifically) when an HTF order block is active but no LTF order block nests inside it.
+    htf_order_block_side: str | None = None
+    htf_order_block_distance: float | None = None
+    refined_order_block_distance: float | None = None
+    stop_compression_ratio: float | None = None
+    # "Optimal Trade Entry" (see ote.ts): the 62-79% retracement band of the current dealing range.
+    # None when no dealing range has formed yet or the trend is NEUTRAL -- the band only exists for
+    # a side, the same "missing, not a zero" convention as every other field above. The band's own
+    # edges (`oteBandLow`/`oteBandHigh` in the TS feature) are deliberately NOT carried here: like
+    # every other field on this dataclass they would be absolute price levels, which this module's
+    # own leakage rule (see features.py's docstring) bans as an ML input -- only the distance is.
+    ote_side: str | None = None  # "BULLISH" | "BEARISH" | None
+    ote_is_within: bool | None = None
+    ote_distance_to_band: float | None = None
+    # ITH/ITL/STH/STL "swing hierarchy" (see swing-hierarchy.ts): a nested "swing of swings"
+    # classification over the same confirmed pivots `structure` already derives from, plus the
+    # doctrine's directional "which side is protected" rule. Distances are None whenever the relevant
+    # Intermediate/Short Term point has not been confirmed yet on this bar -- missing evidence, not a
+    # zero, the same convention as every other distance field above. `swing_protected_side` is None
+    # when the trend was NEUTRAL or the relevant Intermediate Term point had not formed -- there is
+    # nothing for the doctrine to call protected in that case, not "no polarity".
+    swing_distance_to_ith: float | None = None
+    swing_distance_to_itl: float | None = None
+    swing_distance_to_sth: float | None = None
+    swing_distance_to_stl: float | None = None
+    swing_protected_side: str | None = None  # "INTERMEDIATE_TERM_HIGH" | "INTERMEDIATE_TERM_LOW" | None
+    swing_protected_breached: bool | None = None
+
+
+@dataclass(frozen=True)
 class ForwardBar:
     """One completed bar on the forward path after a source candle, in time order.
 
@@ -474,6 +567,10 @@ class CandleEvidence:
     # vertical barrier and obeying the same as-of cutoff as ``future_close``. Empty
     # for the fixed-horizon scheme, which never reads it. Never a feature.
     forward_path: Sequence["ForwardBar"] = ()
+    # The ICT structural read for this bar, or None when not computed for this
+    # (instrument, timeframe) -- absence, not zero evidence. Only schema versions
+    # that declare `ict.*` columns read this; every other schema ignores it.
+    ict: "IctEvidence | None" = None
 
 @dataclass(frozen=True)
 class LabeledExample:

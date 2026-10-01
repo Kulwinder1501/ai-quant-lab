@@ -278,17 +278,29 @@ describe("CandlestickPatternEngine", () => {
     expect(twoResults.some((d) => d.patternCode === "THREE_INSIDE_UP")).toBe(false);
   });
 
-  it("detects Inverted Hammer by pure geometry (independent of trend) and Spinning Top indecision", () => {
-    // Single isolated candle with Inverted Hammer geometry: small body at bottom (10.0-10.4), long upper wick (12.5), tiny lower wick (9.9)
-    const singleInvertedHammer = [
-      candle("1", 10.0, 12.5, 9.9, 10.4),
+  it("requires a downtrend for Inverted Hammer, and Spinning Top by pure geometry", () => {
+    // Same decline shape as the HAMMER test, but the final candle has Inverted Hammer geometry:
+    // small body (10.0-10.4), long upper wick (12.5), tiny lower wick (9.9).
+    const decline = [
+      candle("1", 14.2, 14.5, 13.8, 14),
+      candle("2", 13.2, 13.5, 12.8, 13),
+      candle("3", 12.2, 12.5, 11.8, 12),
+      candle("4", 11.2, 11.5, 10.8, 11),
+      candle("5", 10.0, 12.5, 9.9, 10.4),
     ];
-    const invertedHammer = detectionFor(engine, singleInvertedHammer, "INVERTED_HAMMER", "1", "BULLISH");
-    expect(invertedHammer.contextCandleIds).toEqual(["1"]);
+    const invertedHammer = detectionFor(engine, decline, "INVERTED_HAMMER", "5", "BULLISH");
+    expect(invertedHammer.contextCandleIds).toEqual(["5"]);
     expect(invertedHammer.direction).toBe("BULLISH");
+    expect(invertedHammer.details).toMatchObject({ trend: "DOWN" });
     expect(invertedHammer.details).toHaveProperty("upperShadow");
     expect(invertedHammer.details).toHaveProperty("lowerShadow");
     expect(invertedHammer.details).toHaveProperty("bodyRatio");
+
+    // The identical geometry in isolation -- no trend context at all -- must NOT fire. This is the
+    // regression case: before the downtrend gate, a lone candle fired Inverted Hammer regardless.
+    const isolated = [candle("1", 10.0, 12.5, 9.9, 10.4)];
+    const isolatedResults = engine.detect(isolated);
+    expect(isolatedResults.some((d) => d.patternCode === "INVERTED_HAMMER")).toBe(false);
 
     // Spinning top: small body (100.2 - 100.8 = 0.6 on range 3.0 = 20%), upper wick 1.2 (40%), lower wick 1.2 (40%)
     const spinningTop = detectionFor(engine, [
@@ -297,6 +309,28 @@ describe("CandlestickPatternEngine", () => {
     expect(spinningTop.contextCandleIds).toEqual(["1"]);
     expect(spinningTop.direction).toBe("NEUTRAL");
     expect(spinningTop.confidence).toBeGreaterThan(0.7);
+  });
+
+  /*
+   * Before the downtrend gate, SHOOTING_STAR and INVERTED_HAMMER shared the exact same shape check
+   * (`upperShadowShape`) and only SHOOTING_STAR required a trend -- so in an uptrend, a small-bodied
+   * long-upper-shadow candle fired BOTH a BEARISH Shooting Star and a BULLISH Inverted Hammer.
+   * Measured live 2026-09-22: 5,139 of 11,128 5m candles carrying either code carried both. `uptrend`
+   * and `downtrend` can't both be true, so gating Inverted Hammer on `downtrend` makes the two
+   * mutually exclusive by construction -- the same way HAMMER and HANGING_MAN already are.
+   */
+  it("never fires Inverted Hammer and Shooting Star on the same candle", () => {
+    const advance = [
+      candle("1", 9.8, 10.2, 9.6, 10),
+      candle("2", 10.8, 11.2, 10.6, 11),
+      candle("3", 11.8, 12.2, 11.6, 12),
+      candle("4", 12.8, 13.2, 12.6, 13),
+      candle("5", 13.2, 16, 13.1, 13.5),
+    ];
+    const results = engine.detect(advance);
+    const onCandle5 = results.filter((d) => d.candleId === "5").map((d) => d.patternCode);
+    expect(onCandle5).toContain("SHOOTING_STAR");
+    expect(onCandle5).not.toContain("INVERTED_HAMMER");
   });
 
   it("handles zero range and zero volume candles safely without crashing", () => {

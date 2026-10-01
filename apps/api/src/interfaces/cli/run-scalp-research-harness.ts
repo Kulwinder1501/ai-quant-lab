@@ -12,7 +12,7 @@ import {
   frozenTapeThresholdFor,
   tapeLivenessPolicyVersion,
 } from "../../modules/market-data/domain/tape-liveness.js";
-import { researchScalpStrategies } from "../../modules/research/scalp-harness/domain/research-strategies.js";
+import { createResearchScalpStrategies } from "../../modules/research/scalp-harness/domain/research-strategies.js";
 import {
   selectCaptureStrategies,
   terminalStrategyRegistryVersion,
@@ -307,7 +307,7 @@ async function main(): Promise<void> {
        * session log carries its own explanation instead of requiring a reader to go and diff the
        * registry source against the day the numbers changed.
        */
-      const registrySelection = selectCaptureStrategies(researchScalpStrategies);
+      const registrySelection = selectCaptureStrategies(createResearchScalpStrategies());
 
       reports.push({
         symbol: instrument.symbol,

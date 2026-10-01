@@ -33,6 +33,11 @@ describe("resolveYahooSymbol", () => {
     expect(resolveYahooSymbol("SBIN")).toBe("SBIN.NS");
   });
 
+  it("maps equities whose NSE ticker was renamed, to the Yahoo name that still has history", () => {
+    expect(resolveYahooSymbol("TATAMOTORS")).toBe("TMPV.NS");
+    expect(resolveYahooSymbol("LTIM")).toBe("LTM.NS");
+  });
+
   it("is case- and whitespace-insensitive, which the inline copies were not", () => {
     // `market-data.routes.ts` uppercased before matching and `paper-trading.routes.ts` did
     // not, so the same symbol resolved differently depending on which route received it.

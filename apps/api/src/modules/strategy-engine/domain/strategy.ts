@@ -12,6 +12,7 @@ import type {
 } from "../../pattern-intelligence/domain/observation-summary.js";
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
+import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
 export type TradeSide = "LONG" | "SHORT";
 export type TradeIdeaStatus = "PROPOSED" | "ACCEPTED" | "EXPIRED" | "REJECTED";
@@ -89,6 +90,35 @@ export interface StrategyMarketContext {
   patternObservations?: readonly PatternObservationSummary[];
   patternObservationCoverage?: PatternObservationCoverageState;
   regime?: RegimeContext;
+  confluenceSignal?: {
+    is_level_proximate?: boolean;
+    nearest_level_type?: string | null;
+    nearest_level_price?: number | null;
+    distance_bps?: number | null;
+    raw_di?: number | null;
+    di_tilde?: number | null;
+    directional_bias?: string;
+    gate_action?: string;
+  } | null;
+  /**
+   * Whole-chain put/call ratio (put OI / call OI, nearest un-expired expiry) resolved as-of this
+   * candle's close, for strategies that gate on an option-chain OI wall (e.g.
+   * `hybrid-liquidity-confluence-v1` Pillar C).
+   *
+   * `pcr: null` means "not measurable right now" -- either no snapshot has been observed yet
+   * (`option_chain_snapshots` is forward-accumulating from 2026-08-04, see migration 037) or the
+   * nearest one is older than `PCR_MAX_SNAPSHOT_AGE_MINUTES`. A consumer must treat null as "the
+   * wall cannot be confirmed", never as a default pass -- the same rule
+   * `apps/ml/oi_pcr_signal_check.py` uses for its as-of join, so the live gate and the offline
+   * gap-analysis check can't silently drift onto two different "unmeasured" conventions.
+   */
+  optionChainSignal?: {
+    pcr: number | null;
+    callOpenInterest: number | null;
+    putOpenInterest: number | null;
+    observedAt: Date | null;
+    ageMinutes: number | null;
+  };
   /**
    * Trend and level context from slower timeframes, for confluence scoring.
    *
@@ -107,6 +137,11 @@ export interface StrategyMarketContext {
    * `closeTime <= asOf`, or a 60m bar that has not closed leaks the future into a 5m signal.
    */
   higherTimeframes?: readonly HigherTimeframeContext[];
+  /**
+   * Versioned ICT Composite Snapshot (Pillars 1-4: Structure, Bias, Zones, Liquidity).
+   * Populated per closed bar strictly causally without lookahead.
+   */
+  ictSnapshot?: IctStateCompositeSnapshot;
   /**
    * Raw higher-timeframe contexts keyed by timeframe, when a caller has loaded them.
    *
@@ -133,6 +168,20 @@ export interface StrategyMarketContextRepository {
    * have already closed still surface as SHORT proposals.
    */
   listCompletedContexts(input: { instrumentId: string; timeframe: string; limit: number }): Promise<StrategyMarketContext[]>;
+  /**
+   * The most recent completed context whose candle closed at or before `asOf`.
+   *
+   * The anti-lookahead fetch for higher-timeframe context. At a 1m decision instant the relevant
+   * 5m context is the last 5m bar to have *closed*; an exact close-time match lands one only on a
+   * 5m boundary and misses at every 1m bar in between. The implementation's `close_time <= $asOf`
+   * guard is what makes a slower bar unable to leak into a faster signal.
+   *
+   * Optional because it is additive: a caller that does not supply it simply gets no
+   * higher-timeframe context, which every strategy already treats as a legitimate state rather
+   * than an error. Making it required would break every existing stub at once for a capability
+   * only the momentum path reads.
+   */
+  findCompletedBefore?(input: { instrumentId: string; timeframe: string; asOf: Date }): Promise<StrategyMarketContext | null>;
 }
 
 export interface TradeIdeaEvidence {

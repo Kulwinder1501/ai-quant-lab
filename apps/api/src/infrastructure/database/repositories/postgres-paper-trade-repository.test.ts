@@ -1,5 +1,6 @@
+import { Pool, type PoolClient } from "pg";
 import type { DatabasePool } from "../database.js";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterAll, afterEach, beforeEach } from "vitest";
 import { PostgresPaperTradeRepository } from "./postgres-paper-trade-repository.js";
 
 describe("PostgresPaperTradeRepository manual option transaction", () => {
@@ -197,5 +198,100 @@ describe("PostgresPaperTradeRepository timing boundaries", () => {
 
     const [sql] = query.mock.calls[0] as unknown as [string];
     expect(sql).toContain("stop_loss_effective_at = CURRENT_TIMESTAMP");
+  });
+});
+
+/**
+ * `updateStopLoss`, against a real database.
+ *
+ * A mocked client cannot catch this class of bug: Postgres unifies every occurrence of one
+ * placeholder into a single inferred type, and the query used to bind `$2` both as the (numeric)
+ * `stop_loss` assignment and, separately, cast `$2::text` for the note -- which is exactly the shape
+ * that throws "inconsistent types deduced for parameter $2" (42P08). It did not fail on every call
+ * (the failure is plan-dependent), so it went unnoticed until it took down `AiAutonomousAgent.tick`
+ * for NIFTY50 in production, 2026-09-16, on a real open position whose protective stop needed
+ * tightening. A string-mock test would happily assert on the SQL text without ever asking Postgres
+ * whether that text is actually valid.
+ */
+describe.skipIf(!process.env.DATABASE_URL)("PostgresPaperTradeRepository.updateStopLoss (live DB)", () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  const pool = new Pool({ connectionString: databaseUrl });
+  let client: PoolClient;
+
+  beforeEach(async () => {
+    client = await pool.connect();
+    await client.query("BEGIN");
+  });
+
+  afterEach(async () => {
+    await client.query("ROLLBACK");
+    client.release();
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  async function insertInstrument(symbol: string): Promise<string> {
+    const result = await client.query<{ id: string }>(`
+      INSERT INTO instruments (exchange, symbol, display_name, instrument_type)
+      VALUES ('NSE', $1, $1, 'INDEX')
+      RETURNING id
+    `, [symbol]);
+    return result.rows[0]!.id;
+  }
+
+  async function insertAccount(name: string): Promise<string> {
+    const result = await client.query<{ id: string }>(`
+      INSERT INTO paper_accounts (name, opening_balance)
+      VALUES ($1, 1000000)
+      RETURNING id
+    `, [name]);
+    return result.rows[0]!.id;
+  }
+
+  async function insertOpenTrade(input: { accountId: string; instrumentId: string }): Promise<string> {
+    const now = new Date();
+    const trade = await client.query<{ id: string }>(`
+      INSERT INTO paper_trades (
+        account_id, instrument_id, side, status, quantity, remaining_quantity,
+        entry_price, stop_loss, initial_stop_loss, stop_loss_effective_at, target_price,
+        opened_at
+      ) VALUES ($1, $2, 'LONG', 'OPEN', 75, 75, 100, 90, 90, $3, 130, $3)
+      RETURNING id
+    `, [input.accountId, input.instrumentId, now]);
+    return trade.rows[0]!.id;
+  }
+
+  it("moves the stop and records the note, on a real connection", async () => {
+    const instrumentId = await insertInstrument("STOP-LOSS-TEST");
+    const accountId = await insertAccount("stop-loss-test-account");
+    const tradeId = await insertOpenTrade({ accountId, instrumentId });
+
+    await new PostgresPaperTradeRepository(client as unknown as DatabasePool)
+      .updateStopLoss(tradeId, 95.5, "tighten");
+
+    const result = await client.query<{ stop_loss: string; notes: string | null }>(
+      "SELECT stop_loss, notes FROM paper_trades WHERE id = $1", [tradeId],
+    );
+    expect(Number(result.rows[0]!.stop_loss)).toBe(95.5);
+    expect(result.rows[0]!.notes).toContain("tighten to ₹95.5");
+  });
+
+  it("falls back to the default reason and still records the numeric note", async () => {
+    const instrumentId = await insertInstrument("STOP-LOSS-TEST-2");
+    const accountId = await insertAccount("stop-loss-test-account-2");
+    const tradeId = await insertOpenTrade({ accountId, instrumentId });
+
+    await new PostgresPaperTradeRepository(client as unknown as DatabasePool)
+      .updateStopLoss(tradeId, 92);
+
+    const result = await client.query<{ notes: string | null }>(
+      "SELECT notes FROM paper_trades WHERE id = $1", [tradeId],
+    );
+    // The JS-level `reason || "Dynamic Stop-Loss Tightening"` default always supplies a non-null
+    // string, so the SQL-level `COALESCE($3, 'SL Adjusted')` fallback is unreachable through this
+    // method -- this asserts what actually happens, not what the SQL default alone would suggest.
+    expect(result.rows[0]!.notes).toContain("Dynamic Stop-Loss Tightening to ₹92");
   });
 });

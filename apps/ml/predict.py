@@ -48,6 +48,7 @@ from ai_quant_lab_ml.sequence_inference import (
     validate_sequence_shadow_artifact,
 )
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
+from ai_quant_lab_ml.confluence_gate import evaluate_confluence_signal
 
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
@@ -224,12 +225,18 @@ def score_model(
     maximum_features: int,
     similar_neighbors: int,
     enrolled_at: datetime | None = None,
+    allow_archived_shadow_member: bool = False,
 ) -> dict[str, Any]:
     """Score one model's latest cutoff-bounded candle and persist the prediction.
 
     ``symbol``/``timeframe`` default to the instrument and timeframe recorded in
     the artifact's own dataset block, so pool mode cannot score a model against
     a market it was never trained on.
+
+    ``allow_archived_shadow_member`` is set only by the volatility shadow pool:
+    its sticky enrollment must keep scoring the exact version it enrolled even
+    after the promotion lifecycle archives that version in favour of a later
+    retrain of the same model_key.
     """
 
     if not model_version.artifact_checksum:
@@ -272,6 +279,7 @@ def score_model(
             timeframe=timeframe,
             alphabet=alphabet,
             allow_candidate_pool_member=enrolled_at is not None,
+            allow_archived_shadow_member=allow_archived_shadow_member,
         )
     else:
         contract = validate_production_artifact(
@@ -283,6 +291,7 @@ def score_model(
             # An enrolled pool CANDIDATE shadow-predicts for the daily competition;
             # its no-backdating guard below uses enrolled_at instead of promoted_at.
             allow_candidate_pool_member=enrolled_at is not None,
+            allow_archived_shadow_member=allow_archived_shadow_member,
         )
 
     if sequence_model:
@@ -297,11 +306,11 @@ def score_model(
         require_prediction_after_training_boundary(evidence.close_time, contract)
         if model_version.stage == "PRODUCTION":
             require_prediction_after_production_promotion(evidence.close_time, model_version)
-        elif enrolled_at is not None and model_version.stage == "CANDIDATE":
+        elif enrolled_at is not None and model_version.stage in ("CANDIDATE", "ARCHIVED"):
             require_prediction_after_pool_enrollment(evidence.close_time, enrolled_at)
         else:
             raise InferenceError(
-                "Only a PRODUCTION model or an enrolled competition-pool CANDIDATE may create a prediction."
+                "Only a PRODUCTION model or an enrolled pool/shadow member may create a prediction."
             )
         similar_setup = {
             "method": "NOT_APPLICABLE_FOR_SEQUENCE_MODEL",
@@ -339,15 +348,16 @@ def score_model(
                 "predictionCreated": False,
             }
         require_prediction_after_training_boundary(evidence.close_time, contract)
-        # A PRODUCTION model keeps its promotion guard. A pool CANDIDATE is guarded
-        # by its enrollment instead: same no-backdating property, different clock.
+        # A PRODUCTION model keeps its promotion guard. A pool CANDIDATE, or a
+        # sticky-enrolled ARCHIVED shadow member, is guarded by its enrollment
+        # instead: same no-backdating property, different clock.
         if model_version.stage == "PRODUCTION":
             require_prediction_after_production_promotion(evidence.close_time, model_version)
-        elif enrolled_at is not None and model_version.stage == "CANDIDATE":
+        elif enrolled_at is not None and model_version.stage in ("CANDIDATE", "ARCHIVED"):
             require_prediction_after_pool_enrollment(evidence.close_time, enrolled_at)
         else:
             raise InferenceError(
-                "Only a PRODUCTION model or an enrolled competition-pool CANDIDATE may create a prediction."
+                "Only a PRODUCTION model or an enrolled pool/shadow member may create a prediction."
             )
 
         # The stationary schema needs the previous close and a rolling median
@@ -464,6 +474,13 @@ def score_model(
         prediction_id = auxiliary["id"]
         prediction_model_version_id = auxiliary["modelVersionId"]
 
+    confluence_signal = evaluate_confluence_signal(
+        conn=repository.connection,
+        symbol=symbol,
+        spot_price=float(evidence.close),
+        as_of_time=evidence.close_time,
+    )
+
     return {
         "level": "info",
         "message": "Explainable local model prediction persisted",
@@ -484,6 +501,7 @@ def score_model(
         "classProbabilities": dict(explained_prediction.class_probabilities),
         "topFeatureContributions": list(explained_prediction.feature_contributions),
         "similarSetupLabelAgreement": similar_setup,
+        "confluenceGate": confluence_signal.to_dict(),
         "predictionCreated": True,
         "tradeIdeaCreated": False,
         "paperTradeCreated": False,
@@ -545,6 +563,7 @@ def run_shadow_pool(repository: PostgresMlRepository, args: argparse.Namespace, 
                     maximum_features=args.maximum_features,
                     similar_neighbors=args.similar_neighbors,
                     enrolled_at=member["enrolled_at"],
+                    allow_archived_shadow_member=True,
                 )
                 result["shadowRole"] = member["role"]
                 result["modelKey"] = model_version.model_key

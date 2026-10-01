@@ -119,6 +119,17 @@ describe("decision lifecycle", () => {
       .toThrow(/skips RISK_APPROVED.*bypassed \(I17\)/s);
   });
 
+  it("permits shadow's one structurally-safe shortcut, and nothing else new", () => {
+    // Shadow calls the thesis producer directly and never runs market-state interpretation -- see
+    // DecisionTransitionMode's own docstring for why I17 does not apply to a path with no execution port.
+    expect(() => assertDecisionTransition("CANDIDATE_RESOLVED", "THESIS_FORMED")).toThrow(DecisionTransitionError);
+    expect(() => assertDecisionTransition("CANDIDATE_RESOLVED", "THESIS_FORMED", "shadow")).not.toThrow();
+    // Shadow gets exactly that one addition, not a blanket loosening of the live table.
+    expect(() => assertDecisionTransition("THESIS_FORMED", "EXECUTED", "shadow")).toThrow(DecisionTransitionError);
+    expect(() => assertDecisionTransition("EDGE_ASSESSED", "INSTRUMENT_SELECTED", "shadow"))
+      .toThrow(/skips RISK_APPROVED/);
+  });
+
   it("lets any live stage stop, and never lets a stopped decision move", () => {
     for (const state of LIVE_DECISION_STATES) {
       if (state === "EXECUTED") continue;

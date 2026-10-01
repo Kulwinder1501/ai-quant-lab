@@ -20,10 +20,19 @@ import { SharedStreamPollerRegistry } from "../../application/shared-stream-poll
  * spelled Fin Nifty `FINNIFTY.NS` -- not a ticker -- so its quote rejected, the row was
  * dropped by the tile filter, and the panel rendered one tile short with nothing logged.
  * The resolver now owns every spelling in one place.
+ *
+ * GOLD is `XAU_USD` -- spot gold in USD, quoted through Twelve Data (`ProviderRoutedQuoteClient`
+ * routes any symbol `twelvedata-symbol-resolver.ts` maps there). This started as `GC=F`
+ * (COMEX gold futures via Yahoo, reference-only, no candles) because Fyers has no live segment
+ * for it (India-only, NSE/BSE) and OANDA -- tried next, a real broker -- does not accept
+ * Indian-resident accounts. `XAU_USD` is now the real, backfilled, selectable instrument
+ * (see `apps/api/src/infrastructure/market-data/twelvedata-historical-data-provider.ts`), so
+ * the tile points at it instead of the old placeholder.
  */
 const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [
   { label: "NIFTY50", symbol: "NIFTY50" },
   { label: "BANKNIFTY", symbol: "BANKNIFTY" },
+  { label: "GOLD", symbol: "XAU_USD" },
   { label: "FINNIFTY", symbol: "FINNIFTY" },
   { label: "SENSEX", symbol: "SENSEX" },
   { label: "HANG SENG", symbol: "^HSI" },

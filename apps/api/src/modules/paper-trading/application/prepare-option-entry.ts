@@ -67,6 +67,10 @@ export interface PreparedOptionEntry {
     optionType: "CE" | "PE";
     underlyingSymbol: string;
     underlyingEntryPrice: number;
+    /** The underlying's real observed level at the fill instant, or null. See migration 120. */
+    underlyingFillPrice: number | null;
+    underlyingFillPriceSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null;
+    invalidationLevelAtEntry?: number | null;
     entryIv: number;
   };
   feeBreakdown: Record<string, unknown>;
@@ -83,12 +87,14 @@ export type PrepareOptionEntryResult =
     reason:
       | "IDEA_NOT_FOUND"
       | "NO_STRIKE_STEP"
+      | "MISSING_INVALIDATION_LEVEL"
       | "EXPIRY_REQUIRED"
       | "EXPIRY_INVALID"
       | "EXPIRY_PASSED"
       | "NO_CALENDAR"
       | "EXPIRY_NOT_LISTED"
       | "NO_EXPIRY_FAR_ENOUGH_OUT"
+      | "NO_OPTION_ENTRY"
       | "NO_FRESH_EXECUTABLE_QUOTE"
       | "FILL_NOT_DERIVABLE"
       | "OPTIONS_ENTRY_REJECTED";
@@ -203,6 +209,15 @@ export class PrepareOptionEntry {
       };
     }
 
+    const invalidationLevelAtEntry = idea.stop_loss === null ? null : Number(idea.stop_loss);
+    if (invalidationLevelAtEntry === null || !Number.isFinite(invalidationLevelAtEntry) || invalidationLevelAtEntry <= 0) {
+      return {
+        approved: false,
+        reason: "MISSING_INVALIDATION_LEVEL",
+        explanation: `Trade idea ${idea.id} has invalid or missing stop_loss (${idea.stop_loss}); O1 invalidation level cannot be populated.`,
+      };
+    }
+
     const calendar = await this.optionChainRepository.latestExpiryCalendar(underlyingSymbol, now);
     const chosen = this.resolveExpiry(calendar, input.expiryDate, underlyingSymbol, now);
     if (!chosen.ok) return chosen.refusal;
@@ -213,7 +228,6 @@ export class PrepareOptionEntry {
     // The chain is read before the fill is mapped, because the entry premium should be the
     // market's. The strike does not depend on the mapping -- it is nearestStrike(entry, step)
     // -- so it can be derived here and looked up.
-    const intendedStrike = nearestStrike(Number(idea.entry_price), strikeStep);
     const intendedOptionType = idea.side === "LONG" ? "CE" : "PE";
     const entryChain = await this.optionChainRepository
       .latestSnapshot({
@@ -233,17 +247,87 @@ export class PrepareOptionEntry {
       ? entryChain
       : null;
 
-    const chainGreeks = usableChain === null ? null : solveContractGreeksFromChain({
-      snapshot: usableChain,
-      strikePrice: intendedStrike,
-      optionType: intendedOptionType,
+    if (usableChain === null || usableChain.quotes.length === 0) {
+      return {
+        approved: false,
+        reason: "NO_OPTION_ENTRY",
+        explanation:
+          `No usable option chain found for ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
+          + `within maximum age of ${MAXIMUM_CHAIN_AGE_MINUTES} minutes.`,
+      };
+    }
+
+    const MIN_ENTRY_DELTA = 0.75;
+    const TARGET_DELTA = 0.75;
+    const matchingQuotes = usableChain.quotes.filter((q) => q.optionType === intendedOptionType);
+    const eligible: Array<{
+      quote: typeof matchingQuotes[0];
+      greeks: NonNullable<ReturnType<typeof solveContractGreeksFromChain>>;
+    }> = [];
+
+    for (const q of matchingQuotes) {
+      if (
+        q.bid === null
+        || q.ask === null
+        || !Number.isFinite(q.bid)
+        || !Number.isFinite(q.ask)
+        || !(q.ask > q.bid)
+      ) {
+        continue;
+      }
+      const greeks = solveContractGreeksFromChain({
+        snapshot: usableChain,
+        strikePrice: q.strikePrice,
+        optionType: intendedOptionType,
+      });
+      if (
+        greeks !== null
+        && Number.isFinite(greeks.delta)
+        && Math.abs(greeks.delta) >= MIN_ENTRY_DELTA
+      ) {
+        eligible.push({ quote: q, greeks });
+      }
+    }
+
+    if (eligible.length === 0) {
+      return {
+        approved: false,
+        reason: "NO_OPTION_ENTRY",
+        explanation:
+          `No eligible contract found for ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
+          + `${intendedOptionType}: no contract satisfied abs(delta) >= ${MIN_ENTRY_DELTA} with valid two-sided quotes.`,
+      };
+    }
+
+    // Rank eligible contracts:
+    // 1. Min distance |abs(delta) - 0.75|
+    // 2. Min bid-ask spread (ask - bid)
+    // 3. Strike ASC
+    eligible.sort((a, b) => {
+      const deltaDiffA = Math.abs(Math.abs(a.greeks.delta) - TARGET_DELTA);
+      const deltaDiffB = Math.abs(Math.abs(b.greeks.delta) - TARGET_DELTA);
+      if (Math.abs(deltaDiffA - deltaDiffB) > 1e-6) {
+        return deltaDiffA - deltaDiffB;
+      }
+      const spreadA = a.quote.ask! - a.quote.bid!;
+      const spreadB = b.quote.ask! - b.quote.bid!;
+      if (Math.abs(spreadA - spreadB) > 1e-6) {
+        return spreadA - spreadB;
+      }
+      return a.quote.strikePrice - b.quote.strikePrice;
     });
+
+    const chosenCandidate = eligible[0]!;
+    const intendedStrike = chosenCandidate.quote.strikePrice;
+    const chainGreeks = chosenCandidate.greeks;
+    const deltaAtEntry = chainGreeks.delta;
+    const thetaAtEntry = chainGreeks.theta;
+    const vegaAtEntry = chainGreeks.vega;
+
     // A buyer pays the ask, not the mid. Filling at the mid understates the entry by half
     // the spread on every trade, and spread is the cost that decides whether an options edge
     // survives at all.
-    const intendedQuote = usableChain?.quotes.find(
-      (quote) => quote.strikePrice === intendedStrike && quote.optionType === intendedOptionType,
-    );
+    const intendedQuote = chosenCandidate.quote;
     const denseQuote = await this.premiumTicks?.latestForContract({
       underlyingSymbol,
       expiryDate: settlementExpiry,
@@ -255,17 +339,15 @@ export class PrepareOptionEntry {
       && chainAgeMinutes !== null
       && chainAgeMinutes >= 0
       && chainAgeMinutes * 60_000 <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
-      && intendedQuote?.ask != null
+      && intendedQuote.ask !== null
       && intendedQuote.ask > 0
-      && chainGreeks !== null
       ? {
-        premium: intendedQuote.ask,
-        // The exit evaluator measures both barriers against the bid, so the bid travels with
-        // the fill to keep them on one basis. See `exitBasisOffset` in `option-buyer-fill`.
+        premium: intendedQuote.ask!,
         bid: intendedQuote.bid,
         impliedVolatility: chainGreeks.impliedVolatility,
         source: "OPTION_CHAIN_QUOTE" as const,
         observedAt: entryChain.observedAt,
+        underlyingValue: entryChain.underlyingValue,
       }
       : null;
 
@@ -290,20 +372,15 @@ export class PrepareOptionEntry {
         impliedVolatility: denseIv.impliedVolatility,
         source: "OPTION_PREMIUM_TICK_ASK" as const,
         observedAt: denseQuote.observedAt,
+        underlyingValue: denseQuote.underlyingValue,
       }
       : null;
 
-    // Prefer the denser quote. Both readers are bounded to `observedAt <= now`, so neither can
-    // open a position using a price published after its decision timestamp.
     const observedFill = freshDenseQuote ?? freshChainQuote;
     if (observedFill === null) {
       return {
         approved: false,
         reason: "NO_FRESH_EXECUTABLE_QUOTE",
-        // The expiry is named because omitting it hid a two-day outage: the message read as though
-        // a quoted contract had gone stale, while the real cause was the bot rolling past
-        // MINIMUM_DAYS_TO_EXPIRY onto a contract nothing was collecting. Strike and type alone
-        // matched the quoted book, so the refusals looked inexplicable.
         explanation: `No executable ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
           + `${intendedStrike} ${intendedOptionType} ask `
           + `at or before ${now.toISOString()} was available inside the `
@@ -322,6 +399,7 @@ export class PrepareOptionEntry {
         impliedVolatility,
         expiryDate: settlementExpiry,
         strikeStep,
+        strikeOverride: intendedStrike,
         observedFill,
         now,
       });
@@ -333,9 +411,6 @@ export class PrepareOptionEntry {
       };
     }
 
-    // Keep the chain's OI and paired-strike context, but screen the contract's spread against
-    // the same executable quote used for the fill. Otherwise a 15-minute-old spread could approve
-    // a book that is wide now (or refuse one that has since normalized).
     const validationChain = usableChain === null ? undefined : freshDenseQuote === null ? usableChain : {
       ...usableChain,
       observedAt: freshDenseQuote.observedAt,
@@ -395,6 +470,9 @@ export class PrepareOptionEntry {
           optionType: mapped.optionType,
           underlyingSymbol: idea.symbol,
           underlyingEntryPrice: mapped.underlyingEntryPrice,
+          underlyingFillPrice: mapped.underlyingFillPrice,
+          underlyingFillPriceSource: mapped.underlyingFillPriceSource,
+          invalidationLevelAtEntry,
           entryIv: mapped.impliedVolatility,
         },
         entryFees: entryFees.total,
@@ -421,6 +499,23 @@ export class PrepareOptionEntry {
             chainObservedAt: entryChain?.observedAt.toISOString() ?? null,
             chainAgeMinutes: chainAgeMinutes === null ? null : Number(chainAgeMinutes.toFixed(2)),
             chainUsable: usableChain !== null,
+          },
+          entryProvenance: {
+            selectionMode: "O2_CHAIN_ENUMERATION",
+            targetDelta: 0.75,
+            eligibleContractCount: eligible.length,
+            chainObservedAt: usableChain.observedAt.toISOString(),
+            deltaAtEntry,
+            thetaAtEntry,
+            vegaAtEntry,
+            IVAtEntry: mapped.impliedVolatility,
+            DTE: (settlementExpiry.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
+            optionSpread: observedFill.bid != null && Number.isFinite(observedFill.bid)
+              ? Number((observedFill.premium - observedFill.bid).toFixed(4))
+              : null,
+            strike: mapped.strike,
+            optionType: mapped.optionType,
+            expiryDate: settlementExpiry.toISOString(),
           },
         },
       },

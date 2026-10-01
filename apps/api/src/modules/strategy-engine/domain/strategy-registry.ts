@@ -6,6 +6,7 @@ import type {
 } from "./strategy.js";
 import { MomentumScalpStrategy, momentumScalpStrategyRegistration } from "./momentum-scalp-strategy.js";
 import { MomentumScalpIndexStrategy, momentumScalpIndexStrategyRegistration } from "./momentum-scalp-index-strategy.js";
+import { MomentumScalpGoldStrategy, momentumScalpGoldStrategyRegistration } from "./momentum-scalp-gold-strategy.js";
 import {
   MomentumScalpPatternStrategy,
   MomentumScalpPatternStrategyV2,
@@ -13,6 +14,22 @@ import {
   momentumScalpPatternStrategyV2Registration,
 } from "./momentum-scalp-pattern-strategy.js";
 import { TrendBreakoutStrategy, trendBreakoutStrategyRegistration } from "./trend-breakout-strategy.js";
+import {
+  IctStructureStrategy,
+  ictStructureStrategyRegistration,
+} from "./ict-structure-strategy.js";
+import {
+  HybridLiquidityConfluenceStrategy,
+  hybridLiquidityConfluenceStrategyRegistration,
+} from "./hybrid-liquidity-confluence-strategy.js";
+import {
+  TrendContinuationStrategy,
+  trendContinuationStrategyRegistration,
+} from "./trend-continuation-strategy.js";
+import {
+  EventReversalStrategy,
+  eventReversalStrategyRegistration,
+} from "./event-reversal-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -47,6 +64,21 @@ export interface RegisteredStrategy {
    * generation instead of having to record a refusal per idea.
    */
   executableSides?: readonly TradeSide[];
+  /**
+   * Whether this strategy reads `StrategyMarketContext.ictSnapshot`.
+   *
+   * Declared rather than inferred, because assembling that snapshot is expensive: the composite
+   * engine rescans the causal window per decision point, and its liquidity pass is quadratic. The
+   * context repository asks the registry which timeframes have a consumer and skips the work
+   * entirely for the rest.
+   *
+   * Found 2026-09-07: `ict_state_snapshots` held 7,512 rows at 1m and was still growing, while the
+   * only consumer supports 5m and 15m only. Every one of those rows was computed, persisted and
+   * read by nothing. The alternative patch was a hardcoded `timeframe === "1m"` early return in the
+   * repository, which suppresses the symptom at one timeframe and silently goes stale the moment a
+   * consumer's supported set changes.
+   */
+  readsIctContext?: boolean;
   /**
    * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.
    *
@@ -100,6 +132,42 @@ export interface RegisteredStrategy {
   };
 }
 
+/**
+ * Whether a strategy may put up a LIVE trade idea.
+ *
+ * `operationalDisposition` recorded a verdict and gated nothing: `ict-structure-v1` and
+ * `trend-breakout` were both TERMINAL_UNOWNED, both `is_active = true`, and both timeframe-eligible
+ * for the paper bot, so the only thing standing between a measured-out strategy and a live proposal
+ * was its own gate never happening to pass. That is not a control.
+ *
+ * Registered is deliberately NOT the same as tradeable. A terminal strategy stays in the registry so
+ * backtests and the differential harness can still reach it through `requireRegisteredStrategy`
+ * -- which is exactly what `whyStillRegistered` is for -- and this predicate is what separates the
+ * two. Anything that produces live ideas filters on it; anything that measures does not.
+ *
+ * The switch is exhaustive so a new disposition cannot default into permission: adding a status
+ * fails the type check here, and the runtime arm refuses rather than guessing.
+ */
+export function mayProposeLiveTrades(strategy: RegisteredStrategy): boolean {
+  const disposition = strategy.operationalDisposition;
+  if (disposition === undefined) return true;
+  switch (disposition.status) {
+    case "TERMINAL_UNOWNED":
+      return false;
+    default: {
+      const unhandled: never = disposition.status;
+      throw new Error(
+        `Unhandled operational disposition "${String(unhandled)}": refusing to assume it may trade live.`,
+      );
+    }
+  }
+}
+
+/** The strategies a live path may propose from. Measurement paths use `registeredStrategies`. */
+export function liveTradableStrategies(): readonly RegisteredStrategy[] {
+  return registeredStrategies.filter(mayProposeLiveTrades);
+}
+
 /** Both sides unless the registration narrows them. */
 export function strategyExecutableSides(strategy: RegisteredStrategy): readonly TradeSide[] {
   return strategy.executableSides ?? ["LONG", "SHORT"];
@@ -146,9 +214,8 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "strategy. It is also traded by no bot already -- removed from Classic on 2026-08-17 as a "
         + "15m-and-slower trend strategy outside the scalp band -- so the registration is what keeps "
         + "its ideas available to research and backtesting (`run-backtest` still defaults to it). "
-        + "Nothing evaluates 30m, 60m or 1d at all: SCAN_TIMEFRAMES is 1m/5m/15m and the autonomous "
-        + "agent runs --timeframe=5m, so the intraday and swing work those comments assign to it was "
-        + "never wired.",
+        + "The autonomous agent owns 15m/30m/60m/1d while SCAN_TIMEFRAMES is the 1m/5m scalp band, "
+        + "so the intraday and swing work those comments assign to it is deliberately separate.",
     },
   },
   {
@@ -204,6 +271,17 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     },
   },
   {
+    registration: momentumScalpGoldStrategyRegistration,
+    StrategyClass: MomentumScalpGoldStrategy,
+    // Same rule set as momentum-scalp-index (see that file's header) under its own key, so gold's
+    // live record accumulates independently and never re-arms the Indian-index verdict above.
+    // 1m/5m: what run-gold-paper-trading-bot.ts scans, matching the timeframes Twelve Data has
+    // backfilled for XAU_USD.
+    supportedTimeframes: ["1m", "5m"],
+    // No operationalDisposition, no executableSides restriction: unowned and unmeasured on this
+    // instrument, same starting position as momentum-scalp on AutoBot-Scalp1m.
+  },
+  {
     registration: momentumScalpPatternStrategyRegistration,
     StrategyClass: MomentumScalpPatternStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
@@ -228,8 +306,16 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * identical sibling `momentum-scalp-index` was disabled the same day for the same structural cost
      * reason (74% of the loss); keeping this one running would be re-learning that loss on a second
      * account. Registered, so idea generation, the research twin and this reasoning survive.
+     *
+     * Re-enabled 2026-09-26, both sides, by explicit user decision -- a deliberate re-test, not a
+     * finding that overturns the -Rs 10,209 record above. `selectPriorityPattern`'s alphabetical-vs-
+     * priority tie-break fix (same file, above `BULLISH_PATTERNS`/`BEARISH_PATTERNS`) landed the same
+     * day, but per its own header comment it only changes which pattern is *credited* in evidence/
+     * confidence -- the LONG/SHORT score gate never read which candidate was selected, only whether
+     * one was present, so it could not have changed a single entry, exit, or the P&L above. This
+     * re-enable carries no new evidence of its own; the next live record should be measured against
+     * the same -Rs 10,209/78-trade baseline before trusting it.
      */
-    executableSides: [],
   },
   {
     registration: momentumScalpPatternStrategyV2Registration,
@@ -264,7 +350,156 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
         + "TERMINAL: the generation-2 question is unanswered, not closed.",
     },
   },
+  {
+    registration: ictStructureStrategyRegistration,
+    StrategyClass: IctStructureStrategy,
+    supportedTimeframes: ["5m", "15m"],
+    readsIctContext: true,
+    /*
+     * `operationalDisposition` REMOVED 2026-09-21 to wire this live -- on explicit instruction,
+     * after the evidence below was presented and its own warning was read back verbatim. This is
+     * not a new positive result overturning the closure; the backtest is exactly as unstable as it
+     * was on 2026-09-08. The text is kept in full because the warning it ends on is precisely what
+     * a re-enable like this one needs on record.
+     *
+     * Originally TERMINAL_UNOWNED since 2026-09-08:
+     *
+     * "Closed on sign instability, not on a negative mean. Measured after four doctrinal fixes
+     * verified against the source lectures (farthest-ERL objective, bias sourced from the higher
+     * timeframe rather than local structure, daily HTF anchor, POI discrimination on mean
+     * threshold) and after the engine's quadratic state retention was fixed so runs could be
+     * continuous rather than chunked. Unchunked, 2bps slippage, concurrency 5: at 15m over 20
+     * months NIFTY50 is +18,342 (PF 2.46, 112 trades, 31.3%) while BANKNIFTY is -17,592 (PF 0.74,
+     * 184 trades, 13.6%); at 5m over a common continuous window the signs REVERSE, BANKNIFTY
+     * +1,175 (PF 1.15, 45 trades) against NIFTY50 -2,951 (PF 0.53, 57 trades). It also flips on
+     * window alone: NIFTY50 5m is +1,793 (PF 1.32) over 2026-02-27..09-05 and -2,951 over
+     * 2026-06-01..09-05, a SUBSET of that same period. Whichever cell looks profitable is the cell
+     * that was selected."
+     *
+     * whyStillRegistered: "The four doctrinal fixes and the lecture-by-lecture conformance record
+     * are the asset here, not the strategy. [...] Do not resume by re-running a positive cell --
+     * any cell can be made positive by moving a different axis."
+     *
+     * 2026-09-21 is exactly that: NIFTY50@15m and BANKNIFTY@5m are the two cells that looked
+     * positive in the table above. An out-of-sample check (2026-09-08..09-21, both cells) came
+     * back with zero trades on either -- 13 days against a base rate of ~5-6 signals/month is too
+     * little fresh data to confirm or refute the historical result, so this is going live
+     * unvalidated rather than validated. Wired via two series-scoped bots
+     * (`AutoBot-IctNifty15m`, `AutoBot-IctBankNifty5m` in bot-sandboxes.ts) on fresh accounts, so
+     * the live record is attributable to this decision and judged on its own trades -- not on the
+     * backtest that was already ruled unreliable.
+     */
+  },
+  {
+    registration: hybridLiquidityConfluenceStrategyRegistration,
+    StrategyClass: HybridLiquidityConfluenceStrategy,
+    supportedTimeframes: ["1m", "3m", "5m"],
+    /*
+     * Disabled entirely 2026-09-28 -- both sides, not a side restriction. Same pattern as
+     * `momentum-scalp-pattern-v2` above: registered so idea generation, lineage and this
+     * reasoning survive, but nothing may act on it yet.
+     *
+     * This strategy shipped 2026-09-28 with two real defects, both fixed the same day:
+     * Pillar A's threshold disagreed with its own docstring and backtest script (code gated at
+     * 0.10, docs said 0.15 -- a sensitivity sweep at 0.10/0.125/0.15 settled which value ships,
+     * see docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md), and Pillar C was a stub
+     * that read a `priceActionEvents[].details.oiSupport/oiResistance` flag nothing ever set, so
+     * it defaulted to a silent pass on every proposal. Pillar C is now a real as-of PCR join
+     * against `option_chain_snapshots`.
+     *
+     * Fixing those defects is not the same as validating the strategy. The one test built to
+     * distinguish "this confluence logic adds something" from "this is equivalent to randomly
+     * dropping most of the population" is the random-subsample null comparison recorded in the
+     * doc above -- read it before enabling either side. A single backtest run, in-sample-adjacent
+     * to the data these defects were found in, is not grounds to go live per this project's own
+     * discipline (train -> shadow -> settle -> compete, OOS validation, walk-forward), regardless
+     * of which way that comparison came out.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here (see `terminal-verdict-propagation.test.ts`). This strategy has no research twin and no
+    // TERMINAL verdict -- inventing one to attach a disposition here would misrepresent the record
+    // the same way `trend-breakout`'s comment warns against. `operationalDisposition` does not fit
+    // either: its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this
+    // is not. The plain comment above is the honest record for a "pending validation" disable.
+  },
+  {
+    registration: trendContinuationStrategyRegistration,
+    StrategyClass: TrendContinuationStrategy,
+    supportedTimeframes: ["1m", "5m", "15m"],
+    readsIctContext: true,
+    /*
+     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
+     * `hybrid-liquidity-confluence-v1` above: registered so idea generation, lineage and this
+     * reasoning survive, but nothing may act on it yet.
+     *
+     * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
+     * follow-up fix corrected 8 typecheck errors caused by both new strategies being written against
+     * an imagined snapshot shape (see that commit message for the field-level detail). Fixing those
+     * defects only makes the code compile and run; it says nothing about whether the logic has edge.
+     * No research twin, no CPCV/walk-forward result, no live record exists for this strategy. Per
+     * this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
+     * going live), a strategy with no measurement at all does not get to trade.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here. This strategy has no research twin and no TERMINAL verdict -- there is nothing to
+    // acknowledge yet, only an absence of validation. `operationalDisposition` does not fit either:
+    // its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this is not.
+  },
+  {
+    registration: eventReversalStrategyRegistration,
+    StrategyClass: EventReversalStrategy,
+    supportedTimeframes: ["5m", "15m", "60m", "1d"],
+    readsIctContext: true,
+    /*
+     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
+     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` above: registered so idea
+     * generation, lineage and this reasoning survive, but nothing may act on it yet.
+     *
+     * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
+     * follow-up fix corrected 8 typecheck errors caused by both new strategies being written against
+     * an imagined snapshot shape (see that commit message for the field-level detail, including the
+     * behavioural narrowing on the HTF-sweep gate this strategy's `maxCisdAgeBars` inherited). Fixing
+     * those defects only makes the code compile and run; it says nothing about whether the logic has
+     * edge. No research twin, no CPCV/walk-forward result, no live record exists for this strategy.
+     * Per this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
+     * going live), a strategy with no measurement at all does not get to trade.
+     */
+    executableSides: [],
+    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
+    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
+    // here. This strategy has no research twin and no TERMINAL verdict -- there is nothing to
+    // acknowledge yet, only an absence of validation. `operationalDisposition` does not fit either:
+    // its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this is not.
+  },
 ];
+
+/**
+ * The timeframes at which some registered strategy actually reads the ICT snapshot.
+ *
+ * Derived from the registry rather than listed separately, so it cannot drift from the
+ * `supportedTimeframes` of the strategies that consume it. A strategy that stops reading ICT, or
+ * narrows its timeframes, narrows this set with no other edit.
+ *
+ * Note this stays non-empty while `ict-structure-v1` is registered, even though that strategy is a
+ * measured negative wired to no runner. Retiring the ICT context entirely is a separate decision
+ * from not computing it where nothing can read it.
+ */
+export function ictContextTimeframes(): readonly string[] {
+  return [...new Set<string>(
+    registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes),
+  )].sort();
+}
+
+/** Whether assembling an ICT snapshot at `timeframe` can be read by anything. */
+export function ictContextConsumedAt(timeframe: string): boolean {
+  return ictContextTimeframes().includes(timeframe);
+}
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
   return strategy.supportedTimeframes.includes(timeframe);

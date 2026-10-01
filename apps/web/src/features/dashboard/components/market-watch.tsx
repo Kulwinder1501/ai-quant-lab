@@ -5,7 +5,10 @@ import { useSSE } from "../../../hooks/use-sse";
 import { getApiV1Url } from "../../research/api";
 
 interface MarketWatchItem {
+  /** Canonical routing symbol -- what `/charts/data` and a strategy actually key on. */
   symbol: string;
+  /** Human-readable display text. Diverges from `symbol` for GOLD ("GOLD" vs "XAU_USD"). */
+  label: string;
   price: string | number;
   changePercent: number;
   aiStance: "BULL" | "BEAR" | "NEUT";
@@ -26,11 +29,15 @@ interface MarketWatchItem {
  * `assertScannableSymbols` refuses to trade through — so promoting it into a trading surface is a
  * deliberate decision and not one a dropdown should make silently.
  *
- * The other five therefore stay visible with their live prices, which is the point of a watch
- * list, but are not selectable. Showing them as ordinary options would offer a click that can
- * only ever produce a blank dashboard.
+ * The remaining four therefore stay visible with their live prices, which is the point of a
+ * watch list, but are not selectable. Showing them as ordinary options would offer a click that
+ * can only ever produce a blank dashboard.
+ *
+ * GOLD (`XAU_USD`) joined NIFTY50/BANKNIFTY here once it had a real backfilled candle series via
+ * Twelve Data -- see `twelvedata-historical-data-provider.ts`. Before that it was `GC=F`, a
+ * Yahoo-quoted reference tile with no stored candles, correctly excluded from this set.
  */
-const SELECTABLE_SYMBOLS = new Set(["NIFTY50", "BANKNIFTY"]);
+const SELECTABLE_SYMBOLS = new Set(["NIFTY50", "BANKNIFTY", "XAU_USD"]);
 
 function formatPrice(price: string | number): string {
   return typeof price === "number"
@@ -123,7 +130,7 @@ export function MarketWatchSelect({
         className="flex items-center gap-2 rounded-md border border-cyan-500/50 bg-slate-900 px-3 py-1.5 text-xs font-bold text-white transition hover:border-cyan-400 focus:outline-none focus:border-cyan-400 shadow-lg cursor-pointer"
       >
         <span className="text-[10px]">⚡</span>
-        <span>{selectedSymbol}</span>
+        <span>{selected?.label ?? selectedSymbol}</span>
         {selected && (
           <>
             <span className="font-mono text-slate-200">{formatPrice(selected.price)}</span>
@@ -201,12 +208,12 @@ export function MarketWatchSelect({
                       aria-disabled={!isSelectable}
                       title={isSelectable
                         ? undefined
-                        : `${item.symbol} is quoted for reference only — it has no stored candle series, so the dashboard cannot stream it.`}
+                        : `${item.label} is quoted for reference only — it has no stored candle series, so the dashboard cannot stream it.`}
                       className={`group transition-all duration-300 ${rowClass} ${flashClass}`}
                     >
                       <td className={`max-w-[110px] truncate py-2.5 font-bold ${isSelected ? "text-cyan-400" : "text-slate-300 group-hover:text-white"}`}>
                         {isSelected && <span className="mr-1 text-[10px]">⚡</span>}
-                        {item.symbol}
+                        {item.label}
                       </td>
                       <td className="py-2.5 text-right">
                         <div className={`transition-colors duration-300 ${flash === "up" ? "font-bold text-emerald-400" : flash === "down" ? "font-bold text-rose-400" : "text-slate-200"}`}>

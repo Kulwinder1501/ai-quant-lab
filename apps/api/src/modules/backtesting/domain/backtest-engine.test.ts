@@ -290,3 +290,201 @@ describe("BacktestEngine", () => {
     expect(() => backtest([source, overlapping], {})).toThrow("must not overlap");
   });
 });
+
+describe("BacktestEngine concurrency", () => {
+  /*
+   * Three signals on consecutive bars, none of which can resolve: the bars never touch 95 or 110,
+   * so every position stays open until END_OF_DATA. That isolates admission from exit behaviour.
+   */
+  const flatBar = { open: 100, high: 101, low: 99, close: 100 };
+  const contexts = [
+    context("c1", "2026-01-05", flatBar),
+    context("c2", "2026-01-06", flatBar),
+    context("c3", "2026-01-07", flatBar),
+    context("c4", "2026-01-08", flatBar),
+    context("c5", "2026-01-09", flatBar),
+  ];
+  const strategy = new FixedSignalStrategy({
+    c1: longProposal(), c2: longProposal(), c3: longProposal(),
+  });
+  const config = (overrides: Partial<BacktestConfiguration>): BacktestConfiguration =>
+    ({ ...defaultBacktestConfiguration, ...overrides });
+
+  it("still admits exactly one position at the default, and blocks the rest", () => {
+    // The default is deliberately unchanged, so previously recorded runs stay reproducible.
+    expect(defaultBacktestConfiguration.maxConcurrentPositions).toBe(1);
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({}));
+    expect(result.metrics.signalCount).toBe(3);
+    expect(result.metrics.tradeCount).toBe(1);
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(2);
+  });
+
+  it("admits up to maxConcurrentPositions and blocks only beyond it", () => {
+    const two = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 2 }));
+    expect(two.metrics.tradeCount).toBe(2);
+    expect(two.metrics.skippedSignalsWhilePositionOpen).toBe(1);
+
+    const three = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 3 }));
+    expect(three.metrics.tradeCount).toBe(3);
+    expect(three.metrics.skippedSignalsWhilePositionOpen).toBe(0);
+  });
+
+  it("counts a pending fill against the limit, since it is already committed to open", () => {
+    // With a limit of 1, the signal on c2 arrives while c1's fill is pending, not yet open. It must
+    // still be refused: treating a pending slot as free would over-admit by one on every bar.
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: 1 }));
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(2);
+  });
+
+  it("charges each concurrent position against available capital, not gross equity", () => {
+    // 100 units at ~100 with marginFraction 1 needs ~10,000 per position. Capital for two, asked
+    // for three: the third is refused for capital, not for concurrency.
+    const result = new BacktestEngine(strategy).run(contexts, {}, config({
+      maxConcurrentPositions: 3, quantity: 100, initialCapital: 25_000, marginFraction: 1,
+    }));
+    expect(result.metrics.tradeCount).toBe(2);
+    expect(result.metrics.skippedSignalsInsufficientCapital).toBe(1);
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(0);
+  });
+
+  it("rejects a non-integer or sub-1 concurrency rather than silently clamping", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new BacktestEngine(strategy).run(contexts, {}, config({ maxConcurrentPositions: bad })))
+        .toThrow(/Backtest configuration is invalid/);
+    }
+  });
+});
+
+describe("BacktestEngine opposing-sweep early exit", () => {
+  function withIndicator(
+    baseContext: StrategyMarketContext,
+    type: "BULLISH_SWEEP" | "BEARISH_SWEEP",
+  ): StrategyMarketContext {
+    return {
+      ...baseContext,
+      indicators: [
+        { code: "LIQUIDITY_SWEEP", algorithmVersion: "smc-v2", parameters: {}, values: { type, level: 100 } },
+      ] as unknown as StrategyMarketContext["indicators"],
+    };
+  }
+
+  const flatBar = { open: 100, high: 101, low: 99, close: 100 };
+
+  it("is off by default: an opposing sweep does not close the position", () => {
+    const contexts = [
+      context("c1", "2026-01-05", flatBar),
+      context("c2", "2026-01-06", flatBar),
+      withIndicator(context("c3", "2026-01-07", flatBar), "BEARISH_SWEEP"),
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("END_OF_DATA");
+  });
+
+  it("closes a LONG at the bar's close when a BEARISH_SWEEP appears, once asked for", () => {
+    const contexts = [
+      context("c1", "2026-01-05", flatBar),
+      context("c2", "2026-01-06", flatBar),
+      withIndicator(context("c3", "2026-01-07", { open: 100, high: 102, low: 98, close: 101 }), "BEARISH_SWEEP"),
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, true).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0].exitReason).toBe("OPPOSING_LIQUIDITY_SWEEP");
+    expect(result.trades[0].exitPrice).toBe(101);
+    expect(result.trades[0].reasoning).toContain("Exit policy: OPPOSING_SWEEP_EXIT.");
+  });
+
+  it("does not exit a LONG on a confirming BULLISH_SWEEP", () => {
+    const contexts = [
+      context("c1", "2026-01-05", flatBar),
+      context("c2", "2026-01-06", flatBar),
+      withIndicator(context("c3", "2026-01-07", flatBar), "BULLISH_SWEEP"),
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, true).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("END_OF_DATA");
+  });
+
+  it("lets a same-bar stop take priority over an opposing sweep", () => {
+    const contexts = [
+      context("c1", "2026-01-05", flatBar),
+      context("c2", "2026-01-06", flatBar),
+      // Breaches the 95 stop (low 90) and carries an opposing sweep on the very same bar.
+      withIndicator(context("c3", "2026-01-07", { open: 100, high: 101, low: 90, close: 96 }), "BEARISH_SWEEP"),
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, true).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+  });
+});
+
+describe("BacktestEngine underlying protective stop", () => {
+  // longProposal(): entry 100, stop 95, target 110 -> 1R = 5.
+  const breakEvenOnly = { breakEvenTriggerR: 0.5, trail: null };
+
+  it("is off by default: a reversal after +0.5R still rides to the original stop", () => {
+    const contexts = [
+      context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+      context("c2", "2026-01-06", { open: 100, high: 103, low: 99, close: 102 }), // fills, +0.6R high
+      context("c3", "2026-01-07", { open: 100, high: 100, low: 94, close: 95 }), // reverses through 95
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(95);
+  });
+
+  it("tightens to one tick below entry after +0.5R, turning a full loss into a near-scratch", () => {
+    const contexts = [
+      context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+      context("c2", "2026-01-06", { open: 100, high: 103, low: 99, close: 102 }), // fills, +0.6R high
+      context("c3", "2026-01-07", { open: 100, high: 100, low: 94, close: 95 }), // would ride to 95
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, false, breakEvenOnly).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(99.95);
+  });
+
+  it("tracks the peak across bars, not just the latest one, before tightening", () => {
+    const contexts = [
+      context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+      context("c2", "2026-01-06", { open: 100, high: 102, low: 98, close: 99 }), // fills; +0.4R, not yet
+      context("c3", "2026-01-07", { open: 99, high: 103, low: 98, close: 99 }), // +0.6R peak, then recedes
+      context("c4", "2026-01-08", { open: 100, high: 100, low: 90, close: 91 }), // reversal, no gap through 99.95
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, false, breakEvenOnly).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(99.95);
+  });
+
+  it("never widens the stop once tightened, even if price pulls back before reversing further", () => {
+    const contexts = [
+      context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+      context("c2", "2026-01-06", { open: 100, high: 103, low: 99, close: 102 }), // triggers break-even
+      context("c3", "2026-01-07", { open: 102, high: 104, low: 101, close: 103 }), // still favourable
+      context("c4", "2026-01-08", { open: 103, high: 103, low: 90, close: 91 }), // reversal
+    ];
+    const strategy = new FixedSignalStrategy({ c1: longProposal() });
+    const result = new BacktestEngine(strategy, false, breakEvenOnly).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(99.95);
+  });
+
+  it("works for SHORT trades symmetrically", () => {
+    const shortSignal: ProposedTradeIdea = longProposal({
+      side: "SHORT", entryPrice: 100, stopLoss: 105, targetPrice: 90, riskReward: 2,
+    });
+    const contexts = [
+      context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+      context("c2", "2026-01-06", { open: 100, high: 101, low: 97, close: 98 }), // fills, +0.6R low
+      context("c3", "2026-01-07", { open: 98, high: 106, low: 98, close: 105 }), // reverses through 105
+    ];
+    const strategy = new FixedSignalStrategy({ c1: shortSignal });
+    const result = new BacktestEngine(strategy, false, breakEvenOnly).run(contexts, {}, defaultBacktestConfiguration);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(100.05);
+  });
+});

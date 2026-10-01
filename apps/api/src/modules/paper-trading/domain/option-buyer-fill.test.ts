@@ -68,6 +68,23 @@ describe("mapIdeaToOptionBuyerFill", () => {
     expect(fill.entryGreeks.premium).toBeGreaterThan(0);
   });
 
+  it("prices at strikeOverride instead of the nearest ATM strike when supplied", () => {
+    const atm = mapIdeaToOptionBuyerFill(niftyIdea());
+    const itm1 = mapIdeaToOptionBuyerFill(niftyIdea({ strikeOverride: atm.strike - 50 }));
+
+    expect(atm.strike).not.toBe(itm1.strike);
+    expect(itm1.strike).toBe(atm.strike - 50);
+    // No override still snaps to ATM -- the live call site never passes one.
+    expect(mapIdeaToOptionBuyerFill(niftyIdea()).strike).toBe(atm.strike);
+  });
+
+  it("refuses a non-positive strikeOverride", () => {
+    for (const strikeOverride of [0, -50, Number.NaN]) {
+      expect(() => mapIdeaToOptionBuyerFill(niftyIdea({ strikeOverride })))
+        .toThrow(/strikeOverride/);
+    }
+  });
+
   it("rejects an idea whose stop and target are not on opposite sides of the entry", () => {
     // A long whose stop sits above the entry is not a long.
     expect(() => mapIdeaToOptionBuyerFill(niftyIdea({ underlyingStop: 24_500 })))
@@ -191,6 +208,35 @@ describe("mapIdeaToOptionBuyerFill with an observed chain fill", () => {
     expect(observed.fillSource).toBe("OPTION_CHAIN_QUOTE");
     expect(modelled.fillSource).toBe("OPTION_MODEL");
     expect(modelled.fillPremium).not.toBe(observed.fillPremium);
+  });
+
+  it("carries the observed quote's underlying value as underlyingFillPrice, separate from underlyingEntryPrice", () => {
+    // underlyingEntry (base.underlyingEntry) is the idea's signal-time level; the observed
+    // quote's underlyingValue is a different, later observation -- the real spot at the fill.
+    const observed = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: {
+        premium: 752.75, impliedVolatility: 0.12983,
+        source: "OPTION_PREMIUM_TICK_ASK", underlyingValue: 57_797,
+      },
+    });
+
+    expect(observed.underlyingEntryPrice).toBe(base.underlyingEntry);
+    expect(observed.underlyingFillPrice).toBe(57_797);
+    expect(observed.underlyingFillPriceSource).toBe("OPTION_PREMIUM_TICK_ASK");
+  });
+
+  it("leaves underlyingFillPrice null when there is no observed fill, or the observed quote carried no underlying value", () => {
+    const modelled = mapIdeaToOptionBuyerFill(base);
+    expect(modelled.underlyingFillPrice).toBeNull();
+    expect(modelled.underlyingFillPriceSource).toBeNull();
+
+    const noUnderlyingValue = mapIdeaToOptionBuyerFill({
+      ...base,
+      observedFill: { premium: 752.75, impliedVolatility: 0.12983 },
+    });
+    expect(noUnderlyingValue.underlyingFillPrice).toBeNull();
+    expect(noUnderlyingValue.underlyingFillPriceSource).toBeNull();
   });
 
   it("reprices stop and target on the observed IV, not the caller's estimate", () => {

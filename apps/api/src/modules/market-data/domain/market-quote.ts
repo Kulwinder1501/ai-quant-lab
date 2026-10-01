@@ -1,6 +1,6 @@
 export interface MarketQuote {
   symbol: string;
-  provider: "fyers-api-v3" | "yahoo";
+  provider: "fyers-api-v3" | "yahoo" | "twelvedata";
   shortName: string | null;
   exchange: string | null;
   regularMarketPrice: number | null;

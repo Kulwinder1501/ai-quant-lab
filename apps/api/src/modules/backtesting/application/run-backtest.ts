@@ -17,6 +17,12 @@ export interface BacktestExecutionOverrides {
   positionSizing?: BacktestPositionSizing;
   riskFractionPerTrade?: number;
   marginFraction?: number;
+  /**
+   * Concurrency is an execution assumption like the others, so it travels with them and is saved
+   * into the run's `configuration` before any market data is read. Omit it for the sequential
+   * default; a run that raises it is not comparable with one that did not.
+   */
+  maxConcurrentPositions?: number;
 }
 
 export interface RunBacktestInput {

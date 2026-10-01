@@ -35,6 +35,10 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_V8,
     FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
     FEATURE_SCHEMA_VERSION_V9,
+    FEATURE_SCHEMA_VERSION_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -377,6 +381,113 @@ _PATTERN_BINARY_FEATURES_V9_ADDITIONS: tuple[str, ...] = tuple(
 FEATURE_SCHEMA_V9: tuple[str, ...] = FEATURE_SCHEMA_V8 + _PATTERN_BINARY_FEATURES_V9_ADDITIONS
 assert len(FEATURE_SCHEMA_V9) == 75, f"FEATURE_SCHEMA_V9 must have exactly 75 features, got {len(FEATURE_SCHEMA_V9)}"
 
+# ICT structural covariates -- see `IctEvidence` in contracts.py and
+# `extractIctStructuralFeatures` in apps/api/src/.../ict/feature-extraction.ts, which this mirrors.
+#
+# Categorical fields (bias direction, zone, order-block side) are one-hot rather than a signed
+# numeric code, matching this file's SUPERTREND trend_up/trend_down convention: a tree splits on a
+# threshold, and there is no ordering between BULLISH/BEARISH/NEUTRAL/UNKNOWN a single numeric code
+# could encode without inventing one. All four are 0.0 (not NaN) when absent -- "no bias formed" /
+# "no order block active" is itself evidence a model can use, the same reasoning `pattern.is_*`
+# already applies to "this pattern did not fire".
+#
+# The two raw price distances are ATR-normalised here, not left as rupee levels -- this module's own
+# docstring bans absolute price levels as a feature (era leakage), and BANKNIFTY's price scale is
+# roughly 5x NIFTY50's, so an unnormalised distance would not even mean the same thing across the two
+# instruments this engine was measured on.
+_ICT_FEATURE_COLUMNS: tuple[str, ...] = (
+    "ict.htf_bias_bullish",
+    "ict.htf_bias_bearish",
+    "ict.premium_discount_is_premium",
+    "ict.premium_discount_is_discount",
+    "ict.nearest_order_block_is_bullish",
+    "ict.nearest_order_block_is_bearish",
+    "ict.distance_to_nearest_order_block_atr",
+    "ict.has_bos_level",
+    "ict.has_choch_level",
+    "ict.distance_to_bos_level_atr",
+    "ict.distance_to_choch_level_atr",
+)
+
+# The feature-vs-signal experiment: v9 (Model D, 75 columns) plus the 11 ICT columns above.
+FEATURE_SCHEMA_V_ICT: tuple[str, ...] = FEATURE_SCHEMA_V9 + _ICT_FEATURE_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT) == 86, f"FEATURE_SCHEMA_V_ICT must have exactly 86 features, got {len(FEATURE_SCHEMA_V_ICT)}"
+
+# The cross-timeframe "Refined Order Block" columns -- checked directly against the source
+# transcripts (lecture 4's "Refined Order Block" section, lecture 3's structure-mapping section):
+# order blocks and structure are read top-down, anchored to a higher-timeframe zone, never detected
+# independently per timeframe. `ict.distance_to_nearest_order_block_atr` above is exactly that
+# rejected, naive construction, kept only as the baseline these four columns are compared against.
+#
+# `htf_order_block_distance_atr` is present whenever an HTF pairing was backfilled for the row (an
+# HTF order block is active on almost every bar -- measured 99.99%+ coverage on NIFTY50/BANKNIFTY
+# 15m/60m). `refined_order_block_distance_atr` and `stop_compression_ratio` are only present on the
+# ~16-18% of bars where an LTF order block actually nests inside the HTF one -- the doctrine's own
+# refinement is a genuinely occasional condition, not a re-derivation of the naive distance.
+_ICT_REFINED_ORDER_BLOCK_COLUMNS: tuple[str, ...] = (
+    "ict.htf_order_block_is_bullish",
+    "ict.htf_order_block_is_bearish",
+    "ict.htf_order_block_distance_atr",
+    "ict.has_refined_order_block",
+    "ict.refined_order_block_distance_atr",
+    "ict.stop_compression_ratio",
+)
+
+# v-ict (v9 + the naive same-timeframe OB/BOS/CHoCH read) plus the 6 refined columns above -- a
+# three-way nested ablation chain: v9 subset-of v-ict subset-of v-ict-refined.
+FEATURE_SCHEMA_V_ICT_REFINED: tuple[str, ...] = FEATURE_SCHEMA_V_ICT + _ICT_REFINED_ORDER_BLOCK_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_REFINED) == 92, (
+    f"FEATURE_SCHEMA_V_ICT_REFINED must have exactly 92 features, got {len(FEATURE_SCHEMA_V_ICT_REFINED)}"
+)
+
+# "Optimal Trade Entry" (see `ote.ts`): the 62-79% Fibonacci retracement band of the current dealing
+# range. Unlike the refined order block, this is same-timeframe -- no HTF pairing needed -- and is
+# present on every bar that has a dealing range and a non-NEUTRAL trend (both already required for
+# `ict.premium_discount_is_premium`/`is_discount` above to be meaningful, so coverage should track
+# closely with those two columns rather than with the sparser refined-order-block pair).
+#
+# Band edges themselves are NOT columns -- this module's own docstring bans absolute price levels
+# (era leakage), so only the ATR-normalised distance to the band is carried, following the same
+# convention as every other level-distance column here.
+_ICT_OTE_COLUMNS: tuple[str, ...] = (
+    "ict.ote_side_is_bullish",
+    "ict.ote_side_is_bearish",
+    "ict.ote_is_within",
+    "ict.ote_distance_to_band_atr",
+)
+
+# v-ict-refined plus the 4 OTE columns above -- extends the same nested ablation chain:
+# v9 subset-of v-ict subset-of v-ict-refined subset-of v-ict-ote.
+FEATURE_SCHEMA_V_ICT_OTE: tuple[str, ...] = FEATURE_SCHEMA_V_ICT_REFINED + _ICT_OTE_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_OTE) == 96, (
+    f"FEATURE_SCHEMA_V_ICT_OTE must have exactly 96 features, got {len(FEATURE_SCHEMA_V_ICT_OTE)}"
+)
+
+# ITH/ITL/STH/STL "swing hierarchy" (see `swing-hierarchy.ts`): a nested "swing of swings"
+# classification over the same confirmed pivots `structure`'s own HH/HL/LL/LH columns are derived
+# from, plus the doctrine's directional "which side is protected" rule. Present whenever the trend is
+# non-NEUTRAL and at least one Intermediate/Short Term point has been confirmed -- independent of
+# whether a dealing range has formed, so coverage need not track `ict.premium_discount_is_premium`.
+#
+# Band/level edges are NOT columns, same leakage rule as everywhere else here -- only the
+# ATR-normalised distances and the protected-side/breach flags are.
+_ICT_SWING_HIERARCHY_COLUMNS: tuple[str, ...] = (
+    "ict.swing_protected_side_is_ith",
+    "ict.swing_protected_side_is_itl",
+    "ict.swing_protected_breached",
+    "ict.distance_to_ith_atr",
+    "ict.distance_to_itl_atr",
+    "ict.distance_to_sth_atr",
+    "ict.distance_to_stl_atr",
+)
+
+# v-ict-ote plus the 7 swing-hierarchy columns above -- extends the same nested ablation chain:
+# v9 subset-of v-ict subset-of v-ict-refined subset-of v-ict-ote subset-of v-ict-swing.
+FEATURE_SCHEMA_V_ICT_SWING: tuple[str, ...] = FEATURE_SCHEMA_V_ICT_OTE + _ICT_SWING_HIERARCHY_COLUMNS
+assert len(FEATURE_SCHEMA_V_ICT_SWING) == 103, (
+    f"FEATURE_SCHEMA_V_ICT_SWING must have exactly 103 features, got {len(FEATURE_SCHEMA_V_ICT_SWING)}"
+)
+
 # Multi-hot binary pattern flags for all known patterns
 _PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
     f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
@@ -415,6 +526,10 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V_ICT: FEATURE_SCHEMA_V_ICT,
+    FEATURE_SCHEMA_VERSION_V_ICT_REFINED: FEATURE_SCHEMA_V_ICT_REFINED,
+    FEATURE_SCHEMA_VERSION_V_ICT_OTE: FEATURE_SCHEMA_V_ICT_OTE,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING: FEATURE_SCHEMA_V_ICT_SWING,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
@@ -684,6 +799,90 @@ def build_feature_vector(
                 values["indicator.SUPERTREND.trend_up"] = 0.0
                 values["indicator.SUPERTREND.trend_down"] = 1.0
 
+    # ICT structural covariates (v-ict schema only -- the final schema-key filter drops these for
+    # every other version). Computed unconditionally so a caller building the wrong schema still gets
+    # correct behaviour rather than a KeyError; `candle.ict is None` is "not computed for this bar",
+    # which defaults every column the same way an absent SUPERTREND reading does: the one-hots stay
+    # 0.0 (evidence of absence), the ATR-normalised distances stay NaN (a genuinely missing
+    # measurement, not a zero).
+    ict = candle.ict
+    has_atr = math.isfinite(atr_val) and atr_val > 0
+    values["ict.htf_bias_bullish"] = 1.0 if (ict and ict.htf_bias == "BULLISH") else 0.0
+    values["ict.htf_bias_bearish"] = 1.0 if (ict and ict.htf_bias == "BEARISH") else 0.0
+    values["ict.premium_discount_is_premium"] = 1.0 if (ict and ict.premium_discount_zone == "PREMIUM") else 0.0
+    values["ict.premium_discount_is_discount"] = 1.0 if (ict and ict.premium_discount_zone == "DISCOUNT") else 0.0
+    values["ict.nearest_order_block_is_bullish"] = 1.0 if (ict and ict.nearest_order_block_side == "BULLISH") else 0.0
+    values["ict.nearest_order_block_is_bearish"] = 1.0 if (ict and ict.nearest_order_block_side == "BEARISH") else 0.0
+    values["ict.has_bos_level"] = 1.0 if (ict and ict.has_bos_level) else 0.0
+    values["ict.has_choch_level"] = 1.0 if (ict and ict.has_choch_level) else 0.0
+    values["ict.distance_to_nearest_order_block_atr"] = (
+        ict.distance_to_nearest_order_block / atr_val
+        if (ict and ict.distance_to_nearest_order_block is not None and has_atr)
+        else _nan()
+    )
+    values["ict.distance_to_bos_level_atr"] = (
+        ict.distance_to_bos_level / atr_val if (ict and ict.distance_to_bos_level is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_choch_level_atr"] = (
+        ict.distance_to_choch_level / atr_val if (ict and ict.distance_to_choch_level is not None and has_atr) else _nan()
+    )
+
+    # Cross-timeframe "Refined Order Block" (v-ict-refined schema only). `htf_order_block_*` is
+    # present whenever an HTF pairing was backfilled (an HTF order block is active almost every bar);
+    # `refined_order_block_distance_atr`/`stop_compression_ratio` are only present on the bars where a
+    # genuine nested refinement was found -- see contracts.py's IctEvidence docstring.
+    values["ict.htf_order_block_is_bullish"] = 1.0 if (ict and ict.htf_order_block_side == "BULLISH") else 0.0
+    values["ict.htf_order_block_is_bearish"] = 1.0 if (ict and ict.htf_order_block_side == "BEARISH") else 0.0
+    values["ict.htf_order_block_distance_atr"] = (
+        ict.htf_order_block_distance / atr_val if (ict and ict.htf_order_block_distance is not None and has_atr) else _nan()
+    )
+    values["ict.has_refined_order_block"] = 1.0 if (ict and ict.refined_order_block_distance is not None) else 0.0
+    values["ict.refined_order_block_distance_atr"] = (
+        ict.refined_order_block_distance / atr_val
+        if (ict and ict.refined_order_block_distance is not None and has_atr)
+        else _nan()
+    )
+    values["ict.stop_compression_ratio"] = (
+        ict.stop_compression_ratio if (ict and ict.stop_compression_ratio is not None) else _nan()
+    )
+
+    # "Optimal Trade Entry" (v-ict-ote schema only). Same-timeframe -- present whenever a dealing
+    # range has formed and the trend is non-NEUTRAL (see ote.ts / contracts.py's IctEvidence
+    # docstring), so coverage should track `ict.premium_discount_is_premium`/`is_discount` above
+    # rather than the sparser refined-order-block pair.
+    values["ict.ote_side_is_bullish"] = 1.0 if (ict and ict.ote_side == "BULLISH") else 0.0
+    values["ict.ote_side_is_bearish"] = 1.0 if (ict and ict.ote_side == "BEARISH") else 0.0
+    values["ict.ote_is_within"] = 1.0 if (ict and ict.ote_is_within) else 0.0
+    values["ict.ote_distance_to_band_atr"] = (
+        ict.ote_distance_to_band / atr_val
+        if (ict and ict.ote_distance_to_band is not None and has_atr)
+        else _nan()
+    )
+
+    # ITH/ITL/STH/STL "swing hierarchy" (v-ict-swing schema only). `swing_protected_*` is None
+    # whenever the trend was NEUTRAL or the relevant Intermediate Term point had not formed --
+    # defaults to both one-hots 0.0 and breach 0.0, the same "absence, not a learned zero" posture
+    # every other flag here already takes.
+    values["ict.swing_protected_side_is_ith"] = (
+        1.0 if (ict and ict.swing_protected_side == "INTERMEDIATE_TERM_HIGH") else 0.0
+    )
+    values["ict.swing_protected_side_is_itl"] = (
+        1.0 if (ict and ict.swing_protected_side == "INTERMEDIATE_TERM_LOW") else 0.0
+    )
+    values["ict.swing_protected_breached"] = 1.0 if (ict and ict.swing_protected_breached) else 0.0
+    values["ict.distance_to_ith_atr"] = (
+        ict.swing_distance_to_ith / atr_val if (ict and ict.swing_distance_to_ith is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_itl_atr"] = (
+        ict.swing_distance_to_itl / atr_val if (ict and ict.swing_distance_to_itl is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_sth_atr"] = (
+        ict.swing_distance_to_sth / atr_val if (ict and ict.swing_distance_to_sth is not None and has_atr) else _nan()
+    )
+    values["ict.distance_to_stl_atr"] = (
+        ict.swing_distance_to_stl / atr_val if (ict and ict.swing_distance_to_stl is not None and has_atr) else _nan()
+    )
+
     for pattern_code in _PATTERN_CODES:
         matching = [
             pattern
@@ -846,7 +1045,9 @@ def _validate_evidence_scope(candle: CandleEvidence, request: DatasetRequest) ->
         raise FeatureConstructionError(f"Candle {candle.candle_id} must close after it opens.")
 
 
-def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRequest) -> list[LabeledExample]:
+def build_labeled_examples(
+    records: Sequence[CandleEvidence], request: DatasetRequest, *, schema_version: str | None = None
+) -> list[LabeledExample]:
     """Turn adapter-provided evidence into chronologically ordered labeled examples.
 
     Records without a future close are intentionally omitted: they are valid
@@ -854,6 +1055,13 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
     to attach a future close exactly ``request.horizon_bars`` after each source
     candle and to enforce the immutable data cutoff before calling this pure
     function.
+
+    ``schema_version`` defaults to ``schema_version_for(request.timeframe)`` -- the production
+    training/inference contract, unchanged for every existing caller. Passing it explicitly is for
+    an ablation/experiment run comparing schema versions on the SAME dataset (e.g. v9 vs
+    ml-feature-v-ict): without an override here, every caller silently gets the production schema
+    regardless of what was requested, since nothing else in this function reads a schema from
+    ``request``.
     """
 
     _validate_request(request)
@@ -902,7 +1110,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
         if candle.future_close_time > request.data_window_end:
             raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
 
-        schema_version = schema_version_for(request.timeframe)
+        resolved_schema_version = schema_version if schema_version is not None else schema_version_for(request.timeframe)
         examples.append(
             LabeledExample(
                 candle_id=candle.candle_id,
@@ -919,7 +1127,7 @@ def build_labeled_examples(records: Sequence[CandleEvidence], request: DatasetRe
                     median_volume=median_volume,
                     prior_high=prior_high,
                     prior_low=prior_low,
-                    schema_version=schema_version,
+                    schema_version=resolved_schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,
                     price_action_algorithm_version=request.price_action_algorithm_version,

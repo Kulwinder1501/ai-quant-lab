@@ -55,10 +55,19 @@ export interface AtmPremiumContract {
  *
  * Strike comes from `nearestStrike(spot, step)` inferred from the book — never a
  * price-level guess (BANKNIFTY once got non-existent 50-pt strikes that way).
+ *
+ * `spotOverride` lets the caller supply a spot fresher than `snapshot.underlyingValue`. The
+ * snapshot backing this poll is the 15-minute full-chain job's, so at the open its own spot can be
+ * up to 15 minutes stale while the dense poller itself runs once a minute -- on 43% of sessions
+ * (worse on BANKNIFTY, whose 100-pt strike step is more easily outrun by an opening move) this
+ * left the true ATM strike uncovered for several minutes, refusing otherwise-fillable entries with
+ * `NO_FRESH_EXECUTABLE_QUOTE`. The strike *grid* still comes from the snapshot's quotes -- which
+ * strikes NSE lists does not change intraday, only which one is ATM does -- so only the spot used
+ * to pick among them needs to be fresher than the chain listing itself.
  */
 export function selectAtmPremiumContracts(
   snapshot: OptionChainSnapshot,
-  options: { strikeBand?: number; maxAgeMs?: number; now?: Date } = {},
+  options: { strikeBand?: number; maxAgeMs?: number; now?: Date; spotOverride?: number | null } = {},
 ): AtmPremiumContract[] {
   const strikeBand = options.strikeBand ?? 1;
   const maxAgeMs = options.maxAgeMs ?? 40 * 60 * 1000;
@@ -68,7 +77,10 @@ export function selectAtmPremiumContracts(
     return [];
   }
 
-  const spot = snapshot.underlyingValue;
+  const override = options.spotOverride;
+  const spot = override !== null && override !== undefined && Number.isFinite(override) && override > 0
+    ? override
+    : snapshot.underlyingValue;
   if (spot === null || !Number.isFinite(spot) || spot <= 0) {
     return [];
   }

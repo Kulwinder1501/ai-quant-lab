@@ -22,6 +22,8 @@ import {
   DEFAULT_MAX_BAR_AGE_MINUTES,
 } from "../../modules/paper-trading/domain/bot-data-freshness.js";
 import {
+  liveTradableStrategies,
+  mayProposeLiveTrades,
   registeredStrategies,
   strategySupportsTimeframe,
 } from "../../modules/strategy-engine/domain/strategy-registry.js";
@@ -40,22 +42,35 @@ import type { RegimeContext } from "../../modules/strategy-engine/domain/regime.
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domain/session-close.js";
+import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-trade-cap.js";
 
 /**
  * Refuses to start on a timeframe nothing can trade.
  *
  * The generator skips a strategy whose `supportedTimeframes` do not include the requested
  * one, and reports nothing -- so a misconfigured timeframe looks exactly like a quiet market.
+ *
+ * "Can trade" means MAY trade. This used to check `registeredStrategies`, which counts strategies
+ * that are registered only so backtests can reach them: 15m passed the check on the strength of
+ * `ict-structure-v1` and `trend-breakout`, both measured out as TERMINAL_UNOWNED. The check was
+ * therefore satisfied by two strategies that must never propose, which is the same green signal over
+ * unexamined ground it exists to prevent.
  */
 function assertScannableTimeframes(timeframes: readonly string[]): void {
+  const tradable = liveTradableStrategies();
   for (const timeframe of timeframes) {
-    const supported = registeredStrategies.some((strategy) => strategySupportsTimeframe(strategy, timeframe));
+    const supported = tradable.some((strategy) => strategySupportsTimeframe(strategy, timeframe));
     if (!supported) {
       throw new Error(
-        `No registered strategy supports the ${timeframe} timeframe, so scanning it can only ever `
-        + "produce nothing. Supported: "
-        + registeredStrategies
+        `No live-tradable strategy supports the ${timeframe} timeframe, so scanning it can only ever `
+        + "produce nothing. Live-tradable: "
+        + (tradable.length === 0 ? "(none)" : tradable
           .map((strategy) => `${strategy.registration.strategyKey} (${strategy.supportedTimeframes.join(", ")})`)
+          .join("; "))
+        + ". Terminal (registered for measurement only): "
+        + registeredStrategies
+          .filter((strategy) => !mayProposeLiveTrades(strategy))
+          .map((strategy) => `${strategy.registration.strategyKey}`)
           .join("; ") + ".",
       );
     }
@@ -113,12 +128,74 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * a TIMEFRAME_UNSUPPORTED line per strategy per symbol per run, which is noise in the report and
  * nothing more. Drop it if that noise ever obscures something real.
  */
+/*
+ * 15m restored 2026-09-21 to feed `ict-structure-v1`, scoped to NIFTY50 only via
+ * `AutoBot-IctNifty15m`'s `allowedSeries` -- see bot-sandboxes.ts.
+ *
+ * This is explicitly NOT "a 15m strategy that is not measured out" -- the bar this comment
+ * previously set. `ict-structure-v1` remains registered as `TERMINAL_UNOWNED` with the evidence
+ * that closed it still attached (see strategy-registry.ts): its 20-month backtest is sign-unstable
+ * across instrument, timeframe and even date window within the same cell, and the registry's own
+ * note says "do not resume by re-running a positive cell." It was wired anyway, on explicit
+ * instruction, after that evidence was presented and an out-of-sample check (2026-09-08..09-21,
+ * both target cells) came back with zero trades -- too little fresh data to confirm or refute it.
+ * Live paper trading here is the validation this project's usual gate would have required first,
+ * not confirmation the gate was cleared. Judge these trades by their own record, not by the
+ * pre-registered backtest that was already ruled unreliable.
+ */
 const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
 /** An intraday signal raised after this has no session left to resolve in. */
 const LAST_SIGNAL_MINUTES = 15 * 60 + 25;
+const MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES = 15;
+const MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL = 2;
+
+interface MomentumScalpLossGuardDecision {
+  allowed: boolean;
+  reason: "WITHIN_GUARD" | "LOSS_COOLDOWN" | "CONSECUTIVE_LOSS_LIMIT";
+  consecutiveLosses: number;
+  latestLossAt: Date | null;
+}
+
+async function assessMomentumScalpLossGuard(input: {
+  database: ReturnType<typeof createDatabasePool>;
+  accountId: string;
+  symbol: string;
+  now: Date;
+}): Promise<MomentumScalpLossGuardDecision> {
+  const window = istTradingDayWindow(input.now);
+  const result = await input.database.query<{ realized_pnl: string; closed_at: Date }>(
+    `SELECT realized_pnl, closed_at
+       FROM paper_trades
+      WHERE account_id = $1
+        AND underlying_symbol = $2
+        AND status = 'CLOSED'
+        AND excluded_from_evidence = FALSE
+        AND closed_at >= $3
+        AND closed_at < $4
+      ORDER BY closed_at DESC
+      LIMIT 3`,
+    [input.accountId, input.symbol, window.start, input.now],
+  );
+  let consecutiveLosses = 0;
+  for (const row of result.rows) {
+    if (Number(row.realized_pnl) >= 0) break;
+    consecutiveLosses += 1;
+  }
+  const latestLossAt = result.rows[0] && Number(result.rows[0].realized_pnl) < 0
+    ? result.rows[0].closed_at
+    : null;
+  if (consecutiveLosses >= MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL) {
+    return { allowed: false, reason: "CONSECUTIVE_LOSS_LIMIT", consecutiveLosses, latestLossAt };
+  }
+  if (latestLossAt !== null
+    && input.now.getTime() - latestLossAt.getTime() < MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES * 60_000) {
+    return { allowed: false, reason: "LOSS_COOLDOWN", consecutiveLosses, latestLossAt };
+  }
+  return { allowed: true, reason: "WITHIN_GUARD", consecutiveLosses, latestLossAt };
+}
 
 /**
  * Records the regime observed for one series, returning its id, or null if it could not be recorded.
@@ -325,8 +402,16 @@ async function main(): Promise<void> {
         const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
         if (!instrument) continue;
 
-        // Filter results to only strategies permitted for this specific bot
-        const botResults = results.filter((res) => botSpec.allowedStrategies.includes(res.strategyKey));
+        // Filter results to only strategies permitted for this specific bot, and (when the bot
+        // declares `allowedSeries`) only the symbol/timeframe combinations it owns. Needed because
+        // `allowedStrategies` alone is strategy-key-only: `ict-structure-v1` fires on both indices
+        // at both 5m and 15m, so two bots each meant to own one specific combination would otherwise
+        // both take every combination the strategy produces.
+        const seriesAllowed = botSpec.allowedSeries === undefined
+          || botSpec.allowedSeries.some((series) => series.symbol === symbol && series.timeframe === timeframe);
+        const botResults = seriesAllowed
+          ? results.filter((res) => botSpec.allowedStrategies.includes(res.strategyKey))
+          : [];
 
         for (const result of botResults) {
           if (result.skippedReason) {
@@ -356,6 +441,27 @@ async function main(): Promise<void> {
                 explanation: "New entries are closed for the session: the square-off cutoff has passed.",
               });
               continue;
+            }
+
+            if (timeframe === "1m" && result.strategyKey === "momentum-scalp") {
+              const lossGuard = await assessMomentumScalpLossGuard({
+                database,
+                accountId: account.id,
+                symbol,
+                now,
+              });
+              if (!lossGuard.allowed) {
+                refused.push({
+                  tradeIdeaId, symbol, timeframe,
+                  reason: lossGuard.reason,
+                  explanation: lossGuard.reason === "LOSS_COOLDOWN"
+                    ? `1m momentum scalp is cooling down after a loss on ${symbol}; no re-entry for ${MOMENTUM_SCALP_LOSS_COOLDOWN_MINUTES} minutes.`
+                    : `1m momentum scalp reached ${MOMENTUM_SCALP_MAX_CONSECUTIVE_LOSSES_PER_SYMBOL} consecutive losses on ${symbol}; no further entries this session.`,
+                  consecutiveLosses: lossGuard.consecutiveLosses,
+                  latestLossAt: lossGuard.latestLossAt?.toISOString() ?? null,
+                });
+                continue;
+              }
             }
 
             if (openPositions >= MAX_CONCURRENT_POSITIONS) {

@@ -149,26 +149,47 @@ export class IngestOptionChain {
               (entry) => entry.expiryDate.toISOString().slice(0, 10) === tradableKey,
             )?.providerExpiryToken ?? null
             : null;
-          if (tradableKey !== null && tradableKey !== frontKey && token !== null) {
-            try {
-              const rolled = await this.source.fetchChain({
-                underlyingSymbol,
-                strikeCount: input.strikeCount,
-                expiryToken: token,
-              });
-              assertSnapshotStorable(rolled);
-              const savedRolled = await this.store.saveSnapshot(rolled);
-              tradableExpiries.push({
-                underlyingSymbol,
-                expiryDate: tradableKey,
-                contracts: rolled.quotes.length,
-                inserted: savedRolled.inserted,
-              });
-            } catch (error) {
+          if (tradableKey !== null && tradableKey !== frontKey) {
+            if (token === null) {
+              // The provider listed this expiry -- it is in `listedExpiries`, so the calendar and
+              // `PrepareOptionEntry` both already treat it as tradable -- but did not supply a
+              // token for it alongside the front chain, so there is no request that can fetch its
+              // book. This used to fall through here silently: no failure, no log line, nothing to
+              // distinguish it from every ordinary day this branch is a no-op. It is not ordinary --
+              // it is the 2026-08-24 failure mode (a contract `PrepareOptionEntry` will select with
+              // nobody quoting it) recurring in a new shape, this time upstream of the try/catch
+              // below rather than inside it. Recorded so a run of `NO_FRESH_EXECUTABLE_QUOTE` on the
+              // trading side has a matching entry here explaining why, instead of requiring a
+              // tick-table trace to rediscover what this method already knew at collection time.
               failures.push({
                 underlyingSymbol: `${underlyingSymbol} (tradable expiry ${tradableKey})`,
-                reason: error instanceof Error ? error.message : String(error),
+                reason: `Provider listed ${tradableKey} as an available expiry but supplied no `
+                  + "expiry token for it alongside the front chain, so its option chain could not "
+                  + "be requested. The calendar and PrepareOptionEntry both still see this expiry "
+                  + "as tradable; every candidate against it will refuse NO_FRESH_EXECUTABLE_QUOTE "
+                  + "until a token becomes available on a later poll.",
               });
+            } else {
+              try {
+                const rolled = await this.source.fetchChain({
+                  underlyingSymbol,
+                  strikeCount: input.strikeCount,
+                  expiryToken: token,
+                });
+                assertSnapshotStorable(rolled);
+                const savedRolled = await this.store.saveSnapshot(rolled);
+                tradableExpiries.push({
+                  underlyingSymbol,
+                  expiryDate: tradableKey,
+                  contracts: rolled.quotes.length,
+                  inserted: savedRolled.inserted,
+                });
+              } catch (error) {
+                failures.push({
+                  underlyingSymbol: `${underlyingSymbol} (tradable expiry ${tradableKey})`,
+                  reason: error instanceof Error ? error.message : String(error),
+                });
+              }
             }
           }
         }

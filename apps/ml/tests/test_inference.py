@@ -379,6 +379,44 @@ class InferenceTests(unittest.TestCase):
         with self.assertRaisesRegex(InferenceError, "no persisted promotion timestamp"):
             require_prediction_after_production_promotion(datetime(2024, 3, 11, tzinfo=UTC), production_model())
 
+    def test_an_archived_model_is_rejected_by_default(self) -> None:
+        """A model superseded by a later promotion must not score by default.
+
+        This is the ordinary lifecycle case (an old production version retired
+        in favour of a new one) -- distinct from the sticky volatility shadow
+        pool, which opts back in explicitly below.
+        """
+
+        archived = dataclasses.replace(production_model(), stage="ARCHIVED")
+
+        with self.assertRaisesRegex(InferenceError, "Only a PRODUCTION model"):
+            validate_production_artifact(
+                archived,
+                compatible_metadata(),
+                instrument_symbol="NIFTY50",
+                timeframe="1d",
+            )
+
+    def test_an_archived_model_is_admitted_as_a_sticky_shadow_member(self) -> None:
+        """Sticky shadow enrollment must keep validating its version once archived.
+
+        Promoting a later retrain of the same model_key archives the version the
+        volatility shadow pool already enrolled; enrollment does not follow that
+        promotion, so the archived version must still pass full validation here.
+        """
+
+        archived = dataclasses.replace(production_model(), stage="ARCHIVED")
+
+        contract = validate_production_artifact(
+            archived,
+            compatible_metadata(),
+            instrument_symbol="NIFTY50",
+            timeframe="1d",
+            allow_archived_shadow_member=True,
+        )
+
+        self.assertEqual(contract.model_key, archived.model_key)
+
 
 if __name__ == "__main__":
     unittest.main()

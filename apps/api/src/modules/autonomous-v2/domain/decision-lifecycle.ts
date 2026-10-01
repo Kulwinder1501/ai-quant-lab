@@ -36,6 +36,17 @@ export type LiveDecisionState = (typeof LIVE_DECISION_STATES)[number];
 export type TerminalDecisionState = (typeof TERMINAL_DECISION_STATES)[number];
 export type DecisionState = LiveDecisionState | TerminalDecisionState;
 
+/**
+ * "live" is the pipeline that can reach EXECUTED and therefore must walk every stage (I17). "shadow"
+ * is `shadow-decision.ts`'s thinner path: it calls the thesis producer directly, never runs market-state
+ * interpretation, edge assessment, risk approval, or instrument selection, and has no execution port at
+ * all -- see that module's own docstring: "shadow mode holds no authority to select an instrument."
+ * There is no risk control between CANDIDATE_RESOLVED and THESIS_FORMED for shadow to bypass, because
+ * shadow has no path to execution in the first place. Defaults to "live" everywhere so every existing
+ * caller (the real pipeline, every test written before this mode existed) is unaffected.
+ */
+export type DecisionTransitionMode = "live" | "shadow";
+
 export class DecisionTransitionError extends Error {
   constructor(readonly from: DecisionState, readonly to: DecisionState, detail: string) {
     super(`${from} -> ${to} is not a permitted decision transition: ${detail}`);
@@ -66,6 +77,17 @@ const PERMITTED_TRANSITIONS: Readonly<Record<DecisionState, readonly DecisionSta
   CLOSED_NO_ACTION: [],
 });
 
+/**
+ * Transitions permitted only in shadow mode, on top of the live table above. Shadow calls the thesis
+ * producer directly and stops there or at a terminal -- it never reaches, and cannot skip, any stage
+ * the live table protects (MARKET_STATE_INTERPRETED, EDGE_ASSESSED, RISK_APPROVED, INSTRUMENT_SELECTED,
+ * EXECUTED all stay exactly as strict). This is the one stage shadow is structurally incapable of
+ * reaching that the live table would otherwise forbid skipping.
+ */
+const SHADOW_ONLY_TRANSITIONS: Readonly<Partial<Record<DecisionState, readonly DecisionState[]>>> = Object.freeze({
+  CANDIDATE_RESOLVED: ["THESIS_FORMED"],
+});
+
 export function isTerminalDecisionState(state: DecisionState): state is TerminalDecisionState {
   return (TERMINAL_DECISION_STATES as readonly string[]).includes(state);
 }
@@ -82,7 +104,7 @@ export function permittedNextStates(from: DecisionState): readonly DecisionState
  * describing a transition that never legally happened, and the ledger is the record everything else
  * is reconstructed from (I13, I15).
  */
-export function assertDecisionTransition(from: DecisionState, to: DecisionState): void {
+export function assertDecisionTransition(from: DecisionState, to: DecisionState, mode: DecisionTransitionMode = "live"): void {
   if (isTerminalDecisionState(from)) {
     throw new DecisionTransitionError(from, to, "a decision that has stopped cannot move again; start a new decision");
   }
@@ -93,17 +115,17 @@ export function assertDecisionTransition(from: DecisionState, to: DecisionState)
     throw new DecisionTransitionError(from, to, "a transition must change state, or the ledger records a step that did not happen");
   }
   const permitted = PERMITTED_TRANSITIONS[from];
-  if (!permitted.includes(to)) {
-    const skipped = LIVE_DECISION_STATES.indexOf(to as LiveDecisionState) > LIVE_DECISION_STATES.indexOf(from as LiveDecisionState) + 1;
-    throw new DecisionTransitionError(
-      from,
-      to,
-      skipped
-        ? `it skips ${LIVE_DECISION_STATES[LIVE_DECISION_STATES.indexOf(from as LiveDecisionState) + 1]}, `
-          + "and a stage that can be skipped is a control that can be bypassed (I17)"
-        : `permitted: ${permitted.join(", ") || "(none)"}`,
-    );
-  }
+  if (permitted.includes(to)) return;
+  if (mode === "shadow" && (SHADOW_ONLY_TRANSITIONS[from] ?? []).includes(to)) return;
+  const skipped = LIVE_DECISION_STATES.indexOf(to as LiveDecisionState) > LIVE_DECISION_STATES.indexOf(from as LiveDecisionState) + 1;
+  throw new DecisionTransitionError(
+    from,
+    to,
+    skipped
+      ? `it skips ${LIVE_DECISION_STATES[LIVE_DECISION_STATES.indexOf(from as LiveDecisionState) + 1]}, `
+        + "and a stage that can be skipped is a control that can be bypassed (I17)"
+      : `permitted: ${permitted.join(", ") || "(none)"}`,
+  );
 }
 
 /**
@@ -113,7 +135,7 @@ export function assertDecisionTransition(from: DecisionState, to: DecisionState)
  * be a faithful reconstruction of one that happened. Checking the whole path rather than each pair
  * independently also catches a sequence that is pairwise legal but starts in the wrong place.
  */
-export function assertDecisionPath(path: readonly DecisionState[]): void {
+export function assertDecisionPath(path: readonly DecisionState[], mode: DecisionTransitionMode = "live"): void {
   if (path.length === 0) throw new Error("A decision path cannot be empty.");
   if (path[0] !== "CANDIDATE_RESOLVED") {
     throw new Error(
@@ -122,6 +144,6 @@ export function assertDecisionPath(path: readonly DecisionState[]): void {
     );
   }
   for (let index = 1; index < path.length; index += 1) {
-    assertDecisionTransition(path[index - 1]!, path[index]!);
+    assertDecisionTransition(path[index - 1]!, path[index]!, mode);
   }
 }

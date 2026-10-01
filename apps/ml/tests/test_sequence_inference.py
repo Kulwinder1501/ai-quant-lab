@@ -68,6 +68,39 @@ class SequenceShadowValidationTests(unittest.TestCase):
                 allow_candidate_pool_member=True,
             )
 
+    def test_an_archived_shadow_member_is_rejected_without_the_flag(self) -> None:
+        """A sticky-enrolled model must not silently score once it is archived.
+
+        The stage check runs before any other validation, so an empty metadata
+        payload is enough to isolate it: the failure must be about stage, not
+        about a missing field.
+        """
+
+        with self.assertRaisesRegex(InferenceError, "PRODUCTION or enrolled"):
+            validate_sequence_shadow_artifact(
+                _model_version(stage="ARCHIVED"),
+                {},
+                instrument_symbol="NIFTYBEES",
+                timeframe="1m",
+            )
+
+    def test_an_archived_shadow_member_passes_the_stage_gate_with_the_flag(self) -> None:
+        """Once ``allow_archived_shadow_member`` is set, ARCHIVED is admitted.
+
+        Empty metadata still fails a later check (the artifact/model-version
+        algorithm match), but that failure must no longer be about stage.
+        """
+
+        with self.assertRaises(InferenceError) as raised:
+            validate_sequence_shadow_artifact(
+                _model_version(stage="ARCHIVED"),
+                {},
+                instrument_symbol="NIFTYBEES",
+                timeframe="1m",
+                allow_archived_shadow_member=True,
+            )
+        self.assertNotIn("PRODUCTION or enrolled", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

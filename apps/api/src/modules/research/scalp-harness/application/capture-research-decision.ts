@@ -14,7 +14,7 @@ import { resolveOpportunities, type PersistedProposal } from "../domain/opportun
 import { buildRiskSnapshot, buildRiskSubject, evaluateResearchRisk } from "../domain/research-risk.js";
 import {
   buildControlPoints,
-  researchScalpStrategies,
+  createResearchScalpStrategies,
   type ResearchFeatureCoverage,
 } from "../domain/research-strategies.js";
 import { selectCaptureStrategies } from "../domain/terminal-strategy-registry.js";
@@ -71,6 +71,13 @@ function canonicalAtr(context: StrategyMarketContext): number {
 }
 
 export class CaptureScalpResearchDecision {
+  /*
+   * One adapter set per instance, which is one per harness run: the CLI constructs this once and
+   * `execute` processes a whole batch of contexts, so the instance is the chronological run scope
+   * the stateful adapter needs.
+   */
+  private readonly strategies = createResearchScalpStrategies();
+
   constructor(private readonly writes: ScalpResearchWritePort) {}
 
   async execute(input: {
@@ -114,7 +121,7 @@ export class CaptureScalpResearchDecision {
      * benchmark opt-in both terminal strategies stay active, so this changes no behaviour today; see
      * the registry for why the switch has to be thrown on a recorded session boundary.
      */
-    const selection = selectCaptureStrategies(researchScalpStrategies);
+    const selection = selectCaptureStrategies(this.strategies);
     const activeStrategies = selection.active;
 
     for (const strategy of activeStrategies) await this.writes.saveStrategyDefinition(strategy.definition);

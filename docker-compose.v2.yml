@@ -38,6 +38,14 @@ services:
       # token lapses. It was absent, so the one command that can restore Fyers access failed
       # on a missing variable rather than on anything to do with the credential.
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
+      # Kill switch for the ORDERBOOK-01 live entry gate. Default false: apps/ml/orderbook01_verdict.json
+      # (2026-09-28) recorded CASE E, "FALSIFIED. No robust directional edge found in OOS test.", the
+      # same day the gate started actually blocking real paper trade entries. Shadow logging/audit is
+      # unaffected either way; set to "true" to restore the blocking behaviour.
+      ORDERBOOK01_LIVE_GATE_ENABLED: ${ORDERBOOK01_LIVE_GATE_ENABLED:-false}
+      # Twelve Data: the market-data vendor behind XAU_USD, since Fyers/Kite are India-only
+      # brokers with no segment for it and OANDA does not accept Indian-resident accounts.
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       API_MUTATION_RATE_LIMIT: ${API_MUTATION_RATE_LIMIT:-120}
@@ -73,6 +81,22 @@ services:
       FYERS_PIN: ${FYERS_PIN:-}
       FYERS_REDIRECT_URI: ${FYERS_REDIRECT_URI:-}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
+      # Kill switch for the ORDERBOOK-01 live entry gate. See api-v2's own copy of this variable
+      # for why it defaults false. This process is what actually runs PAPER_TRADING_BOT
+      # (`npm run trading:paper:bot`, a child process that inherits this environment), which is
+      # the reachable path into the gate.
+      ORDERBOOK01_LIVE_GATE_ENABLED: ${ORDERBOOK01_LIVE_GATE_ENABLED:-false}
+      # Twelve Data: powers XAU_USD candle collection (XAU_CANDLE_COLLECTION) and the gold paper
+      # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
+      # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
+      TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      # Kill switch for the gold bot's live entries, same shape as ORDERBOOK01_LIVE_GATE_ENABLED
+      # above: `ict-structure-v1` has zero validation on XAU_USD (its only evidence is
+      # TERMINAL_UNOWNED sign-instability on NIFTY50/BANKNIFTY). Default false: PAPER_TRADING_BOT_GOLD
+      # (a child process `npm run trading:paper:bot:gold` inheriting this environment) still
+      # scans and logs every signal it would have acted on, it just does not open a real (paper)
+      # position while this is off. Set to "true" once the instrument has been validated.
+      GOLD_ICT_LIVE_ENTRIES_ENABLED: ${GOLD_ICT_LIVE_ENTRIES_ENABLED:-false}
       # Keeps this process's own log lines on the bind mount below, where they survive the
       # container. Docker stores json-file logs under the container's directory and deletes them
       # with it, so `--force-recreate` destroys them -- and a skipped run writes nothing to

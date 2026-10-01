@@ -134,6 +134,38 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         self.assertIn("model_versions.id = volatility_shadow_enrollments.model_version_id", query)
         self.assertEqual(parameters, ("volatility-expansion-v1", "volatility-expansion-v1"))
 
+    def test_shadow_pool_keeps_scoring_an_enrolled_version_after_it_is_archived(self) -> None:
+        """Sticky enrollment must survive the enrolled version being superseded.
+
+        Promoting a later retrain of the same model_key archives the previously
+        PRODUCTION version. Enrollment does not follow that promotion -- it keeps
+        pointing at the exact version it first enrolled -- so the archived version
+        must still come back from the shadow pool, not silently disappear from it.
+        """
+
+        enrolled_at = at(22)
+        connection = FakeConnection([[
+            model_row(
+                model_key="volatility-expansion-champion--BANKNIFTY--15m",
+                stage="ARCHIVED",
+                validation_metrics={
+                    "validationProtocol": {"labelScheme": "volatility-expansion-v1"},
+                    "promotionAssessment": {"decision": "INITIAL_BASELINE_THRESHOLD_MET"},
+                },
+                shadow_enrolled_at=enrolled_at,
+            )
+        ]])
+
+        members = PostgresMlRepository(connection).list_shadow_pool("volatility-expansion-v1")
+
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0]["model_version"].stage, "ARCHIVED")
+        query, _parameters = connection.calls[0]
+        self.assertIn("'ARCHIVED'", query)
+        # REJECTED means the candidate failed its gate outright; sticky
+        # enrollment must never resurrect a prediction from one of those.
+        self.assertNotIn("'REJECTED'", query)
+
     def test_directional_scheme_cannot_query_the_auxiliary_shadow_pool(self) -> None:
         connection = FakeConnection([])
 

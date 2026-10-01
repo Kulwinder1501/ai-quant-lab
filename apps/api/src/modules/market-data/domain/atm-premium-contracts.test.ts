@@ -62,6 +62,42 @@ describe("selectAtmPremiumContracts", () => {
     })).toHaveLength(0);
   });
 
+  it("chooses ATM from spotOverride when given, not the snapshot's own (possibly stale) spot", () => {
+    // Snapshot spot is 24,650; a live spot of 24,700 has since moved a full strike. Before
+    // spotOverride existed, this always picked ATM from the snapshot's spot regardless of how
+    // stale it was -- exactly the defect that left the true ATM strike uncovered for several
+    // minutes at the open on 43% of sessions.
+    const contracts = selectAtmPremiumContracts(snapshot(), {
+      now: new Date("2026-08-11T05:05:00.000Z"),
+      strikeBand: 0,
+      spotOverride: 24_700,
+    });
+    expect(new Set(contracts.map((c) => c.strikePrice))).toEqual(new Set([24_700]));
+  });
+
+  it("falls back to the snapshot's own spot when spotOverride is null or missing", () => {
+    const withNull = selectAtmPremiumContracts(snapshot(), {
+      now: new Date("2026-08-11T05:05:00.000Z"),
+      strikeBand: 0,
+      spotOverride: null,
+    });
+    const withoutOption = selectAtmPremiumContracts(snapshot(), {
+      now: new Date("2026-08-11T05:05:00.000Z"),
+      strikeBand: 0,
+    });
+    expect(new Set(withNull.map((c) => c.strikePrice))).toEqual(new Set([24_650]));
+    expect(new Set(withoutOption.map((c) => c.strikePrice))).toEqual(new Set([24_650]));
+  });
+
+  it("ignores a non-finite or non-positive spotOverride rather than trusting it", () => {
+    const contracts = selectAtmPremiumContracts(snapshot(), {
+      now: new Date("2026-08-11T05:05:00.000Z"),
+      strikeBand: 0,
+      spotOverride: -100,
+    });
+    expect(new Set(contracts.map((c) => c.strikePrice))).toEqual(new Set([24_650]));
+  });
+
   it("infers the strike grid only from the selected expiry", () => {
     const base = snapshot();
     const laterExpiry = new Date("2026-08-25T10:00:00.000Z");

@@ -18,6 +18,9 @@ export const riskReasonCodes = {
   sizeReducedForExpansion: "SIZE_REDUCED_PREDICTED_VOLATILITY_EXPANSION",
   regimeIgnoredLowConfidence: "REGIME_IGNORED_BELOW_CONFIDENCE_FLOOR",
   regimeUnavailable: "REGIME_UNAVAILABLE",
+  breadthFromFuture: "REJECTED_BREADTH_EVIDENCE_FROM_FUTURE",
+  sizeReducedForBreadthChase: "SIZE_REDUCED_CHASING_BREADTH_EXTENSION",
+  breadthUnavailable: "BREADTH_UNAVAILABLE",
 } as const;
 
 export type VolatilityRegime = "CONTRACTION" | "STABLE" | "EXPANSION";
@@ -57,6 +60,23 @@ export interface RiskProposal {
   lotSize?: number;
 }
 
+/**
+ * Market breadth: NIFTYNXT50's daily return minus NIFTY50's, for the most recently
+ * completed session. Positive means the broader market (outside the headline top 50)
+ * outperformed the index the session before -- a broad, already-extended move. Measured
+ * 2026-09-22 against 439 settled option-buying trades: a LONG (CE) idea placed the day
+ * after a positive reading loses far more on average than one placed after a negative
+ * reading (gap -377/trade, replicated in both chronological halves, Sidak-corrected
+ * p=0.0017). No equivalent effect was found for SHORT (PE) ideas, so this is consumed
+ * only for LONG, the same way volatility-regime evidence is a sizing signal and never a
+ * directional one.
+ */
+export interface BreadthEvidence {
+  relativeReturn: number;
+  /** The session close this reading was computed from. */
+  evidenceCutoffAt: Date;
+}
+
 export interface RiskState {
   /** Realised equity now. */
   accountEquity: number;
@@ -66,6 +86,7 @@ export interface RiskState {
   /** Realised P&L booked today, negative when losing. */
   realizedPnlToday: number;
   volatilityRegime: VolatilityRegimeEvidence | null;
+  breadthEvidence: BreadthEvidence | null;
 }
 
 export interface RiskPolicy {
@@ -82,6 +103,8 @@ export interface RiskPolicy {
   expansionSizeMultiplier: number;
   /** Below this confidence the regime is treated as unknown rather than acted on. */
   minimumRegimeConfidence: number;
+  /** Size multiplier applied to a LONG (CE) idea the session after positive breadth. */
+  breadthSizeMultiplierForChasingLong: number;
 }
 
 /**
@@ -99,6 +122,7 @@ export const defaultRiskPolicy: RiskPolicy = {
   marginFraction: 0.2,
   expansionSizeMultiplier: 0.5,
   minimumRegimeConfidence: 0.5,
+  breadthSizeMultiplierForChasingLong: 0.5,
 };
 
 export interface RiskDecision {
@@ -189,6 +213,20 @@ export function evaluateRisk(
   } else if (regime.prediction === "EXPANSION") {
     riskFraction *= policy.expansionSizeMultiplier;
     reasonCodes.push(riskReasonCodes.sizeReducedForExpansion);
+  }
+
+  // Breadth is a LONG-only sizing signal, the same posture as the volatility regime above:
+  // it says nothing about SHORT ideas, so it is never consulted for one. See BreadthEvidence.
+  if (proposal.side === "LONG") {
+    const breadth = state.breadthEvidence;
+    if (breadth === null) {
+      reasonCodes.push(riskReasonCodes.breadthUnavailable);
+    } else if (breadth.evidenceCutoffAt.getTime() > proposal.decisionTimestamp.getTime()) {
+      reasonCodes.push(riskReasonCodes.breadthFromFuture);
+    } else if (breadth.relativeReturn > 0) {
+      riskFraction *= policy.breadthSizeMultiplierForChasingLong;
+      reasonCodes.push(riskReasonCodes.sizeReducedForBreadthChase);
+    }
   }
 
   const lotSize = proposal.lotSize ?? 1;

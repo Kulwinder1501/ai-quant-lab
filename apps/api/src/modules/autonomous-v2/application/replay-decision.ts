@@ -1,11 +1,13 @@
 import {
   assertLedgerChain,
+  SHADOW_LEDGER_PRODUCER_SERVICE,
   type DecisionLedgerEvent,
 } from "../domain/decision-ledger.js";
 import {
   assertDecisionPath,
   isTerminalDecisionState,
   type DecisionState,
+  type DecisionTransitionMode,
 } from "../domain/decision-lifecycle.js";
 import { researchIdentityEncodingVersion } from "../../platform/identity/identity.js";
 import type { SnapshotRef } from "../../platform/snapshot/snapshot-ref.js";
@@ -121,8 +123,9 @@ export async function replayDecision(input: {
    * so taking stateTo throughout yields the sequence the transition table expects.
    */
   const path = events.map((event) => event.stateTo);
+  const mode: DecisionTransitionMode = events[0]?.producer.service === SHADOW_LEDGER_PRODUCER_SERVICE ? "shadow" : "live";
   try {
-    assertDecisionPath(path);
+    assertDecisionPath(path, mode);
   } catch (error: unknown) {
     findings.push(`ILLEGAL_PATH: ${(error as Error).message}`);
   }

@@ -32,6 +32,10 @@ function state(overrides: Partial<RiskState> = {}): RiskState {
       confidence: 0.7,
       evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z"),
     },
+    breadthEvidence: {
+      relativeReturn: -0.001,
+      evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z"),
+    },
     ...overrides,
   };
 }
@@ -94,6 +98,66 @@ describe("evaluateRisk", () => {
     expect(decision.approved).toBe(true);
     expect(decision.approvedQuantity).toBe(250);
     expect(decision.reasonCodes).toContain(riskReasonCodes.regimeUnavailable);
+  });
+
+  it("halves a LONG idea's size after a positive breadth reading, rather than blocking it", () => {
+    const decision = evaluateRisk(proposal({ side: "LONG" }), state({
+      breadthEvidence: { relativeReturn: 0.004, evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z") },
+    }));
+
+    expect(decision.approved).toBe(true);
+    expect(decision.approvedQuantity).toBe(125);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.sizeReducedForBreadthChase);
+  });
+
+  it("does not shrink a LONG idea's size after a negative or zero breadth reading", () => {
+    for (const relativeReturn of [-0.004, 0]) {
+      const decision = evaluateRisk(proposal({ side: "LONG" }), state({
+        breadthEvidence: { relativeReturn, evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z") },
+      }));
+      expect(decision.approvedQuantity).toBe(250);
+      expect(decision.reasonCodes).not.toContain(riskReasonCodes.sizeReducedForBreadthChase);
+    }
+  });
+
+  it("never consults breadth for a SHORT (PE) idea -- no measured effect was found for it", () => {
+    const decision = evaluateRisk(
+      proposal({ side: "SHORT", entryPrice: 24_000, stopLoss: 24_100, targetPrice: 23_800 }),
+      state({ breadthEvidence: { relativeReturn: 0.01, evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z") } }),
+    );
+
+    expect(decision.approvedQuantity).toBe(250);
+    expect(decision.reasonCodes).not.toContain(riskReasonCodes.sizeReducedForBreadthChase);
+  });
+
+  it("refuses a breadth reading whose evidence closes after the decision", () => {
+    const decision = evaluateRisk(proposal({ side: "LONG" }), state({
+      breadthEvidence: { relativeReturn: 0.004, evidenceCutoffAt: new Date("2026-07-31T07:00:00.000Z") },
+    }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.breadthFromFuture);
+  });
+
+  it("still approves a LONG idea at full size when no breadth reading is available, but says so", () => {
+    const decision = evaluateRisk(proposal({ side: "LONG" }), state({ breadthEvidence: null }));
+
+    expect(decision.approved).toBe(true);
+    expect(decision.approvedQuantity).toBe(250);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.breadthUnavailable);
+  });
+
+  it("compounds the breadth haircut with the volatility-expansion haircut", () => {
+    const decision = evaluateRisk(proposal({ side: "LONG" }), state({
+      volatilityRegime: { prediction: "EXPANSION", confidence: 0.8, evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z") },
+      breadthEvidence: { relativeReturn: 0.004, evidenceCutoffAt: new Date("2026-07-31T06:00:00.000Z") },
+    }));
+
+    // 0.5 * 0.5 = 0.25 of the base 250-unit size.
+    expect(decision.approved).toBe(true);
+    expect(decision.approvedQuantity).toBe(62);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.sizeReducedForExpansion);
+    expect(decision.reasonCodes).toContain(riskReasonCodes.sizeReducedForBreadthChase);
   });
 
   it("blocks a new entry once the position limit is reached", () => {

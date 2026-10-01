@@ -61,6 +61,11 @@ export function TradeHistoryTable({ closedTrades }: TradeHistoryTableProps) {
                     <td className="py-3.5 px-4 font-bold text-white">
                       {trade.instrumentSymbol || "NIFTY50"}
                       <span className="block text-xs font-normal text-slate-500">{trade.timeframe || "1d"}</span>
+                      {trade.strategyName && (
+                        <span className="mt-1 inline-block text-[10px] font-medium text-purple-400 border border-purple-500/30 bg-purple-500/10 rounded px-1.5 py-0.5">
+                          {trade.strategyName}
+                        </span>
+                      )}
                     </td>
                     <td className="py-3.5 px-4">
                       <span className={`inline-flex px-2 py-0.5 rounded text-xs font-bold ${

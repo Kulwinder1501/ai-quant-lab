@@ -70,7 +70,17 @@ export class ClassicalReversalEngine {
         const valley2 = candles[i - 3]!.low;
         const neckline = (valley1 + valley2) / 2;
 
-        if (head.high > ls.high && head.high > rs.high && Math.abs(ls.high - rs.high) / head.high < 0.01) {
+        /*
+         * `head.high` must clear both valleys, not just both shoulders. Nothing upstream guarantees
+         * that on fixed-offset candle sampling (as opposed to genuine swing-point detection): a
+         * small-bodied head candle can still beat both shoulder highs while sitting below a valley
+         * candle's low, producing patternHigh < patternLow downstream (measured 2026-09-16, NIFTY50
+         * 1m 2026-09-11: head 23351.6 vs valley 23352.85). A real head-and-shoulders top is the
+         * highest point of the whole formation by definition, so this is a correctness condition on
+         * the pattern, not an extra filter.
+         */
+        if (head.high > ls.high && head.high > rs.high && head.high > valley1 && head.high > valley2
+          && Math.abs(ls.high - rs.high) / head.high < 0.01) {
           if (current.close < neckline) {
             candidates.push({
               startIndex: i - 8,
@@ -88,7 +98,10 @@ export class ClassicalReversalEngine {
         const peak1 = candles[i - 6]!.high;
         const peak2 = candles[i - 3]!.high;
         const invNeckline = (peak1 + peak2) / 2;
-        if (head.low < ls.low && head.low < rs.low && Math.abs(ls.low - rs.low) / head.low < 0.01) {
+        // Symmetric correctness condition: the head must undercut both peaks, not just both
+        // shoulders, so patternHigh (the higher peak) stays above patternLow (the head).
+        if (head.low < ls.low && head.low < rs.low && head.low < peak1 && head.low < peak2
+          && Math.abs(ls.low - rs.low) / head.low < 0.01) {
           if (current.close > invNeckline) {
             candidates.push({
               startIndex: i - 8,

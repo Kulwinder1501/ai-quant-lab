@@ -23,6 +23,7 @@ export interface PaperTradeRow {
    * distinguishes it from a real one.
    */
   strategyKey?: string | null;
+  strategyName?: string | null;
   tradeIdeaId?: string | null;
   side: "BUY" | "SELL" | "LONG" | "SHORT";
   status: "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";

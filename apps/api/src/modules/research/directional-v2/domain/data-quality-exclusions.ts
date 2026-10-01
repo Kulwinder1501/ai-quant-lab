@@ -23,6 +23,21 @@ const SESSION_EXCLUSIONS_V1: Readonly<Record<string, readonly DirectionalSession
     { sessionDate: "2023-11-21", reason: "FYERS 1m candle at 11:50 IST violates OHLC bounds" },
     { sessionDate: "2024-02-09", reason: "FYERS 1m opening candle violates OHLC bounds" },
   ],
+  /*
+   * 2026-09-14 was Ganesh Chaturthi (confirmed in nse_holidays), so the exchange never opened --
+   * but the live candle collector had no holiday gate of its own (fixed 2026-09-16, see
+   * collect-live-market-data.ts) and kept polling Fyers' quote endpoint, which kept answering with
+   * the prior close. That recorded a full nominal session's worth of flat, zero-volume 1m/5m/15m/
+   * 30m/60m candles, all identical, none real. `research_scalp.control_points` already references
+   * some of the resulting candle rows (append-only; cannot be deleted), so the candles themselves
+   * stay in storage -- this exclusion is what keeps them from being read as a real session.
+   */
+  NIFTY50: [
+    { sessionDate: "2026-09-14", reason: "Ganesh Chaturthi (NSE holiday); collector recorded flat, zero-volume placeholder candles" },
+  ],
+  BANKNIFTY: [
+    { sessionDate: "2026-09-14", reason: "Ganesh Chaturthi (NSE holiday); collector recorded flat, zero-volume placeholder candles" },
+  ],
 };
 
 /** Exact settled FYERS prints outside the continuous session; retained in storage, excluded here. */

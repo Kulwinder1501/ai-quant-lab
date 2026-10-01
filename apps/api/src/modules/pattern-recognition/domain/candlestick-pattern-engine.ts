@@ -193,13 +193,23 @@ export class CandlestickPatternEngine {
           0.85,
         ), [current], { upperShadow: currentShape.upperShadow, lowerShadow: currentShape.lowerShadow, trend: "UP" }));
       }
-      // Pure geometry for Inverted Hammer: small body, long upper shadow, short lower shadow
-      if (upperShadowShape && currentShape.bodyRatio <= this.configuration.smallBodyRatio) {
+      /*
+       * Inverted Hammer: small body, long upper shadow, short lower shadow -- AND a downtrend.
+       *
+       * Doctrinally this only means something as a bullish reversal after a decline; without that
+       * gate it shares `upperShadowShape` with SHOOTING_STAR exactly, so in an uptrend the same
+       * candle fired both a BEARISH Shooting Star and a BULLISH Inverted Hammer at once. Measured
+       * live 2026-09-22: 5,139 of 11,128 5m candles carrying either code carried both -- 46%, not an
+       * edge case. `downtrend` and `uptrend` can't both be true (see `isUptrend`/`isDowntrend`
+       * above), so this makes the two mutually exclusive by construction, the same way HAMMER and
+       * HANGING_MAN already are.
+       */
+      if (upperShadowShape && currentShape.bodyRatio <= this.configuration.smallBodyRatio && downtrend) {
         results.push(detection(current, "INVERTED_HAMMER", "BULLISH", confidence(
           Math.min(1, currentShape.upperShadow / (minimumBody * this.configuration.longShadowBodyMultiplier)),
           1 - currentShape.lowerShadow / Math.max(currentShape.range, 1e-9),
           0.85,
-        ), [current], { upperShadow: currentShape.upperShadow, lowerShadow: currentShape.lowerShadow, bodyRatio: currentShape.bodyRatio }));
+        ), [current], { upperShadow: currentShape.upperShadow, lowerShadow: currentShape.lowerShadow, bodyRatio: currentShape.bodyRatio, trend: "DOWN" }));
       }
 
       // 5b. SPINNING TOP (Neutral indecision candle with small body and balanced shadows)

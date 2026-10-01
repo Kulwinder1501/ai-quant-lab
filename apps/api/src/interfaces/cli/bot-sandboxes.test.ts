@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DUAL_BOT_SANDBOX } from "./bot-sandboxes.js";
+import { DUAL_BOT_SANDBOX, type BotSandboxSpec } from "./bot-sandboxes.js";
 import { findRegisteredStrategy, strategyKeys } from "../../modules/strategy-engine/domain/strategy-registry.js";
 
 /**
@@ -9,16 +9,39 @@ import { findRegisteredStrategy, strategyKeys } from "../../modules/strategy-eng
  * only readable while the arms differ in exactly one thing. The comparison is already confounded
  * before 2026-08-18 because the arms shared ideas; a strategy appearing in two rosters would
  * reintroduce the same defect silently, and the symptom would be a comparison that looks valid.
+ *
+ * `allowedSeries` (added 2026-09-21 for the two ict-structure-v1 bots) is a deliberate, narrow
+ * exception: two bots MAY share a strategy key if -- and only if -- each restricts itself to a
+ * disjoint set of (symbol, timeframe) series, so neither can ever see the other's signals. An
+ * unscoped bot (`allowedSeries` absent) still claims a strategy everywhere, so it can never
+ * coexist with anything else that touches that same strategy.
  */
+function seriesOverlap(
+  a: readonly { symbol: string; timeframe: string }[] | undefined,
+  b: readonly { symbol: string; timeframe: string }[] | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return true; // an unscoped claim touches everything
+  return a.some((sa) => b.some((sb) => sa.symbol === sb.symbol && sa.timeframe === sb.timeframe));
+}
+
 describe("bot sandboxes", () => {
-  it("gives every strategy to at most one arm", () => {
-    const seen = new Map<string, string>();
-    const overlaps: string[] = [];
+  it("gives every strategy to at most one arm per (symbol, timeframe) series", () => {
+    const claims: Array<{ bot: string; strategy: string; series: BotSandboxSpec["allowedSeries"] }> = [];
     for (const bot of DUAL_BOT_SANDBOX) {
       for (const strategy of bot.allowedStrategies) {
-        const owner = seen.get(strategy);
-        if (owner !== undefined) overlaps.push(`${strategy}: ${owner} and ${bot.name}`);
-        seen.set(strategy, bot.name);
+        claims.push({ bot: bot.name, strategy, series: bot.allowedSeries });
+      }
+    }
+
+    const overlaps: string[] = [];
+    for (let i = 0; i < claims.length; i += 1) {
+      for (let j = i + 1; j < claims.length; j += 1) {
+        const a = claims[i]!;
+        const b = claims[j]!;
+        if (a.strategy !== b.strategy) continue;
+        if (seriesOverlap(a.series, b.series)) {
+          overlaps.push(`${a.strategy}: ${a.bot} and ${b.bot}`);
+        }
       }
     }
 

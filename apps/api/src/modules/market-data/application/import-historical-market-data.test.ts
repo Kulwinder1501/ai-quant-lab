@@ -12,6 +12,7 @@ const instrument: Instrument = {
   displayName: "NIFTY 50",
   instrumentType: "INDEX",
   isin: null,
+  currency: "INR",
   tickSize: "0.05",
   lotSize: 1,
   isActive: true,

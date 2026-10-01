@@ -51,6 +51,7 @@ interface PaperTradeRow extends QueryResultRow {
   remaining_quantity?: string | null;
   entry_price: string;
   stop_loss: string;
+  initial_stop_loss: string | number;
   stop_loss_effective_at: Date;
   target_price: string;
   opened_at: Date;
@@ -68,9 +69,16 @@ interface PaperTradeRow extends QueryResultRow {
   option_type: "CE" | "PE" | null;
   underlying_symbol: string | null;
   underlying_entry_price: string | null;
+  underlying_fill_price: string | null;
+  underlying_fill_price_source: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
   underlying_exit_price: string | null;
   entry_iv: string | null;
   regime_observation_id: string | null;
+  exit_engine_version?: "LEGACY" | "O1" | null;
+  underlying_direction?: "LONG" | "SHORT" | null;
+  entry_underlying?: string | null;
+  invalidation_level_at_entry?: string | null;
+  initial_risk_distance?: string | null;
 }
 
 interface CapitalRow extends QueryResultRow {
@@ -88,9 +96,6 @@ export interface OpenManualOptionTradeInput extends Omit<OpenPaperTradeInput, "t
   instrumentId: string;
 }
 
-// Re-exported so existing importers keep working; the definitions moved to the domain, because
-// whether a failure is ordinary or a fault decides whether a bot cycle continues and is not a
-// database detail.
 export {
   DailyTradeCapReachedError,
   TradeIdeaAlreadyTakenError,
@@ -105,13 +110,6 @@ const tradeColumns = `
   paper_trades.trade_idea_id,
   paper_trades.instrument_id,
   source_candle.timeframe,
-  -- The strategy that actually produced this trade.
-  --
-  -- Selected because the dashboard was inventing it: active-positions-table.tsx rendered
-  -- trade.timeframe === "1m" ? "momentum-scalp" : "trend-breakout", so every non-1m position was
-  -- labelled trend-breakout -- a strategy that is TERMINAL_UNOWNED and traded by no bot. A live 5m
-  -- Sniper position from momentum-scalp-pattern displayed as trend-breakout, which is an
-  -- attribution the data never made.
   strategies.strategy_key,
   paper_trades.side,
   paper_trades.status,
@@ -119,6 +117,7 @@ const tradeColumns = `
   paper_trades.remaining_quantity,
   paper_trades.entry_price,
   paper_trades.stop_loss,
+  paper_trades.initial_stop_loss,
   paper_trades.stop_loss_effective_at,
   paper_trades.target_price,
   paper_trades.opened_at,
@@ -135,9 +134,16 @@ const tradeColumns = `
   paper_trades.option_type,
   paper_trades.underlying_symbol,
   paper_trades.underlying_entry_price,
+  paper_trades.underlying_fill_price,
+  paper_trades.underlying_fill_price_source,
   paper_trades.underlying_exit_price,
   paper_trades.entry_iv,
-  paper_trades.regime_observation_id
+  paper_trades.regime_observation_id,
+  paper_trades.exit_engine_version,
+  paper_trades.underlying_direction,
+  paper_trades.entry_underlying,
+  paper_trades.invalidation_level_at_entry,
+  paper_trades.initial_risk_distance
 `;
 
 function toNumber(value: string, field: string): number {
@@ -175,6 +181,7 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
       : toNumber(row.quantity, "trade quantity"),
     entryPrice: toNumber(row.entry_price, "trade entry price"),
     stopLoss: toNumber(row.stop_loss, "trade stop loss"),
+    initialStopLoss: Number(row.initial_stop_loss),
     stopLossEffectiveAt: row.stop_loss_effective_at,
     targetPrice: toNumber(row.target_price, "trade target price"),
     openedAt: row.opened_at,
@@ -195,6 +202,10 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
     underlyingEntryPrice: row.underlying_entry_price === null || row.underlying_entry_price === undefined
       ? null
       : toNumber(row.underlying_entry_price, "underlying entry price"),
+    underlyingFillPrice: row.underlying_fill_price === null || row.underlying_fill_price === undefined
+      ? null
+      : toNumber(row.underlying_fill_price, "underlying fill price"),
+    underlyingFillPriceSource: row.underlying_fill_price_source ?? null,
     underlyingExitPrice: row.underlying_exit_price === null || row.underlying_exit_price === undefined
       ? null
       : toNumber(row.underlying_exit_price, "underlying exit price"),
@@ -202,6 +213,11 @@ function toPaperTrade(row: PaperTradeRow): PaperTrade {
       ? null
       : toNumber(row.entry_iv, "entry IV"),
     regimeObservationId: row.regime_observation_id ?? null,
+    exitEngineVersion: row.exit_engine_version ?? "LEGACY",
+    underlyingDirection: row.underlying_direction ?? null,
+    entryUnderlying: row.entry_underlying ? Number(row.entry_underlying) : null,
+    invalidationLevelAtEntry: row.invalidation_level_at_entry ? Number(row.invalidation_level_at_entry) : null,
+    initialRiskDistance: row.initial_risk_distance ? Number(row.initial_risk_distance) : null,
   };
 }
 
@@ -232,13 +248,18 @@ function hasGeometryForFill(side: TradeSide, fillPrice: number, stopLoss: number
 function exitEventType(reason: PaperTradeExitReason): PaperTradeEventType {
   switch (reason) {
     case "STOP_LOSS":
+    case "HARD_STOP":
+    case "UNDERLYING_INVALIDATION":
+    case "PREMIUM_TOLERANCE":
       return "STOP_LOSS_HIT";
     case "TARGET":
+    case "TARGET_REACHED":
     case "T1_TARGET":
     case "T2_TARGET":
       return "TARGET_HIT";
     case "MANUAL":
     case "MOMENTUM_STALL":
+    case "TIME_STOP":
     case "RUNNER_TRAIL":
     // A rule closed it, not a barrier. Grouping it with the barrier hits would inflate the
     // measured stop and target rates with exits the market never reached.
@@ -520,16 +541,28 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     const status = input.status ?? "OPEN";
     const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
     const contract = input.optionContract;
+    const entryUnderlying = contract?.underlyingFillPrice ?? contract?.underlyingEntryPrice ?? null;
+    const invalidationLevelAtEntry = contract?.invalidationLevelAtEntry ?? null;
+    const initialRiskDistance =
+      entryUnderlying !== null &&
+      invalidationLevelAtEntry !== null &&
+      Number.isFinite(entryUnderlying) &&
+      Number.isFinite(invalidationLevelAtEntry)
+        ? Math.abs(entryUnderlying - invalidationLevelAtEntry)
+        : null;
+
     const inserted = await client.query<{ id: string }>(`
       INSERT INTO paper_trades (
         account_id, trade_idea_id, instrument_id, side, status, quantity, remaining_quantity,
-        entry_price, stop_loss, stop_loss_effective_at, target_price, opened_at,
+        entry_price, stop_loss, initial_stop_loss, stop_loss_effective_at, target_price, opened_at,
         fees, fee_breakdown, slippage, notes,
         option_strike, option_expiry, option_type, underlying_symbol, underlying_entry_price, entry_iv,
-        regime_observation_id
+        regime_observation_id, underlying_fill_price, underlying_fill_price_source,
+        exit_engine_version, underlying_direction, entry_underlying, invalidation_level_at_entry, initial_risk_distance
       ) VALUES (
-        $1, $2, $3, $4, $14, $5, $5, $6, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
-        $15, $16, $17, $18, $19, $20, $21
+        $1, $2, $3, $4, $14, $5, $5, $6, $7, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
+        $15, $16, $17, $18, $19, $20, $21, $22, $23,
+        'O1', $4, $24, $25, $26
       ) RETURNING id
     `, [
       input.accountId, idea.id, idea.instrument_id, side, input.quantity,
@@ -539,6 +572,8 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       contract?.optionType ?? null, contract?.underlyingSymbol ?? null,
       contract?.underlyingEntryPrice ?? null, contract?.entryIv ?? null,
       input.regimeObservationId ?? null,
+      contract?.underlyingFillPrice ?? null, contract?.underlyingFillPriceSource ?? null,
+      entryUnderlying, invalidationLevelAtEntry, initialRiskDistance,
     ]);
     const paperTradeId = inserted.rows[0]?.id;
     if (!paperTradeId) {
@@ -1060,12 +1095,23 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
 
   async updateStopLoss(id: string, newStopLoss: number, reason?: string): Promise<void> {
     assertPositiveFinite(newStopLoss, "New stop loss");
+    /*
+     * $2 is bound twice, deliberately as two separate placeholders rather than one reused
+     * parameter: `stop_loss = $2` infers numeric from the column, while `$4::text` casts to
+     * text for the note. Postgres unifies every occurrence of one placeholder into a single
+     * type, so reusing $2 for both (as this used to) throws "inconsistent types deduced for
+     * parameter $2" (42P08, "text versus numeric") -- not on every call, only when the
+     * planner actually needs to unify both uses, which is data/plan-dependent and had gone
+     * unnoticed until it took down an entire agent tick in production, 2026-09-16.
+     */
     await this.database.query(`
+      -- initial_stop_loss is deliberately NOT touched: it records what the trade opened with,
+      -- and the stall rule reads it precisely because stop_loss moves.
       UPDATE paper_trades
       SET stop_loss = $2,
           stop_loss_effective_at = CURRENT_TIMESTAMP,
-          notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $2::text, ']')
+          notes = CONCAT(notes, ' [', COALESCE($3, 'SL Adjusted'), ' to ₹', $4::text, ']')
       WHERE id = $1 AND status = 'OPEN'
-    `, [id, newStopLoss, reason || "Dynamic Stop-Loss Tightening"]);
+    `, [id, newStopLoss, reason || "Dynamic Stop-Loss Tightening", newStopLoss]);
   }
 }

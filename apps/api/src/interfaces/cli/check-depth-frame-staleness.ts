@@ -3,6 +3,7 @@ import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresDepthFrameRepository } from "../../infrastructure/database/repositories/postgres-depth-frame-repository.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
+import { loadNseHolidays } from "../../modules/market-data/domain/nse-session-calendar.js";
 import {
   DEPTH_CAPTURE_SEGMENT,
   DEPTH_STRUCTURAL_SILENCE_MS,
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
     const now = new Date();
     const repository = new PostgresDepthFrameRepository(database);
     const marketSession = new NseMarketSession(
-      (process.env.NSE_HOLIDAYS ?? "").split(",").map((d) => d.trim()).filter((d) => d !== ""),
+      await loadNseHolidays(database),
       DEPTH_CAPTURE_SEGMENT,
     );
     const session = marketSession.getSession(now, DEPTH_CAPTURE_SEGMENT);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   blockPermuted,
   circularShifted,
+  matchedTimeDiversity,
   signFlipped,
   wrongDayMatchedTime,
 } from "./placebos.js";
@@ -152,5 +153,85 @@ describe("wrongDayMatchedTime", () => {
 
   it("rejects a non-positive bucket size", () => {
     expect(() => wrongDayMatchedTime([], 1, 0)).toThrow(/positive integer/);
+  });
+});
+
+describe("matchedTimeDiversity", () => {
+  /** Same clock time on `days` consecutive sessions, so every bucket spans multiple days. */
+  function acrossDays(days: number, valuePerDay: (day: number) => number) {
+    const observations: Array<{ at: Date; value: number }> = [];
+    for (let day = 0; day < days; day += 1) {
+      observations.push({
+        at: new Date(Date.UTC(2026, 7, 3 + day, 4, 0, 0)),
+        value: valuePerDay(day),
+      });
+    }
+    return observations;
+  }
+
+  it("reports degenerate when every observation is on a single calendar day", () => {
+    // The exact bug found live: a capture session that only spans one real trading day. Every
+    // 15-minute bucket has exactly one day in it, so nothing is swappable and wrongDayMatchedTime
+    // is a silent no-op even though it happily returns a same-shaped array.
+    const observations: Array<{ at: Date; value: number }> = [];
+    for (let bar = 0; bar < 20; bar += 1) {
+      observations.push({
+        at: new Date(Date.UTC(2026, 7, 3, 4, 0, 0) + bar * 5 * 60_000),
+        value: bar,
+      });
+    }
+
+    const diversity = matchedTimeDiversity(observations);
+
+    expect(diversity.isDegenerate).toBe(true);
+    expect(diversity.swappableFraction).toBe(0);
+    expect(diversity.distinctDays).toBe(1);
+
+    // And the placebo itself really is a no-op on this input, confirming the diagnostic matches
+    // what wrongDayMatchedTime actually does.
+    expect(wrongDayMatchedTime(observations, 1)).toEqual(observations.map((o) => o.value));
+  });
+
+  it("reports non-degenerate when buckets genuinely span multiple days", () => {
+    const observations = acrossDays(8, (day) => day * 10);
+    const diversity = matchedTimeDiversity(observations);
+
+    expect(diversity.isDegenerate).toBe(false);
+    expect(diversity.swappableFraction).toBe(1);
+    expect(diversity.distinctDays).toBe(8);
+  });
+
+  it("treats a mostly single-day window with one diverse bucket as still degenerate at the default threshold", () => {
+    // 10 bars, 15 minutes apart (the default bucket width), so each lands in its own bucket alone on
+    // day 0 -- single-day, not swappable. One further observation on a second day matches the first
+    // bar's time-of-day exactly, so only that one bucket (2 of the 11 observations) gets real
+    // diversity -- under the default 20% threshold.
+    const observations: Array<{ at: Date; value: number }> = [];
+    for (let bar = 0; bar < 10; bar += 1) {
+      observations.push({
+        at: new Date(Date.UTC(2026, 7, 3, 4, 0, 0) + bar * 15 * 60_000),
+        value: bar,
+      });
+    }
+    // A second day contributing to just the first bucket.
+    observations.push({ at: new Date(Date.UTC(2026, 7, 4, 4, 0, 0)), value: 99 });
+
+    const diversity = matchedTimeDiversity(observations);
+
+    expect(diversity.distinctDays).toBe(2);
+    expect(diversity.swappableObservations).toBe(2);
+    expect(diversity.swappableFraction).toBeLessThan(0.2);
+    expect(diversity.isDegenerate).toBe(true);
+  });
+
+  it("honours a custom minimum swappable fraction", () => {
+    const observations = acrossDays(8, (day) => day * 10);
+    // Fully diverse data must still clear an even stricter bar.
+    expect(matchedTimeDiversity(observations, 15, 0.99).isDegenerate).toBe(false);
+    // And a lenient bar accepts near-zero diversity.
+    const singleDay: Array<{ at: Date; value: number }> = [
+      { at: new Date(Date.UTC(2026, 7, 3, 4, 0, 0)), value: 1 },
+    ];
+    expect(matchedTimeDiversity(singleDay, 15, 0).isDegenerate).toBe(false);
   });
 });

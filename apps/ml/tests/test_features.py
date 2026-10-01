@@ -531,6 +531,353 @@ class FeatureConstructionTests(unittest.TestCase):
         schema_v9 = feature_schema(FEATURE_SCHEMA_VERSION_V9)
         self.assertEqual(schema_v9, FEATURE_SCHEMA_V9)
 
+    def test_build_labeled_examples_defaults_to_the_production_schema(self) -> None:
+        """Without an override, the schema is `schema_version_for(request.timeframe)`, unchanged."""
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT
+
+        source = evidence(future_close=103.0)
+        examples = build_labeled_examples([source], request())
+        self.assertEqual(len(examples), 1)
+        self.assertNotIn("ict.htf_bias_bullish", examples[0].features)
+
+        # An explicit override changes which columns get built, on the identical candle.
+        overridden = build_labeled_examples([source], request(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        self.assertIn("ict.htf_bias_bullish", overridden[0].features)
+
+    def test_v_ict_schema_is_v9_plus_eleven_ict_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V9, FEATURE_SCHEMA_VERSION_V_ICT
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V9, FEATURE_SCHEMA_V_ICT
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT), len(FEATURE_SCHEMA_V9) + 11)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT[: len(FEATURE_SCHEMA_V9)], FEATURE_SCHEMA_V9)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT), FEATURE_SCHEMA_V_ICT)
+        # v9 itself must not have gained the ICT columns as a side effect of this change.
+        self.assertNotIn("ict.htf_bias_bullish", FEATURE_SCHEMA_V9)
+
+    def test_v_ict_features_default_to_absence_when_no_ict_evidence_is_attached(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT
+
+        observed = features_of(evidence(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        # One-hots default to 0.0 (evidence of absence), matching pattern.is_* / SUPERTREND's own
+        # convention -- never left out of the vector just because nothing was attached.
+        for column in (
+            "ict.htf_bias_bullish",
+            "ict.htf_bias_bearish",
+            "ict.premium_discount_is_premium",
+            "ict.premium_discount_is_discount",
+            "ict.nearest_order_block_is_bullish",
+            "ict.nearest_order_block_is_bearish",
+            "ict.has_bos_level",
+            "ict.has_choch_level",
+        ):
+            self.assertEqual(observed[column], 0.0, column)
+        # The ATR-normalised distances are a genuinely missing measurement, so NaN, not 0.
+        for column in (
+            "ict.distance_to_nearest_order_block_atr",
+            "ict.distance_to_bos_level_atr",
+            "ict.distance_to_choch_level_atr",
+        ):
+            self.assertTrue(math.isnan(observed[column]), column)
+
+    def test_v_ict_features_populate_from_attached_ict_evidence(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BEARISH",
+                premium_discount_zone="PREMIUM",
+                distance_to_nearest_order_block=8.0,
+                nearest_order_block_side="BEARISH",
+                has_bos_level=True,
+                has_choch_level=True,
+                distance_to_bos_level=-12.0,
+                distance_to_choch_level=6.0,
+            ),
+        )
+
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT)
+        self.assertEqual(observed["ict.htf_bias_bullish"], 0.0)
+        self.assertEqual(observed["ict.htf_bias_bearish"], 1.0)
+        self.assertEqual(observed["ict.premium_discount_is_premium"], 1.0)
+        self.assertEqual(observed["ict.premium_discount_is_discount"], 0.0)
+        self.assertEqual(observed["ict.nearest_order_block_is_bullish"], 0.0)
+        self.assertEqual(observed["ict.nearest_order_block_is_bearish"], 1.0)
+        self.assertEqual(observed["ict.has_bos_level"], 1.0)
+        self.assertEqual(observed["ict.has_choch_level"], 1.0)
+        # Raw distances (8.0, -12.0, 6.0) divided by ATR (4.0) -- scale-free, per this module's own
+        # anti-leakage rule against absolute price levels.
+        self.assertAlmostEqual(observed["ict.distance_to_nearest_order_block_atr"], 2.0, places=10)
+        self.assertAlmostEqual(observed["ict.distance_to_bos_level_atr"], -3.0, places=10)
+        self.assertAlmostEqual(observed["ict.distance_to_choch_level_atr"], 1.5, places=10)
+
+    def test_v_ict_columns_are_absent_from_every_other_schema(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V9, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+            ),
+        )
+        # ict evidence attached, but built under v9: no ict.* key should leak into a production
+        # schema's vector just because the evidence happened to be present on the candle.
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V9)
+        self.assertFalse(any(key.startswith("ict.") for key in observed))
+
+    def test_v_ict_refined_schema_is_v_ict_plus_six_refined_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V_ICT, FEATURE_SCHEMA_V_ICT_REFINED
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT_REFINED), len(FEATURE_SCHEMA_V_ICT) + 6)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT_REFINED[: len(FEATURE_SCHEMA_V_ICT)], FEATURE_SCHEMA_V_ICT)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT_REFINED), FEATURE_SCHEMA_V_ICT_REFINED)
+        self.assertNotIn("ict.stop_compression_ratio", FEATURE_SCHEMA_V_ICT)
+
+    def test_v_ict_refined_defaults_to_absence_without_a_refinement(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED, IctEvidence
+
+        # HTF order block present, but no nested refinement found on this bar.
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+                htf_order_block_side="BULLISH",
+                htf_order_block_distance=40.0,
+                refined_order_block_distance=None,
+                stop_compression_ratio=None,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_REFINED)
+        self.assertEqual(observed["ict.htf_order_block_is_bullish"], 1.0)
+        self.assertEqual(observed["ict.htf_order_block_is_bearish"], 0.0)
+        self.assertEqual(observed["ict.has_refined_order_block"], 0.0)
+        self.assertTrue(math.isnan(observed["ict.refined_order_block_distance_atr"]))
+        self.assertTrue(math.isnan(observed["ict.stop_compression_ratio"]))
+
+    def test_v_ict_refined_populates_from_a_real_refinement(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=10.0,
+                nearest_order_block_side="BULLISH",
+                has_bos_level=True,
+                has_choch_level=False,
+                distance_to_bos_level=5.0,
+                distance_to_choch_level=None,
+                htf_order_block_side="BEARISH",
+                htf_order_block_distance=40.0,
+                refined_order_block_distance=8.0,
+                stop_compression_ratio=0.375,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_REFINED)
+        self.assertEqual(observed["ict.htf_order_block_is_bearish"], 1.0)
+        self.assertAlmostEqual(observed["ict.htf_order_block_distance_atr"], 10.0, places=10)  # 40.0 / 4.0
+        self.assertEqual(observed["ict.has_refined_order_block"], 1.0)
+        self.assertAlmostEqual(observed["ict.refined_order_block_distance_atr"], 2.0, places=10)  # 8.0 / 4.0
+        self.assertAlmostEqual(observed["ict.stop_compression_ratio"], 0.375, places=10)
+
+    def test_v_ict_ote_schema_is_v_ict_refined_plus_four_ote_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_OTE
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V_ICT_OTE, FEATURE_SCHEMA_V_ICT_REFINED
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT_OTE), len(FEATURE_SCHEMA_V_ICT_REFINED) + 4)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT_OTE[: len(FEATURE_SCHEMA_V_ICT_REFINED)], FEATURE_SCHEMA_V_ICT_REFINED)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT_OTE), FEATURE_SCHEMA_V_ICT_OTE)
+        self.assertNotIn("ict.ote_distance_to_band_atr", FEATURE_SCHEMA_V_ICT_REFINED)
+
+    def test_v_ict_ote_defaults_to_absence_without_a_dealing_range(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_OTE, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="UNKNOWN",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side=None,
+                ote_is_within=None,
+                ote_distance_to_band=None,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_OTE)
+        self.assertEqual(observed["ict.ote_side_is_bullish"], 0.0)
+        self.assertEqual(observed["ict.ote_side_is_bearish"], 0.0)
+        self.assertEqual(observed["ict.ote_is_within"], 0.0)
+        self.assertTrue(math.isnan(observed["ict.ote_distance_to_band_atr"]))
+
+    def test_v_ict_ote_populates_from_a_real_band(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_OTE, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BEARISH",
+                premium_discount_zone="PREMIUM",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side="BEARISH",
+                ote_is_within=False,
+                ote_distance_to_band=10.0,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_OTE)
+        self.assertEqual(observed["ict.ote_side_is_bullish"], 0.0)
+        self.assertEqual(observed["ict.ote_side_is_bearish"], 1.0)
+        self.assertEqual(observed["ict.ote_is_within"], 0.0)
+        self.assertAlmostEqual(observed["ict.ote_distance_to_band_atr"], 2.5, places=10)  # 10.0 / 4.0
+
+    def test_v_ict_ote_columns_are_absent_from_v_ict_refined(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_REFINED, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side="BULLISH",
+                ote_is_within=True,
+                ote_distance_to_band=0.0,
+            ),
+        )
+        # ict.ote evidence attached, but built under v-ict-refined: no ict.ote.* key should leak in.
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_REFINED)
+        self.assertFalse(any(key.startswith("ict.ote_") for key in observed))
+
+    def test_v_ict_swing_schema_is_v_ict_ote_plus_seven_swing_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V_ICT_OTE, FEATURE_SCHEMA_V_ICT_SWING
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT_SWING), len(FEATURE_SCHEMA_V_ICT_OTE) + 7)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT_SWING[: len(FEATURE_SCHEMA_V_ICT_OTE)], FEATURE_SCHEMA_V_ICT_OTE)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT_SWING), FEATURE_SCHEMA_V_ICT_SWING)
+        self.assertNotIn("ict.distance_to_ith_atr", FEATURE_SCHEMA_V_ICT_OTE)
+
+    def test_v_ict_swing_defaults_to_absence_without_a_hierarchy(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="UNKNOWN",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                swing_distance_to_ith=None,
+                swing_distance_to_itl=None,
+                swing_distance_to_sth=None,
+                swing_distance_to_stl=None,
+                swing_protected_side=None,
+                swing_protected_breached=None,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING)
+        self.assertEqual(observed["ict.swing_protected_side_is_ith"], 0.0)
+        self.assertEqual(observed["ict.swing_protected_side_is_itl"], 0.0)
+        self.assertEqual(observed["ict.swing_protected_breached"], 0.0)
+        for column in (
+            "ict.distance_to_ith_atr",
+            "ict.distance_to_itl_atr",
+            "ict.distance_to_sth_atr",
+            "ict.distance_to_stl_atr",
+        ):
+            self.assertTrue(math.isnan(observed[column]), column)
+
+    def test_v_ict_swing_populates_from_a_real_hierarchy(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                swing_distance_to_ith=None,
+                swing_distance_to_itl=8.0,
+                swing_distance_to_sth=None,
+                swing_distance_to_stl=20.0,
+                swing_protected_side="INTERMEDIATE_TERM_LOW",
+                swing_protected_breached=True,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING)
+        self.assertEqual(observed["ict.swing_protected_side_is_ith"], 0.0)
+        self.assertEqual(observed["ict.swing_protected_side_is_itl"], 1.0)
+        self.assertEqual(observed["ict.swing_protected_breached"], 1.0)
+        self.assertAlmostEqual(observed["ict.distance_to_itl_atr"], 2.0, places=10)  # 8.0 / 4.0
+        self.assertAlmostEqual(observed["ict.distance_to_stl_atr"], 5.0, places=10)  # 20.0 / 4.0
+        self.assertTrue(math.isnan(observed["ict.distance_to_ith_atr"]))
+        self.assertTrue(math.isnan(observed["ict.distance_to_sth_atr"]))
+
+    def test_v_ict_swing_columns_are_absent_from_v_ict_ote(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_OTE, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="DISCOUNT",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                swing_protected_side="INTERMEDIATE_TERM_HIGH",
+                swing_protected_breached=False,
+            ),
+        )
+        # ict.swing evidence attached, but built under v-ict-ote: no swing-hierarchy key should leak in.
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_OTE)
+        self.assertFalse(any(key.startswith("ict.swing_") or "_to_ith" in key or "_to_itl" in key for key in observed))
+
     def test_candlestick_geometry_scale_free_and_zero_division_protection(self) -> None:
         from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8_GEOMETRY
 

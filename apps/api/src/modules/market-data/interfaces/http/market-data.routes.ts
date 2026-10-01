@@ -21,15 +21,153 @@ import {
 
 /** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
+import type { IctStructureSnapshot } from "../../../technical-analysis/domain/ict/structure.js";
 import { summariseIvPercentile, type DailyImpliedVolatility } from "../../domain/iv-percentile.js";
+
+export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
+
+export interface ChartIctStructure {
+  readonly trend: string;
+  /** Confirmed swings, each at the candle that MADE the extreme, never the later bar that confirmed it. */
+  readonly swings: ReadonlyArray<{ label: ChartSwingLabel; price: number; timestamp: string }>;
+  readonly idm: { price: number; timestamp: string } | null;
+  readonly bosLevel: number | null;
+  readonly chochLevel: number | null;
+  readonly lastEvent:
+    | { type: string; direction: string; level: number; timestamp: string; isWickOnly: boolean }
+    | null;
+}
+
+/**
+ * Projects the engine's market-structure read into the shape a chart can mark up.
+ *
+ * Extracted and exported rather than inlined in the route so the de-duplication rule below can be
+ * tested directly -- it is the only real logic here, and it was found by running the mapping against
+ * live snapshots, not by reading the types.
+ *
+ * **Swings are ordered by the current trend's frame, then de-duplicated by pivot index**, because one
+ * pivot can carry two labels at once: a bearish CHoCH sets `lastLH = lastHH` and never clears
+ * `lastHH` (see structure.ts), leaving the same swing as both. Observed live -- NIFTY50 5m and 15m
+ * each reported HH and LH as the identical pivot (23489 @ 03:45). Internally harmless; drawn on a
+ * chart it is two contradictory labels on one candle. The trend-appropriate label wins: in a
+ * downtrend that swing is the LH the structure is working against, and calling it the HH would
+ * describe a frame the engine has already left.
+ *
+ * Every timestamp goes through `new Date(...)` because a pivot's `time` and an event's `candleTime`
+ * arrive as real `Date`s on a fresh compute but as ISO strings on a cache hit -- jsonb has no Date
+ * type, so `ict_state_snapshots.snapshot_payload` flattens them on the way out.
+ */
+export function toChartIctStructure(structure: IctStructureSnapshot | null | undefined): ChartIctStructure | null {
+  if (!structure) return null;
+
+  const ordered: ReadonlyArray<readonly [ChartSwingLabel, IctStructureSnapshot["lastHH"]]> =
+    structure.trend === "BEARISH"
+      ? [["LL", structure.lastLL], ["LH", structure.lastLH], ["HH", structure.lastHH], ["HL", structure.lastHL]]
+      : [["HH", structure.lastHH], ["HL", structure.lastHL], ["LL", structure.lastLL], ["LH", structure.lastLH]];
+
+  const emitted = new Set<number>();
+  const swings: Array<{ label: ChartSwingLabel; price: number; timestamp: string }> = [];
+  for (const [label, pivot] of ordered) {
+    if (!pivot || emitted.has(pivot.index)) continue;
+    emitted.add(pivot.index);
+    swings.push({ label, price: pivot.price, timestamp: new Date(pivot.time).toISOString() });
+  }
+
+  return {
+    trend: structure.trend,
+    swings,
+    idm: structure.idm
+      ? { price: structure.idm.price, timestamp: new Date(structure.idm.time).toISOString() }
+      : null,
+    bosLevel: structure.bosLevel,
+    chochLevel: structure.chochLevel,
+    lastEvent: structure.lastEvent
+      ? {
+          type: structure.lastEvent.type,
+          direction: structure.lastEvent.direction,
+          level: structure.lastEvent.level,
+          timestamp: new Date(structure.lastEvent.candleTime).toISOString(),
+          isWickOnly: structure.lastEvent.isWickOnly,
+        }
+      : null,
+  };
+}
 
 export function registerMarketDataRoutes(
   app: Express,
   dependencies: Pick<HttpDependencies,
     "dashboardRepository" | "getInstitutionalContext" | "optionChainRepository"
-    | "fyersLiveStreamer" | "marketQuoteClient"
+    | "fyersLiveStreamer" | "marketQuoteClient" | "instrumentRepository" | "strategyContextRepository"
   >,
 ): void {
+  /**
+   * The chart's own Order Block / FVG zones, sourced from the doctrinally-correct ICT ledger
+   * (`IctZoneLedger` via `IctCompositeEngine`, exposed as `StrategyMarketContext.ictSnapshot.zones`)
+   * instead of `technical-indicator-engine.ts`'s `orderBlock()`/`fvg()`.
+   *
+   * That indicator-engine pair never expires a zone -- every FVG/OB it ever detected stays flagged,
+   * so a chart built from it shows boxes price traded straight through hours or days ago as if they
+   * were still live. The ledger tracks fill percentage and marks a zone CONSUMED/INVALIDATED (or
+   * re-emits it as a MITIGATION/BREAKER zone on the other side) the moment price actually does that,
+   * and `activeFvgs`/`activeObs` already excludes anything dead -- see `zones.ts`.
+   *
+   * Only available where `ictContextConsumedAt(timeframe)` is true -- today, 5m and 15m, the
+   * timeframes `ict-structure-v1` (the only registered ICT-reading strategy) supports. Elsewhere
+   * `ictSnapshot` is simply absent and this returns empty arrays, which is honest: no strategy reads
+   * ICT there, so nothing computes or caches it, and drawing zones from candles alone would silently
+   * reintroduce the "never expires" problem for a timeframe no one has actually vetted.
+   */
+  async function loadIctZones(symbol: string, timeframe: string): Promise<{
+    fvg: Array<{ timestamp: string; type: string; top: number; bottom: number; state: string }>;
+    orderBlock: Array<{ timestamp: string; type: string; top: number; bottom: number; state: string }>;
+    /**
+     * The market-structure read behind those zones: the swing points the engine has actually
+     * confirmed, the inducement it is currently watching, and the levels whose break would be a BOS
+     * or a CHoCH.
+     *
+     * All of this was already computed on every bar and then discarded at this boundary -- only
+     * `zones` crossed it -- so a chart could draw the two POI types but never the structure that
+     * decides whether either of them is tradeable. `null` when no ICT snapshot exists for this
+     * timeframe, the same honest-absence contract the zone arrays use.
+     */
+    structure: ChartIctStructure | null;
+  }> {
+    const empty = { fvg: [], orderBlock: [], structure: null };
+    const instrument = await dependencies.instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
+    if (!instrument) return empty;
+
+    const context = await dependencies.strategyContextRepository.findLatestCompleted({
+      instrumentId: instrument.id,
+      timeframe,
+    });
+    const zones = context?.ictSnapshot?.zones;
+    if (!zones) return empty;
+    /*
+     * `createdAtBarTime` is a real `Date` when the snapshot was just computed, but a plain ISO
+     * string when it round-tripped through `ict_state_snapshots.snapshot_payload` (jsonb has no
+     * Date type, so `JSON.stringify` in `persistIctSnapshot` flattens it and the driver hands the
+     * string straight back). Verified live: the same process returned a `Date` for one timeframe's
+     * freshly-computed snapshot and a string for another's cache hit. `new Date(...)` accepts both.
+     */
+    return {
+      fvg: zones.activeFvgs.map((fvg) => ({
+        timestamp: new Date(fvg.createdAtBarTime).toISOString(),
+        type: fvg.type,
+        top: fvg.top,
+        bottom: fvg.bottom,
+        state: fvg.state,
+      })),
+      orderBlock: zones.activeObs.map((ob) => ({
+        timestamp: new Date(ob.createdAtBarTime).toISOString(),
+        type: ob.type,
+        top: ob.top,
+        bottom: ob.bottom,
+        state: ob.state,
+      })),
+      structure: toChartIctStructure(context?.ictSnapshot?.structure),
+    };
+  }
+
   app.get("/api/v1/candles", async (request, response, next) => {
     try {
       const symbol = queryString(request, "symbol") || "NIFTY50";
@@ -58,7 +196,10 @@ export function registerMarketDataRoutes(
         volume: row.volume,
       }));
 
-      const smcCodes = ["FVG", "BOS", "CHOCH", "LIQUIDITY_SWEEP", "ORDER_BLOCK", "EQUILIBRIUM_ZONE"] as const;
+      // FVG and ORDER_BLOCK are excluded here and sourced from the ICT ledger instead -- see
+      // `loadIctZones`. BOS/CHOCH/LIQUIDITY_SWEEP/EQUILIBRIUM_ZONE still come from the indicator
+      // engine below; only the two zone types with a known "never expires" defect are redirected.
+      const smcCodes = ["BOS", "CHOCH", "LIQUIDITY_SWEEP", "EQUILIBRIUM_ZONE"] as const;
       const indicators: Record<string, any[]> = {
         SMA: [], BB: [], RSI: [],
         ...Object.fromEntries(smcCodes.map((code) => [code, []])),
@@ -104,6 +245,11 @@ export function registerMarketDataRoutes(
           });
         }
       });
+
+      const ictZones = await loadIctZones(symbol.toUpperCase(), timeframe);
+      indicators["FVG"] = ictZones.fvg;
+      indicators["ORDER_BLOCK"] = ictZones.orderBlock;
+
       response.status(200).json({
         data: { symbol: symbol.toUpperCase(), timeframe, candles, indicators, patterns },
       });

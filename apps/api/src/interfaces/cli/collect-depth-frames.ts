@@ -11,6 +11,7 @@ import {
 } from "../../modules/market-data/application/capture-depth-frames.js";
 import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-frame-sequencing.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
+import { loadNseHolidays } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { frontMonthFuturesSymbol } from "../../modules/market-data/domain/depth-frame-staleness.js";
 
 /**
@@ -225,9 +226,7 @@ async function main(): Promise<void> {
 
   const flushTimer = setInterval(() => { void flush(); }, options.flushSeconds * 1_000);
 
-  const marketSession = new NseMarketSession(
-    (process.env.NSE_HOLIDAYS ?? "").split(",").map((day) => day.trim()).filter((day) => day !== ""),
-  );
+  const marketSession = new NseMarketSession(await loadNseHolidays(database));
 
   // The heartbeat. Without it a working daemon is indistinguishable from a hung one.
   const progressTimer = setInterval(() => {

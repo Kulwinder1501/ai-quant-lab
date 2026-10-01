@@ -43,6 +43,40 @@ describe("ProviderRoutedQuoteClient", () => {
     expect(result.get("^GSPC")?.provider).toBe("yahoo");
   });
 
+  it("routes an already-Yahoo-qualified futures/forex ticker to Yahoo, not Fyers", async () => {
+    const fyers = reader("fyers-api-v3");
+    const foreign = reader("yahoo");
+    const client = new ProviderRoutedQuoteClient(fyers, foreign);
+
+    const result = await client.quoteSymbols(["NIFTY50", "GC=F"]);
+
+    expect(fyers.quoteSymbols).toHaveBeenCalledWith(["NIFTY50"]);
+    expect(foreign.quoteSymbols).toHaveBeenCalledWith(["GC=F"]);
+    expect(result.get("GC=F")?.provider).toBe("yahoo");
+  });
+
+  it("routes a Twelve-Data-mapped symbol there, ahead of the Fyers/Yahoo split", async () => {
+    const fyers = reader("fyers-api-v3");
+    const foreign = reader("yahoo");
+    const twelveData = reader("twelvedata");
+    const client = new ProviderRoutedQuoteClient(fyers, foreign, twelveData);
+
+    const result = await client.quoteSymbols(["NIFTY50", "^GSPC", "XAU_USD"]);
+
+    expect(twelveData.quoteSymbols).toHaveBeenCalledWith(["XAU_USD"]);
+    expect(fyers.quoteSymbols).toHaveBeenCalledWith(["NIFTY50"]);
+    expect(foreign.quoteSymbols).toHaveBeenCalledWith(["^GSPC"]);
+    expect(result.get("XAU_USD")?.provider).toBe("twelvedata");
+  });
+
+  it("never calls Twelve Data when it is unconfigured, even for a symbol it would own", async () => {
+    const fyers = reader("fyers-api-v3");
+    const client = new ProviderRoutedQuoteClient(fyers);
+
+    await expect(client.quoteSymbol("XAU_USD")).resolves.toBeNull();
+    expect(fyers.quoteSymbols).not.toHaveBeenCalled();
+  });
+
   it("returns no Indian quote when Fyers is unconfigured and never calls Yahoo", async () => {
     const foreign = reader("yahoo");
     const client = new ProviderRoutedQuoteClient(null, foreign);

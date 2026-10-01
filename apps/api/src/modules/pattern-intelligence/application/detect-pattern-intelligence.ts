@@ -69,6 +69,12 @@ export interface DetectPatternIntelligenceResult {
   candidatesRefusedStaleBar: number;
   /** Candidates refused because no frozen PatternDefinition backs them — a registry misconfiguration. */
   candidatesRefusedUnregistered: number;
+  /**
+   * Candidates whose detection engine reported `patternHigh < patternLow` — an engine defect, not a
+   * data-readiness gap, since every other refusal here is. Refused rather than thrown: one malformed
+   * candidate from one engine must not abort every other family's detection for the whole window.
+   */
+  candidatesRefusedMalformedGeometry: number;
   /** The definition ids that were missing, so the misconfiguration is nameable rather than a count. */
   unregisteredDefinitionIds: readonly string[];
   /** Families skipped wholesale because this source cannot evaluate them (errata Section 1). */
@@ -118,6 +124,7 @@ export class DetectPatternIntelligence {
         candidatesRefusedOutsideSession: 0,
         candidatesRefusedStaleBar: 0,
         candidatesRefusedUnregistered: 0,
+        candidatesRefusedMalformedGeometry: 0,
         unregisteredDefinitionIds: [],
         familiesBlockedByDataReadiness: [],
       };
@@ -127,6 +134,7 @@ export class DetectPatternIntelligence {
     let candidatesRefusedOutsideSession = 0;
     let candidatesRefusedStaleBar = 0;
     let candidatesRefusedUnregistered = 0;
+    let candidatesRefusedMalformedGeometry = 0;
     const unregisteredDefinitionIds = new Set<string>();
     const familiesBlockedByDataReadiness: PatternFamily[] = [];
 
@@ -200,6 +208,18 @@ export class DetectPatternIntelligence {
         intervalMs: barIntervalMs,
       })) {
         candidatesRefusedStaleBar++;
+        return;
+      }
+
+      /*
+       * A structural invariant this module can enforce even though it does not compute geometry
+       * itself: whichever engine found this candidate must agree its own high sits above its own
+       * low. Nothing upstream currently guarantees that (see `classical-reversal-engine.ts`'s
+       * head-and-shoulders fix, prompted by exactly this), so this is defence in depth against the
+       * next engine that gets it wrong, not a substitute for fixing the engine that does.
+       */
+      if (!(patternHigh >= patternLow)) {
+        candidatesRefusedMalformedGeometry++;
         return;
       }
 
@@ -546,6 +566,7 @@ export class DetectPatternIntelligence {
       candidatesRefusedOutsideSession,
       candidatesRefusedStaleBar,
       candidatesRefusedUnregistered,
+      candidatesRefusedMalformedGeometry,
       unregisteredDefinitionIds: [...unregisteredDefinitionIds],
       familiesBlockedByDataReadiness,
     };

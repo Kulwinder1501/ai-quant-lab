@@ -21,6 +21,8 @@ export interface IndicatorPoint {
   level?: number;
   equilibrium?: number;
   active?: string | boolean;
+  /** FVG/Order Block lifecycle state from the ICT ledger (FRESH/TOUCHED/PARTIALLY_FILLED/...). */
+  state?: string;
 }
 
 export interface PatternAnnotation {

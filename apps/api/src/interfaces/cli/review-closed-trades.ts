@@ -26,6 +26,7 @@ async function main(): Promise<void> {
       exit_price: string; stop_loss: string; target_price: string;
       opened_at: Date; closed_at: Date; timeframe: string | null;
       fees: string | null; underlying_entry_price: string | null; partial_exits: string;
+      underlying_fill_price: string | null;
       underlying_exit_price: string | null; idea_side: TradeSide | null;
       idea_stop: string | null; idea_target: string | null;
       option_expiry: Date | null; option_type: "CE" | "PE" | null; underlying_symbol: string | null;
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
              paper_trades.exit_price, paper_trades.stop_loss, paper_trades.target_price,
              paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe,
              paper_trades.fees, paper_trades.underlying_entry_price,
+             paper_trades.underlying_fill_price,
              paper_trades.underlying_exit_price,
              -- The thesis levels are the *underlying's*, and they live on the idea rather than on the
              -- trade, whose stop and target are option premiums. Needed to say whether the thesis
@@ -168,10 +170,27 @@ async function main(): Promise<void> {
        * because candle extremes are an upper bound and the bound tightens with the timeframe.
        *
        * Null when the trade has no thesis levels to measure against, or no candles were stored.
+       *
+       * `entryReference` here is deliberately `underlying_fill_price` (migration 120) rather than
+       * `underlying_entry_price`, falling back to the latter only for trades opened before 120
+       * captured a fill-moment observation. This is the "did the underlying actually move during
+       * the hold" question -- `underlyingBars` already spans [opened_at, closed_at], i.e. the real
+       * fill-to-close window, and anchoring the excursion at the earlier signal-time price silently
+       * folds the signal-to-fill lag into the measured move. That produced a real wrong diagnosis:
+       * trade 1cecb6fe-cb1c-4a90-a06b-9bd34ae5abc6 read as "the underlying barely moved" off a
+       * 77-point-stale entry reference, when the real move from the actual fill was ~79 points
+       * against the position. `underlying_entry_price` remains correct for the *thesis* layer below
+       * (`layeredOutcomeFromClosedTrade`'s `underlyingEntryPrice`), which is answering a different
+       * question: where the decision was made, not where the position started.
        */
       let underlyingPath = null;
+      const underlyingFillOrEntryPrice = row.underlying_fill_price !== null
+        ? Number(row.underlying_fill_price)
+        : row.underlying_entry_price !== null
+          ? Number(row.underlying_entry_price)
+          : null;
       if (row.idea_side !== null && row.idea_stop !== null && row.idea_target !== null
-        && row.underlying_entry_price !== null) {
+        && underlyingFillOrEntryPrice !== null) {
         const underlyingBars = await repository.findHoldingPeriodCandles({
           instrumentId: row.instrument_id,
           openedAt: row.opened_at,
@@ -190,7 +209,7 @@ async function main(): Promise<void> {
           : resolveUnderlyingPath({
               thesis: {
                 direction: row.idea_side,
-                entryReference: Number(row.underlying_entry_price),
+                entryReference: underlyingFillOrEntryPrice,
                 stop: Number(row.idea_stop),
                 target: Number(row.idea_target),
               },

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { MomentumScalpPatternStrategy, MomentumScalpPatternStrategyV2 } from "./momentum-scalp-pattern-strategy.js";
 import { MomentumScalpStrategy } from "./momentum-scalp-strategy.js";
+import { MomentumScalpGoldStrategy } from "./momentum-scalp-gold-strategy.js";
 import { TrendBreakoutStrategy } from "./trend-breakout-strategy.js";
+import { IctStructureStrategy } from "./ict-structure-strategy.js";
+import { HybridLiquidityConfluenceStrategy } from "./hybrid-liquidity-confluence-strategy.js";
 import {
   findRegisteredStrategy,
   registeredStrategies,
@@ -9,15 +12,36 @@ import {
   strategyExecutableSides,
   strategyKeys,
   strategySupportsTimeframe,
+  ictContextTimeframes,
+  ictContextConsumedAt,
 } from "./strategy-registry.js";
+
+import { TrendContinuationStrategy } from "./trend-continuation-strategy.js";
+import { EventReversalStrategy } from "./event-reversal-strategy.js";
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
-    expect(strategyKeys()).toEqual(["trend-breakout", "momentum-scalp", "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2"]);
+    expect(strategyKeys()).toEqual([
+      "trend-breakout",
+      "momentum-scalp",
+      "momentum-scalp-index",
+      "momentum-scalp-gold",
+      "momentum-scalp-pattern",
+      "momentum-scalp-pattern-v2",
+      "ict-structure-v1",
+      "hybrid-liquidity-confluence-v1",
+      "trend-continuation-v1",
+      "event-reversal-v1",
+    ]);
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
+    expect(requireRegisteredStrategy("momentum-scalp-gold").StrategyClass).toBe(MomentumScalpGoldStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
+    expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
+    expect(requireRegisteredStrategy("hybrid-liquidity-confluence-v1").StrategyClass).toBe(HybridLiquidityConfluenceStrategy);
+    expect(requireRegisteredStrategy("trend-continuation-v1").StrategyClass).toBe(TrendContinuationStrategy);
+    expect(requireRegisteredStrategy("event-reversal-v1").StrategyClass).toBe(EventReversalStrategy);
   });
 
   it("keeps the scalp and swing timeframe sets disjoint", () => {
@@ -41,17 +65,19 @@ describe("strategy registry", () => {
     expect(new StrategyClass()).not.toBe(new StrategyClass());
   });
 
-  it("disables the pattern confluence scalp entirely, on its full losing record", () => {
+  it("re-enables the pattern confluence scalp for a deliberate re-test, both sides", () => {
     /*
-     * Short-only from 2026-09-02, then both sides disabled 2026-09-03. The short cell that "nothing
-     * measured argued against" (+Rs 424 over 32 trades) turned: over the full live record the
-     * strategy is -Rs 10,209 (78 trades, all in AutoBot-Sniper), 23% of the account's total loss.
-     * Its sibling `momentum-scalp-index` was disabled the same day for the same structural cost
-     * reason, so keeping this near-identical strategy running would re-learn a known loss.
+     * Disabled entirely 2026-09-03 on a -Rs 10,209/78-trade record (23% of the account's total
+     * loss); re-enabled 2026-09-26 by explicit user decision, not by new evidence. The same-day
+     * `selectPriorityPattern` fix (alphabetical-vs-priority tie-break) only changes which pattern is
+     * credited in evidence/confidence -- the LONG/SHORT score gate never read which candidate was
+     * selected, so it could not have changed the entries/exits behind that -Rs 10,209 record. This
+     * re-enable carries no new evidence of its own; the next live record should be measured against
+     * that same baseline before trusting it.
      */
     const patternScalp = requireRegisteredStrategy("momentum-scalp-pattern");
 
-    expect(strategyExecutableSides(patternScalp)).toEqual([]);
+    expect(strategyExecutableSides(patternScalp)).toEqual(["LONG", "SHORT"]);
   });
 
   it("disables the v2 pattern scalp entirely, on asymmetric evidence", () => {
@@ -92,11 +118,15 @@ describe("strategy registry", () => {
     expect(indexScalp.terminalResearchAcknowledgement?.disposition).toMatch(/^DISABLED/);
   });
 
-  it("restricts exactly the two strategies with a measured losing long side, and no others", () => {
+  it("restricts exactly the three strategies gated off, and no others", () => {
     /*
      * Pinned as an exact set rather than a per-strategy check. The restriction is per strategy on
      * purpose -- a global side filter would silence that side everywhere -- so the risk worth
      * guarding is a restriction spreading to a strategy whose evidence never justified one.
+     *
+     * `hybrid-liquidity-confluence-v1` joined this set 2026-09-28, the same day it shipped -- not
+     * for a measured losing side like the other two, but gated pending the random-subsample
+     * validation recorded in docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md.
      */
     const restricted = registeredStrategies
       .filter((strategy) => strategy.executableSides !== undefined)
@@ -104,13 +134,42 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "momentum-scalp-index", "momentum-scalp-pattern", "momentum-scalp-pattern-v2",
+      "event-reversal-v1", "hybrid-liquidity-confluence-v1", "momentum-scalp-index",
+      "momentum-scalp-pattern-v2", "trend-continuation-v1",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
       expect(strategyExecutableSides(strategy), strategy.registration.strategyKey)
         .toEqual(["LONG", "SHORT"]);
     }
+  });
+
+  it("gates hybrid-liquidity-confluence-v1 off pending validation, not on a measured verdict", () => {
+    const hybrid = requireRegisteredStrategy("hybrid-liquidity-confluence-v1");
+
+    expect(strategyExecutableSides(hybrid)).toEqual([]);
+    // Deliberately no terminalResearchAcknowledgement: it has no research twin and no TERMINAL
+    // verdict, so attaching one would misrepresent the record (see the registry comment).
+    expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
+  });
+
+  it("gates trend-continuation-v1 and event-reversal-v1 off pending validation, not on a measured verdict", () => {
+    /*
+     * Both shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation. The
+     * same-day follow-up fix (commit cherry-picked as part of this gate) corrected 8 typecheck
+     * errors in both files, but that only makes the code compile and run -- it is not evidence the
+     * logic has edge. Same pattern as `hybrid-liquidity-confluence-v1`: gated pending validation,
+     * not on a measured losing verdict.
+     */
+    const trendContinuation = requireRegisteredStrategy("trend-continuation-v1");
+    const eventReversal = requireRegisteredStrategy("event-reversal-v1");
+
+    expect(strategyExecutableSides(trendContinuation)).toEqual([]);
+    expect(strategyExecutableSides(eventReversal)).toEqual([]);
+    // Deliberately no terminalResearchAcknowledgement for either: neither has a research twin or a
+    // TERMINAL verdict, so attaching one would misrepresent the record (see the registry comment).
+    expect(trendContinuation.terminalResearchAcknowledgement).toBeUndefined();
+    expect(eventReversal.terminalResearchAcknowledgement).toBeUndefined();
   });
 });
 
@@ -162,17 +221,47 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
       .map((strategy) => strategy.registration.strategyKey);
 
     expect(fifteenMinute).toContain("trend-breakout");
-    expect(fifteenMinute).toHaveLength(1);
+    expect(fifteenMinute).toContain("ict-structure-v1");
+    expect(fifteenMinute).toContain("trend-continuation-v1");
+    expect(fifteenMinute).toContain("event-reversal-v1");
+    expect(fifteenMinute).toHaveLength(4);
   });
 
-  it("owns every timeframe above the scalp band, and nothing evaluates them", () => {
-    // Recorded so the claim in the disposition stays checkable: 30m/60m/1d have exactly one
-    // registered strategy, and it is this terminal one.
-    for (const timeframe of ["30m", "60m", "1d"]) {
-      const owners = registeredStrategies
-        .filter((strategy) => strategySupportsTimeframe(strategy, timeframe))
-        .map((strategy) => strategy.registration.strategyKey);
-      expect(owners, timeframe).toEqual(["trend-breakout"]);
-    }
+  it("owns timeframes above the scalp band", () => {
+    const owners30m = registeredStrategies
+      .filter((strategy) => strategySupportsTimeframe(strategy, "30m"))
+      .map((strategy) => strategy.registration.strategyKey);
+    expect(owners30m).toEqual(["trend-breakout"]);
+  });
+});
+
+describe("ICT context consumption", () => {
+  it("reports exactly the timeframes of the strategies that declare they read it", () => {
+    // Derived, not listed. If it were listed it could drift from the consumer's own
+    // supportedTimeframes, which is how the repository ends up computing a snapshot nobody reads.
+    const declared = registeredStrategies
+      .filter((strategy) => strategy.readsIctContext === true)
+      .flatMap((strategy) => strategy.supportedTimeframes);
+    expect(ictContextTimeframes()).toEqual([...new Set<string>(declared)].sort());
+  });
+
+  it("excludes 3m, where nothing reads ICT", () => {
+    expect(ictContextConsumedAt("3m")).toBe(false);
+  });
+
+  it("includes the timeframes the ICT strategy actually supports", () => {
+    expect(ictContextConsumedAt("1m")).toBe(true);
+    expect(ictContextConsumedAt("5m")).toBe(true);
+    expect(ictContextConsumedAt("15m")).toBe(true);
+    expect(ictContextConsumedAt("1d")).toBe(true);
+  });
+
+  it("registers consumers reading ICT context", () => {
+    const consumers = registeredStrategies.filter((s) => s.readsIctContext === true);
+    expect(consumers).toHaveLength(3);
+    const keys = consumers.map((c) => c.registration.strategyKey);
+    expect(keys).toContain("ict-structure-v1");
+    expect(keys).toContain("trend-continuation-v1");
+    expect(keys).toContain("event-reversal-v1");
   });
 });

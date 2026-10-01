@@ -96,10 +96,18 @@ export function evaluateResearchRisk(input: {
      * those decisions (12.9%) carry a legitimate null: an absent instrument would have been invisible
      * among them, indistinguishable once stored.
      */
-  }, narrowToInstrument(
-    { asOf: input.snapshot.asOf, ...input.snapshot.state },
-    input.subject.instrumentId,
-  ), input.policy ?? defaultRiskPolicy);
+  }, {
+    // This research harness's snapshot format predates breadth evidence and has no equivalent
+    // "every instrument, complete by contract" map for it (see risk-snapshot.ts's own account of
+    // why the two RiskState shapes exist). `null` here means the same thing evaluateRisk already
+    // does for a live decision with no reading available -- BREADTH_UNAVAILABLE, non-blocking --
+    // not a claim that breadth was measured and found neutral.
+    ...narrowToInstrument(
+      { asOf: input.snapshot.asOf, ...input.snapshot.state },
+      input.subject.instrumentId,
+    ),
+    breadthEvidence: null,
+  }, input.policy ?? defaultRiskPolicy);
   const riskDecisionKey = logicalKey("risk-decision", [
     input.subject.riskSubjectKey, input.snapshot.id, researchRiskPolicyVersion,
   ]);

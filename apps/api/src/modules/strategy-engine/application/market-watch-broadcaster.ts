@@ -9,9 +9,16 @@ export interface MarketWatchTile {
  * Nullable prices are deliberate: `MarketQuote` allows them and the route this replaces forwarded
  * them to the client untouched. Filtering or coercing here would change the payload the UI already
  * handles, which is a separate decision from where the polling happens.
+ *
+ * `symbol` is the canonical routing symbol (`tile.symbol`), not the display text -- the UI needs
+ * it to select a chart/strategy correctly. `label` is what a human reads. These coincided for
+ * NIFTY50/BANKNIFTY (label happened to equal symbol) until GOLD's label ("GOLD") diverged from
+ * its canonical symbol ("XAU_USD"): selecting it with the label would ask `/charts/data` for a
+ * symbol that owns no candles.
  */
 export interface MarketWatchRow {
   readonly symbol: string;
+  readonly label: string;
   readonly price: number | null;
   readonly changePercent: number | null;
   readonly aiStance: string;
@@ -157,7 +164,8 @@ export class MarketWatchBroadcaster {
         const quote = quotes.get(tile.symbol);
         if (quote === undefined) return [];
         return [{
-          symbol: tile.label,
+          symbol: tile.symbol,
+          label: tile.label,
           price: quote.regularMarketPrice,
           changePercent: quote.regularMarketChangePercent,
           aiStance: "NEUT", // Kept for UI compatibility, could be dynamic later

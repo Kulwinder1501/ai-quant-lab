@@ -140,6 +140,12 @@ export class PostgresDepthFrameRepository {
     bidQty: number[];
     askPrice: number[];
     askQty: number[];
+    /**
+     * Which collector run wrote this row. Always present: a range query spanning several collector
+     * restarts (see the doc comment above) needs this to tell its caller which sessions it actually
+     * pooled, without a second round trip -- see `capture-session-window.ts`.
+     */
+    captureSessionId: string;
   }>> {
     const conditions = ["provider_symbol = $1"];
     const values: unknown[] = [input.providerSymbol.toUpperCase()];
@@ -167,9 +173,10 @@ export class PostgresDepthFrameRepository {
       bid_qty: string[];
       ask_price: string[];
       ask_qty: string[];
+      capture_session_id: string;
     }>(
       `SELECT sequence_no, received_at, is_snapshot, is_duplicate, is_regression, gap_before,
-              bid_price, bid_qty, ask_price, ask_qty
+              bid_price, bid_qty, ask_price, ask_qty, capture_session_id
        FROM depth_frames
        WHERE ${conditions.join(" AND ")}
        ORDER BY received_at ASC, sequence_no ASC`,
@@ -188,6 +195,7 @@ export class PostgresDepthFrameRepository {
       bidQty: row.bid_qty.map(Number),
       askPrice: row.ask_price.map(Number),
       askQty: row.ask_qty.map(Number),
+      captureSessionId: row.capture_session_id,
     }));
   }
 

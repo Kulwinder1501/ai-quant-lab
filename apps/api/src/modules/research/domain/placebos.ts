@@ -99,23 +99,14 @@ function istDay(at: Date): string {
   return new Date(at.getTime() + (5 * 60 + 30) * 60_000).toISOString().slice(0, 10);
 }
 
-/**
- * Permutes values only among observations sharing a time-of-day bucket, across different days.
- *
- * Returns values in the original observation order, so the result stays aligned with whatever return
- * series the caller is scoring against. Buckets holding observations from fewer than two distinct
- * days are left untouched: there is no other day to swap with, and inventing one would fabricate
- * data rather than shuffle it.
- */
-export function wrongDayMatchedTime(
+/** Groups observation indices by time-of-day bucket, skipping unparseable timestamps. */
+function bucketIndicesByTimeOfDay(
   observations: readonly TimestampedValue[],
-  seed: number,
-  bucketMinutes = 15,
-): number[] {
+  bucketMinutes: number,
+): Map<number, number[]> {
   if (!Number.isInteger(bucketMinutes) || bucketMinutes < 1) {
     throw new Error("bucketMinutes must be a positive integer.");
   }
-
   const byBucket = new Map<number, number[]>();
   for (let index = 0; index < observations.length; index += 1) {
     const observation = observations[index]!;
@@ -125,6 +116,88 @@ export function wrongDayMatchedTime(
     if (members) members.push(index);
     else byBucket.set(bucket, [index]);
   }
+  return byBucket;
+}
+
+/**
+ * How much of `wrongDayMatchedTime`'s bucketing actually has a day to swap with.
+ *
+ * The placebo leaves a bucket untouched when fewer than two distinct calendar days land in it —
+ * correct behaviour for a single bucket, but a documented silent no-op when it happens to *every*
+ * bucket in the window (a capture that only spans one real trading day, even if it technically
+ * crosses a UTC/IST date line with a handful of stray after-hours frames). When that happens the
+ * placebo's output is identical to the input, so its "IC" is really the real IC measured twice, and
+ * a caller comparing the two sees a fake, exact tie instead of an honest null.
+ *
+ * `swappableFraction` is the fraction of observations sitting in a bucket that *does* have at least
+ * two distinct days (and therefore at least one other member to draw from) — i.e. the fraction of
+ * the series this placebo can actually perturb. Below `minimumSwappableFraction` the placebo is
+ * DEGENERATE: not enough of the window was actually shuffled for its IC to mean anything, whether
+ * that IC came out identical to the real one or not.
+ */
+export interface MatchedTimeDiversity {
+  readonly totalObservations: number;
+  readonly swappableObservations: number;
+  readonly swappableFraction: number;
+  /** Distinct IST calendar days across the whole window, for diagnostics. */
+  readonly distinctDays: number;
+  readonly minimumSwappableFraction: number;
+  readonly isDegenerate: boolean;
+}
+
+/** Below this fraction of observations actually eligible to be shuffled, the placebo is a no-op. */
+export const DEFAULT_MINIMUM_SWAPPABLE_FRACTION = 0.2;
+
+export function matchedTimeDiversity(
+  observations: readonly TimestampedValue[],
+  bucketMinutes = 15,
+  minimumSwappableFraction: number = DEFAULT_MINIMUM_SWAPPABLE_FRACTION,
+): MatchedTimeDiversity {
+  const byBucket = bucketIndicesByTimeOfDay(observations, bucketMinutes);
+
+  let totalObservations = 0;
+  let swappableObservations = 0;
+  const allDays = new Set<string>();
+
+  for (const members of byBucket.values()) {
+    totalObservations += members.length;
+    const distinctDaysInBucket = new Set(members.map((index) => istDay(observations[index]!.at)));
+    for (const day of distinctDaysInBucket) allDays.add(day);
+    if (members.length >= 2 && distinctDaysInBucket.size >= 2) {
+      swappableObservations += members.length;
+    }
+  }
+
+  const swappableFraction = totalObservations === 0 ? 0 : swappableObservations / totalObservations;
+
+  return {
+    totalObservations,
+    swappableObservations,
+    swappableFraction,
+    distinctDays: allDays.size,
+    minimumSwappableFraction,
+    isDegenerate: totalObservations === 0 || swappableFraction < minimumSwappableFraction,
+  };
+}
+
+/**
+ * Permutes values only among observations sharing a time-of-day bucket, across different days.
+ *
+ * Returns values in the original observation order, so the result stays aligned with whatever return
+ * series the caller is scoring against. Buckets holding observations from fewer than two distinct
+ * days are left untouched: there is no other day to swap with, and inventing one would fabricate
+ * data rather than shuffle it.
+ *
+ * Callers that compare this placebo's IC against the real one must check `matchedTimeDiversity`
+ * first: when every bucket (or effectively every bucket) is single-day, this function is a
+ * documented no-op returning the input essentially unchanged, and its IC is not a placebo result.
+ */
+export function wrongDayMatchedTime(
+  observations: readonly TimestampedValue[],
+  seed: number,
+  bucketMinutes = 15,
+): number[] {
+  const byBucket = bucketIndicesByTimeOfDay(observations, bucketMinutes);
 
   const random = createSeededRandom(seed);
   const result = observations.map((observation) => observation.value);

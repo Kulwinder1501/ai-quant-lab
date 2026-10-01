@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { validateOptionsEntry } from "./options-entry-validator.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 
@@ -281,5 +281,67 @@ describe("validateOptionsEntry", () => {
 
     expect(asserted.isValid).toBe(false);
     expect(asserted.reasons.join(" ")).toMatch(/Macro Event Filter/);
+  });
+
+  describe("ORDERBOOK-01 directional gate kill switch", () => {
+    // gate_action recommends SHORT; IDEA is LONG, so evaluateOrderbookDirectionalGate returns BLOCK.
+    const BLOCKING_SIGNAL = {
+      is_level_proximate: true,
+      nearest_level_type: "SWING_HIGH",
+      nearest_level_price: 57_750,
+      distance_bps: 5,
+      raw_di: 0.4,
+      di_tilde: 0.4,
+      directional_bias: "BEARISH_SWEEP",
+      gate_action: "BUY_PUT_OR_SHORT",
+    };
+
+    const originalFlag = process.env.ORDERBOOK01_LIVE_GATE_ENABLED;
+    afterEach(() => {
+      if (originalFlag === undefined) {
+        delete process.env.ORDERBOOK01_LIVE_GATE_ENABLED;
+      } else {
+        process.env.ORDERBOOK01_LIVE_GATE_ENABLED = originalFlag;
+      }
+    });
+
+    // Regression test: this must fail on the pre-kill-switch code (isValid would be false) and
+    // pass once the flag defaults the blocking behaviour off. Shadow reasoning still surfaces
+    // via `reasons` -- only `isValid` stops flipping.
+    it("does not invalidate an entry on a BLOCK verdict when the flag is unset", () => {
+      delete process.env.ORDERBOOK01_LIVE_GATE_ENABLED;
+
+      const result = validateOptionsEntry({
+        proposedIdea: IDEA,
+        candleVolume: 12_000,
+        optionChain: chain(),
+        intendedStrike: 57_700,
+        intendedContractDelta: 0.51,
+        hasMacroEvent: false,
+        ivPercentile: 50,
+        confluenceSignal: BLOCKING_SIGNAL,
+      });
+
+      expect(result.isValid).toBe(true);
+      expect(result.reasons.join(" ")).toMatch(/ORDERBOOK-01 BLOCK/);
+    });
+
+    it("still invalidates an entry on a BLOCK verdict when the flag is explicitly true", () => {
+      process.env.ORDERBOOK01_LIVE_GATE_ENABLED = "true";
+
+      const result = validateOptionsEntry({
+        proposedIdea: IDEA,
+        candleVolume: 12_000,
+        optionChain: chain(),
+        intendedStrike: 57_700,
+        intendedContractDelta: 0.51,
+        hasMacroEvent: false,
+        ivPercentile: 50,
+        confluenceSignal: BLOCKING_SIGNAL,
+      });
+
+      expect(result.isValid).toBe(false);
+      expect(result.reasons.join(" ")).toMatch(/ORDERBOOK-01 BLOCK/);
+    });
   });
 });

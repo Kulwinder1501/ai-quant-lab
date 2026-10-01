@@ -11,6 +11,7 @@ import {
   type SessionCandle,
 } from "../../modules/research/directional-v2/domain/session-calendar.js";
 import { phase29ExcludedSpecialSessionMap } from "../../modules/research/directional-v2/domain/excluded-special-sessions.js";
+import { phase29DataQualitySessionExclusionMap } from "../../modules/research/directional-v2/domain/data-quality-exclusions.js";
 import { auditDirectionalCandles } from "../../modules/research/directional-v2/application/audit-directional-candles.js";
 import { generateDirectionalDataset } from "../../modules/research/directional-v2/application/generate-directional-dataset.js";
 import {
@@ -458,6 +459,7 @@ async function main(): Promise<void> {
         .filter((session) => session.sessionDate < todayIst);
       const audit = auditDirectionalCandles(symbol, candles, expectedSessions, {
         excludedSpecialSessions: phase29ExcludedSpecialSessionMap(),
+        excludedDataQualitySessions: phase29DataQualitySessionExclusionMap(symbol),
       });
       if (!audit.ready) {
         throw new Error(`${symbol} failed its D2 index candle audit: ${audit.issues.map((issue) => issue.message).join(" | ")}`);

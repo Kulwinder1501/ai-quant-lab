@@ -10,7 +10,7 @@ interface PaperAccountRow extends QueryResultRow {
   id: string;
   name: string;
   opening_balance: string;
-  currency: "INR";
+  currency: "INR" | "USD";
   is_active: boolean;
 }
 
@@ -34,16 +34,16 @@ function toPaperAccount(row: PaperAccountRow): PaperAccount {
   };
 }
 
-/** Persists local INR simulation accounts only; it has no broker or payment integration. */
+/** Persists local INR/USD simulation accounts only; it has no broker or payment integration. */
 export class PostgresPaperAccountRepository implements PaperAccountRepository {
   constructor(private readonly database: DatabaseQueryable) {}
 
   async create(input: CreatePaperAccountInput): Promise<PaperAccount> {
     const result = await this.database.query<PaperAccountRow>(`
       INSERT INTO paper_accounts (name, opening_balance, currency, is_active)
-      VALUES ($1, $2, 'INR', TRUE)
+      VALUES ($1, $2, $3, TRUE)
       RETURNING ${accountColumns}
-    `, [input.name, input.openingBalance]);
+    `, [input.name, input.openingBalance, input.currency ?? "INR"]);
     const account = result.rows[0];
     if (!account) {
       throw new Error("Paper account creation did not return a row.");

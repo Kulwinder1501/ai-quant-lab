@@ -1,4 +1,4 @@
-# Exit Geometry Falsification Program V1
+﻿# Exit Geometry Falsification Program V1
 
 How scalp stop-loss and target geometry is being decided, and why the answer is not yet "optimise the target".
 
@@ -298,6 +298,72 @@ Nothing further is buildable until sessions accumulate. The dense cells (`BANKNI
 
 Accumulation is unattended — see [The scheduled run](#the-scheduled-run). At one session per trading day the dense cells reach `PROVISIONAL` (5 sessions) inside a week and `DECISION_ELIGIBLE` (20 sessions) in roughly a month, assuming no collector outages.
 
+## Amendment 1 (2026-09-22) — every trailing result on record was a break-even result
+
+**The defect.** `paper_trades_check` required a LONG's `stop_loss` to sit strictly below `entry_price`. Both stop implementations — `paper-trading/domain/protective-stop.ts` live, `backtesting/domain/underlying-protective-stop.ts` in the harness — therefore clamped a trailed stop to one tick below entry. A trail that cannot cross entry is break-even with extra arithmetic.
+
+**The proof, not the inference.** Replaying the stored option premium ticks of all 439 closed option trades, `trail 0.5R/0.25R` (clamped) and `break-even @0.5R` return the identical book: **+9,632.96** against the recorded baseline, both, to the rupee. The clamped-trail row and the break-even row in that sweep are the same numbers in every column, per instrument and per era.
+
+This retro-scopes the NO_EDGE verdict recorded in `protective-stop.ts` (BANKNIFTY −63.08 → −64.03/trade, t = −2.63) and the note that the proposed trail "never once activated": both are findings about break-even. **A profit-locking trail had never been measured here.** Migration 117 moves the opening invariant onto `initial_stop_loss` and frees `stop_loss`; `ProtectiveStopPolicy.trail.lockProfit` (default false, so every prior arm is byte-identical) selects the behaviour, and `--protective-stop trail:A:B:lock` drives it.
+
+**First measurement of the new arm — `NOT CLEARED`, shipped default-off.**
+
+Paired same-trade replay, 439 closed option trades / 21 sessions / 2026-08-17 → 2026-09-22, entries held fixed, live fee model on both legs, session-clustered SE. The baseline reproduces the booked P&L exactly (−57,349.87 vs −57,349.87).
+
+| Arm | ALL /trade | t | BANKNIFTY /trade | t | NIFTY50 /trade | t |
+|---|---|---|---|---|---|---|
+| break-even @0.5R | +21.94 | 1.71 | +24.44 | 1.49 | +19.12 | 1.17 |
+| trail 0.5R/0.25R clamped | +21.94 | 1.71 | +24.44 | 1.49 | +19.12 | 1.17 |
+| trail 0.5R/0.25R **lock** | +43.29 | 1.79 | +83.95 | 3.05 | −2.69 | −0.07 |
+| trail 0.5R/0.5R **lock** | +41.39 | 2.33 | +66.59 | 3.14 | +12.89 | 0.47 |
+| trail 1.0R/0.5R **lock** | +7.14 | 0.50 | +14.68 | 1.11 | −1.40 | −0.05 |
+
+Gate readout for the best arm, `0.5R/0.5R lock`:
+
+- **Replication** — marginal pass. Same sign on both instruments, but NIFTY50 is +12.89 at t = 0.47; the effect is BANKNIFTY's.
+- **Noise floor** — fails correction. Nine configurations were examined, so the Šidák threshold at 20 df is |t| ≈ 3.10. ALL reaches 2.33. BANKNIFTY alone reaches 3.14 and would clear if BANKNIFTY alone were the pre-registered cell, which it was not.
+- **Era holdout** — sign-consistent (+25.66/trade before 2026-09-04, +149.01 after), but the second era is 56 trades at t = 1.24.
+- **Concentration** — the one that governs. The policy moves 185 of 439 trades, helping 109 and hurting 76, and **the top five winners are 51.5% of the entire effect**. Half the result is five trades.
+
+A book whose gain is one coin-flip in direction and five fat tails in magnitude is the shape a fitted artifact takes, not a durable edge. Shipped in-tree, default-off, measurable — the same disposition as every other arm that did not clear.
+
+**Scale-out (TP1) — `NO_EDGE`, negative at every level tested.** Selling half at a fixed R and letting the rest run: +0.25R → −8.62/trade, +0.5R → −7.54, +0.75R → −8.25, +1.0R → −14.54. Negative on NIFTY50 throughout (−22 to −29/trade) and roughly flat on BANKNIFTY. The mechanism is visible in the MFE distribution — only 56.5% of trades ever reach +0.5R and 33.7% reach +1.0R, while the median configured target is 1.43R, so a TP1 that fires often enough to matter fires mostly on trades that were going to reach target anyway, caps them, and pays a second ₹23.60 order fee for it. There is no level at which a partial exit is near-certain; +0.25R, the most-reached rung, is hit by 72.7%.
+
+Note also that scale-out is **not implemented on any live path**: `buildMultiTargetPlan` is imported by `evaluate-open-paper-trades.ts` and never called, `PartialExitPaperTrade` is constructed nowhere, and all 439 rows in `paper_trade_partial_exits` are full-size single slices written by the ordinary close. Measuring it in the backtester would require the engine to decrement `remainingQuantity`, which it never does. Given the result above, that work is not currently justified.
+
+## Amendment 2 (2026-09-29) — first decision-grade G1 reading: `NO_PATH_INFORMATION`, G3 stays closed
+
+**What was run.** `npm run research:studies:path -- --study PATH_STUDY_V2`, the exact command the Saturday scheduler executes, followed by the same study with an explicit `--from 2026-08-25` (the freeze date) to see the full accumulation rather than only the runner's default 30-calendar-day lookback window. Both runs verified the registration hash unchanged, declared trials in one transaction, and recorded results (`RECORDED`/`IDEMPOTENT`, 0 `DETERMINISM_VIOLATION`s, 0 unfinished). `GEOMETRY_MATRIX_V1` was **not** run — see below.
+
+**The default rolling window undercounts by one session right now.** The runner's `--from` defaults to `through - 30 days`. Run today with defaults, the best cell (`pattern-v4-research-v2`, `BANKNIFTY`/`NIFTY50` x `1m` x `LONG`/`SHORT`) sits at **19 of 20 sessions, `PROVISIONAL`** -- the 30-day window's start (2026-08-30) clips one session that the freeze-date query still counts. This is a real property of the deployed command, not a bug: because the query window slides forward every week, `session_count` is "sessions in the trailing month," not "sessions since the study began," so a cell can cross 20 and later drop back below it if a gap widens the window's effective session gaps. Both readings are reported here rather than picking the more convenient one.
+
+**With the fuller window, four cells cross the threshold for the first time.** `--from 2026-08-25`, `session_range 2026-08-27 -> 2026-09-29`, cohort `16e8edea3670...` (`pattern-v4-research-v2`, the only strategy-definition lineage that has run unchanged long enough to matter -- see below):
+
+| instrument | timeframe | direction | sessions | gateStanding |
+| --- | --- | --- | --- | --- |
+| BANKNIFTY | 1m | LONG | 20 | `DECISION_ELIGIBLE` |
+| BANKNIFTY | 1m | SHORT | 20 | `DECISION_ELIGIBLE` |
+| NIFTY50 | 1m | LONG | 20 | `DECISION_ELIGIBLE` |
+| NIFTY50 | 1m | SHORT | 20 | `DECISION_ELIGIBLE` |
+
+No other cell reaches 20 under either window. The closest: `pattern-v4-research` (the superseded v4 lineage, cohort `1f9befea...`) tops out at 18-19 and stopped accumulating on 2026-09-23; `index-v3-research`'s 5m cells (cohort `f1adfdef...`) sit at 17-19 and are still live; `pattern-v4-research-v2`'s own 5m cells sit at 15-18.
+
+**G1's own verdict on all four eligible cells: `NO_PATH_INFORMATION`.** Run under the registered `SIMULTANEOUS_DAY_MAXT_V1` band (`PATH_STUDY_V2`'s pre-specified inference, not the superseded pointwise one), `commonSupportDays: 20` on every cell, no horizon excluded:
+
+| cell | criticalValue | closest-to-zero horizon | dayMeanEdge | simultaneousLower |
+| --- | --- | --- | --- | --- |
+| BANKNIFTY 1m LONG | 3.341 | h=1m | -0.092 | -0.723 |
+| BANKNIFTY 1m SHORT | 3.493 | h=3m | -0.038 | -2.218 |
+| NIFTY50 1m LONG | 2.631 | h=3m | +0.352 | -0.440 |
+| NIFTY50 1m SHORT | 2.583 | h=5m | +0.597 | -0.567 |
+
+Two of the four cells (`NIFTY50` both directions) have positive point estimates at short horizons -- the band absorbs them because the per-day standard error is wide relative to a ~20-day sample, exactly the degenerate-interval mechanism this program measured and built around. No horizon on any of the four cells clears zero. `NIFTY50 SHORT @ h=5m` is the closest any cell has come (simultaneousLower -0.567 against a dayMeanEdge of +0.597), still short of a claim.
+
+**G3 therefore stays closed, and `GEOMETRY_MATRIX_V1` was not run.** The stage order is explicit -- `G3 | Which stop/target region monetises it? | closed behind G1` -- and it is closed per cell, not for the study as a whole. For the first time the closure is not "insufficient data": these four cells hit the predeclared 20-session bar and the predeclared inference still returns no control-adjusted directional information at any of the ten registered horizons. Running `GEOMETRY_MATRIX_V1` (the actual stop/target grid that would compare 1.5R against other multiples) against a cell G1 has not cleared would be exactly the substitution the registry exists to prevent -- a different study's numbers filed under this one's gate. **Whether 1.5R is the right ratio remains untested, and per this program's own rule it should stay untested until some cell actually shows G1 information to monetise.**
+
+**Why other cells never reach continuity: strategy-definition churn, not a collector outage.** The cohort key is a hash of the contributing `strategy_definition_hash` set (`cohortKeyOf`, `estimators.ts`), so a cell's session count resets whenever its strategy's definition changes. `research_scalp.strategy_definitions` shows why `pattern-v4-research-v2` (created 2026-08-27) is the only lineage dense enough to qualify: `pattern-v4-research` (v4) was superseded by `pattern-v5-research` on 2026-09-23, exactly when its cohort's `session_range_end` stops advancing. `momentum-v5-research`'s own cohort stalled at 7-8 sessions on 2026-09-04 and was followed by six further version bumps (v6 09-04, v7/v8 09-07, v9/v10/v11 09-09) -- none has run long enough alone to reach even `PROVISIONAL`'s upper end. Momentum is one of the three strategies sharing this program's target geometry (see the opening paragraph), and under the current pace of strategy-definition changes its own cell may never reach `DECISION_ELIGIBLE` on a single-cohort basis. Worth a deliberate look independent of this measurement pass -- not fixed here, since doing so would mean changing a live strategy-versioning practice rather than running the frozen protocol.
+
+**No live behaviour changed.** This pass only ran the registered `PATH_STUDY_V2` runner (default window, then `--from 2026-08-25`) and let it write its normal append-only trial/result rows. `1.5R` is unchanged everywhere it is configured.
 ## Commands
 
 ```powershell

@@ -18,6 +18,7 @@ interface TradeHistoryRow extends QueryResultRow {
   instrument_name: string;
   timeframe: string | null;
   trade_idea_id: string | null;
+  strategy_name: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: string | number;
@@ -79,6 +80,7 @@ function toRecord(row: TradeHistoryRow): PaperTradeHistoryRecord {
     instrumentName: row.instrument_name,
     timeframe: row.timeframe,
     tradeIdeaId: row.trade_idea_id,
+    strategyName: row.strategy_name,
     side: row.side,
     status: row.status,
     quantity,
@@ -159,7 +161,7 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
     } else if (input.outcome === "BREAK_EVEN") {
       conditions.push("pt.realized_pnl = 0");
     }
-    parameters.push(input.limit);
+        parameters.push(input.limit);
 
     const result = await this.database.query<TradeHistoryRow>(`
       SELECT
@@ -171,6 +173,7 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
         i.display_name AS instrument_name,
         COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe,
         pt.trade_idea_id,
+        s.name AS strategy_name,
         pt.side,
         pt.status,
         pt.quantity,
@@ -185,9 +188,6 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
         pt.fees,
         pt.slippage,
         pt.notes,
-        -- The contract, not just the instrument. Every option position is booked side=LONG
-        -- because the bot only ever buys, so the ledger's side column cannot separate a call
-        -- from a put and a reader cannot tell which trade a row describes.
         pt.option_type,
         pt.option_strike,
         pt.underlying_symbol
@@ -196,6 +196,8 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
       INNER JOIN instruments i ON i.id = pt.instrument_id
       LEFT JOIN trade_ideas ti ON ti.id = pt.trade_idea_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
+      LEFT JOIN strategy_versions sv ON sv.id = ti.strategy_version_id
+      LEFT JOIN strategies s ON s.id = sv.strategy_id
       ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
       ORDER BY pt.opened_at DESC, pt.id DESC
       LIMIT $${parameters.length}

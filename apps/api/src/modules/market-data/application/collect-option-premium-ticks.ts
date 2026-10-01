@@ -65,8 +65,20 @@ export class CollectOptionPremiumTicks {
         continue;
       }
 
+      /*
+       * The chain snapshot's own spot is up to 15 minutes stale (it comes from the 15m full-chain
+       * job, not this once-a-minute poller), so at the open it can pick the wrong ATM band for
+       * several minutes while the underlying is still moving -- see `selectAtmPremiumContracts`'s
+       * `spotOverride` doc. Fetch the underlying's own live quote first, before knowing which
+       * option contracts to ask for, and use *that* to choose ATM instead of the snapshot's spot.
+       */
+      const underlyingProviderSymbol = resolveFyersSymbol(symbol);
+      const liveUnderlyingQuotes = await this.fetchRichQuotes([underlyingProviderSymbol]);
+      const liveUnderlying = liveUnderlyingQuotes.get(underlyingProviderSymbol.toUpperCase())?.lastPrice ?? null;
+
       const atmContracts = selectAtmPremiumContracts(snapshot, {
         strikeBand: input.strikeBand ?? 1,
+        spotOverride: liveUnderlying,
       });
       const requiredContracts = await this.additionalContracts?.listForUnderlying(symbol) ?? [];
       const contracts = [...new Map(
@@ -84,12 +96,7 @@ export class CollectOptionPremiumTicks {
         continue;
       }
 
-      const underlyingProviderSymbol = resolveFyersSymbol(symbol);
-      const richQuotes = await this.fetchRichQuotes([
-        ...contracts.map((c) => c.providerSymbol),
-        underlyingProviderSymbol,
-      ]);
-      const liveUnderlying = richQuotes.get(underlyingProviderSymbol.toUpperCase())?.lastPrice ?? null;
+      const richQuotes = await this.fetchRichQuotes(contracts.map((c) => c.providerSymbol));
       const observedAt = new Date();
       const ticks = contracts.flatMap((contract) => {
         const quote = richQuotes.get(contract.providerSymbol.toUpperCase());

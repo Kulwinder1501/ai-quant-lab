@@ -83,6 +83,17 @@ export function istSessionDate(instant: Date): string {
   return new Date(instant.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+/**
+ * The IST minute-of-day of an instant: the inverse of `istInstant`'s minute argument.
+ *
+ * 09:15 is 555 and 15:30 is 930, so a regular NSE session spans [555, 930).
+ */
+export function istMinuteOfDay(instant: Date): number {
+  if (Number.isNaN(instant.getTime())) throw new Error("An instant must be a valid Date.");
+  const shifted = new Date(instant.getTime() + IST_OFFSET_MS);
+  return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+}
+
 /** The UTC instant of an IST minute-of-day on a given IST date. */
 export function istInstant(sessionDate: string, istMinute: number): Date {
   if (!DATE_PATTERN.test(sessionDate)) throw new Error(`A session date must be YYYY-MM-DD; got "${sessionDate}".`);

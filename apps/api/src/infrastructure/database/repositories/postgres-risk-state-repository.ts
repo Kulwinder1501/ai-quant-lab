@@ -1,10 +1,19 @@
 import type { DatabaseQueryable } from "../database.js";
-import type { RiskState, VolatilityRegime, VolatilityRegimeEvidence } from "../../../modules/risk-management/domain/risk.js";
+import type {
+  BreadthEvidence,
+  RiskState,
+  VolatilityRegime,
+  VolatilityRegimeEvidence,
+} from "../../../modules/risk-management/domain/risk.js";
 
 /** The label scheme whose predictions this reads. Non-directional by construction. */
 export const VOLATILITY_LABEL_SCHEME = "volatility-expansion-v1";
 
 const VOLATILITY_REGIMES: readonly string[] = ["CONTRACTION", "STABLE", "EXPANSION"];
+
+/** Breadth is NIFTYNXT50 (the market outside the top 50) measured against NIFTY50 itself. */
+const BREADTH_SYMBOL = "NIFTYNXT50";
+const BREADTH_INDEX_SYMBOL = "NIFTY50";
 
 export class PostgresRiskStateRepository {
   constructor(private readonly client: DatabaseQueryable) {}
@@ -53,6 +62,56 @@ export class PostgresRiskStateRepository {
       prediction: row.prediction as VolatilityRegime,
       confidence: Number(row.confidence),
       evidenceCutoffAt: row.evidence_cutoff_at,
+    };
+  }
+
+  /**
+   * NIFTYNXT50's daily return minus NIFTY50's, for the most recently completed session
+   * strictly before `asOf`. See `BreadthEvidence` in risk.ts for what this measures and why.
+   *
+   * Each symbol's own two most recent daily closes before `asOf` are read independently and
+   * matched by calendar date rather than joined in SQL, because the two series are not
+   * guaranteed to update in the same transaction -- a same-date match is the point-in-time
+   * guarantee this needs, not a row-count coincidence.
+   */
+  async findBreadthEvidence(asOf: Date): Promise<BreadthEvidence | null> {
+    const closesFor = async (symbol: string): Promise<Array<{ date: string; close: number }>> => {
+      const result = await this.client.query<{ close_time: Date; close: string }>(`
+        SELECT close_time, close FROM candles
+        WHERE instrument_id = (SELECT id FROM instruments WHERE symbol = $1)
+          AND timeframe = '1d' AND close_time < $2
+        ORDER BY close_time DESC
+        LIMIT 3
+      `, [symbol, asOf]);
+      return result.rows.map((row) => ({
+        date: row.close_time.toISOString().slice(0, 10),
+        close: Number(row.close),
+      }));
+    };
+
+    const [nxt50Closes, niftyCloses] = await Promise.all([
+      closesFor(BREADTH_SYMBOL),
+      closesFor(BREADTH_INDEX_SYMBOL),
+    ]);
+
+    const niftyByDate = new Map(niftyCloses.map((row) => [row.date, row.close]));
+    const nxt50Dates = nxt50Closes.map((row) => row.date).filter((date) => niftyByDate.has(date));
+    if (nxt50Dates.length < 2) return null;
+
+    const [currentDate, previousDate] = nxt50Dates;
+    const nxt50ByDate = new Map(nxt50Closes.map((row) => [row.date, row.close]));
+    const nxt50Current = nxt50ByDate.get(currentDate)!;
+    const nxt50Previous = nxt50ByDate.get(previousDate)!;
+    const niftyCurrent = niftyByDate.get(currentDate)!;
+    const niftyPrevious = niftyByDate.get(previousDate)!;
+    if (nxt50Previous === 0 || niftyPrevious === 0) return null;
+
+    const nxt50Return = (nxt50Current - nxt50Previous) / nxt50Previous;
+    const niftyReturn = (niftyCurrent - niftyPrevious) / niftyPrevious;
+
+    return {
+      relativeReturn: nxt50Return - niftyReturn,
+      evidenceCutoffAt: new Date(`${currentDate}T00:00:00.000Z`),
     };
   }
 
@@ -113,6 +172,7 @@ export class PostgresRiskStateRepository {
         asOf: input.asOf,
         maxAgeMinutes: input.maxRegimeAgeMinutes,
       }),
+      breadthEvidence: await this.findBreadthEvidence(input.asOf),
     };
   }
 }

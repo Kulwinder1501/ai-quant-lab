@@ -5,7 +5,7 @@ import {
   PatternIntelligenceResearchAdapter,
   patternIntelligenceResearchDefinition,
 } from "./pattern-intelligence-research-strategy.js";
-import { researchScalpStrategies } from "./research-strategies.js";
+import { createResearchScalpStrategies } from "./research-strategies.js";
 
 const closeTime = new Date("2026-08-25T06:01:00.000Z");
 
@@ -37,11 +37,15 @@ function observation(overrides: Partial<PatternObservationSummary> = {}): Patter
 
 describe("Pattern V4 Research generation 2", () => {
   it("runs as a sibling of generation 1, never replacing it", () => {
-    const keys = researchScalpStrategies.map((adapter) => adapter.definition.strategyKey);
-    expect(keys).toContain("pattern-v4-research");
+    // Generation 1 now runs as pattern-v5-research: momentum-scalp-pattern-strategy.ts's
+    // trigger-selection fix (2026-09-22) forced a new cohort under a new key, since the TERMINAL
+    // pattern-v4-research entry's verdict was measured against the pre-fix evidence. See the note on
+    // patternDefinition in research-strategies.ts.
+    const keys = createResearchScalpStrategies().map((adapter) => adapter.definition.strategyKey);
+    expect(keys).toContain("pattern-v5-research");
     expect(keys).toContain("pattern-v4-research-v2");
     // Distinct definition hashes, so the two cohorts can never be pooled by accident.
-    const generation1 = researchScalpStrategies.find((a) => a.definition.strategyKey === "pattern-v4-research")!;
+    const generation1 = createResearchScalpStrategies().find((a) => a.definition.strategyKey === "pattern-v5-research")!;
     expect(generation1.definition.strategyDefinitionHash)
       .not.toBe(patternIntelligenceResearchDefinition.strategyDefinitionHash);
   });

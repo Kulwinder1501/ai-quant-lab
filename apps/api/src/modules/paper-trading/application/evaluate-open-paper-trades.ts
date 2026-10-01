@@ -1,4 +1,5 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
+import { advanceProtectiveStop, momentumScalp1mStopPolicy, type ProtectiveStopPolicy } from "../domain/protective-stop.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
 import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
 import {
@@ -13,8 +14,54 @@ import {
   priceOptionMark,
   priceOptionMarksAtOhlc,
 } from "../domain/option-mark-to-market.js";
+import { evaluateO1TradeExit } from "../domain/o1-exit-state-machine.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
+import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
+
+/**
+ * How long a scalp may go without progress before it is cut, and how much progress counts.
+ *
+ * Keyed by timeframe rather than hardcoded to one. A timeframe absent from this table has no stall
+ * at all, which is how a new timeframe stays opted out until someone measures it rather than
+ * inheriting a cell fitted on a different bar size.
+ *
+ * `5m` -- measured, and the direction is well supported. See the block that uses this for the
+ * sweep, the bootstrap interval, and why the cutoff is a band rather than an optimum.
+ *
+ * `1m` was added here 2026-09-08 "by request and against its measurement" (the sweep of 2026-09-07
+ * found the rule negative in 41 of 45 cells on the cohort it actually governs, t=-0.62 at the exact
+ * cell configured, i.e. no evidence it helps). Reverted 2026-09-15 back to the pre-09-08 state --
+ * no 1m entry, no stall on 1m -- since the live cell this rule now actually governs is 1m
+ * (`momentum-scalp` on AutoBot-Scalp1m; 5m was independently retired to `executableSides: []` on
+ * 2026-09-03, three days *before* this table's 5m cutoff was even lowered to 10 minutes -- see
+ * `stall-cutoff-20min-is-too-slow` / `scalp-gate-is-only-executable-cell` in project memory), and
+ * running an against-the-measurement rule on the one cell that actually trades was the part worth
+ * undoing. The 5m entry stays: it is the one this table's own evidence supports, even though 5m is
+ * not live right now -- reverting it too would erase a real, if currently unexercised, finding.
+ */
+interface MomentumStallPolicy {
+  readonly cutoffMinutes: number;
+  readonly minimumProgressR: number;
+}
+
+const MOMENTUM_STALL_POLICIES: Readonly<Record<string, MomentumStallPolicy | undefined>> = Object.freeze({
+  "5m": { cutoffMinutes: 10, minimumProgressR: 0.5 },
+});
+
+/**
+ * The only strategies this rule has ever been measured against. Keying the policy by timeframe
+ * alone meant any other strategy trading the same timeframe silently inherited it the moment it
+ * went live -- which happened for real: `momentum-scalp-pattern` was re-enabled on AutoBot-Sniper
+ * on 2026-09-26 and immediately started inheriting this exact policy on its own 5m trades. A
+ * same-day backtest comparison (`momentum-stall-exit.ts`, `run-backtest.ts --momentum-stall`) found
+ * the rule roughly DOUBLES momentum-scalp-pattern's net loss on BANKNIFTY 5m (-Rs 15,227 ->
+ * -Rs 27,984 over 236/446 trades) by driving far higher trade turnover at an unchanged per-trade
+ * expectancy -- the opposite of this rule's measured effect on the strategy it was built for.
+ * `momentum-scalp-pattern-v2` shares the same architecture and is excluded for the same reason,
+ * even though it is not currently live.
+ */
+const MOMENTUM_STALL_ELIGIBLE_STRATEGIES = new Set(["momentum-scalp", "momentum-scalp-index"]);
 
 export interface EvaluateOpenPaperTradesInput {
   accountId: string;
@@ -152,6 +199,11 @@ export class EvaluateOpenPaperTrades {
     private readonly candleRepository: CandleRepository,
     private readonly impliedVolatilitySource?: ImpliedVolatilitySource,
     private readonly densePremiums?: DenseOptionPremiumReader,
+    // Defaults to the real shipped policy so no caller has to know this exists. Injectable only so
+    // a test can exercise the peak-sampling mechanics below with break-even active, independent of
+    // whether the shipped policy currently has it enabled -- see `protective-stop.ts` for why it's
+    // off by default as of 2026-09-21.
+    private readonly momentumScalpStopPolicy: ProtectiveStopPolicy = momentumScalp1mStopPolicy,
   ) {}
 
   async execute(input: EvaluateOpenPaperTradesInput): Promise<EvaluateOpenPaperTradesResult> {
@@ -431,7 +483,8 @@ export class EvaluateOpenPaperTrades {
 
     // Force-close at/after expiry using intrinsic settlement mark.
     if (asOf.getTime() >= expiry.getTime()) {
-      const spot = resolveLiveSpot(trade, livePrices)
+      const liveSpotAtExpiry = resolveLiveSpot(trade, livePrices);
+      const spot = liveSpotAtExpiry
         ?? await this.latestCompletedClose(trade, asOf);
       if (spot === undefined) {
         return null;
@@ -443,6 +496,12 @@ export class EvaluateOpenPaperTrades {
         exitReason: "EXPIRED",
         closedAt: asOf.getTime() > expiry.getTime() ? asOf : expiry,
         exercisedIntrinsic: mark.greeks.intrinsicValue,
+        // Only when `spot` is a genuinely observed live quote (`resolveLiveSpot`), never the
+        // candle-close fallback above -- that is a reconstruction, not an observation at the
+        // exit instant, so it must stay null. Same convention as OPTION_LIVE_MARK_EVALUATOR:
+        // an observed underlying level is recorded regardless of how the premium beside it
+        // (here, the intrinsic settlement mark) was derived.
+        underlyingExitPrice: liveSpotAtExpiry ?? null,
         details: {
           source: "OPTION_EXPIRY_SETTLEMENT",
           spot,
@@ -483,6 +542,226 @@ export class EvaluateOpenPaperTrades {
       trade.openedAt,
       asOf,
     ) ?? [];
+
+    if (trade.exitEngineVersion === "O1") {
+      if (
+        !trade.underlyingDirection ||
+        trade.entryUnderlying == null ||
+        trade.invalidationLevelAtEntry == null ||
+        trade.initialRiskDistance == null ||
+        trade.initialRiskDistance <= 0
+      ) {
+        throw new Error(`O1 trade ${trade.id} has incomplete entry snapshot fields.`);
+      }
+
+      // Step 1: Tick series scan using O1 state machine
+      for (const sample of observedSamples) {
+        const bid = sample.bid;
+        if (bid === null || !Number.isFinite(bid) || bid <= 0) continue;
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: sample.observedAt,
+          currentOptionPrice: bid,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: sample.underlyingValue ?? null,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: bid,
+            exitReason: o1Result.exitReason,
+            closedAt: sample.observedAt,
+            underlyingExitPrice: sample.underlyingValue ?? null,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_TICK_SERIES",
+              quoteObservedAt: sample.observedAt.toISOString(),
+              bid,
+              scannedFrom: trade.openedAt.toISOString(),
+              scannedTo: asOf.toISOString(),
+              samplesScanned: observedSamples.length,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+              underlyingValue: sample.underlyingValue ?? null,
+            },
+          });
+        }
+      }
+
+      const denseQuote = await this.densePremiums?.latestForContract(
+        contractKey,
+        2 * 60_000,
+        asOf,
+      ) ?? null;
+      const suppliedLiveSpot = resolveLiveSpot(trade, livePrices);
+      const denseSpot = denseQuote?.underlyingValue != null
+        && Number.isFinite(denseQuote.underlyingValue) && denseQuote.underlyingValue > 0
+        ? denseQuote.underlyingValue
+        : undefined;
+      const liveSpot = suppliedLiveSpot ?? denseSpot;
+
+      const quoteIsAfterEntry = denseQuote !== null
+        && denseQuote.observedAt.getTime() > trade.openedAt.getTime();
+      const freshBid = quoteIsAfterEntry
+        && denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0
+        ? denseQuote.bid
+        : null;
+
+      // Step 2: Fresh bid evaluation at asOf
+      if (freshBid !== null) {
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: asOf,
+          currentOptionPrice: freshBid,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: liveSpot ?? null,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: freshBid,
+            exitReason: o1Result.exitReason,
+            closedAt: asOf,
+            underlyingExitPrice: denseSpot ?? null,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_FRESH_BID",
+              quoteObservedAt: denseQuote!.observedAt.toISOString(),
+              bid: freshBid,
+              spot: liveSpot,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+
+        if (shouldFlattenAtSessionClose(trade.timeframe, asOf)) {
+          return closeOption({
+            exitPrice: freshBid,
+            exitReason: "SESSION_CLOSE",
+            closedAt: asOf,
+            underlyingExitPrice: denseSpot ?? null,
+            details: {
+              source: "SESSION_CLOSE_FLATTEN",
+              cutoffIst: "15:15",
+              timeframe: trade.timeframe,
+              freshBid,
+              quoteObservedAt: denseQuote!.observedAt.toISOString(),
+              eventType: "MANUALLY_CLOSED",
+            },
+          });
+        }
+
+        return null;
+      }
+
+      if (this.densePremiums) {
+        return null;
+      }
+
+      const volatility = await this.resolveVolatility(trade, asOf);
+      if (volatility === null) {
+        return null;
+      }
+
+      if (liveSpot !== undefined) {
+        const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: asOf,
+          currentOptionPrice: mark.premium,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: liveSpot,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: mark.premium,
+            exitReason: o1Result.exitReason,
+            closedAt: asOf,
+            underlyingExitPrice: liveSpot,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_LIVE_MARK",
+              spot: liveSpot,
+              volatility,
+              markPremium: mark.premium,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+      }
+
+      if (!trade.timeframe) {
+        return null;
+      }
+
+      const candles = await this.candleRepository.listCompleted(trade.instrumentId, trade.timeframe);
+      for (const persisted of candles) {
+        const candle = toCompletedPriceCandle(persisted);
+        if (candle.openTime < trade.openedAt || candle.closeTime > asOf) {
+          continue;
+        }
+        if (candle.closeTime.getTime() > expiry.getTime()) {
+          continue;
+        }
+        input.onEligibleCandle();
+        const barIv = (await this.resolveVolatility(trade, candle.closeTime)) ?? volatility;
+        const marks = priceOptionMarksAtOhlc({ trade, candle, volatility: barIv });
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: candle.closeTime,
+          currentOptionPrice: marks.close,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: candle.close,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: marks.close,
+            exitReason: o1Result.exitReason,
+            closedAt: candle.closeTime,
+            underlyingExitPrice: candle.close,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_COMPLETED_CANDLE",
+              candleId: candle.id,
+              candleOpenTime: candle.openTime.toISOString(),
+              candleCloseTime: candle.closeTime.toISOString(),
+              underlyingOhlc: { open: candle.open, high: candle.high, low: candle.low, close: candle.close },
+              premiumMarks: marks,
+              volatility: barIv,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+      }
+
+      return null;
+    }
+
     const observedExit = decideOptionBuyerObservedExit(trade, observedSamples, {
       stopLossEffectiveAt: trade.stopLossEffectiveAt,
     });
@@ -534,6 +813,52 @@ export class EvaluateOpenPaperTrades {
       ? denseQuote.bid
       : null;
     if (freshBid !== null) {
+      if (trade.strategyKey === "momentum-scalp" && trade.timeframe === "1m") {
+        /*
+         * Break-even, and the trail behind the same policy object.
+         *
+         * The inlined version measured progress from `trade.stopLoss`, which is the value it then
+         * moved -- so on the next sweep the trade's own risk had changed and every derived quantity
+         * shifted with it. It also carried a SHORT branch with inverted comparisons, unreachable
+         * because `decideOptionBuyerLiveExit` throws on any side but LONG.
+         *
+         * The policy's trail is null, so this is the same behaviour as before: break-even at +0.5R
+         * and nothing else. Turning the trail on is a research decision with a registered gate --
+         * see the note in `protective-stop.ts`.
+         *
+         * Progress is measured against the peak bid seen since the trade opened, not just
+         * `freshBid`. The barrier scan above already walks every tick in `observedSamples` (this
+         * bot sweeps every five minutes against a book sampled roughly twice a minute); checking
+         * only the single latest bid here meant a peak that reached +0.5R and receded before the
+         * next sweep's fresh quote could never trigger the move -- the exact sampling asymmetry
+         * that left this stop un-advanced in every closed trade to date. Reusing the same scan the
+         * barrier check already paid for closes the gap without adding a second query.
+         */
+        const peakBid = observedSamples.reduce(
+          (max, observed) => (
+            observed.bid !== null && Number.isFinite(observed.bid) && observed.bid > max
+              ? observed.bid
+              : max
+          ),
+          freshBid,
+        );
+        const advance = advanceProtectiveStop({
+          entryPrice: trade.entryPrice,
+          initialStopLoss: trade.initialStopLoss ?? trade.stopLoss,
+          currentStopLoss: trade.stopLoss,
+          markPremium: peakBid,
+          policy: this.momentumScalpStopPolicy,
+        });
+        if (advance && this.paperTradeRepository.updateStopLoss) {
+          await this.paperTradeRepository.updateStopLoss(
+            trade.id,
+            advance.stopLoss,
+            `1m momentum scalp ${advance.reason}`,
+          );
+          trade.stopLoss = advance.stopLoss;
+          trade.stopLossEffectiveAt = asOf;
+        }
+      }
       const decision = decideOptionBuyerLiveExit(trade, freshBid, liveSpot);
       if (decision) {
         return closeOption({
@@ -603,16 +928,57 @@ export class EvaluateOpenPaperTrades {
         });
       }
 
-      // Momentum Stall Stop (5m timeframe, elapsed market time >= 20 mins, gain < 0.5R)
+      // Momentum Stall Stop (a timeframe with a policy, elapsed market time >= its cutoff, gain
+      // below its progress threshold). See MOMENTUM_STALL_POLICIES for which timeframes are in and
+      // what evidence each rests on -- 1m was tried and reverted 2026-09-15, against its own
+      // measurement's request-driven addition; it carries no policy and therefore no stall.
       // We apply this strict time limit only to scalp setups (Reward/Risk <= 1.6).
       // Directional setups (target ~2R+) are given more room to breathe and form the trend.
-      if (trade.timeframe === "5m") {
+      //
+      // The cutoff was 20 minutes, chosen by judgment and never tested. Measured 2026-09-06 by
+      // replaying 243 5m scalp trades over 10 sessions from entry against the observed premium bid
+      // series, with barriers resolved before this clause exactly as they are below: gross by
+      // cutoff at the same 0.5R threshold ran 5min +3,005, 10min +6,427, 15min +3,112, 20min
+      // -5,499, 30min -3,538, 40min -7,219, and never-cut -22,888. The surface is smooth and
+      // unimodal around 10 minutes rather than a lone spike, 9 of 10 sessions improved, and the
+      // held-out sessions agreed, so waiting 20 minutes was giving back most of what the rule earns.
+      //
+      // Ten minutes, not a tuned optimum. A session-clustered bootstrap (the session is the unit;
+      // trades inside one share the same underlying move) puts this cell at +11,926 with a 95%
+      // interval of [-863, +21,642] -- so the *direction* is well supported but the exact cell is
+      // not identifiable on 10 sessions, and neighbouring cells at 0.25R and 15min/1R sit within
+      // noise of it. Re-run the sweep as sessions accumulate rather than reading 10/0.5R as optimal.
+      //
+      // This reduces a loss, it does not create edge: cohort fees are ~17,130 against a best
+      // achievable gross of +6,427, so the book stays net-negative either way.
+      const stallPolicy = trade.timeframe && trade.strategyKey && MOMENTUM_STALL_ELIGIBLE_STRATEGIES.has(trade.strategyKey)
+        ? MOMENTUM_STALL_POLICIES[trade.timeframe]
+        : undefined;
+      if (stallPolicy) {
         const elapsedMinutes = (asOf.getTime() - trade.openedAt.getTime()) / 60_000;
-        const initialRisk = trade.entryPrice - trade.stopLoss;
+        /*
+         * The OPENING stop, not the one currently in force.
+         *
+         * This read `trade.stopLoss`, which break-even advances to entry at +0.5R -- so risk
+         * collapsed toward zero, `reward / risk` blew past the `<= 1.6` scalp test, and this time
+         * stop switched itself off for exactly the trades that touched +0.5R and then died. Same
+         * failure that withdrew V4, arriving through the stop instead of the target.
+         *
+         * Latent rather than active when found: 0 of 414 trades had ever moved a stop, so no
+         * historical measurement is affected. Falls back to the live stop only for a trade loaded
+         * before migration 106 filled the column.
+         */
+        const openingStop = trade.initialStopLoss ?? trade.stopLoss;
+        const initialRisk = trade.entryPrice - openingStop;
         const initialReward = trade.targetPrice - trade.entryPrice;
         const isScalp = initialRisk > 0 ? (initialReward / initialRisk) <= 1.6 : false;
-        
-        if (isScalp && elapsedMinutes >= 20 && initialRisk > 0 && freshBid < trade.entryPrice + 0.5 * initialRisk) {
+
+        if (
+          isScalp
+          && elapsedMinutes >= stallPolicy.cutoffMinutes
+          && initialRisk > 0
+          && freshBid < trade.entryPrice + stallPolicy.minimumProgressR * initialRisk
+        ) {
           return closeOption({
             exitPrice: freshBid,
             exitReason: "MOMENTUM_STALL",
@@ -621,6 +987,13 @@ export class EvaluateOpenPaperTrades {
             details: {
               source: "MOMENTUM_STALL_EVALUATOR",
               elapsedMinutes,
+              // Stamped so a booked exit explains itself: the cutoff has moved once already, and
+              // without it a stall booked under 20 minutes is indistinguishable from one under 10.
+              // The timeframe joins them now that the rule runs on more than one, because 5m and 1m
+              // stalls rest on very different evidence and must be separable in the booked record.
+              timeframe: trade.timeframe,
+              cutoffMinutes: stallPolicy.cutoffMinutes,
+              minimumProgressR: stallPolicy.minimumProgressR,
               freshBid,
               entryPrice: trade.entryPrice,
               initialRisk,

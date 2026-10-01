@@ -6,6 +6,12 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresSnapshotRegistry } from "../../infrastructure/database/repositories/postgres-snapshot-registry.js";
 import { PostgresShadowLedger } from "../../infrastructure/database/repositories/postgres-shadow-ledger.js";
+import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
+import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { PostgresDecisionPipelineLedger } from "../../infrastructure/database/repositories/postgres-decision-pipeline-ledger.js";
+import { runDecisionPipeline } from "../../modules/autonomous-v2/domain/decision-pipeline.js";
+import { buildDecisionPipelineInput } from "../../modules/autonomous-v2/application/decision-pipeline-input.js";
+import { canonicalDecisionPipelineOutcome } from "../../modules/autonomous-v2/application/decision-pipeline-comparison.js";
 import {
   marketSnapshotContent,
   marketSnapshotFromLegacyContext,
@@ -242,6 +248,9 @@ async function main(): Promise<void> {
     const contextRepository = new PostgresStrategyMarketContextRepository(database);
     const registry = new PostgresSnapshotRegistry(database);
     const ledger = new PostgresShadowLedger(database, instanceId);
+    const institutionalFlowRepository = new PostgresInstitutionalFlowRepository(database);
+    const optionChainRepository = new PostgresOptionChainRepository(database);
+    const decisionPipelineLedger = new PostgresDecisionPipelineLedger(database, instanceId);
     const observations = new PostgresDifferentialObservations(database);
     const classifications = new PostgresDifferentialClassifications(database);
     const session = new NseMarketSession();
@@ -410,6 +419,90 @@ async function main(): Promise<void> {
           decisionAt: latest.candle.closeTime,
         });
         const legacy = comparableAction(legacyOutcome);
+
+        /*
+         * The new dual-sided decision pipeline (P5-P10), run *alongside* the two thesis producers
+         * above -- not one of them, and not selected by `--producer`. It always runs, the same
+         * posture the CLI already takes running native and ported-v1 side by side: a third,
+         * independent producer identity ("native-pipeline"), graded separately by P13, never pooled.
+         *
+         * Wrapped in its own try/catch so a defect in this newer path cannot take down the existing,
+         * load-bearing V1 comparison recording above -- additive wiring should not destabilise what
+         * already works.
+         */
+        try {
+          const institutionalFlow = await institutionalFlowRepository.findLatest({ withinDays: 7 });
+          const volatilityReading = await contextRepository.findRawVolatilityReading({
+            instrumentId: instrument.id,
+            timeframe: latest.candle.timeframe,
+            closeTime: latest.candle.closeTime,
+          });
+          const pipelineOptionChain = await optionChainRepository.latestSnapshot({
+            underlyingSymbol: symbol,
+            asOf: latest.candle.closeTime,
+          });
+          const pipelineExecutionChain = await optionChainRepository.latestSnapshot({ underlyingSymbol: symbol });
+
+          const pipelineInput = buildDecisionPipelineInput({
+            decisionId: randomUUID(),
+            instrumentSymbol: symbol,
+            instrumentTickSize: instrument.tickSize,
+            instrumentLotSize: instrument.lotSize,
+            latestClose: latest.candle.close,
+            latestCloseTime: latest.candle.closeTime,
+            evaluationAt: knownAt,
+            snapshotInstants: snapshot.instants,
+            observedIn: snapshot.ref,
+            indicators: latest.indicators,
+            legacyPatterns: latest.patterns,
+            patternsComputed: coverage.patternsComputed,
+            volatilityReading,
+            institutionalFlow,
+            optionChain: pipelineOptionChain,
+            executionChain: pipelineExecutionChain,
+          });
+
+          const pipelineRun = runDecisionPipeline(pipelineInput);
+          await decisionPipelineLedger.append(pipelineRun);
+
+          const pipelineV2 = comparableAction(canonicalDecisionPipelineOutcome(pipelineRun));
+          const pipelineRecorded = await observations.record({
+            observation: {
+              comparisonKey: `${symbol}@${latest.candle.timeframe}@${latest.candle.closeTime.toISOString()}`,
+              legacySnapshotRef: sealed.snapshotId,
+              v2SnapshotRef: sealed.snapshotId,
+              legacyOutcome: legacy.action,
+              v2Outcome: pipelineV2.action,
+            },
+            comparisonVersion: thesisComparisonVersion,
+            producerId: "native-pipeline",
+            legacyDetail: legacy.detail,
+            v2Detail: pipelineV2.detail,
+          });
+
+          records.push({
+            symbol,
+            timeframe,
+            producer: "native-pipeline",
+            decisionId: pipelineRun.decisionId,
+            legacyAction: legacy.action,
+            legacyReason: legacy.detail || null,
+            agreed: legacy.action === pipelineV2.action,
+            observationRecorded: pipelineRecorded,
+            barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+            outcome: pipelineRun.outcome.kind,
+            contextSnapshotId: sealed.snapshotId.slice(0, 12),
+            tapeLiveness: tape.liveness,
+          });
+        } catch (error) {
+          records.push({
+            symbol,
+            timeframe,
+            producer: "native-pipeline",
+            skipped: "PIPELINE_ERROR",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
 
         for (const producer of selected) {
           const record = await runShadowDecision({

@@ -71,9 +71,24 @@ export interface AuxiliaryPredictionSettlementRepository {
    * facts, and conflating them would manufacture agreement.
    */
   recordUnsettleable(predictionId: string, reason: string): Promise<void>;
+  /**
+   * Resolves rows that can never be graded because they carry no source candle.
+   *
+   * `listSettleableVolatilityPredictions` inner-joins the source candle, so these rows are invisible
+   * to it -- neither returned nor marked, sitting as "pending" for ever. Measured 2026-09-08: 467
+   * such rows, all written between 2026-08-04 and 2026-08-13, indistinguishable in a count from
+   * predictions genuinely waiting for their horizon. That is a shape of problem this repo has hit
+   * before: a pending queue quietly holding work that nothing will ever pick up.
+   *
+   * Resolving them here rather than by a hand-written UPDATE keeps settlement the only component
+   * that decides whether a prediction is gradeable, and makes it repeatable if the writer regresses.
+   */
+  markAnchorlessVolatilityPredictionsUnsettleable(limit: number): Promise<number>;
 }
 
 export interface SettleAuxiliaryPredictionsResult {
+  /** Rows resolved as ungradeable for want of a source candle, before grading began. */
+  markedAnchorless: number;
   examined: number;
   settled: number;
   notYetMatured: number;
@@ -94,8 +109,15 @@ export class SettleAuxiliaryPredictions {
       throw new Error("The settlement batch limit must be a positive integer.");
     }
 
+    /*
+     * Resolve the ungradeable before listing the gradeable, so no row can be reported as pending on
+     * one pass and anchorless on the next.
+     */
+    const markedAnchorless = await this.repository.markAnchorlessVolatilityPredictionsUnsettleable(limit);
+
     const pending = await this.repository.listSettleableVolatilityPredictions(limit);
     const result: SettleAuxiliaryPredictionsResult = {
+      markedAnchorless,
       examined: pending.length,
       settled: 0,
       notYetMatured: 0,

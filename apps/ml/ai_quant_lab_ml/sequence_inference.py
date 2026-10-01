@@ -58,6 +58,7 @@ def validate_sequence_shadow_artifact(
     timeframe: str,
     alphabet: LabelAlphabet = VOLATILITY_ALPHABET,
     allow_candidate_pool_member: bool = False,
+    allow_archived_shadow_member: bool = False,
 ) -> ProductionInferenceContract:
     """Validate a TCN/stack research artifact for shadow scoring.
 
@@ -65,9 +66,17 @@ def validate_sequence_shadow_artifact(
     do not ship a training-reference neighbor set, and their explanation path is
     temporal/meta rather than TreeSHAP. Settlement-critical fields
     (``horizonBars``, ``expansionBand``, ``labelScheme``, cutoffs) remain mandatory.
+
+    ``allow_archived_shadow_member`` mirrors the tabular contract: a volatility
+    shadow pool's sticky enrollment must keep evaluating its enrolled version
+    even after the promotion lifecycle archives it in favour of a later retrain.
     """
 
-    allowed_stages = ("PRODUCTION", "CANDIDATE") if allow_candidate_pool_member else ("PRODUCTION",)
+    allowed_stages = ["PRODUCTION"]
+    if allow_candidate_pool_member:
+        allowed_stages.append("CANDIDATE")
+    if allow_archived_shadow_member:
+        allowed_stages.append("ARCHIVED")
     if model_version.stage not in allowed_stages:
         raise InferenceError("Only a PRODUCTION or enrolled CANDIDATE sequence model may create a shadow prediction.")
     if model_version.algorithm not in SEQUENCE_SHADOW_ALGORITHMS:

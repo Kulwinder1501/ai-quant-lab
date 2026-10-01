@@ -12,17 +12,18 @@ import {
 function build(
   count: number,
   produce: (index: number, random: () => number) => { featureValue: number; forwardReturn: number },
-  options: { skewFeatureAsOfByMs?: number } = {},
+  options: { skewFeatureAsOfByMs?: number; barsPerDay?: number; minutesPerBar?: number } = {},
 ): FalsificationObservation[] {
   const random = createSeededRandom(2026);
-  const barsPerDay = 50;
+  const barsPerDay = options.barsPerDay ?? 50;
+  const minutesPerBar = options.minutesPerBar ?? 5;
   const observations: FalsificationObservation[] = [];
 
   for (let index = 0; index < count; index += 1) {
     const day = Math.floor(index / barsPerDay);
     const bar = index % barsPerDay;
     // 04:00Z is 09:30 IST; five-minute bars from there stay inside the session.
-    const at = new Date(Date.UTC(2026, 7, 3 + day, 4, 0, 0) + bar * 5 * 60_000);
+    const at = new Date(Date.UTC(2026, 7, 3 + day, 4, 0, 0) + bar * minutesPerBar * 60_000);
     const { featureValue, forwardReturn } = produce(index, random);
     observations.push({
       at,
@@ -223,5 +224,139 @@ describe("falsification harness", () => {
     expect(first.verdict).toBe(second.verdict);
     expect(first.placeboBand).toBe(second.placeboBand);
     expect(first.real.ic).toBe(second.real.ic);
+  });
+
+  describe("wrong-day-matched-time degeneracy guard", () => {
+    it("reports INCONCLUSIVE, not NO_SIGNAL, when the window spans a single calendar day", () => {
+      // All 400 observations land on one day (barsPerDay === count), which is exactly the bug found
+      // live: the wrong-day-matched-time placebo becomes a silent no-op and its IC exactly equals the
+      // real IC, which would otherwise drag a possibly-genuine result down to a fake NO_SIGNAL.
+      const observations = build(
+        400,
+        (_, random) => ({ featureValue: random(), forwardReturn: random() - 0.5 }),
+        { barsPerDay: 400, minutesPerBar: 2 },
+      );
+
+      const report = runFalsificationHarness(observations, { seed: 4, bootstrapSamples: 200 });
+
+      expect(report.verdict).toBe("INCONCLUSIVE");
+      expect(report.matchedTimeDiversity).not.toBeNull();
+      expect(report.matchedTimeDiversity!.isDegenerate).toBe(true);
+      expect(report.matchedTimeDiversity!.distinctDays).toBe(1);
+      const dayPlacebo = report.placeboIcs.find((entry) => entry.placebo === "wrong-day-matched-time");
+      expect(dayPlacebo?.degenerate).toBe(true);
+      // The degenerate placebo's own IC exactly ties the real IC -- the failure mode this guard
+      // exists to catch -- and it must not have been allowed to set the band.
+      expect(dayPlacebo?.ic).toBe(report.real.ic);
+      expect(report.failures.join(" ")).toMatch(/degenerate/i);
+    });
+
+    it("still reaches PASS on a feature that IS the forward return, even single-day", () => {
+      // A degenerate day-placebo must not manufacture a false PASS either: verdict is withheld
+      // (INCONCLUSIVE), not upgraded, regardless of how strong the real IC looks.
+      const observations = build(
+        400,
+        (_, random) => {
+          const forwardReturn = random() - 0.5;
+          return { featureValue: forwardReturn, forwardReturn };
+        },
+        { barsPerDay: 400, minutesPerBar: 2 },
+      );
+
+      const report = runFalsificationHarness(observations, { seed: 4, bootstrapSamples: 200 });
+
+      expect(report.verdict).toBe("INCONCLUSIVE");
+      expect(report.verdict).not.toBe("PASS");
+    });
+
+    it("does not regress PASS/NO_SIGNAL behaviour when the window genuinely spans multiple days", () => {
+      // Same construction as the pre-existing PASS and NO_SIGNAL tests above (8 days x 50 bars):
+      // confirms the new guard leaves already-valid multi-day verdicts untouched.
+      const passObservations = build(400, (_, random) => {
+        const forwardReturn = random() - 0.5;
+        return { featureValue: forwardReturn, forwardReturn };
+      });
+      const passReport = runFalsificationHarness(passObservations, { seed: 4, bootstrapSamples: 200 });
+      expect(passReport.verdict).toBe("PASS");
+      expect(passReport.matchedTimeDiversity?.isDegenerate).toBe(false);
+
+      const noiseObservations = build(400, (_, random) => ({
+        featureValue: random(),
+        forwardReturn: random() - 0.5,
+      }));
+      const noiseReport = runFalsificationHarness(noiseObservations, { seed: 4, bootstrapSamples: 300 });
+      expect(noiseReport.verdict).toBe("NO_SIGNAL");
+      expect(noiseReport.matchedTimeDiversity?.isDegenerate).toBe(false);
+    });
+
+    it("recovers a genuine verdict by pooling two single-day sessions that are each INCONCLUSIVE alone", () => {
+      // The real bug found live (Phase 28 doc §10): depth-collector-v2 restarts roughly daily (a
+      // deploy, or the host's Modern Standby suspending the Docker VM), so a capture session has
+      // mostly been one calendar day since 2026-09-21. Two single-day sessions evaluated separately
+      // both go INCONCLUSIVE; a --from/--to range query that pools them into one population is the
+      // fix. Each session gets its own seed (not a shifted copy of the other) so the two days carry
+      // genuinely different values -- a placebo that shuffles two IDENTICAL numbers between "days"
+      // would be exactly as tautological as the single-day bug this guards against, just disguised.
+      const barsPerDay = 400;
+      const minutesPerBar = 2;
+      const singleDaySession = (seed: number, dayOffset: number): FalsificationObservation[] => {
+        const random = createSeededRandom(seed);
+        const observations: FalsificationObservation[] = [];
+        for (let index = 0; index < barsPerDay; index += 1) {
+          // 04:00Z is 09:30 IST; stays inside the session at 2-minute bars for 400 bars.
+          const at = new Date(Date.UTC(2026, 7, 3 + dayOffset, 4, 0, 0) + index * minutesPerBar * 60_000);
+          const forwardReturn = random() - 0.5;
+          observations.push({ at, featureAsOf: at, featureValue: forwardReturn, forwardReturn });
+        }
+        return observations;
+      };
+
+      const sessionA = singleDaySession(11, 0);
+      const reportA = runFalsificationHarness(sessionA, { seed: 4, bootstrapSamples: 200 });
+      expect(reportA.verdict).toBe("INCONCLUSIVE");
+      expect(reportA.matchedTimeDiversity!.distinctDays).toBe(1);
+
+      // Session B: a second collector run, a calendar day later -- same time-of-day shape (a fresh
+      // session picks up the next trading day at roughly the same market-open instant), a different
+      // day's actual market realisation, and independently also single-day hence INCONCLUSIVE alone.
+      const sessionB = singleDaySession(22, 1);
+      const reportB = runFalsificationHarness(sessionB, { seed: 4, bootstrapSamples: 200 });
+      expect(reportB.verdict).toBe("INCONCLUSIVE");
+
+      // Pooled -- exactly what a --from/--to query spanning both collector-restart sessions returns --
+      // now has two genuinely distinct calendar days per time-of-day bucket, so the wrong-day placebo
+      // is no longer a no-op and a real verdict is reachable.
+      const pooled = [...sessionA, ...sessionB];
+      const pooledReport = runFalsificationHarness(pooled, { seed: 4, bootstrapSamples: 200 });
+
+      expect(pooledReport.verdict).not.toBe("INCONCLUSIVE");
+      expect(pooledReport.verdict).toBe("PASS");
+      expect(pooledReport.matchedTimeDiversity!.isDegenerate).toBe(false);
+      expect(pooledReport.matchedTimeDiversity!.distinctDays).toBe(2);
+      const dayPlacebo = pooledReport.placeboIcs.find(
+        (entry) => entry.placebo === "wrong-day-matched-time",
+      );
+      expect(dayPlacebo?.degenerate).toBe(false);
+      expect(dayPlacebo?.ic).not.toBe(pooledReport.real.ic);
+    });
+
+    it("honours a caller-supplied minimum swappable fraction", () => {
+      // With the bar dropped to 0, even single-day data is accepted as non-degenerate (fraction 0
+      // always clears >= 0), so the pre-existing NO_SIGNAL/PASS behaviour is reachable again.
+      const observations = build(
+        400,
+        (_, random) => ({ featureValue: random(), forwardReturn: random() - 0.5 }),
+        { barsPerDay: 400, minutesPerBar: 2 },
+      );
+
+      const report = runFalsificationHarness(observations, {
+        seed: 4,
+        bootstrapSamples: 200,
+        matchedTimeMinimumSwappableFraction: 0,
+      });
+
+      expect(report.verdict).not.toBe("INCONCLUSIVE");
+      expect(report.matchedTimeDiversity!.isDegenerate).toBe(false);
+    });
   });
 });

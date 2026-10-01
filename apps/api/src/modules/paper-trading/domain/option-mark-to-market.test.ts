@@ -232,6 +232,22 @@ describe("trap detection", () => {
     expect(decideOptionBuyerLiveExit(anchoredOnSpot, 150, spot)).toBeNull();
   });
 
+  it("anchors on underlyingFillPrice rather than underlyingEntryPrice when both are recorded", () => {
+    // The idea's signal-time level (underlyingEntryPrice) says the underlying already ran +20,
+    // past the trap's gate. The real fill-moment level (underlyingFillPrice) says it has not
+    // moved at all. Anchoring on the fill price is what migration 120 exists for: the trap
+    // should measure the move since the position actually opened, not since the idea fired.
+    const trade = trapTrade({ underlyingEntryPrice: ENTRY_SPOT, underlyingFillPrice: ENTRY_SPOT + 20 });
+
+    expect(decideOptionBuyerLiveExit(trade, 150, ENTRY_SPOT + 20)).toBeNull();
+  });
+
+  it("falls back to underlyingEntryPrice when no fill price was captured (trades opened before migration 120)", () => {
+    const trade = trapTrade({ underlyingEntryPrice: ENTRY_SPOT, underlyingFillPrice: null });
+
+    expect(decideOptionBuyerLiveExit(trade, 150, ENTRY_SPOT + 20)?.reason).toBe("TRAP_DETECTED");
+  });
+
   it("skips trap detection entirely when no anchor was recorded", () => {
     // Preferred to guessing one: the position keeps its ordinary stop and target.
     const noAnchor = optionTrade({ entryPrice: 180, underlyingEntryPrice: null });

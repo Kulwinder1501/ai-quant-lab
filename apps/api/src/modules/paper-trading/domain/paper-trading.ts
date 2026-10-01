@@ -3,7 +3,9 @@ import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/st
 export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
 export type PaperTradeExitReason =
   | "STOP_LOSS"
+  | "HARD_STOP"
   | "TARGET"
+  | "TARGET_REACHED"
   | "MANUAL"
   | "CANCELLED"
   | "EXPIRED"
@@ -13,7 +15,10 @@ export type PaperTradeExitReason =
   | "RUNNER_TRAIL"
   | "MOMENTUM_STALL"
   /** The 15:15 IST intraday square-off. See `domain/session-close.ts`. */
-  | "SESSION_CLOSE";
+  | "SESSION_CLOSE"
+  | "UNDERLYING_INVALIDATION"
+  | "TIME_STOP"
+  | "PREMIUM_TOLERANCE";
 export type PaperTradeEventType =
   | "PENDING_PLACED"
   | "OPENED"
@@ -30,13 +35,16 @@ export interface PaperAccount {
   id: string;
   name: string;
   openingBalance: number;
-  currency: "INR";
+  /** Every account was INR until AutoBot-Gold's USD-quoted XAU_USD (Twelve Data, direct-fill). */
+  currency: "INR" | "USD";
   isActive: boolean;
 }
 
 export interface CreatePaperAccountInput {
   name: string;
   openingBalance: number;
+  /** Defaults to "INR" at the repository layer so every existing caller is unaffected. */
+  currency?: "INR" | "USD";
 }
 
 export interface PaperAccountRepository {
@@ -68,6 +76,14 @@ export interface PaperTrade {
   remainingQuantity: number;
   entryPrice: number;
   stopLoss: number;
+  /**
+   * The stop the trade OPENED with, which never moves.
+   *
+   * `stopLoss` does move -- break-even advances it at +0.5R -- so anything that needs the trade's
+   * original geometry has to read this instead. The stall rule recomputed risk from the live stop
+   * and switched itself off the moment break-even fired; see migration 106.
+   */
+  initialStopLoss?: number;
   /** First instant at which the currently persisted stopLoss was active. */
   stopLossEffectiveAt?: Date;
   targetPrice: number;
@@ -89,6 +105,43 @@ export interface PaperTrade {
   optionType?: OptionContractType | null;
   underlyingSymbol?: string | null;
   underlyingEntryPrice?: number | null;
+  /**
+   * The underlying's real observed level at the instant this position actually filled, and null
+   * when none was observed.
+   *
+   * Distinct from `underlyingEntryPrice`: that is the idea's signal-candle level, recorded at the
+   * moment the trade idea was generated. Acceptance checks, sizing and cadence put real lag
+   * between a signal and its fill, and the underlying moves in that window -- a gap of 19 to 158
+   * points was measured across 8 recent BANKNIFTY trades. Use this field, not
+   * `underlyingEntryPrice`, for any "did the underlying move during the hold" question; keep using
+   * `underlyingEntryPrice` for anything anchored to the thesis/decision (stop and target distances,
+   * `UnderlyingOutcome.entryReference`, and similar), since those are computed from the signal
+   * candle by construction.
+   *
+   * Populated going forward from the same real-time quote that fills the option leg
+   * (`option_premium_ticks.underlying_value`, or the chain snapshot's `underlying_value` as a
+   * fallback). A historical trade may instead carry a value reconstructed by a one-off backfill
+   * from the nearest tick within tolerance -- see `underlyingFillPriceSource` to tell the two
+   * apart. See migration 120.
+   */
+  underlyingFillPrice?: number | null;
+  /**
+   * Provenance for `underlyingFillPrice`. 'OPTION_CHAIN_QUOTE' / 'OPTION_PREMIUM_TICK_ASK' mean
+   * observed in real time, from the same quote that filled the option. 'BACKFILLED_NEAREST_TICK'
+   * means reconstructed after the fact from the nearest `option_premium_ticks` row -- a weaker
+   * claim. Null exactly when `underlyingFillPrice` is null.
+   */
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  /** Exit state machine version: 'LEGACY' for pre-O1 trades, 'O1' for frozen O1 state machine. */
+  exitEngineVersion?: "LEGACY" | "O1";
+  /** Underlying trade direction captured at entry ('LONG' or 'SHORT'). */
+  underlyingDirection?: "LONG" | "SHORT" | null;
+  /** Observed underlying fill price at entry. */
+  entryUnderlying?: number | null;
+  /** Immutable underlying structural stop price captured at entry from trade idea. */
+  invalidationLevelAtEntry?: number | null;
+  /** Immutable initial risk distance |entryUnderlying - invalidationLevelAtEntry|. */
+  initialRiskDistance?: number | null;
   /**
    * The underlying's level observed at the exit instant, and null on an open position.
    *
@@ -123,15 +176,10 @@ export interface OptionContractSpec {
   optionExpiry: Date;
   optionType: OptionContractType;
   underlyingSymbol: string;
-  /**
-   * Spot when the contract was bought, the anchor trap detection measures divergence from.
-   *
-   * Optional because "not known" is a real state and the honest encoding of it. The column is
-   * already nullable and `decideOptionBuyerLiveExit` skips trap detection without an anchor,
-   * so a position simply keeps its ordinary stop and target. Substituting something
-   * spot-shaped instead — the strike, say — produces confident wrong exits.
-   */
   underlyingEntryPrice?: number;
+  underlyingFillPrice?: number | null;
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  invalidationLevelAtEntry?: number | null;
   entryIv: number;
 }
 
