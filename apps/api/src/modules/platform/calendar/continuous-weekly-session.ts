@@ -14,18 +14,10 @@
  * holidays to track here -- Twelve Data simply stops updating when the underlying venues are
  * shut, so a request during a real closure returns stale data rather than an error.
  */
-const OPEN_WEEKDAY = 0; // Sunday
-const OPEN_UTC_HOUR = 22;
-const CLOSE_WEEKDAY = 5; // Friday
-const CLOSE_UTC_HOUR = 22;
+import { XAUUSD_OANDA_PROFILE, getNewYorkParts } from "./instrument-profile.js";
 
 export function isXauSessionOpen(now: Date): boolean {
-  const day = now.getUTCDay();
-  const hour = now.getUTCHours();
-  if (day === 6) return false; // Saturday: always closed
-  if (day === OPEN_WEEKDAY) return hour >= OPEN_UTC_HOUR;
-  if (day === CLOSE_WEEKDAY) return hour < CLOSE_UTC_HOUR;
-  return true; // Monday-Thursday: always open
+  return XAUUSD_OANDA_PROFILE.isSessionActive(now);
 }
 
 /**
@@ -36,8 +28,9 @@ export function isXauSessionOpen(now: Date): boolean {
  * exactly the same reason on the NSE bots' daily close.
  */
 export function isNearXauWeeklyClose(now: Date, minutesBeforeClose: number): boolean {
-  if (now.getUTCDay() !== CLOSE_WEEKDAY) return false;
-  const minutesSinceMidnight = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const closeMinute = CLOSE_UTC_HOUR * 60;
+  const ny = getNewYorkParts(now);
+  if (ny.dayOfWeek !== 5) return false; // Friday in New York
+  const minutesSinceMidnight = ny.hour * 60 + ny.minute;
+  const closeMinute = 17 * 60; // 17:00 NY time
   return minutesSinceMidnight >= closeMinute - minutesBeforeClose && minutesSinceMidnight < closeMinute;
 }

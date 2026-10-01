@@ -92,6 +92,8 @@
     "classify:divergence": "npm run classify:divergence --workspace @ai-quant-lab/api --",
     "review:divergences": "npm run review:divergences --workspace @ai-quant-lab/api --",
     "risk:evaluate": "npm run risk:evaluate --workspace @ai-quant-lab/api --",
+    "research:option:attribution": "npm run research:option:attribution --workspace @ai-quant-lab/api --",
+    "research:gold:shadow-audit": "npm run research:gold:shadow-audit --workspace @ai-quant-lab/api --",
     "scheduler": "npm run scheduler --workspace @ai-quant-lab/api"
   },
   "engines": {

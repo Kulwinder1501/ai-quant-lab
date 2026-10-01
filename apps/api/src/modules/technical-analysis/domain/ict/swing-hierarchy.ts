@@ -134,6 +134,52 @@ export interface SwingHierarchyFeature {
   readonly protectedLevelBreached: boolean;
 }
 
+/**
+ * The three exact states the fail-closed protected-level gate can produce.
+ *
+ * - `PROTECTED`  — a protected level exists for the trend and price has NOT breached it.
+ * - `BREACHED`   — a protected level exists but price has already closed beyond it.
+ * - `UNKNOWN`    — no protected level can be established (no swing-hierarchy data, the
+ *                  trend is NEUTRAL, or the relevant ITH/ITL has not yet formed).
+ *
+ * Both `BREACHED` and `UNKNOWN` fail the counter-trend guard — the specification's
+ * fail-closed requirement: missing evidence is never treated as permission.
+ */
+export type ProtectedLevelStatus = "PROTECTED" | "BREACHED" | "UNKNOWN";
+
+/**
+ * Resolves the protected-level status as-of the data cutoff (the current bar's close time).
+ *
+ * This is the PIT-safe helper for the G1 fail-closed gate. It returns:
+ * - `PROTECTED`  when an ITH/ITL protective level is established AND price has not crossed it.
+ * - `BREACHED`   when the level is established AND price has already closed beyond it.
+ * - `UNKNOWN`    in all other cases (no snapshot, NEUTRAL trend, no ITH/ITL formed yet).
+ *
+ * Callers must check `=== "PROTECTED"` to pass; anything else fails closed.
+ */
+export function resolveProtectedLevelStatusAt(
+  snapshot: SwingHierarchySnapshot | null | undefined,
+  trend: TrendDirection,
+  currentPrice: number,
+): ProtectedLevelStatus {
+  if (snapshot == null) return "UNKNOWN";
+
+  if (trend === "BULLISH") {
+    const itl = snapshot.nearestIntermediateTermLow;
+    if (itl === null) return "UNKNOWN";
+    return currentPrice < itl.price ? "BREACHED" : "PROTECTED";
+  }
+
+  if (trend === "BEARISH") {
+    const ith = snapshot.nearestIntermediateTermHigh;
+    if (ith === null) return "UNKNOWN";
+    return currentPrice > ith.price ? "BREACHED" : "PROTECTED";
+  }
+
+  // NEUTRAL trend — no protected side defined.
+  return "UNKNOWN";
+}
+
 function distanceTo(pivot: ConfirmedPivot | null, currentPrice: number): number | null {
   return pivot === null ? null : Math.abs(currentPrice - pivot.price);
 }

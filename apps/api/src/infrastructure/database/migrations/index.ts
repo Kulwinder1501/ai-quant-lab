@@ -118,6 +118,7 @@ import { paperTradeProfitLockingStopMigration } from "./117-paper-trade-profit-l
 import { backtestMomentumStallExitMigration } from "./118-backtest-momentum-stall-exit.js";
 import { dxyTwelveDataSupportMigration } from "./119-dxy-twelvedata-support.js";
 import { paperTradeUnderlyingFillMigration } from "./120-paper-trade-underlying-fill.js";
+import { paperTradeO1ExitEngineMigration } from "./121-paper-trade-o1-exit-engine.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -240,4 +241,5 @@ export const migrations = [
   backtestMomentumStallExitMigration,
   dxyTwelveDataSupportMigration,
   paperTradeUnderlyingFillMigration,
+  paperTradeO1ExitEngineMigration,
 ];

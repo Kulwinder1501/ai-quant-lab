@@ -180,7 +180,9 @@ export function summarizePaperTradeHistory(records: readonly PaperTradeHistoryRe
 
   const exitReasonCounts: Record<PaperTradeExitReason, number> = {
     STOP_LOSS: 0,
+    HARD_STOP: 0,
     TARGET: 0,
+    TARGET_REACHED: 0,
     MANUAL: 0,
     CANCELLED: 0,
     EXPIRED: 0,
@@ -190,6 +192,9 @@ export function summarizePaperTradeHistory(records: readonly PaperTradeHistoryRe
     RUNNER_TRAIL: 0,
     MOMENTUM_STALL: 0,
     SESSION_CLOSE: 0,
+    UNDERLYING_INVALIDATION: 0,
+    TIME_STOP: 0,
+    PREMIUM_TOLERANCE: 0,
   };
   for (const record of records) {
     if (record.exitReason) {

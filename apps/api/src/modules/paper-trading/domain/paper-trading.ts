@@ -3,7 +3,9 @@ import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/st
 export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
 export type PaperTradeExitReason =
   | "STOP_LOSS"
+  | "HARD_STOP"
   | "TARGET"
+  | "TARGET_REACHED"
   | "MANUAL"
   | "CANCELLED"
   | "EXPIRED"
@@ -13,7 +15,10 @@ export type PaperTradeExitReason =
   | "RUNNER_TRAIL"
   | "MOMENTUM_STALL"
   /** The 15:15 IST intraday square-off. See `domain/session-close.ts`. */
-  | "SESSION_CLOSE";
+  | "SESSION_CLOSE"
+  | "UNDERLYING_INVALIDATION"
+  | "TIME_STOP"
+  | "PREMIUM_TOLERANCE";
 export type PaperTradeEventType =
   | "PENDING_PLACED"
   | "OPENED"
@@ -127,6 +132,16 @@ export interface PaperTrade {
    * claim. Null exactly when `underlyingFillPrice` is null.
    */
   underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  /** Exit state machine version: 'LEGACY' for pre-O1 trades, 'O1' for frozen O1 state machine. */
+  exitEngineVersion?: "LEGACY" | "O1";
+  /** Underlying trade direction captured at entry ('LONG' or 'SHORT'). */
+  underlyingDirection?: "LONG" | "SHORT" | null;
+  /** Observed underlying fill price at entry. */
+  entryUnderlying?: number | null;
+  /** Immutable underlying structural stop price captured at entry from trade idea. */
+  invalidationLevelAtEntry?: number | null;
+  /** Immutable initial risk distance |entryUnderlying - invalidationLevelAtEntry|. */
+  initialRiskDistance?: number | null;
   /**
    * The underlying's level observed at the exit instant, and null on an open position.
    *
@@ -161,24 +176,10 @@ export interface OptionContractSpec {
   optionExpiry: Date;
   optionType: OptionContractType;
   underlyingSymbol: string;
-  /**
-   * The idea's signal-candle spot, not necessarily when the contract was actually bought.
-   *
-   * Trap detection (`decideOptionBuyerExit` / `decideOptionBuyerLiveExit`) prefers
-   * `underlyingFillPrice` as its divergence anchor and falls back to this field only when no fill
-   * price was captured -- see migration 120. This field remains the right anchor for anything tied
-   * to the thesis rather than the fill (stop/target distances, `UnderlyingOutcome.entryReference`).
-   *
-   * Optional because "not known" is a real state and the honest encoding of it. The column is
-   * already nullable and `decideOptionBuyerLiveExit` skips trap detection without an anchor,
-   * so a position simply keeps its ordinary stop and target. Substituting something
-   * spot-shaped instead — the strike, say — produces confident wrong exits.
-   */
   underlyingEntryPrice?: number;
-  /** See `PaperTrade.underlyingFillPrice`. Carried through at open time via migration 120. */
   underlyingFillPrice?: number | null;
-  /** See `PaperTrade.underlyingFillPriceSource`. */
   underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  invalidationLevelAtEntry?: number | null;
   entryIv: number;
 }
 

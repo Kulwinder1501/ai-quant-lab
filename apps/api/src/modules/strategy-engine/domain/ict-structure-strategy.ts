@@ -7,7 +7,7 @@ import type {
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
 import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCandidate, type OrderBlockKind } from "../../technical-analysis/domain/ict/zones.js";
-import { computeSwingHierarchyFeature, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
+import { computeSwingHierarchyFeature, resolveProtectedLevelStatusAt, type ProtectedLevelStatus, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
 import type { BalancedPriceRange } from "../../technical-analysis/domain/ict/bpr.js";
 import { LiquidityResponseResolver } from "../../technical-analysis/domain/ict/liquidity-response.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
@@ -255,14 +255,36 @@ export class IctStructureStrategy implements StrategyEvaluator {
      * or any future caller that predates this field) is missing evidence, not evidence of an intact
      * level, so it is never gated on when absent.
      */
+    /*
+     * Compute the swing-hierarchy feature for covariate telemetry (protectedSide,
+     * protectedLevelBreached), unchanged in purpose — the old behavioural gate was
+     * `if (config.requireProtectedLevelIntact && protectedLevelBreached) return []`.
+     *
+     * The NEW fail-closed gate below (for the G1 correctness invariant) uses
+     * `resolveProtectedLevelStatusAt`, which returns PROTECTED | BREACHED | UNKNOWN.
+     * UNKNOWN previously passed silently when no ITH/ITL had formed yet; it now fails
+     * closed — the specification requirement. The gate only activates when the strategy
+     * configuration enables `requireProtectedLevelIntact`.
+     */
     let protectedSide: ProtectedSide | null = null;
     let protectedLevelBreached = false;
+    let protectedStatusAtCutoff: ProtectedLevelStatus = "UNKNOWN";
     if (swingHierarchy) {
       const swingHierarchyFeature = computeSwingHierarchyFeature(swingHierarchy, structure.trend, context.candle.close);
       protectedSide = swingHierarchyFeature.protectedSide;
       protectedLevelBreached = swingHierarchyFeature.protectedLevelBreached;
+      // PIT-safe, fail-closed status resolved as-of dataCutoff (context.candle.closeTime).
+      // The same close price is the data cutoff here: we evaluate at bar close.
+      protectedStatusAtCutoff = resolveProtectedLevelStatusAt(
+        swingHierarchy,
+        structure.trend,
+        context.candle.close,
+      );
     }
-    if (config.requireProtectedLevelIntact && protectedLevelBreached) return [];
+    // Fail-closed: reject BREACHED and UNKNOWN, not just BREACHED.
+    // When requireProtectedLevelIntact is off this gate is never reached, so the
+    // behaviour for every currently live bot is byte-identical to before.
+    if (config.requireProtectedLevelIntact && protectedStatusAtCutoff !== "PROTECTED") return [];
 
     // Pillar Gate 3: Liquidity Status
     if (isBullish && liquidity.alignmentStatus !== "ALIGNED_LONG") return [];

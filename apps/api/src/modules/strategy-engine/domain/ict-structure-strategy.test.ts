@@ -347,10 +347,10 @@ describe("IctStructureStrategy swing-hierarchy protected level (entry-model arm 
     expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(1);
   });
 
-  it("never gates on a missing swingHierarchy field (absent evidence, not evidence of a breach)", () => {
+  it("fails closed on missing swingHierarchy field when requireProtectedLevelIntact is enabled (UNKNOWN -> REJECT)", () => {
     const snapshot = alignedLongSnapshot({ zones: { activeObs: [validOb], activeFvgs: [] } });
     delete snapshot.swingHierarchy;
-    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(1);
+    expect(new IctStructureStrategy().evaluate(makeContext(snapshot), { requireProtectedLevelIntact: true })).toHaveLength(0);
   });
 });
 

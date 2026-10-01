@@ -14,6 +14,7 @@ import {
   priceOptionMark,
   priceOptionMarksAtOhlc,
 } from "../domain/option-mark-to-market.js";
+import { evaluateO1TradeExit } from "../domain/o1-exit-state-machine.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
 import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
@@ -541,6 +542,226 @@ export class EvaluateOpenPaperTrades {
       trade.openedAt,
       asOf,
     ) ?? [];
+
+    if (trade.exitEngineVersion === "O1") {
+      if (
+        !trade.underlyingDirection ||
+        trade.entryUnderlying == null ||
+        trade.invalidationLevelAtEntry == null ||
+        trade.initialRiskDistance == null ||
+        trade.initialRiskDistance <= 0
+      ) {
+        throw new Error(`O1 trade ${trade.id} has incomplete entry snapshot fields.`);
+      }
+
+      // Step 1: Tick series scan using O1 state machine
+      for (const sample of observedSamples) {
+        const bid = sample.bid;
+        if (bid === null || !Number.isFinite(bid) || bid <= 0) continue;
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: sample.observedAt,
+          currentOptionPrice: bid,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: sample.underlyingValue ?? null,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: bid,
+            exitReason: o1Result.exitReason,
+            closedAt: sample.observedAt,
+            underlyingExitPrice: sample.underlyingValue ?? null,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_TICK_SERIES",
+              quoteObservedAt: sample.observedAt.toISOString(),
+              bid,
+              scannedFrom: trade.openedAt.toISOString(),
+              scannedTo: asOf.toISOString(),
+              samplesScanned: observedSamples.length,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+              underlyingValue: sample.underlyingValue ?? null,
+            },
+          });
+        }
+      }
+
+      const denseQuote = await this.densePremiums?.latestForContract(
+        contractKey,
+        2 * 60_000,
+        asOf,
+      ) ?? null;
+      const suppliedLiveSpot = resolveLiveSpot(trade, livePrices);
+      const denseSpot = denseQuote?.underlyingValue != null
+        && Number.isFinite(denseQuote.underlyingValue) && denseQuote.underlyingValue > 0
+        ? denseQuote.underlyingValue
+        : undefined;
+      const liveSpot = suppliedLiveSpot ?? denseSpot;
+
+      const quoteIsAfterEntry = denseQuote !== null
+        && denseQuote.observedAt.getTime() > trade.openedAt.getTime();
+      const freshBid = quoteIsAfterEntry
+        && denseQuote?.bid != null && Number.isFinite(denseQuote.bid) && denseQuote.bid > 0
+        ? denseQuote.bid
+        : null;
+
+      // Step 2: Fresh bid evaluation at asOf
+      if (freshBid !== null) {
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: asOf,
+          currentOptionPrice: freshBid,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: liveSpot ?? null,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: freshBid,
+            exitReason: o1Result.exitReason,
+            closedAt: asOf,
+            underlyingExitPrice: denseSpot ?? null,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_FRESH_BID",
+              quoteObservedAt: denseQuote!.observedAt.toISOString(),
+              bid: freshBid,
+              spot: liveSpot,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+
+        if (shouldFlattenAtSessionClose(trade.timeframe, asOf)) {
+          return closeOption({
+            exitPrice: freshBid,
+            exitReason: "SESSION_CLOSE",
+            closedAt: asOf,
+            underlyingExitPrice: denseSpot ?? null,
+            details: {
+              source: "SESSION_CLOSE_FLATTEN",
+              cutoffIst: "15:15",
+              timeframe: trade.timeframe,
+              freshBid,
+              quoteObservedAt: denseQuote!.observedAt.toISOString(),
+              eventType: "MANUALLY_CLOSED",
+            },
+          });
+        }
+
+        return null;
+      }
+
+      if (this.densePremiums) {
+        return null;
+      }
+
+      const volatility = await this.resolveVolatility(trade, asOf);
+      if (volatility === null) {
+        return null;
+      }
+
+      if (liveSpot !== undefined) {
+        const mark = priceOptionMark({ trade, spot: liveSpot, asOf, volatility });
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: asOf,
+          currentOptionPrice: mark.premium,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: liveSpot,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: mark.premium,
+            exitReason: o1Result.exitReason,
+            closedAt: asOf,
+            underlyingExitPrice: liveSpot,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_LIVE_MARK",
+              spot: liveSpot,
+              volatility,
+              markPremium: mark.premium,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+      }
+
+      if (!trade.timeframe) {
+        return null;
+      }
+
+      const candles = await this.candleRepository.listCompleted(trade.instrumentId, trade.timeframe);
+      for (const persisted of candles) {
+        const candle = toCompletedPriceCandle(persisted);
+        if (candle.openTime < trade.openedAt || candle.closeTime > asOf) {
+          continue;
+        }
+        if (candle.closeTime.getTime() > expiry.getTime()) {
+          continue;
+        }
+        input.onEligibleCandle();
+        const barIv = (await this.resolveVolatility(trade, candle.closeTime)) ?? volatility;
+        const marks = priceOptionMarksAtOhlc({ trade, candle, volatility: barIv });
+        const o1Result = evaluateO1TradeExit({
+          side: trade.side,
+          underlyingDirection: trade.underlyingDirection,
+          entryUnderlying: trade.entryUnderlying,
+          invalidationLevelAtEntry: trade.invalidationLevelAtEntry,
+          initialRiskDistance: trade.initialRiskDistance,
+          entryOptionPrice: trade.entryPrice,
+          openedAt: trade.openedAt,
+          now: candle.closeTime,
+          currentOptionPrice: marks.close,
+          effectivePremiumStop: trade.stopLoss,
+          effectivePremiumTarget: trade.targetPrice,
+          currentUnderlyingPrice: candle.close,
+        });
+        if (o1Result.shouldExit && o1Result.exitReason) {
+          return closeOption({
+            exitPrice: marks.close,
+            exitReason: o1Result.exitReason,
+            closedAt: candle.closeTime,
+            underlyingExitPrice: candle.close,
+            details: {
+              source: "O1_EXIT_STATE_MACHINE_COMPLETED_CANDLE",
+              candleId: candle.id,
+              candleOpenTime: candle.openTime.toISOString(),
+              candleCloseTime: candle.closeTime.toISOString(),
+              underlyingOhlc: { open: candle.open, high: candle.high, low: candle.low, close: candle.close },
+              premiumMarks: marks,
+              volatility: barIv,
+              exitReason: o1Result.exitReason,
+              telemetry: o1Result.telemetry,
+            },
+          });
+        }
+      }
+
+      return null;
+    }
+
     const observedExit = decideOptionBuyerObservedExit(trade, observedSamples, {
       stopLossEffectiveAt: trade.stopLossEffectiveAt,
     });

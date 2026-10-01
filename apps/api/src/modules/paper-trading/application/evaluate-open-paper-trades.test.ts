@@ -1221,4 +1221,155 @@ describe("EvaluateOpenPaperTrades", () => {
     expect(result.tradesClosed).toBe(0);
     expect(closings).toEqual([]);
   });
+
+  describe("O1 Exit State Machine Routing", () => {
+    function o1Trade(overrides: Partial<PaperTrade> = {}): PaperTrade {
+      return optionBuyerTrade({
+        exitEngineVersion: "O1",
+        underlyingDirection: "LONG",
+        entryUnderlying: 24000,
+        invalidationLevelAtEntry: 23900,
+        initialRiskDistance: 100,
+        entryPrice: 180,
+        stopLoss: 120,
+        targetPrice: 260,
+        openedAt: new Date("2026-08-06T09:15:00.000Z"),
+        ...overrides,
+      });
+    }
+
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+
+    it("exits O1 trade with UNDERLYING_INVALIDATION when underlying reaches invalidation level", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const trade = o1Trade();
+      const asOf = new Date("2026-08-06T09:20:00.000Z");
+      const densePremiums = denseReader(sample("2026-08-06T09:19:45.000Z", 160, 23890));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(trade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(1);
+      expect(closings[0]).toMatchObject({
+        exitPrice: 160,
+        exitReason: "UNDERLYING_INVALIDATION",
+        underlyingExitPrice: 23890,
+      });
+    });
+
+    it("exits O1 trade with TIME_STOP when holding > 15m and progressR < 0.30", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const trade = o1Trade();
+      const asOf = new Date("2026-08-06T09:32:00.000Z"); // 17 minutes later
+      // Underlying at 24010 -> favorable move = 10 -> progressR = 10 / 100 = 0.10 (< 0.30)
+      const densePremiums = denseReader(sample("2026-08-06T09:31:45.000Z", 175, 24010));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(trade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(1);
+      expect(closings[0]).toMatchObject({
+        exitPrice: 175,
+        exitReason: "TIME_STOP",
+      });
+    });
+
+    it("exits O1 trade with PREMIUM_TOLERANCE when underlying move >= +15bps but premium drawdown >= 25%", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const trade = o1Trade({ entryPrice: 200 });
+      const asOf = new Date("2026-08-06T09:20:00.000Z");
+      // Underlying move = 24040 - 24000 = +40 pts = +16.67 bps (>= 15 bps)
+      // Current option price = 140 -> drawdown = (200 - 140)/200 = 30% (>= 25%)
+      const densePremiums = denseReader(sample("2026-08-06T09:19:45.000Z", 140, 24040));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(trade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(1);
+      expect(closings[0]).toMatchObject({
+        exitPrice: 140,
+        exitReason: "PREMIUM_TOLERANCE",
+      });
+    });
+
+    it("exits O1 trade with HARD_STOP when option price <= effectivePremiumStop", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const trade = o1Trade({ stopLoss: 120 });
+      const asOf = new Date("2026-08-06T09:20:00.000Z");
+      const densePremiums = denseReader(sample("2026-08-06T09:19:45.000Z", 115, 24050));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(trade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(1);
+      expect(closings[0]).toMatchObject({
+        exitPrice: 115,
+        exitReason: "HARD_STOP",
+      });
+    });
+
+    it("skips underlying dependent exit rules when underlying price is null during outage", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const trade = o1Trade();
+      const asOf = new Date("2026-08-06T09:35:00.000Z"); // 20 min later (would trigger TIME_STOP if underlying were available)
+      // underlyingValue is null! Option bid is 170 (above 120 stop, below 260 target)
+      const densePremiums = denseReader(sample("2026-08-06T09:34:45.000Z", 170, null));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(trade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(0);
+      expect(closings).toHaveLength(0);
+    });
+
+    it("keeps LEGACY trade running pre-O1 exit engine without executing O1 exit rules", async () => {
+      const closings: ClosePaperTradeInput[] = [];
+      const legacyTrade = optionBuyerTrade({
+        exitEngineVersion: "LEGACY",
+        openedAt: new Date("2026-08-06T09:15:00.000Z"),
+        entryPrice: 180,
+        stopLoss: 120,
+        targetPrice: 260,
+      });
+      const asOf = new Date("2026-08-06T09:35:00.000Z");
+      // Underlying is 23800 (breached if O1, but legacy trade has no O1 invalidation check)
+      // Premium is 150 (above legacy stopLoss 120)
+      const densePremiums = denseReader(sample("2026-08-06T09:34:45.000Z", 150, 23800));
+
+      const result = await new EvaluateOpenPaperTrades(
+        stubRepo(legacyTrade, closings),
+        candleRepository,
+        new FixedImpliedVolatilitySource(0.12),
+        densePremiums,
+      ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+
+      expect(result.tradesClosed).toBe(0);
+      expect(closings).toHaveLength(0);
+    });
+  });
 });

@@ -29,15 +29,15 @@ function calendar(overrides: Partial<OptionExpiryCalendar> = {}): OptionExpiryCa
 
 function chain(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnapshot {
   const quote = {
-    strikePrice: 57700,
+    strikePrice: 56000,
     optionType: "CE" as const,
     expiryDate: MONTHLY,
     expiryKind: "MONTHLY" as const,
-    providerSymbol: "NSE:BANKNIFTY26082557700CE",
+    providerSymbol: "NSE:BANKNIFTY26082556000CE",
     providerToken: null,
-    lastPrice: 748,
-    bid: 745,
-    ask: 752,
+    lastPrice: 2105,
+    bid: 2100,
+    ask: 2110,
     volume: 120_000,
     openInterest: 900_000,
     previousOpenInterest: 800_000,
@@ -50,7 +50,16 @@ function chain(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnapsho
     underlyingValue: 57_720,
     quotes: [
       quote,
-      { ...quote, optionType: "PE" as const, bid: 500, ask: 505, lastPrice: 502, openInterest: 1_200_000 },
+      {
+        ...quote,
+        strikePrice: 59500,
+        optionType: "PE" as const,
+        providerSymbol: "NSE:BANKNIFTY26082559500PE",
+        bid: 2000,
+        ask: 2010,
+        lastPrice: 2005,
+        openInterest: 1_200_000,
+      },
     ],
     listedExpiries: calendar().expiries,
     ...overrides,
@@ -125,9 +134,9 @@ function service(overrides: Overrides = {}) {
     latestForContract: async () => overrides.premiumTick === undefined
       ? {
         observedAt: NOW,
-        bid: 745,
-        ask: 752,
-        lastPrice: 748,
+        bid: 2100,
+        ask: 2110,
+        lastPrice: 2105,
         underlyingValue: 57_720,
       }
       : overrides.premiumTick,
@@ -187,28 +196,24 @@ describe("PrepareOptionEntry - choosing the contract", () => {
 
 describe("PrepareOptionEntry - pricing the entry", () => {
   it("fills at the observed ask, not at the model premium", async () => {
-    // A buyer pays the offer. On a live BANKNIFTY 57700 CE the model said 770.22 against a
-    // quoted mid of 748.25 -- Rs 329 a lot of model error before any market cost.
     const result = await service().execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
-    expect(result.entry.fillPrice).toBe(752);
+    expect(result.entry.fillPrice).toBe(2110);
     expect(result.entry.feeBreakdown.entryChecks).toMatchObject({
       fillSource: "OPTION_PREMIUM_TICK_ASK",
-      observedAsk: 752,
+      observedAsk: 2110,
       quoteObservedAt: NOW.toISOString(),
     });
   });
 
   it("refuses a stale chain when no fresh executable tick exists", async () => {
-    // The measured failure was a model entry at 124.65 while the real ask was about 67.50.
-    // A missing quote is a refusal, not permission to invent a fill.
     const stale = chain({ observedAt: new Date(NOW.getTime() - 90 * 60 * 1000) });
     const result = await service({ snapshot: stale, premiumTick: null })
       .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
-    expect(result).toMatchObject({ approved: false, reason: "NO_FRESH_EXECUTABLE_QUOTE" });
+    expect(result).toMatchObject({ approved: false, reason: "NO_OPTION_ENTRY" });
   });
 
   it("uses the latest dense ask when the chain context is older", async () => {
@@ -217,7 +222,7 @@ describe("PrepareOptionEntry - pricing the entry", () => {
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
-    expect(result.entry.fillPrice).toBe(752);
+    expect(result.entry.fillPrice).toBe(2110);
     expect(result.entry.feeBreakdown.entryChecks).toMatchObject({
       fillSource: "OPTION_PREMIUM_TICK_ASK",
       quoteObservedAt: NOW.toISOString(),
@@ -225,7 +230,6 @@ describe("PrepareOptionEntry - pricing the entry", () => {
   });
 
   it("sizes in whole lots, never in units", async () => {
-    // `quantity: 1` against a lot of 15 is not a small position, it is an impossible one.
     const result = await service().execute({ tradeIdeaId: "idea-1", lots: 2, now: NOW });
 
     expect(result.approved).toBe(true);
@@ -236,11 +240,8 @@ describe("PrepareOptionEntry - pricing the entry", () => {
   });
 
   it("carries the dense tick's real underlying value as underlyingFillPrice, distinct from the idea's signal-time entry", async () => {
-    // The idea's entry_price (57720) is the signal-candle level; the dense tick observed at the
-    // actual fill moment shows the underlying has since moved to 57_797 -- the kind of
-    // signal-to-fill lag that produced a 19-158 point gap on real BANKNIFTY trades.
     const result = await service({
-      premiumTick: { observedAt: NOW, bid: 745, ask: 752, lastPrice: 748, underlyingValue: 57_797 },
+      premiumTick: { observedAt: NOW, bid: 2175, ask: 2187, lastPrice: 2181, underlyingValue: 57_797 },
     }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
 
     expect(result.approved).toBe(true);
@@ -263,14 +264,14 @@ describe("PrepareOptionEntry - pricing the entry", () => {
 describe("PrepareOptionEntry - the pre-trade gate", () => {
   it("refuses a wide spread and says by how much", async () => {
     const wide = chain();
-    wide.quotes[0] = { ...wide.quotes[0]!, bid: 700, ask: 800 };
+    wide.quotes[0] = { ...wide.quotes[0]!, bid: 2050, ask: 2150 };
     const result = await service({
       snapshot: wide,
       premiumTick: {
         observedAt: NOW,
-        bid: 700,
-        ask: 800,
-        lastPrice: 750,
+        bid: 2050,
+        ask: 2150,
+        lastPrice: 2100,
         underlyingValue: 57_720,
       },
     }).execute({ tradeIdeaId: "idea-1", now: NOW });
@@ -370,3 +371,124 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     expect(result).toMatchObject({ approved: false, reason: "IDEA_NOT_FOUND" });
   });
 });
+
+describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
+  it("populates entryProvenance with O2_CHAIN_ENUMERATION, targetDelta, and eligibleContractCount", async () => {
+    const result = await service().execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect((result.entry.feeBreakdown as any).entryProvenance).toMatchObject({
+      selectionMode: "O2_CHAIN_ENUMERATION",
+      targetDelta: 0.75,
+      eligibleContractCount: 1,
+      chainObservedAt: NOW.toISOString(),
+      strike: 56000,
+      optionType: "CE",
+    });
+  });
+
+  it("refuses with NO_OPTION_ENTRY when no contracts satisfy abs(delta) >= 0.75", async () => {
+    const otmChain = chain({
+      quotes: [
+        {
+          strikePrice: 57700, // ATM strike, delta ~0.52 (< 0.75)
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082557700CE",
+          providerToken: null,
+          lastPrice: 748,
+          bid: 745,
+          ask: 752,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ snapshot: otmChain, premiumTick: null }).execute({ tradeIdeaId: "idea-1", now: NOW });
+
+    expect(result.approved).toBe(false);
+    if (result.approved) return;
+    expect(result.reason).toBe("NO_OPTION_ENTRY");
+    expect(result.explanation).toContain("abs(delta) >= 0.75");
+  });
+
+  it("refuses with NO_OPTION_ENTRY when all matching quotes have ask <= bid", async () => {
+    const invalidQuoteChain = chain({
+      quotes: [
+        {
+          strikePrice: 56000,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082556000CE",
+          providerToken: null,
+          lastPrice: 2105,
+          bid: 2110,
+          ask: 2100, // Invalid: ask <= bid
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ snapshot: invalidQuoteChain, premiumTick: null }).execute({ tradeIdeaId: "idea-1", now: NOW });
+
+    expect(result.approved).toBe(false);
+    if (result.approved) return;
+    expect(result.reason).toBe("NO_OPTION_ENTRY");
+  });
+
+  it("ranks eligible contracts by distance to target delta 0.75, spread, and strike ASC", async () => {
+    // 56000 CE has delta ~0.76 (diff 0.01)
+    // 55500 CE has delta ~0.82 (diff 0.07)
+    const multiStrikeChain = chain({
+      quotes: [
+        {
+          strikePrice: 55500,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082555500CE",
+          providerToken: null,
+          lastPrice: 2550,
+          bid: 2540,
+          ask: 2560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+        {
+          strikePrice: 56000,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082556000CE",
+          providerToken: null,
+          lastPrice: 2105,
+          bid: 2100,
+          ask: 2110,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ snapshot: multiStrikeChain }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionStrike).toBe(56000);
+    expect((result.entry.feeBreakdown as any).entryProvenance.eligibleContractCount).toBe(2);
+  });
+});
+
