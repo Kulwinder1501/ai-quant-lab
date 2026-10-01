@@ -185,21 +185,33 @@ export interface IctLiquiditySnapshot {
   readonly rationale: string;
 }
 
-export class IctLiquidityResolver {
-  resolve(
-    currentPrice: number,
-    biasSnap: IctBiasSnapshot,
-    structSnap: IctStructureSnapshot,
-    zoneSnap: IctZoneSnapshot,
-    sessionLevels: SessionLevelsSnapshot,
-    /** Passed in rather than read off the snapshot, which no longer carries the history. */
-    confirmedPivots: readonly ConfirmedPivot[] = []
-  ): IctLiquiditySnapshot {
-    const erlPools: LiquidityPool[] = [];
-    const irlPools: LiquidityPool[] = [];
+export interface BuiltLiquidityPools {
+  readonly erlPools: readonly LiquidityPool[];
+  readonly irlPools: readonly LiquidityPool[];
+}
 
-    // 1. Collect External Range Liquidity (ERL)
-    if (sessionLevels.levels) {
+/**
+ * Collects the same ERL/IRL pool catalog `IctLiquidityResolver.resolve()` has always built for its
+ * own objective selection -- extracted verbatim (no logic changes) so a second, independent
+ * consumer (the shadow `computeDrawOnLiquidity` observation wired in `composite-engine.ts`) can see
+ * the identical pool set without duplicating this logic a second time and risking it drifting from
+ * what the live resolver actually uses. `resolve()` below calls this and is otherwise unchanged;
+ * the existing liquidity.test.ts suite (unmodified) is what proves that extraction didn't move
+ * `primaryTarget`/`coverage.liquidity`'s live behaviour by so much as one price.
+ */
+export function buildIctLiquidityPools(
+  currentPrice: number,
+  structSnap: IctStructureSnapshot,
+  zoneSnap: IctZoneSnapshot,
+  sessionLevels: SessionLevelsSnapshot,
+  /** Passed in rather than read off the snapshot, which no longer carries the history. */
+  confirmedPivots: readonly ConfirmedPivot[] = []
+): BuiltLiquidityPools {
+  const erlPools: LiquidityPool[] = [];
+  const irlPools: LiquidityPool[] = [];
+
+  // 1. Collect External Range Liquidity (ERL)
+  if (sessionLevels.levels) {
       erlPools.push({
         id: "erl-pdh",
         kind: "ERL_PDH",
@@ -329,6 +341,27 @@ export class IctLiquidityResolver {
         isMitigated: ob.state === "CONSUMED" || ob.state === "INVALIDATED",
       });
     }
+
+  return { erlPools, irlPools };
+}
+
+export class IctLiquidityResolver {
+  resolve(
+    currentPrice: number,
+    biasSnap: IctBiasSnapshot,
+    structSnap: IctStructureSnapshot,
+    zoneSnap: IctZoneSnapshot,
+    sessionLevels: SessionLevelsSnapshot,
+    /** Passed in rather than read off the snapshot, which no longer carries the history. */
+    confirmedPivots: readonly ConfirmedPivot[] = []
+  ): IctLiquiditySnapshot {
+    const { erlPools, irlPools } = buildIctLiquidityPools(
+      currentPrice,
+      structSnap,
+      zoneSnap,
+      sessionLevels,
+      confirmedPivots
+    );
 
     // 3. Lecture 5 Trend-Aligned Objective Matrix
     const bias = biasSnap.bias;
