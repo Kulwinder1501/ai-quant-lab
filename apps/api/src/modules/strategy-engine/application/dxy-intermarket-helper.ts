@@ -219,8 +219,17 @@ export async function buildAndEvaluateDxyIntermarket(
     dxyRoc3: dxyRoc3Val !== undefined && dxyCandleAvailableAt ? { value: dxyRoc3Val, availableAt: dxyCandleAvailableAt } : undefined,
     dxyRoc5: dxyRoc5Val !== undefined && dxyCandleAvailableAt ? { value: dxyRoc5Val, availableAt: dxyCandleAvailableAt } : undefined,
 
+    // KNOWN STUB, deliberate: real BOS/CHoCH structure detection and order-block/FVG location
+    // detection on DXY have not been implemented -- that's a substantial, separately-validated
+    // undertaking, out of scope here. These two fields are hardcoded to their "nothing
+    // detected" values rather than left undefined (undefined would mark the feature
+    // FEATURE_UNAVAILABLE via the completeness check below), so in practice dxyBias collapses
+    // to momentum (ROC)-only. `dxyStructureDataComputed: false` discloses this on the output
+    // payload (`dxy.structureDataComputed`) so nobody downstream mistakes this hardcoded
+    // "NONE"/"OPEN_SPACE" for an evaluated absence of structure.
     dxyStructure: dxyCandleAvailableAt ? { event: "NONE", confirmedAt: dxyCandleAvailableAt } : undefined,
     dxyLocation: dxyCandleAvailableAt ? { location: "OPEN_SPACE", availableAt: dxyCandleAvailableAt } : undefined,
+    dxyStructureDataComputed: false,
 
     xauCandleAvailableAt,
     xauATR14: xauCandleAvailableAt ? { value: xauAtr, availableAt: xauCandleAvailableAt } : undefined,

@@ -41,6 +41,14 @@ export interface DxyEvaluatorInputs {
   dxyRoc5?: { value: number; availableAt: string };
   dxyStructure?: { event: DxyStructure; confirmedAt: string; eventId?: string };
   dxyLocation?: { location: DxyLocation; availableAt: string };
+  /**
+   * Whether `dxyStructure`/`dxyLocation` above reflect a real BOS/CHoCH/OB/FVG determination
+   * (true, the default) versus a known stub that always reports "NONE"/"OPEN_SPACE" because
+   * structure/location detection for DXY isn't implemented yet (false). Passed through to
+   * `DxyIntermarketPayload.dxy.structureDataComputed` so callers can't mistake a stubbed
+   * "nothing detected" for an evaluated absence.
+   */
+  dxyStructureDataComputed?: boolean;
 
   xauCandleAvailableAt?: string;
   xauATR14?: { value: number; availableAt: string };
@@ -69,6 +77,12 @@ export interface DxyIntermarketPayload {
     momentum: DxyMomentum;
     location: DxyLocation;
     bias: DxyBias;
+    /**
+     * False when `structure`/`location` above are a stand-in stub ("NONE"/"OPEN_SPACE")
+     * rather than a real BOS/CHoCH/OB/FVG determination -- see `DxyEvaluatorInputs.dxyStructureDataComputed`.
+     * Defaults to true for callers that supply a real `dxyStructure`/`dxyLocation`.
+     */
+    structureDataComputed: boolean;
   };
   smt: {
     state: SmtState;
@@ -373,6 +387,7 @@ export class DxyIntermarketEvaluator {
     const dxyMomentum = evaluateDxyMomentum(inputs.dxyRoc3?.value, inputs.dxyRoc5?.value);
     const dxyStructure = inputs.dxyStructure?.event ?? "NONE";
     const dxyLocation = inputs.dxyLocation?.location ?? "OPEN_SPACE";
+    const dxyStructureDataComputed = inputs.dxyStructureDataComputed ?? true;
     const dxyBias = evaluateDxyBias(dxyStructure, dxyMomentum);
 
     const smtResult = evaluateSmtDivergence(
@@ -455,6 +470,7 @@ export class DxyIntermarketEvaluator {
         momentum: dxyMomentum,
         location: dxyLocation,
         bias: dxyBias,
+        structureDataComputed: dxyStructureDataComputed,
       },
       smt: {
         state: smtResult.state,
