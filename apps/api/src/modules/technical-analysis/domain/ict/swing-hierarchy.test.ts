@@ -9,13 +9,15 @@ import type { ConfirmedPivot } from "./causal-pivot.js";
 let nextIndex = 0;
 function pivot(type: "HIGH" | "LOW", price: number): ConfirmedPivot {
   const index = nextIndex++;
+  const confirmedAtTime = new Date(2026, 0, 1, 0, index + 3);
   return {
     index,
     time: new Date(2026, 0, 1, 0, index),
     price,
     type,
     confirmedAtIndex: index + 3,
-    confirmedAtTime: new Date(2026, 0, 1, 0, index + 3),
+    confirmedAtTime,
+    availableAt: confirmedAtTime.getTime(),
   };
 }
 

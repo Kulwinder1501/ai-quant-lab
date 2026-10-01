@@ -30,13 +30,15 @@ describe("IctLiquidityResolver", () => {
   };
 
   function makePivot(index: number, price: number, type: "HIGH" | "LOW") {
+    const confirmedAtTime = new Date();
     return {
       index,
       time: new Date(),
       price,
       type,
       confirmedAtIndex: index + 2,
-      confirmedAtTime: new Date(),
+      confirmedAtTime,
+      availableAt: confirmedAtTime.getTime(),
     };
   }
 
@@ -153,9 +155,13 @@ describe("liquidity objective selection", () => {
    * pdh and lastHH at the same price (120), so there is only one candidate and the test cannot tell
    * "nearest" from "farthest". That is why the defect survived it.
    */
-  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => ({
-    index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime: new Date(),
-  });
+  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => {
+    const confirmedAtTime = new Date();
+    return {
+      index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime,
+      availableAt: confirmedAtTime.getTime(),
+    };
+  };
   const zones: IctZoneSnapshot = { activeFvgs: [], activeObs: [], lastZoneEvent: null };
   const bullBias = (equilibrium: number): IctBiasSnapshot => ({
     bias: "BULLISH",
@@ -216,9 +222,13 @@ describe("intermediate target: internal-range waypoint", () => {
    * only fires when none exists (the pre-existing tests above, whose fixtures carry no zones, cover
    * that fallback already).
    */
-  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => ({
-    index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime: new Date(),
-  });
+  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => {
+    const confirmedAtTime = new Date();
+    return {
+      index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime,
+      availableAt: confirmedAtTime.getTime(),
+    };
+  };
   const bullBias = (equilibrium: number): IctBiasSnapshot => ({
     bias: "BULLISH",
     dailyTemplate: "OLHC",

@@ -205,13 +205,15 @@ describe("extractIctStructuralFeatures", () => {
   });
 
   it("computes the swing-hierarchy feature from the snapshot's swing hierarchy and trend", () => {
+    const confirmedAtTime = new Date();
     const nearestIntermediateTermLow = {
       index: 0,
       time: new Date(),
       price: 100,
       type: "LOW" as const,
       confirmedAtIndex: 3,
-      confirmedAtTime: new Date(),
+      confirmedAtTime,
+      availableAt: confirmedAtTime.getTime(),
     };
     const features = extractIctStructuralFeatures(
       makeSnapshot({

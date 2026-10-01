@@ -4,13 +4,15 @@ import type { IctStructureSnapshot } from "../../../technical-analysis/domain/ic
 import type { ConfirmedPivot } from "../../../technical-analysis/domain/ict/causal-pivot.js";
 
 function pivot(index: number, price: number, type: "HIGH" | "LOW"): ConfirmedPivot {
+  const confirmedAtTime = new Date(Date.UTC(2026, 8, 22, 3, 47 + index));
   return {
     index,
     time: new Date(Date.UTC(2026, 8, 22, 3, 45 + index)),
     price,
     type,
     confirmedAtIndex: index + 2,
-    confirmedAtTime: new Date(Date.UTC(2026, 8, 22, 3, 47 + index)),
+    confirmedAtTime,
+    availableAt: confirmedAtTime.getTime(),
   };
 }
 
@@ -101,6 +103,7 @@ describe("toChartIctStructure", () => {
         candleTime: new Date(Date.UTC(2026, 8, 22, 8, 50)),
         brokenPivot: pivot(4, 23193.65, "LOW"),
         isWickOnly: false,
+        availableAt: Date.UTC(2026, 8, 22, 8, 50),
       },
     }));
 

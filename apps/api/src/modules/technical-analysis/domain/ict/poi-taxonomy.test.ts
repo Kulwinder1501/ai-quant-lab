@@ -50,6 +50,7 @@ function withEvent(type: StructureEvent["type"], direction: "BULLISH" | "BEARISH
       candleTime: new Date(Date.UTC(2026, 0, 1, 9, 25)),
       brokenPivot: pivot,
       isWickOnly: type === "SWEEP",
+      availableAt: Date.UTC(2026, 0, 1, 9, 25),
     },
   };
 }
