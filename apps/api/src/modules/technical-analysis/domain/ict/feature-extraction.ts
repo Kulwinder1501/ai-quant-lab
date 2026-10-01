@@ -1,6 +1,6 @@
 import type { IctStateCompositeSnapshot } from "./config.js";
 import type { IctBiasDirection } from "./bias.js";
-import { isDoctrinallyValidOrderBlockCandidate, type OrderBlock } from "./zones.js";
+import { isDoctrinallyValidOrderBlockCandidate, type FairValueGap, type OrderBlock } from "./zones.js";
 import { computeRefinedOrderBlock, type RefinedOrderBlockFeature } from "./refined-order-block.js";
 import { computeOte, type OteFeature } from "./ote.js";
 import { computeSwingHierarchyFeature, type SwingHierarchyFeature } from "./swing-hierarchy.js";
@@ -185,12 +185,28 @@ export interface IctRawPrimitiveFeatureVector {
   ob_direction: -1 | 0 | 1;
   ob_distance_atr: number;
   ob_age_bars: number;
+  /**
+   * Whether the nearest order block has been mitigated as of this bar. Named `_count` for schema
+   * stability, but `OrderBlock` only ever carries a single optional `mitigatedAt` timestamp, never a
+   * running count -- a failed block becomes a brand-new zone object (see the immutability note on
+   * `OrderBlock.kind` in zones.ts), so "mitigated" is intrinsically binary here, not cumulative.
+   * 1 when `mitigatedAt` is set, 0 when absent or when there is no nearest order block at all.
+   */
   ob_mitigation_count_at_T: number;
 
   // Valuation & Context
   premium_discount_state: -1 | 0 | 1;
   ote_zone_active: boolean;
-  session_killzone_active: boolean;
+  /*
+   * Deliberately no `session_killzone_active` field here. `SessionLevelsSnapshot` (session-levels.ts)
+   * tracks reference levels and the current session's own high/low/open -- it has no killzone concept
+   * at all. The only killzone logic in the codebase (`killzoneAt`/`KILLZONE_WINDOWS` in
+   * strategy-engine's `ict-structure-strategy.ts`) lives one layer up from this module, is
+   * module-private, and is keyed off a raw `Date`, not off any field this snapshot carries. Rather
+   * than reach across that layer boundary or invent a fake computation to satisfy a field that was
+   * never backed by real data, the field is omitted -- a future caller that wants it should compute
+   * it the same way the strategy does, from the bar's own timestamp.
+   */
   body_expansion_atr: number;
   fvg_created: boolean;
   displacement_confirmed: boolean;
@@ -262,7 +278,7 @@ export function extractIctRawPrimitiveFeatureVector(
     : 0;
   const ob_distance_atr = nearestOb ? nearestOb.dist / effectiveAtr : -1;
   const ob_age_bars = nearestOb ? snapshot.barIndex - nearestOb.ob.createdAtBarIndex : -1;
-  const ob_mitigation_count_at_T = nearestOb ? nearestOb.ob.mitigationCount : 0;
+  const ob_mitigation_count_at_T = nearestOb && nearestOb.ob.mitigatedAt !== undefined ? 1 : 0;
 
   // Valuation & Context
   const dealingRange = snapshot.bias.dealingRange;
@@ -270,8 +286,7 @@ export function extractIctRawPrimitiveFeatureVector(
     dealingRange === null ? 0 : dealingRange.isPremium(currentPrice) ? 1 : -1;
 
   const ote = computeOte(dealingRange, snapshot.structure.trend, currentPrice);
-  const ote_zone_active = ote !== null && ote.isInOteZone;
-  const session_killzone_active = snapshot.sessionLevels.inKillzone;
+  const ote_zone_active = ote !== null && ote.isWithinOte;
   const body_expansion_atr = Math.abs(candle.close - candle.open) / effectiveAtr;
 
   const fvg_created = activeFvgs.some((f) => f.createdAtBarIndex === snapshot.barIndex);
@@ -302,7 +317,6 @@ export function extractIctRawPrimitiveFeatureVector(
     ob_mitigation_count_at_T,
     premium_discount_state,
     ote_zone_active,
-    session_killzone_active,
     body_expansion_atr,
     fvg_created,
     displacement_confirmed,
