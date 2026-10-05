@@ -151,6 +151,47 @@ describe("FyersOptionChainClient", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // Regression test for the 2026-09-29 to 2026-10-05 NIFTY50 chain gap: a weekly symbol's month
+  // slot is one fixed-width character, `1`-`9` for Jan-Sep but `O`/`N`/`D` for Oct/Nov/Dec -- never
+  // the two-digit `10`/`11`/`12` a plain `Number(month)` produces. With more than one expiry in the
+  // header (NIFTY50 always has several, unlike BANKNIFTY's monthly-only calendar), every row
+  // used to go unattributable from the first October weekly onward and the whole chain came back
+  // with zero quotes.
+  it("matches an October/November/December weekly symbol by its single-letter month code", async () => {
+    const client = build(async () => new Response(JSON.stringify({
+      s: "ok",
+      code: 200,
+      data: {
+        // More than one expiry in the header, so the shortcut for a lone date does not apply and
+        // the symbol must actually be parsed.
+        expiryData: [
+          { date: "06-10-2026", expiry: "1", expiry_flag: "W" },
+          { date: "27-10-2026", expiry: "2", expiry_flag: "M" },
+        ],
+        optionsChain: [
+          { strike_price: 0, ltp: 22_513, symbol: "NSE:NIFTY50-INDEX" },
+          {
+            strike_price: 22_000, option_type: "CE", symbol: "NSE:NIFTY26O0622000CE",
+            fyToken: "tok-ce", ltp: 527, bid: 530.1, ask: 531.45, volume: 2_997_670,
+            oi: 518_895, prev_oi: 775_905, oich: -257_010,
+          },
+          {
+            strike_price: 22_000, option_type: "PE", symbol: "NSE:NIFTY26O0622000PE",
+            fyToken: "tok-pe", ltp: 6.15, bid: 6.1, ask: 6.15, volume: 183_136_200,
+            oi: 14_080_495, prev_oi: 10_058_500, oich: 4_021_995,
+          },
+        ],
+      },
+    }), { status: 200 }));
+
+    const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+    expect(snapshot.quotes).toHaveLength(2);
+    expect(snapshot.quotes.every((quote) => quote.expiryKind === "WEEKLY")).toBe(true);
+    expect(snapshot.quotes.every((quote) => quote.expiryDate.toISOString().slice(0, 10) === "2026-10-06"))
+      .toBe(true);
+  });
+
   it("sends the colon-joined Fyers authorization header", async () => {
     let authorization: string | undefined;
     const client = build(async (_input, init) => {

@@ -202,6 +202,16 @@ function parseExpiryDate(value: string | undefined): Date | null {
  * `NSE:BANKNIFTY26AUG57400PE` is yy-MON for a monthly. When a chain covers exactly one
  * expiry — which is what a single request returns — the header's own date is
  * unambiguous and is used directly, which avoids depending on a symbol-format parse.
+ *
+ * The weekly `M` slot is fixed-width (one character) so the symbol length does not vary
+ * by month: single digit `1`-`9` for January-September, but `O`/`N`/`D` for October,
+ * November, December -- not `10`/`11`/`12`. Confirmed live 2026-10-05 against
+ * `NSE:NIFTY26O0622000PE` (the 06-10-2026 weekly). Treating the month as a plain number
+ * (`Number(month)` -> `"10"`) only ever matched Jan-Sep: every NIFTY50 weekly row from the
+ * first October expiry onward became unattributable and was dropped, emptying `quotes`
+ * entirely and tripping `assertSnapshotStorable`'s "chain returned no contracts" refusal --
+ * the 2026-09-29 to 2026-10-05 NIFTY50 chain gap. BANKNIFTY has no weekly expiries (see
+ * `atm-premium-contracts.ts`'s calendar doc), so its monthly-only symbols never hit this.
  */
 function expiryFromSymbol(
   symbol: string | undefined,
@@ -214,11 +224,13 @@ function expiryFromSymbol(
   // More than one expiry in the header: prefer a symbol match so rows are not all
   // attributed to the nearest expiry.
   if (symbol) {
+    const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    // Index 0 is unused (months are 1-indexed); 10/11/12 are the single-letter codes above.
+    const weeklyMonthCodes = ["", "1", "2", "3", "4", "5", "6", "7", "8", "9", "O", "N", "D"];
     for (const date of dates) {
       const [year, month, day] = date.split("-") as [string, string, string];
       const yy = year.slice(2);
-      const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-      const weekly = `${yy}${Number(month)}${day}`;
+      const weekly = `${yy}${weeklyMonthCodes[Number(month)]}${day}`;
       const monthly = `${yy}${monthNames[Number(month) - 1]}`;
       if (symbol.includes(weekly) || symbol.includes(monthly)) {
         return new Date(`${date}T10:00:00.000Z`);
