@@ -198,17 +198,23 @@ def fetch_active_structural_levels(conn: psycopg.Connection, symbol: str, as_of_
     as_of_ist = as_of_time.astimezone(INDIA_TZ) if as_of_time.tzinfo else as_of_time.replace(tzinfo=INDIA_TZ)
     session_date = as_of_ist.date()
 
+    # liquidity_pool_candidates has no `status` column; a level is active as of
+    # as_of_time when it was already knowable (known_at_time <= as_of_time) and
+    # not yet invalidated by that time. `created_at` is just the row's insertion
+    # timestamp (DEFAULT CURRENT_TIMESTAMP, stamped in per-run batches by
+    # generate-liquidity-candidates.ts) and is not safe for walk-forward filtering.
     query = """
         SELECT pool_type, price
         FROM liquidity_pool_candidates
-        WHERE status = 'ACTIVE'
-          AND created_at <= %s
+        WHERE symbol = %s
+          AND known_at_time <= %s
+          AND (invalidated_at_time IS NULL OR invalidated_at_time > %s)
           AND pool_type IN ('PDL', 'SWING_HIGH', 'SWING_LOW', 'SESSION_HIGH', 'SESSION_LOW', 'ITH', 'ITL')
-        ORDER BY created_at DESC
+        ORDER BY known_at_time DESC
         LIMIT 50;
     """
     with conn.cursor() as cur:
-        cur.execute(query, (as_of_time,))
+        cur.execute(query, (symbol, as_of_time, as_of_time))
         rows = cur.fetchall()
 
     if rows:

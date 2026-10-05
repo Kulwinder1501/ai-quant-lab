@@ -771,6 +771,11 @@ class PostgresMlRepository:
         # _load_breadth_contexts. Keyed by (data_cutoff_at, window_start).
         self._breadth_cache: dict[tuple[datetime, datetime], list[BreadthContext]] = {}
 
+    @property
+    def connection(self) -> Connection[Any]:
+        """The underlying psycopg connection, for callers that need a raw cursor."""
+        return self._connection
+
     def load_candle_evidence(self, request: DatasetRequest) -> Sequence[CandleEvidence]:
         """Return ordered source-candle evidence with later labels kept separate from features."""
 
