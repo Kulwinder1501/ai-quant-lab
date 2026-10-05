@@ -83,12 +83,15 @@ export function evaluateO1TradeExit(input: O1ExitEvaluationInput): O1ExitEvaluat
     return { shouldExit: true, exitReason: "TIME_STOP", telemetry };
   }
 
-  // 4. PREMIUM_TOLERANCE: underlying move >= +15 bps but option premium drawdown >= 25%
+  // 4. PREMIUM_TOLERANCE: underlying has NOT moved meaningfully (< 10 bps) for > 10 minutes
+  // while the option premium has bled out > 25% -- flat underlying, bleeding premium (pure
+  // theta/vega decay), not a directional stop.
   if (
     underlyingMoveBps !== null &&
-    underlyingMoveBps >= 15 &&
+    underlyingMoveBps < 10 &&
+    holdingMinutes > 10 &&
     premiumDrawdownPct !== null &&
-    premiumDrawdownPct >= 0.25
+    premiumDrawdownPct > 0.25
   ) {
     return { shouldExit: true, exitReason: "PREMIUM_TOLERANCE", telemetry };
   }

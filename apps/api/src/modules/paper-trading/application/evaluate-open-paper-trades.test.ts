@@ -1287,13 +1287,13 @@ describe("EvaluateOpenPaperTrades", () => {
       });
     });
 
-    it("exits O1 trade with PREMIUM_TOLERANCE when underlying move >= +15bps but premium drawdown >= 25%", async () => {
+    it("exits O1 trade with PREMIUM_TOLERANCE when flat underlying (< 10bps) bleeds premium (> 25%) past 10 minutes held", async () => {
       const closings: ClosePaperTradeInput[] = [];
       const trade = o1Trade({ entryPrice: 200 });
-      const asOf = new Date("2026-08-06T09:20:00.000Z");
-      // Underlying move = 24040 - 24000 = +40 pts = +16.67 bps (>= 15 bps)
-      // Current option price = 140 -> drawdown = (200 - 140)/200 = 30% (>= 25%)
-      const densePremiums = denseReader(sample("2026-08-06T09:19:45.000Z", 140, 24040));
+      const asOf = new Date("2026-08-06T09:26:00.000Z"); // 11 minutes after openedAt (> 10)
+      // Underlying move = 24010 - 24000 = +10 pts = +4.17 bps (< 10 bps, i.e. flat)
+      // Current option price = 140 -> drawdown = (200 - 140)/200 = 30% (> 25%)
+      const densePremiums = denseReader(sample("2026-08-06T09:25:45.000Z", 140, 24010));
 
       const result = await new EvaluateOpenPaperTrades(
         stubRepo(trade, closings),

@@ -107,24 +107,106 @@ describe("evaluateO1TradeExit (O1 Exit State Machine)", () => {
     expect(res.telemetry.progressR).toBeCloseTo(40 / 420, 3);
   });
 
-  it("triggers PREMIUM_TOLERANCE when underlyingMoveBps >= 15 but option premium drawdown >= 25%", () => {
-    const res = evaluateO1TradeExit({
-      side: "LONG",
-      underlyingDirection: "LONG",
+  /**
+   * PREMIUM_TOLERANCE is the "flat underlying, bleeding premium" check: the underlying has
+   * NOT moved meaningfully (< 10 bps) while the option has decayed hard (pure theta/vega
+   * drag, not a directional stop) -- and it should only fire once the position has been held
+   * long enough (> 10 min) to rule out opening-print noise. The frozen spec is:
+   *
+   *   underlyingMoveBps < 10 AND holdingMinutes > 10 AND premiumLossPct > 0.25 -> EXIT
+   *
+   * A shared base keeps HARD_STOP / UNDERLYING_INVALIDATION / TIME_STOP / TARGET_REACHED out
+   * of range (option price between stop and target, underlying nowhere near the invalidation
+   * level, holding <= 15 min so TIME_STOP's own >15min gate never engages) so each case below
+   * isolates the PREMIUM_TOLERANCE condition itself.
+   */
+  describe("PREMIUM_TOLERANCE (flat underlying, bleeding premium)", () => {
+    const base = {
+      side: "LONG" as const,
+      underlyingDirection: "LONG" as const,
       entryUnderlying: 57720,
       invalidationLevelAtEntry: 57300,
       initialRiskDistance: 420,
       entryOptionPrice: 1000,
       openedAt: OPENED_AT,
-      now: new Date("2026-10-01T10:05:00.000Z"), // holding 5 min
-      currentOptionPrice: 700, // 300 drawdown on 1000 = 30% >= 25%
       effectivePremiumStop: 500,
       effectivePremiumTarget: 1800,
-      currentUnderlyingPrice: 57850, // +130 points move = +22.5 bps >= 15 bps
+    };
+
+    it("does NOT trigger when held < 10 minutes, even with bps < 10 and loss > 25%", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:05:00.000Z"), // holding 5 min <= 10
+        currentOptionPrice: 700, // 30% drawdown > 25%
+        currentUnderlyingPrice: 57740, // +20 pts = +3.47 bps < 10
+      });
+
+      expect(res.shouldExit).toBe(false);
+      expect(res.exitReason).toBeNull();
     });
 
-    expect(res.shouldExit).toBe(true);
-    expect(res.exitReason).toBe("PREMIUM_TOLERANCE");
+    it("does NOT trigger when the underlying HAS moved meaningfully (bps >= 10), even held > 10 min and loss > 25%", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:11:00.000Z"), // holding 11 min > 10
+        currentOptionPrice: 700, // 30% drawdown > 25%
+        currentUnderlyingPrice: 57807, // +87 pts = +15.07 bps, a real move -> not "flat"
+      });
+
+      expect(res.shouldExit).toBe(false);
+      expect(res.exitReason).toBeNull();
+    });
+
+    it("triggers when held > 10 min, underlying flat (bps < 10), and premium loss > 25%", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:11:00.000Z"), // holding 11 min > 10
+        currentOptionPrice: 700, // 30% drawdown > 25%
+        currentUnderlyingPrice: 57740, // +20 pts = +3.47 bps < 10
+      });
+
+      expect(res.shouldExit).toBe(true);
+      expect(res.exitReason).toBe("PREMIUM_TOLERANCE");
+    });
+
+    it("boundary: exactly 10 minutes held does NOT trigger (gate is strictly > 10)", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:10:00.000Z"), // holding exactly 10 min
+        currentOptionPrice: 700, // 30% drawdown > 25%
+        currentUnderlyingPrice: 57740, // +3.47 bps < 10
+      });
+
+      expect(res.telemetry.holdingMinutes).toBe(10);
+      expect(res.shouldExit).toBe(false);
+      expect(res.exitReason).toBeNull();
+    });
+
+    it("boundary: exactly 10 bps move does NOT trigger (gate is strictly < 10)", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:11:00.000Z"), // holding 11 min > 10
+        currentOptionPrice: 700, // 30% drawdown > 25%
+        currentUnderlyingPrice: 57777.72, // +57.72 pts = exactly 10 bps on entry 57720
+      });
+
+      expect(res.telemetry.underlyingMoveBps).toBeCloseTo(10, 6);
+      expect(res.shouldExit).toBe(false);
+      expect(res.exitReason).toBeNull();
+    });
+
+    it("boundary: exactly 25% premium loss does NOT trigger (gate is strictly > 0.25)", () => {
+      const res = evaluateO1TradeExit({
+        ...base,
+        now: new Date("2026-10-01T10:11:00.000Z"), // holding 11 min > 10
+        currentOptionPrice: 750, // exactly 25% drawdown on entry 1000
+        currentUnderlyingPrice: 57740, // +3.47 bps < 10
+      });
+
+      expect(res.telemetry.premiumDrawdownPct).toBeCloseTo(0.25, 6);
+      expect(res.shouldExit).toBe(false);
+      expect(res.exitReason).toBeNull();
+    });
   });
 
   /**
