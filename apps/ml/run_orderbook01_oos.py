@@ -7,11 +7,14 @@ Status: FROZEN — Parameters locked after calibration on Aug 21 – Sep 25, 202
 Evaluation Logic:
 1. Tier 1 (Reversal): SWING_HIGH/LOW, ITH/ITL, SESSION_HIGH/LOW at 300s horizon.
    - DI_tilde = -DI. Predict REJECTION (breached=False) if DI_tilde > 0.
-   - H1-R Target: Accuracy >= 0.72, Binomial p <= 0.01, N >= 3,000, >= 4 of 6 level types pass.
+   - H1-R Target: Accuracy >= 0.72, Accuracy > trivial majority-class baseline, McNemar p <= 0.01
+     (one-sided, model vs. baseline on paired events -- see mcnemar_one_sided_p), N >= 3,000,
+     >= 4 of 6 level types pass.
 
 2. Tier 2 (Momentum): PDL at 30s horizon.
    - DI_tilde = -DI. Predict SWEEP (breached=True) if DI_tilde > 0.
-   - H1-M Target: Accuracy >= 0.78, Binomial p <= 0.01, N >= 1,000.
+   - H1-M Target: Accuracy >= 0.78, Accuracy > trivial majority-class baseline, McNemar p <= 0.01
+     (one-sided, model vs. baseline), N >= 1,000.
 
 3. Hypothesis 2 (Monotonicity):
    - Q4 accuracy >= Q1 accuracy + 8 percentage points.
@@ -23,6 +26,17 @@ Evaluation Logic:
    - Case C: H1-R PASS, H1-M FALSIFIED (Reversal-only edge)
    - Case D: H1-R FALSIFIED, H1-M PASS (PDL momentum edge)
    - Case E: H1-R FALSIFIED, H1-M FALSIFIED (Falsified)
+
+Statistical note (fixed 2026-10-05): H1-R/H1-M previously tested model accuracy against a 50/50
+binomial null (`binomtest(successes, n, 0.5)`), which is the wrong null for these heavily
+class-imbalanced labels -- PDL breaches at the 30s horizon 97.28% of the time (4299/4419,
+confirmed against the live DB), and other Tier-1 levels sit at 84-97%. Against a 0.5 null, a
+constant always-predict-majority classifier also reports p~=0.0, so the old test could not
+distinguish a real edge from doing nothing. This mirrors the "trivial baseline" convention used
+throughout apps/ml/train.py (`trivial_majority_metrics`): every hypothesis here is now tested
+against the real majority-class baseline computed from the same population, using a one-sided
+exact McNemar test on paired model-vs-baseline correctness (see `mcnemar_one_sided_p`) rather
+than a one-sample test against an arbitrary null proportion.
 """
 
 from __future__ import annotations
@@ -189,6 +203,56 @@ def match_events_to_depth(
     return matched
 
 
+def trivial_baseline_rate(outcomes: list[bool]) -> tuple[bool, float]:
+    """Compute the always-predict-the-majority-outcome baseline on this exact population.
+
+    Mirrors the house convention in apps/ml/train.py's `trivial_majority_metrics`: the
+    baseline that matters is not a 50/50 coin flip, it's a constant predictor that always
+    guesses whichever outcome is more common. For heavily imbalanced labels (e.g. PDL
+    breaches 97.28% of the time at the 30s horizon) that constant predictor's accuracy is
+    far above 50%, so any test against a 0.5 null overstates significance for every model,
+    including a trivial one.
+    """
+    n = len(outcomes)
+    if n == 0:
+        return True, 0.0
+    rate_true = sum(1 for o in outcomes if o) / n
+    majority_label = rate_true >= 0.5
+    baseline_acc = rate_true if majority_label else (1.0 - rate_true)
+    return majority_label, baseline_acc
+
+
+def mcnemar_one_sided_p(model_correct: list[bool], baseline_correct: list[bool]) -> tuple[float, int, int]:
+    """One-sided exact McNemar test: does the model beat the majority-baseline on these paired events?
+
+    The model and the trivial baseline are scored on the *same* events, so their correctness
+    is correlated -- both tend to be right together whenever an event lands on the majority
+    side, and that shared correctness carries zero information about whether the model adds
+    anything. A one-sample test (binomial against 0.5, or even against the baseline rate
+    treated as an independent null proportion) can't see that correlation and will call a
+    result "significant" purely because concordant-correct pairs pile up for both sides --
+    which is exactly how the old 50/50-null test let a below-baseline PDL accuracy (96.8%
+    model vs 97.28% trivial) through as p~=0.
+
+    McNemar's test strips out the concordant pairs entirely and looks only at the discordant
+    ones -- cases where exactly one of {model, baseline} was correct -- and asks whether the
+    model wins those more often than chance (p=0.5). That is precisely "does the model beat
+    this specific majority-class baseline on this specific sample," which is the paired
+    comparison the task calls for. It reduces to an exact binomial test on the discordant
+    count, so no new dependency (e.g. statsmodels) is needed -- scipy.stats.binomtest, already
+    imported above, is sufficient.
+    """
+    n10 = sum(1 for m, b in zip(model_correct, baseline_correct) if m and not b)
+    n01 = sum(1 for m, b in zip(model_correct, baseline_correct) if (not m) and b)
+    discordant = n10 + n01
+    if discordant == 0:
+        # Model and baseline agree on every single event (always both right or both wrong) --
+        # there is no paired evidence the model adds anything, so this cannot be significant.
+        return 1.0, n10, n01
+    p_val = float(stats.binomtest(n10, discordant, 0.5, alternative="greater").pvalue)
+    return p_val, n10, n01
+
+
 def evaluate_h1_r(tier1_matched: list[dict], is_oos: bool = True) -> dict:
     """Evaluate Hypothesis 1-R (Tier 1 Reversal DI Accuracy)."""
     n = len(tier1_matched)
@@ -197,7 +261,8 @@ def evaluate_h1_r(tier1_matched: list[dict], is_oos: bool = True) -> dict:
             "status": "INSUFFICIENT_DATA",
             "n": 0,
             "accuracy": 0.0,
-            "binomial_p": 1.0,
+            "trivial_baseline_accuracy": 0.0,
+            "vs_baseline_p": 1.0,
             "per_level": {},
             "level_types_passed": 0,
             "reason": "Zero matched Tier 1 contact events in period.",
@@ -207,43 +272,58 @@ def evaluate_h1_r(tier1_matched: list[dict], is_oos: bool = True) -> dict:
     for level_type in TIER1_LEVELS:
         level_events = [e for e in tier1_matched if e["pool_type"] == level_type]
         if not level_events:
-            level_results[level_type] = {"n": 0, "accuracy": 0.0, "pass": False}
+            level_results[level_type] = {"n": 0, "accuracy": 0.0, "trivial_baseline_accuracy": 0.0, "pass": False}
             continue
         # Tier 1 Reversal: predict REJECTION (breached == False) if di_tilde > 0
-        corrects = [(e["di_tilde"] > 0) == (not e["breached"]) for e in level_events]
-        acc = float(np.mean(corrects))
-        # Level passes if acc >= 0.70 and binomial p <= 0.05
-        p_val = float(stats.binomtest(sum(corrects), len(corrects), 0.50, alternative="greater").pvalue)
+        actual_breached = [e["breached"] for e in level_events]
+        model_correct = [(e["di_tilde"] > 0) == (not e["breached"]) for e in level_events]
+        acc = float(np.mean(model_correct))
+        majority_label, baseline_acc = trivial_baseline_rate(actual_breached)
+        baseline_correct = [a == majority_label for a in actual_breached]
+        p_val, n10, n01 = mcnemar_one_sided_p(model_correct, baseline_correct)
+        # Level passes only if it clears the pre-registered floor AND beats the real
+        # majority-class baseline on this population, not merely a 50/50 coin flip.
         level_results[level_type] = {
             "n": len(level_events),
             "accuracy": round(acc, 4),
+            "trivial_baseline_accuracy": round(baseline_acc, 4),
             "p_value": round(p_val, 6),
-            "pass": bool(acc >= 0.70 and p_val <= 0.05),
+            "mcnemar_n10": n10,
+            "mcnemar_n01": n01,
+            "pass": bool(acc >= 0.70 and acc > baseline_acc and p_val <= 0.05),
         }
 
-    all_correct = [(e["di_tilde"] > 0) == (not e["breached"]) for e in tier1_matched]
-    overall_acc = float(np.mean(all_correct))
-    binom_p = float(stats.binomtest(sum(all_correct), n, 0.50, alternative="greater").pvalue)
+    all_actual_breached = [e["breached"] for e in tier1_matched]
+    all_model_correct = [(e["di_tilde"] > 0) == (not e["breached"]) for e in tier1_matched]
+    overall_acc = float(np.mean(all_model_correct))
+    overall_majority_label, overall_baseline_acc = trivial_baseline_rate(all_actual_breached)
+    overall_baseline_correct = [a == overall_majority_label for a in all_actual_breached]
+    vs_baseline_p, n10, n01 = mcnemar_one_sided_p(all_model_correct, overall_baseline_correct)
     levels_passed = sum(1 for r in level_results.values() if r["pass"])
 
     min_n = 3000 if is_oos else 1000
     pass_acc = bool(overall_acc >= 0.72)
-    pass_p = bool(binom_p <= 0.01)
+    pass_baseline = bool(overall_acc > overall_baseline_acc)
+    pass_p = bool(vs_baseline_p <= 0.01)
     pass_n = bool(n >= min_n)
     pass_levels = bool(levels_passed >= 4)
 
-    is_pass = pass_acc and pass_p and pass_n and pass_levels
+    is_pass = pass_acc and pass_baseline and pass_p and pass_n and pass_levels
 
     return {
         "status": "PASS" if is_pass else "FALSIFIED",
         "n": n,
         "accuracy": round(overall_acc, 4),
-        "binomial_p": round(binom_p, 6),
+        "trivial_baseline_accuracy": round(overall_baseline_acc, 4),
+        "vs_baseline_p": round(vs_baseline_p, 6),
+        "mcnemar_n10": n10,
+        "mcnemar_n01": n01,
         "levels_passed": levels_passed,
         "per_level": level_results,
         "criteria_checks": {
             "acc_ge_0_72": pass_acc,
-            "p_le_0_01": pass_p,
+            "acc_gt_trivial_baseline": pass_baseline,
+            "mcnemar_p_le_0_01": pass_p,
             f"n_ge_{min_n}": pass_n,
             "levels_ge_4": pass_levels,
         },
@@ -258,30 +338,47 @@ def evaluate_h1_m(tier2_matched: list[dict], is_oos: bool = True) -> dict:
             "status": "INSUFFICIENT_DATA",
             "n": 0,
             "accuracy": 0.0,
-            "binomial_p": 1.0,
+            "trivial_baseline_accuracy": 0.0,
+            "vs_baseline_p": 1.0,
             "reason": "Zero matched Tier 2 (PDL) contact events in period.",
         }
 
     # Tier 2 Momentum (PDL): predict SWEEP (breached == True) if di_tilde > 0
-    corrects = [(e["di_tilde"] > 0) == e["breached"] for e in tier2_matched]
-    acc = float(np.mean(corrects))
-    binom_p = float(stats.binomtest(sum(corrects), n, 0.50, alternative="greater").pvalue)
+    actual_breached = [e["breached"] for e in tier2_matched]
+    model_correct = [(e["di_tilde"] > 0) == e["breached"] for e in tier2_matched]
+    acc = float(np.mean(model_correct))
+
+    # PDL breaches at the 30s horizon in 84-97% of contacts (confirmed against the live DB --
+    # 4299/4419 = 97.28% for PDL specifically), so a constant always-predict-breach classifier
+    # already scores well above the old 0.78 floor. Testing accuracy against a 50/50 null (as
+    # this script did before) reports p~=0.0 for that constant classifier too, which is how a
+    # 96.8%-accurate model that is actually *worse* than the 97.3% trivial baseline got waved
+    # through as "highly significant." See trivial_baseline_rate / mcnemar_one_sided_p above for
+    # the corrected, paired, baseline-relative test.
+    majority_label, baseline_acc = trivial_baseline_rate(actual_breached)
+    baseline_correct = [a == majority_label for a in actual_breached]
+    vs_baseline_p, n10, n01 = mcnemar_one_sided_p(model_correct, baseline_correct)
 
     min_n = 1000 if is_oos else 500
     pass_acc = bool(acc >= 0.78)
-    pass_p = bool(binom_p <= 0.01)
+    pass_baseline = bool(acc > baseline_acc)
+    pass_p = bool(vs_baseline_p <= 0.01)
     pass_n = bool(n >= min_n)
 
-    is_pass = pass_acc and pass_p and pass_n
+    is_pass = pass_acc and pass_baseline and pass_p and pass_n
 
     return {
         "status": "PASS" if is_pass else "FALSIFIED",
         "n": n,
         "accuracy": round(acc, 4),
-        "binomial_p": round(binom_p, 6),
+        "trivial_baseline_accuracy": round(baseline_acc, 4),
+        "vs_baseline_p": round(vs_baseline_p, 6),
+        "mcnemar_n10": n10,
+        "mcnemar_n01": n01,
         "criteria_checks": {
             "acc_ge_0_78": pass_acc,
-            "p_le_0_01": pass_p,
+            "acc_gt_trivial_baseline": pass_baseline,
+            "mcnemar_p_le_0_01": pass_p,
             f"n_ge_{min_n}": pass_n,
         },
     }
@@ -486,15 +583,27 @@ def main():
     print("\nHYPOTHESIS EVALUATION SUMMARY")
     print("-" * 80)
     print(f"H1-R (Tier 1 Reversal Accuracy): [{h1_r['status']}]")
-    print(f"  N: {h1_r['n']} | Accuracy: {h1_r['accuracy']*100:.1f}% | Binomial p: {h1_r['binomial_p']:.6f}")
+    print(
+        f"  N: {h1_r['n']} | Accuracy: {h1_r['accuracy']*100:.1f}% | "
+        f"Trivial baseline: {h1_r.get('trivial_baseline_accuracy', 0.0)*100:.1f}% | "
+        f"McNemar p (vs baseline): {h1_r.get('vs_baseline_p', 1.0):.6f}"
+    )
     print(f"  Level Types Passed: {h1_r.get('levels_passed', 0)} / 6")
     if "per_level" in h1_r:
         for lvl, stats_dict in h1_r["per_level"].items():
             st = "PASS" if stats_dict["pass"] else "FAIL"
-            print(f"    - {lvl:12s}: N={stats_dict['n']:4d} | Acc={stats_dict['accuracy']*100:5.1f}% | p={stats_dict.get('p_value', 1.0):.4f} [{st}]")
+            print(
+                f"    - {lvl:12s}: N={stats_dict['n']:4d} | Acc={stats_dict['accuracy']*100:5.1f}% | "
+                f"Baseline={stats_dict.get('trivial_baseline_accuracy', 0.0)*100:5.1f}% | "
+                f"p={stats_dict.get('p_value', 1.0):.4f} [{st}]"
+            )
 
     print(f"\nH1-M (Tier 2 Momentum PDL Accuracy): [{h1_m['status']}]")
-    print(f"  N: {h1_m['n']} | Accuracy: {h1_m['accuracy']*100:.1f}% | Binomial p: {h1_m['binomial_p']:.6f}")
+    print(
+        f"  N: {h1_m['n']} | Accuracy: {h1_m['accuracy']*100:.1f}% | "
+        f"Trivial baseline: {h1_m.get('trivial_baseline_accuracy', 0.0)*100:.1f}% | "
+        f"McNemar p (vs baseline): {h1_m.get('vs_baseline_p', 1.0):.6f}"
+    )
 
     print(f"\nH2 (DI Monotonicity Lift): [{h2['status']}]")
     print(f"  N: {h2['n']} | Q4-Q1 Lift: {h2['q4_minus_q1']*100:+.1f} pp | Permutation p: {h2['permutation_p']:.6f}")
