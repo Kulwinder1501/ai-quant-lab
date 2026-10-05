@@ -1,93 +1,119 @@
 {
   "pre_registration": "ORDERBOOK-01",
   "eval_mode": "oos",
-  "eval_start": "2026-09-25",
-  "eval_end": "2026-10-01",
+  "eval_start": "2026-09-26",
+  "eval_end": "2026-10-05",
   "h1_r": {
     "status": "FALSIFIED",
-    "n": 2010,
-    "accuracy": 0.8532,
-    "binomial_p": 0.0,
-    "levels_passed": 5,
+    "n": 1548,
+    "accuracy": 0.8288,
+    "trivial_baseline_accuracy": 0.8915,
+    "vs_baseline_p": 1.0,
+    "mcnemar_n10": 18,
+    "mcnemar_n01": 115,
+    "levels_passed": 0,
     "per_level": {
-      "SESSION_LOW": {
-        "n": 602,
-        "accuracy": 0.8472,
-        "p_value": 0.0,
-        "pass": true
-      },
-      "ITH": {
-        "n": 160,
-        "accuracy": 0.8125,
-        "p_value": 0.0,
-        "pass": true
+      "ITL": {
+        "n": 124,
+        "accuracy": 0.8952,
+        "trivial_baseline_accuracy": 0.9113,
+        "p_value": 1.0,
+        "mcnemar_n10": 0,
+        "mcnemar_n01": 2,
+        "pass": false
       },
       "SESSION_HIGH": {
-        "n": 307,
-        "accuracy": 0.6743,
-        "p_value": 0.0,
+        "n": 222,
+        "accuracy": 0.5856,
+        "trivial_baseline_accuracy": 0.8739,
+        "p_value": 1.0,
+        "mcnemar_n10": 10,
+        "mcnemar_n01": 74,
         "pass": false
       },
       "SWING_LOW": {
-        "n": 377,
-        "accuracy": 0.9496,
-        "p_value": 0.0,
-        "pass": true
-      },
-      "ITL": {
-        "n": 180,
-        "accuracy": 0.9278,
-        "p_value": 0.0,
-        "pass": true
+        "n": 253,
+        "accuracy": 0.9249,
+        "trivial_baseline_accuracy": 0.9565,
+        "p_value": 1.0,
+        "mcnemar_n10": 0,
+        "mcnemar_n01": 8,
+        "pass": false
       },
       "SWING_HIGH": {
-        "n": 384,
-        "accuracy": 0.8932,
-        "p_value": 0.0,
-        "pass": true
+        "n": 257,
+        "accuracy": 0.8833,
+        "trivial_baseline_accuracy": 0.9377,
+        "p_value": 0.999572,
+        "mcnemar_n10": 4,
+        "mcnemar_n01": 18,
+        "pass": false
+      },
+      "ITH": {
+        "n": 117,
+        "accuracy": 0.8376,
+        "trivial_baseline_accuracy": 0.9145,
+        "p_value": 0.993637,
+        "mcnemar_n10": 4,
+        "mcnemar_n01": 13,
+        "pass": false
+      },
+      "SESSION_LOW": {
+        "n": 575,
+        "accuracy": 0.84,
+        "trivial_baseline_accuracy": 0.84,
+        "p_value": 1.0,
+        "mcnemar_n10": 0,
+        "mcnemar_n01": 0,
+        "pass": false
       }
     },
     "criteria_checks": {
       "acc_ge_0_72": true,
-      "p_le_0_01": true,
+      "acc_gt_trivial_baseline": false,
+      "mcnemar_p_le_0_01": false,
       "n_ge_3000": false,
-      "levels_ge_4": true
+      "levels_ge_4": false
     }
   },
   "h1_m": {
-    "status": "PASS",
-    "n": 4401,
-    "accuracy": 0.9675,
-    "binomial_p": 0.0,
+    "status": "FALSIFIED",
+    "n": 4278,
+    "accuracy": 0.9911,
+    "trivial_baseline_accuracy": 0.9965,
+    "vs_baseline_p": 1.0,
+    "mcnemar_n10": 2,
+    "mcnemar_n01": 25,
     "criteria_checks": {
       "acc_ge_0_78": true,
-      "p_le_0_01": true,
+      "acc_gt_trivial_baseline": false,
+      "mcnemar_p_le_0_01": false,
       "n_ge_1000": true
     }
   },
   "h2": {
     "status": "FALSIFIED",
-    "n": 6411,
-    "q4_minus_q1": 0.0238,
-    "permutation_p": 0.048,
+    "n": 5826,
+    "q4_minus_q1": 0.0527,
+    "permutation_p": 0.0,
     "quartile_accs": [
-      0.8817,
-      0.9811,
-      0.9587,
-      0.9055
+      0.887,
+      0.9876,
+      0.9776,
+      0.9397
     ],
     "quartile_counts": [
-      1597,
-      1585,
-      1621,
-      1608
+      1451,
+      1446,
+      1470,
+      1459
     ],
     "criteria_checks": {
       "diff_ge_0_08": false,
       "p_le_0_05": true
     }
   },
-  "verdict": "CASE D",
-  "verdict_description": "PDL Momentum Edge Confirmed. Apply DI gate to PDL sweep setups only.",
-  "executed_at": "2026-10-01T21:53:18.267647+05:30"
+  "verdict": "CASE E",
+  "verdict_description": "FALSIFIED. No robust directional edge found in OOS test.",
+  "executed_at": "2026-10-05T11:14:18.758302+05:30"
 }
