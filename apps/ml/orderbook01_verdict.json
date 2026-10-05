@@ -1,70 +1,70 @@
 {
   "pre_registration": "ORDERBOOK-01",
   "eval_mode": "oos",
-  "eval_start": "2026-09-26",
+  "eval_start": "2026-09-25",
   "eval_end": "2026-10-05",
   "h1_r": {
     "status": "FALSIFIED",
-    "n": 1548,
-    "accuracy": 0.8288,
-    "trivial_baseline_accuracy": 0.8915,
+    "n": 2220,
+    "accuracy": 0.8563,
+    "trivial_baseline_accuracy": 0.9225,
     "vs_baseline_p": 1.0,
     "mcnemar_n10": 18,
-    "mcnemar_n01": 115,
+    "mcnemar_n01": 165,
     "levels_passed": 0,
     "per_level": {
-      "ITL": {
-        "n": 124,
-        "accuracy": 0.8952,
-        "trivial_baseline_accuracy": 0.9113,
+      "SESSION_LOW": {
+        "n": 707,
+        "accuracy": 0.8699,
+        "trivial_baseline_accuracy": 0.8699,
         "p_value": 1.0,
         "mcnemar_n10": 0,
-        "mcnemar_n01": 2,
+        "mcnemar_n01": 0,
         "pass": false
       },
       "SESSION_HIGH": {
-        "n": 222,
-        "accuracy": 0.5856,
-        "trivial_baseline_accuracy": 0.8739,
+        "n": 359,
+        "accuracy": 0.6741,
+        "trivial_baseline_accuracy": 0.9109,
         "p_value": 1.0,
         "mcnemar_n10": 10,
-        "mcnemar_n01": 74,
+        "mcnemar_n01": 95,
+        "pass": false
+      },
+      "SWING_HIGH": {
+        "n": 403,
+        "accuracy": 0.8883,
+        "trivial_baseline_accuracy": 0.9603,
+        "p_value": 1.0,
+        "mcnemar_n10": 4,
+        "mcnemar_n01": 33,
+        "pass": false
+      },
+      "ITH": {
+        "n": 167,
+        "accuracy": 0.8024,
+        "trivial_baseline_accuracy": 0.9401,
+        "p_value": 0.999998,
+        "mcnemar_n10": 4,
+        "mcnemar_n01": 27,
         "pass": false
       },
       "SWING_LOW": {
-        "n": 253,
-        "accuracy": 0.9249,
-        "trivial_baseline_accuracy": 0.9565,
+        "n": 396,
+        "accuracy": 0.952,
+        "trivial_baseline_accuracy": 0.9722,
         "p_value": 1.0,
         "mcnemar_n10": 0,
         "mcnemar_n01": 8,
         "pass": false
       },
-      "SWING_HIGH": {
-        "n": 257,
-        "accuracy": 0.8833,
-        "trivial_baseline_accuracy": 0.9377,
-        "p_value": 0.999572,
-        "mcnemar_n10": 4,
-        "mcnemar_n01": 18,
-        "pass": false
-      },
-      "ITH": {
-        "n": 117,
-        "accuracy": 0.8376,
-        "trivial_baseline_accuracy": 0.9145,
-        "p_value": 0.993637,
-        "mcnemar_n10": 4,
-        "mcnemar_n01": 13,
-        "pass": false
-      },
-      "SESSION_LOW": {
-        "n": 575,
-        "accuracy": 0.84,
-        "trivial_baseline_accuracy": 0.84,
+      "ITL": {
+        "n": 188,
+        "accuracy": 0.9309,
+        "trivial_baseline_accuracy": 0.9415,
         "p_value": 1.0,
         "mcnemar_n10": 0,
-        "mcnemar_n01": 0,
+        "mcnemar_n01": 2,
         "pass": false
       }
     },
@@ -78,12 +78,12 @@
   },
   "h1_m": {
     "status": "FALSIFIED",
-    "n": 4278,
-    "accuracy": 0.9911,
-    "trivial_baseline_accuracy": 0.9965,
+    "n": 4797,
+    "accuracy": 0.965,
+    "trivial_baseline_accuracy": 0.9708,
     "vs_baseline_p": 1.0,
-    "mcnemar_n10": 2,
-    "mcnemar_n01": 25,
+    "mcnemar_n10": 3,
+    "mcnemar_n01": 31,
     "criteria_checks": {
       "acc_ge_0_78": true,
       "acc_gt_trivial_baseline": false,
@@ -93,20 +93,20 @@
   },
   "h2": {
     "status": "FALSIFIED",
-    "n": 5826,
-    "q4_minus_q1": 0.0527,
-    "permutation_p": 0.0,
+    "n": 7017,
+    "q4_minus_q1": 0.0289,
+    "permutation_p": 0.01,
     "quartile_accs": [
-      0.887,
-      0.9876,
-      0.9776,
-      0.9397
+      0.8778,
+      0.9815,
+      0.9568,
+      0.9067
     ],
     "quartile_counts": [
-      1451,
-      1446,
-      1470,
-      1459
+      1751,
+      1727,
+      1781,
+      1758
     ],
     "criteria_checks": {
       "diff_ge_0_08": false,
@@ -115,5 +115,5 @@
   },
   "verdict": "CASE E",
   "verdict_description": "FALSIFIED. No robust directional edge found in OOS test.",
-  "executed_at": "2026-10-05T11:14:18.758302+05:30"
+  "executed_at": "2026-10-05T15:36:17.124702+05:30"
 }
