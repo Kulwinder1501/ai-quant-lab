@@ -31,11 +31,138 @@ class ConfluenceGateSignal:
     distance_bps: float | None
     raw_di: float | None
     di_tilde: float | None
-    directional_bias: str  # 'BULLISH_REJECTION', 'BEARISH_REJECTION', 'BEARISH_SWEEP', 'NONE'
+    directional_bias: str  # 'BULLISH_REJECTION', 'BEARISH_REJECTION', 'BEARISH_SWEEP', 'BULLISH_SWEEP', 'NONE'
     gate_action: str       # 'BUY_CALL_OR_LONG', 'BUY_PUT_OR_SHORT', 'NO_ACTION'
+    # Two-level agreement diagnostics (see select_confluent_level):
+    second_level_type: str | None = None
+    second_level_distance_bps: float | None = None
+    levels_agree: bool | None = None  # None = nothing to compare against (0 or 1 level in band)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _level_side(level_type: str) -> str | None:
+    """Classify a structural level as resistance-side ('UP') or support-side ('DOWN').
+
+    Returns None for a level type the gate does not recognize (e.g. 'PDH',
+    which the fallback candle-derived path can still emit even though it is
+    not wired into UP_LEVELS/DOWN_LEVELS). An unrecognized side can never be
+    confirmed to agree with anything.
+    """
+    if level_type in UP_LEVELS:
+        return "UP"
+    if level_type in DOWN_LEVELS:
+        return "DOWN"
+    return None
+
+
+@dataclass(frozen=True)
+class LevelSelection:
+    is_proximate: bool
+    nearest_level_type: str | None
+    nearest_level_price: float | None
+    distance_bps: float | None
+    second_level_type: str | None
+    second_level_price: float | None
+    second_distance_bps: float | None
+    levels_agree: bool | None
+
+
+def select_confluent_level(
+    levels: list[tuple[str, float]],
+    spot_price: float,
+    bandwidth_bps: float,
+) -> LevelSelection:
+    """Rank active levels by distance from spot and check two-level agreement.
+
+    Previously the gate tracked only the single nearest level and acted on it
+    alone, even when another active level nearby pointed the other way (e.g.
+    spot 10bps from a SESSION_HIGH but also 15bps from a contradictory
+    SWING_LOW). This function fixes that: it looks at the two nearest active
+    levels and, when both are within `bandwidth_bps` of spot, requires them to
+    agree on structural side (resistance/'UP' vs support/'DOWN') before the
+    selection is treated as actionable.
+
+    Edge cases (explicit, not accidental):
+    - Zero levels at all, or the nearest level is further than
+      `bandwidth_bps` away: not proximate at all. `levels_agree` is None
+      (there is nothing to agree or disagree about). Unchanged from the
+      pre-fix behavior.
+    - Exactly one level within the band (no second level close enough to
+      compare): the single level is still fully usable on its own -- this
+      fix adds a second check, it does not remove the single-level path.
+      `levels_agree` is None here too, meaning "not applicable", which the
+      caller must not confuse with False ("checked, and they disagree").
+    - Two or more levels, and the second-nearest is also within the band:
+      compare sides. Agreement -> proceed using the nearest level as before.
+      Disagreement -> proximate=True but the caller must report a neutral /
+      no-signal outcome instead of acting on the nearer level alone.
+    """
+    candidates: list[tuple[float, str, float]] = []
+    for lvl_type, lvl_price in levels:
+        if lvl_price <= 0:
+            continue
+        dist_bps = abs(spot_price - lvl_price) / lvl_price * 10_000.0
+        candidates.append((dist_bps, lvl_type, lvl_price))
+
+    if not candidates:
+        return LevelSelection(
+            is_proximate=False,
+            nearest_level_type=None,
+            nearest_level_price=None,
+            distance_bps=None,
+            second_level_type=None,
+            second_level_price=None,
+            second_distance_bps=None,
+            levels_agree=None,
+        )
+
+    candidates.sort(key=lambda c: c[0])
+    nearest_dist, nearest_type, nearest_price = candidates[0]
+
+    if nearest_dist > bandwidth_bps:
+        return LevelSelection(
+            is_proximate=False,
+            nearest_level_type=nearest_type,
+            nearest_level_price=nearest_price,
+            distance_bps=round(nearest_dist, 2),
+            second_level_type=None,
+            second_level_price=None,
+            second_distance_bps=None,
+            levels_agree=None,
+        )
+
+    # candidates is sorted ascending, so candidates[1] (if any) is the
+    # second-nearest level overall -- no need to scan further.
+    second = candidates[1] if len(candidates) > 1 else None
+    if second is None or second[0] > bandwidth_bps:
+        return LevelSelection(
+            is_proximate=True,
+            nearest_level_type=nearest_type,
+            nearest_level_price=nearest_price,
+            distance_bps=round(nearest_dist, 2),
+            second_level_type=None,
+            second_level_price=None,
+            second_distance_bps=None,
+            levels_agree=None,  # only one level nearby: nothing to compare
+        )
+
+    second_dist, second_type, second_price = second
+    nearest_side = _level_side(nearest_type)
+    second_side = _level_side(second_type)
+    agree = nearest_side is not None and nearest_side == second_side
+
+    return LevelSelection(
+        is_proximate=True,
+        nearest_level_type=nearest_type,
+        nearest_level_price=nearest_price,
+        distance_bps=round(nearest_dist, 2),
+        second_level_type=second_type,
+        second_level_price=second_price,
+        second_distance_bps=round(second_dist, 2),
+        levels_agree=agree,
+    )
 
 
 def fetch_latest_depth_di(conn: psycopg.Connection, as_of_time: datetime) -> tuple[float | None, float | None]:
@@ -128,34 +255,45 @@ def evaluate_confluence_signal(
             gate_action="NO_ACTION",
         )
 
-    # 1. Fetch active levels & check proximity
+    # 1. Fetch active levels, rank by proximity, and require two-level agreement
     levels = fetch_active_structural_levels(conn, symbol, as_of_time)
-    best_level_type = None
-    best_level_price = None
-    min_dist_bps = float("inf")
+    selection = select_confluent_level(levels, spot_price, bandwidth_bps)
 
-    for lvl_type, lvl_price in levels:
-        if lvl_price <= 0:
-            continue
-        dist_bps = abs(spot_price - lvl_price) / lvl_price * 10_000.0
-        if dist_bps < min_dist_bps:
-            min_dist_bps = dist_bps
-            best_level_type = lvl_type
-            best_level_price = lvl_price
-
-    is_proximate = min_dist_bps <= bandwidth_bps
-
-    if not is_proximate or best_level_type is None:
+    if not selection.is_proximate:
         return ConfluenceGateSignal(
             is_level_proximate=False,
-            nearest_level_type=best_level_type,
-            nearest_level_price=best_level_price,
-            distance_bps=round(min_dist_bps, 2) if min_dist_bps < 99999 else None,
+            nearest_level_type=selection.nearest_level_type,
+            nearest_level_price=selection.nearest_level_price,
+            distance_bps=selection.distance_bps,
             raw_di=None,
             di_tilde=None,
             directional_bias="NONE",
             gate_action="NO_ACTION",
+            second_level_type=None,
+            second_level_distance_bps=None,
+            levels_agree=None,
         )
+
+    if selection.levels_agree is False:
+        # Two nearby levels contradict each other -- report neutral rather
+        # than acting on the nearer one alone (the core fix).
+        return ConfluenceGateSignal(
+            is_level_proximate=True,
+            nearest_level_type=selection.nearest_level_type,
+            nearest_level_price=selection.nearest_level_price,
+            distance_bps=selection.distance_bps,
+            raw_di=None,
+            di_tilde=None,
+            directional_bias="NONE",
+            gate_action="NO_ACTION",
+            second_level_type=selection.second_level_type,
+            second_level_distance_bps=selection.second_distance_bps,
+            levels_agree=False,
+        )
+
+    best_level_type = selection.nearest_level_type
+    best_level_price = selection.nearest_level_price
+    min_dist_bps = selection.distance_bps
 
     # 2. Fetch depth imbalance
     raw_di, di_tilde = fetch_latest_depth_di(conn, as_of_time)
@@ -165,11 +303,14 @@ def evaluate_confluence_signal(
             is_level_proximate=True,
             nearest_level_type=best_level_type,
             nearest_level_price=best_level_price,
-            distance_bps=round(min_dist_bps, 2),
+            distance_bps=min_dist_bps,
             raw_di=None,
             di_tilde=None,
             directional_bias="NONE",
             gate_action="NO_ACTION",
+            second_level_type=selection.second_level_type,
+            second_level_distance_bps=selection.second_distance_bps,
+            levels_agree=selection.levels_agree,
         )
 
     # 3. Determine directional bias based on ORDERBOOK-01 frozen spec rules:
@@ -210,9 +351,12 @@ def evaluate_confluence_signal(
         is_level_proximate=True,
         nearest_level_type=best_level_type,
         nearest_level_price=best_level_price,
-        distance_bps=round(min_dist_bps, 2),
+        distance_bps=min_dist_bps,
         raw_di=round(raw_di, 4) if raw_di is not None else None,
         di_tilde=round(di_tilde, 4) if di_tilde is not None else None,
         directional_bias=bias,
         gate_action=action,
+        second_level_type=selection.second_level_type,
+        second_level_distance_bps=selection.second_distance_bps,
+        levels_agree=selection.levels_agree,
     )
