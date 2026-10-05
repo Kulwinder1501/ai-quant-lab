@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { IctBiasTracker } from "./bias.js";
 import { IctStructureTracker } from "./structure.js";
 import { IctSessionLevelTracker } from "./session-levels.js";
+import { NSE_IST_PROFILE, XAUUSD_OANDA_PROFILE } from "../../../platform/calendar/instrument-profile.js";
 import type { CausalCandle } from "./causal-pivot.js";
 
 function makeIstCandle(
@@ -198,5 +199,65 @@ describe("IctBiasTracker", () => {
         expect(lastBias.dealingRange?.rangeLow).toBe(93.6);
       }
     }
+  });
+});
+
+describe("IctBiasTracker instrument profile wiring (G1)", () => {
+  // Three bars, all after gold's 18:00 NY open on 2026-07-13 EXCEPT the first, which sits 15:00-19:00
+  // NY and so belongs to the PRIOR gold session date -- but all three land after IST midnight on the
+  // same calendar day, so NSE's fixed +5:30 profile buckets all three into one session.
+  const barBeforeOpen: CausalCandle = {
+    id: "xau-before-open",
+    openTime: new Date("2026-07-13T19:00:00.000Z"), // 15:00 NY EDT
+    open: 100, high: 105, low: 95, close: 102, volume: 10,
+  };
+  const barAfterOpen: CausalCandle = {
+    id: "xau-after-open",
+    openTime: new Date("2026-07-13T23:00:00.000Z"), // 19:00 NY EDT
+    open: 102, high: 112, low: 101, close: 110, volume: 10,
+  };
+  const barThird: CausalCandle = {
+    id: "xau-third",
+    openTime: new Date("2026-07-14T05:00:00.000Z"), // 01:00 NY EDT, still before today's 18:00 open
+    open: 110, high: 111, low: 108, close: 109, volume: 10,
+  };
+  const candles = [barBeforeOpen, barAfterOpen, barThird];
+
+  function lastBiasWith(profile: typeof NSE_IST_PROFILE) {
+    const structTracker = new IctStructureTracker(2);
+    const sessionTracker = new IctSessionLevelTracker(profile);
+    const biasTracker = new IctBiasTracker();
+    let snap;
+    for (let i = 0; i < candles.length; i++) {
+      const struct = structTracker.processCandle(candles, i);
+      const session = sessionTracker.processCandle(candles, i);
+      snap = biasTracker.processCandle(candles, i, struct, session, "OWN_STRUCTURE", undefined, profile);
+    }
+    return snap!;
+  }
+
+  it("defaults to NSE_IST_PROFILE, matching an explicit NSE_IST_PROFILE call byte-for-byte", () => {
+    const structTracker = new IctStructureTracker(2);
+    const sessionTracker = new IctSessionLevelTracker(); // default profile too
+    const biasTracker = new IctBiasTracker();
+    let withDefault;
+    for (let i = 0; i < candles.length; i++) {
+      const struct = structTracker.processCandle(candles, i);
+      const session = sessionTracker.processCandle(candles, i);
+      withDefault = biasTracker.processCandle(candles, i, struct, session, "OWN_STRUCTURE"); // no profile arg
+    }
+    expect(withDefault).toEqual(lastBiasWith(NSE_IST_PROFILE));
+  });
+
+  it("resolves a wider same-session walk-back under NSE's fixed-offset profile than under XAU's NY-local one", () => {
+    // Under NSE, all three bars share one IST calendar date, so the session-start walk-back reaches
+    // all the way back to bar 0 -- 3 bars is enough for a resolved daily template.
+    const nseBias = lastBiasWith(NSE_IST_PROFILE);
+    expect(nseBias.dailyTemplate).toBe("OLHC"); // session low (bar 0) precedes session high (bar 1)
+
+    // Under XAU_USD's NY-local 18:00 boundary, bar 0 belongs to the PRIOR session, so the walk-back
+    // stops at bar 1 -- only 2 bars in the current session, below the 3-bar minimum for a template.
+    const xauBias = lastBiasWith(XAUUSD_OANDA_PROFILE);
+    expect(xauBias.dailyTemplate).toBe("UNKNOWN");
   });
 });

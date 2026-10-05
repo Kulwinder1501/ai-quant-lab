@@ -106,3 +106,66 @@ export const XAUUSD_OANDA_PROFILE: InstrumentProfile = {
     return true;
   },
 };
+
+const IST_OFFSET_MS = 5.5 * 60 * 60_000;
+
+/**
+ * NSE's session-date resolver, expressed as an `InstrumentProfile`.
+ *
+ * India does not observe DST, so "the IST calendar date of an instant" is a fixed +5:30 shift with
+ * no timezone-table lookup involved -- this intentionally duplicates `istSessionDate`'s own
+ * arithmetic (`trading-session.ts`) rather than importing it, because `sessionDateResolver` must
+ * return a `Date` (this interface's contract) where `istSessionDate` returns a `YYYY-MM-DD` string.
+ * The two are proven equivalent -- same calendar date, every existing NSE test case -- in
+ * `instrument-profile.test.ts`.
+ *
+ * `isDailyBreak`/`isSessionActive` below are intentionally conservative: they know only the regular
+ * Mon-Fri, 09:15-15:30 IST shape, with no holiday or non-regular-session calendar. Nothing this
+ * profile is actually wired into (`session-levels.ts`, `bias.ts`) calls either method -- both
+ * callers resolve session *dates*, never tradability -- so these two exist only to satisfy the
+ * `InstrumentProfile` contract. A caller that needs real NSE tradability (holidays, Muhurat,
+ * Saturday specials) must use `NseMarketSession`/`resolveTradingSession`, which carry the actual
+ * exchange calendar; this profile does not attempt to duplicate that.
+ */
+export const NSE_IST_PROFILE: InstrumentProfile = {
+  symbol: "NSE_IST",
+  timezone: "Asia/Kolkata",
+
+  sessionDateResolver(now: Date): Date {
+    const istDateString = new Date(now.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+    return new Date(`${istDateString}T00:00:00.000Z`);
+  },
+
+  isDailyBreak(): boolean {
+    return false; // The NSE regular session has no intraday break.
+  },
+
+  isSessionActive(now: Date): boolean {
+    const shifted = new Date(now.getTime() + IST_OFFSET_MS);
+    const dayOfWeek = shifted.getUTCDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) return false; // Weekend, only ever a default.
+    const minuteOfDay = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+    return minuteOfDay >= 555 && minuteOfDay < 930; // 09:15-15:30 IST regular cash session.
+  },
+};
+
+/**
+ * Resolves the `InstrumentProfile` a given instrument symbol should use for session-date bucketing.
+ *
+ * Defaults to `NSE_IST_PROFILE` -- every instrument this platform trades except gold is NSE-listed,
+ * and defaulting there keeps every existing caller's behaviour unchanged. `XAU_USD` is the one
+ * registered exception: its session boundary is NY-local 18:00, DST-aware via `getNewYorkParts`,
+ * which an IST-fixed-offset default would get wrong across the US DST transition.
+ */
+export function instrumentProfileForSymbol(symbol: string): InstrumentProfile {
+  return symbol === XAUUSD_OANDA_PROFILE.symbol ? XAUUSD_OANDA_PROFILE : NSE_IST_PROFILE;
+}
+
+/**
+ * The session-date key `session-levels.ts`/`bias.ts` group bars by: `profile.sessionDateResolver`'s
+ * `Date` result, formatted the same way `istSessionDate` always has (`YYYY-MM-DD`) so date keys stay
+ * sortable as strings and Map-keyable exactly as before.
+ */
+export function sessionDateKey(profile: InstrumentProfile, instant: Date): string {
+  return profile.sessionDateResolver(instant).toISOString().slice(0, 10);
+}

@@ -1,4 +1,4 @@
-import { istSessionDate } from "../../../platform/calendar/trading-session.js";
+import { NSE_IST_PROFILE, sessionDateKey, type InstrumentProfile } from "../../../platform/calendar/instrument-profile.js";
 import type { CausalCandle } from "./causal-pivot.js";
 import type { IctStructureSnapshot } from "./structure.js";
 import type { SessionLevelsSnapshot } from "./session-levels.js";
@@ -40,7 +40,13 @@ export class IctBiasTracker {
      * Absent (or UNKNOWN) means no higher-timeframe evidence, which resolves to UNKNOWN rather than
      * NEUTRAL: missing evidence is not a reading of "no direction".
      */
-    htfBias?: IctBiasDirection
+    htfBias?: IctBiasDirection,
+    /**
+     * Which calendar resolves a bar's session date here. Defaults to `NSE_IST_PROFILE`, matching
+     * `IctSessionLevelTracker`'s default so the two trackers agree on session boundaries unless a
+     * caller deliberately passes the same non-default profile to both (as `IctCompositeEngine` does).
+     */
+    profile: InstrumentProfile = NSE_IST_PROFILE
   ): IctBiasSnapshot {
     const current = candles[currentIndex];
     const currentDate = sessionLevels.currentSessionDate;
@@ -50,7 +56,7 @@ export class IctBiasTracker {
     let sessionStartIndex = currentIndex;
     while (
       sessionStartIndex > 0 &&
-      istSessionDate(candles[sessionStartIndex - 1].openTime) === currentDate
+      sessionDateKey(profile, candles[sessionStartIndex - 1].openTime) === currentDate
     ) {
       sessionStartIndex--;
     }

@@ -1,4 +1,4 @@
-import { istSessionDate } from "../../../platform/calendar/trading-session.js";
+import { NSE_IST_PROFILE, sessionDateKey, type InstrumentProfile } from "../../../platform/calendar/instrument-profile.js";
 import type { CausalCandle } from "./causal-pivot.js";
 
 export interface SessionReferenceLevels {
@@ -46,12 +46,20 @@ export class IctSessionLevelTracker {
   private priorAcc: InternalSessionAcc | null = null;
   private lastSweep: SessionSweepEvent | null = null;
 
+  /**
+   * `profile` resolves which calendar a bar's session date belongs to. Defaults to
+   * `NSE_IST_PROFILE`, which keeps every existing caller's behaviour unchanged -- see
+   * `instrument-profile.ts`'s `instrumentProfileForSymbol` for how a caller picks a different one
+   * (XAU_USD, specifically).
+   */
+  constructor(private readonly profile: InstrumentProfile = NSE_IST_PROFILE) {}
+
   processCandle(
     candles: readonly CausalCandle[],
     currentIndex: number
   ): SessionLevelsSnapshot {
     const current = candles[currentIndex];
-    const barDate = istSessionDate(current.openTime);
+    const barDate = sessionDateKey(this.profile, current.openTime);
 
     this.lastSweep = null;
 
@@ -159,11 +167,12 @@ export class IctSessionLevelTracker {
 }
 
 export function buildSessionReferenceLevelsMap(
-  candles: readonly CausalCandle[]
+  candles: readonly CausalCandle[],
+  profile: InstrumentProfile = NSE_IST_PROFILE
 ): Map<string, SessionReferenceLevels> {
   const sessions = new Map<string, { open: number; high: number; low: number; close: number }>();
   for (const c of candles) {
-    const d = istSessionDate(c.openTime);
+    const d = sessionDateKey(profile, c.openTime);
     const existing = sessions.get(d);
     if (!existing) {
       sessions.set(d, { open: c.open, high: c.high, low: c.low, close: c.close });

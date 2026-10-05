@@ -17,6 +17,7 @@ import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
 import { CisdTracker, type CisdEvent } from "./cisd.js";
 import { computeBalancedPriceRanges } from "./bpr.js";
 import { IctAtrTracker } from "./atr-tracker.js";
+import { NSE_IST_PROFILE, type InstrumentProfile } from "../../../platform/calendar/instrument-profile.js";
 
 export class IctCompositeEngine {
   private readonly structTracker: IctStructureTracker;
@@ -34,14 +35,23 @@ export class IctCompositeEngine {
    */
   private readonly atrTracker: IctAtrTracker;
 
-  constructor(private readonly config: IctEngineConfig = defaultIctEngineConfig) {
+  /**
+   * `profile` resolves session-date bucketing for both the session-levels and bias pillars.
+   * Defaults to `NSE_IST_PROFILE`, which is byte-identical to this engine's pre-existing behaviour
+   * -- every current caller gets the same output as before. A caller running this engine over
+   * non-NSE candles (XAU_USD, via `instrumentProfileForSymbol`) passes the matching profile instead.
+   */
+  constructor(
+    private readonly config: IctEngineConfig = defaultIctEngineConfig,
+    private readonly profile: InstrumentProfile = NSE_IST_PROFILE
+  ) {
     this.structTracker = new IctStructureTracker(config.pivotLength);
     this.zoneLedger = new IctZoneLedger(
       config.obDisplacementBodyAtrMultiple,
       config.obMeanThresholdFraction,
       config.invertedBlocksRemainPoi
     );
-    this.sessionTracker = new IctSessionLevelTracker();
+    this.sessionTracker = new IctSessionLevelTracker(profile);
     this.biasTracker = new IctBiasTracker();
     this.liquidityResolver = new IctLiquidityResolver();
     this.cisdTracker = new CisdTracker();
@@ -79,7 +89,7 @@ export class IctCompositeEngine {
     const swingHierarchy = computeSwingHierarchySnapshot(this.structTracker.confirmedPivotsView());
     const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
     // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
-    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias);
+    const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias, this.profile);
 
     // HTF bias is a separate (fractal) pillar. It is carried alongside the local
     // bias and never overwrites its value: overwriting left the reason codes

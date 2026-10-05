@@ -21,6 +21,7 @@ import {
 } from "../../../modules/strategy-engine/domain/regime.js";
 import type { DatabaseQueryable } from "../database.js";
 import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/ict/composite-engine.js";
+import { instrumentProfileForSymbol } from "../../../modules/platform/calendar/instrument-profile.js";
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
 import { computeHtfBucketBiases, mapBarsToHtfBias, type HtfSourceCandle } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
 import { resolveConfluenceSignalFromDepth } from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
@@ -38,6 +39,8 @@ interface CompletedCandleRow extends QueryResultRow {
   close: string;
   volume: string;
   tick_size: string;
+  /** From the same `instruments` join that already supplies `tick_size` -- see `instrumentProfileForSymbol`. */
+  symbol: string;
 }
 
 interface IndicatorSnapshotRow extends QueryResultRow {
@@ -156,7 +159,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         candles.low,
         candles.close,
         candles.volume,
-        instruments.tick_size
+        instruments.tick_size,
+        instruments.symbol
       FROM candles
       INNER JOIN instruments ON instruments.id = candles.instrument_id
       WHERE candles.instrument_id = $1
@@ -196,7 +200,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
           candles.low,
           candles.close,
           candles.volume,
-          instruments.tick_size
+          instruments.tick_size,
+          instruments.symbol
         FROM candles
         INNER JOIN instruments ON instruments.id = candles.instrument_id
         WHERE candles.instrument_id = $1
@@ -224,7 +229,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
           candles.low,
           candles.close,
           candles.volume,
-          instruments.tick_size
+          instruments.tick_size,
+          instruments.symbol
         FROM candles
         INNER JOIN instruments ON instruments.id = candles.instrument_id
         WHERE candles.instrument_id = $1
@@ -277,7 +283,16 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     const htfBucketBiases = computeHtfBucketBiases(htfSourceCandles, defaultIctEngineConfig);
     const htfBiasSeries = mapBarsToHtfBias(causalCandles, htfBucketBiases);
 
-    const engine = new IctCompositeEngine(defaultIctEngineConfig);
+    /*
+     * The one place G1's session-date resolver actually changes behaviour: `targetCandle.symbol`
+     * comes straight off the `instruments` join (`instruments.symbol`, already selected alongside
+     * `tick_size`), so XAU_USD gets its real DST-aware NY session boundary here instead of silently
+     * inheriting NSE's fixed +5:30 one. Every NSE instrument resolves to `NSE_IST_PROFILE`, which
+     * `instrument-profile.test.ts` proves byte-identical to the old `istSessionDate` behaviour this
+     * engine always had -- see that file's "matches istSessionDate" cases.
+     */
+    const profile = instrumentProfileForSymbol(targetCandle.symbol);
+    const engine = new IctCompositeEngine(defaultIctEngineConfig, profile);
     let snapshot: IctStateCompositeSnapshot | undefined;
 
     for (let i = 0; i < causalCandles.length; i++) {
@@ -357,7 +372,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
   }): Promise<StrategyMarketContext | null> {
     const candleResult = await this.database.query<CompletedCandleRow>(`
       SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
-        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size,
+        instruments.symbol
       FROM candles
       INNER JOIN instruments ON instruments.id = candles.instrument_id
       WHERE candles.instrument_id = $1 AND candles.timeframe = $2
@@ -386,7 +402,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
   }): Promise<StrategyMarketContext | null> {
     const candleResult = await this.database.query<CompletedCandleRow>(`
       SELECT candles.id, candles.instrument_id, candles.timeframe, candles.open_time, candles.close_time,
-        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size
+        candles.open, candles.high, candles.low, candles.close, candles.volume, instruments.tick_size,
+        instruments.symbol
       FROM candles
       INNER JOIN instruments ON instruments.id = candles.instrument_id
       WHERE candles.instrument_id = $1 AND candles.timeframe = $2
@@ -416,7 +433,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         candles.low,
         candles.close,
         candles.volume,
-        instruments.tick_size
+        instruments.tick_size,
+        instruments.symbol
       FROM candles
       INNER JOIN instruments ON instruments.id = candles.instrument_id
       WHERE candles.instrument_id = $1

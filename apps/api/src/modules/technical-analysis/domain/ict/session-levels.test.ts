@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { IctSessionLevelTracker, buildSessionReferenceLevelsMap } from "./session-levels.js";
+import { NSE_IST_PROFILE, XAUUSD_OANDA_PROFILE } from "../../../platform/calendar/instrument-profile.js";
 import type { CausalCandle } from "./causal-pivot.js";
 
 function makeIstCandle(
@@ -127,5 +128,58 @@ describe("IctSessionLevelTracker", () => {
     expect(day3.pdh).toBe(116);
     expect(day3.pdl).toBe(106);
     expect(day3.pdc).toBe(112);
+  });
+});
+
+describe("IctSessionLevelTracker instrument profile wiring (G1)", () => {
+  it("an explicit NSE_IST_PROFILE is byte-identical to the default (no-arg) tracker", () => {
+    const candles: CausalCandle[] = [
+      makeIstCandle("2026-01-05", 9, 15, 100, 110, 95, 105),
+      makeIstCandle("2026-01-05", 15, 25, 105, 108, 102, 107),
+      makeIstCandle("2026-01-06", 9, 15, 107, 115, 106, 114),
+    ];
+
+    const defaultTracker = new IctSessionLevelTracker();
+    const explicitTracker = new IctSessionLevelTracker(NSE_IST_PROFILE);
+
+    for (let i = 0; i < candles.length; i++) {
+      const fromDefault = defaultTracker.processCandle(candles, i);
+      const fromExplicit = explicitTracker.processCandle(candles, i);
+      expect(fromExplicit).toEqual(fromDefault);
+    }
+  });
+
+  it("XAUUSD_OANDA_PROFILE buckets by the NY 18:00 boundary, which disagrees with NSE_IST_PROFILE on the same instants", () => {
+    // 15:00 NY (EDT) -- before gold's 18:00 open.
+    const barBeforeOpen: CausalCandle = {
+      id: "xau-before-open",
+      openTime: new Date("2026-07-13T19:00:00.000Z"),
+      open: 100, high: 105, low: 95, close: 102, volume: 10,
+    };
+    // 19:00 NY (EDT) -- after gold's 18:00 open, so a NEW gold session date has started.
+    const barAfterOpen: CausalCandle = {
+      id: "xau-after-open",
+      openTime: new Date("2026-07-13T23:00:00.000Z"),
+      open: 102, high: 112, low: 101, close: 110, volume: 10,
+    };
+    const candles = [barBeforeOpen, barAfterOpen];
+
+    const xauTracker = new IctSessionLevelTracker(XAUUSD_OANDA_PROFILE);
+    xauTracker.processCandle(candles, 0);
+    const xauSnap = xauTracker.processCandle(candles, 1);
+    // Gold rolled to a new session date between the two bars, so bar 1 sees bar 0's levels.
+    expect(xauSnap.currentSessionDate).toBe("2026-07-14");
+    expect(xauSnap.levels).not.toBeNull();
+    expect(xauSnap.levels?.priorSessionDate).toBe("2026-07-13");
+    expect(xauSnap.levels?.pdh).toBe(105);
+    expect(xauSnap.levels?.pdl).toBe(95);
+
+    // The SAME two raw instants, read through NSE's fixed +5:30 IST shift, both fall after IST
+    // midnight on 2026-07-14 -- so NSE sees them as the SAME session, with no rollover between them.
+    const nseTracker = new IctSessionLevelTracker(NSE_IST_PROFILE);
+    nseTracker.processCandle(candles, 0);
+    const nseSnap = nseTracker.processCandle(candles, 1);
+    expect(nseSnap.currentSessionDate).toBe("2026-07-14");
+    expect(nseSnap.levels).toBeNull();
   });
 });
