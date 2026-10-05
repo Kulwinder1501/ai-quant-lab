@@ -4,6 +4,7 @@ import {
   MINIMUM_DAYS_TO_EXPIRY,
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS,
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE,
+  MAXIMUM_IDEA_PRICE_DRIFT_FRACTION,
 } from "./prepare-option-entry.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import type { OptionExpiryCalendar } from "../../market-data/domain/option-expiry-calendar.js";
@@ -74,6 +75,8 @@ function chain(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnapsho
 const IDEA = {
   id: "idea-1",
   side: "LONG",
+  status: "PROPOSED",
+  expires_at: null as Date | null,
   entry_price: "57720",
   stop_loss: "57300",
   target_price: "58400",
@@ -109,11 +112,17 @@ interface Overrides {
     lastPrice: number | null;
     underlyingValue: number | null;
   } | null;
+  /** Captures every query run against the database mock, so a test can assert a write happened. */
+  onQuery?: (text: string, values?: unknown[]) => void;
 }
 
 function service(overrides: Overrides = {}) {
   const database = {
-    query: async <T,>(text: string): Promise<{ rows: T[] }> => {
+    query: async <T,>(text: string, values?: unknown[]): Promise<{ rows: T[] }> => {
+      overrides.onQuery?.(text, values);
+      if (text.includes("UPDATE trade_ideas SET status = 'EXPIRED'")) {
+        return { rows: [] as T[] };
+      }
       if (text.includes("FROM trade_ideas")) {
         const idea = overrides.idea === undefined ? IDEA : overrides.idea;
         return { rows: (idea ? [idea] : []) as T[] };
@@ -619,6 +628,110 @@ describe("PrepareOptionEntry - underlyingDirection (real thesis, not the always-
     // instead of `underlyingDirection` here would get the wrong answer.
     expect(result.entry.side).toBe("LONG");
     expect(result.entry.underlyingDirection).not.toBe(result.entry.side);
+  });
+});
+
+describe("PrepareOptionEntry - stale-idea invalidation", () => {
+  /*
+   * Reproduces `f29afcdc-3815-4c27-a6f8-34df642d5f74` (BANKNIFTY 2026-10-27 53300 CE, the AI
+   * Autonomous Agent / "Classic" bot): an idea whose chosen strike sits far outside the live
+   * quotable band kept refusing with NO_FRESH_EXECUTABLE_QUOTE on every two-minute tick, forever,
+   * because nothing ever invalidated the idea itself -- `trade_ideas.expires_at` is reachable
+   * only from the paper-trade open-write path, which a refused entry never reaches. These tests
+   * prove the gate itself now clears a dead idea on its very next attempt, rather than retrying a
+   * contract that can never price.
+   */
+
+  it("refuses and marks EXPIRED an idea whose underlying has drifted past the staleness bound, before ever pricing a contract", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    // The idea's thesis was anchored at 57000; the chain (unchanged from every "approved" test
+    // above, so the contract itself is otherwise perfectly fillable) now shows the underlying at
+    // 57720 -- a 1.26% move, past the 1% bound. A NO_FRESH_EXECUTABLE_QUOTE-style refusal from
+    // strike selection is not what should fire here -- the drift check must run first and preempt
+    // it, which is exactly what left `f29afcdc-...` retrying a dead strike for 40+ minutes live.
+    const result = await service({
+      idea: { ...IDEA, entry_price: "57000" },
+      onQuery: (text, values) => queries.push({ text, values }),
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "IDEA_PRICE_DRIFT_EXPIRED" });
+    if (result.approved) return;
+    expect(result.explanation).toContain("1.26%");
+    expect(result.explanation).toContain("marked EXPIRED");
+
+    const expireCall = queries.find((q) => q.text.includes("UPDATE trade_ideas SET status = 'EXPIRED'"));
+    expect(expireCall).toBeDefined();
+    expect(expireCall?.values).toEqual(["idea-1"]);
+  });
+
+  it("does not expire an idea whose drift sits comfortably under the staleness bound", async () => {
+    // ~0.5% drift from the chain's 57720 -- an ordinary, healthy amount of movement between
+    // proposal and attempt, well under the 1% bound.
+    const result = await service({ idea: { ...IDEA, entry_price: "57432" } })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+  });
+
+  it("keeps retrying (and failing) forever without the drift check -- this pins the exact production refusal the fix replaces", async () => {
+    // Same drifted thesis as above, but the contract itself is unfillable too: the chain is older
+    // than the 2-minute freshness window this (non-scalp) idea requires and no dense tick exists
+    // -- exactly `f29afcdc-...`'s real shape, where `option_premium_ticks` never carried the
+    // chosen strike at all. Confirms the earlier, more specific drift refusal preempts the
+    // generic one, so the idea is cleared out on the very first attempt rather than failing the
+    // same unhelpful way on every subsequent two-minute tick.
+    const staleChain = chain({ observedAt: new Date(NOW.getTime() - 15 * 60 * 1000) });
+    const result = await service({
+      idea: { ...IDEA, entry_price: "57000" },
+      snapshot: staleChain,
+      premiumTick: null,
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    // Without the fix this would be NO_FRESH_EXECUTABLE_QUOTE -- the same unhelpful refusal every
+    // two-minute tick, with the idea never leaving PROPOSED.
+    expect(result).toMatchObject({ approved: false, reason: "IDEA_PRICE_DRIFT_EXPIRED" });
+  });
+
+  it("refuses an idea past its own expires_at immediately, and marks it EXPIRED, instead of attempting to price it", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const expiredIdea = { ...IDEA, expires_at: new Date(NOW.getTime() - 60_000) };
+    const result = await service({
+      idea: expiredIdea,
+      onQuery: (text, values) => queries.push({ text, values }),
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "IDEA_EXPIRED" });
+    const expireCall = queries.find((q) => q.text.includes("UPDATE trade_ideas SET status = 'EXPIRED'"));
+    expect(expireCall).toBeDefined();
+  });
+
+  it("does not re-expire or re-price an idea that is already EXPIRED -- it is reported the same as not found", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const alreadyExpired = { ...IDEA, status: "EXPIRED" };
+    const result = await service({
+      idea: alreadyExpired,
+      onQuery: (text, values) => queries.push({ text, values }),
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "IDEA_NOT_FOUND" });
+    if (result.approved) return;
+    expect(result.explanation).toContain("EXPIRED");
+    expect(queries.some((q) => q.text.includes("UPDATE trade_ideas SET status = 'EXPIRED'"))).toBe(false);
+  });
+
+  it("refuses a drifted ACCEPTED idea without relabelling it EXPIRED -- ACCEPTED means a position may already exist against it", async () => {
+    const queries: Array<{ text: string; values?: unknown[] }> = [];
+    const acceptedIdea = { ...IDEA, status: "ACCEPTED" };
+    const result = await service({
+      idea: acceptedIdea,
+      snapshot: chain({ underlyingValue: 58_400 }),
+      onQuery: (text, values) => queries.push({ text, values }),
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "IDEA_PRICE_DRIFT_EXPIRED" });
+    if (result.approved) return;
+    expect(result.explanation).not.toContain("marked EXPIRED");
+    expect(queries.some((q) => q.text.includes("UPDATE trade_ideas SET status = 'EXPIRED'"))).toBe(false);
   });
 });
 

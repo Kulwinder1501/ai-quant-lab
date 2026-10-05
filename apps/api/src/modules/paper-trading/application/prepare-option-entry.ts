@@ -77,6 +77,32 @@ export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS = 2 * 60 * 1000;
  */
 export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE = 25 * 1000;
 
+/**
+ * How far the underlying may drift from a trade idea's `entry_price` before the idea is treated
+ * as a dead thesis rather than a merely delayed one.
+ *
+ * `trade_ideas` carries its own `expires_at` (four hours past `generated_at` for the autonomous
+ * agent's proposals), but that bound is reachable only lazily: the sole code that ever marks a
+ * row EXPIRED lives in the paper-trade open-write path, after this gate has already approved an
+ * entry. A proposal this gate refuses -- for any reason, `NO_FRESH_EXECUTABLE_QUOTE` included --
+ * never reaches that code, so it sits `PROPOSED` for its full four-hour window regardless of how
+ * stale its underlying reference has become.
+ *
+ * Trade idea `f29afcdc-3815-4c27-a6f8-34df642d5f74` (BANKNIFTY 2026-10-27 53300 CE, AI Autonomous
+ * Agent / "Classic" bot) is the case that exposed this: refused every two-minute tick with
+ * `NO_FRESH_EXECUTABLE_QUOTE` because the delta-0.75 strike this gate picks for BANKNIFTY's only
+ * tradable (monthly) expiry sits roughly 1,300 points from spot -- far outside the ATM-band the
+ * dense premium-tick collector covers (`selectAtmPremiumContracts`) -- yet the idea itself stayed
+ * `PROPOSED` for the full window because nothing ever re-checked it. A drift bound expires a dead
+ * idea on its very next entry attempt instead of leaving it to retry a contract that can never
+ * price, so the next qualifying tick raises a fresh idea off the current price instead.
+ *
+ * One percent is generous relative to how this gate is actually used: every idea is expected to
+ * fill within its `MAXIMUM_EXECUTABLE_QUOTE_AGE_MS*` freshness window (two minutes, or 25 seconds
+ * on 1-minute cadence) of being proposed, so a healthy entry's drift is a small fraction of this.
+ */
+export const MAXIMUM_IDEA_PRICE_DRIFT_FRACTION = 0.01;
+
 export interface PreparedOptionEntry {
   tradeIdeaId: string;
   underlyingSymbol: string;
@@ -130,7 +156,9 @@ export type PrepareOptionEntryResult =
       | "NO_OPTION_ENTRY"
       | "NO_FRESH_EXECUTABLE_QUOTE"
       | "FILL_NOT_DERIVABLE"
-      | "OPTIONS_ENTRY_REJECTED";
+      | "OPTIONS_ENTRY_REJECTED"
+      | "IDEA_EXPIRED"
+      | "IDEA_PRICE_DRIFT_EXPIRED";
     explanation: string;
     reasons?: string[];
     unchecked?: string[];
@@ -185,6 +213,8 @@ interface PremiumTickReader {
 interface IdeaRow {
   id: string;
   side: TradeSide;
+  status: string;
+  expires_at: Date | null;
   entry_price: string;
   stop_loss: string;
   target_price: string;
@@ -210,7 +240,7 @@ export class PrepareOptionEntry {
     const now = input.now ?? new Date();
 
     const ideaResult = await this.database.query<IdeaRow>(`
-      SELECT ti.id, ti.side, ti.entry_price, ti.stop_loss, ti.target_price,
+      SELECT ti.id, ti.side, ti.status, ti.expires_at, ti.entry_price, ti.stop_loss, ti.target_price,
              ti.instrument_id, ti.confidence, ti.reasoning, ti.source_candle_id,
              i.lot_size, i.symbol, i.strike_step,
              c.timeframe AS source_candle_timeframe
@@ -222,6 +252,35 @@ export class PrepareOptionEntry {
     const idea = ideaResult.rows[0];
     if (!idea) {
       return { approved: false, reason: "IDEA_NOT_FOUND", explanation: "Trade idea not found." };
+    }
+
+    // An idea that is no longer PROPOSED or ACCEPTED (EXPIRED/REJECTED) is not actionable by
+    // anyone, so it is reported the same way an absent row would be: "approved" must never read
+    // the same whether the gate found nothing or found something it already knows is dead.
+    if (idea.status !== "PROPOSED" && idea.status !== "ACCEPTED") {
+      return {
+        approved: false,
+        reason: "IDEA_NOT_FOUND",
+        explanation: `Trade idea ${idea.id} is ${idea.status}, not PROPOSED or ACCEPTED, and cannot be opened.`,
+      };
+    }
+
+    // Proactive, not lazy: the only other place that ever marks a PROPOSED idea EXPIRED is the
+    // paper-trade open-write path, reached only once this gate has already approved the entry.
+    // A repeatedly-refused idea never gets there, so it sits PROPOSED for its whole `expires_at`
+    // window. Checking it here means every call to this gate -- approved or refused -- is a
+    // chance to clear a dead idea out, not just a successful one.
+    if (idea.status === "PROPOSED" && idea.expires_at !== null && idea.expires_at.getTime() <= now.getTime()) {
+      await this.database.query(
+        `UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`,
+        [idea.id],
+      );
+      return {
+        approved: false,
+        reason: "IDEA_EXPIRED",
+        explanation: `Trade idea ${idea.id} expired at ${idea.expires_at.toISOString()}, `
+          + `before this entry attempt at ${now.toISOString()}. Marked EXPIRED.`,
+      };
     }
 
     const underlyingSymbol = String(idea.symbol).toUpperCase();
@@ -292,6 +351,37 @@ export class PrepareOptionEntry {
           `No usable option chain found for ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
           + `within maximum age of ${MAXIMUM_CHAIN_AGE_MINUTES} minutes.`,
       };
+    }
+
+    // The idea's own thesis is anchored to `entry_price`; once the market has moved past it by
+    // more than `MAXIMUM_IDEA_PRICE_DRIFT_FRACTION`, retrying this idea is retrying a stale
+    // thesis, not a delayed fill. Checked against the chain's own underlying value -- the same
+    // reference this gate uses to price the contract -- rather than a caller-supplied price, so
+    // this cannot be bypassed by whatever quote happens to be fresh.
+    const referenceEntryPrice = Number(idea.entry_price);
+    const currentUnderlyingValue = usableChain.underlyingValue;
+    if (
+      Number.isFinite(referenceEntryPrice) && referenceEntryPrice > 0
+      && currentUnderlyingValue !== null && Number.isFinite(currentUnderlyingValue) && currentUnderlyingValue > 0
+    ) {
+      const driftFraction = Math.abs(currentUnderlyingValue - referenceEntryPrice) / referenceEntryPrice;
+      if (driftFraction > MAXIMUM_IDEA_PRICE_DRIFT_FRACTION) {
+        if (idea.status === "PROPOSED") {
+          await this.database.query(
+            `UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`,
+            [idea.id],
+          );
+        }
+        return {
+          approved: false,
+          reason: "IDEA_PRICE_DRIFT_EXPIRED",
+          explanation: `${underlyingSymbol} has moved ${(driftFraction * 100).toFixed(2)}% from this idea's `
+            + `entry_price (${referenceEntryPrice.toFixed(2)}) to the option chain's current underlying `
+            + `value (${currentUnderlyingValue.toFixed(2)}), past the `
+            + `${(MAXIMUM_IDEA_PRICE_DRIFT_FRACTION * 100).toFixed(0)}% staleness bound.`
+            + (idea.status === "PROPOSED" ? " The idea has been marked EXPIRED." : ""),
+        };
+      }
     }
 
     const MIN_ENTRY_DELTA = 0.75;
