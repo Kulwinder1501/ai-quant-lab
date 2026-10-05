@@ -39,6 +39,7 @@ from .contracts import (
     FEATURE_SCHEMA_VERSION_V_ICT_OTE,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
     FEATURE_SCHEMA_VERSION_V_ICT_SWING,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL,
     KNOWN_FEATURE_SCHEMA_VERSIONS,
     CandleEvidence,
     DatasetRequest,
@@ -53,6 +54,7 @@ from .volatility_expansion import (
     trailing_range_of,
     volatility_expansion_label,
 )
+from .volume_intelligence import INDIA_TZ, assign_rvol_bin, get_tod_bucket_index
 
 
 class FeatureConstructionError(ValueError):
@@ -63,6 +65,12 @@ class FeatureConstructionError(ValueError):
 # same thing in 2023 and 2026. The window is trailing and includes the scored
 # bar, so it never reads a later one.
 VOLUME_MEDIAN_WINDOW = 20
+
+# Trailing window for the Parkinson realised-volatility estimator (v-ict-swing-vol schema only).
+# Deliberately shorter than ATR's 14-bar Wilder memory (see `_INDICATOR_PARAMETERS["ATR"]`): the whole
+# point of this feature is to react to a volatility regime change faster than the one volatility
+# column this schema already carries, so its own lookback must be shorter, not merely different.
+PARKINSON_WINDOW = 10
 
 
 def trailing_feature_context(series: Sequence[tuple[float, float]]) -> tuple[float, float]:
@@ -83,6 +91,39 @@ def trailing_feature_context(series: Sequence[tuple[float, float]]) -> tuple[flo
     prior_close = closes[-2] if len(closes) >= 2 else _nan()
     median_volume = statistics.median(volumes[-VOLUME_MEDIAN_WINDOW:]) if volumes else _nan()
     return prior_close, median_volume
+
+
+def _parkinson_ratio(window: Sequence[tuple[float, float]]) -> float:
+    """Parkinson (1980) range-based realised-volatility estimate over a trailing window.
+
+    ``window`` is chronological ``(high, low)`` for consecutive completed candles ending with the bar
+    being scored -- the same discipline :func:`trailing_feature_context` documents for its own
+    ``(prior_close, median_volume)`` window: the caller must never hand this a window reaching past
+    the scored bar, and it is free to include the scored bar's own high/low (already fully known at
+    its own close, the same reasoning ``candle.range_bps`` and the geometry block rely on).
+
+    Returns a dimensionless per-bar fractional volatility (for example ``0.004`` for a ~0.4% typical
+    true-range-implied move), deliberately left un-annualised: annualising needs a bars-per-year
+    assumption that differs by timeframe (1d vs 5m vs 1m), and this feature only needs to be a
+    consistent, comparable realised-volatility reading, not a cross-timeframe annualised figure --
+    the same scale-free posture this module's docstring requires of every column.
+
+    ``math.nan`` when the window is not yet ``PARKINSON_WINDOW`` bars long, or any bar in it has a
+    non-finite or non-positive high/low -- "no scale yet", the same treatment a too-short trailing
+    range gets elsewhere in this module.
+    """
+
+    if len(window) < PARKINSON_WINDOW:
+        return _nan()
+    recent = window[-PARKINSON_WINDOW:]
+    squared_log_ranges: list[float] = []
+    for high, low in recent:
+        if not (math.isfinite(high) and math.isfinite(low) and high > 0 and low > 0 and high >= low):
+            return _nan()
+        squared_log_ranges.append(math.log(high / low) ** 2)
+    mean_squared_log_range = sum(squared_log_ranges) / len(squared_log_ranges)
+    variance = mean_squared_log_range / (4.0 * math.log(2.0))
+    return math.sqrt(variance)
 
 
 _CANDLE_FEATURES: tuple[str, ...] = (
@@ -488,6 +529,43 @@ assert len(FEATURE_SCHEMA_V_ICT_SWING) == 103, (
     f"FEATURE_SCHEMA_V_ICT_SWING must have exactly 103 features, got {len(FEATURE_SCHEMA_V_ICT_SWING)}"
 )
 
+# Binary presence flag for the OTE band (see `_ICT_OTE_COLUMNS` above), added after the fact rather
+# than slotted into that frozen tuple: v-ict-ote and v-ict-swing are already-registered contracts,
+# and changing their column count in place is exactly the drift this file's versioning exists to
+# prevent. Mirrors `has_bos_level` / `has_choch_level` / `has_refined_order_block`'s own convention --
+# "no band was computed for this bar" is evidence a model can use, the same way "this pattern did not
+# fire" already is everywhere else in this schema.
+_ICT_OTE_PRESENCE_COLUMN: tuple[str, ...] = ("ict.ote_is_active",)
+
+# Cyclical time-of-day encoding, built on `volume_intelligence.get_tod_bucket_index`'s own
+# 09:15-15:30 IST, 5-minute-bucket session definition. See `build_feature_vector` for why the angle
+# itself is taken over the true 24-hour clock rather than over the 75-bucket session range.
+_TIME_OF_DAY_COLUMNS: tuple[str, ...] = ("time.tod_sin", "time.tod_cos")
+
+# Bucketed/quantised reading of this schema's own real-time volume ratio
+# (`candle.volume_median_ratio`), using `volume_intelligence.assign_rvol_bin`'s six non-parametric
+# bins rather than a new ad hoc threshold set.
+_VOLUME_REGIME_COLUMNS: tuple[str, ...] = ("volume.rvol_bucket",)
+
+# Parkinson range-based realised-volatility estimator -- see `_parkinson_ratio` and `PARKINSON_WINDOW`.
+_VOLATILITY_REGIME_COLUMNS: tuple[str, ...] = ("volatility.parkinson_ratio",)
+
+# v-ict-swing plus the five columns above, closing the OTE-presence-flag, time-of-day, RVOL, and
+# realised-volatility gaps a 2026-10-05 feature-coverage review found -- none of them part of the
+# v9/v-ict/.../v-ict-swing ICT ablation chain itself, but v-ict-swing (the richest, most current
+# schema in that chain, and the only one already carrying the OTE columns the presence flag needs) is
+# the most appropriate base to extend rather than an older or narrower version.
+FEATURE_SCHEMA_V_ICT_SWING_VOL: tuple[str, ...] = (
+    FEATURE_SCHEMA_V_ICT_SWING
+    + _ICT_OTE_PRESENCE_COLUMN
+    + _TIME_OF_DAY_COLUMNS
+    + _VOLUME_REGIME_COLUMNS
+    + _VOLATILITY_REGIME_COLUMNS
+)
+assert len(FEATURE_SCHEMA_V_ICT_SWING_VOL) == 108, (
+    f"FEATURE_SCHEMA_V_ICT_SWING_VOL must have exactly 108 features, got {len(FEATURE_SCHEMA_V_ICT_SWING_VOL)}"
+)
+
 # Multi-hot binary pattern flags for all known patterns
 _PATTERN_BINARY_FEATURES: tuple[str, ...] = tuple(
     f"pattern.is_{code.lower()}" for code in _PATTERN_CODES
@@ -530,6 +608,7 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED: FEATURE_SCHEMA_V_ICT_REFINED,
     FEATURE_SCHEMA_VERSION_V_ICT_OTE: FEATURE_SCHEMA_V_ICT_OTE,
     FEATURE_SCHEMA_VERSION_V_ICT_SWING: FEATURE_SCHEMA_V_ICT_SWING,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL: FEATURE_SCHEMA_V_ICT_SWING_VOL,
 }
 assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
@@ -665,6 +744,7 @@ def build_feature_vector(
     median_volume: float,
     prior_high: float = _nan(),
     prior_low: float = _nan(),
+    trailing_high_low: Sequence[tuple[float, float]] = (),
     schema_version: str = FEATURE_SCHEMA_VERSION,
     indicator_algorithm_version: str = "ta-v1",
     pattern_algorithm_version: str = "candlestick-v1",
@@ -858,6 +938,11 @@ def build_feature_vector(
         if (ict and ict.ote_distance_to_band is not None and has_atr)
         else _nan()
     )
+    # Binary presence flag (v-ict-swing-vol schema only), mirroring has_bos_level / has_choch_level /
+    # has_refined_order_block's own convention: "no OTE band was computed for this bar" is evidence of
+    # absence (0.0), not a missing measurement, independent of whether ATR happened to be available --
+    # unlike `ote_distance_to_band_atr`, which still needs `has_atr` because it is a ratio.
+    values["ict.ote_is_active"] = 1.0 if (ict and ict.ote_distance_to_band is not None) else 0.0
 
     # ITH/ITL/STH/STL "swing hierarchy" (v-ict-swing schema only). `swing_protected_*` is None
     # whenever the trend was NEUTRAL or the relevant Intermediate Term point had not formed --
@@ -882,6 +967,47 @@ def build_feature_vector(
     values["ict.distance_to_stl_atr"] = (
         ict.swing_distance_to_stl / atr_val if (ict and ict.swing_distance_to_stl is not None and has_atr) else _nan()
     )
+
+    # Cyclical time-of-day (v-ict-swing-vol schema only). `get_tod_bucket_index` is reused purely as
+    # the trading-session membership gate (09:15-15:30 IST, 5-minute granularity) that function already
+    # encodes -- outside it (for example an end-of-day settlement marker on a daily bar) there is no
+    # time-of-day evidence, so both columns stay NaN rather than a fabricated angle, the same
+    # missing-evidence convention as every other optional reading here.
+    #
+    # Inside the session, the angle itself is taken over the true 24-hour clock, not over the
+    # 75-bucket session range: dividing by 75 would place bucket 75 (15:25-15:29) within one
+    # bucket-width of bucket 1 (09:15) on the unit circle, falsely implying the session close flows
+    # continuously into the next day's open across the ~17h45m overnight gap that
+    # `candle.overnight_gap_bps` exists to describe. Encoding over the real clock instead gives
+    # correctly-distant endpoints.
+    #
+    # `close_time` may already be a naive datetime holding the IST wall clock (this module's existing
+    # test-fixture convention) or a real tz-aware instant; either way this never falls back to the
+    # host machine's local timezone, keeping the feature deterministic regardless of where it runs.
+    close_time = candle.close_time
+    ist_close_time = close_time if close_time.tzinfo is None else close_time.astimezone(INDIA_TZ)
+    tod_bucket = get_tod_bucket_index(ist_close_time)
+    if tod_bucket is not None:
+        minute_of_day = ist_close_time.hour * 60 + ist_close_time.minute
+        angle = 2.0 * math.pi * minute_of_day / 1440.0
+        values["time.tod_sin"] = math.sin(angle)
+        values["time.tod_cos"] = math.cos(angle)
+    else:
+        values["time.tod_sin"] = _nan()
+        values["time.tod_cos"] = _nan()
+
+    # Bucketed/quantised RVOL (v-ict-swing-vol schema only). Reuses this schema's own real-time volume
+    # ratio (`candle.volume_median_ratio`, computed above) rather than a new RVOL computation, bucketed
+    # with `volume_intelligence.assign_rvol_bin`'s own six non-parametric edges -- the same bins the
+    # Jonckheere-Terpstra test found a genuine ordered relationship with absolute return across. NaN
+    # when the ratio itself is NaN (no trailing volume yet), the same missing-evidence convention as
+    # every other derived ratio in this module.
+    rvol_bucket = assign_rvol_bin(values["candle.volume_median_ratio"])
+    values["volume.rvol_bucket"] = float(rvol_bucket) if rvol_bucket is not None else _nan()
+
+    # Parkinson range-based realised volatility (v-ict-swing-vol schema only) -- see
+    # `_parkinson_ratio` and `PARKINSON_WINDOW` for the estimator and leakage-safety reasoning.
+    values["volatility.parkinson_ratio"] = _parkinson_ratio(trailing_high_low)
 
     for pattern_code in _PATTERN_CODES:
         matching = [
@@ -1070,6 +1196,12 @@ def build_labeled_examples(
     # The window advances one bar at a time, so a feature can only ever see bars
     # at or before the candle it describes.
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
+    # Same discipline for the Parkinson estimator's trailing (high, low) window -- fixed at
+    # PARKINSON_WINDOW regardless of request.horizon_bars, so the feature's meaning never depends on
+    # which label scheme asked for it. Advances every candle, including ones later skipped for scope
+    # or a missing label, so it stays a true picture of recent range (the same reasoning
+    # build_volatility_expansion_examples's own trailing_highs/trailing_lows documents).
+    parkinson_window: collections.deque[tuple[float, float]] = collections.deque(maxlen=PARKINSON_WINDOW)
     prior_close = _nan()
     prior_high = _nan()
     prior_low = _nan()
@@ -1082,6 +1214,7 @@ def build_labeled_examples(
         if math.isfinite(current_volume):
             volume_window.append(current_volume)
         median_volume = statistics.median(volume_window) if volume_window else _nan()
+        parkinson_window.append((_source_number(candle.high, "high"), _source_number(candle.low, "low")))
 
         try:
             _validate_evidence_scope(candle, request)
@@ -1127,6 +1260,7 @@ def build_labeled_examples(
                     median_volume=median_volume,
                     prior_high=prior_high,
                     prior_low=prior_low,
+                    trailing_high_low=tuple(parkinson_window),
                     schema_version=resolved_schema_version,
                     indicator_algorithm_version=request.indicator_algorithm_version,
                     pattern_algorithm_version=request.pattern_algorithm_version,

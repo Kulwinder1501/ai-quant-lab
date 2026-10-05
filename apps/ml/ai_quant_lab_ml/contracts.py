@@ -142,6 +142,32 @@ FEATURE_SCHEMA_VERSION_V_ICT_OTE = "ml-feature-v-ict-ote"
 #: previously the largest documented gap after the fractal cascade itself.
 FEATURE_SCHEMA_VERSION_V_ICT_SWING = "ml-feature-v-ict-swing"
 
+#: v-ict-swing (the full 103-column ICT ablation chain) plus five columns closing three gaps found
+#: in a 2026-10-05 feature-coverage review, none of them ICT-ablation experiments:
+#:
+#: * `ict.ote_is_active` -- a binary presence flag for the OTE band, mirroring the convention
+#:   `has_bos_level`/`has_choch_level`/`has_refined_order_block` already use. `ict.ote_distance_to_band_atr`
+#:   (added in v-ict-ote) never got one of its own, so the training-fold-median imputer could not tell
+#:   "no OTE band was computed for this bar" from "price happens to sit at the median distance from an
+#:   active band" -- a train/serve skew source the other three presence flags do not have.
+#: * `time.tod_sin` / `time.tod_cos` -- a cyclical time-of-day encoding built on
+#:   `volume_intelligence.get_tod_bucket_index`. The Jonckheere-Terpstra result behind it (RVOL has a
+#:   genuine ordered relationship with absolute return across the 75 intraday buckets) was real and
+#:   statistically validated, but lived only in a standalone research script before this version.
+#: * `volume.rvol_bucket` -- the same real-time volume ratio this schema already carries
+#:   (`candle.volume_median_ratio`), bucketed with `volume_intelligence.assign_rvol_bin`'s own six
+#:   non-parametric edges rather than a new ad hoc threshold set.
+#: * `volatility.parkinson_ratio` -- a 10-bar Parkinson range-based realised-volatility estimator.
+#:   `indicator.ATR.value_ratio` was, before this version, the only volatility-shaped column anywhere
+#:   in the schema, and its 14-bar Wilder smoothing has a long memory that reacts slowly to a regime
+#:   change.
+#:
+#: Registered as its own version rather than folded into v-ict-swing in place for the same reason
+#: every other bump in this file is: an artifact trained on 103 columns must stay loadable and
+#: reconstructible bit-for-bit, and a 108-column vector silently served against it would be scored on
+#: the wrong contract.
+FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL = "ml-feature-v-ict-swing-vol"
+
 #: Every schema version this codebase can still construct feature vectors for.
 #: An artifact recorded under any other version is rejected at load time.
 KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
@@ -158,6 +184,7 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
     FEATURE_SCHEMA_VERSION_V_ICT_OTE,
     FEATURE_SCHEMA_VERSION_V_ICT_SWING,
+    FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL,
 )
 
 # Scalping timeframes share one schema. The swing schema's pattern, price-action,

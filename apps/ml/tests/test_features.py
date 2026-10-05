@@ -878,6 +878,299 @@ class FeatureConstructionTests(unittest.TestCase):
         observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_OTE)
         self.assertFalse(any(key.startswith("ict.swing_") or "_to_ith" in key or "_to_itl" in key for key in observed))
 
+    # ------------------------------------------------------------------------------------------
+    # v-ict-swing-vol: OTE presence flag, cyclical time-of-day, RVOL bucket, Parkinson volatility.
+    # ------------------------------------------------------------------------------------------
+
+    def test_v_ict_swing_vol_schema_is_v_ict_swing_plus_five_columns(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        from ai_quant_lab_ml.features import FEATURE_SCHEMA_V_ICT_SWING, FEATURE_SCHEMA_V_ICT_SWING_VOL
+
+        self.assertEqual(len(FEATURE_SCHEMA_V_ICT_SWING_VOL), len(FEATURE_SCHEMA_V_ICT_SWING) + 5)
+        self.assertEqual(FEATURE_SCHEMA_V_ICT_SWING_VOL[: len(FEATURE_SCHEMA_V_ICT_SWING)], FEATURE_SCHEMA_V_ICT_SWING)
+        self.assertEqual(feature_schema(FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL), FEATURE_SCHEMA_V_ICT_SWING_VOL)
+        for column in (
+            "ict.ote_is_active",
+            "time.tod_sin",
+            "time.tod_cos",
+            "volume.rvol_bucket",
+            "volatility.parkinson_ratio",
+        ):
+            self.assertIn(column, FEATURE_SCHEMA_V_ICT_SWING_VOL)
+            # None of these five are part of the ICT ablation chain itself -- v-ict-swing must not
+            # have gained them as a side effect of this change.
+            self.assertNotIn(column, FEATURE_SCHEMA_V_ICT_SWING)
+
+    def test_v_ict_swing_vol_columns_are_absent_from_v_ict_swing(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="PREMIUM",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side="BULLISH",
+                ote_is_within=True,
+                ote_distance_to_band=0.0,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING)
+        for column in (
+            "ict.ote_is_active",
+            "time.tod_sin",
+            "time.tod_cos",
+            "volume.rvol_bucket",
+            "volatility.parkinson_ratio",
+        ):
+            self.assertNotIn(column, observed)
+
+    def test_ote_is_active_flag_is_false_without_a_band(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL, IctEvidence
+
+        source = dataclasses.replace(
+            evidence(),
+            ict=IctEvidence(
+                htf_bias="BULLISH",
+                premium_discount_zone="UNKNOWN",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side=None,
+                ote_is_within=None,
+                ote_distance_to_band=None,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL)
+        self.assertEqual(observed["ict.ote_is_active"], 0.0)
+        # The imputer-skew case this flag exists to fix: no band, no ATR either, so the distance
+        # column is NaN -- the flag must still read 0.0 (absence), never NaN itself.
+        self.assertTrue(math.isnan(observed["ict.ote_distance_to_band_atr"]))
+
+    def test_ote_is_active_flag_is_true_with_an_active_band(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL, IctEvidence
+
+        atr_indicator = IndicatorEvidence("ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": 4.0})
+        source = dataclasses.replace(
+            evidence(indicators=(atr_indicator,)),
+            ict=IctEvidence(
+                htf_bias="BEARISH",
+                premium_discount_zone="PREMIUM",
+                distance_to_nearest_order_block=None,
+                nearest_order_block_side=None,
+                has_bos_level=False,
+                has_choch_level=False,
+                distance_to_bos_level=None,
+                distance_to_choch_level=None,
+                ote_side="BEARISH",
+                # Within the band (distance 0.0) is still an *active* band -- the presence flag reads
+                # "was a band computed", not "is price currently inside it" (that is `ote_is_within`).
+                ote_is_within=True,
+                ote_distance_to_band=0.0,
+            ),
+        )
+        observed = features_of(source, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL)
+        self.assertEqual(observed["ict.ote_is_active"], 1.0)
+        self.assertEqual(observed["ict.ote_distance_to_band_atr"], 0.0)
+
+    def test_time_of_day_known_bucket_boundaries(self) -> None:
+        """Market open and the last 5-minute bucket before close land in buckets 1 and 75."""
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        from ai_quant_lab_ml.volume_intelligence import INDIA_TZ, get_tod_bucket_index
+
+        open_tick = datetime(2024, 1, 2, 9, 15, tzinfo=INDIA_TZ)
+        last_bucket_tick = datetime(2024, 1, 2, 15, 25, tzinfo=INDIA_TZ)
+        midday_tick = datetime(2024, 1, 2, 12, 30, tzinfo=INDIA_TZ)
+
+        self.assertEqual(get_tod_bucket_index(open_tick), 1)
+        self.assertEqual(get_tod_bucket_index(last_bucket_tick), 75)
+
+        def observed_at(tick: datetime) -> dict[str, float]:
+            candle = dataclasses.replace(evidence(), close_time=tick)
+            return features_of(candle, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL)
+
+        open_observed = observed_at(open_tick)
+        last_observed = observed_at(last_bucket_tick)
+        midday_observed = observed_at(midday_tick)
+
+        # Market open: minute-of-day 555/1440 -> a specific, hand-computable angle.
+        open_angle = 2.0 * math.pi * (9 * 60 + 15) / 1440.0
+        self.assertAlmostEqual(open_observed["time.tod_sin"], math.sin(open_angle), places=10)
+        self.assertAlmostEqual(open_observed["time.tod_cos"], math.cos(open_angle), places=10)
+
+        # Midday is neither of the two endpoints -- just a sanity check it is a distinct, finite point.
+        self.assertTrue(math.isfinite(midday_observed["time.tod_sin"]))
+        self.assertTrue(math.isfinite(midday_observed["time.tod_cos"]))
+        self.assertNotAlmostEqual(midday_observed["time.tod_sin"], open_observed["time.tod_sin"], places=3)
+
+        # The cyclical property this feature must get right: 09:15 and the last pre-15:30 bucket are
+        # ~17h45m apart across the overnight gap, not neighbours. A naive angle = 2*pi*(bucket-1)/75
+        # would place them about one 75th of the circle apart (Euclidean distance ~0.084 on the unit
+        # circle) -- wrongly implying the session wraps continuously into the next day's open. Encoding
+        # over the true 24-hour clock instead keeps them far apart.
+        distance = math.hypot(
+            open_observed["time.tod_sin"] - last_observed["time.tod_sin"],
+            open_observed["time.tod_cos"] - last_observed["time.tod_cos"],
+        )
+        self.assertGreater(distance, 1.0, f"09:15 and 15:25 should be far apart on the unit circle, got {distance}")
+
+    def test_time_of_day_outside_the_session_is_missing_not_zero(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        from ai_quant_lab_ml.volume_intelligence import INDIA_TZ
+
+        # 16:00 IST: after the 15:30 close, outside the session `get_tod_bucket_index` defines.
+        after_close = dataclasses.replace(
+            evidence(), close_time=datetime(2024, 1, 2, 16, 0, tzinfo=INDIA_TZ)
+        )
+        observed = features_of(after_close, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL)
+        self.assertTrue(math.isnan(observed["time.tod_sin"]))
+        self.assertTrue(math.isnan(observed["time.tod_cos"]))
+
+    def test_rvol_bucket_reuses_the_existing_volume_ratio_not_a_new_computation(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        from ai_quant_lab_ml.volume_intelligence import assign_rvol_bin
+
+        # volume_median_ratio = 1_000.0 / 800.0 = 1.25 -> bin 4 under volume_intelligence's own edges
+        # (1.25 <= RVOL < 1.50). Computed directly from the same evidence() fixture everything else in
+        # this file uses (volume=1_000.0, MEDIAN_VOLUME=800.0), not a bespoke scenario.
+        observed = features_of(evidence(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL)
+        ratio = observed["candle.volume_median_ratio"]
+        self.assertAlmostEqual(ratio, 1.25, places=10)
+        self.assertEqual(observed["volume.rvol_bucket"], float(assign_rvol_bin(ratio)))
+        self.assertEqual(observed["volume.rvol_bucket"], 4.0)
+
+    def test_rvol_bucket_is_missing_when_the_ratio_is_missing(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+
+        # median_volume=0.0 makes candle.volume_median_ratio NaN (see build_feature_vector's own
+        # zero-division guard) -- the bucket must follow it to NaN, not silently default to a bin.
+        observed = features_of(
+            evidence(), median_volume=0.0, schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        )
+        self.assertTrue(math.isnan(observed["candle.volume_median_ratio"]))
+        self.assertTrue(math.isnan(observed["volume.rvol_bucket"]))
+
+    def test_parkinson_ratio_matches_a_hand_computed_value(self) -> None:
+        """Ten bars of a constant (high, low) range have a closed-form Parkinson estimate."""
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+
+        high, low = 101.0, 99.0
+        window = tuple((high, low) for _ in range(10))
+        expected = math.sqrt(math.log(high / low) ** 2 / (4.0 * math.log(2.0)))
+
+        observed = features_of(
+            evidence(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL, trailing_high_low=window
+        )
+        self.assertAlmostEqual(observed["volatility.parkinson_ratio"], expected, places=12)
+        # Sanity bound: a +/-1% range around 100 should read a small-single-digit-percent vol, not a
+        # value in the wrong units (e.g. an absolute price level, or 100x off from a ratio).
+        self.assertGreater(observed["volatility.parkinson_ratio"], 0.0)
+        self.assertLess(observed["volatility.parkinson_ratio"], 0.05)
+
+    def test_parkinson_ratio_is_missing_below_the_window_size(self) -> None:
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+        from ai_quant_lab_ml.features import PARKINSON_WINDOW
+
+        short_window = tuple((101.0, 99.0) for _ in range(PARKINSON_WINDOW - 1))
+        observed = features_of(
+            evidence(), schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL, trailing_high_low=short_window
+        )
+        self.assertTrue(math.isnan(observed["volatility.parkinson_ratio"]))
+
+    def test_parkinson_ratio_reacts_to_a_regime_change_faster_than_atr(self) -> None:
+        """The demonstrable improvement this feature exists for.
+
+        Both columns are read off the identical synthetic bar via the same `build_feature_vector`
+        call, so this is a true apples-to-apples comparison on one series, not two separate claims.
+
+        Calm phase: every bar has high=100.1/low=99.9 (true range 0.2, no gaps since open=close=100
+        every bar). ATR is Wilder-seeded with that same 0.2 true range, so it starts already converged
+        and constant at 0.2 through the whole calm phase -- the cleanest possible baseline for "how far
+        has it moved" after the shock, with no residual drift to account for.
+
+        Shock: a single storm bar (high=104.0/low=96.0, true range 8.0) lands with 9 calm bars still in
+        the Parkinson window and 13 calm periods of smoothing already behind the ATR. Each series is
+        then compared against its own fully-converged, hand-computable steady-state value for a
+        permanently sustained storm -- the ATR fixed point (period-weighted average that converges to
+        the constant input) and the Parkinson value for a fully-storm window -- to get a
+        regime-independent "fraction of the way there" figure for each.
+        """
+        from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL
+
+        atr_period = 14
+        calm_high, calm_low = 100.1, 99.9
+        storm_high, storm_low = 104.0, 96.0
+        calm_true_range = calm_high - calm_low  # 0.2
+        storm_true_range = storm_high - storm_low  # 8.0
+
+        # Wilder ATR seeded at the calm true range: atr[i] = atr[i-1] + (TR[i] - atr[i-1]) / period.
+        # With atr[0] == calm_true_range and every subsequent TR == calm_true_range, atr stays exactly
+        # calm_true_range for the whole calm phase (a fixed point of its own recursion) -- not an
+        # approximation, the exact Wilder value for a perfectly calm history.
+        atr_before_shock = calm_true_range
+        atr_after_one_storm_bar = atr_before_shock + (storm_true_range - atr_before_shock) / atr_period
+        # Hand-computable: 0.2 + (8.0 - 0.2) / 14
+        self.assertAlmostEqual(atr_after_one_storm_bar, 0.2 + 7.8 / 14, places=12)
+
+        atr_indicator_before = IndicatorEvidence(
+            "ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": atr_before_shock}
+        )
+        atr_indicator_after = IndicatorEvidence(
+            "ATR", "ta-v1", {"period": 14, "smoothing": "WILDER"}, {"value": atr_after_one_storm_bar}
+        )
+
+        calm_window = tuple((calm_high, calm_low) for _ in range(10))
+        one_storm_window = calm_window[1:] + ((storm_high, storm_low),)
+
+        before = features_of(
+            dataclasses.replace(evidence(indicators=(atr_indicator_before,))),
+            schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL,
+            trailing_high_low=calm_window,
+        )
+        after_one_storm_bar = features_of(
+            dataclasses.replace(evidence(indicators=(atr_indicator_after,))),
+            schema_version=FEATURE_SCHEMA_VERSION_V_ICT_SWING_VOL,
+            trailing_high_low=one_storm_window,
+        )
+
+        # Fully-converged steady state for a permanently sustained storm, computed independently of
+        # the implementation under test:
+        atr_steady_state = storm_true_range  # Wilder's fixed point under a constant input.
+        parkinson_steady_state = math.sqrt(math.log(storm_high / storm_low) ** 2 / (4.0 * math.log(2.0)))
+
+        atr_ratio_before = before["indicator.ATR.value_ratio"]
+        atr_ratio_after = after_one_storm_bar["indicator.ATR.value_ratio"]
+        parkinson_before = before["volatility.parkinson_ratio"]
+        parkinson_after = after_one_storm_bar["volatility.parkinson_ratio"]
+
+        # `indicator.*_ratio` columns divide by the candle's own close (101.0 on the `evidence()`
+        # fixture), not by an assumed round number -- see `_INDICATOR_VALUE_FIELDS`'s "_ratio" handling.
+        close_price = evidence().close
+        self.assertAlmostEqual(atr_ratio_before, calm_true_range / close_price, places=10)
+        self.assertAlmostEqual(atr_ratio_after, atr_after_one_storm_bar / close_price, places=10)
+
+        atr_steady_ratio = atr_steady_state / close_price
+        atr_recovery_fraction = (atr_ratio_after - atr_ratio_before) / (atr_steady_ratio - atr_ratio_before)
+        parkinson_recovery_fraction = (parkinson_after - parkinson_before) / (
+            parkinson_steady_state - parkinson_before
+        )
+
+        # Both move toward their new regime after one storm bar, but Parkinson -- an unweighted mean
+        # over a 10-bar window -- gets a 1/10 share of the new regime immediately, while Wilder's
+        # recursive smoothing only takes a 1/14 step every bar no matter how extreme the new reading
+        # is. The real, demonstrable improvement: Parkinson covers clearly more of the distance to the
+        # new regime than ATR does, on the identical synthetic shock.
+        self.assertGreater(parkinson_recovery_fraction, atr_recovery_fraction * 2.0)
+        self.assertGreater(parkinson_recovery_fraction, 0.25)
+
     def test_candlestick_geometry_scale_free_and_zero_division_protection(self) -> None:
         from ai_quant_lab_ml.contracts import FEATURE_SCHEMA_VERSION_V8_GEOMETRY
 
