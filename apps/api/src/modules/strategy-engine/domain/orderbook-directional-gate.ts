@@ -253,7 +253,15 @@ export function resolveConfluenceSignalFromDepth(input: {
 
   const { rawDi, decayingDi } = calculateDecayingDepthImbalance(input.depth);
   const isTier1 = ["SWING_HIGH", "SWING_LOW", "ITH", "ITL", "SESSION_HIGH", "SESSION_LOW"].includes(input.nearestLevelType);
-  const diTilde = isTier1 ? -rawDi : rawDi;
+  // DI_tilde = -DI uniformly across BOTH tiers, matching the frozen OOS validator
+  // (apps/ml/run_orderbook01_oos.py: `di_tilde = -di` in match_events_to_depth, applied to
+  // Tier 1 and Tier 2/PDL alike -- see the module docstring's Tier 1/Tier 2 sections, both of
+  // which state "DI_tilde = -DI"). This gate previously negated only for Tier 1
+  // (`isTier1 ? -rawDi : rawDi`), leaving Tier 2 (PDL) on the raw, un-negated sign -- i.e. the
+  // opposite convention from what was actually backtested. Git history (introduced in
+  // 8f9930a2, "wire runtime L2 depth buffer... and implement distance-weighted decaying DI")
+  // shows no documented reason for the asymmetry; it was a bug, not a deliberate choice.
+  const diTilde = -rawDi;
 
   let directional_bias = "NONE";
   let gate_action = "NO_ACTION";

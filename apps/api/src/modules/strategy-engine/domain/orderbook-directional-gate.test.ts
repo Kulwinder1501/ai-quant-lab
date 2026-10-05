@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyOrderbookGateToProposal,
   evaluateOrderbookDirectionalGate,
+  resolveConfluenceSignalFromDepth,
+  type DepthFrameLevelData,
 } from "./orderbook-directional-gate.js";
 import type { ProposedTradeIdea } from "./strategy.js";
 
@@ -56,6 +58,103 @@ describe("evaluateOrderbookDirectionalGate", () => {
     });
     expect(result.gateStatus).toBe("BLOCK");
     expect(result.confidenceAdjustment).toBe(-0.30);
+  });
+});
+
+/**
+ * `resolveConfluenceSignalFromDepth` negates raw DI into `di_tilde` before the directional
+ * read. `apps/ml/run_orderbook01_oos.py` (the frozen OOS validator this gate implements)
+ * applies `di_tilde = -di` UNIFORMLY to Tier 1 (SWING/ITH/ITL/SESSION) and Tier 2 (PDL) alike --
+ * see its module docstring, which states "DI_tilde = -DI" for both tiers. This gate used to
+ * negate only for Tier 1 (`isTier1 ? -rawDi : rawDi`), leaving Tier 2/PDL on the raw, un-negated
+ * sign: the opposite convention from what was actually backtested. Fixed 2026-10-05 to negate
+ * uniformly. These tests pin the sign convention for both tiers so a reintroduced asymmetry
+ * fails loudly.
+ */
+describe("resolveConfluenceSignalFromDepth DI_tilde sign convention", () => {
+  // total_sell_qty > total_buy_qty => rawDi < 0 => di_tilde = -rawDi > 0.
+  const sellDominantDepth: DepthFrameLevelData = {
+    totalBuyQty: 200,
+    totalSellQty: 800,
+    bidPrice: [100],
+    bidQty: [200],
+    askPrice: [101],
+    askQty: [800],
+  };
+
+  // total_buy_qty > total_sell_qty => rawDi > 0 => di_tilde = -rawDi < 0.
+  const buyDominantDepth: DepthFrameLevelData = {
+    totalBuyQty: 800,
+    totalSellQty: 200,
+    bidPrice: [100],
+    bidQty: [800],
+    askPrice: [101],
+    askQty: [200],
+  };
+
+  it("negates raw DI for a Tier 1 level (SESSION_HIGH): sell-dominant depth flags BEARISH_REJECTION", () => {
+    const signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "SESSION_HIGH",
+      nearestLevelPrice: 100.5,
+      distanceBps: 5,
+      depth: sellDominantDepth,
+    });
+    expect(signal.raw_di).toBeCloseTo(-0.6, 10);
+    expect(signal.di_tilde).toBeCloseTo(0.6, 10);
+    expect(signal.directional_bias).toBe("BEARISH_REJECTION");
+    expect(signal.gate_action).toBe("BUY_PUT_OR_SHORT");
+  });
+
+  it("negates raw DI for a Tier 2 level (PDL): sell-dominant depth flags BEARISH_SWEEP, not NO_ACTION", () => {
+    // Before the fix, Tier 2 used the raw (un-negated) DI: di_tilde would have stayed -0.6,
+    // failing the `di_tilde > 0` check entirely and reporting NO_ACTION/NONE here -- silently
+    // dropping a signal the OOS validator would have scored as a sweep.
+    const signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "PDL",
+      nearestLevelPrice: 100.5,
+      distanceBps: 5,
+      depth: sellDominantDepth,
+    });
+    expect(signal.raw_di).toBeCloseTo(-0.6, 10);
+    expect(signal.di_tilde).toBeCloseTo(0.6, 10);
+    expect(signal.directional_bias).toBe("BEARISH_SWEEP");
+    expect(signal.gate_action).toBe("BUY_PUT_OR_SHORT");
+  });
+
+  it("Tier 1 and Tier 2 agree in sign on the same depth snapshot (uniform negation)", () => {
+    const tier1Signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "ITH",
+      nearestLevelPrice: 100.5,
+      distanceBps: 5,
+      depth: buyDominantDepth,
+    });
+    const tier2Signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "PDL",
+      nearestLevelPrice: 100.5,
+      distanceBps: 5,
+      depth: buyDominantDepth,
+    });
+    // Same raw_di input (buy-dominant => rawDi > 0) must negate to the same-signed di_tilde
+    // for both tiers -- Tier 1 historically did this correctly; Tier 2 did not.
+    expect(tier1Signal.raw_di).toBeCloseTo(0.6, 10);
+    expect(tier2Signal.raw_di).toBeCloseTo(0.6, 10);
+    expect(tier1Signal.di_tilde).toBeCloseTo(-0.6, 10);
+    expect(tier2Signal.di_tilde).toBeCloseTo(-0.6, 10);
+    // di_tilde < 0 for both means neither predicts its tier's "di_tilde > 0" outcome here.
+    expect(tier1Signal.gate_action).toBe("NO_ACTION");
+    expect(tier2Signal.gate_action).toBe("NO_ACTION");
+  });
+
+  it("negates raw DI for a Tier 1 LOW level: sell-dominant depth flags BULLISH_REJECTION", () => {
+    const signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "SESSION_LOW",
+      nearestLevelPrice: 100.5,
+      distanceBps: 5,
+      depth: sellDominantDepth,
+    });
+    expect(signal.di_tilde).toBeCloseTo(0.6, 10);
+    expect(signal.directional_bias).toBe("BULLISH_REJECTION");
+    expect(signal.gate_action).toBe("BUY_CALL_OR_LONG");
   });
 });
 
