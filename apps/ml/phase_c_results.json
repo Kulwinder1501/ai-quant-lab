@@ -1,8 +1,8 @@
 {
   "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
-  "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+  "governanceStatus": "PHASE_C_PARTIAL_EXECUTION_LOCATION_ONLY",
   "tradingExecutionAuthorized": false,
-  "postgresqlDatabaseCandleEvaluation": {
+  "realDataLocationOnlyDiagnostic_NOT_PHASE_C_F1_F4": {
     "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
     "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
     "tradingExecutionAuthorized": false,
@@ -10,110 +10,130 @@
       {
         "experimentId": "F1_GOLDEN_POCKET",
         "zoneName": "GOLDEN_POCKET",
-        "nTreatmentTotal": 0,
-        "nControlTotal": 4991,
-        "nTreatmentMatched": 0,
-        "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
-        "asmdMax": 0.0,
-        "estimateHatDeltaBps": 0.0,
-        "lowerCiUnadjusted95Bps": 0.0,
-        "pValRaw": 1.0,
+        "nTreatmentTotal": 12,
+        "nControlTotal": 7619,
+        "nTreatmentMatched": 10,
+        "nControlMatched": 10,
+        "trimmedCommonSupportCount": 2883,
+        "asmdMax": 0.07381495657702568,
+        "estimateHatDeltaBps": 2.8498537298106856,
+        "lowerCiUnadjusted95Bps": -2.6165247179166053,
+        "pValRaw": 0.22007799220077992,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 7074,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
-        "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "pValHolmAdjusted": 0.44015598440155984,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
       {
         "experimentId": "F2_OTE",
         "zoneName": "OTE",
-        "nTreatmentTotal": 0,
-        "nControlTotal": 4991,
-        "nTreatmentMatched": 0,
-        "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
-        "asmdMax": 0.0,
-        "estimateHatDeltaBps": 0.0,
-        "lowerCiUnadjusted95Bps": 0.0,
-        "pValRaw": 1.0,
+        "nTreatmentTotal": 17,
+        "nControlTotal": 7619,
+        "nTreatmentMatched": 16,
+        "nControlMatched": 16,
+        "trimmedCommonSupportCount": 5214,
+        "asmdMax": 0.35774795586214425,
+        "estimateHatDeltaBps": 8.48580263160264,
+        "lowerCiUnadjusted95Bps": 5.078956219193005,
+        "pValRaw": 9.999000099990002e-05,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 7074,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
-        "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": false,
+        "pValHolmAdjusted": 0.00029997000299970003,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
       {
         "experimentId": "F3_DEEP_RETRACEMENT",
         "zoneName": "DEEP_RETRACEMENT",
-        "nTreatmentTotal": 0,
-        "nControlTotal": 4991,
-        "nTreatmentMatched": 0,
-        "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
-        "asmdMax": 0.0,
-        "estimateHatDeltaBps": 0.0,
-        "lowerCiUnadjusted95Bps": 0.0,
-        "pValRaw": 1.0,
+        "nTreatmentTotal": 10,
+        "nControlTotal": 7619,
+        "nTreatmentMatched": 6,
+        "nControlMatched": 6,
+        "trimmedCommonSupportCount": 4572,
+        "asmdMax": 0.546785993386071,
+        "estimateHatDeltaBps": 3.1323940620457127,
+        "lowerCiUnadjusted95Bps": -3.5217362325725157,
+        "pValRaw": 0.26077392260773924,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 7074,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
-        "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": false,
+        "pValHolmAdjusted": 0.44015598440155984,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       }
     ],
     "familyBResults": [
       {
         "experimentId": "F4_B1_0.618",
         "boundaryRatio": 0.618,
-        "nTreatmentTotal": 0,
-        "nControlTotal": 0,
+        "nTreatmentTotal": 6,
+        "nControlTotal": 1,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
+        "trimmedCommonSupportCount": 7,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 1,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B2_0.65",
         "boundaryRatio": 0.65,
-        "nTreatmentTotal": 0,
-        "nControlTotal": 0,
+        "nTreatmentTotal": 3,
+        "nControlTotal": 3,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
+        "trimmedCommonSupportCount": 6,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 3,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B3_0.702",
         "boundaryRatio": 0.702,
         "nTreatmentTotal": 0,
-        "nControlTotal": 0,
+        "nControlTotal": 4,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
         "trimmedCommonSupportCount": 0,
@@ -126,34 +146,42 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B4_0.786",
         "boundaryRatio": 0.786,
-        "nTreatmentTotal": 0,
-        "nControlTotal": 0,
+        "nTreatmentTotal": 1,
+        "nControlTotal": 1,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 0,
+        "trimmedCommonSupportCount": 2,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 0,
+          "ACTIVE_ANCHOR": 1,
           "SYNTHETIC_FALLBACK": 0
         },
-        "absoluteSurplusPassed": false,
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B5_0.886",
         "boundaryRatio": 0.886,
         "nTreatmentTotal": 0,
-        "nControlTotal": 0,
+        "nControlTotal": 3,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
         "trimmedCommonSupportCount": 0,
@@ -166,19 +194,42 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       }
     ],
     "zoneBoundingVerdicts": {
-      "GOLDEN_POCKET": "FALSIFIED",
-      "OTE": "FALSIFIED",
-      "DEEP_RETRACEMENT": "FALSIFIED"
+      "GOLDEN_POCKET": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "OTE": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "DEEP_RETRACEMENT": "INCONCLUSIVE_INSUFFICIENT_DATA"
+    },
+    "fibEngineDiagnostics": {
+      "NIFTY50": {
+        "barsEvaluated": 4987,
+        "activePoiBarCount": 4795,
+        "poiQualifiedCount": 9
+      },
+      "BANKNIFTY": {
+        "barsEvaluated": 4987,
+        "activePoiBarCount": 4308,
+        "poiQualifiedCount": 24
+      }
+    },
+    "dataCompleteness": {
+      "ofiAvailable": false,
+      "footprintTapeAvailable": false,
+      "optionsGexAvailable": false,
+      "marketBreadthAvailable": false,
+      "note": "OFI, trade-tape footprint/netDelta, options GEX and cross-sectional breadth are not derivable from this OHLCV-only candle feed and were left at honest neutral values rather than fabricated constants. This section therefore tests a LOCATION-ONLY diagnostic (does price reach the Fib zone, what is the raw unconditioned net MFE there) and is NOT a run of the full OFI-conditioned F1-F4 protocol in Research Specification v1.1. It must not be read as Phase C sign-off."
     }
   },
-  "empirical60SessionBenchmarkEvaluation": {
+  "syntheticPipelineSmokeTest_NOT_EVIDENCE": {
     "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
-    "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+    "governanceStatus": "SYNTHETIC_PIPELINE_SMOKE_TEST_NOT_EVIDENCE",
     "tradingExecutionAuthorized": false,
     "familyAResults": [
       {
@@ -198,8 +249,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
       {
         "experimentId": "F2_OTE",
@@ -218,8 +273,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
       {
         "experimentId": "F3_DEEP_RETRACEMENT",
@@ -238,8 +297,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "incrementalSurplusPassed": false
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       }
     ],
     "familyBResults": [
@@ -260,8 +323,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B2_0.65",
@@ -280,8 +347,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B3_0.702",
@@ -300,8 +371,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B4_0.786",
@@ -320,8 +395,12 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       },
       {
         "experimentId": "F4_B5_0.886",
@@ -340,14 +419,20 @@
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
         "pValHolmAdjusted": 1.0,
-        "boundaryPassed": false
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
       }
     ],
     "zoneBoundingVerdicts": {
-      "GOLDEN_POCKET": "FALSIFIED",
-      "OTE": "FALSIFIED",
-      "DEEP_RETRACEMENT": "FALSIFIED"
-    }
+      "GOLDEN_POCKET": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "OTE": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "DEEP_RETRACEMENT": "INCONCLUSIVE_INSUFFICIENT_DATA"
+    },
+    "isSyntheticData": true,
+    "evidentiaryValue": "NONE_FOR_REAL_EDGE_CLAIMS"
   }
 }

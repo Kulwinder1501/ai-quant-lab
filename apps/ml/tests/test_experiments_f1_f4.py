@@ -50,7 +50,7 @@ def test_propensity_matcher_real_active_anchor_restriction():
     c_no_anchor = [make_episode(f"C_noact_{i}", "2026-10-05", 1000000 + i * 1000 + 600, False, "NONE", False, 0.50, 2.0) for i in range(5)]
 
     all_controls = c_active + c_no_anchor
-    pairs, trimmed, asmd, counts = matcher.match_1to1_deterministic(t_eps, all_controls)
+    pairs, trimmed, asmd, counts, separation = matcher.match_1to1_deterministic(t_eps, all_controls)
 
     # Verify synthetic/no-anchor observations were strictly excluded
     assert counts["ACTIVE_ANCHOR"] == 5
@@ -73,7 +73,7 @@ def test_deterministic_matching_tie_break():
     c1 = make_episode("C_B", "2026-10-05", 1000100, False, "NONE", True, 0.50, 2.0)
     c2 = make_episode("C_A", "2026-10-05", 1000100, False, "NONE", True, 0.50, 2.0)
 
-    pairs, trimmed, asmd, counts = matcher.match_1to1_deterministic([t_ep], [c1, c2])
+    pairs, trimmed, asmd, counts, separation = matcher.match_1to1_deterministic([t_ep], [c1, c2])
 
     assert len(pairs) == 1
     # Secondary tie-break = episodeId ascending -> "C_A" must be selected over "C_B"
@@ -136,3 +136,50 @@ def test_run_phase_c_experiments_full_manifest():
     assert len(manifest["familyAResults"]) == 3
     assert len(manifest["familyBResults"]) == 5
     assert "zoneBoundingVerdicts" in manifest
+    # With real (if modest) matched samples here, the pipeline must actually have run the test
+    # rather than silently reporting "no common support" as if it had.
+    for res in manifest["familyAResults"]:
+        assert res["nTreatmentMatched"] > 0
+        assert res["separationDetected"] is False
+
+
+def test_quasi_separation_reports_inconclusive_not_falsified():
+    """
+    Regression test for the bug found in run_phase_c_pipeline.py's synthetic benchmark: when a
+    covariate (e.g. todSin/breadthAd) takes a distinct constant value per group, the propensity
+    logistic regression quasi-perfectly separates treatment from control, eta saturates at the
+    clip bound, common support collapses to empty, and matching silently returns zero pairs.
+    That must surface as "insufficient data to test" (INCONCLUSIVE), never as "FALSIFIED"
+    (p=1.0, CI=0 look identical to a genuine null result otherwise).
+    """
+    episodes = []
+    for s in range(1, 31):
+        session_str = f"2026-10-{s:02d}"
+        t_base = 10000000 + s * 86400000
+        # Treatment group: todSin/breadthAd pinned to one constant...
+        episodes.append(ObservationEpisode(
+            episodeId=f"T_{s}", symbol="NIFTY", sessionDate=session_str, entryTimestamp=t_base + 1000,
+            isSessionCloseExcluded=False, isTreatment=True, fibZone="GOLDEN_POCKET", hasRealActiveAnchor=True,
+            retracementRatio=0.62, mfeNetBps=5.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
+            todSin=0.10, todCos=0.20, breadthAd=0.30, l2DepthLiquidity=500.0
+        ))
+        # ...control group pinned to a different constant -> perfect separation on that feature alone.
+        episodes.append(ObservationEpisode(
+            episodeId=f"C_{s}", symbol="NIFTY", sessionDate=session_str, entryTimestamp=t_base + 1100,
+            isSessionCloseExcluded=False, isTreatment=False, fibZone="NONE", hasRealActiveAnchor=True,
+            retracementRatio=0.50, mfeNetBps=1.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
+            todSin=0.12, todCos=0.22, breadthAd=0.32, l2DepthLiquidity=500.0
+        ))
+
+    means = [10.0, 1.2, 5.0, 0.11, 0.21, 0.31, 500.0]
+    stds = [2.0, 0.3, 2.0, 0.01, 0.01, 0.01, 100.0]
+
+    manifest = run_phase_c_experiments(episodes, means, stds, B=200, seed=42)
+
+    gp_result = manifest["familyAResults"][0]
+    assert gp_result["separationDetected"] is True
+    assert gp_result["nTreatmentMatched"] == 0
+    assert gp_result["dataSufficientForVerdict"] is False
+    assert gp_result["incrementalSurplusPassed"] is False
+    assert gp_result["verdict"] == "INCONCLUSIVE_INSUFFICIENT_DATA"
+    assert manifest["zoneBoundingVerdicts"]["GOLDEN_POCKET"] == "INCONCLUSIVE_INSUFFICIENT_DATA"
