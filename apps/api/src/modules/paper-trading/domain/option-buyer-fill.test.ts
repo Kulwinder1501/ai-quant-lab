@@ -39,6 +39,26 @@ describe("mapIdeaToOptionBuyerFill", () => {
     expect(short.side).toBe("LONG");
   });
 
+  // Regression guard for the bug where `postgres-paper-trade-repository.ts` persisted
+  // `underlying_direction` from the trade's own (always-"LONG") `side` instead of the idea's
+  // real thesis direction. `underlyingDirection` is the field threaded through to fix that --
+  // it must carry the real LONG/SHORT thesis even though `side` never varies.
+  it("carries the idea's real thesis direction separately from the always-LONG side", () => {
+    const long = mapIdeaToOptionBuyerFill(niftyIdea({ ideaSide: "LONG" }));
+    const short = mapIdeaToOptionBuyerFill(niftyIdea({
+      ideaSide: "SHORT",
+      underlyingStop: 24_600,
+      underlyingTarget: 24_100,
+    }));
+
+    expect(long.underlyingDirection).toBe("LONG");
+    expect(short.underlyingDirection).toBe("SHORT");
+    // The point of the distinction: `side` is LONG for both, `underlyingDirection` is not.
+    expect(long.side).toBe("LONG");
+    expect(short.side).toBe("LONG");
+    expect(long.underlyingDirection).not.toBe(short.underlyingDirection);
+  });
+
   it("snaps the strike to the instrument's interval", () => {
     const nifty = mapIdeaToOptionBuyerFill(niftyIdea({ strikeStep: 50 }));
     const banknifty = mapIdeaToOptionBuyerFill(niftyIdea({

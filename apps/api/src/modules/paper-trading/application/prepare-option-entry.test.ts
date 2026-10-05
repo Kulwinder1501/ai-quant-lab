@@ -492,3 +492,62 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
   });
 });
 
+describe("PrepareOptionEntry - underlyingDirection (real thesis, not the always-LONG side)", () => {
+  // Regression coverage for the bug where `postgres-paper-trade-repository.ts` persisted
+  // `underlying_direction` from the trade's own `side` -- which is always "LONG" for an option
+  // buyer -- instead of the idea's real bullish/bearish direction. `entry.underlyingDirection`
+  // is the field that must carry the real thesis all the way to the repository's INSERT.
+  it("reports LONG for a bullish (CE) idea", async () => {
+    const result = await service().execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionType).toBe("CE");
+    expect(result.entry.underlyingDirection).toBe("LONG");
+    // The point of the distinction: `side` never varies, `underlyingDirection` does.
+    expect(result.entry.side).toBe("LONG");
+  });
+
+  it("reports SHORT for a bearish (PE) idea, even though side still reads LONG", async () => {
+    const shortIdea = {
+      ...IDEA,
+      side: "SHORT",
+      stop_loss: "58140", // mirrors IDEA's 420-point risk, on the opposite side of entry
+      target_price: "57040", // mirrors IDEA's 680-point reward, on the opposite side of entry
+    };
+    // A deep-ITM PE (strike well above spot) is needed to clear the entry gate's abs(delta) >=
+    // 0.75 screen, the same way the default fixture's 56000 CE does for the LONG case.
+    const peChain = chain({
+      quotes: [
+        {
+          strikePrice: 60000,
+          optionType: "PE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082560000PE",
+          providerToken: null,
+          lastPrice: 2310,
+          bid: 2300,
+          ask: 2320,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+    const result = await service({ idea: shortIdea, snapshot: peChain })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionType).toBe("PE");
+    expect(result.entry.underlyingDirection).toBe("SHORT");
+    // This is exactly the bug: the trade's own `side` is LONG (an option buyer is always long
+    // the contract) even though the underlying thesis is bearish. A consumer that read `side`
+    // instead of `underlyingDirection` here would get the wrong answer.
+    expect(result.entry.side).toBe("LONG");
+    expect(result.entry.underlyingDirection).not.toBe(result.entry.side);
+  });
+});
+

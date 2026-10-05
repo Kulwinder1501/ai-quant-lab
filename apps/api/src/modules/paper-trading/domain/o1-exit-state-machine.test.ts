@@ -127,6 +127,96 @@ describe("evaluateO1TradeExit (O1 Exit State Machine)", () => {
     expect(res.exitReason).toBe("PREMIUM_TOLERANCE");
   });
 
+  /**
+   * The exact scenario the audit reproduced against the live bug: `postgres-paper-trade-
+   * repository.ts` persisted `underlying_direction` from the trade's own `side` (always
+   * `"LONG"` for an option buyer) instead of the idea's real thesis direction, so a PE
+   * (bearish) position's `underlyingDirection` was wrongly stored as `"LONG"`.
+   *
+   * This function is pure and correct for whatever `underlyingDirection` it is handed -- that
+   * is exactly why these tests, with the value supplied correctly, cannot by themselves prove
+   * the production bug is fixed. What follows reproduces both the broken behaviour (wrong
+   * input, matching what the repository used to persist) and the fixed behaviour (correct
+   * input, matching what it persists now) for the same PE position and the same underlying
+   * path, so the contrast is explicit. The data-flow fix is proven separately, in
+   * `prepare-option-entry.test.ts` and `postgres-paper-trade-repository.test.ts`, which show
+   * the correct value actually reaches this field.
+   */
+  describe("PE (bearish-thesis) position -- the audit's reproduction", () => {
+    const peBase = {
+      side: "LONG" as const, // an option buyer's own side is always LONG, PE included
+      entryUnderlying: 57_720,
+      invalidationLevelAtEntry: 58_140, // the real structural stop: above entry, for a PE
+      initialRiskDistance: 420,
+      entryOptionPrice: 500,
+      openedAt: OPENED_AT,
+      now: new Date("2026-10-01T10:05:00.000Z"),
+      currentOptionPrice: 600, // comfortably above the premium stop either way
+      effectivePremiumStop: 300,
+      effectivePremiumTarget: 900,
+    };
+
+    it("a favourable fall must NOT exit, but does under the bug's wrong (LONG) direction", () => {
+      const underlyingFellFavourably = { ...peBase, currentUnderlyingPrice: 57_300 }; // fell 420
+
+      const correct = evaluateO1TradeExit({ ...underlyingFellFavourably, underlyingDirection: "SHORT" });
+      expect(correct.shouldExit).toBe(false);
+      expect(correct.exitReason).toBeNull();
+
+      // Reproduces the bug: persisting `side` ("LONG") instead of the real PE thesis made a
+      // favourable move look like the underlying crossing a LONG invalidation level.
+      const buggy = evaluateO1TradeExit({ ...underlyingFellFavourably, underlyingDirection: "LONG" });
+      expect(buggy.shouldExit).toBe(true);
+      expect(buggy.exitReason).toBe("UNDERLYING_INVALIDATION");
+    });
+
+    it("a genuine invalidating rise MUST exit, but is missed under the bug's wrong (LONG) direction", () => {
+      const underlyingRoseThroughStop = { ...peBase, currentUnderlyingPrice: 58_200 }; // >= 58,140
+
+      const correct = evaluateO1TradeExit({ ...underlyingRoseThroughStop, underlyingDirection: "SHORT" });
+      expect(correct.shouldExit).toBe(true);
+      expect(correct.exitReason).toBe("UNDERLYING_INVALIDATION");
+
+      // Reproduces the bug: a genuine break of the structural stop went uncaught because the
+      // (wrongly LONG) direction checks for the underlying falling, not rising.
+      const buggy = evaluateO1TradeExit({ ...underlyingRoseThroughStop, underlyingDirection: "LONG" });
+      expect(buggy.shouldExit).toBe(false);
+      expect(buggy.exitReason).toBeNull();
+    });
+  });
+
+  /** Symmetric check: the fix must not regress the CE (bullish) side it already worked on. */
+  describe("CE (bullish-thesis) position -- symmetric regression guard", () => {
+    const ceBase = {
+      side: "LONG" as const,
+      entryUnderlying: 57_720,
+      invalidationLevelAtEntry: 57_300, // below entry, for a CE
+      initialRiskDistance: 420,
+      entryOptionPrice: 500,
+      openedAt: OPENED_AT,
+      now: new Date("2026-10-01T10:05:00.000Z"),
+      currentOptionPrice: 600,
+      effectivePremiumStop: 300,
+      effectivePremiumTarget: 900,
+    };
+
+    it("a favourable rise does not exit under the correct LONG direction", () => {
+      const underlyingRoseFavourably = { ...ceBase, currentUnderlyingPrice: 58_140 }; // rose 420
+      const result = evaluateO1TradeExit({ ...underlyingRoseFavourably, underlyingDirection: "LONG" });
+
+      expect(result.shouldExit).toBe(false);
+      expect(result.exitReason).toBeNull();
+    });
+
+    it("a genuine invalidating fall exits under the correct LONG direction", () => {
+      const underlyingFellThroughStop = { ...ceBase, currentUnderlyingPrice: 57_200 }; // <= 57,300
+      const result = evaluateO1TradeExit({ ...underlyingFellThroughStop, underlyingDirection: "LONG" });
+
+      expect(result.shouldExit).toBe(true);
+      expect(result.exitReason).toBe("UNDERLYING_INVALIDATION");
+    });
+  });
+
   it("triggers TARGET_REACHED when currentOptionPrice reaches effectivePremiumTarget", () => {
     const res = evaluateO1TradeExit({
       side: "LONG",

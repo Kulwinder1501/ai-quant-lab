@@ -163,6 +163,135 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
   });
 });
 
+/**
+ * Regression coverage for the bug where the single shared `openFromTradeIdeaWithinTransaction`
+ * INSERT bound `underlying_direction` to the trade's own `side` column instead of the idea's
+ * real bullish/bearish thesis direction. For an option buyer `side` is always `"LONG"` -- you
+ * are long the contract whichever way the idea points -- so every option trade's
+ * `underlying_direction` read as `"LONG"` regardless of whether a CE or PE had been bought. A
+ * PE (bearish-thesis) position then had its `UNDERLYING_INVALIDATION` check evaluated as if it
+ * were bullish.
+ *
+ * These tests exercise the real INSERT's parameter list (not the pure `o1-exit-state-machine`
+ * function, which already receives a correct `underlyingDirection` and so cannot see this class
+ * of bug) and assert that `underlying_direction` carries `input.underlyingDirection` -- the value
+ * threaded from `idea.side` through `PrepareOptionEntry` -- rather than `side`.
+ */
+describe("PostgresPaperTradeRepository underlying_direction persistence", () => {
+  function buildSuccessfulOpenClient() {
+    const statements: Array<{ text: string; parameters: unknown[] | undefined }> = [];
+    const client = {
+      query: vi.fn(async (text: string, parameters?: unknown[]) => {
+        const normalized = text.replace(/\s+/g, " ").trim();
+        statements.push({ text: normalized, parameters });
+        if (text.includes("FROM paper_accounts") && text.includes("FOR UPDATE")) {
+          return { rows: [{ id: "account-1", name: "acct", opening_balance: "100000", currency: "INR", is_active: true, daily_trade_cap: null }] };
+        }
+        if (text.includes("FROM trade_ideas") && text.includes("FOR UPDATE")) {
+          return { rows: [{
+            id: "idea-1", instrument_id: "instrument-1", side: "SHORT",
+            entry_price: "57720", stop_loss: "58140", target_price: "57040",
+            expires_at: null, lot_size: 15,
+          }] };
+        }
+        if (text.includes("AS available_capital")) return { rows: [{ available_capital: "100000" }] };
+        if (text.includes("INSERT INTO paper_trades")) return { rows: [{ id: "trade-1" }] };
+        if (text.includes("UPDATE trade_ideas SET status = 'ACCEPTED'")) return { rows: [{ id: "idea-1" }] };
+        if (text.includes("AND trade_idea_id = $2")) return { rows: [] };
+        if (text.includes("FROM paper_trades")) {
+          return { rows: [{
+            id: "trade-1", account_id: "account-1", trade_idea_id: "idea-1",
+            instrument_id: "instrument-1", timeframe: null, side: "LONG", status: "OPEN",
+            quantity: "15", entry_price: "2105", stop_loss: "1800", target_price: "2500",
+            opened_at: new Date("2026-10-01T05:00:00.000Z"), closed_at: null, exit_price: null,
+            exit_reason: null, realized_pnl: null, fees: "20", fee_breakdown: {}, slippage: "0",
+            notes: "test", option_strike: "59500", option_expiry: new Date("2026-08-25T10:00:00.000Z"),
+            option_type: "PE", underlying_symbol: "BANKNIFTY", underlying_entry_price: "57720",
+            entry_iv: "0.14",
+          }] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    return { client, statements };
+  }
+
+  function insertParameters(statements: Array<{ text: string; parameters: unknown[] | undefined }>): unknown[] {
+    const insert = statements.find((s) => s.text.startsWith("INSERT INTO paper_trades"));
+    expect(insert).toBeDefined();
+    return insert!.parameters!;
+  }
+
+  it("persists the threaded underlyingDirection for a PE option-buyer trade, not the always-LONG side", async () => {
+    const { client, statements } = buildSuccessfulOpenClient();
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+    const repository = new PostgresPaperTradeRepository(database);
+
+    await repository.openFromTradeIdea({
+      accountId: "account-1",
+      tradeIdeaId: "idea-1",
+      quantity: 15,
+      fillPrice: 2105,
+      openedAt: new Date("2026-10-01T05:00:00.000Z"),
+      entryFees: 20,
+      entrySlippage: 0,
+      notes: "test",
+      stopLossOverride: 1800,
+      targetPriceOverride: 2500,
+      // Exactly the shape an option-buyer caller supplies: the trade's own side is always
+      // LONG (long the PE contract), while underlyingDirection carries the real bearish thesis.
+      sideOverride: "LONG",
+      underlyingDirection: "SHORT",
+      optionContract: {
+        optionStrike: 59500,
+        optionExpiry: new Date("2026-08-25T10:00:00.000Z"),
+        optionType: "PE",
+        underlyingSymbol: "BANKNIFTY",
+        underlyingEntryPrice: 57720,
+        underlyingFillPrice: 57720,
+        underlyingFillPriceSource: "OPTION_CHAIN_QUOTE",
+        invalidationLevelAtEntry: 58140,
+        entryIv: 0.14,
+      },
+    });
+
+    const parameters = insertParameters(statements);
+    // $4 is `side` -- must stay "LONG" for the option contract's own paper-trade side.
+    expect(parameters[3]).toBe("LONG");
+    // The last bound parameter ($27) is `underlying_direction` -- this is the bug: it must be
+    // the threaded "SHORT" thesis, not a copy of `side`.
+    expect(parameters.at(-1)).toBe("SHORT");
+    expect(parameters.at(-1)).not.toBe(parameters[3]);
+  });
+
+  it("falls back to side for a direct-fill trade with no underlyingDirection override", async () => {
+    const { client, statements } = buildSuccessfulOpenClient();
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+    const repository = new PostgresPaperTradeRepository(database);
+
+    await repository.openFromTradeIdea({
+      accountId: "account-1",
+      tradeIdeaId: "idea-1",
+      quantity: 15,
+      fillPrice: 100,
+      openedAt: new Date("2026-10-01T05:00:00.000Z"),
+      entryFees: 20,
+      entrySlippage: 0,
+      notes: "test",
+      // SHORT geometry in the fill's own space: target < fill < stop.
+      stopLossOverride: 110,
+      targetPriceOverride: 90,
+      // No sideOverride, no underlyingDirection: a bare index/cash position, where the idea's
+      // own SHORT side genuinely is the thesis direction.
+    });
+
+    const parameters = insertParameters(statements);
+    expect(parameters[3]).toBe("SHORT"); // side, taken from idea.side
+    expect(parameters.at(-1)).toBe("SHORT"); // underlying_direction falls back to side
+  });
+});
+
 describe("PostgresPaperTradeRepository timing boundaries", () => {
   it("moves opened_at and stop effectiveness to the actual pending fill time", async () => {
     const filledAt = new Date("2026-08-13T05:15:00.000Z");
