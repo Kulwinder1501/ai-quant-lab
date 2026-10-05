@@ -1,0 +1,353 @@
+{
+  "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+  "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+  "tradingExecutionAuthorized": false,
+  "postgresqlDatabaseCandleEvaluation": {
+    "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+    "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+    "tradingExecutionAuthorized": false,
+    "familyAResults": [
+      {
+        "experimentId": "F1_GOLDEN_POCKET",
+        "zoneName": "GOLDEN_POCKET",
+        "nTreatmentTotal": 0,
+        "nControlTotal": 4991,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      },
+      {
+        "experimentId": "F2_OTE",
+        "zoneName": "OTE",
+        "nTreatmentTotal": 0,
+        "nControlTotal": 4991,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      },
+      {
+        "experimentId": "F3_DEEP_RETRACEMENT",
+        "zoneName": "DEEP_RETRACEMENT",
+        "nTreatmentTotal": 0,
+        "nControlTotal": 4991,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      }
+    ],
+    "familyBResults": [
+      {
+        "experimentId": "F4_B1_0.618",
+        "boundaryRatio": 0.618,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B2_0.65",
+        "boundaryRatio": 0.65,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B3_0.702",
+        "boundaryRatio": 0.702,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B4_0.786",
+        "boundaryRatio": 0.786,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B5_0.886",
+        "boundaryRatio": 0.886,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      }
+    ],
+    "zoneBoundingVerdicts": {
+      "GOLDEN_POCKET": "FALSIFIED",
+      "OTE": "FALSIFIED",
+      "DEEP_RETRACEMENT": "FALSIFIED"
+    }
+  },
+  "empirical60SessionBenchmarkEvaluation": {
+    "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+    "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+    "tradingExecutionAuthorized": false,
+    "familyAResults": [
+      {
+        "experimentId": "F1_GOLDEN_POCKET",
+        "zoneName": "GOLDEN_POCKET",
+        "nTreatmentTotal": 60,
+        "nControlTotal": 180,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 240,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 180,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      },
+      {
+        "experimentId": "F2_OTE",
+        "zoneName": "OTE",
+        "nTreatmentTotal": 60,
+        "nControlTotal": 180,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 240,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 180,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      },
+      {
+        "experimentId": "F3_DEEP_RETRACEMENT",
+        "zoneName": "DEEP_RETRACEMENT",
+        "nTreatmentTotal": 60,
+        "nControlTotal": 180,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 240,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 180,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false
+      }
+    ],
+    "familyBResults": [
+      {
+        "experimentId": "F4_B1_0.618",
+        "boundaryRatio": 0.618,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B2_0.65",
+        "boundaryRatio": 0.65,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B3_0.702",
+        "boundaryRatio": 0.702,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B4_0.786",
+        "boundaryRatio": 0.786,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      },
+      {
+        "experimentId": "F4_B5_0.886",
+        "boundaryRatio": 0.886,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false
+      }
+    ],
+    "zoneBoundingVerdicts": {
+      "GOLDEN_POCKET": "FALSIFIED",
+      "OTE": "FALSIFIED",
+      "DEEP_RETRACEMENT": "FALSIFIED"
+    }
+  }
+}
