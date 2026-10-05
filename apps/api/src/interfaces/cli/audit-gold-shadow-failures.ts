@@ -1,6 +1,7 @@
 ﻿import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { G2_NOT_FUNCTIONAL_MESSAGE, shadowDecisionsTableExists } from "./gold-shadow-audit-availability.js";
 
 /**
  * G2 — Frozen Snapshot Replay Audit (Phase G2 of the implementation plan)
@@ -24,6 +25,16 @@ import { createDatabasePool } from "../../infrastructure/database/database.js";
  * Note: Full replay requires injecting the old vs new strategy evaluator. This script
  * computes the audit from persisted decision metadata (shadow_decisions table) without
  * requiring a full market context replay, which is more PIT-safe.
+ *
+ * ## This tool is NOT YET FUNCTIONAL
+ *
+ * Neither the `shadow_decisions` table above nor the 22 frozen case fixtures this script is
+ * documented to replay (`gold-shadow-g2-001.json` .. `022.json`) have ever been built -- see
+ * `gold-shadow-audit-availability.ts`'s docstring for the full investigation, including why
+ * `decision_ledger`/`differential_observations` (Brain V2.2's unrelated, NSE-only shadow-decision
+ * pipeline) is not a substitute. Rather than silently reporting a zero-row "clean" result when the
+ * table is absent -- which used to happen here via a swallowed query error -- this refuses up front
+ * with a clear, non-zero exit. See `G2_NOT_FUNCTIONAL_MESSAGE` for exactly what it reports.
  */
 
 export interface FailureTaxonomyRecord {
@@ -40,6 +51,18 @@ export interface FailureTaxonomyRecord {
 const env = loadEnvironment();
 const pool = await createDatabasePool(env.DATABASE_URL);
 
+/*
+ * Checked BEFORE anything else runs. The query below used to run unconditionally and swallow
+ * whatever error a missing `shadow_decisions` table produced, which made "the table doesn't exist"
+ * and "the table exists and is genuinely empty" print the identical message. Those are not the same
+ * fact, and only one of them is a clean audit result.
+ */
+if (!(await shadowDecisionsTableExists(pool))) {
+  console.error(G2_NOT_FUNCTIONAL_MESSAGE);
+  await pool.end();
+  process.exit(1);
+}
+
 const args = process.argv.slice(2);
 function argValue(flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -54,7 +77,8 @@ const params: unknown[] = [accountId];
 if (fromDate) { params.push(fromDate); whereClause.push(`sd.evaluated_at >= $${params.length}::timestamptz`); }
 if (toDate) { params.push(toDate); whereClause.push(`sd.evaluated_at < $${params.length}::timestamptz`); }
 
-// Query shadow decisions with their market context metadata
+// Query shadow decisions with their market context metadata. The table is now known to exist (the
+// guard above returned true), so a failure here is a real defect and must surface, not be swallowed.
 const result = await pool.query<{
   id: string;
   account_id: string;
@@ -71,12 +95,11 @@ const result = await pool.query<{
   WHERE ${whereClause.join(" AND ")}
   ORDER BY sd.evaluated_at ASC
   LIMIT 1000
-`, params).catch(() => {
-  // Shadow decisions table may not exist — report gracefully
-  return { rows: [] as never[] };
-});
+`, params);
 
 if (!result.rows.length) {
+  // The table is real and was queried successfully; a genuinely empty result is a legitimate
+  // outcome here (unlike the missing-table case above, which never reaches this line).
   console.log(`No shadow decisions found for account ${accountId} with strategy ict-structure.`);
   console.log("The G2 audit requires shadow decisions recorded by run-shadow-decisions.ts.");
   console.log("To populate: npm run shadow:decisions -- --account AutoBot-Gold");
