@@ -65,9 +65,25 @@ function argValue(flag: string): string | undefined {
   const idx = args.indexOf(flag);
   return idx >= 0 ? args[idx + 1] : undefined;
 }
-const accountId = argValue("--account") ?? "AutoBot-Gold";
+const accountName = argValue("--account") ?? "AutoBot-Gold";
 const fromDate = argValue("--from");
 const toDate = argValue("--to");
+
+/*
+ * `--account` takes the account's NAME (matching the usage comment above and the gold bot's own
+ * GOLD_ACCOUNT_NAME constant), not its id -- `shadow_decisions.account_id` is a UUID column, so
+ * the name has to be resolved first. Refuses clearly on a typo'd name rather than letting Postgres
+ * reject an obviously-wrong "UUID" with a cryptic 22P02.
+ */
+const accountRow = await pool.query<{ id: string }>(
+  "SELECT id FROM paper_accounts WHERE name = $1", [accountName],
+);
+const accountId = accountRow.rows[0]?.id;
+if (!accountId) {
+  console.error(`G2 audit refused: no paper_accounts row named "${accountName}".`);
+  await pool.end();
+  process.exit(1);
+}
 
 const whereClause = ["sd.account_id = $1", "sd.strategy_key = $2"];
 const params: unknown[] = [accountId, ICT_STRUCTURE_STRATEGY_KEY];
@@ -97,14 +113,14 @@ const result = await pool.query<{
 if (!result.rows.length) {
   // The table is real and was queried successfully; a genuinely empty result is a legitimate
   // outcome here (unlike the missing-table case above, which never reaches this line).
-  console.log(`No shadow decisions found for account ${accountId} with strategy ${ICT_STRUCTURE_STRATEGY_KEY}.`);
+  console.log(`No shadow decisions found for account ${accountName} (${accountId}) with strategy ${ICT_STRUCTURE_STRATEGY_KEY}.`);
   console.log("shadow_decisions is populated by run-gold-paper-trading-bot.ts on every scheduler tick");
   console.log("that evaluates ict-structure-v1 against a fresh bar -- run the bot, then re-run this audit.");
   await pool.end();
   process.exit(0);
 }
 
-console.log(`G2 Audit: ${result.rows.length} shadow decisions for ${accountId}\n`);
+console.log(`G2 Audit: ${result.rows.length} shadow decisions for ${accountName}\n`);
 
 const records: FailureTaxonomyRecord[] = [];
 let survivesCount = 0, rejectedCount = 0;
