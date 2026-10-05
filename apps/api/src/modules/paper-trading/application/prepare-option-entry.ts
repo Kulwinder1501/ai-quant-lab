@@ -49,8 +49,33 @@ export const MINIMUM_DAYS_TO_EXPIRY = 2;
 
 /** Chain context may be older because it supplies OI and paired strikes, not the execution. */
 const MAXIMUM_CHAIN_AGE_MINUTES = 40;
-/** An unattended market entry may only cross an ask observed in the last two minutes. */
+/**
+ * An unattended market entry may only cross an ask observed in the last two minutes.
+ *
+ * This is the ceiling for every idea whose source candle is *not* 1-minute: `ict-structure-v1`
+ * (5m/15m), `trend-breakout` (15m/30m/60m/1d), and any `momentum-scalp-*` idea that happened to
+ * fire off a slower bar it also supports. Two minutes between an observed ask and a market order
+ * is a reasonable bound for those cadences, because the strategy itself only re-evaluates every
+ * several minutes -- the premium cannot have moved as far from a two-minute-old ask as it could
+ * from a sixty-second-old one on a contract re-priced every minute.
+ */
 export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS = 2 * 60 * 1000;
+/**
+ * The tighter ceiling for an idea raised off a 1-minute candle -- `momentum-scalp` and any
+ * `momentum-scalp-*` sibling (index/pattern/gold) when it fires on 1m, which is the entire set
+ * `strategy-registry.ts` lists as supporting that timeframe.
+ *
+ * Trade `535e5951-56e3-4323-b8af-f47e5f6812c5` (AutoBot-Scalp1m, BANKNIFTY 54900 CE) filled
+ * against a quote that was 60.27 seconds stale by the time the trade actually opened; a
+ * materially worse tick had already arrived live, so the position was underwater the instant it
+ * opened. Measured across 58 similar Scalp1m trades: median quote lag 2.27s, ~10% of trades run
+ * past 20s. 25 seconds sits inside the peer-recommended 20-30s band: comfortably above the
+ * ~2.27s median so ordinary operation is unaffected, but far enough under the 60s+ staleness that
+ * actually produced the bad fill -- and under the bulk of the 20s+ tail -- that the race between
+ * the once-a-minute scan cadence and the once-a-minute option-premium-tick collector can no
+ * longer land a fill on a quote describing a materially different market.
+ */
+export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE = 25 * 1000;
 
 export interface PreparedOptionEntry {
   tradeIdeaId: string;
@@ -170,6 +195,8 @@ interface IdeaRow {
   confidence: string | number | null;
   reasoning: unknown;
   source_candle_id: string | null;
+  /** The source candle's bar size, or null when the idea records no source candle. */
+  source_candle_timeframe: string | null;
 }
 
 export class PrepareOptionEntry {
@@ -185,9 +212,11 @@ export class PrepareOptionEntry {
     const ideaResult = await this.database.query<IdeaRow>(`
       SELECT ti.id, ti.side, ti.entry_price, ti.stop_loss, ti.target_price,
              ti.instrument_id, ti.confidence, ti.reasoning, ti.source_candle_id,
-             i.lot_size, i.symbol, i.strike_step
+             i.lot_size, i.symbol, i.strike_step,
+             c.timeframe AS source_candle_timeframe
       FROM trade_ideas ti
       INNER JOIN instruments i ON i.id = ti.instrument_id
+      LEFT JOIN candles c ON c.id = ti.source_candle_id
       WHERE ti.id = $1
     `, [input.tradeIdeaId]);
     const idea = ideaResult.rows[0];
@@ -325,6 +354,16 @@ export class PrepareOptionEntry {
       return a.quote.strikePrice - b.quote.strikePrice;
     });
 
+    // Cadence is read off the idea's own source candle, not off the strategy's name. A single
+    // strategy key can fire on more than one bar size (momentum-scalp-index, -pattern and -gold
+    // all list "1m" alongside slower timeframes in strategy-registry.ts), so the candle actually
+    // behind *this* idea is the real signal of how fast the bot that raised it re-evaluates --
+    // not a guess from a hardcoded strategy-key list. An idea with no source candle on record
+    // gets the looser, conservative default rather than the tighter one.
+    const quoteStalenessToleranceMs = idea.source_candle_timeframe === "1m"
+      ? MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE
+      : MAXIMUM_EXECUTABLE_QUOTE_AGE_MS;
+
     const chosenCandidate = eligible[0]!;
     const intendedStrike = chosenCandidate.quote.strikePrice;
     const chainGreeks = chosenCandidate.greeks;
@@ -341,12 +380,12 @@ export class PrepareOptionEntry {
       expiryDate: settlementExpiry,
       strikePrice: intendedStrike,
       optionType: intendedOptionType,
-    }, MAXIMUM_EXECUTABLE_QUOTE_AGE_MS, now).catch(() => null) ?? null;
+    }, quoteStalenessToleranceMs, now).catch(() => null) ?? null;
 
     const freshChainQuote = entryChain !== null
       && chainAgeMinutes !== null
       && chainAgeMinutes >= 0
-      && chainAgeMinutes * 60_000 <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
+      && chainAgeMinutes * 60_000 <= quoteStalenessToleranceMs
       && intendedQuote.ask !== null
       && intendedQuote.ask > 0
       ? {
@@ -392,7 +431,7 @@ export class PrepareOptionEntry {
         explanation: `No executable ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
           + `${intendedStrike} ${intendedOptionType} ask `
           + `at or before ${now.toISOString()} was available inside the `
-          + `${MAXIMUM_EXECUTABLE_QUOTE_AGE_MS / 1000}-second freshness window. `
+          + `${quoteStalenessToleranceMs / 1000}-second freshness window. `
           + "The position was not opened; theoretical premiums are not executable fills.",
       };
     }
@@ -508,6 +547,7 @@ export class PrepareOptionEntry {
             chainObservedAt: entryChain?.observedAt.toISOString() ?? null,
             chainAgeMinutes: chainAgeMinutes === null ? null : Number(chainAgeMinutes.toFixed(2)),
             chainUsable: usableChain !== null,
+            quoteStalenessToleranceMs,
           },
           entryProvenance: {
             selectionMode: "O2_CHAIN_ENUMERATION",

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PrepareOptionEntry, MINIMUM_DAYS_TO_EXPIRY } from "./prepare-option-entry.js";
+import {
+  PrepareOptionEntry,
+  MINIMUM_DAYS_TO_EXPIRY,
+  MAXIMUM_EXECUTABLE_QUOTE_AGE_MS,
+  MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE,
+} from "./prepare-option-entry.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import type { OptionExpiryCalendar } from "../../market-data/domain/option-expiry-calendar.js";
 
@@ -79,6 +84,9 @@ const IDEA = {
   confidence: 0.75,
   reasoning: ["VOLATILITY_EXPANSION regime", "volume confirms the break"],
   source_candle_id: "candle-1",
+  // Default fixture represents a non-scalp-cadence idea (e.g. ict-structure-v1 on 5m), so every
+  // existing test above keeps the looser MAXIMUM_EXECUTABLE_QUOTE_AGE_MS ceiling by default.
+  source_candle_timeframe: "5m",
 };
 
 interface Overrides {
@@ -258,6 +266,69 @@ describe("PrepareOptionEntry - pricing the entry", () => {
     if (!result.approved) return;
     expect(result.entry.optionContract.underlyingFillPrice).toBe(57_720);
     expect(result.entry.optionContract.underlyingFillPriceSource).toBe("OPTION_CHAIN_QUOTE");
+  });
+});
+
+describe("PrepareOptionEntry - cadence-aware quote staleness", () => {
+  // `535e5951-56e3-4323-b8af-f47e5f6812c5` (AutoBot-Scalp1m) filled against a quote 60.27s
+  // stale. These lock in the tighter ceiling for 1m-cadence ideas, the unchanged looser ceiling
+  // for everything else, and the signaling mechanism (NO_FRESH_EXECUTABLE_QUOTE) staying the same.
+  it("accepts a 1m-cadence idea's chain quote inside the tightened scalp window", async () => {
+    const withinScalpWindow = chain({
+      observedAt: new Date(NOW.getTime() - (MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE - 5_000)),
+    });
+    const result = await service({
+      idea: { ...IDEA, source_candle_timeframe: "1m" },
+      snapshot: withinScalpWindow,
+      premiumTick: null,
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+  });
+
+  it("rejects a 1m-cadence idea's chain quote beyond the tightened scalp window, though it would pass the looser default", async () => {
+    const beyondScalpWindow = chain({
+      observedAt: new Date(NOW.getTime() - (MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE + 5_000)),
+    });
+    // Sanity check: this age is still comfortably inside the non-scalp default ceiling.
+    expect(MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE + 5_000).toBeLessThan(MAXIMUM_EXECUTABLE_QUOTE_AGE_MS);
+
+    const result = await service({
+      idea: { ...IDEA, source_candle_timeframe: "1m" },
+      snapshot: beyondScalpWindow,
+      premiumTick: null,
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result).toMatchObject({ approved: false, reason: "NO_FRESH_EXECUTABLE_QUOTE" });
+    if (result.approved) return;
+    expect(result.explanation).toContain(`${MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE / 1000}-second`);
+  });
+
+  it("leaves a slower-cadence (5m) idea's freshness window at the looser default, unaffected by the scalp tightening", async () => {
+    // Older than the scalp ceiling, younger than the default -- only a non-scalp idea should pass.
+    const betweenBothWindows = chain({
+      observedAt: new Date(NOW.getTime() - (MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE + 5_000)),
+    });
+    const result = await service({
+      idea: { ...IDEA, source_candle_timeframe: "5m" },
+      snapshot: betweenBothWindows,
+      premiumTick: null,
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+  });
+
+  it("falls back to the looser default when the idea records no source candle at all", async () => {
+    const betweenBothWindows = chain({
+      observedAt: new Date(NOW.getTime() - (MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE + 5_000)),
+    });
+    const result = await service({
+      idea: { ...IDEA, source_candle_id: null, source_candle_timeframe: null },
+      snapshot: betweenBothWindows,
+      premiumTick: null,
+    }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
   });
 });
 
