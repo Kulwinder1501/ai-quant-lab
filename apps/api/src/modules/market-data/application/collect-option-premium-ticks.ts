@@ -2,8 +2,13 @@ import type { PostgresOptionChainRepository } from "../../../infrastructure/data
 import type { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-token-service.js";
 import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
-import { selectAtmPremiumContracts, selectDeltaTargetPremiumContracts } from "../domain/atm-premium-contracts.js";
+import {
+  premiumCoverageExpiries,
+  selectAtmPremiumContracts,
+  selectDeltaTargetPremiumContracts,
+} from "../domain/atm-premium-contracts.js";
 import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
+import type { OptionChainSnapshot } from "../domain/option-chain.js";
 import { normaliseTradedVolume } from "../domain/traded-volume.js";
 import { POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY } from "../domain/collector-regimes.js";
 
@@ -19,6 +24,14 @@ export interface CollectOptionPremiumTicksInput {
    */
   deltaTarget?: number;
   deltaTargetStrikeMargin?: number;
+  /**
+   * Mirrors `MINIMUM_DAYS_TO_EXPIRY` in the trading path (`prepare-option-entry.ts`) and
+   * `OptionPremiumTickStreamer`'s own option of the same name, so this HTTP floor poller covers
+   * the same two expiries the socket streamer already does. See `premiumCoverageExpiries`'s doc.
+   */
+  minimumTradableDaysToExpiry?: number;
+  /** Evaluation instant for the roll rule. Injected so the behaviour is testable. */
+  now?: Date;
 }
 
 export interface CollectOptionPremiumTicksResult {
@@ -59,10 +72,42 @@ export class CollectOptionPremiumTicks {
   async execute(input: CollectOptionPremiumTicksInput): Promise<CollectOptionPremiumTicksResult> {
     const underlyings: CollectOptionPremiumTicksResult["underlyings"] = [];
     let inserted = 0;
+    const now = input.now ?? new Date();
 
     for (const symbol of input.underlyingSymbols) {
-      const snapshot = await this.chainRepository.latestSnapshot({ underlyingSymbol: symbol });
-      if (!snapshot) {
+      /*
+       * One snapshot per covered expiry, not only the front one.
+       *
+       * This HTTP floor poller used to call `latestSnapshot` with no expiry at all, which
+       * `PostgresOptionChainRepository` resolves to `max(observed_at)` across every stored
+       * expiry -- in practice whichever expiry the 15m chain job happened to write last. That is
+       * the same narrow-coverage shape `premiumCoverageExpiries`'s doc describes having silently
+       * stopped the paper bots once before (2026-08-24): the front expiry is what D2 prices, but
+       * `PrepareOptionEntry` refuses anything inside `MINIMUM_DAYS_TO_EXPIRY` and rolls to the next
+       * listed expiry, so a bot can be trying to open a contract this poller was never asking Fyers
+       * for. `OptionPremiumTickStreamer.refreshSubscriptions` already covers both expiries this way
+       * for the socket path; this mirrors that loop exactly for the HTTP floor.
+       */
+      const calendar = await this.chainRepository
+        .latestExpiryCalendar(symbol, now)
+        .catch(() => null);
+      const expiryKeys = premiumCoverageExpiries(
+        calendar, now, input.minimumTradableDaysToExpiry ?? 2,
+      );
+      // No calendar is not the same as no contracts: fall back to the previous unqualified read
+      // rather than silently polling nothing and reporting a healthy run.
+      const wantedExpiries: Array<string | undefined> = expiryKeys.length > 0 ? expiryKeys : [undefined];
+
+      const snapshots: OptionChainSnapshot[] = [];
+      for (const expiryDate of wantedExpiries) {
+        const snapshot = await this.chainRepository.latestSnapshot({
+          underlyingSymbol: symbol,
+          ...(expiryDate === undefined ? {} : { expiryDate }),
+        });
+        if (snapshot) snapshots.push(snapshot);
+      }
+
+      if (snapshots.length === 0) {
         underlyings.push({
           symbol,
           contractsSelected: 0,
@@ -84,18 +129,18 @@ export class CollectOptionPremiumTicks {
       const liveUnderlyingQuotes = await this.fetchRichQuotes([underlyingProviderSymbol]);
       const liveUnderlying = liveUnderlyingQuotes.get(underlyingProviderSymbol.toUpperCase())?.lastPrice ?? null;
 
-      const atmContracts = selectAtmPremiumContracts(snapshot, {
+      const atmContracts = snapshots.flatMap((snapshot) => selectAtmPremiumContracts(snapshot, {
         strikeBand: input.strikeBand ?? 1,
         spotOverride: liveUnderlying,
-      });
+      }));
       // The ATM band tracks spot; `PrepareOptionEntry`'s delta-based strike does not sit anywhere
       // near spot for a typical BANKNIFTY monthly tenor (see that function's doc). Without this,
       // every delta-selected idea refuses with NO_FRESH_EXECUTABLE_QUOTE for a contract this
       // collector never asked Fyers for.
-      const deltaTargetContracts = selectDeltaTargetPremiumContracts(snapshot, {
+      const deltaTargetContracts = snapshots.flatMap((snapshot) => selectDeltaTargetPremiumContracts(snapshot, {
         targetDelta: input.deltaTarget,
         strikeMargin: input.deltaTargetStrikeMargin,
-      });
+      }));
       const requiredContracts = await this.additionalContracts?.listForUnderlying(symbol) ?? [];
       const contracts = [...new Map(
         [...atmContracts, ...deltaTargetContracts, ...requiredContracts]

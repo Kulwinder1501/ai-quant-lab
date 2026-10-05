@@ -22,6 +22,10 @@ describe("CollectOptionPremiumTicks", () => {
       openInterestChange: 1_000,
     };
     const chainRepository = {
+      // No calendar recorded for this fixture: `premiumCoverageExpiries` returns no keys, so the
+      // collector falls back to one unqualified `latestSnapshot` call, same as before this covered
+      // multiple expiries.
+      latestExpiryCalendar: vi.fn(async () => null),
       latestSnapshot: vi.fn(async () => ({
         underlyingSymbol: "NIFTY50",
         provider: "fyers-api-v3",
@@ -118,6 +122,7 @@ describe("CollectOptionPremiumTicks", () => {
       openInterestChange: 1_000,
     };
     const chainRepository = {
+      latestExpiryCalendar: vi.fn(async () => null),
       latestSnapshot: vi.fn(async () => ({
         underlyingSymbol: "NIFTY50",
         provider: "fyers-api-v3",
@@ -166,5 +171,183 @@ describe("CollectOptionPremiumTicks", () => {
 
     expect(result.inserted).toBe(2);
     expect(new Set(stored.map((tick) => tick.strikePrice))).toEqual(new Set([22_050]));
+  });
+
+  it("polls both the front and the tradable expiry, not only the front one", async () => {
+    // Regression test for the HTTP floor poller silently narrowing to `latestSnapshot` with no
+    // expiry -- which resolves to whichever expiry was most recently written, the same gap
+    // `premiumCoverageExpiries` was added to close for the socket streamer. 2026-08-24 is 1.25
+    // days from the 2026-08-25 front expiry, inside the 2-day trading floor, so `PrepareOptionEntry`
+    // would roll to 2026-09-29 -- both must be covered or the bot's actual contract goes unquoted.
+    const now = new Date("2026-08-24T04:00:00.000Z");
+    const frontExpiry = new Date("2026-08-25T10:00:00.000Z");
+    const tradableExpiry = new Date("2026-09-29T10:00:00.000Z");
+    // `now` above drives the roll-rule evaluation (which expiries to cover), kept historical to
+    // match `premiumCoverageExpiries`'s own fixture dates. `selectAtmPremiumContracts`'s own
+    // freshness check compares the snapshot's `observedAt` against the real wall clock, so the
+    // snapshot itself is stamped close to it instead, independent of the roll-rule instant.
+    const observedAt = new Date();
+
+    const snapshotFor = (expiryDate: Date, suffix: string) => ({
+      underlyingSymbol: "NIFTY50",
+      provider: "fyers-api-v3",
+      observedAt,
+      underlyingValue: 22_000,
+      quotes: [
+        {
+          expiryDate, expiryKind: "WEEKLY" as const, strikePrice: 21_950, optionType: "CE" as const,
+          providerSymbol: `NSE:NIFTY-21950CE-${suffix}`, providerToken: null, lastPrice: 200,
+          bid: 199, ask: 201, volume: 1_000, openInterest: 10_000, previousOpenInterest: 9_000,
+          openInterestChange: 1_000,
+        },
+        {
+          expiryDate, expiryKind: "WEEKLY" as const, strikePrice: 22_000, optionType: "CE" as const,
+          providerSymbol: `NSE:NIFTY-22000CE-${suffix}`, providerToken: null, lastPrice: 200,
+          bid: 199, ask: 201, volume: 1_000, openInterest: 10_000, previousOpenInterest: 9_000,
+          openInterestChange: 1_000,
+        },
+        {
+          expiryDate, expiryKind: "WEEKLY" as const, strikePrice: 22_000, optionType: "PE" as const,
+          providerSymbol: `NSE:NIFTY-22000PE-${suffix}`, providerToken: null, lastPrice: 190,
+          bid: 189, ask: 191, volume: 1_000, openInterest: 10_000, previousOpenInterest: 9_000,
+          openInterestChange: 1_000,
+        },
+      ],
+      listedExpiries: [{ expiryDate, expiryKind: "WEEKLY" as const }],
+    });
+
+    const requestedExpiryDates: Array<string | undefined> = [];
+    const chainRepository = {
+      latestExpiryCalendar: vi.fn(async () => ({
+        underlyingSymbol: "NIFTY50",
+        provider: "fyers-api-v3",
+        observedAt: now,
+        expiries: [
+          { expiryDate: frontExpiry, expiryKind: "WEEKLY" as const },
+          { expiryDate: tradableExpiry, expiryKind: "MONTHLY" as const },
+        ],
+      })),
+      latestSnapshot: vi.fn(async (input: { underlyingSymbol: string; expiryDate?: string }) => {
+        requestedExpiryDates.push(input.expiryDate);
+        if (input.expiryDate === "2026-08-25") return snapshotFor(frontExpiry, "FRONT");
+        if (input.expiryDate === "2026-09-29") return snapshotFor(tradableExpiry, "TRADABLE");
+        return null;
+      }),
+    };
+    const stored: OptionPremiumTickRow[] = [];
+    const tickRepository = {
+      insertTicks: vi.fn(async (ticks: readonly OptionPremiumTickRow[]) => {
+        stored.push(...ticks);
+        return { inserted: ticks.length, skipped: 0 };
+      }),
+    };
+    const fetchFn = vi.fn(async (request: URL | RequestInfo) => {
+      const symbols = new URL(String(request)).searchParams.get("symbols")?.split(",") ?? [];
+      const isUnderlyingOnlyCall = symbols.length === 1 && symbols[0] === "NSE:NIFTY50-INDEX";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          s: "ok",
+          d: isUnderlyingOnlyCall
+            ? [{ n: "NSE:NIFTY50-INDEX", s: "ok", v: { lp: 22_000 } }]
+            : symbols.map((symbol) => ({
+              n: symbol, s: "ok", v: { lp: 200, bid: 199, ask: 201, volume: 1_000 },
+            })),
+        }),
+      } as Response;
+    });
+
+    const collector = new CollectOptionPremiumTicks(
+      chainRepository as never,
+      tickRepository as never,
+      { appId: "app", tokenService: { getAccessToken: async () => "token" }, fetch: fetchFn as never },
+    );
+    const result = await collector.execute({ underlyingSymbols: ["NIFTY50"], strikeBand: 0, now });
+
+    // Both the front and the rolled-to expiry were asked for by name -- never an unqualified read.
+    expect(requestedExpiryDates).toEqual(["2026-08-25", "2026-09-29"]);
+    expect(result.underlyings[0]!.refusal).toBeNull();
+    // Both expiries' ATM contracts made it into the same poll, not just whichever was requested
+    // last.
+    const storedSymbols = new Set(stored.map((tick) => tick.providerSymbol));
+    expect(storedSymbols).toContain("NSE:NIFTY-22000CE-FRONT");
+    expect(storedSymbols).toContain("NSE:NIFTY-22000CE-TRADABLE");
+  });
+
+  it("falls back to one unqualified snapshot when there is no expiry calendar", async () => {
+    // No calendar is not the same as no contracts: the poller must not go silent just because the
+    // calendar write failed or hasn't happened yet.
+    const now = new Date();
+    const expiry = new Date("2026-08-25T10:00:00.000Z");
+    const chainRepository = {
+      latestExpiryCalendar: vi.fn(async () => null),
+      latestSnapshot: vi.fn(async (input: { expiryDate?: string }) => {
+        expect(input.expiryDate).toBeUndefined();
+        return {
+          underlyingSymbol: "NIFTY50",
+          provider: "fyers-api-v3",
+          observedAt: now,
+          underlyingValue: 22_000,
+          quotes: [
+            // Two distinct strikes: the ATM selector infers its strike step from the listed grid,
+            // and refuses to guess one from a single strike.
+            {
+              expiryDate: expiry, expiryKind: "WEEKLY" as const, strikePrice: 21_950,
+              optionType: "CE" as const, providerSymbol: "NSE:NIFTY2682521950CE", providerToken: null,
+              lastPrice: 250, bid: 249, ask: 251, volume: 1_000, openInterest: 10_000,
+              previousOpenInterest: 9_000, openInterestChange: 1_000,
+            },
+            {
+              expiryDate: expiry, expiryKind: "WEEKLY" as const, strikePrice: 22_000,
+              optionType: "CE" as const, providerSymbol: "NSE:NIFTY2682522000CE", providerToken: null,
+              lastPrice: 200, bid: 199, ask: 201, volume: 1_000, openInterest: 10_000,
+              previousOpenInterest: 9_000, openInterestChange: 1_000,
+            },
+            {
+              expiryDate: expiry, expiryKind: "WEEKLY" as const, strikePrice: 22_000,
+              optionType: "PE" as const, providerSymbol: "NSE:NIFTY2682522000PE", providerToken: null,
+              lastPrice: 190, bid: 189, ask: 191, volume: 1_000, openInterest: 10_000,
+              previousOpenInterest: 9_000, openInterestChange: 1_000,
+            },
+          ],
+          listedExpiries: [{ expiryDate: expiry, expiryKind: "WEEKLY" as const }],
+        };
+      }),
+    };
+    const stored: OptionPremiumTickRow[] = [];
+    const tickRepository = {
+      insertTicks: vi.fn(async (ticks: readonly OptionPremiumTickRow[]) => {
+        stored.push(...ticks);
+        return { inserted: ticks.length, skipped: 0 };
+      }),
+    };
+    const fetchFn = vi.fn(async (request: URL | RequestInfo) => {
+      const symbols = new URL(String(request)).searchParams.get("symbols")?.split(",") ?? [];
+      const isUnderlyingOnlyCall = symbols.length === 1 && symbols[0] === "NSE:NIFTY50-INDEX";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          s: "ok",
+          d: isUnderlyingOnlyCall
+            ? [{ n: "NSE:NIFTY50-INDEX", s: "ok", v: { lp: 22_000 } }]
+            : symbols.map((symbol) => ({
+              n: symbol, s: "ok", v: { lp: 200, bid: 199, ask: 201, volume: 1_000 },
+            })),
+        }),
+      } as Response;
+    });
+
+    const collector = new CollectOptionPremiumTicks(
+      chainRepository as never,
+      tickRepository as never,
+      { appId: "app", tokenService: { getAccessToken: async () => "token" }, fetch: fetchFn as never },
+    );
+    const result = await collector.execute({ underlyingSymbols: ["NIFTY50"], strikeBand: 0 });
+
+    expect(chainRepository.latestSnapshot).toHaveBeenCalledTimes(1);
+    expect(result.inserted).toBe(2);
+    expect(stored).toHaveLength(2);
   });
 });
