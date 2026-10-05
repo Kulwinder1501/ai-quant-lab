@@ -15,6 +15,27 @@ import psycopg
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
+# Tolerance (as a fraction of price) within which PDH/P4HH (or PDL/P4HL) are
+# merged into a single CONFLUENCE_HIGH/LOW level instead of being treated as
+# two isolated levels.
+#
+# Swept across {0.0002, 0.0005, 0.0010, 0.0020} on real BANKNIFTY (Jan-Oct
+# 2026, 187 sessions with both PDH/PDL and P4HH/P4HL available) and NIFTY50
+# (2024-2026, 209 such sessions) history --
+# docs/2026-10-05-confluence-tolerance-calibration.md. Result: BANKNIFTY shows
+# no distinguishable REJECTION/SWEEP/NEUTRAL split between merged and isolated
+# events at any tested tolerance (chi2 p >= 0.38 throughout). NIFTY50 alone
+# shows a nominally low p-value at 3 of 4 tolerances (p=0.031-0.040), but in
+# the direction opposite the "stronger reaction zone" hypothesis (merged
+# events reject LESS and sweep MORE than isolated ones), does not replicate
+# in BANKNIFTY, and does not survive Holm-Bonferroni correction across the 12
+# chi2 tests run (smallest raw p=0.0220 against a required ~0.0042). This
+# tolerance is therefore a checked-but-arbitrary choice, kept at its original
+# 0.0005 -- no tested value is an empirically superior "stronger zone"
+# classifier, and the merge concept itself is not shown to add predictive
+# value at any tested tolerance.
+DEFAULT_CONFLUENCE_TOLERANCE_PCT = 0.0005
+
 def get_db_connection_string() -> str:
     import os
     db_url = os.environ.get("DATABASE_URL")
@@ -52,6 +73,7 @@ class CalibrationSummary:
     symbol: str
     proximity_bandwidth_bps: float
     reaction_threshold_bps: float
+    confluence_tolerance_pct: float
     total_sessions: int
     total_5m_bars: int
     total_proximity_events: int
@@ -175,6 +197,79 @@ def compute_4h_levels_from_5m(bars_5m: list[dict[str, Any]]) -> dict[date, dict[
     return levels_4h
 
 
+def build_active_levels(
+    pdh: float | None,
+    p4hh: float | None,
+    pdl: float | None,
+    p4hl: float | None,
+    session_date: date,
+    confluence_tolerance_pct: float = DEFAULT_CONFLUENCE_TOLERANCE_PCT,
+) -> list[StructuralLevel]:
+    """Build a session's active structural levels.
+
+    PDH and P4HH (resp. PDL and P4HL) are merged into a single
+    CONFLUENCE_HIGH (resp. CONFLUENCE_LOW) level when they sit within
+    `confluence_tolerance_pct` of each other (as a fraction of price);
+    otherwise both are kept as isolated levels.
+    """
+    active_levels: list[StructuralLevel] = []
+
+    if pdh and p4hh and abs(pdh - p4hh) / min(pdh, p4hh) <= confluence_tolerance_pct:
+        active_levels.append(StructuralLevel("CONFLUENCE_HIGH", (pdh + p4hh) / 2.0, session_date, "1d+4h"))
+    else:
+        if pdh:
+            active_levels.append(StructuralLevel("PDH", pdh, session_date, "1d"))
+        if p4hh:
+            active_levels.append(StructuralLevel("P4HH", p4hh, session_date, "4h"))
+
+    if pdl and p4hl and abs(pdl - p4hl) / min(pdl, p4hl) <= confluence_tolerance_pct:
+        active_levels.append(StructuralLevel("CONFLUENCE_LOW", (pdl + p4hl) / 2.0, session_date, "1d+4h"))
+    else:
+        if pdl:
+            active_levels.append(StructuralLevel("PDL", pdl, session_date, "1d"))
+        if p4hl:
+            active_levels.append(StructuralLevel("P4HL", p4hl, session_date, "4h"))
+
+    return active_levels
+
+
+def compute_confluence_merge_stats(
+    daily_levels: dict[date, dict[str, float]],
+    levels_4h: dict[date, dict[str, float]],
+    confluence_tolerance_pct: float = DEFAULT_CONFLUENCE_TOLERANCE_PCT,
+) -> dict[str, int]:
+    """Count, across every session where both sides of a pair exist, how many
+    sessions merge PDH/P4HH (resp. PDL/P4HL) into CONFLUENCE_HIGH/LOW versus
+    stay isolated at the given tolerance. This is a session-level count of
+    *eligible pairs*, independent of whether price ever traded near either
+    level (contrast with the event-level counts in CalibrationSummary).
+    """
+    high_merged = high_isolated = low_merged = low_isolated = 0
+    for session_date, d_lvl in daily_levels.items():
+        h_lvl = levels_4h.get(session_date, {})
+        pdh, p4hh = d_lvl.get("PDH"), h_lvl.get("P4HH")
+        pdl, p4hl = d_lvl.get("PDL"), h_lvl.get("P4HL")
+
+        if pdh and p4hh:
+            if abs(pdh - p4hh) / min(pdh, p4hh) <= confluence_tolerance_pct:
+                high_merged += 1
+            else:
+                high_isolated += 1
+
+        if pdl and p4hl:
+            if abs(pdl - p4hl) / min(pdl, p4hl) <= confluence_tolerance_pct:
+                low_merged += 1
+            else:
+                low_isolated += 1
+
+    return {
+        "high_merged": high_merged,
+        "high_isolated": high_isolated,
+        "low_merged": low_merged,
+        "low_isolated": low_isolated,
+    }
+
+
 def run_calibration_experiment(
     symbol: str = "BANKNIFTY",
     start_date: date = date(2026, 1, 1),
@@ -182,6 +277,7 @@ def run_calibration_experiment(
     proximity_bandwidth_bps: float = 15.0,
     reaction_threshold_bps: float = 10.0,
     forward_window_bars: int = 3,
+    confluence_tolerance_pct: float = DEFAULT_CONFLUENCE_TOLERANCE_PCT,
 ) -> CalibrationSummary:
     """Run exploratory backtest on calibration window (Jan-Jun 2026 ONLY)."""
     warmup_start = datetime(2025, 12, 1, 0, 0, tzinfo=zoneinfo.ZoneInfo("UTC"))
@@ -224,29 +320,12 @@ def run_calibration_experiment(
         if not d_lvl and not h_lvl:
             continue
 
-        active_levels: list[StructuralLevel] = []
         pdh = d_lvl.get("PDH")
         p4hh = h_lvl.get("P4HH")
         pdl = d_lvl.get("PDL")
         p4hl = h_lvl.get("P4HL")
 
-        # Check Confluence High
-        if pdh and p4hh and abs(pdh - p4hh) / min(pdh, p4hh) <= 0.0005:
-            active_levels.append(StructuralLevel("CONFLUENCE_HIGH", (pdh + p4hh) / 2.0, s_date, "1d+4h"))
-        else:
-            if pdh:
-                active_levels.append(StructuralLevel("PDH", pdh, s_date, "1d"))
-            if p4hh:
-                active_levels.append(StructuralLevel("P4HH", p4hh, s_date, "4h"))
-
-        # Check Confluence Low
-        if pdl and p4hl and abs(pdl - p4hl) / min(pdl, p4hl) <= 0.0005:
-            active_levels.append(StructuralLevel("CONFLUENCE_LOW", (pdl + p4hl) / 2.0, s_date, "1d+4h"))
-        else:
-            if pdl:
-                active_levels.append(StructuralLevel("PDL", pdl, s_date, "1d"))
-            if p4hl:
-                active_levels.append(StructuralLevel("P4HL", p4hl, s_date, "4h"))
+        active_levels = build_active_levels(pdh, p4hh, pdl, p4hl, s_date, confluence_tolerance_pct)
 
         triggered_levels_this_session: set[str] = set()
 
@@ -360,6 +439,7 @@ def run_calibration_experiment(
         symbol=symbol,
         proximity_bandwidth_bps=proximity_bandwidth_bps,
         reaction_threshold_bps=reaction_threshold_bps,
+        confluence_tolerance_pct=confluence_tolerance_pct,
         total_sessions=total_sessions,
         total_5m_bars=total_5m_bars,
         total_proximity_events=total_events,

@@ -24,18 +24,192 @@ from ai_quant_lab_ml.structure_intelligence import (
     fetch_candles,
     compute_daily_levels,
     compute_4h_levels_from_5m,
-    StructuralLevel
+    compute_confluence_merge_stats,
+    run_calibration_experiment,
+    build_active_levels,
+    DEFAULT_CONFLUENCE_TOLERANCE_PCT,
+    StructuralLevel,
 )
 from ai_quant_lab_ml.volume_intelligence import assign_rvol_bin
 
+# Confluence-merge tolerance grid swept in
+# docs/2026-10-05-confluence-tolerance-calibration.md (0.02% / 0.05% / 0.10% / 0.20%).
+CONFLUENCE_TOLERANCE_GRID: list[float] = [0.0002, 0.0005, 0.0010, 0.0020]
+
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
+
+
+def _level_type_totals(by_level_type: dict, level_types: list[str]) -> dict[str, int]:
+    """Sum rejection/sweep/neutral/total counts across a set of level types
+    from a CalibrationSummary.by_level_type dict."""
+    total = rej = sweep = 0
+    for lt in level_types:
+        stats = by_level_type.get(lt)
+        if not stats:
+            continue
+        total += stats["total_events"]
+        rej += stats["rejection_count"]
+        sweep += stats["sweep_count"]
+    neutral = total - rej - sweep
+    return {"total": total, "rejection": rej, "sweep": sweep, "neutral": neutral}
+
+
+def run_tolerance_sweep() -> None:
+    """Sweep the PDH/P4HH (and PDL/P4HL) confluence-merge tolerance across
+    CONFLUENCE_TOLERANCE_GRID on real BANKNIFTY and NIFTY50 history.
+
+    For each tolerance, reports:
+    - how many eligible PDH/P4HH (and PDL/P4HL) pairs merge into
+      CONFLUENCE_HIGH/LOW versus stay isolated (session-level count), and
+    - the REJECTION/SWEEP/NEUTRAL reaction-rate distribution for merged
+      confluence events versus isolated single-level events, with a
+      chi-square test of independence between {merged, isolated} and
+      {REJECTION, SWEEP, NEUTRAL}.
+
+    Uses each instrument's full available 5m history (not just the Jan-Jun
+    2026 "calibration" window this module's single-run mode defaults to).
+    This is a deliberate, documented deviation from the calibration/OOS-blind
+    convention: unlike a predictive threshold being fit to maximize an
+    objective, a merge-tolerance choice here is being checked for ANY
+    measurable effect at all, with no parameter being optimized against this
+    data for later live use -- see docs/2026-10-05-confluence-tolerance-calibration.md.
+    """
+    from scipy import stats as scipy_stats
+
+    today = date.today()
+    symbol_windows = [
+        ("BANKNIFTY", date(2026, 1, 1), today),
+        ("NIFTY50", date(2024, 1, 1), today),
+    ]
+
+    pooled_by_tol: dict[float, dict[str, dict[str, int]]] = {
+        tol: {"merged": {"total": 0, "rejection": 0, "sweep": 0, "neutral": 0},
+              "isolated": {"total": 0, "rejection": 0, "sweep": 0, "neutral": 0}}
+        for tol in CONFLUENCE_TOLERANCE_GRID
+    }
+
+    for symbol, s_date, e_date in symbol_windows:
+        print("=" * 80, flush=True)
+        print(f"   CONFLUENCE TOLERANCE SWEEP -- {symbol} ({s_date} to {e_date})", flush=True)
+        print("=" * 80, flush=True)
+
+        bars_5m = fetch_candles(symbol, timeframe="5m")
+        daily_candles = fetch_candles(symbol, timeframe="1d")
+        daily_levels = compute_daily_levels(daily_candles)
+        levels_4h = compute_4h_levels_from_5m(bars_5m)
+        print(f"Loaded {len(bars_5m)} 5m candles, {len(daily_candles)} 1d candles, "
+              f"{len(daily_levels)} sessions with daily levels, "
+              f"{len(levels_4h)} sessions with 4h levels.\n", flush=True)
+
+        header = (f"{'Tolerance':<10} | {'HighMerged':<10} | {'HighIso':<8} | {'LowMerged':<10} | "
+                   f"{'LowIso':<7} | {'MergedEvt':<10} | {'IsoEvt':<7} | {'MergedRej%':<11} | "
+                   f"{'IsoRej%':<8} | {'Chi2 p':<8}")
+        print(header, flush=True)
+        print("-" * len(header), flush=True)
+
+        for tol in CONFLUENCE_TOLERANCE_GRID:
+            merge_stats = compute_confluence_merge_stats(daily_levels, levels_4h, tol)
+            summary = run_calibration_experiment(
+                symbol=symbol,
+                start_date=s_date,
+                end_date=e_date,
+                confluence_tolerance_pct=tol,
+            )
+            merged = _level_type_totals(summary.by_level_type, ["CONFLUENCE_HIGH", "CONFLUENCE_LOW"])
+            isolated = _level_type_totals(summary.by_level_type, ["PDH", "P4HH", "PDL", "P4HL"])
+
+            pooled_by_tol[tol]["merged"]["total"] += merged["total"]
+            pooled_by_tol[tol]["merged"]["rejection"] += merged["rejection"]
+            pooled_by_tol[tol]["merged"]["sweep"] += merged["sweep"]
+            pooled_by_tol[tol]["merged"]["neutral"] += merged["neutral"]
+            pooled_by_tol[tol]["isolated"]["total"] += isolated["total"]
+            pooled_by_tol[tol]["isolated"]["rejection"] += isolated["rejection"]
+            pooled_by_tol[tol]["isolated"]["sweep"] += isolated["sweep"]
+            pooled_by_tol[tol]["isolated"]["neutral"] += isolated["neutral"]
+
+            merged_rej_pct = (merged["rejection"] / merged["total"] * 100.0) if merged["total"] else 0.0
+            iso_rej_pct = (isolated["rejection"] / isolated["total"] * 100.0) if isolated["total"] else 0.0
+
+            table = [
+                [merged["rejection"], merged["sweep"], merged["neutral"]],
+                [isolated["rejection"], isolated["sweep"], isolated["neutral"]],
+            ]
+            p_str = "n/a"
+            if merged["total"] >= 10 and isolated["total"] >= 10:
+                try:
+                    chi2, p_val, _, _ = scipy_stats.chi2_contingency(table)
+                    p_str = f"{p_val:.4f}"
+                except ValueError:
+                    p_str = "n/a"
+
+            print(
+                f"{tol:<10.4f} | {merge_stats['high_merged']:<10} | {merge_stats['high_isolated']:<8} | "
+                f"{merge_stats['low_merged']:<10} | {merge_stats['low_isolated']:<7} | "
+                f"{merged['total']:<10} | {isolated['total']:<7} | {merged_rej_pct:<11.1f} | "
+                f"{iso_rej_pct:<8.1f} | {p_str:<8}",
+                flush=True,
+            )
+        print("", flush=True)
+
+    print("=" * 80, flush=True)
+    print("   POOLED ACROSS BOTH INSTRUMENTS", flush=True)
+    print("=" * 80, flush=True)
+    header = (f"{'Tolerance':<10} | {'MergedEvt':<10} | {'IsoEvt':<7} | {'MergedRej%':<11} | "
+               f"{'MergedSwp%':<11} | {'IsoRej%':<8} | {'IsoSwp%':<8} | {'Chi2 p':<8}")
+    print(header, flush=True)
+    print("-" * len(header), flush=True)
+    for tol in CONFLUENCE_TOLERANCE_GRID:
+        merged = pooled_by_tol[tol]["merged"]
+        isolated = pooled_by_tol[tol]["isolated"]
+        merged_rej_pct = (merged["rejection"] / merged["total"] * 100.0) if merged["total"] else 0.0
+        merged_swp_pct = (merged["sweep"] / merged["total"] * 100.0) if merged["total"] else 0.0
+        iso_rej_pct = (isolated["rejection"] / isolated["total"] * 100.0) if isolated["total"] else 0.0
+        iso_swp_pct = (isolated["sweep"] / isolated["total"] * 100.0) if isolated["total"] else 0.0
+
+        table = [
+            [merged["rejection"], merged["sweep"], merged["neutral"]],
+            [isolated["rejection"], isolated["sweep"], isolated["neutral"]],
+        ]
+        p_str = "n/a"
+        if merged["total"] >= 10 and isolated["total"] >= 10:
+            try:
+                chi2, p_val, _, _ = scipy_stats.chi2_contingency(table)
+                p_str = f"{p_val:.4f}"
+            except ValueError:
+                p_str = "n/a"
+
+        print(
+            f"{tol:<10.4f} | {merged['total']:<10} | {isolated['total']:<7} | {merged_rej_pct:<11.1f} | "
+            f"{merged_swp_pct:<11.1f} | {iso_rej_pct:<8.1f} | {iso_swp_pct:<8.1f} | {p_str:<8}",
+            flush=True,
+        )
+    print("\n================================================================================")
+    print("   CONFLUENCE TOLERANCE SWEEP COMPLETE")
+    print("================================================================================\n", flush=True)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CONFLUENCE Exploratory Calibration Backtest")
     parser.add_argument("--symbol", type=str, default="BANKNIFTY")
     parser.add_argument("--start-date", type=str, default="2026-01-01")
     parser.add_argument("--end-date", type=str, default="2026-06-30")
+    parser.add_argument(
+        "--confluence-tolerance-pct", type=float, default=DEFAULT_CONFLUENCE_TOLERANCE_PCT,
+        help="Fraction-of-price tolerance for merging PDH/P4HH (or PDL/P4HL) into a "
+             "single CONFLUENCE_HIGH/LOW level (default 0.0005 = 0.05%%).",
+    )
+    parser.add_argument(
+        "--tolerance-sweep", action="store_true",
+        help="Runs the confluence-tolerance sensitivity sweep "
+             f"({CONFLUENCE_TOLERANCE_GRID}) across BANKNIFTY and NIFTY50's full "
+             "available history and exits -- see "
+             "docs/2026-10-05-confluence-tolerance-calibration.md.",
+    )
     args = parser.parse_args()
+
+    if args.tolerance_sweep:
+        run_tolerance_sweep()
+        return
 
     s_date = date.fromisoformat(args.start_date)
     e_date = date.fromisoformat(args.end_date)
@@ -152,17 +326,9 @@ def main() -> None:
             pdl = d_lvl.get("PDL")
             p4hl = h_lvl.get("P4HL")
 
-            if pdh and p4hh and abs(pdh - p4hh) / min(pdh, p4hh) <= 0.0005:
-                active_levels.append(StructuralLevel("CONFLUENCE_HIGH", (pdh + p4hh) / 2.0, s_date_iter, "1d+4h"))
-            else:
-                if pdh: active_levels.append(StructuralLevel("PDH", pdh, s_date_iter, "1d"))
-                if p4hh: active_levels.append(StructuralLevel("P4HH", p4hh, s_date_iter, "4h"))
-
-            if pdl and p4hl and abs(pdl - p4hl) / min(pdl, p4hl) <= 0.0005:
-                active_levels.append(StructuralLevel("CONFLUENCE_LOW", (pdl + p4hl) / 2.0, s_date_iter, "1d+4h"))
-            else:
-                if pdl: active_levels.append(StructuralLevel("PDL", pdl, s_date_iter, "1d"))
-                if p4hl: active_levels.append(StructuralLevel("P4HL", p4hl, s_date_iter, "4h"))
+            active_levels = build_active_levels(
+                pdh, p4hh, pdl, p4hl, s_date_iter, args.confluence_tolerance_pct
+            )
 
         triggered_levels_this_session: set[str] = set()
         
