@@ -542,6 +542,7 @@ async function main(): Promise<void> {
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,
                 sideOverride: entry.side,
+                underlyingDirection: entry.underlyingDirection,
                 feeBreakdown: entry.feeBreakdown,
                 applyBrokerageFees: false,
                 optionContract: entry.optionContract,

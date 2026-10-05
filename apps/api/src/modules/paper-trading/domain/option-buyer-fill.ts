@@ -110,6 +110,18 @@ export interface OptionBuyerFill {
   optionType: OptionType;
   /** Paper trade side — always LONG for an option buyer. */
   side: "LONG";
+  /**
+   * The underlying thesis direction this fill was bought to express: LONG for a CE
+   * (bullish), SHORT for a PE (bearish). Carried straight from `ideaSide` rather than
+   * re-derived from `optionType`, so there is exactly one place that decides it.
+   *
+   * Distinct from `side`, which is always `"LONG"` here (an option buyer is long premium
+   * whichever way the underlying view points). This field is what `UNDERLYING_INVALIDATION`
+   * in the O1 exit state machine needs: for a bearish/PE thesis invalidation is the underlying
+   * rising past the stop; for a bullish/CE thesis it is the underlying falling past it. Using
+   * `side` for that check would read every position as bullish, because `side` never varies.
+   */
+  underlyingDirection: TradeSide;
   strike: number;
   fillPremium: number;
   /** Where the entry premium came from, so a trade record is never ambiguous about it. */
@@ -290,6 +302,7 @@ export function mapIdeaToOptionBuyerFill(input: OptionBuyerFillInput): OptionBuy
   return {
     optionType,
     side: "LONG",
+    underlyingDirection: input.ideaSide,
     strike,
     fillPremium: roundMoney(fillPremium),
     fillSource: input.observedFill === undefined

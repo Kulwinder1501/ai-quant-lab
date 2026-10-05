@@ -182,6 +182,7 @@ export class OpenOptionPositionFromIdea {
       stopLossOverride: entry.stopLossOverride,
       targetPriceOverride: entry.targetPriceOverride,
       sideOverride: entry.side,
+      underlyingDirection: entry.underlyingDirection,
       feeBreakdown: entry.feeBreakdown,
       // The entry gate already computed fees from the observed premium; recomputing here would
       // charge a second, differently-derived set.

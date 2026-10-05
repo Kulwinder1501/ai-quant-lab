@@ -203,6 +203,15 @@ export interface OpenPaperTradeInput {
   stopLossOverride?: number;
   targetPriceOverride?: number;
   sideOverride?: TradeSide;
+  /**
+   * The real bullish/bearish thesis direction, persisted as `underlying_direction`.
+   *
+   * Distinct from `sideOverride`: an option buyer's `side` is always `"LONG"` (long the
+   * contract), whichever way the underlying view points, so `sideOverride` can never carry
+   * this. Omit only for a direct-fill (non-option) trade, where the trade's own `side` already
+   * is the thesis direction and the repository falls back to it.
+   */
+  underlyingDirection?: TradeSide | null;
   /** When set, persists first-class option contract columns for live repricing. */
   optionContract?: OptionContractSpec;
   /** Result of the strict 11-factor options entry validation checklist. */

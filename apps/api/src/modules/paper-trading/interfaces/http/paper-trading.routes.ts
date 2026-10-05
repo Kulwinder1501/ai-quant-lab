@@ -380,6 +380,7 @@ export function registerPaperTradingRoutes(
       let stopOverride: number | undefined;
       let targetOverride: number | undefined;
       let sideOverride: TradeSide | undefined;
+      let underlyingDirection: TradeSide | undefined;
       let feeMeta: Record<string, unknown> | undefined;
       let optionContract: {
         optionStrike: number;
@@ -421,6 +422,7 @@ export function registerPaperTradingRoutes(
         stopOverride = prepared.entry.stopLossOverride;
         targetOverride = prepared.entry.targetPriceOverride;
         sideOverride = prepared.entry.side;
+        underlyingDirection = prepared.entry.underlyingDirection;
         optionContract = prepared.entry.optionContract;
         feeMeta = prepared.entry.feeBreakdown;
       }
@@ -440,6 +442,7 @@ export function registerPaperTradingRoutes(
         stopLossOverride: stopOverride,
         targetPriceOverride: targetOverride,
         sideOverride,
+        underlyingDirection,
         feeBreakdown: feeMeta,
         applyBrokerageFees: !feeMeta,
         optionContract,
@@ -621,6 +624,12 @@ export function registerPaperTradingRoutes(
         entrySlippage: 0,
         notes: notes || "Manual option trade from chain",
         sideOverride: "LONG", // Buying options is always LONG
+        // There is no antecedent trade idea on this path to read a thesis side from, so the
+        // direction is derived from the contract itself: buying a CE is a bullish call, buying
+        // a PE is a bearish one. Hardcoding this to "LONG" (the same value as sideOverride
+        // above) was the same bug as the automated path: a manually-opened PE's
+        // UNDERLYING_INVALIDATION would have been evaluated as a bullish thesis.
+        underlyingDirection: normalizedOptionType === "CE" ? "LONG" : "SHORT",
         feeBreakdown: feeMeta,
         optionContract,
       });

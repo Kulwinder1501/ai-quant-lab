@@ -541,6 +541,22 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     const status = input.status ?? "OPEN";
     const feeBreakdown = input.feeBreakdown ?? { entry: { total: input.entryFees } };
     const contract = input.optionContract;
+    /*
+     * The real bullish/bearish thesis direction, not the trade's own `side`.
+     *
+     * For an option buyer `side` is always `"LONG"` -- you are long the contract, whichever way
+     * the underlying view points -- so binding it here made `underlying_direction` read as
+     * `"LONG"` for every option trade regardless of whether a CE or PE was actually bought. A
+     * bearish (PE) position then had its `UNDERLYING_INVALIDATION` check evaluated as if it were
+     * bullish: a favourable fall was flagged as invalidation, and a genuine invalidating rise
+     * was not.
+     *
+     * `input.underlyingDirection` is threaded from `idea.side` by the option-entry gate
+     * (`PrepareOptionEntry` / `mapIdeaToOptionBuyerFill`). It falls back to `side` only for a
+     * direct-fill (non-option) trade, where no override is supplied and the trade's own side
+     * already is the thesis direction.
+     */
+    const underlyingDirection = input.underlyingDirection ?? side;
     const entryUnderlying = contract?.underlyingFillPrice ?? contract?.underlyingEntryPrice ?? null;
     const invalidationLevelAtEntry = contract?.invalidationLevelAtEntry ?? null;
     const initialRiskDistance =
@@ -562,7 +578,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       ) VALUES (
         $1, $2, $3, $4, $14, $5, $5, $6, $7, $7, $9, $8, $9, $10, $13::jsonb, $11, $12,
         $15, $16, $17, $18, $19, $20, $21, $22, $23,
-        'O1', $4, $24, $25, $26
+        'O1', $27, $24, $25, $26
       ) RETURNING id
     `, [
       input.accountId, idea.id, idea.instrument_id, side, input.quantity,
@@ -574,6 +590,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       input.regimeObservationId ?? null,
       contract?.underlyingFillPrice ?? null, contract?.underlyingFillPriceSource ?? null,
       entryUnderlying, invalidationLevelAtEntry, initialRiskDistance,
+      underlyingDirection,
     ]);
     const paperTradeId = inserted.rows[0]?.id;
     if (!paperTradeId) {

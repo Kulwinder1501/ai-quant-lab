@@ -56,6 +56,14 @@ export interface PreparedOptionEntry {
   tradeIdeaId: string;
   underlyingSymbol: string;
   side: "LONG";
+  /**
+   * The underlying thesis direction: LONG for a CE (bullish idea), SHORT for a PE (bearish
+   * idea). Distinct from `side` above, which is always `"LONG"` (you are long the option
+   * contract itself). This is what the O1 exit state machine's `UNDERLYING_INVALIDATION`
+   * check needs, and must never be confused with `side` -- conflating the two made every
+   * position read as bullish regardless of whether a CE or PE was actually bought.
+   */
+  underlyingDirection: "LONG" | "SHORT";
   quantity: number;
   lotSize: number;
   fillPrice: number;
@@ -459,6 +467,7 @@ export class PrepareOptionEntry {
         tradeIdeaId: idea.id,
         underlyingSymbol,
         side: mapped.side,
+        underlyingDirection: mapped.underlyingDirection,
         quantity,
         lotSize,
         fillPrice: mapped.fillPremium,

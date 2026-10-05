@@ -22,6 +22,12 @@ export interface OpenPaperTradeRequest {
   stopLossOverride?: number;
   targetPriceOverride?: number;
   sideOverride?: TradeSide;
+  /**
+   * The real bullish/bearish thesis direction (see `OpenPaperTradeInput.underlyingDirection`).
+   * An option-buyer caller must pass this; it is never derivable from `sideOverride`, which is
+   * always `"LONG"` for an option buyer regardless of whether a CE or PE was bought.
+   */
+  underlyingDirection?: TradeSide;
   feeBreakdown?: Record<string, unknown>;
   /** Persists strike/expiry/type/IV for live Black–Scholes mark-to-market. */
   optionContract?: OptionContractSpec;
@@ -72,6 +78,7 @@ export class OpenPaperTrade {
       stopLossOverride: input.stopLossOverride,
       targetPriceOverride: input.targetPriceOverride,
       sideOverride: input.sideOverride,
+      underlyingDirection: input.underlyingDirection ?? null,
       optionContract: input.optionContract,
       regimeObservationId: input.regimeObservationId ?? null,
     };
