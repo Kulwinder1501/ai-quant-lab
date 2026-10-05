@@ -31,10 +31,10 @@ describe("shadowDecisionsTableExists", () => {
 });
 
 describe("G2_NOT_FUNCTIONAL_MESSAGE", () => {
-  it("names the two missing things and says plainly that the tool does not work yet", () => {
-    expect(G2_NOT_FUNCTIONAL_MESSAGE).toMatch(/NOT YET FUNCTIONAL/);
+  it("names the missing table and points at migration 123 and the gold bot, not a permanent gap", () => {
     expect(G2_NOT_FUNCTIONAL_MESSAGE).toMatch(/shadow_decisions/);
-    expect(G2_NOT_FUNCTIONAL_MESSAGE).toMatch(/gold-shadow-g2-001\.json/);
+    expect(G2_NOT_FUNCTIONAL_MESSAGE).toMatch(/migration 123/);
+    expect(G2_NOT_FUNCTIONAL_MESSAGE).toMatch(/run-gold-paper-trading-bot\.ts/);
     // It must not read like a clean, empty result.
     expect(G2_NOT_FUNCTIONAL_MESSAGE).not.toMatch(/^No shadow decisions found/);
   });
@@ -43,15 +43,18 @@ describe("G2_NOT_FUNCTIONAL_MESSAGE", () => {
 const databaseUrl = process.env.DATABASE_URL;
 
 /**
- * Against the real, live database rather than a mock: this is the exact fact the whole fix is
- * built on (`shadow_decisions` has never been migrated), and a mock could drift from reality
- * without this ever catching it.
+ * Against the real, live database rather than a mock, so a schema drift between this repo's
+ * migrations and whatever is actually applied on a given database is caught rather than assumed.
+ * Deliberately does not assert a fixed true/false: migration 123 may or may not have been run
+ * against whichever database DATABASE_URL points at when this executes, and both are legitimate
+ * states for `shadowDecisionsTableExists` to report honestly -- the property under test is that it
+ * reports SOMETHING rather than throwing, matching whatever `to_regclass` actually says.
  */
 describe.skipIf(!databaseUrl)("shadowDecisionsTableExists (live DB)", () => {
-  it("confirms shadow_decisions does not exist on the live database", async () => {
+  it("resolves to a boolean without throwing, regardless of whether migration 123 has run", async () => {
     const pool = createDatabasePool(databaseUrl!);
     try {
-      expect(await shadowDecisionsTableExists(pool)).toBe(false);
+      expect(typeof (await shadowDecisionsTableExists(pool))).toBe("boolean");
     } finally {
       await pool.end();
     }

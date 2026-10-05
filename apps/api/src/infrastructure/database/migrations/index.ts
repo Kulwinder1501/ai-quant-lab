@@ -120,6 +120,7 @@ import { dxyTwelveDataSupportMigration } from "./119-dxy-twelvedata-support.js";
 import { paperTradeUnderlyingFillMigration } from "./120-paper-trade-underlying-fill.js";
 import { paperTradeO1ExitEngineMigration } from "./121-paper-trade-o1-exit-engine.js";
 import { paperTradeUnderlyingFillQuoteObservedSourceMigration } from "./122-paper-trade-underlying-fill-quote-observed-source.js";
+import { shadowDecisionsMigration } from "./123-shadow-decisions.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -244,4 +245,5 @@ export const migrations = [
   paperTradeUnderlyingFillMigration,
   paperTradeO1ExitEngineMigration,
   paperTradeUnderlyingFillQuoteObservedSourceMigration,
+  shadowDecisionsMigration,
 ];

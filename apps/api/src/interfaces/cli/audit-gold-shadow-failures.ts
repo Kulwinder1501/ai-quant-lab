@@ -2,39 +2,36 @@
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { G2_NOT_FUNCTIONAL_MESSAGE, shadowDecisionsTableExists } from "./gold-shadow-audit-availability.js";
+import { ICT_STRUCTURE_STRATEGY_KEY } from "../../modules/technical-analysis/domain/ict/config.js";
 
 /**
- * G2 — Frozen Snapshot Replay Audit (Phase G2 of the implementation plan)
+ * G2 — Shadow Decision Failure-Taxonomy Audit (Phase G2 of the Gold Bot & Option Scalper spec)
  *
- * Replays the OLD vs NEW ict-structure-strategy evaluators against frozen case JSON fixtures
- * to classify failure taxonomy and confirm that G1 invariants now reject the shadow cases.
+ * Reads `shadow_decisions` (migration 123, written by `generate-trade-ideas.ts` +
+ * `run-gold-paper-trading-bot.ts` every time `ict-structure-v1` evaluates a bar) and summarizes
+ * which decisions carry the failure-taxonomy flags G1's fail-closed invariants care about:
  *
- * This script reads `gold_shadow_decisions` (or equivalent) from the database and re-evaluates
- * each proposal snapshot with both the legacy evaluator (before G1 changes) and the current
- * evaluator (after G1 changes), then reports which proposals would have been REJECTED by the
- * new fail-closed invariants.
- *
- * Failure taxonomy (matching the FailureTaxonomyRecord spec):
- *   SESSION_CALIBRATION       - sessionDate resolver mismatch (old hardcoded vs DST-aware)
- *   PROTECTED_LEVEL_BREACH    - protectedStatusAtCutoff was BREACHED but old code allowed it
- *   STALE_MACRO_TARGET        - macro target was stale at entry time
+ *   SESSION_CALIBRATION       - this bar's instant buckets into a different session date under
+ *                               NSE_IST_PROFILE than under the instrument's own profile (gold's
+ *                               DST-aware NY-session rollover; see ict-shadow-diagnostics.ts)
+ *   PROTECTED_LEVEL_BREACH    - protectedStatusAtCutoff was BREACHED or UNKNOWN while a swing
+ *                               hierarchy was actually present (i.e. not merely unformed)
+ *   STALE_MACRO_TARGET        - liquidity.primaryTarget disagreed with the independently
+ *                               recomputed draw-on-liquidity selection for the same bar
  *
  * Usage:
  *   npm run research:gold:shadow-audit [--account AutoBot-Gold] [--from 2026-09-01] [--to 2026-10-01]
  *
- * Note: Full replay requires injecting the old vs new strategy evaluator. This script
- * computes the audit from persisted decision metadata (shadow_decisions table) without
- * requiring a full market context replay, which is more PIT-safe.
+ * ## What this does NOT do
  *
- * ## This tool is NOT YET FUNCTIONAL
- *
- * Neither the `shadow_decisions` table above nor the 22 frozen case fixtures this script is
- * documented to replay (`gold-shadow-g2-001.json` .. `022.json`) have ever been built -- see
- * `gold-shadow-audit-availability.ts`'s docstring for the full investigation, including why
- * `decision_ledger`/`differential_observations` (Brain V2.2's unrelated, NSE-only shadow-decision
- * pipeline) is not a substitute. Rather than silently reporting a zero-row "clean" result when the
- * table is absent -- which used to happen here via a swallowed query error -- this refuses up front
- * with a clear, non-zero exit. See `G2_NOT_FUNCTIONAL_MESSAGE` for exactly what it reports.
+ * This does not replay an old vs. a new strategy evaluator against frozen fixtures -- that was the
+ * original G2 design's second half, and it was never built (no `gold-shadow-g2-NNN.json` fixtures
+ * exist anywhere in this repo or its history). What it does instead is read taxonomy flags that
+ * were computed ONCE, at decision time, from the real engine (`IctShadowDiagnostics`, see
+ * `ict-shadow-diagnostics.ts`), and persisted alongside the decision. That is a narrower claim than
+ * "replay-verified", but it is a real one: every flag here reflects what the live engine actually
+ * computed for that bar, not a fixture standing in for it. A dual-evaluator replay harness remains
+ * unbuilt and would be a separate, later piece of work.
  */
 
 export interface FailureTaxonomyRecord {
@@ -72,8 +69,8 @@ const accountId = argValue("--account") ?? "AutoBot-Gold";
 const fromDate = argValue("--from");
 const toDate = argValue("--to");
 
-const whereClause = ["sd.account_id = $1", "sd.strategy_key = 'ict-structure'"];
-const params: unknown[] = [accountId];
+const whereClause = ["sd.account_id = $1", "sd.strategy_key = $2"];
+const params: unknown[] = [accountId, ICT_STRUCTURE_STRATEGY_KEY];
 if (fromDate) { params.push(fromDate); whereClause.push(`sd.evaluated_at >= $${params.length}::timestamptz`); }
 if (toDate) { params.push(toDate); whereClause.push(`sd.evaluated_at < $${params.length}::timestamptz`); }
 
@@ -100,9 +97,9 @@ const result = await pool.query<{
 if (!result.rows.length) {
   // The table is real and was queried successfully; a genuinely empty result is a legitimate
   // outcome here (unlike the missing-table case above, which never reaches this line).
-  console.log(`No shadow decisions found for account ${accountId} with strategy ict-structure.`);
-  console.log("The G2 audit requires shadow decisions recorded by run-shadow-decisions.ts.");
-  console.log("To populate: npm run shadow:decisions -- --account AutoBot-Gold");
+  console.log(`No shadow decisions found for account ${accountId} with strategy ${ICT_STRUCTURE_STRATEGY_KEY}.`);
+  console.log("shadow_decisions is populated by run-gold-paper-trading-bot.ts on every scheduler tick");
+  console.log("that evaluates ict-structure-v1 against a fresh bar -- run the bot, then re-run this audit.");
   await pool.end();
   process.exit(0);
 }

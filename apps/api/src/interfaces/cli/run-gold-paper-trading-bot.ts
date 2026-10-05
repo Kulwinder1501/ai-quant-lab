@@ -9,6 +9,7 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
 import { PostgresCandidateLedgerRepository, type CandidateDecisionInput } from "../../infrastructure/database/repositories/postgres-candidate-ledger-repository.js";
+import { PostgresShadowDecisionRepository } from "../../infrastructure/database/repositories/postgres-shadow-decision-repository.js";
 import { TwelveDataQuoteClient } from "../../infrastructure/market-data/twelvedata-quote-client.js";
 import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
@@ -131,6 +132,7 @@ async function main(): Promise<void> {
     const prepareEntry = new PrepareDirectEntry(database, quoteClient);
     const openTrade = new OpenPaperTrade(tradeRepository);
     const ledger = new PostgresCandidateLedgerRepository(database);
+    const shadowDecisions = new PostgresShadowDecisionRepository(database);
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
       new PostgresStrategyMarketContextRepository(database),
@@ -183,7 +185,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
           continue;
         }
 
-        const results = await generator.execute({ instrumentId: instrument.id, timeframe });
+        const results = await generator.execute({ instrumentId: instrument.id, timeframe, symbol: XAU_SYMBOL });
         const goldResults = results.filter((result) => result.strategyKey === GOLD_STRATEGY_KEY);
 
         for (const result of goldResults) {
@@ -305,6 +307,47 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
               fillPrice: entry.fillPrice, stopLoss: entry.stopLossOverride, targetPrice: entry.targetPriceOverride,
               quantity: entry.quantity, requiredMargin: entry.requiredMargin, leverage: entry.leverage,
             });
+          }
+
+          // G2: one shadow_decisions row per (account, strategy, bar), regardless of whether this
+          // result raised any ideas -- "ran and found nothing" is itself part of the failure
+          // taxonomy's population, not only the ideas that were raised and then refused.
+          if (result.sourceCandleId) {
+            const ideaIds = new Set(result.tradeIdeaIds);
+            const openedHere = opened.filter((o) => ideaIds.has(String(o.tradeIdeaId)));
+            const refusedHere = refused.filter((r) => ideaIds.has(String(r.tradeIdeaId)));
+            const decision = result.candidatesGenerated === 0
+              ? "NO_SIGNAL" as const
+              : openedHere.length > 0
+                ? "EXECUTED" as const
+                : "REFUSED" as const;
+            try {
+              await shadowDecisions.recordDecision({
+                accountId: account.id,
+                strategyKey: result.strategyKey,
+                instrumentId: instrument.id,
+                timeframe,
+                sourceCandleId: result.sourceCandleId,
+                evaluatedAt: now,
+                proposalCount: result.candidatesGenerated,
+                decision,
+                contextMetadata: {
+                  symbol: XAU_SYMBOL,
+                  candidatesGenerated: result.candidatesGenerated,
+                  ideasRaised: result.tradeIdeaIds.length,
+                  openedCount: openedHere.length,
+                  refusedCount: refusedHere.length,
+                },
+                strategyMetadata: result.shadowDiagnostics ? { ...result.shadowDiagnostics } : {},
+              });
+            } catch (error) {
+              console.error(JSON.stringify({
+                level: "error",
+                message: "Could not record a G2 shadow decision; the bot run is unaffected.",
+                timeframe, sourceCandleId: result.sourceCandleId,
+                reason: error instanceof Error ? error.message : String(error),
+              }));
+            }
           }
         }
       }

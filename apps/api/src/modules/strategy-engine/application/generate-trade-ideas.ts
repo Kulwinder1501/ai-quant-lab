@@ -16,11 +16,20 @@ import {
 } from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
 import { applyOrderbookGateToProposal } from "../domain/orderbook-directional-gate.js";
+import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
+import { computeIctShadowDiagnostics, type IctShadowDiagnostics } from "../domain/ict-shadow-diagnostics.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
   timeframe: string;
   allowedSides?: readonly TradeSide[];
+  /**
+   * The instrument's own ticker, used only to compute `GenerateTradeIdeasResult.shadowDiagnostics`'
+   * `sessionDateMismatch` field (see `ict-shadow-diagnostics.ts`) -- that check needs the real
+   * symbol, which `StrategyMarketContext` does not carry. Optional and additive: omitting it simply
+   * leaves `sessionDateMismatch` null, exactly as before this field existed.
+   */
+  symbol?: string;
 }
 
 export interface GenerateTradeIdeasResult {
@@ -40,6 +49,14 @@ export interface GenerateTradeIdeasResult {
    * backfilled and recomputed. Nothing in the generator reads it; it exists to be recorded.
    */
   regime: RegimeContext | null;
+  /**
+   * G2's failure taxonomy (see `ict-shadow-diagnostics.ts`), present only when this result is for
+   * `ict-structure-v1` and a context with an `ictSnapshot` was available. Same "surfaced because a
+   * caller needs to record it" rationale as `regime` above: nothing in `execute()` reads this
+   * field or branches on it, it exists so `run-gold-paper-trading-bot.ts` can write a
+   * `shadow_decisions` row (migration 123) without re-deriving the engine's own state.
+   */
+  shadowDiagnostics?: IctShadowDiagnostics;
 }
 
 export interface ScanTradeIdeasInput {
@@ -222,6 +239,9 @@ export class GenerateTradeIdeas {
           tradeIdeaIds: tradeIdeas.map((idea) => idea.id),
           skippedReason: proposals.length === 0 ? "RULES_NOT_MET" : null,
           regime: context.regime ?? null,
+          shadowDiagnostics: registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY && context.ictSnapshot
+            ? computeIctShadowDiagnostics(context.ictSnapshot, context.candle.close, context.candle.openTime, input.symbol)
+            : undefined,
         });
       } catch (error) {
         results.push({
