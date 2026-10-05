@@ -189,7 +189,15 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
         const goldResults = results.filter((result) => result.strategyKey === GOLD_STRATEGY_KEY);
 
         for (const result of goldResults) {
-          if (result.skippedReason) {
+          /*
+           * RULES_NOT_MET is deliberately NOT an early `continue` here, unlike every other skip
+           * reason. It is the only one that still carries a real `sourceCandleId` AND
+           * `shadowDiagnostics` (generate-trade-ideas.ts computes both regardless of
+           * `candidatesGenerated`) -- "the strategy evaluated this bar and found nothing" is part
+           * of G2's population, not absent from it. NO_COMPLETED_CANDLE / STRATEGY_INACTIVE /
+           * TIMEFRAME_UNSUPPORTED / STRATEGY_FAILED have no context to diagnose and stay skipped.
+           */
+          if (result.skippedReason && result.skippedReason !== "RULES_NOT_MET") {
             strategyOutcomes.push({
               timeframe, strategy: result.strategyKey, skippedReason: result.skippedReason,
               ...(result.failureMessage ? { failureMessage: result.failureMessage } : {}),
@@ -197,7 +205,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
             continue;
           }
           strategyOutcomes.push({
-            timeframe, strategy: result.strategyKey, skippedReason: null,
+            timeframe, strategy: result.strategyKey, skippedReason: result.skippedReason,
             candidatesGenerated: result.candidatesGenerated, ideasRaised: result.tradeIdeaIds.length,
           });
 
