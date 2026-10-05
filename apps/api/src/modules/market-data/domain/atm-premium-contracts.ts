@@ -1,6 +1,7 @@
 import { nearestStrike } from "@ai-quant-lab/pricing";
 import type { OptionChainSnapshot } from "./option-chain.js";
 import { selectNearestListedExpiry, type OptionExpiryCalendar } from "./option-expiry-calendar.js";
+import { solveContractGreeksFromChain } from "./chain-greeks.js";
 
 /**
  * Which expiries the dense premium feed must cover, as `YYYY-MM-DD` keys.
@@ -118,6 +119,134 @@ export function selectAtmPremiumContracts(
           q.strikePrice === strike
           && q.optionType === optionType
           && q.expiryDate.toISOString().slice(0, 10) === expiryDate,
+      );
+      if (!quote?.providerSymbol) continue;
+      selected.push({
+        underlyingSymbol: snapshot.underlyingSymbol,
+        expiryDate,
+        strikePrice: strike,
+        optionType,
+        providerSymbol: quote.providerSymbol,
+      });
+    }
+  }
+  return selected;
+}
+
+/**
+ * Mirrors `MIN_ENTRY_DELTA` / `TARGET_DELTA` in `prepare-option-entry.ts` (both 0.75 today).
+ *
+ * Restated rather than imported: `modules/market-data` must not depend on `modules/paper-trading`
+ * (the dependency points the other way everywhere else in this codebase -- see
+ * `collect-option-premium-ticks.ts`'s own comment on `collectorRegime` for the same rule applied
+ * to a different constant). If that gate's target ever moves, this must move with it; nothing
+ * enforces that automatically, which is why both call sites below also accept an override.
+ */
+export const DEFAULT_DELTA_TARGET = 0.75;
+
+/**
+ * Picks the contract(s) `PrepareOptionEntry`'s delta-based selection is actually going to choose,
+ * from the same chain snapshot the dense collector already has -- not a guessed strike-count away
+ * from ATM.
+ *
+ * `PrepareOptionEntry` (apps/api/src/modules/paper-trading/application/prepare-option-entry.ts)
+ * stopped picking the near-ATM strike on 2026-10-01 ("O1 engine and gold isolation") and started
+ * picking the strike whose delta is closest to 0.75 among every strike with `abs(delta) >= 0.75` --
+ * a genuine options-pricing decision, not a strike-count offset. `selectAtmPremiumContracts`'s
+ * ATM±`strikeBand` window has no way to express that: band 1 covers three strikes either side of
+ * spot, but a 0.75-delta BANKNIFTY call at a realistic ~22-day monthly tenor sits roughly 12-15
+ * strikes away (confirmed against the live chain on 2026-10-05: BANKNIFTY spot 54,612.70, 22.1 DTE,
+ * 16-18% IV -- the 0.75-delta neighbourhood was strikes 53,100-53,500, 11-15 steps below ATM).
+ * That gap is why trade idea `f29afcdc-3815-4c27-a6f8-34df642d5f74` refused every two-minute tick
+ * with `NO_FRESH_EXECUTABLE_QUOTE`: the contract `PrepareOptionEntry` wanted was never quoted by
+ * this collector in the first place.
+ *
+ * A fixed wider band was considered and rejected. The distance to a 0.75-delta strike is not a
+ * constant -- it scales with both time-to-expiry and implied volatility, and BANKNIFTY's
+ * monthly-only calendar means the collector must cover DTE anywhere from 2 to roughly 36 days
+ * (right after a roll). A sweep against this file's own Black-Scholes delta at BANKNIFTY's strikes
+ * found the 0.75-delta distance ranging from 4 steps (5 DTE, 10% IV) to 19+ steps (40 DTE, 20% IV)
+ * -- no single fixed band is both cheap on ordinary days and safe on the wide ones, and guessing
+ * one `MAX_STRIKE_STEP`-style constant here would only be right for the DTE/IV combination it was
+ * tuned against, the same mistake the deep-ITM selection itself was added to get away from.
+ * Solving for the actual delta directly instead means this collector tracks whatever
+ * `PrepareOptionEntry` will do without needing to be retuned when IV or the roll calendar moves --
+ * and it costs only a handful of extra quotes (`2 * strikeMargin + 1` per side that clears the
+ * floor), not the 25+ per side a band wide enough for the worst case would need against the Fyers
+ * rate limit this collector already has a documented history of tripping (see
+ * `OptionPremiumTickStreamer`'s class doc: 97 of 1,038 HTTP runs 429'd in one week).
+ *
+ * Returns nothing for a side where no strike in the *listed* chain reaches the delta floor at all
+ * (observed live on the BANKNIFTY put side on 2026-10-05: the furthest listed strike only reached
+ * delta -0.71). That is a strike-*listing*-range gap in the 15-minute chain collector, not
+ * something this dense poller can fix by asking Fyers for a strike nobody listed -- and
+ * `PrepareOptionEntry` would refuse that side with `NO_OPTION_ENTRY` before ever reaching the
+ * freshness check this collector exists to satisfy, so there is nothing to pre-emptively quote.
+ */
+export function selectDeltaTargetPremiumContracts(
+  snapshot: OptionChainSnapshot,
+  options: {
+    targetDelta?: number;
+    /**
+     * Strike-steps of margin kept on each side of the computed target, to absorb drift between
+     * this snapshot (up to `maxAgeMs` old) and whatever chain `PrepareOptionEntry` reads for the
+     * same contract at idea-evaluation time. Both read the same table on a similar cadence, so
+     * day-to-day this covers rounding rather than a real gap -- it is not re-deriving the whole
+     * ATM-to-target span, only guarding the one strike the chain says is the answer.
+     */
+    strikeMargin?: number;
+    maxAgeMs?: number;
+    now?: Date;
+  } = {},
+): AtmPremiumContract[] {
+  const targetDelta = options.targetDelta ?? DEFAULT_DELTA_TARGET;
+  const strikeMargin = options.strikeMargin ?? 2;
+  const maxAgeMs = options.maxAgeMs ?? 40 * 60 * 1000;
+  const now = options.now ?? new Date();
+
+  if (now.getTime() - snapshot.observedAt.getTime() > maxAgeMs) return [];
+
+  // Same expiry-isolation rule as `selectAtmPremiumContracts`: infer the strike grid from one
+  // expiry only, never a mix.
+  const expiries = [...new Set(
+    snapshot.quotes.map((q) => q.expiryDate.toISOString().slice(0, 10)),
+  )].sort();
+  if (expiries.length === 0) return [];
+  const expiryDate = expiries[0]!;
+  const expiryQuotes = snapshot.quotes.filter(
+    (quote) => quote.expiryDate.toISOString().slice(0, 10) === expiryDate,
+  );
+
+  const strikes = [...new Set(expiryQuotes.map((q) => q.strikePrice))]
+    .filter((s) => Number.isFinite(s) && s > 0)
+    .sort((a, b) => a - b);
+  if (strikes.length < 2) return [];
+
+  const step = inferStrikeStep(strikes);
+  if (step === null) return [];
+
+  const selected: AtmPremiumContract[] = [];
+  for (const optionType of ["CE", "PE"] as const) {
+    const withDelta: Array<{ strike: number; absDelta: number }> = [];
+    for (const strike of strikes) {
+      const greeks = solveContractGreeksFromChain({ snapshot, strikePrice: strike, optionType });
+      if (greeks !== null && Number.isFinite(greeks.delta)) {
+        withDelta.push({ strike, absDelta: Math.abs(greeks.delta) });
+      }
+    }
+
+    // Mirror `PrepareOptionEntry`'s own eligibility floor: only a strike that already clears the
+    // target delta is one it could ever pick. Nothing below the floor is a candidate.
+    const eligible = withDelta.filter((d) => d.absDelta >= targetDelta);
+    if (eligible.length === 0) continue;
+
+    eligible.sort((a, b) => Math.abs(a.absDelta - targetDelta) - Math.abs(b.absDelta - targetDelta));
+    const best = eligible[0]!;
+
+    for (let i = -strikeMargin; i <= strikeMargin; i += 1) {
+      const strike = best.strike + i * step;
+      const quote = expiryQuotes.find(
+        (q) => q.strikePrice === strike && q.optionType === optionType,
       );
       if (!quote?.providerSymbol) continue;
       selected.push({

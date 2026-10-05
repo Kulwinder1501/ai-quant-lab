@@ -2,7 +2,7 @@ import type { PostgresOptionChainRepository } from "../../../infrastructure/data
 import type { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-token-service.js";
 import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
-import { selectAtmPremiumContracts } from "../domain/atm-premium-contracts.js";
+import { selectAtmPremiumContracts, selectDeltaTargetPremiumContracts } from "../domain/atm-premium-contracts.js";
 import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
 import { normaliseTradedVolume } from "../domain/traded-volume.js";
 import { POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY } from "../domain/collector-regimes.js";
@@ -11,6 +11,14 @@ export interface CollectOptionPremiumTicksInput {
   underlyingSymbols: readonly string[];
   /** ATM ± this many strike steps. Default 1 → 6 contracts per underlying. */
   strikeBand?: number;
+  /**
+   * Mirrors `PrepareOptionEntry`'s `TARGET_DELTA`/`MIN_ENTRY_DELTA` (0.75). The ATM band covers
+   * what D2 and other near-the-money consumers need; this covers the deep-ITM contract the
+   * paper-trading bots will actually try to open -- see `selectDeltaTargetPremiumContracts`'s doc
+   * for why a wider `strikeBand` is not how this is covered instead.
+   */
+  deltaTarget?: number;
+  deltaTargetStrikeMargin?: number;
 }
 
 export interface CollectOptionPremiumTicksResult {
@@ -80,9 +88,17 @@ export class CollectOptionPremiumTicks {
         strikeBand: input.strikeBand ?? 1,
         spotOverride: liveUnderlying,
       });
+      // The ATM band tracks spot; `PrepareOptionEntry`'s delta-based strike does not sit anywhere
+      // near spot for a typical BANKNIFTY monthly tenor (see that function's doc). Without this,
+      // every delta-selected idea refuses with NO_FRESH_EXECUTABLE_QUOTE for a contract this
+      // collector never asked Fyers for.
+      const deltaTargetContracts = selectDeltaTargetPremiumContracts(snapshot, {
+        targetDelta: input.deltaTarget,
+        strikeMargin: input.deltaTargetStrikeMargin,
+      });
       const requiredContracts = await this.additionalContracts?.listForUnderlying(symbol) ?? [];
       const contracts = [...new Map(
-        [...atmContracts, ...requiredContracts]
+        [...atmContracts, ...deltaTargetContracts, ...requiredContracts]
           .map((contract) => [contract.providerSymbol.toUpperCase(), contract]),
       ).values()];
       if (contracts.length === 0) {

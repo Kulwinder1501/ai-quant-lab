@@ -4,6 +4,7 @@ import type { AtmPremiumContract } from "../../modules/market-data/domain/atm-pr
 import {
   premiumCoverageExpiries,
   selectAtmPremiumContracts,
+  selectDeltaTargetPremiumContracts,
 } from "../../modules/market-data/domain/atm-premium-contracts.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import {
@@ -51,6 +52,13 @@ export interface OptionPremiumTickStreamerOptions {
    */
   contractRetentionMs?: number;
   strikeBand?: number;
+  /**
+   * Mirrors `PrepareOptionEntry`'s `TARGET_DELTA`/`MIN_ENTRY_DELTA` (0.75). The ATM band above
+   * covers what D2 and other near-the-money consumers need; this covers the deep-ITM contract the
+   * paper-trading bots will actually try to open. See `selectDeltaTargetPremiumContracts`'s doc.
+   */
+  deltaTarget?: number;
+  deltaTargetStrikeMargin?: number;
   /**
    * Mirrors `MINIMUM_DAYS_TO_EXPIRY` in the trading path, so the feed covers the contract the bot
    * will choose. Lowering it below the trading floor re-opens the gap this closed.
@@ -252,6 +260,15 @@ export class OptionPremiumTickStreamer {
         if (snapshot) {
           contracts.push(...selectAtmPremiumContracts(snapshot, {
             strikeBand: this.options.strikeBand ?? 1,
+            now: this.now(),
+          }));
+          // The band above tracks spot; `PrepareOptionEntry`'s delta-based strike does not sit
+          // anywhere near spot for a typical BANKNIFTY monthly tenor (see that function's doc).
+          // Without this, every delta-selected idea refuses with NO_FRESH_EXECUTABLE_QUOTE for a
+          // contract this collector never asked Fyers for.
+          contracts.push(...selectDeltaTargetPremiumContracts(snapshot, {
+            targetDelta: this.options.deltaTarget,
+            strikeMargin: this.options.deltaTargetStrikeMargin,
             now: this.now(),
           }));
         }
