@@ -234,6 +234,57 @@ export function registerPaperTradingRoutes(
     }
   });
 
+  app.get("/api/v1/gold-shadow", async (request, response, next) => {
+    try {
+      const strategy = (request.query.strategy as string) || 'ict-structure-v1';
+      // Connect to the DB to fetch Gold shadow trades
+      const { Client } = await import('pg');
+      const client = new Client({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@postgres:5432/ai_quant_lab' });
+      await client.connect();
+
+      // Aggregate stats
+      const aggResult = await client.query(`
+        SELECT 
+          cs.outcome,
+          COUNT(*) as count,
+          SUM(CAST(cs.r_multiple AS FLOAT)) as total_r
+        FROM candidate_settlements cs
+        JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
+        WHERE ti.evidence->>'strategy' = $1
+        GROUP BY cs.outcome;
+      `, [strategy]);
+
+      // Details
+      const detailsResult = await client.query(`
+        SELECT 
+          ti.id as trade_idea_id,
+          ti.generated_at,
+          ti.side,
+          ti.entry_price,
+          ti.target_price,
+          ti.stop_loss,
+          ti.risk_reward,
+          cs.outcome,
+          cs.r_multiple,
+          cs.settled_at
+        FROM candidate_settlements cs
+        JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
+        WHERE ti.evidence->>'strategy' = $1
+        ORDER BY ti.generated_at DESC
+        LIMIT 200;
+      `, [strategy]);
+
+      await client.end();
+
+      response.status(200).json({
+        summary: aggResult.rows,
+        trades: detailsResult.rows
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/v1/paper-accounts", async (_request, response, next) => {
     try {
       response.status(200).json({ data: await dependencies.dashboardRepository.listPaperAccounts() });
