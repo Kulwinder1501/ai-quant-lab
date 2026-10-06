@@ -47,6 +47,7 @@
     "verify:cap-concurrency": "npm run verify:cap-concurrency --workspace @ai-quant-lab/api --",
     "ops:collector-health": "npm run ops:collector-health --workspace @ai-quant-lab/api --",
     "ops:depth-staleness": "npm run ops:depth-staleness --workspace @ai-quant-lab/api --",
+    "ops:depth-prune": "npm run ops:depth-prune --workspace @ai-quant-lab/api --",
     "research:scalp:estimate": "npm run research:scalp:estimate --workspace @ai-quant-lab/api --",
     "paper:trades:evaluate": "npm run paper:trades:evaluate --workspace @ai-quant-lab/api --",
     "paper:trades:close": "npm run paper:trades:close --workspace @ai-quant-lab/api --",

@@ -7,6 +7,7 @@ import { loadNseHolidays } from "../../modules/market-data/domain/nse-session-ca
 import {
   DEPTH_CAPTURE_SEGMENT,
   DEPTH_STRUCTURAL_SILENCE_MS,
+  canonicalUnderlyingFromTicker,
   describeContractRoll,
   evaluateDepthCaptureStaleness,
 } from "../../modules/market-data/domain/depth-frame-staleness.js";
@@ -101,12 +102,17 @@ async function main(): Promise<void> {
         .sort((a, b) => b.lastAt.getTime() - a.lastAt.getTime())[0]?.providerSymbol;
       if (lastCaptured !== undefined) {
         const parsedUnderlying = lastCaptured.replace(/^[A-Z]+:/, "").replace(/\d{2}[A-Z]{3}FUT$/, "");
+        // parsedUnderlying is the ticker's own token (e.g. "NIFTY"), which is not always the
+        // calendar's canonical name (e.g. "NIFTY50") -- see futuresTickerUnderlying's doc comment
+        // in depth-frame-staleness.ts. Querying by the raw ticker token found zero rows for NIFTY
+        // before this, silently losing the roll hint (not the staleness verdict itself, which
+        // does not depend on this lookup).
         const expiries = await database.query<{ expiry_date: string }>(
           `SELECT DISTINCT to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date
            FROM option_expiry_calendar
            WHERE underlying_symbol = $1
            ORDER BY expiry_date`,
-          [parsedUnderlying],
+          [canonicalUnderlyingFromTicker(parsedUnderlying)],
         );
         rollHint = describeContractRoll({
           lastCapturedSymbol: lastCaptured,

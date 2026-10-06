@@ -38,13 +38,21 @@ This version:
    labeled, not a calibrated-feature substitute) realized-vol-ratio proxy, and a real
    forward net-MFE outcome (minus the 2.0bp round-trip friction) -- all derived only
    from the real OHLCV candles this query fetches.
- - Features this data source cannot supply at all -- L2-based CKS OFI, trade-tape
-   netDelta/footprint shape, options GEX, cross-sectional market breadth -- are left at
-   honest neutral/zero values instead of hardcoded constants that trivially always pass
-   their gates. Because real OFI is unavailable, this run cannot execute the full
-   OFI-conditioned F1-F4 protocol; it is reported as a location-only diagnostic
-   (does price even reach the Fib zones, and what is the raw, unconditioned net MFE
-   there) and is explicitly NOT a substitute for Phase C sign-off.
+ - Real CKS touch-level OFI (ai_quant_lab_ml/cks_ofi_touch.py, a faithful port of the
+   validated TypeScript Phase 28 implementation) is now wired in for BANKNIFTY, the only
+   instrument with any captured depth data -- joined to each candle by nearest prior
+   observation within a 60s staleness tolerance, never blended across a futures-contract
+   roll. NIFTY50 has zero real depth data captured anywhere in this system; its OFI stays
+   an honest 0.0 rather than a fabricated constant.
+ - Trade-tape netDelta/footprint shape, options GEX, and cross-sectional market breadth
+   are still not derivable from any data source this system captures today, and are left
+   at honest neutral/zero values instead of hardcoded constants that trivially always
+   pass their gates. Because Layer 2's footprint/GEX inputs remain unavailable and OFI
+   has no validated gate threshold (see cks_ofi_touch.py's module docstring), this run
+   still cannot execute the full F1-F4 protocol as originally specified; it is reported
+   as a location-only diagnostic (does price reach the Fib zone, what is the raw net MFE
+   there, now informed by real order flow where available) and is explicitly NOT a
+   substitute for Phase C sign-off.
  - Calibration means/stds for propensity matching are computed from a strict leading
    slice of each instrument's real episodes (calibration period), with the remainder
    used for evaluation, honoring `calibrationEnd < evaluationStart`.
@@ -57,11 +65,19 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import psycopg
 
+from ai_quant_lab_ml.cks_ofi_touch import (
+    BANKNIFTY_DEPTH_CONTRACTS,
+    CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
+    DepthFrameRow,
+    OfiWindowObservation,
+    compute_windowed_ofi_series,
+    join_nearest_prior,
+)
 from ai_quant_lab_ml.experiments_f1_f4 import ObservationEpisode, run_phase_c_experiments
 from ai_quant_lab_ml.fibonacci_pit_engine import (
     ATRObservation,
@@ -74,6 +90,7 @@ from ai_quant_lab_ml.fibonacci_pit_engine import (
     MagnitudeEstimate,
     NormalizedOFI,
     RetracementObservation,
+    StatefulPITFibEngineBearish,
     StructuralLevel,
 )
 from ai_quant_lab_ml.master_scanner import Master5LayerScanner
@@ -140,6 +157,21 @@ def compute_confirmed_swing_highs(highs: List[float]) -> List[Optional[Tuple[int
     return result
 
 
+def compute_confirmed_swing_lows(lows: List[float]) -> List[Optional[Tuple[int, int, float]]]:
+    """
+    Bearish mirror of compute_confirmed_swing_highs: the most recent CONFIRMED swing low at or
+    before each index, for binding an MSS breakdown (close < support) rather than a breakout.
+    """
+    n = len(lows)
+    result: List[Optional[Tuple[int, int, float]]] = [None] * n
+    last: Optional[Tuple[int, int, float]] = None
+    for j in range(2, n):
+        if lows[j - 1] < lows[j - 2] and lows[j - 1] < lows[j]:
+            last = (j - 1, j, lows[j - 1])
+        result[j] = last
+    return result
+
+
 def compute_vol_ratio_series(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
     """
     Simple real (not fabricated) volatility-ratio proxy from true range: short (5-bar) rolling
@@ -177,25 +209,88 @@ def is_near_session_close(dt: datetime, minutes_before_close: int = 15) -> bool:
     return ist_minutes > (SESSION_END_MIN - minutes_before_close)
 
 
-def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> Tuple[List[ObservationEpisode], dict]:
+def fetch_banknifty_ofi_observations(connection: psycopg.Connection) -> List[OfiWindowObservation]:
+    """
+    Real touch-level, 5s-window OFI from captured depth, one independent chain per futures
+    contract (never blended across a roll), concatenated in chronological order. Contracts
+    are captured sequentially with no time overlap, so concatenation preserves the ordering
+    `join_nearest_prior` requires.
+    """
+    all_observations: List[OfiWindowObservation] = []
+    cur = connection.cursor()
+    for symbol, _start, _end in BANKNIFTY_DEPTH_CONTRACTS:
+        try:
+            cur.execute(
+                """
+                SELECT received_at, is_snapshot, is_duplicate, gap_before,
+                       bid_price[1], bid_qty[1], ask_price[1], ask_qty[1]
+                FROM depth_frames
+                WHERE provider_symbol = %s
+                ORDER BY received_at ASC;
+                """,
+                (symbol,),
+            )
+            depth_rows = cur.fetchall()
+        except Exception as e:
+            print(f"Notice: depth_frames query for {symbol} returned: {e}", file=sys.stderr)
+            depth_rows = []
+
+        if not depth_rows:
+            continue
+
+        frames = [
+            DepthFrameRow(
+                received_at=r[0], is_snapshot=bool(r[1]), is_duplicate=bool(r[2]), gap_before=r[3],
+                bid_price_0=float(r[4]) if r[4] is not None else 0.0,
+                bid_qty_0=float(r[5]) if r[5] is not None else 0.0,
+                ask_price_0=float(r[6]) if r[6] is not None else 0.0,
+                ask_qty_0=float(r[7]) if r[7] is not None else 0.0,
+            )
+            for r in depth_rows
+        ]
+        contract_observations = compute_windowed_ofi_series(frames)
+        print(
+            f"Computed {len(contract_observations)} real OFI observations from {len(depth_rows)} "
+            f"depth frames for {symbol}.",
+            file=sys.stderr,
+        )
+        all_observations.extend(contract_observations)
+
+    return all_observations
+
+
+def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
+                               ofi_observations: Optional[List[OfiWindowObservation]] = None
+                               ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict]:
     """
     Builds ObservationEpisodes for ONE instrument's own chronologically-ordered, single-
-    timeframe candle stream, driving a dedicated Master5LayerScanner / Fib engine instance.
+    timeframe candle stream, driving a dedicated Master5LayerScanner (bullish) and
+    StatefulPITFibEngineBearish instance in lockstep over the same bars.
 
-    Also returns a small diagnostics dict so a "0 treatment contacts" result downstream is
-    interpretable: did the Fib engine ever actually form/track a real POI (data pipeline
-    working), or did price simply never retrace into the Golden Pocket/OTE/Deep bands within
-    this sample (a real, small-sample null result, not a bug)?
+    Returns (bullish_episodes, bearish_episodes, diagnostics). diagnostics has "bullish" and
+    "bearish" sub-dicts so a "0 treatment contacts" result downstream is interpretable in each
+    direction independently: did that direction's engine ever actually form/track a real POI
+    (data pipeline working), or did price simply never retrace into the Golden Pocket/OTE/Deep
+    bands within this sample (a real, small-sample null result, not a bug)?
     """
+    empty_diag = {"poiQualifiedCount": 0, "activePoiBarCount": 0, "barsEvaluated": 0}
     if len(rows) < 40:
-        return [], {"poiQualifiedCount": 0, "activePoiBarCount": 0, "barsEvaluated": 0}
+        return [], [], {"bullish": dict(empty_diag), "bearish": dict(empty_diag)}
 
     closes = [float(r[4]) for r in rows]
     highs = [float(r[2]) for r in rows]
     lows = [float(r[3]) for r in rows]
     atr_series = compute_atr_wilder_series(highs, lows, closes)
     swing_high_series = compute_confirmed_swing_highs(highs)
+    swing_low_series = compute_confirmed_swing_lows(lows)
     vol_ratio_series = compute_vol_ratio_series(highs, lows, closes)
+
+    if ofi_observations:
+        candle_times = [r[0] if isinstance(r[0], datetime) else datetime.fromtimestamp(r[0] / 1000.0, tz=timezone.utc) for r in rows]
+        ofi_joined = join_nearest_prior(ofi_observations, candle_times, max_staleness_seconds=60.0)
+    else:
+        ofi_joined = [None] * len(rows)
+    ofi_available_count = sum(1 for v in ofi_joined if v is not None)
 
     horizon_bars = max(1, round(HORIZON_MINUTES / timeframe_minutes))
 
@@ -229,10 +324,19 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
         evaluation_start=1,
         tick_size=0.05,
     )
+    # Bearish mirror engine, driven directly (not through Master5LayerScanner, which is
+    # bullish-only throughout its feature-vector/signalType labeling) over the same bars.
+    bear_engine = StatefulPITFibEngineBearish(fib_artifact=fib_art, tick_size=0.05)
 
     candle_buffer: List[FootprintBar] = []
-    episodes: List[ObservationEpisode] = []
+    # One raw candidate record per bar while a POI is active; deduplicated to one episode per
+    # anchor AFTER the loop (see below) to avoid pseudoreplication -- a POI that stays active (or
+    # sits inside a zone) for many consecutive bars must not become many "independent" episodes
+    # from the same underlying anchor, each with a heavily overlapping forward-MFE window.
+    candidate_records: List[dict] = []
+    bear_candidate_records: List[dict] = []
     active_poi_bar_count = 0
+    bear_active_poi_bar_count = 0
     bars_evaluated = 0
 
     for idx, r in enumerate(rows):
@@ -244,9 +348,9 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
             identity=CandleIdentity(barId=f"{instrument}_{idx + 1}", sequenceNumber=idx + 1, closeTimestamp=t_ms),
             open=float(r[1]), high=highs[idx], low=lows[idx], close=closes[idx],
             totalVolume=float(r[5]) if r[5] else 0.0,
-            # Not computable from an OHLCV-only candle feed -- honest neutral zeros, not a
-            # fabricated footprint shape. Layer 2 (Lambda Proxy / footprint shape / CKS OFI)
-            # genuinely cannot be evaluated from this data source; see module docstring.
+            # Trade-tape delta/footprint shape is not computable from an OHLCV-only candle
+            # feed -- honest neutral zeros, not a fabricated footprint shape. (OFI, below, is
+            # now real for BANKNIFTY; netDelta/footprint still are not -- no tape data exists.)
             netDelta=0.0, pocDisplacementZ=0.0, tailVolumeRatio=0.0,
             availableAt=t_ms,
         )
@@ -259,111 +363,253 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
         if atr_val is None or atr_val <= 0:
             continue  # ATR not yet seeded (first 14 bars) -- numeric fail-closed guard
 
-        swing = swing_high_series[idx]
-        if swing is None:
-            continue  # no confirmed resistance level exists yet to bind an MSS breakout to
-        _, confirming_idx, resistance_price = swing
-        confirm_dt = rows[confirming_idx][0]
-        if not isinstance(confirm_dt, datetime):
-            confirm_dt = datetime.fromtimestamp(confirm_dt / 1000.0, tz=timezone.utc)
-        resistance_ts_ms = int(confirm_dt.timestamp() * 1000)
-
         tod_sin, tod_cos = time_of_day_sin_cos(dt)
         magnitude = MagnitudeEstimate(
             expectedMoveBps=(atr_val / bar.close) * 10000.0,  # real volatility-implied move size
             confidence=0.5, sourceTimestamp=t_ms, availableAt=t_ms,
         )
-        # Real OFI is unavailable from an OHLCV-only feed. 0.0 fails the >0.032 baseline gate
-        # honestly, rather than a fabricated constant that always passes it.
-        normalized_ofi = NormalizedOFI(ofi30s=0.0, depthNormFactor=1000.0, sourceTimestamp=t_ms, availableAt=t_ms)
+        # Real touch-level, 5s-window OFI for BANKNIFTY (joined above, nearest-prior within 60s);
+        # genuinely unavailable for NIFTY50 (no depth ever captured for it) -- 0.0, honestly, not
+        # a fabricated value. See cks_ofi_touch.py: there is no validated gate threshold on this
+        # feature's value either way, so nothing here treats it as a pass/fail cutoff.
+        ofi_value = ofi_joined[idx]
+        normalized_ofi = NormalizedOFI(
+            ofi30s=ofi_value if ofi_value is not None else 0.0,
+            depthNormFactor=1000.0, sourceTimestamp=t_ms, availableAt=t_ms,
+            featureDefinitionId=CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
+        )
         l2_depth = L2DepthLiquidityObservation(meanTop5Depth=0.0, sourceTimestamp=t_ms, availableAt=t_ms)
-        resistance = StructuralLevel(
-            levelPrice=resistance_price, sequenceNumber=confirming_idx + 1,
-            sourceTimestamp=resistance_ts_ms, availableAt=resistance_ts_ms,
-        )
         atr_obs = ATRObservation(atr14=atr_val, sourceTimestamp=t_ms, availableAt=t_ms)
-        retracement = RetracementObservation(low=bar.low, sequenceNumber=idx + 1, observedAt=t_ms, availableAt=t_ms)
-
-        sig = scanner.process_market_state(
-            bar=bar,
-            current_candles=candle_buffer[-20:],
-            current_l2=None,
-            gex_context=GEXContext("UNAVAILABLE", None, None, None),  # no options data in this feed
-            magnitude=magnitude,
-            normalized_ofi=normalized_ofi,
-            l2_depth_liq=l2_depth,
-            breadth_ad=0.0, breadth_available_at=t_ms, breadth_source_time=t_ms,  # no breadth feed -- neutral
-            yz_vol=vol_ratio_series[idx], yz_available_at=t_ms, yz_source_time=t_ms,
-            # Volume-profile regime labeling is not implemented from this data source either;
-            # held fixed since it only affects layer0Status/rejectReason, which episode
-            # construction below deliberately ignores (see comment at `zone = sig.macroZone`).
-            vp_label="TRENDING_UP", vp_available_at=t_ms,
-            tod_sin=tod_sin, tod_cos=tod_cos,
-            structural_resistance=resistance,
-            retracement=retracement, atr_obs=atr_obs,
-            current_instrument=instrument, current_regime="NORMAL",
-            decision_at=t_ms,
-        )
-
-        # `sig.macroZone` reflects the real Layer 1 location evaluation regardless of whether
-        # Layer 0/2 subsequently passed or vetoed -- per protocol amendment #2, Layer 0
-        # (regime/magnitude) and Layer 2 must NOT silently become additional treatment/control
-        # filtering criteria for F1-F3. "NONE" is a legitimate, informative control observation
-        # (price simply wasn't in a Fib zone), not a rejected/uninformative bar.
-        zone = sig.macroZone
-        is_treat = zone in ("GOLDEN_POCKET", "OTE", "DEEP_RETRACEMENT")
         bars_evaluated += 1
-        if scanner.layer1.active_poi is not None:
-            active_poi_bar_count += 1
 
-        if idx + horizon_bars >= len(rows):
-            continue  # not enough real forward bars left to compute the outcome horizon
-        exit_dt = rows[idx + horizon_bars][0]
-        if not isinstance(exit_dt, datetime):
-            exit_dt = datetime.fromtimestamp(exit_dt / 1000.0, tz=timezone.utc)
-        if exit_dt.strftime("%Y-%m-%d") != session_str:
-            continue  # horizon would cross a session boundary -- exclude per protocol item 5
+        # ---------------------------------------------------------------------------------
+        # BULLISH: impulse up, retrace down into a Fib zone. Independently gated on its own
+        # confirmed swing high existing -- does not block the bearish branch below.
+        # ---------------------------------------------------------------------------------
+        swing_h = swing_high_series[idx]
+        if swing_h is not None:
+            _, confirming_idx, resistance_price = swing_h
+            confirm_dt = rows[confirming_idx][0]
+            if not isinstance(confirm_dt, datetime):
+                confirm_dt = datetime.fromtimestamp(confirm_dt / 1000.0, tz=timezone.utc)
+            resistance_ts_ms = int(confirm_dt.timestamp() * 1000)
 
-        future_highs = highs[idx + 1: idx + 1 + horizon_bars]
-        mfe_gross_bps = (max(future_highs) - bar.close) / bar.close * 10000.0
+            resistance = StructuralLevel(
+                levelPrice=resistance_price, sequenceNumber=confirming_idx + 1,
+                sourceTimestamp=resistance_ts_ms, availableAt=resistance_ts_ms,
+            )
+            retracement = RetracementObservation(low=bar.low, sequenceNumber=idx + 1, observedAt=t_ms, availableAt=t_ms)
+
+            sig = scanner.process_market_state(
+                bar=bar,
+                current_candles=candle_buffer[-20:],
+                current_l2=None,
+                gex_context=GEXContext("UNAVAILABLE", None, None, None),  # no options data in this feed
+                magnitude=magnitude,
+                normalized_ofi=normalized_ofi,
+                l2_depth_liq=l2_depth,
+                breadth_ad=0.0, breadth_available_at=t_ms, breadth_source_time=t_ms,  # no breadth feed -- neutral
+                yz_vol=vol_ratio_series[idx], yz_available_at=t_ms, yz_source_time=t_ms,
+                # Volume-profile regime labeling is not implemented from this data source either;
+                # held fixed since it only affects layer0Status/rejectReason, which episode
+                # construction below deliberately ignores (see comment at `zone = sig.macroZone`).
+                vp_label="TRENDING_UP", vp_available_at=t_ms,
+                tod_sin=tod_sin, tod_cos=tod_cos,
+                structural_resistance=resistance,
+                retracement=retracement, atr_obs=atr_obs,
+                current_instrument=instrument, current_regime="NORMAL",
+                decision_at=t_ms,
+            )
+
+            # `sig.macroZone` reflects the real Layer 1 location evaluation regardless of whether
+            # Layer 0/2 subsequently passed or vetoed -- per protocol amendment #2, Layer 0
+            # (regime/magnitude) and Layer 2 must NOT silently become additional treatment/control
+            # filtering criteria for F1-F3. "NONE" is a legitimate, informative control observation
+            # (price simply wasn't in a Fib zone), not a rejected/uninformative bar.
+            zone = sig.macroZone
+            is_treat = zone in ("GOLDEN_POCKET", "OTE", "DEEP_RETRACEMENT")
+            anchor_id = scanner.layer1.poi_qualified_seq  # unique per anchor; None until one qualifies
+            if anchor_id is not None:
+                active_poi_bar_count += 1
+
+                if idx + horizon_bars < len(rows):
+                    exit_dt = rows[idx + horizon_bars][0]
+                    if not isinstance(exit_dt, datetime):
+                        exit_dt = datetime.fromtimestamp(exit_dt / 1000.0, tz=timezone.utc)
+                    if exit_dt.strftime("%Y-%m-%d") == session_str:  # else: horizon crosses a session boundary
+                        candidate_records.append({
+                            "anchor_id": anchor_id,
+                            "idx": idx,
+                            "dt": dt,
+                            "t_ms": t_ms,
+                            "session_str": session_str,
+                            "zone": zone,
+                            "is_treat": is_treat,
+                            "retracementRatio": sig.featureVector.fibRetracement if sig.featureVector.fibRetracement is not None else 0.50,
+                            "impulseRange": sig.featureVector.anchorRangePrice if sig.featureVector.anchorRangePrice else 0.0,
+                            "anchorAgeBars": float(sig.featureVector.anchorAgeBars) if sig.featureVector.anchorAgeBars is not None else 0.0,
+                            "todSin": tod_sin, "todCos": tod_cos,
+                            "yzVolRatio": vol_ratio_series[idx],
+                            "ofiValue": ofi_value,
+                        })
+
+        # ---------------------------------------------------------------------------------
+        # BEARISH: impulse down, retrace up into a Fib zone (the mirror the engine never
+        # looked for before). Driven directly off StatefulPITFibEngineBearish, since
+        # Master5LayerScanner's Layer 0/2/feature-vector labeling is bullish-only throughout;
+        # we only ever read the equivalent of Layer 1's own location/anchor state anyway.
+        # ---------------------------------------------------------------------------------
+        swing_l = swing_low_series[idx]
+        if swing_l is not None:
+            _, confirming_idx_l, support_price = swing_l
+            confirm_dt_l = rows[confirming_idx_l][0]
+            if not isinstance(confirm_dt_l, datetime):
+                confirm_dt_l = datetime.fromtimestamp(confirm_dt_l / 1000.0, tz=timezone.utc)
+            support_ts_ms = int(confirm_dt_l.timestamp() * 1000)
+
+            support = StructuralLevel(
+                levelPrice=support_price, sequenceNumber=confirming_idx_l + 1,
+                sourceTimestamp=support_ts_ms, availableAt=support_ts_ms,
+            )
+            retracement_bear = RetracementObservation(
+                low=0.0, high=bar.high, sequenceNumber=idx + 1, observedAt=t_ms, availableAt=t_ms,
+            )
+
+            bear_engine.process_new_candle(
+                candles=candle_buffer[-20:],
+                structural_support=support,
+                retracement=retracement_bear,
+                atr_obs=atr_obs,
+                decision_at=t_ms,
+            )
+
+            _, zone_b = bear_engine.evaluate_location(bar.close, decision_at=t_ms)
+            is_treat_b = zone_b in ("GOLDEN_POCKET", "OTE", "DEEP_RETRACEMENT")
+            anchor_id_b = bear_engine.poi_qualified_seq
+            if anchor_id_b is not None:
+                bear_active_poi_bar_count += 1
+                poi_b = bear_engine.active_poi
+                anchor_range_b = (poi_b.anchorHigh - poi_b.anchorLow) if poi_b else None
+                fib_retracement_b = ((bar.close - poi_b.anchorLow) / anchor_range_b) if (poi_b and anchor_range_b and anchor_range_b > 0) else 0.50
+                anchor_age_bars_b = (bar.identity.sequenceNumber - bear_engine.mss_confirmed_seq) if (poi_b and bear_engine.mss_confirmed_seq) else 0.0
+
+                if idx + horizon_bars < len(rows):
+                    exit_dt_b = rows[idx + horizon_bars][0]
+                    if not isinstance(exit_dt_b, datetime):
+                        exit_dt_b = datetime.fromtimestamp(exit_dt_b / 1000.0, tz=timezone.utc)
+                    if exit_dt_b.strftime("%Y-%m-%d") == session_str:
+                        bear_candidate_records.append({
+                            "anchor_id": anchor_id_b,
+                            "idx": idx,
+                            "dt": dt,
+                            "t_ms": t_ms,
+                            "session_str": session_str,
+                            "zone": zone_b,
+                            "is_treat": is_treat_b,
+                            "retracementRatio": fib_retracement_b,
+                            "impulseRange": anchor_range_b if anchor_range_b else 0.0,
+                            "anchorAgeBars": float(anchor_age_bars_b),
+                            "todSin": tod_sin, "todCos": tod_cos,
+                            "yzVolRatio": vol_ratio_series[idx],
+                            "ofiValue": ofi_value,
+                        })
+
+    bull_episodes, bull_anchors, bull_episodes_with_real_ofi = _dedupe_records_to_episodes(
+        candidate_records, highs, lows, closes, horizon_bars, instrument, "BULLISH"
+    )
+    bear_episodes, bear_anchors, bear_episodes_with_real_ofi = _dedupe_records_to_episodes(
+        bear_candidate_records, highs, lows, closes, horizon_bars, instrument, "BEARISH"
+    )
+
+    diagnostics = {
+        "bullish": {
+            "barsEvaluated": bars_evaluated,
+            "activePoiBarCount": active_poi_bar_count,
+            "poiQualifiedCount": sum(1 for e in scanner.layer1.event_history if e["eventType"] == "RETRACEMENT_QUALIFIED"),
+            "uniqueAnchorsWithValidHorizon": len(bull_anchors),
+            "episodesAfterDedup": len(bull_episodes),
+            "realOfiAvailableBarFraction": (ofi_available_count / bars_evaluated) if bars_evaluated else 0.0,
+            "realOfiAvailableEpisodeCount": bull_episodes_with_real_ofi,
+        },
+        "bearish": {
+            "barsEvaluated": bars_evaluated,
+            "activePoiBarCount": bear_active_poi_bar_count,
+            "poiQualifiedCount": sum(1 for e in bear_engine.event_history if e["eventType"] == "RETRACEMENT_QUALIFIED"),
+            "uniqueAnchorsWithValidHorizon": len(bear_anchors),
+            "episodesAfterDedup": len(bear_episodes),
+            "realOfiAvailableBarFraction": (ofi_available_count / bars_evaluated) if bars_evaluated else 0.0,
+            "realOfiAvailableEpisodeCount": bear_episodes_with_real_ofi,
+        },
+    }
+    return bull_episodes, bear_episodes, diagnostics
+
+
+def _dedupe_records_to_episodes(records: List[dict], highs: List[float], lows: List[float], closes: List[float],
+                                 horizon_bars: int, instrument: str, direction: str
+                                 ) -> Tuple[List[ObservationEpisode], Dict[int, List[dict]], int]:
+    """
+    Shared by both directions: deduplicate to ONE observation per anchor (protocol item #4:
+    "one observation = one unique signal episode per Fib anchor"). Per anchor: if it ever
+    touched a zone, take the FIRST such contact (spec's "first eligible entry timestamp") as
+    the treatment episode; otherwise take the anchor's own first observed bar as a single
+    control episode. This also keeps treatment and control strictly disjoint by construction --
+    one anchor contributes to exactly one of them, never both.
+
+    The forward outcome is direction-specific: bullish MFE is the best UPSIDE excursion (a long
+    entered at this zone profits from price rising); bearish MFE is the best DOWNSIDE excursion
+    (a short entered at this zone profits from price falling) -- the mirror of the same
+    round-trip-cost-adjusted net outcome.
+    """
+    anchors: Dict[int, List[dict]] = {}
+    for rec in records:
+        anchors.setdefault(rec["anchor_id"], []).append(rec)
+
+    selected_records = []
+    for anchor_id, recs in anchors.items():
+        treat_recs = [r for r in recs if r["is_treat"]]
+        selected_records.append(treat_recs[0] if treat_recs else recs[0])
+
+    episodes: List[ObservationEpisode] = []
+    for rec in selected_records:
+        idx = rec["idx"]
+        if direction == "BULLISH":
+            future_highs = highs[idx + 1: idx + 1 + horizon_bars]
+            mfe_gross_bps = (max(future_highs) - closes[idx]) / closes[idx] * 10000.0
+        else:
+            future_lows = lows[idx + 1: idx + 1 + horizon_bars]
+            mfe_gross_bps = (closes[idx] - min(future_lows)) / closes[idx] * 10000.0
         mfe_net_bps = mfe_gross_bps - ROUND_TRIP_FRICTION_BPS
 
         episodes.append(ObservationEpisode(
-            episodeId=f"{instrument}_ep_{idx + 1}",
+            episodeId=f"{instrument}_{direction}_anchor_{rec['anchor_id']}",
             symbol=instrument,
-            sessionDate=session_str,
-            entryTimestamp=t_ms,
-            isSessionCloseExcluded=is_near_session_close(dt),
-            isTreatment=is_treat,
-            fibZone=zone,
-            hasRealActiveAnchor=(scanner.layer1.active_poi is not None),
-            retracementRatio=sig.featureVector.fibRetracement if sig.featureVector.fibRetracement is not None else 0.50,
+            sessionDate=rec["session_str"],
+            entryTimestamp=rec["t_ms"],
+            isSessionCloseExcluded=is_near_session_close(rec["dt"]),
+            isTreatment=rec["is_treat"],
+            fibZone=rec["zone"],
+            hasRealActiveAnchor=True,
+            retracementRatio=rec["retracementRatio"],
             mfeNetBps=mfe_net_bps,
-            impulseRange=sig.featureVector.anchorRangePrice if sig.featureVector.anchorRangePrice else 0.0,
-            yzVolRatio=vol_ratio_series[idx],
-            anchorAgeBars=float(sig.featureVector.anchorAgeBars) if sig.featureVector.anchorAgeBars is not None else 0.0,
-            todSin=tod_sin, todCos=tod_cos,
+            impulseRange=rec["impulseRange"],
+            yzVolRatio=rec["yzVolRatio"],
+            anchorAgeBars=rec["anchorAgeBars"],
+            todSin=rec["todSin"], todCos=rec["todCos"],
             breadthAd=0.0,
             l2DepthLiquidity=0.0,
         ))
 
-    diagnostics = {
-        "barsEvaluated": bars_evaluated,
-        "activePoiBarCount": active_poi_bar_count,
-        "poiQualifiedCount": sum(1 for e in engine_event_history(scanner) if e["eventType"] == "RETRACEMENT_QUALIFIED"),
-    }
-    return episodes, diagnostics
+    episodes_with_real_ofi = sum(1 for rec in selected_records if rec["ofiValue"] is not None)
+    return episodes, anchors, episodes_with_real_ofi
 
 
-def engine_event_history(scanner: Master5LayerScanner):
-    return scanner.layer1.event_history
-
-
-def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]) -> Tuple[List[ObservationEpisode], dict]:
+def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
+                                      ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict]:
     if connection is None:
-        return [], {}
+        return [], [], {}
 
-    episodes: List[ObservationEpisode] = []
+    bull_episodes: List[ObservationEpisode] = []
+    bear_episodes: List[ObservationEpisode] = []
     per_instrument_diagnostics: dict = {}
     cur = connection.cursor()
     for instrument in INSTRUMENTS:
@@ -394,11 +640,15 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]) -
             first_date = rows[0][0]
             last_date = rows[-1][0]
             print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument} ({first_date} to {last_date}).", file=sys.stderr)
-            instrument_episodes, diag = build_instrument_episodes(rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME])
-            episodes.extend(instrument_episodes)
+            ofi_observations = fetch_banknifty_ofi_observations(connection) if instrument == "BANKNIFTY" else None
+            instrument_bull_episodes, instrument_bear_episodes, diag = build_instrument_episodes(
+                rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME], ofi_observations=ofi_observations
+            )
+            bull_episodes.extend(instrument_bull_episodes)
+            bear_episodes.extend(instrument_bear_episodes)
             per_instrument_diagnostics[instrument] = diag
 
-    return episodes, per_instrument_diagnostics
+    return bull_episodes, bear_episodes, per_instrument_diagnostics
 
 
 def split_calibration_and_evaluation(episodes: List[ObservationEpisode]) -> Tuple[List[ObservationEpisode], List[float], List[float]]:
@@ -490,43 +740,54 @@ def generate_synthetic_smoke_test_episodes() -> List[ObservationEpisode]:
     return episodes
 
 
+def _build_real_data_manifest(episodes: List[ObservationEpisode], poi_diagnostics: dict, direction: str) -> Optional[dict]:
+    if not episodes:
+        return None
+    eval_episodes, means, stds = split_calibration_and_evaluation(episodes)
+    n_treat = sum(1 for ep in eval_episodes if ep.isTreatment)
+    print(f"Real-data {direction} evaluation: {len(eval_episodes)} episodes ({n_treat} Fib-zone treatment contacts).", file=sys.stderr)
+    manifest_real = run_phase_c_experiments(episodes=eval_episodes, calibration_means=means, calibration_stds=stds, B=10000, seed=42)
+    manifest_real["fibEngineDiagnostics"] = poi_diagnostics  # interprets a "0 treatment" result: did a POI ever form/track?
+    manifest_real["dataCompleteness"] = {
+        "ofiAvailable": False,
+        "footprintTapeAvailable": False,
+        "optionsGexAvailable": False,
+        "marketBreadthAvailable": False,
+        "note": (
+            "OFI, trade-tape footprint/netDelta, options GEX and cross-sectional breadth are "
+            "not derivable from this OHLCV-only candle feed and were left at honest neutral "
+            "values rather than fabricated constants. This section therefore tests a "
+            "LOCATION-ONLY diagnostic (does price reach the Fib zone, what is the raw "
+            "unconditioned net MFE there) and is NOT a run of the full OFI-conditioned F1-F4 "
+            "protocol in Research Specification v1.1. It must not be read as Phase C sign-off."
+        ),
+    }
+    return manifest_real
+
+
 def main():
     print("=== Phase C Numerical Pipeline Execution ===", file=sys.stderr)
     db_url = get_database_url()
 
-    episodes_db: List[ObservationEpisode] = []
-    poi_diagnostics: dict = {}
+    bull_episodes_db: List[ObservationEpisode] = []
+    bear_episodes_db: List[ObservationEpisode] = []
+    poi_diagnostics: dict = {}  # {instrument: {"bullish": {...}, "bearish": {...}}}
     try:
         with psycopg.connect(db_url, connect_timeout=5) as conn:
-            episodes_db, poi_diagnostics = load_historical_episodes_from_db(conn)
+            bull_episodes_db, bear_episodes_db, poi_diagnostics = load_historical_episodes_from_db(conn)
     except Exception as e:
         print(f"Notice: Connecting to DB failed ({e}). No real-data evaluation will run.", file=sys.stderr)
 
-    if episodes_db:
-        eval_episodes, means, stds = split_calibration_and_evaluation(episodes_db)
-        n_treat = sum(1 for ep in eval_episodes if ep.isTreatment)
-        print(f"Real-data evaluation: {len(eval_episodes)} episodes ({n_treat} Fib-zone treatment contacts).", file=sys.stderr)
-        manifest_real = run_phase_c_experiments(episodes=eval_episodes, calibration_means=means, calibration_stds=stds, B=10000, seed=42)
-        manifest_real["fibEngineDiagnostics"] = poi_diagnostics  # interprets a "0 treatment" result: did a POI ever form/track?
-        manifest_real["dataCompleteness"] = {
-            "ofiAvailable": False,
-            "footprintTapeAvailable": False,
-            "optionsGexAvailable": False,
-            "marketBreadthAvailable": False,
-            "note": (
-                "OFI, trade-tape footprint/netDelta, options GEX and cross-sectional breadth are "
-                "not derivable from this OHLCV-only candle feed and were left at honest neutral "
-                "values rather than fabricated constants. This section therefore tests a "
-                "LOCATION-ONLY diagnostic (does price reach the Fib zone, what is the raw "
-                "unconditioned net MFE there) and is NOT a run of the full OFI-conditioned F1-F4 "
-                "protocol in Research Specification v1.1. It must not be read as Phase C sign-off."
-            ),
-        }
-        real_section_label = "realDataLocationOnlyDiagnostic_NOT_PHASE_C_F1_F4"
-    else:
-        manifest_real = None
-        real_section_label = "realDataLocationOnlyDiagnostic_NOT_PHASE_C_F1_F4"
+    bull_diag = {instrument: diag["bullish"] for instrument, diag in poi_diagnostics.items()}
+    bear_diag = {instrument: diag["bearish"] for instrument, diag in poi_diagnostics.items()}
+
+    manifest_real_bullish = _build_real_data_manifest(bull_episodes_db, bull_diag, "bullish")
+    manifest_real_bearish = _build_real_data_manifest(bear_episodes_db, bear_diag, "bearish")
+    if not bull_episodes_db and not bear_episodes_db:
         print("Notice: no real episodes available; skipping real-data evaluation.", file=sys.stderr)
+
+    bullish_section_label = "realDataLocationOnlyDiagnostic_BULLISH_NOT_PHASE_C_F1_F4"
+    bearish_section_label = "realDataLocationOnlyDiagnostic_BEARISH_NOT_PHASE_C_F1_F4"
 
     print("Running synthetic pipeline smoke test (non-evidentiary; B=10,000 block bootstrap)...", file=sys.stderr)
     synthetic_episodes = generate_synthetic_smoke_test_episodes()
@@ -541,9 +802,13 @@ def main():
 
     final_output = {
         "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
-        "governanceStatus": "PHASE_C_PARTIAL_EXECUTION_LOCATION_ONLY" if manifest_real else "PHASE_C_NO_REAL_DATA_AVAILABLE",
+        "governanceStatus": (
+            "PHASE_C_PARTIAL_EXECUTION_LOCATION_ONLY"
+            if (manifest_real_bullish or manifest_real_bearish) else "PHASE_C_NO_REAL_DATA_AVAILABLE"
+        ),
         "tradingExecutionAuthorized": False,  # Sole authority behind Phase E!
-        real_section_label: manifest_real,
+        bullish_section_label: manifest_real_bullish,
+        bearish_section_label: manifest_real_bearish,
         "syntheticPipelineSmokeTest_NOT_EVIDENCE": manifest_synthetic,
     }
 

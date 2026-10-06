@@ -15,6 +15,25 @@ from typing import Dict, List, Optional, Tuple
 ASMD_BALANCE_THRESHOLD = 0.10
 MIN_MATCHED_PAIRS_FOR_VERDICT = 20
 
+# Same-session matching window. Widened from the spec's original 30 minutes to 60, a
+# deliberate protocol change (pre-registered here, before the next evaluation run, not derived
+# from having seen F1-F3's result on today's data) after a funnel diagnostic showed temporal
+# locality -- not raw anchor scarcity or the propensity caliper -- as the dominant bottleneck:
+# of 78 Golden Pocket treatment anchors, only 10 had any same-session control within 30
+# minutes at all, before the caliper even applied. See the "study(ml): diagnose why F1-F3 are
+# INCONCLUSIVE" commit for the full funnel numbers this is responding to.
+SAME_SESSION_MATCH_WINDOW_MS = 60 * 60 * 1000
+
+# Propensity-score caliper, in standard deviations of the logit propensity score. Widened from
+# the spec's original 0.20 to 0.5, a deliberate protocol change (owner decision, pre-registered
+# here before the next evaluation run) after the 60-minute window still left Golden Pocket and
+# Deep Retracement with 0 matched pairs despite 14-15 temporally-eligible candidates each --
+# the caliper, not temporal locality, was then the binding constraint for those two zones. A
+# wider caliper lets in less-comparable pairs; ASMD_BALANCE_THRESHOLD is the check that is
+# supposed to catch it if this goes too far (see OTE's 0.618 ASMD under the narrower caliper --
+# already failing balance before this change, which is its own, separate problem).
+PROPENSITY_CALIPER_SD = 0.5
+
 
 @dataclass
 class ObservationEpisode:
@@ -68,7 +87,7 @@ class ExperimentResult:
 
 
 class PropensityMatcher:
-    def __init__(self, means: np.ndarray, stds: np.ndarray, caliper_sd: float = 0.20):
+    def __init__(self, means: np.ndarray, stds: np.ndarray, caliper_sd: float = PROPENSITY_CALIPER_SD):
         self.means = np.array(means, dtype=np.float64)
         self.stds = np.array(stds, dtype=np.float64)
         self.stds[self.stds == 0] = 1.0
@@ -127,17 +146,24 @@ class PropensityMatcher:
         return eta_final, separation_detected  # Logit propensity scores L = logit(P)
 
     def match_1to1_deterministic(self, treatment_episodes: List[ObservationEpisode],
-                                control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int], bool]:
+                                control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int], bool, int]:
         """
         Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement.
-        Restricted to same-session observations, delta_t <= 30 minutes.
+        Restricted to same-session observations, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+        (60 minutes; widened from the spec's original 30 -- see that constant's own comment).
         Primary tie-break = logit distance; Secondary tie-break = episodeId ascending.
         Common-support overlap trimmed strictly on logit scores.
 
-        Returns (matched_pairs, trimmed_count, asmd_max, control_source_counts, separation_detected).
+        Returns (matched_pairs, trimmed_count, asmd_max, control_source_counts,
+        separation_detected, treatments_with_temporal_candidate). The last is a diagnostic
+        only -- how many in-support treatment episodes had ANY control in the same session
+        within the match window, before the propensity caliper is applied -- so a caller can
+        tell temporal-locality scarcity (anchors are rare events spread across years, so two
+        independent ones rarely fall in the same window) apart from the caliper itself being
+        the bottleneck.
         """
         if not treatment_episodes or not control_episodes:
-            return [], 0, 0.0, {"ACTIVE_ANCHOR": 0, "SYNTHETIC_FALLBACK": 0}, False
+            return [], 0, 0.0, {"ACTIVE_ANCHOR": 0, "SYNTHETIC_FALLBACK": 0}, False, 0
 
         # Filter strictly for real active anchor control population
         control_active = [ep for ep in control_episodes if ep.hasRealActiveAnchor]
@@ -147,7 +173,7 @@ class PropensityMatcher:
         }
 
         if not control_active:
-            return [], 0, 0.0, control_source_counts, False
+            return [], 0, 0.0, control_source_counts, False, 0
 
         episodes_for_matching = treatment_episodes + control_active
         n_treat = len(treatment_episodes)
@@ -176,7 +202,10 @@ class PropensityMatcher:
         trimmed_count = int(np.sum(~treat_in_support_mask) + np.sum(~ctrl_in_support_mask))
 
         logit_sd = np.std(logits)
-        caliper_dist = self.caliper_sd * logit_sd if logit_sd > 0 else 0.20
+        # Degenerate fallback (logits all equal -- no spread to scale a caliper by): an absolute
+        # logit-unit distance, kept proportional to the configured caliper_sd rather than a
+        # second independent magic number.
+        caliper_dist = self.caliper_sd * logit_sd if logit_sd > 0 else self.caliper_sd
 
         # Sort treatment episodes deterministically by episodeId ascending
         treat_indices = [i for i in range(n_treat) if treat_in_support_mask[i]]
@@ -184,20 +213,30 @@ class PropensityMatcher:
 
         available_ctrl_indices = set(i for i in range(n_ctrl) if ctrl_in_support_mask[i])
         matched_pairs: List[MatchedPair] = []
+        # Diagnostic only (does not affect matching or any verdict): isolates WHY a treatment
+        # episode failed to match -- no control exists in the same session within the match
+        # window at all (temporal-locality scarcity, the dominant bottleneck found when anchors
+        # are rare events spread across years), vs one exists but sits outside the propensity
+        # caliper.
+        treatments_with_temporal_candidate = 0
 
         for t_idx in treat_indices:
             t_ep = treatment_episodes[t_idx]
             t_logit = logits_treat[t_idx]
 
             candidates = []
+            has_temporal_candidate = False
             for c_idx in available_ctrl_indices:
                 c_ep = control_active[c_idx]
 
-                # Restrictions: Same-session, delta_t <= 30 minutes (1800000 ms)
-                if c_ep.sessionDate == t_ep.sessionDate and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= 1800000:
+                # Restrictions: Same-session, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+                if c_ep.sessionDate == t_ep.sessionDate and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= SAME_SESSION_MATCH_WINDOW_MS:
+                    has_temporal_candidate = True
                     dist = abs(t_logit - logits_ctrl[c_idx])
                     if dist <= caliper_dist:
                         candidates.append((dist, c_ep.episodeId, c_idx))
+            if has_temporal_candidate:
+                treatments_with_temporal_candidate += 1
 
             if candidates:
                 # Primary tie-break = dist; Secondary tie-break = episodeId ascending
@@ -236,7 +275,10 @@ class PropensityMatcher:
         else:
             asmd_max = 0.0
 
-        return matched_pairs, trimmed_count, asmd_max, control_source_counts, separation_detected
+        return (
+            matched_pairs, trimmed_count, asmd_max, control_source_counts, separation_detected,
+            treatments_with_temporal_candidate,
+        )
 
 
 def run_null_centered_bootstrap(matched_pairs: List[MatchedPair],
@@ -348,7 +390,9 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
 
     for exp_id, zone_name, t_eps in family_a_tasks:
         c_eps = [ep for ep in control_eps_all if ep not in t_eps]
-        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation = matcher.match_1to1_deterministic(t_eps, c_eps)
+        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation, treat_with_temporal_candidate = (
+            matcher.match_1to1_deterministic(t_eps, c_eps)
+        )
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
         abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_eps]) > 0.0) if t_eps else False
@@ -371,7 +415,11 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "absoluteSurplusPassed": abs_passed,
             "separationDetected": separation,
             "dataSufficientForVerdict": data_sufficient,
-            "balanceAchieved": balance_achieved
+            "balanceAchieved": balance_achieved,
+            # Diagnostic: isolates temporal-locality scarcity (no control exists in the same
+            # session within the match window) from propensity-caliper tightness as the
+            # matching bottleneck. Does not affect any verdict.
+            "treatmentsWithTemporalCandidate": treat_with_temporal_candidate,
         })
         raw_p_family_a.append(p_raw)
 
@@ -415,7 +463,9 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             t_b = [ep for ep in valid_episodes if B_k - delta < ep.retracementRatio <= B_k]
             c_b = [ep for ep in valid_episodes if B_k < ep.retracementRatio <= B_k + delta and ep.hasRealActiveAnchor]
 
-        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation = matcher.match_1to1_deterministic(t_b, c_b)
+        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation, treat_with_temporal_candidate = (
+            matcher.match_1to1_deterministic(t_b, c_b)
+        )
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
         abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_b]) > 0.0) if t_b else False
@@ -438,7 +488,8 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "absoluteSurplusPassed": abs_passed,
             "separationDetected": separation,
             "dataSufficientForVerdict": data_sufficient,
-            "balanceAchieved": balance_achieved
+            "balanceAchieved": balance_achieved,
+            "treatmentsWithTemporalCandidate": treat_with_temporal_candidate,
         })
         raw_p_family_b.append(p_raw)
 
