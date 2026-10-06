@@ -100,6 +100,51 @@ describe("IctStructureStrategy", () => {
     expect(idea.confidence).toBeGreaterThanOrEqual(0.7);
   });
 
+  it("scales expiresAt to the signal candle's own duration, not a hardcoded 5 minutes", () => {
+    const strategy = new IctStructureStrategy();
+    const alignedSnap: any = {
+      coverage: {
+        structure: "COMPLETE", bias: "COMPLETE", zones: "COMPLETE",
+        sessionLevels: "COMPLETE", liquidity: "COMPLETE", htf: "COMPLETE",
+      },
+      htfBias: "BULLISH",
+      bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 105 } },
+      structure: { trend: "BULLISH" },
+      zones: { activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }], activeFvgs: [] },
+      sessionLevels: { levels: { pdh: 120, pdl: 90 }, lastSweepEvent: null },
+      liquidity: { alignmentStatus: "ALIGNED_LONG", primaryTarget: { kind: "ERL_PDH", price: 120 }, intermediateTarget: 105, invalidationLevel: 90 },
+    };
+
+    function contextWithTimeframe(openTime: Date, closeTime: Date): StrategyMarketContext {
+      return {
+        candle: {
+          id: "c-test-tf", instrumentId: "inst-1", timeframe: "irrelevant-to-this-test",
+          openTime, closeTime, open: 98, high: 101, low: 97, close: 98, volume: 500, tickSize: 0.05,
+        },
+        indicators: [], patterns: [], priceActionEvents: [], ictSnapshot: alignedSnap,
+      };
+    }
+
+    // 5-minute candle: expiryCandles (3) * 5 minutes = 15 minutes past close.
+    const fiveMinClose = new Date("2026-01-06T03:50:00.000Z");
+    const fiveMinProposal = strategy.evaluate(
+      contextWithTimeframe(new Date("2026-01-06T03:45:00.000Z"), fiveMinClose), {},
+    )[0];
+    expect(fiveMinProposal.expiresAt).not.toBeNull();
+    expect(fiveMinProposal.expiresAt!.getTime() - fiveMinClose.getTime()).toBe(15 * 60_000);
+
+    // 15-minute candle: expiryCandles (3) * 15 minutes = 45 minutes past close, not 15. The bug
+    // this guards: a hardcoded `* 5 * 60_000` gave every 15m-sourced idea only a 15-minute window
+    // regardless of its own candle's real duration -- a 3x under-grant that left 96% of this
+    // strategy's live 15m-timeframe gold ideas timing out before ever reaching stop or target.
+    const fifteenMinClose = new Date("2026-01-06T04:00:00.000Z");
+    const fifteenMinProposal = strategy.evaluate(
+      contextWithTimeframe(new Date("2026-01-06T03:45:00.000Z"), fifteenMinClose), {},
+    )[0];
+    expect(fifteenMinProposal.expiresAt).not.toBeNull();
+    expect(fifteenMinProposal.expiresAt!.getTime() - fifteenMinClose.getTime()).toBe(45 * 60_000);
+  });
+
   it("rejects proposal if risk-reward is below threshold", () => {
     const strategy = new IctStructureStrategy();
     const alignedSnap: any = {
