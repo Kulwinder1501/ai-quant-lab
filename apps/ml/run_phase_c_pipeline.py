@@ -57,7 +57,7 @@ import math
 import os
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import psycopg
@@ -231,7 +231,11 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
     )
 
     candle_buffer: List[FootprintBar] = []
-    episodes: List[ObservationEpisode] = []
+    # One raw candidate record per bar while a POI is active; deduplicated to one episode per
+    # anchor AFTER the loop (see below) to avoid pseudoreplication -- a POI that stays active (or
+    # sits inside a zone) for many consecutive bars must not become many "independent" episodes
+    # from the same underlying anchor, each with a heavily overlapping forward-MFE window.
+    candidate_records: List[dict] = []
     active_poi_bar_count = 0
     bars_evaluated = 0
 
@@ -313,36 +317,69 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
         zone = sig.macroZone
         is_treat = zone in ("GOLDEN_POCKET", "OTE", "DEEP_RETRACEMENT")
         bars_evaluated += 1
-        if scanner.layer1.active_poi is not None:
+        anchor_id = scanner.layer1.poi_qualified_seq  # unique per anchor; None until one qualifies
+        if anchor_id is not None:
             active_poi_bar_count += 1
 
-        if idx + horizon_bars >= len(rows):
-            continue  # not enough real forward bars left to compute the outcome horizon
-        exit_dt = rows[idx + horizon_bars][0]
-        if not isinstance(exit_dt, datetime):
-            exit_dt = datetime.fromtimestamp(exit_dt / 1000.0, tz=timezone.utc)
-        if exit_dt.strftime("%Y-%m-%d") != session_str:
-            continue  # horizon would cross a session boundary -- exclude per protocol item 5
+            if idx + horizon_bars >= len(rows):
+                continue  # not enough real forward bars left to compute the outcome horizon
+            exit_dt = rows[idx + horizon_bars][0]
+            if not isinstance(exit_dt, datetime):
+                exit_dt = datetime.fromtimestamp(exit_dt / 1000.0, tz=timezone.utc)
+            if exit_dt.strftime("%Y-%m-%d") != session_str:
+                continue  # horizon would cross a session boundary -- exclude per protocol item 5
 
+            candidate_records.append({
+                "anchor_id": anchor_id,
+                "idx": idx,
+                "dt": dt,
+                "t_ms": t_ms,
+                "session_str": session_str,
+                "zone": zone,
+                "is_treat": is_treat,
+                "retracementRatio": sig.featureVector.fibRetracement if sig.featureVector.fibRetracement is not None else 0.50,
+                "impulseRange": sig.featureVector.anchorRangePrice if sig.featureVector.anchorRangePrice else 0.0,
+                "anchorAgeBars": float(sig.featureVector.anchorAgeBars) if sig.featureVector.anchorAgeBars is not None else 0.0,
+                "todSin": tod_sin, "todCos": tod_cos,
+            })
+
+    # Deduplicate to ONE observation per anchor (protocol item #4: "one observation = one unique
+    # signal episode per Fib anchor"). Per anchor: if it ever touched a zone, take the FIRST such
+    # contact (spec's "first eligible entry timestamp") as the treatment episode; otherwise take
+    # the anchor's own first observed bar as a single control episode. This also keeps treatment
+    # and control strictly disjoint by construction -- one anchor contributes to exactly one of
+    # them, never both.
+    anchors: Dict[int, List[dict]] = {}
+    for rec in candidate_records:
+        anchors.setdefault(rec["anchor_id"], []).append(rec)
+
+    selected_records = []
+    for anchor_id, recs in anchors.items():
+        treat_recs = [r for r in recs if r["is_treat"]]
+        selected_records.append(treat_recs[0] if treat_recs else recs[0])
+
+    episodes: List[ObservationEpisode] = []
+    for rec in selected_records:
+        idx = rec["idx"]
         future_highs = highs[idx + 1: idx + 1 + horizon_bars]
-        mfe_gross_bps = (max(future_highs) - bar.close) / bar.close * 10000.0
+        mfe_gross_bps = (max(future_highs) - closes[idx]) / closes[idx] * 10000.0
         mfe_net_bps = mfe_gross_bps - ROUND_TRIP_FRICTION_BPS
 
         episodes.append(ObservationEpisode(
-            episodeId=f"{instrument}_ep_{idx + 1}",
+            episodeId=f"{instrument}_anchor_{rec['anchor_id']}",
             symbol=instrument,
-            sessionDate=session_str,
-            entryTimestamp=t_ms,
-            isSessionCloseExcluded=is_near_session_close(dt),
-            isTreatment=is_treat,
-            fibZone=zone,
-            hasRealActiveAnchor=(scanner.layer1.active_poi is not None),
-            retracementRatio=sig.featureVector.fibRetracement if sig.featureVector.fibRetracement is not None else 0.50,
+            sessionDate=rec["session_str"],
+            entryTimestamp=rec["t_ms"],
+            isSessionCloseExcluded=is_near_session_close(rec["dt"]),
+            isTreatment=rec["is_treat"],
+            fibZone=rec["zone"],
+            hasRealActiveAnchor=True,
+            retracementRatio=rec["retracementRatio"],
             mfeNetBps=mfe_net_bps,
-            impulseRange=sig.featureVector.anchorRangePrice if sig.featureVector.anchorRangePrice else 0.0,
+            impulseRange=rec["impulseRange"],
             yzVolRatio=vol_ratio_series[idx],
-            anchorAgeBars=float(sig.featureVector.anchorAgeBars) if sig.featureVector.anchorAgeBars is not None else 0.0,
-            todSin=tod_sin, todCos=tod_cos,
+            anchorAgeBars=rec["anchorAgeBars"],
+            todSin=rec["todSin"], todCos=rec["todCos"],
             breadthAd=0.0,
             l2DepthLiquidity=0.0,
         ))
@@ -351,6 +388,8 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
         "barsEvaluated": bars_evaluated,
         "activePoiBarCount": active_poi_bar_count,
         "poiQualifiedCount": sum(1 for e in engine_event_history(scanner) if e["eventType"] == "RETRACEMENT_QUALIFIED"),
+        "uniqueAnchorsWithValidHorizon": len(anchors),
+        "episodesAfterDedup": len(episodes),
     }
     return episodes, diagnostics
 
