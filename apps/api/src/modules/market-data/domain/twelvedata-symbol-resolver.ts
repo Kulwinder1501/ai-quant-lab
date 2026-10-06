@@ -10,7 +10,17 @@
  */
 const twelveDataSymbols: Record<string, string> = {
   XAU_USD: "XAU/USD",
-  DXY: "DXY",
+  // DXY itself is deliberately absent: Twelve Data does not carry the US Dollar Index under any
+  // symbol (confirmed 2026-10-06 against their live /indices catalog -- 1,308 entries, zero
+  // matches). `compute-synthetic-dxy.ts` reconstructs it from these 6 real component pairs via
+  // the public ICE formula instead; resolving "DXY" here would just reintroduce the HTTP 404
+  // every `XAU_CANDLE_COLLECTION` run used to hit.
+  EUR_USD: "EUR/USD",
+  USD_JPY: "USD/JPY",
+  GBP_USD: "GBP/USD",
+  USD_CAD: "USD/CAD",
+  USD_SEK: "USD/SEK",
+  USD_CHF: "USD/CHF",
 };
 
 export function resolveTwelveDataSymbol(symbol: string): string {
