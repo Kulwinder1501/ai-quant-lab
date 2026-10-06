@@ -8,7 +8,7 @@ import {
   type IctStateCompositeSnapshot,
   type PillarCoverage,
 } from "./config.js";
-import { IctStructureTracker } from "./structure.js";
+import { IctStructureTracker, type StructureEvent } from "./structure.js";
 import { IctZoneLedger } from "./zones.js";
 import { IctSessionLevelTracker } from "./session-levels.js";
 import { IctBiasTracker, type IctBiasDirection } from "./bias.js";
@@ -27,6 +27,8 @@ export class IctCompositeEngine {
   private readonly liquidityResolver: IctLiquidityResolver;
   private readonly cisdTracker: CisdTracker;
   private lastCisdEvent: CisdEvent | null = null;
+  /** Persisted across bars -- see `IctStateCompositeSnapshot.lastConfirmedStructureEvent`'s own docstring. */
+  private lastConfirmedStructureEvent: StructureEvent | null = null;
   private readonly configHash: string;
   /**
    * Feeds the shadow `drawOnLiquidityState` observation only (see its docstring on
@@ -79,6 +81,7 @@ export class IctCompositeEngine {
       ? sweep.levelType
       : undefined;
     const struct = this.structTracker.processCandle(candles, currentIndex, sweptPriorDayLevel);
+    if (struct.lastEvent !== null) this.lastConfirmedStructureEvent = struct.lastEvent;
     // Independent of structure: CISD is candle-to-candle delivery, not swing-pivot driven. See
     // cisd.ts's own docstring for why it is not folded into the structure tracker.
     const cisdEvent = this.cisdTracker.processCandle(candles, currentIndex);
@@ -165,6 +168,7 @@ export class IctCompositeEngine {
       structure: struct,
       swingHierarchy,
       cisd: this.lastCisdEvent,
+      lastConfirmedStructureEvent: this.lastConfirmedStructureEvent,
       balancedPriceRanges: computeBalancedPriceRanges(zones.activeFvgs),
       zones,
       sessionLevels,

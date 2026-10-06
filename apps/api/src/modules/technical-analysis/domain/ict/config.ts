@@ -129,6 +129,18 @@ export interface IctStateCompositeSnapshot {
    */
   readonly cisd: import("./cisd.js").CisdEvent | null;
   /**
+   * The most recently confirmed structural event (BOS/CHOCH/IDM_CONFIRMED/SWEEP), persisted across
+   * bars -- same pattern as `cisd` above, for the same reason. `structure.lastEvent` is deliberately
+   * ephemeral (null on every bar it doesn't fire on; see its own docstring), which is correct for
+   * `zones.ts`'s "did a CHOCH/SWEEP happen on exactly this bar" reads but wrong for anything that
+   * needs a STABLE identity for "the currently active confirmed setup" across many bars of
+   * re-evaluation -- e.g. a deterministic setupId that must hash the same while the setup is still
+   * open, not mint a fresh one every bar. Null until the first structural event ever confirms (the
+   * NEUTRAL -> BULLISH/BEARISH trend bootstrap in `structure.ts` fires with no event of its own, so
+   * this can legitimately stay null for a window at the very start of a series).
+   */
+  readonly lastConfirmedStructureEvent: import("./structure.js").StructureEvent | null;
+  /**
    * Every currently-active overlapping opposing-FVG pair (see bpr.ts), recomputed fresh each bar --
    * not persisted like `cisd`, because it needs no persistence: it derives entirely from
    * `zones.activeFvgs`, which is already carried on this same snapshot, so it is automatically

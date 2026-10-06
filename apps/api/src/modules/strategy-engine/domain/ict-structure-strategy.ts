@@ -506,7 +506,14 @@ export class IctStructureStrategy implements StrategyEvaluator {
     if (atr === null || atr <= 0 || Number.isNaN(atr)) return [];
 
     // Structural Confirmation & PIT Setup Identity (Item 3)
-    const lastEvent = structure.lastEvent;
+    //
+    // `structure.lastEvent` is ephemeral -- null on every bar except the one that confirms it (see
+    // its own docstring) -- so hashing it directly would mint a fresh setupId every subsequent bar
+    // the same setup is still being re-evaluated, defeating the uniqueness index this identity
+    // exists to feed. `ict.lastConfirmedStructureEvent` is the persisted-across-bars equivalent
+    // (same pattern as `cisd`), so the setupId stays stable for as long as the confirmed setup is
+    // still the active one.
+    const lastEvent = ict.lastConfirmedStructureEvent;
     const pitValidEvent = lastEvent && lastEvent.availableAt <= context.candle.closeTime.getTime() ? lastEvent : null;
 
     const setupId = pitValidEvent
