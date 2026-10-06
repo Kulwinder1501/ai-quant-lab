@@ -44,15 +44,20 @@ This version:
    observation within a 60s staleness tolerance, never blended across a futures-contract
    roll. NIFTY50 has zero real depth data captured anywhere in this system; its OFI stays
    an honest 0.0 rather than a fabricated constant.
- - Trade-tape netDelta/footprint shape, options GEX, and cross-sectional market breadth
-   are still not derivable from any data source this system captures today, and are left
-   at honest neutral/zero values instead of hardcoded constants that trivially always
-   pass their gates. Because Layer 2's footprint/GEX inputs remain unavailable and OFI
-   has no validated gate threshold (see cks_ofi_touch.py's module docstring), this run
-   still cannot execute the full F1-F4 protocol as originally specified; it is reported
-   as a location-only diagnostic (does price reach the Fib zone, what is the raw net MFE
-   there, now informed by real order flow where available) and is explicitly NOT a
-   substitute for Phase C sign-off.
+ - Real daily advance/decline market breadth (fetch_breadth_contexts) is now wired in,
+   reusing the project's own existing ai_quant_lab_ml.breadth module and BREADTH_UNIVERSE
+   contract (the same panel PostgresMlRepository already loads for training) rather than a
+   hand-rolled parallel computation -- an earlier version of this file assumed breadth was
+   undeliverable from any data source this system captures; it wasn't, it just hadn't been
+   queried for this. PIT-safe via latest_breadth_at's staleness-bounded as-of lookup.
+ - Trade-tape netDelta/footprint shape and options GEX are still not derivable from any data
+   source this system captures today, and are left at honest neutral/zero values instead of
+   hardcoded constants that trivially always pass their gates. Because Layer 2's
+   footprint/GEX inputs remain unavailable and OFI has no validated gate threshold (see
+   cks_ofi_touch.py's module docstring), this run still cannot execute the full F1-F4
+   protocol as originally specified; it is reported as a location-only diagnostic (does
+   price reach the Fib zone, what is the raw net MFE there, now informed by real order flow
+   and real breadth where available) and is explicitly NOT a substitute for Phase C sign-off.
  - Calibration means/stds for propensity matching are computed from a strict leading
    slice of each instrument's real episodes (calibration period), with the remainder
    used for evaluation, honoring `calibrationEnd < evaluationStart`.
@@ -70,6 +75,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import psycopg
 
+from ai_quant_lab_ml.breadth import PanelBar, compute_breadth_contexts, latest_breadth_at
 from ai_quant_lab_ml.cks_ofi_touch import (
     BANKNIFTY_DEPTH_CONTRACTS,
     CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
@@ -78,6 +84,7 @@ from ai_quant_lab_ml.cks_ofi_touch import (
     compute_windowed_ofi_series,
     join_nearest_prior,
 )
+from ai_quant_lab_ml.contracts import BREADTH_INDEX_PRIMARY, BREADTH_INDEX_SECONDARY, BREADTH_UNIVERSE, BreadthContext
 from ai_quant_lab_ml.experiments_f1_f4 import ObservationEpisode, run_phase_c_experiments
 from ai_quant_lab_ml.fibonacci_pit_engine import (
     ATRObservation,
@@ -259,8 +266,54 @@ def fetch_banknifty_ofi_observations(connection: psycopg.Connection) -> List[Ofi
     return all_observations
 
 
+_BREADTH_PANEL_SQL = """
+    SELECT i.symbol, c.close_time, c.close, c.volume
+    FROM candles c
+    JOIN instruments i ON c.instrument_id = i.id
+    WHERE i.symbol = ANY(%s) AND c.timeframe = '1d' AND c.is_complete = true
+    ORDER BY i.symbol ASC, c.close_time ASC;
+"""
+
+
+def fetch_breadth_contexts(connection: psycopg.Connection) -> List[BreadthContext]:
+    """
+    Real daily advance/decline breadth, reusing the project's own already-built, already-tested
+    breadth module (ai_quant_lab_ml.breadth.compute_breadth_contexts) and its exact BREADTH_
+    UNIVERSE/BREADTH_INDEX_PRIMARY/SECONDARY contract (ai_quant_lab_ml.contracts) -- the same
+    panel PostgresMlRepository._load_breadth_contexts already loads for training.
+
+    Replaces the honest-but-fake breadthAd=0.0 placeholder: an earlier version of this file
+    assumed breadth was undeliverable from any data source this system captures. It wasn't --
+    this exact panel was already sitting in the database and already had a correct, PIT-safe
+    computation written for it; reusing it beats re-deriving an inferior parallel version from
+    scratch. PIT correctness (never reading today's own still-forming session) is handled by
+    latest_breadth_at's staleness-bounded as-of lookup at the call site, not by this function.
+    """
+    cur = connection.cursor()
+    cur.execute(_BREADTH_PANEL_SQL, ([*BREADTH_UNIVERSE, BREADTH_INDEX_PRIMARY, BREADTH_INDEX_SECONDARY],))
+    rows = cur.fetchall()
+    if not rows:
+        return []
+
+    universe = set(BREADTH_UNIVERSE)
+    panel: Dict[str, List[PanelBar]] = {}
+    primary_index_bars: List[PanelBar] = []
+    secondary_index_bars: List[PanelBar] = []
+    for symbol, close_time, close, volume in rows:
+        bar = PanelBar(close_time=close_time, close=float(close), volume=float(volume) if volume else 0.0)
+        if symbol in universe:
+            panel.setdefault(symbol, []).append(bar)
+        elif symbol == BREADTH_INDEX_PRIMARY:
+            primary_index_bars.append(bar)
+        elif symbol == BREADTH_INDEX_SECONDARY:
+            secondary_index_bars.append(bar)
+
+    return compute_breadth_contexts(panel, primary_index_bars=primary_index_bars, secondary_index_bars=secondary_index_bars)
+
+
 def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
-                               ofi_observations: Optional[List[OfiWindowObservation]] = None
+                               ofi_observations: Optional[List[OfiWindowObservation]] = None,
+                               breadth_contexts: Optional[List[BreadthContext]] = None
                                ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict]:
     """
     Builds ObservationEpisodes for ONE instrument's own chronologically-ordered, single-
@@ -364,6 +417,14 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
             continue  # ATR not yet seeded (first 14 bars) -- numeric fail-closed guard
 
         tod_sin, tod_cos = time_of_day_sin_cos(dt)
+        # Real daily advance/decline breadth (fetch_breadth_contexts), via latest_breadth_at's
+        # staleness-bounded as-of lookup -- PIT-safe by construction (an intraday bar's own
+        # close_time is always earlier than that same day's own breadth context, whose
+        # observed_at is the session's end, so this always resolves to the prior completed
+        # session, never today's own still-forming one). 0.0 (neutral) where no context is
+        # available yet or the freshest one is too stale, honestly, not a fabricated reading.
+        breadth_ctx = latest_breadth_at(breadth_contexts, dt) if breadth_contexts else None
+        breadth_val = breadth_ctx.advance_decline if breadth_ctx else 0.0
         magnitude = MagnitudeEstimate(
             expectedMoveBps=(atr_val / bar.close) * 10000.0,  # real volatility-implied move size
             confidence=0.5, sourceTimestamp=t_ms, availableAt=t_ms,
@@ -408,7 +469,7 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                 magnitude=magnitude,
                 normalized_ofi=normalized_ofi,
                 l2_depth_liq=l2_depth,
-                breadth_ad=0.0, breadth_available_at=t_ms, breadth_source_time=t_ms,  # no breadth feed -- neutral
+                breadth_ad=breadth_val, breadth_available_at=t_ms, breadth_source_time=t_ms,
                 yz_vol=vol_ratio_series[idx], yz_available_at=t_ms, yz_source_time=t_ms,
                 # Volume-profile regime labeling is not implemented from this data source either;
                 # held fixed since it only affects layer0Status/rejectReason, which episode
@@ -451,6 +512,7 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                             "todSin": tod_sin, "todCos": tod_cos,
                             "yzVolRatio": vol_ratio_series[idx],
                             "ofiValue": ofi_value,
+                            "breadthAd": breadth_val,
                         })
 
         # ---------------------------------------------------------------------------------
@@ -512,6 +574,7 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                             "todSin": tod_sin, "todCos": tod_cos,
                             "yzVolRatio": vol_ratio_series[idx],
                             "ofiValue": ofi_value,
+                            "breadthAd": breadth_val,
                         })
 
     bull_episodes, bull_anchors, bull_episodes_with_real_ofi = _dedupe_records_to_episodes(
@@ -595,7 +658,7 @@ def _dedupe_records_to_episodes(records: List[dict], highs: List[float], lows: L
             yzVolRatio=rec["yzVolRatio"],
             anchorAgeBars=rec["anchorAgeBars"],
             todSin=rec["todSin"], todCos=rec["todCos"],
-            breadthAd=0.0,
+            breadthAd=rec["breadthAd"],
             l2DepthLiquidity=0.0,
         ))
 
@@ -611,6 +674,8 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
     bull_episodes: List[ObservationEpisode] = []
     bear_episodes: List[ObservationEpisode] = []
     per_instrument_diagnostics: dict = {}
+    breadth_contexts = fetch_breadth_contexts(connection)
+    print(f"Computed real daily breadth: {len(breadth_contexts)} sessions from {len(BREADTH_UNIVERSE)} stocks.", file=sys.stderr)
     cur = connection.cursor()
     for instrument in INSTRUMENTS:
         try:
@@ -642,7 +707,8 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
             print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument} ({first_date} to {last_date}).", file=sys.stderr)
             ofi_observations = fetch_banknifty_ofi_observations(connection) if instrument == "BANKNIFTY" else None
             instrument_bull_episodes, instrument_bear_episodes, diag = build_instrument_episodes(
-                rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME], ofi_observations=ofi_observations
+                rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME],
+                ofi_observations=ofi_observations, breadth_contexts=breadth_contexts,
             )
             bull_episodes.extend(instrument_bull_episodes)
             bear_episodes.extend(instrument_bear_episodes)
