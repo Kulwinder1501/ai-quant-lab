@@ -122,6 +122,7 @@ import { paperTradeO1ExitEngineMigration } from "./121-paper-trade-o1-exit-engin
 import { paperTradeUnderlyingFillQuoteObservedSourceMigration } from "./122-paper-trade-underlying-fill-quote-observed-source.js";
 import { shadowDecisionsMigration } from "./123-shadow-decisions.js";
 import { paperTradeO1ExitReasonMigration } from "./124-paper-trade-o1-exit-reason.js";
+import { dxyFxComponentInstrumentsMigration } from "./125-dxy-fx-component-instruments.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -248,4 +249,5 @@ export const migrations = [
   paperTradeUnderlyingFillQuoteObservedSourceMigration,
   shadowDecisionsMigration,
   paperTradeO1ExitReasonMigration,
+  dxyFxComponentInstrumentsMigration,
 ];

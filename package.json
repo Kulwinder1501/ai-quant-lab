@@ -13,6 +13,7 @@
     "data:seed:core-instruments": "npm run data:seed:core-instruments --workspace @ai-quant-lab/api",
     "data:register:instrument": "npm run data:register:instrument --workspace @ai-quant-lab/api --",
     "data:collect:historical": "npm run data:collect:historical --workspace @ai-quant-lab/api --",
+    "data:compute:synthetic-dxy": "npm run data:compute:synthetic-dxy --workspace @ai-quant-lab/api --",
     "data:collect:live": "npm run data:collect:live --workspace @ai-quant-lab/api --",
     "data:collect:institutional": "npm run data:collect:institutional --workspace @ai-quant-lab/api --",
     "data:collect:option-chain": "npm run data:collect:option-chain --workspace @ai-quant-lab/api --",
