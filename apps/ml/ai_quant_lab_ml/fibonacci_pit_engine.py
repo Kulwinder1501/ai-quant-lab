@@ -88,7 +88,12 @@ class NormalizedOFI:
     depthNormFactor: float
     sourceTimestamp: int
     availableAt: int
-    featureDefinitionId: str = "CKS_OFI_30S_NORMALIZED_TOP5_V1"
+    # "CKS_OFI_30S_NORMALIZED_TOP5_V1" (30s window, top-5 levels, depth-normalized) was never
+    # implemented or validated anywhere in this codebase. What Phase 28 actually built and
+    # validated (docs/phase-28-microstructure-information-flow.md) is touch-level-only, a
+    # 5000ms trailing window, raw units -- see apps/ml/ai_quant_lab_ml/cks_ofi_touch.py, which
+    # ports it faithfully under its correct name.
+    featureDefinitionId: str = "CKS_OFI_TOUCH_5S_RAW_V1"
 
 
 @dataclass(frozen=True)

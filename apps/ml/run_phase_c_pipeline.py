@@ -38,13 +38,21 @@ This version:
    labeled, not a calibrated-feature substitute) realized-vol-ratio proxy, and a real
    forward net-MFE outcome (minus the 2.0bp round-trip friction) -- all derived only
    from the real OHLCV candles this query fetches.
- - Features this data source cannot supply at all -- L2-based CKS OFI, trade-tape
-   netDelta/footprint shape, options GEX, cross-sectional market breadth -- are left at
-   honest neutral/zero values instead of hardcoded constants that trivially always pass
-   their gates. Because real OFI is unavailable, this run cannot execute the full
-   OFI-conditioned F1-F4 protocol; it is reported as a location-only diagnostic
-   (does price even reach the Fib zones, and what is the raw, unconditioned net MFE
-   there) and is explicitly NOT a substitute for Phase C sign-off.
+ - Real CKS touch-level OFI (ai_quant_lab_ml/cks_ofi_touch.py, a faithful port of the
+   validated TypeScript Phase 28 implementation) is now wired in for BANKNIFTY, the only
+   instrument with any captured depth data -- joined to each candle by nearest prior
+   observation within a 60s staleness tolerance, never blended across a futures-contract
+   roll. NIFTY50 has zero real depth data captured anywhere in this system; its OFI stays
+   an honest 0.0 rather than a fabricated constant.
+ - Trade-tape netDelta/footprint shape, options GEX, and cross-sectional market breadth
+   are still not derivable from any data source this system captures today, and are left
+   at honest neutral/zero values instead of hardcoded constants that trivially always
+   pass their gates. Because Layer 2's footprint/GEX inputs remain unavailable and OFI
+   has no validated gate threshold (see cks_ofi_touch.py's module docstring), this run
+   still cannot execute the full F1-F4 protocol as originally specified; it is reported
+   as a location-only diagnostic (does price reach the Fib zone, what is the raw net MFE
+   there, now informed by real order flow where available) and is explicitly NOT a
+   substitute for Phase C sign-off.
  - Calibration means/stds for propensity matching are computed from a strict leading
    slice of each instrument's real episodes (calibration period), with the remainder
    used for evaluation, honoring `calibrationEnd < evaluationStart`.
@@ -62,6 +70,14 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import psycopg
 
+from ai_quant_lab_ml.cks_ofi_touch import (
+    BANKNIFTY_DEPTH_CONTRACTS,
+    CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
+    DepthFrameRow,
+    OfiWindowObservation,
+    compute_windowed_ofi_series,
+    join_nearest_prior,
+)
 from ai_quant_lab_ml.experiments_f1_f4 import ObservationEpisode, run_phase_c_experiments
 from ai_quant_lab_ml.fibonacci_pit_engine import (
     ATRObservation,
@@ -177,7 +193,58 @@ def is_near_session_close(dt: datetime, minutes_before_close: int = 15) -> bool:
     return ist_minutes > (SESSION_END_MIN - minutes_before_close)
 
 
-def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> Tuple[List[ObservationEpisode], dict]:
+def fetch_banknifty_ofi_observations(connection: psycopg.Connection) -> List[OfiWindowObservation]:
+    """
+    Real touch-level, 5s-window OFI from captured depth, one independent chain per futures
+    contract (never blended across a roll), concatenated in chronological order. Contracts
+    are captured sequentially with no time overlap, so concatenation preserves the ordering
+    `join_nearest_prior` requires.
+    """
+    all_observations: List[OfiWindowObservation] = []
+    cur = connection.cursor()
+    for symbol, _start, _end in BANKNIFTY_DEPTH_CONTRACTS:
+        try:
+            cur.execute(
+                """
+                SELECT received_at, is_snapshot, is_duplicate, gap_before,
+                       bid_price[1], bid_qty[1], ask_price[1], ask_qty[1]
+                FROM depth_frames
+                WHERE provider_symbol = %s
+                ORDER BY received_at ASC;
+                """,
+                (symbol,),
+            )
+            depth_rows = cur.fetchall()
+        except Exception as e:
+            print(f"Notice: depth_frames query for {symbol} returned: {e}", file=sys.stderr)
+            depth_rows = []
+
+        if not depth_rows:
+            continue
+
+        frames = [
+            DepthFrameRow(
+                received_at=r[0], is_snapshot=bool(r[1]), is_duplicate=bool(r[2]), gap_before=r[3],
+                bid_price_0=float(r[4]) if r[4] is not None else 0.0,
+                bid_qty_0=float(r[5]) if r[5] is not None else 0.0,
+                ask_price_0=float(r[6]) if r[6] is not None else 0.0,
+                ask_qty_0=float(r[7]) if r[7] is not None else 0.0,
+            )
+            for r in depth_rows
+        ]
+        contract_observations = compute_windowed_ofi_series(frames)
+        print(
+            f"Computed {len(contract_observations)} real OFI observations from {len(depth_rows)} "
+            f"depth frames for {symbol}.",
+            file=sys.stderr,
+        )
+        all_observations.extend(contract_observations)
+
+    return all_observations
+
+
+def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
+                               ofi_observations: Optional[List[OfiWindowObservation]] = None) -> Tuple[List[ObservationEpisode], dict]:
     """
     Builds ObservationEpisodes for ONE instrument's own chronologically-ordered, single-
     timeframe candle stream, driving a dedicated Master5LayerScanner / Fib engine instance.
@@ -196,6 +263,13 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
     atr_series = compute_atr_wilder_series(highs, lows, closes)
     swing_high_series = compute_confirmed_swing_highs(highs)
     vol_ratio_series = compute_vol_ratio_series(highs, lows, closes)
+
+    if ofi_observations:
+        candle_times = [r[0] if isinstance(r[0], datetime) else datetime.fromtimestamp(r[0] / 1000.0, tz=timezone.utc) for r in rows]
+        ofi_joined = join_nearest_prior(ofi_observations, candle_times, max_staleness_seconds=60.0)
+    else:
+        ofi_joined = [None] * len(rows)
+    ofi_available_count = sum(1 for v in ofi_joined if v is not None)
 
     horizon_bars = max(1, round(HORIZON_MINUTES / timeframe_minutes))
 
@@ -248,9 +322,9 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
             identity=CandleIdentity(barId=f"{instrument}_{idx + 1}", sequenceNumber=idx + 1, closeTimestamp=t_ms),
             open=float(r[1]), high=highs[idx], low=lows[idx], close=closes[idx],
             totalVolume=float(r[5]) if r[5] else 0.0,
-            # Not computable from an OHLCV-only candle feed -- honest neutral zeros, not a
-            # fabricated footprint shape. Layer 2 (Lambda Proxy / footprint shape / CKS OFI)
-            # genuinely cannot be evaluated from this data source; see module docstring.
+            # Trade-tape delta/footprint shape is not computable from an OHLCV-only candle
+            # feed -- honest neutral zeros, not a fabricated footprint shape. (OFI, below, is
+            # now real for BANKNIFTY; netDelta/footprint still are not -- no tape data exists.)
             netDelta=0.0, pocDisplacementZ=0.0, tailVolumeRatio=0.0,
             availableAt=t_ms,
         )
@@ -277,9 +351,16 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
             expectedMoveBps=(atr_val / bar.close) * 10000.0,  # real volatility-implied move size
             confidence=0.5, sourceTimestamp=t_ms, availableAt=t_ms,
         )
-        # Real OFI is unavailable from an OHLCV-only feed. 0.0 fails the >0.032 baseline gate
-        # honestly, rather than a fabricated constant that always passes it.
-        normalized_ofi = NormalizedOFI(ofi30s=0.0, depthNormFactor=1000.0, sourceTimestamp=t_ms, availableAt=t_ms)
+        # Real touch-level, 5s-window OFI for BANKNIFTY (joined above, nearest-prior within 60s);
+        # genuinely unavailable for NIFTY50 (no depth ever captured for it) -- 0.0, honestly, not
+        # a fabricated value. See cks_ofi_touch.py: there is no validated gate threshold on this
+        # feature's value either way, so nothing here treats it as a pass/fail cutoff.
+        ofi_value = ofi_joined[idx]
+        normalized_ofi = NormalizedOFI(
+            ofi30s=ofi_value if ofi_value is not None else 0.0,
+            depthNormFactor=1000.0, sourceTimestamp=t_ms, availableAt=t_ms,
+            featureDefinitionId=CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
+        )
         l2_depth = L2DepthLiquidityObservation(meanTop5Depth=0.0, sourceTimestamp=t_ms, availableAt=t_ms)
         resistance = StructuralLevel(
             levelPrice=resistance_price, sequenceNumber=confirming_idx + 1,
@@ -341,6 +422,7 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
                 "impulseRange": sig.featureVector.anchorRangePrice if sig.featureVector.anchorRangePrice else 0.0,
                 "anchorAgeBars": float(sig.featureVector.anchorAgeBars) if sig.featureVector.anchorAgeBars is not None else 0.0,
                 "todSin": tod_sin, "todCos": tod_cos,
+                "ofiValue": ofi_value,
             })
 
     # Deduplicate to ONE observation per anchor (protocol item #4: "one observation = one unique
@@ -384,12 +466,15 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
             l2DepthLiquidity=0.0,
         ))
 
+    episodes_with_real_ofi = sum(1 for rec in selected_records if rec["ofiValue"] is not None)
     diagnostics = {
         "barsEvaluated": bars_evaluated,
         "activePoiBarCount": active_poi_bar_count,
         "poiQualifiedCount": sum(1 for e in engine_event_history(scanner) if e["eventType"] == "RETRACEMENT_QUALIFIED"),
         "uniqueAnchorsWithValidHorizon": len(anchors),
         "episodesAfterDedup": len(episodes),
+        "realOfiAvailableBarFraction": (ofi_available_count / bars_evaluated) if bars_evaluated else 0.0,
+        "realOfiAvailableEpisodeCount": episodes_with_real_ofi,
     }
     return episodes, diagnostics
 
@@ -433,7 +518,10 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]) -
             first_date = rows[0][0]
             last_date = rows[-1][0]
             print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument} ({first_date} to {last_date}).", file=sys.stderr)
-            instrument_episodes, diag = build_instrument_episodes(rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME])
+            ofi_observations = fetch_banknifty_ofi_observations(connection) if instrument == "BANKNIFTY" else None
+            instrument_episodes, diag = build_instrument_episodes(
+                rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME], ofi_observations=ofi_observations
+            )
             episodes.extend(instrument_episodes)
             per_instrument_diagnostics[instrument] = diag
 

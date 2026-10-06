@@ -209,18 +209,22 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15730,
+        "barsEvaluated": 15736,
         "activePoiBarCount": 5595,
         "poiQualifiedCount": 401,
         "uniqueAnchorsWithValidHorizon": 398,
-        "episodesAfterDedup": 398
+        "episodesAfterDedup": 398,
+        "realOfiAvailableBarFraction": 0.0,
+        "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14080,
-        "activePoiBarCount": 5145,
-        "poiQualifiedCount": 356,
+        "barsEvaluated": 14086,
+        "activePoiBarCount": 5148,
+        "poiQualifiedCount": 357,
         "uniqueAnchorsWithValidHorizon": 348,
-        "episodesAfterDedup": 348
+        "episodesAfterDedup": 348,
+        "realOfiAvailableBarFraction": 0.13069714610251312,
+        "realOfiAvailableEpisodeCount": 48
       }
     },
     "dataCompleteness": {
