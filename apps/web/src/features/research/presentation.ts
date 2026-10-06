@@ -22,6 +22,30 @@ export function formatPercentage(value: number | null): string {
   return value === null ? "Not recorded" : `${(value * 100).toFixed(1)}%`;
 }
 
+/**
+ * Formats a holding duration for open positions.
+ *
+ * Uses whole units so a live-ticking cell does not flicker between fractional
+ * seconds. Returns "—" for missing/invalid timestamps rather than inventing a
+ * duration of zero, which would look like a brand-new trade.
+ */
+export function formatElapsedDuration(openedAt: string | null | undefined, nowMs: number = Date.now()): string {
+  if (!openedAt) return "—";
+  const openedMs = new Date(openedAt).getTime();
+  if (!Number.isFinite(openedMs) || openedMs > nowMs) return "—";
+
+  const totalSeconds = Math.max(0, Math.floor((nowMs - openedMs) / 1000));
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 export function labelTone(label: string | null): string {
   if (label === "BULLISH") return "border-emerald-300/35 bg-emerald-300/10 text-emerald-100";
   if (label === "BEARISH") return "border-rose-300/35 bg-rose-300/10 text-rose-100";

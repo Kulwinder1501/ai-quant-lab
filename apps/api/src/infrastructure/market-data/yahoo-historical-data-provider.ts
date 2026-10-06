@@ -5,23 +5,35 @@ import type {
   HistoricalMarketDataRequest,
 } from "../../modules/market-data/domain/historical-data-provider.js";
 import { resolveYahooSymbol } from "../../modules/market-data/domain/yahoo-symbol-resolver.js";
+import { YAHOO_PROVIDER_ID } from "../../modules/market-data/domain/candle-provenance.js";
 
+/**
+ * Only timeframes Yahoo serves natively are mapped. `3m` and `10m` are absent
+ * deliberately: Yahoo has no such interval, and the previous mapping to `1m`/`5m`
+ * returned finer bars that the caller then stamped with the coarser duration. That
+ * produced overlapping windows carrying a shorter bar's high/low/close — fabricated
+ * candles, not a resample. Honest downsampling would have to aggregate the finer
+ * series; until something does that, these timeframes fail closed here.
+ */
 function getYahooInterval(timeframe: string): "1m" | "2m" | "5m" | "15m" | "30m" | "60m" | "90m" | "1h" | "1d" | "5d" | "1wk" | "1mo" | "3mo" {
   switch (timeframe) {
     case "1m": return "1m";
-    case "3m": return "1m"; // Yahoo doesn't support 3m natively
     case "5m": return "5m";
-    case "10m": return "5m";
     case "15m": return "15m";
     case "30m": return "30m";
     case "60m": return "60m";
     case "1d": return "1d";
-    default: return "1d";
+    default:
+      throw new Error(
+        `Yahoo has no native "${timeframe}" interval. Serving it would mean relabelling a `
+        + `finer bar with a coarser duration. Use 1m, 5m, 15m, 30m, 60m or 1d, or collect `
+        + `this timeframe from a provider that supports it natively.`,
+      );
   }
 }
 
 export class YahooHistoricalDataProvider implements HistoricalMarketDataProvider {
-  readonly id = "yahoo";
+  readonly id = YAHOO_PROVIDER_ID;
 
   async fetchCandles(request: HistoricalMarketDataRequest): Promise<HistoricalMarketCandle[]> {
     const yfSymbol = resolveYahooSymbol(request.providerInstrumentId);
@@ -38,26 +50,37 @@ export class YahooHistoricalDataProvider implements HistoricalMarketDataProvider
     const results = await yf.chart(yfSymbol, queryOptions);
     const quotes = results.quotes || [];
 
-    return quotes.map((row: any) => {
-      // Calculate closeTime by adding timeframe minutes
-      const openTime = new Date(row.date);
-      let durationMs = 0;
-      if (request.timeframe.endsWith("m")) {
-        durationMs = parseInt(request.timeframe.replace("m", ""), 10) * 60000;
-      } else if (request.timeframe.endsWith("d")) {
-        durationMs = parseInt(request.timeframe.replace("d", ""), 10) * 86400000;
-      }
-      const closeTime = new Date(openTime.getTime() + durationMs);
+    return quotes
+      // Yahoo emits rows with null OHLC for exchange holidays and for a bar that
+      // has not settled yet. Coercing those to 0 with `row.open || 0` produced a
+      // candle with a zero price, which the importer correctly rejects as invalid
+      // OHLC — so one holiday in the requested range failed the whole backfill.
+      // A row without a price is absent data, not a zero price, so it is skipped.
+      .filter((row: any) => [row.open, row.high, row.low, row.close].every(
+        (price) => typeof price === "number" && Number.isFinite(price) && price > 0,
+      ))
+      .map((row: any) => {
+        // Calculate closeTime by adding timeframe minutes
+        const openTime = new Date(row.date);
+        let durationMs = 0;
+        if (request.timeframe.endsWith("m")) {
+          durationMs = parseInt(request.timeframe.replace("m", ""), 10) * 60000;
+        } else if (request.timeframe.endsWith("d")) {
+          durationMs = parseInt(request.timeframe.replace("d", ""), 10) * 86400000;
+        }
+        const closeTime = new Date(openTime.getTime() + durationMs);
 
-      return {
-        openTime,
-        closeTime,
-        open: String(row.open || 0),
-        high: String(row.high || 0),
-        low: String(row.low || 0),
-        close: String(row.close || 0),
-        volume: String(row.volume || 0),
-      };
-    });
+        return {
+          openTime,
+          closeTime,
+          open: String(row.open),
+          high: String(row.high),
+          low: String(row.low),
+          close: String(row.close),
+          // Volume genuinely is absent on an index series, so zero is the honest
+          // value here rather than a placeholder for a missing number.
+          volume: String(Number.isFinite(row.volume) ? row.volume : 0),
+        };
+      });
   }
 }

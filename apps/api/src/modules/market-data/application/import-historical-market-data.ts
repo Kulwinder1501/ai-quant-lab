@@ -10,6 +10,26 @@ export interface ImportHistoricalMarketDataInput {
   timeframe: HistoricalTimeframe;
   from: Date;
   to: Date;
+  /**
+   * When true, dates already stored as completed candles are left untouched
+   * instead of re-written. Providers such as Yahoo re-issue slightly revised OHLC
+   * on a re-fetch, which trips the repository's (correct) immutability guard and
+   * aborts an otherwise-successful backfill. This makes an overlapping re-run
+   * idempotent. Default false preserves the strict behaviour.
+   */
+  skipExisting?: boolean;
+  /**
+   * When true, a candle that fails validation is counted and dropped instead of
+   * aborting the batch. Upstream data carries occasional corrupt prints — Fyers
+   * returned one NIFTYBEES 5m opening bar whose `open` sat below its own `low`, one
+   * bar in 25,159 — and letting a single bad tick block a multi-year backfill is the
+   * wrong trade. The rejected count and samples are reported, never swallowed: a
+   * silent drop would be indistinguishable from a market holiday.
+   *
+   * Default false preserves the strict abort, which is correct for CSV fixtures where
+   * any invalid row means the file is wrong.
+   */
+  skipInvalid?: boolean;
 }
 
 export interface ImportHistoricalMarketDataResult {
@@ -17,6 +37,24 @@ export interface ImportHistoricalMarketDataResult {
   provider: string;
   candlesFetched: number;
   candlesPersisted: number;
+  /** Completed candles left untouched because they were already stored (skipExisting). */
+  candlesSkipped: number;
+  /** Candles dropped for failing validation under `skipInvalid`. Zero when strict. */
+  candlesRejected: number;
+  /** Up to five rejected candles, so a bad upstream print is diagnosable. */
+  rejectedSamples: Array<{ openTime: string; reason: string }>;
+  /** In-progress bars left for a later fetch to deliver settled. Never persisted. */
+  candlesDeferred: number;
+}
+
+/**
+ * Whether a stored candle was built by the live collector rather than fetched settled.
+ *
+ * `quoteObservedAt` is written by `CollectLiveMarketData` on every quote it applies, so it
+ * is present on exactly the bars this distinction is about.
+ */
+function isLiveAggregated(candle: { sourceMetadata: Record<string, unknown> }): boolean {
+  return candle.sourceMetadata?.quoteObservedAt !== undefined;
 }
 
 function isPositiveDecimal(value: string): boolean {
@@ -65,7 +103,9 @@ function toPersistenceInput(
 
 /**
  * Coordinates ingestion and keeps the provider adapter outside the application rule.
- * Historical input is always stored as completed candles; live updates are a later phase.
+ * Settled provider bars are stored complete; a bar whose close is still ahead of
+ * wall clock is deferred to a later fetch, never persisted. Live in-progress bars
+ * are owned exclusively by the live collector.
  */
 export class ImportHistoricalMarketData {
   constructor(
@@ -102,30 +142,91 @@ export class ImportHistoricalMarketData {
         to: input.to,
       });
       const timestamps = new Set<number>();
-      const candles = fetched
+      const inRange = fetched
         .filter((candle) => candle.openTime >= input.from && candle.openTime <= input.to)
         .sort((left, right) => left.openTime.getTime() - right.openTime.getTime());
 
       // Validate the whole batch before any write, preventing malformed files
       // from creating a partially imported sequence.
-      for (const candle of candles) {
-        validateCandle(candle);
+      const candles: HistoricalMarketCandle[] = [];
+      const rejectedSamples: Array<{ openTime: string; reason: string }> = [];
+      let candlesRejected = 0;
+      for (const candle of inRange) {
+        try {
+          validateCandle(candle);
+        } catch (error) {
+          if (!input.skipInvalid) throw error;
+          candlesRejected += 1;
+          if (rejectedSamples.length < 5) {
+            rejectedSamples.push({
+              openTime: candle.openTime instanceof Date && !Number.isNaN(candle.openTime.getTime())
+                ? candle.openTime.toISOString()
+                : "unparseable timestamp",
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
+          continue;
+        }
         const timestamp = candle.openTime.getTime();
         if (timestamps.has(timestamp)) {
           throw new Error(`Provider returned duplicate candle timestamp ${candle.openTime.toISOString()}.`);
         }
         timestamps.add(timestamp);
+        candles.push(candle);
       }
+      let candlesSkipped = 0;
+      let candlesDeferred = 0;
+      const now = new Date();
       for (const candle of candles) {
-        await this.candleRepository.upsert({ ...toPersistenceInput(candle, input), ingestionId: ingestion.id });
+        // Historical import persists settled evidence only. Providers (Yahoo
+        // especially) append the in-progress session bar, often keyed at the
+        // last trade time rather than the timeframe grid — persisting it, even
+        // as provisional, littered every intraday series with orphaned rows no
+        // later fetch could match and no sweep could honestly finalise. The
+        // bar is not lost: the next fetch after its window closes delivers it
+        // settled, on-grid. The forming bar belongs to the live collector,
+        // which constructs its own session-anchored windows.
+        if (candle.closeTime.getTime() > now.getTime()) {
+          candlesDeferred += 1;
+          continue;
+        }
+        if (input.skipExisting) {
+          const existing = await this.candleRepository.findByKey(
+            input.instrument.id,
+            input.timeframe,
+            candle.openTime,
+          );
+          // Only an already-*completed* candle is skipped. An incomplete one is
+          // still allowed to be finalised by this write.
+          //
+          // A live-aggregated bar is never skipped, complete or not. It is a sample of the
+          // window taken every few seconds from quote snapshots; this is the exchange's own
+          // settled bar for it. They are not the same object, and the differences are not
+          // subtle -- the live path carries no index volume at all, because the quotes
+          // endpoint reports zero for an index. Skipping it would make the approximation
+          // permanent, since the settled bar is fetched exactly once.
+          if (existing?.isComplete && !isLiveAggregated(existing)) {
+            candlesSkipped += 1;
+            continue;
+          }
+        }
+        await this.candleRepository.upsert({
+          ...toPersistenceInput(candle, input),
+          ingestionId: ingestion.id,
+        });
       }
 
-      await this.ingestionRepository.complete(ingestion.id, candles.length);
+      const candlesPersisted = candles.length - candlesSkipped - candlesDeferred;
+      await this.ingestionRepository.complete(ingestion.id, candlesPersisted);
       return {
         ingestionId: ingestion.id,
         provider: input.provider.id,
         candlesFetched: fetched.length,
-        candlesPersisted: candles.length,
+        candlesPersisted,
+        candlesSkipped,
+        candlesRejected,
+        rejectedSamples,
+        candlesDeferred,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown historical import failure.";

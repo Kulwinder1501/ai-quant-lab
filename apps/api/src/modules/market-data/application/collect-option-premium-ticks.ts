@@ -1,0 +1,271 @@
+import type { PostgresOptionChainRepository } from "../../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import type { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
+import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-token-service.js";
+import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
+import {
+  premiumCoverageExpiries,
+  selectAtmPremiumContracts,
+  selectDeltaTargetPremiumContracts,
+} from "../domain/atm-premium-contracts.js";
+import type { AtmPremiumContract } from "../domain/atm-premium-contracts.js";
+import type { OptionChainSnapshot } from "../domain/option-chain.js";
+import { normaliseTradedVolume } from "../domain/traded-volume.js";
+import { POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY } from "../domain/collector-regimes.js";
+
+export interface CollectOptionPremiumTicksInput {
+  underlyingSymbols: readonly string[];
+  /** ATM ± this many strike steps. Default 1 → 6 contracts per underlying. */
+  strikeBand?: number;
+  /**
+   * Mirrors `PrepareOptionEntry`'s `TARGET_DELTA`/`MIN_ENTRY_DELTA` (0.75). The ATM band covers
+   * what D2 and other near-the-money consumers need; this covers the deep-ITM contract the
+   * paper-trading bots will actually try to open -- see `selectDeltaTargetPremiumContracts`'s doc
+   * for why a wider `strikeBand` is not how this is covered instead.
+   */
+  deltaTarget?: number;
+  deltaTargetStrikeMargin?: number;
+  /**
+   * Mirrors `MINIMUM_DAYS_TO_EXPIRY` in the trading path (`prepare-option-entry.ts`) and
+   * `OptionPremiumTickStreamer`'s own option of the same name, so this HTTP floor poller covers
+   * the same two expiries the socket streamer already does. See `premiumCoverageExpiries`'s doc.
+   */
+  minimumTradableDaysToExpiry?: number;
+  /** Evaluation instant for the roll rule. Injected so the behaviour is testable. */
+  now?: Date;
+}
+
+export interface CollectOptionPremiumTicksResult {
+  underlyings: Array<{
+    symbol: string;
+    contractsSelected: number;
+    ticksInserted: number;
+    ticksSkipped: number;
+    refusal: string | null;
+  }>;
+  inserted: number;
+}
+
+type FetchFunction = typeof fetch;
+
+export interface AdditionalPremiumContractReader {
+  listForUnderlying(underlyingSymbol: string): Promise<AtmPremiumContract[]>;
+}
+
+/**
+ * Polls Fyers quotes for ATM-band contracts chosen from the latest chain snapshot.
+ *
+ * Keeps the 15m full-chain job unchanged; this is the dense mark series Phase 27 needs.
+ */
+export class CollectOptionPremiumTicks {
+  constructor(
+    private readonly chainRepository: PostgresOptionChainRepository,
+    private readonly tickRepository: PostgresOptionPremiumTickRepository,
+    private readonly options: {
+      appId: string;
+      tokenService: { getAccessToken(): Promise<string> };
+      fetch?: FetchFunction;
+      baseUrl?: string;
+    },
+    private readonly additionalContracts?: AdditionalPremiumContractReader,
+  ) {}
+
+  async execute(input: CollectOptionPremiumTicksInput): Promise<CollectOptionPremiumTicksResult> {
+    const underlyings: CollectOptionPremiumTicksResult["underlyings"] = [];
+    let inserted = 0;
+    const now = input.now ?? new Date();
+
+    for (const symbol of input.underlyingSymbols) {
+      /*
+       * One snapshot per covered expiry, not only the front one.
+       *
+       * This HTTP floor poller used to call `latestSnapshot` with no expiry at all, which
+       * `PostgresOptionChainRepository` resolves to `max(observed_at)` across every stored
+       * expiry -- in practice whichever expiry the 15m chain job happened to write last. That is
+       * the same narrow-coverage shape `premiumCoverageExpiries`'s doc describes having silently
+       * stopped the paper bots once before (2026-08-24): the front expiry is what D2 prices, but
+       * `PrepareOptionEntry` refuses anything inside `MINIMUM_DAYS_TO_EXPIRY` and rolls to the next
+       * listed expiry, so a bot can be trying to open a contract this poller was never asking Fyers
+       * for. `OptionPremiumTickStreamer.refreshSubscriptions` already covers both expiries this way
+       * for the socket path; this mirrors that loop exactly for the HTTP floor.
+       */
+      const calendar = await this.chainRepository
+        .latestExpiryCalendar(symbol, now)
+        .catch(() => null);
+      const expiryKeys = premiumCoverageExpiries(
+        calendar, now, input.minimumTradableDaysToExpiry ?? 2,
+      );
+      // No calendar is not the same as no contracts: fall back to the previous unqualified read
+      // rather than silently polling nothing and reporting a healthy run.
+      const wantedExpiries: Array<string | undefined> = expiryKeys.length > 0 ? expiryKeys : [undefined];
+
+      const snapshots: OptionChainSnapshot[] = [];
+      for (const expiryDate of wantedExpiries) {
+        const snapshot = await this.chainRepository.latestSnapshot({
+          underlyingSymbol: symbol,
+          ...(expiryDate === undefined ? {} : { expiryDate }),
+        });
+        if (snapshot) snapshots.push(snapshot);
+      }
+
+      if (snapshots.length === 0) {
+        underlyings.push({
+          symbol,
+          contractsSelected: 0,
+          ticksInserted: 0,
+          ticksSkipped: 0,
+          refusal: "NO_CHAIN_SNAPSHOT",
+        });
+        continue;
+      }
+
+      /*
+       * The chain snapshot's own spot is up to 15 minutes stale (it comes from the 15m full-chain
+       * job, not this once-a-minute poller), so at the open it can pick the wrong ATM band for
+       * several minutes while the underlying is still moving -- see `selectAtmPremiumContracts`'s
+       * `spotOverride` doc. Fetch the underlying's own live quote first, before knowing which
+       * option contracts to ask for, and use *that* to choose ATM instead of the snapshot's spot.
+       */
+      const underlyingProviderSymbol = resolveFyersSymbol(symbol);
+      const liveUnderlyingQuotes = await this.fetchRichQuotes([underlyingProviderSymbol]);
+      const liveUnderlying = liveUnderlyingQuotes.get(underlyingProviderSymbol.toUpperCase())?.lastPrice ?? null;
+
+      const atmContracts = snapshots.flatMap((snapshot) => selectAtmPremiumContracts(snapshot, {
+        strikeBand: input.strikeBand ?? 1,
+        spotOverride: liveUnderlying,
+      }));
+      // The ATM band tracks spot; `PrepareOptionEntry`'s delta-based strike does not sit anywhere
+      // near spot for a typical BANKNIFTY monthly tenor (see that function's doc). Without this,
+      // every delta-selected idea refuses with NO_FRESH_EXECUTABLE_QUOTE for a contract this
+      // collector never asked Fyers for.
+      const deltaTargetContracts = snapshots.flatMap((snapshot) => selectDeltaTargetPremiumContracts(snapshot, {
+        targetDelta: input.deltaTarget,
+        strikeMargin: input.deltaTargetStrikeMargin,
+      }));
+      const requiredContracts = await this.additionalContracts?.listForUnderlying(symbol) ?? [];
+      const contracts = [...new Map(
+        [...atmContracts, ...deltaTargetContracts, ...requiredContracts]
+          .map((contract) => [contract.providerSymbol.toUpperCase(), contract]),
+      ).values()];
+      if (contracts.length === 0) {
+        underlyings.push({
+          symbol,
+          contractsSelected: 0,
+          ticksInserted: 0,
+          ticksSkipped: 0,
+          refusal: "NO_FRESH_ATM_CONTRACTS",
+        });
+        continue;
+      }
+
+      const richQuotes = await this.fetchRichQuotes(contracts.map((c) => c.providerSymbol));
+      const observedAt = new Date();
+      const ticks = contracts.flatMap((contract) => {
+        const quote = richQuotes.get(contract.providerSymbol.toUpperCase());
+        if (!quote) return [];
+        const tradedVolume = normaliseTradedVolume(quote.volume);
+        return [{
+          underlyingSymbol: contract.underlyingSymbol,
+          provider: FYERS_PROVIDER_ID,
+          observedAt,
+          expiryDate: contract.expiryDate,
+          strikePrice: contract.strikePrice,
+          optionType: contract.optionType,
+          providerSymbol: contract.providerSymbol,
+          lastPrice: quote.lastPrice,
+          bid: quote.bid,
+          ask: quote.ask,
+          // The polling path carries the same exposure as the socket: the provider's traded-volume
+          // counter can arrive wrapped, and an impossible value must not reach a CHECK constraint.
+          volume: tradedVolume.volume,
+          volumeRaw: tradedVolume.rejectedRaw,
+          // Same HTTP observation as the option bid/ask. Reusing the 15-minute chain spot here
+          // made the dense series look fresh while trap detection was anchored to a stale index.
+          underlyingValue: liveUnderlying !== null && liveUnderlying > 0 ? liveUnderlying : null,
+          /*
+           * Declare the regime. This path wrote NULL from migration 078 until now -- roughly 6-7% of
+           * every session's ticks, unattributable to any capture code. Migration 078 gave the column
+           * no DEFAULT precisely so that omission would surface rather than be silently labelled, and
+           * it did: `COLLECTOR_HEALTH` reported DEGRADED the first session it was able to run.
+           *
+           * `POLLER_V2_FLOOR_...` and not `LEGACY_POLLER_V1`: that name belongs to the pre-streamer
+           * sessions this is not a continuation of. This is the deliberate once-a-minute floor under
+           * the socket, and its rows carry a receipt clock only, since the HTTP quotes endpoint
+           * publishes no exchange time.
+           */
+          collectorRegime: POLLER_V2_FLOOR_RECEIPT_CLOCK_ONLY,
+        }];
+      });
+
+      const write = await this.tickRepository.insertTicks(ticks);
+      inserted += write.inserted;
+      underlyings.push({
+        symbol,
+        contractsSelected: contracts.length,
+        ticksInserted: write.inserted,
+        ticksSkipped: write.skipped,
+        refusal: ticks.length === 0 ? "NO_QUOTES" : null,
+      });
+    }
+
+    return { underlyings, inserted };
+  }
+
+  /**
+   * Quotes endpoint with bid/ask when the provider supplies them.
+   * Falls back to last price only — never fabricates a spread.
+   */
+  private async fetchRichQuotes(
+    providerSymbols: readonly string[],
+  ): Promise<Map<string, { lastPrice: number | null; bid: number | null; ask: number | null; volume: number | null }>> {
+    const fetchFn = this.options.fetch ?? globalThis.fetch;
+    const baseUrl = this.options.baseUrl ?? "https://api-t1.fyers.in";
+    const accessToken = await this.options.tokenService.getAccessToken();
+    const endpoint = new URL("/data/quotes", baseUrl);
+    endpoint.searchParams.set("symbols", [...new Set(providerSymbols)].join(","));
+
+    const response = await fetchFn(endpoint, {
+      headers: { Authorization: `${this.options.appId}:${accessToken}` },
+    });
+    const payload = await response.json().catch(() => undefined) as {
+      s?: string;
+      code?: number;
+      message?: string;
+      d?: Array<{
+        n?: string;
+        s?: string;
+        v?: {
+          lp?: number;
+          bid?: number;
+          ask?: number;
+          volume?: number | null;
+        };
+      }>;
+    } | undefined;
+
+    const out = new Map<string, {
+      lastPrice: number | null;
+      bid: number | null;
+      ask: number | null;
+      volume: number | null;
+    }>();
+    if (!response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
+      throw new Error(
+        `Fyers premium quote request failed (HTTP ${response.status}, code ${payload?.code ?? "none"}). `
+        + `${payload?.message ?? "No quote rows returned."}`,
+      );
+    }
+
+    for (const row of payload.d) {
+      if (row.s !== "ok" || !row.n || !row.v) continue;
+      const finite = (value: number | null | undefined): number | null =>
+        value !== null && value !== undefined && Number.isFinite(value) ? value : null;
+      out.set(row.n.toUpperCase(), {
+        lastPrice: finite(row.v.lp),
+        bid: finite(row.v.bid),
+        ask: finite(row.v.ask),
+        volume: finite(row.v.volume ?? null),
+      });
+    }
+    return out;
+  }
+}

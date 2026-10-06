@@ -11,7 +11,19 @@ import type {
 
 const statuses: readonly TradeHistoryStatus[] = ["OPEN", "CLOSED", "CANCELLED"];
 const sides: readonly TradeHistorySide[] = ["LONG", "SHORT"];
-const exitReasons: readonly TradeHistoryExitReason[] = ["STOP_LOSS", "TARGET", "MANUAL", "CANCELLED"];
+const exitReasons: readonly TradeHistoryExitReason[] = [
+  "STOP_LOSS",
+  "TARGET",
+  "MANUAL",
+  "CANCELLED",
+  "MOMENTUM_STALL",
+  "SESSION_CLOSE",
+  "RUNNER_TRAIL",
+  "T1_TARGET",
+  "T2_TARGET",
+  "TRAP_DETECTED",
+  "EXPIRED",
+];
 
 function member<T extends string>(value: unknown, allowed: readonly T[]): T | null {
   const text = asString(value);
@@ -58,6 +70,9 @@ export function parseTradeHistoryRecord(value: unknown): TradeHistoryRecord | nu
     fees: asNumber(record.fees),
     slippage: asNumber(record.slippage),
     notes: asString(record.notes) ?? "",
+    optionType: record.optionType === "CE" || record.optionType === "PE" ? record.optionType : null,
+    optionStrike: asNumber(record.optionStrike),
+    underlyingSymbol: asString(record.underlyingSymbol),
   };
 }
 
@@ -91,6 +106,13 @@ export function parseTradeHistorySummary(value: unknown): TradeHistorySummary {
       TARGET: numberOrZero(exitReasonCounts.TARGET),
       MANUAL: numberOrZero(exitReasonCounts.MANUAL),
       CANCELLED: numberOrZero(exitReasonCounts.CANCELLED),
+      MOMENTUM_STALL: numberOrZero(exitReasonCounts.MOMENTUM_STALL),
+      SESSION_CLOSE: numberOrZero(exitReasonCounts.SESSION_CLOSE),
+      RUNNER_TRAIL: numberOrZero(exitReasonCounts.RUNNER_TRAIL),
+      T1_TARGET: numberOrZero(exitReasonCounts.T1_TARGET),
+      T2_TARGET: numberOrZero(exitReasonCounts.T2_TARGET),
+      TRAP_DETECTED: numberOrZero(exitReasonCounts.TRAP_DETECTED),
+      EXPIRED: numberOrZero(exitReasonCounts.EXPIRED),
     },
   };
 }

@@ -7,10 +7,19 @@ export const indicatorCodes = [
   "VWAP",
   "BOLLINGER_BANDS",
   "SUPERTREND",
+  "FVG",
+  "BOS",
+  "CHOCH",
+  "LIQUIDITY_SWEEP",
+  "ORDER_BLOCK",
+  "EQUILIBRIUM_ZONE",
 ] as const;
 
 export type IndicatorCode = (typeof indicatorCodes)[number];
-export type IndicatorValues = Record<string, number | string | null>;
+export type IndicatorValues = Record<string, number | string | boolean | null>;
+
+/** Corrected, point-in-time SMC series. Legacy ta-v1 SMC snapshots are not trade evidence. */
+export const SMC_ALGORITHM_VERSION = "smc-v2";
 
 export interface IndicatorDefinitionSpec {
   code: IndicatorCode;
@@ -50,13 +59,33 @@ export interface IndicatorDefinitionRepository {
   ensure(input: EnsureIndicatorDefinitionInput): Promise<IndicatorDefinition>;
 }
 
+export interface IndicatorSnapshotInput {
+  candleId: string;
+  indicatorDefinitionId: string;
+  values: IndicatorValues;
+}
+
 export interface IndicatorSnapshotRepository {
-  upsert(input: { candleId: string; indicatorDefinitionId: string; values: IndicatorValues }): Promise<void>;
+  /**
+   * Writes a batch. Deliberately not a single-row `upsert`: the caller has one row per
+   * (candle, definition), so a per-row method meant ~810,000 awaited round trips for one
+   * NIFTY50 1m recompute, and that job runs every minute.
+   */
+  upsertMany(inputs: readonly IndicatorSnapshotInput[]): Promise<void>;
 }
 
 export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
   { code: "SMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
   { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 20 }, outputSchema: { value: "number" } },
+  // EMA-9 is the fast leg the momentum-scalp strategy pairs with the 20-period
+  // slow EMA. Without it in the registry, `analysis:calculate-indicators` never
+  // computes it, so the scalp strategy's resolveIndicators always fails on real
+  // data and it can produce no ideas in either direction. The ML feature pipeline
+  // selects EMA strictly at period 20 (see _INDICATOR_PARAMETERS), so this extra
+  // definition does not touch the immutable feature schema.
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 9 }, outputSchema: { value: "number" } },
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, outputSchema: { value: "number" } },
+  { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, outputSchema: { value: "number" } },
   { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, outputSchema: { value: "number" } },
   {
     code: "MACD",
@@ -77,5 +106,41 @@ export const defaultIndicatorDefinitions: readonly IndicatorDefinitionSpec[] = [
     algorithmVersion: "ta-v1",
     parameters: { atrPeriod: 10, multiplier: 3 },
     outputSchema: { value: "number", upperBand: "number", lowerBand: "number", trend: "UP|DOWN" },
+  },
+  {
+    code: "FVG",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: {},
+    outputSchema: { top: "number", bottom: "number", type: "BULLISH|BEARISH", active: "boolean" },
+  },
+  {
+    code: "BOS",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_BOS|BEARISH_BOS", level: "number" },
+  },
+  {
+    code: "CHOCH",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_CHOCH|BEARISH_CHOCH", level: "number" },
+  },
+  {
+    code: "LIQUIDITY_SWEEP",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: { pivotLength: 5 },
+    outputSchema: { type: "BULLISH_SWEEP|BEARISH_SWEEP", level: "number" },
+  },
+  {
+    code: "ORDER_BLOCK",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: { displacementThreshold: 1.5 },
+    outputSchema: { type: "BULLISH_OB|BEARISH_OB", top: "number", bottom: "number", blockBarOffset: "number" },
+  },
+  {
+    code: "EQUILIBRIUM_ZONE",
+    algorithmVersion: SMC_ALGORITHM_VERSION,
+    parameters: { pivotLength: 5 },
+    outputSchema: { top: "number", bottom: "number", equilibrium: "number" },
   },
 ];

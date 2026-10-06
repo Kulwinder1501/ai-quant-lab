@@ -14,13 +14,20 @@ Local-first Indian-market research and paper-trading platform. It **never places
 ## Start locally
 
 1. Copy `.env.example` to `.env` and set secure local values.
-2. Start the database: `docker compose up -d database`.
+2. Start the v2 system-of-record database: `docker compose -f docker-compose.v2.yml up -d database-v2`.
 3. Install JavaScript dependencies: `npm install`.
 4. Apply the local schema: `npm run db:migrate`.
 5. Start the API: `npm run dev:api`.
 6. Start the dashboard: `npm run dev:web`.
 
 Market-data integrations are added only after a provider is selected and its terms are reviewed.
+
+The v2 Compose stack publishes the dashboard, API, and database on `127.0.0.1` only. The API
+also restricts browser origins, caps JSON bodies at 256 KB, and rate-limits state-changing
+requests per source address (`API_MUTATION_RATE_LIMIT`, 120/minute by default). Do not change
+the port bindings to `0.0.0.0` without putting authenticated TLS termination in front of both
+the dashboard and API. Environment files and their backups are excluded from every Docker
+build context.
 
 For Phase 3, use `npm run data:seed:core-instruments`, then import a licensed CSV or configure the optional read-only Kite historical-data adapter. See `docs/phase-03-historical-data.md` for commands and data-source guidance.
 
@@ -46,13 +53,95 @@ Phase 13 adds a GET-only Market Scanner and active local instrument Watchlist. I
 
 Phase 14 transforms the platform into an interactive, full-stack Next.js web application operable from the FE. It introduces rich UI modules for Paper Trading (`/paper-trading`), Strategy & Trade Ideas (`/strategy`), Chronological Backtesting (`/backtesting`), and Interactive Technical Charts (`/charts`) with indicator/pattern overlays, eliminating CLI dependence while strictly maintaining the no-live-trading safety boundary. See [the Phase 14 interactive full-stack guide](docs/phase-14-interactive-fullstack-fe.md) for transport helpers, UI aesthetics, and feature operability.
 
-Phase 15 containerizes the entire stack (API, Web, and PostgreSQL/pgvector database) using Docker and Docker Compose. It establishes automated container startup workflows, including database schema migration, core instrument registration, and comprehensive market data seeding (600+ candlesticks, indicator snapshots, pattern detections, and 12 active trade proposals), enabling turnkey out-of-the-box UI operability with `docker compose up -d --build`. See [the Phase 15 Docker orchestration and seeding guide](docs/phase-15-docker-orchestration-seeding.md) for container networking, multi-stage Dockerfiles, and automated bootstrapper mechanics.
+Phase 15 containerizes the entire stack (API, Web, and PostgreSQL/pgvector database) using Docker and Docker Compose. The current system of record is the v2 stack: start it with `docker compose -f docker-compose.v2.yml up -d --build`. The unqualified `docker-compose.yml` stack is retained only as the v1 audit environment and must not be used for current ingestion or training. See [the Phase 15 Docker orchestration and seeding guide](docs/phase-15-docker-orchestration-seeding.md) for container networking, multi-stage Dockerfiles, and automated bootstrapper mechanics.
 
 Phase 19 makes XGBoost and LightGBM real trainable model families alongside the logistic baseline with `npm run ml:train -- --instrument NIFTY50 --timeframe 1d --from 2022-01-01 --to 2025-01-01 --algorithm xgboost`. Each family keeps its own promotion lineage by default, a shared `--model-key` makes two algorithms compete for one production slot on identical unseen data, and a boosted prediction is explained with exact TreeSHAP contributions rather than borrowed linear-coefficient language. See [the Phase 19 gradient-boosting guide](docs/phase-19-gradient-boosting-models.md) for defaults, determinism, and the explainer contract.
 
-Phase 20 adds the two remaining specified dashboard modules: a **Trade History** ledger (`/trade-history`) with realised profit factor, expectancy, reward multiples, and ordered drawdown across every local paper account, and a **Model Performance** registry (`/model-performance`) exposing each version's holdout metrics, hyperparameters, purged validation protocol, promotion decision, and training-to-validation gap. Both are GET-only and cannot alter paper activity or the model registry. See [the Phase 20 trade-history and model-performance guide](docs/phase-20-trade-history-model-performance.md) for the API contract and metric semantics.
+Phase 20 adds the two remaining specified dashboard modules: a **Trade History** ledger (`/trade-history`) with realised profit factor, expectancy, reward multiples, and ordered drawdown across every local paper account, and a **Model Performance** registry (now served under `/ai-models`) exposing each version's holdout metrics, hyperparameters, purged validation protocol, promotion decision, and training-to-validation gap. Both are GET-only and cannot alter paper activity or the model registry. See [the Phase 20 trade-history and model-performance guide](docs/phase-20-trade-history-model-performance.md) for the API contract and metric semantics.
 
 Phase 21 hardens model integrity. The feature schema moves to `ml-feature-v2`, where every column is a basis-point distance, a ratio, a bounded oscillator, or a confidence — no absolute rupee level, because a price level acts as a proxy for time and lets a chronological holdout leak its label distribution. A new leakage audit (`npm run ml:audit -- --instrument NIFTY50 --timeframe 1d --from 2024-01-01 --to 2026-01-01`) runs label-shuffle, feature-lag, and era-holdout checks, and blocks promotion when one fails. The promotion gate now also refuses a suspiciously high score or a negative training-to-holdout gap, reports the directional hit rate and coverage next to macro-F1, and supports walk-forward validation via `--folds N` where both the mean and the most recent fold must clear the floor. Retraining the previously promoted model under v2 dropped it from 0.703 to 0.288 macro-F1, which is what the leak was worth. See [the Phase 21 model-integrity guide](docs/phase-21-model-integrity-and-leakage-audits.md) for the schema mapping, gate order, and check thresholds.
+
+Phase 22 integrates FII/DII Institutional Flows and GIFT Nifty data via a daily automated NSE scraper (`npm run data:collect:institutional`), feeding into the ML features and the `AiAutonomousAgent` logic. It also introduces `npm run ml:prune` to automatically garbage-collect old candidate models, and finalizes the scalping views, which now live as a mode tab on the shared pages rather than as separate routes: `/strategy?mode=scalp` and `/trade-history?mode=scalp`. The former `/scalp-strategy` and `/scalp-trade-history` paths still resolve as redirects so older bookmarks and this document's earlier revisions keep working. See [the Phase 22 institutional & scalping guide](docs/phase-22-institutional-scalping.md) for data flow and UI isolation details.
+
+Phase 23 expands the Market News architecture by replacing the volatile mock memory-repository with real PostgreSQL persistence. It deprecates stale publishers (MoneyControl, ET) and integrates highly active external RSS feeds (LiveMint, Times of India, Business Standard, NDTV Profit). This ensures authentic publication timestamps and accurate, live sentiment scoring directly from the `market_news` table.
+
+Phase 24 introduces **Pending Paper Trades**. It adds the capability to submit simulated limit/stop-entry orders that wait for the market to trigger them instead of executing instantly at the current price. It relies on both live-tick checking and completed-candle checking to resolve `PENDING` states into `OPEN` positions, and implements End-of-Day cancellations to automatically void untriggered intraday limit orders at midnight.
+
+## The autonomous agent runs on a schedule, not on a page view
+
+`AiAutonomousAgent.tick` evaluates open paper trades against the live price, applies the news
+sentiment circuit breakers, and can open a position. It is driven by the scheduler's
+`AI_AGENT_TICK` job (`npm run agent:tick -- --symbols=NIFTY50,BANKNIFTY --timeframe=15m`), every
+two minutes during the session.
+
+It is deliberately **not** driven by the dashboard. `GET /api/v1/stream/live-agent` once called
+the tick on every one-second poll of every connected browser, which meant open positions were
+only evaluated while a tab happened to be open, the mutation rate limiter did not apply (it
+exempts GET by design), and a slow agent pass stalled the price feed the panel exists to show.
+That stream is now strictly read-only: it reports the agent's thoughts and reflections without
+advancing it. If nothing is scheduled, nothing trades.
+
+The agent scores **both directions** and trades whichever the evidence supports, in
+`strategy-engine/domain/directional-setup-score.ts`. This replaced a scorer whose every term was
+written for a long, after which the side was picked from the latest pattern's direction — so a
+bearish pattern inverted the position while keeping a score built for the opposite thesis, and the
+agent's most confident shorts were its most confidently bullish reads. Each thesis is now scored
+from the same evidence and the winner carries its own number; both are recorded on the proposal so
+a near-tie is distinguishable from conviction.
+
+Positions are opened through `OpenOptionPositionFromIdea`, the same gated path the paper-trading
+bot uses: `PrepareOptionEntry` picks a listed contract and fills at the observed ask (LONG → call,
+SHORT → put), then `evaluateRisk` applies the concurrent-position, daily-loss and drawdown limits.
+The agent previously called the trade repository directly with `fillPrice: livePrice`, so it booked
+a cash-style position **at the index level** — an instrument that cannot be bought — with no risk
+check and no way to cost it honestly. The sentiment circuit breaker's exit is priced from the
+observed contract bid for the same reason, and refuses to close a position it cannot price rather
+than closing it at the underlying's level.
+
+### The scorer is measured, and the short side is switched off because of it
+
+`npm run measure:directional-scorer -- --instrument=NIFTY50 --timeframe=15m` replays the scorer
+over stored history, applies the agent's ATR bracket, and resolves each one with the paper-trading
+exit rules (gap fills, conservative same-candle stop-first). On 15m with news/flow/macro held out,
+against a 0.3333 break-even hit rate:
+
+| instrument | side | gated (score ≥ 80) | gated expectancy | unconditional | delta |
+|---|---|---|---|---|---|
+| NIFTY50 | LONG | 0.3351 (n=367) | +0.005R | 0.3370 | −0.0019 |
+| NIFTY50 | SHORT | 0.2950 (n=261) | **−0.262R** | 0.3595 | −0.0645 |
+| BANKNIFTY | LONG | 0.3850 (n=413) | +0.182R | 0.3568 | +0.0282 |
+| BANKNIFTY | SHORT | 0.2478 (n=347) | **−0.376R** | 0.3315 | −0.0837 |
+
+The comparison that matters is gated against **unconditional** — taking that side on every bar
+regardless of score. The short gate is below break-even on both instruments, strongly negative in
+expectancy, and 6–8 points worse than its own baseline: it does not merely fail to select, it
+reliably selects *bad* shorts. So `AGENT_EXECUTABLE_SIDES` excludes SHORT. It is still scored and
+journalled — the population that would have traded stays visible — but it is not traded. The long
+gate is roughly neutral and stays enabled with no claim of edge.
+
+Two caveats. With news and flow held out the ceiling is 75, so clearing 80 requires a pattern; the
+gated population is "bars carrying a ≥0.7 pattern", and live the gate is reachable without one.
+And an earlier run of this measurement reported the short side at 0.3829 with *positive* expectancy
+— that run used a stale pattern set, because `analysis:detect-patterns` had no scheduled caller at
+all (NIFTY50 15m detections stopped six days short of its candles; BANKNIFTY had none ever). Since
+the gate effectively requires a pattern, stale patterns move the gated population and can invert
+the result. `PATTERN_DETECTION_INTRADAY` now refreshes them every 15 minutes during the session.
+
+Refreshing on a schedule created a second, subtler version of the same problem: a consumer reading
+between refreshes sees a partially computed layer and cannot tell it from a genuinely empty one.
+Detection now records what it covered in `candle_feature_coverage`, and the scalp research harness
+waits for that marker before capturing a decision. The table is deliberately never backfilled — an
+absent row means "unknown", which is the fact worth keeping.
+
+Scalp stop-loss and target geometry is being decided the same way, one gate at a time, in the
+[Exit Geometry Falsification Program](docs/exit-geometry-falsification-program-v1.md). Every study is
+registered with a content hash before it produces a figure, and every configuration examined is
+recorded — because the corrections for having searched take the number of configurations as an input,
+and reconstructed after the fact that number is always too small. Two inference defects were measured
+and closed along the way: a day-clustered interval at two clusters is simply the minimum day mean, and
+reading per-horizon intervals across a ten-horizon ladder fires at 8–17% under the null rather than 5%.
+Current verdict after two sessions is that nothing is established — which is what the harness should
+be saying.
 
 ## Safety boundary
 

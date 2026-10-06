@@ -12,6 +12,7 @@ function trade(overrides: Partial<PaperTrade> = {}): PaperTrade {
     side: "LONG",
     status: "CLOSED",
     quantity: 10,
+    remainingQuantity: 0,
     entryPrice: 100,
     stopLoss: 90,
     targetPrice: 120,

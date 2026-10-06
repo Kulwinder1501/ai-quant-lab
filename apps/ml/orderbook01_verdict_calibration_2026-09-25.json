@@ -1,0 +1,94 @@
+{
+  "pre_registration": "ORDERBOOK-01",
+  "eval_mode": "calibration",
+  "eval_start": "2026-01-01",
+  "eval_end": "2026-09-25",
+  "h1_r": {
+    "status": "PASS",
+    "n": 1855,
+    "accuracy": 0.8307,
+    "binomial_p": 0.0,
+    "levels_passed": 5,
+    "per_level": {
+      "ITH": {
+        "n": 182,
+        "accuracy": 0.8132,
+        "p_value": 0.0,
+        "pass": true
+      },
+      "SESSION_LOW": {
+        "n": 327,
+        "accuracy": 0.8685,
+        "p_value": 0.0,
+        "pass": true
+      },
+      "ITL": {
+        "n": 208,
+        "accuracy": 0.8702,
+        "p_value": 0.0,
+        "pass": true
+      },
+      "SWING_LOW": {
+        "n": 405,
+        "accuracy": 0.8765,
+        "p_value": 0.0,
+        "pass": true
+      },
+      "SWING_HIGH": {
+        "n": 430,
+        "accuracy": 0.8535,
+        "p_value": 0.0,
+        "pass": true
+      },
+      "SESSION_HIGH": {
+        "n": 303,
+        "accuracy": 0.6799,
+        "p_value": 0.0,
+        "pass": false
+      }
+    },
+    "criteria_checks": {
+      "acc_ge_0_72": true,
+      "p_le_0_01": true,
+      "n_ge_1000": true,
+      "levels_ge_4": true
+    }
+  },
+  "h1_m": {
+    "status": "PASS",
+    "n": 3304,
+    "accuracy": 0.7942,
+    "binomial_p": 0.0,
+    "criteria_checks": {
+      "acc_ge_0_78": true,
+      "p_le_0_01": true,
+      "n_ge_500": true
+    }
+  },
+  "h2": {
+    "status": "PASS",
+    "n": 5159,
+    "q4_minus_q1": 0.2364,
+    "permutation_p": 0.0,
+    "quartile_accs": [
+      0.6442,
+      0.7995,
+      0.9048,
+      0.8806
+    ],
+    "quartile_counts": [
+      1290,
+      1287,
+      1292,
+      1290
+    ],
+    "criteria_checks": {
+      "diff_ge_0_08": true,
+      "p_le_0_05": true
+    }
+  },
+  "verdict": "CASE A",
+  "verdict_description": "Full Edge Confirmed. Authorize DI as directional gate for Confluence setups.",
+  "executed_at": "2026-09-25T20:23:58.915010+05:30",
+  "_archived_note": "Preserved by the 2026-09-26 unverified-flag review before orderbook01_verdict.json was overwritten by a real --eval-mode oos rerun. This is the IN-SAMPLE/calibration result the original doc mislabeled as an OOS pass."
+}

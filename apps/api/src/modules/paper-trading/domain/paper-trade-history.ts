@@ -17,6 +17,7 @@ export interface PaperTradeHistoryRecord {
   instrumentName: string;
   timeframe: string | null;
   tradeIdeaId: string | null;
+  strategyName?: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: number;
@@ -37,6 +38,16 @@ export interface PaperTradeHistoryRecord {
   fees: number;
   slippage: number;
   notes: string;
+  /**
+   * The option contract, when the position is one.
+   *
+   * `side` cannot stand in for this. An option buyer is always LONG — `mapIdeaToOptionBuyerFill`
+   * hard-codes it — so a ledger showing only LONG/SHORT renders a bought call and a bought put
+   * identically, which is the ambiguity these three fields exist to remove.
+   */
+  optionType: "CE" | "PE" | null;
+  optionStrike: number | null;
+  underlyingSymbol: string | null;
 }
 
 export type TradeOutcomeFilter = "WIN" | "LOSS" | "BREAK_EVEN";
@@ -50,6 +61,9 @@ export interface ListPaperTradeHistoryInput {
   outcome?: TradeOutcomeFilter;
   openedFrom?: Date;
   openedTo?: Date;
+  /** Half-open IST activity-day range applied to either the open or close timestamp. */
+  activityFrom?: Date;
+  activityToExclusive?: Date;
   limit: number;
 }
 
@@ -166,9 +180,21 @@ export function summarizePaperTradeHistory(records: readonly PaperTradeHistoryRe
 
   const exitReasonCounts: Record<PaperTradeExitReason, number> = {
     STOP_LOSS: 0,
+    HARD_STOP: 0,
     TARGET: 0,
+    TARGET_REACHED: 0,
     MANUAL: 0,
     CANCELLED: 0,
+    EXPIRED: 0,
+    TRAP_DETECTED: 0,
+    T1_TARGET: 0,
+    T2_TARGET: 0,
+    RUNNER_TRAIL: 0,
+    MOMENTUM_STALL: 0,
+    SESSION_CLOSE: 0,
+    UNDERLYING_INVALIDATION: 0,
+    TIME_STOP: 0,
+    PREMIUM_TOLERANCE: 0,
   };
   for (const record of records) {
     if (record.exitReason) {

@@ -1,25 +1,30 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ai_quant_lab_ml.artifacts import ArtifactError, write_model_artifact
 from ai_quant_lab_ml.contracts import (
+    DIRECTIONAL_ALPHABET,
     FEATURE_SCHEMA_VERSION,
     DatasetRequest,
     EvaluationMetrics,
+    LabeledExample,
     PersistedModelVersion,
+    TemporalSplit,
 )
 from ai_quant_lab_ml.features import feature_definition, feature_schema
 from ai_quant_lab_ml.training import BaselineTrainingResult
 from train import (
     apply_audit_verdict,
+    cpcv_summary,
     default_model_key,
     fold_summary,
     parse_timestamp,
     promotion_assessment,
+    trivial_majority_metrics,
     validate_candidate_artifact,
 )
 
@@ -31,6 +36,21 @@ def metrics(macro_f1: float) -> EvaluationMetrics:
         macro_f1=macro_f1,
         sample_count=10,
         class_counts={"BEARISH": 3, "NEUTRAL": 4, "BULLISH": 3},
+    )
+
+
+def labeled(index: int, label: str) -> LabeledExample:
+    observed_at = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=index)
+    return LabeledExample(
+        candle_id=f"candle-{index}",
+        instrument_id="instrument-1",
+        symbol="NIFTY50",
+        timeframe="1d",
+        observed_at=observed_at,
+        label_available_at=observed_at + timedelta(days=5),
+        forward_return=0.0,
+        label=label,
+        features={"feature.one": float(index)},
     )
 
 
@@ -63,6 +83,10 @@ def assess(
         "minimum_initial_macro_f1": 0.38,
         "maximum_plausible_macro_f1": 0.60,
         "override_suspicious": False,
+        # The sample-size floors are neutralised here so each test exercises the one
+        # rule it names. They have their own tests below.
+        "minimum_validation_rows": 1,
+        "minimum_directional_predictions": 1,
     }
     arguments.update(overrides)
     return promotion_assessment(**arguments)  # type: ignore[arg-type]
@@ -80,6 +104,106 @@ def incumbent() -> PersistedModelVersion:
         feature_schema=({"name": "feature.one"},),
         validation_metrics={},
     )
+
+
+class PromotionSampleSizeGateTests(unittest.TestCase):
+    """A macro-F1 floor cannot discriminate on a holdout too small to resolve it."""
+
+    def test_a_passing_score_on_too_few_rows_is_refused(self) -> None:
+        # The real case this came from: a 15m candidate scored 0.4023 on 24 rows,
+        # cleared the 0.38 floor, and was declared promotion-eligible.
+        thin = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=metrics(0.4023),
+            training_rows=91,
+            validation_rows=24,
+        )
+        qualifies, assessment = assess(
+            0.4023,
+            candidate=thin,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=1,
+        )
+        self.assertFalse(qualifies)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+        self.assertIn("24 validation rows", str(assessment["reason"]))
+
+    def test_sample_size_is_checked_before_the_score_floor(self) -> None:
+        """Insufficient evidence must not be reported as a quality failure.
+
+        Reporting a too-small holdout as INITIAL_BASELINE_THRESHOLD_NOT_MET would
+        send someone off to improve a model when the actual problem is the window.
+        """
+
+        _, assessment = assess(0.10, minimum_validation_rows=60, minimum_directional_predictions=1)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+
+    def test_sample_size_is_checked_before_a_suspiciously_high_score(self) -> None:
+        _, assessment = assess(0.95, minimum_validation_rows=60, minimum_directional_predictions=1)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_VALIDATION_EVIDENCE")
+
+    def test_a_model_that_almost_never_commits_has_no_readable_hit_rate(self) -> None:
+        directional = EvaluationMetrics(
+            accuracy=0.5,
+            balanced_accuracy=0.5,
+            macro_f1=0.45,
+            sample_count=100,
+            class_counts={"BEARISH": 30, "NEUTRAL": 40, "BULLISH": 30},
+            directional_predictions=8,
+            directional_hit_rate=0.25,
+            coverage=0.08,
+        )
+        thin = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=directional,
+            training_rows=400,
+            validation_rows=100,
+        )
+        qualifies, assessment = assess(
+            0.45,
+            candidate=thin,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=30,
+        )
+        self.assertFalse(qualifies)
+        self.assertEqual(assessment["decision"], "INSUFFICIENT_DIRECTIONAL_EVIDENCE")
+
+    def test_sufficient_evidence_reaches_the_score_floor(self) -> None:
+        """With enough rows and enough directional calls the gate judges quality again."""
+
+        ample = EvaluationMetrics(
+            accuracy=0.5,
+            balanced_accuracy=0.5,
+            macro_f1=0.45,
+            sample_count=200,
+            class_counts={"BEARISH": 60, "NEUTRAL": 80, "BULLISH": 60},
+            directional_predictions=120,
+            directional_hit_rate=0.52,
+            coverage=0.6,
+        )
+        strong = BaselineTrainingResult(
+            algorithm="sklearn-logistic-regression-v1",
+            model=None,
+            feature_schema=("feature.one",),
+            training_metrics=metrics(0.50),
+            validation_metrics=ample,
+            training_rows=800,
+            validation_rows=200,
+        )
+        qualifies, assessment = assess(
+            0.45,
+            candidate=strong,
+            minimum_validation_rows=60,
+            minimum_directional_predictions=30,
+        )
+        self.assertTrue(qualifies)
+        self.assertEqual(assessment["decision"], "INITIAL_BASELINE_THRESHOLD_MET")
 
 
 class TrainCliPolicyTests(unittest.TestCase):
@@ -101,6 +225,59 @@ class TrainCliPolicyTests(unittest.TestCase):
         )
         self.assertNotEqual(default_model_key(five_bar, "logistic"), default_model_key(ten_bar, "logistic"))
         self.assertNotEqual(default_model_key(five_bar, "logistic"), default_model_key(wider_band, "logistic"))
+
+    def test_a_label_scheme_gets_its_own_lineage_and_only_its_own_parameters(self) -> None:
+        """A scheme is a different question, so it must never share a PRODUCTION slot.
+
+        The key also carries only the parameters that shape *that* scheme's target:
+        stamping a neutral band or barrier multiples onto a volatility model would
+        name a geometry it does not have, and would split one model's lineage in two
+        whenever an unrelated flag moved.
+        """
+
+        from ai_quant_lab_ml.contracts import (
+            LABEL_SCHEME_TRIPLE_BARRIER,
+            LABEL_SCHEME_VOLATILITY_EXPANSION,
+        )
+
+        common = {
+            "instrument_symbol": "NIFTY50",
+            "timeframe": "1d",
+            "data_window_start": datetime(2024, 1, 1, tzinfo=UTC),
+            "data_window_end": datetime(2024, 2, 1, tzinfo=UTC),
+            "data_cutoff_at": datetime(2024, 2, 2, tzinfo=UTC),
+            "horizon_bars": 10,
+            "neutral_threshold_bps": 50.0,
+        }
+        directional = DatasetRequest(**common)
+        barrier = DatasetRequest(**common, label_scheme=LABEL_SCHEME_TRIPLE_BARRIER)
+        volatility = DatasetRequest(**common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION)
+
+        keys = {
+            default_model_key(directional, "logistic"),
+            default_model_key(barrier, "logistic"),
+            default_model_key(volatility, "logistic"),
+        }
+        self.assertEqual(len(keys), 3, "each scheme must get a distinct lineage")
+
+        volatility_key = default_model_key(volatility, "logistic")
+        # Named for the target family, not "market-direction".
+        self.assertTrue(volatility_key.startswith("volatility-expansion-logistic"))
+        self.assertIn("band0.25", volatility_key)
+        # The directional-only label parameters must not appear.
+        self.assertNotIn("neutral-", volatility_key)
+        self.assertNotIn("bu1", volatility_key)
+
+        # A changed band is a changed target, so it is a different lineage...
+        wider = DatasetRequest(
+            **common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION, expansion_band=0.5
+        )
+        self.assertNotEqual(volatility_key, default_model_key(wider, "logistic"))
+        # ...while an unused barrier flag must not move a volatility key at all.
+        unused_barrier = DatasetRequest(
+            **common, label_scheme=LABEL_SCHEME_VOLATILITY_EXPANSION, barrier_upper_multiple=3.0
+        )
+        self.assertEqual(volatility_key, default_model_key(unused_barrier, "logistic"))
 
     def test_each_algorithm_gets_its_own_default_promotion_lineage(self) -> None:
         request = DatasetRequest(
@@ -207,6 +384,44 @@ class TrainCliPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(summary["spreadMacroF1"], 0.20, places=10)
         # The final fold is the one whose artifact is persisted and promoted.
         self.assertAlmostEqual(summary["finalFoldMacroF1"], 0.40, places=10)
+
+    def test_cpcv_summary_separates_a_macro_f1_edge_from_an_accuracy_edge(self) -> None:
+        # The real 2026-08-01 measurement on NIFTY50 daily, in miniature: the model
+        # beat the constant predictor on macro-F1 in every split and lost to it on
+        # accuracy in every split. Reporting only macro-F1 would have read as a
+        # discovered edge when the model was getting fewer rows right.
+        model = [
+            EvaluationMetrics(accuracy=0.35, balanced_accuracy=0.33, macro_f1=0.29, sample_count=290, class_counts={}),
+            EvaluationMetrics(accuracy=0.37, balanced_accuracy=0.35, macro_f1=0.32, sample_count=290, class_counts={}),
+        ]
+        trivial = [
+            EvaluationMetrics(accuracy=0.49, balanced_accuracy=0.33, macro_f1=0.22, sample_count=290, class_counts={}),
+            EvaluationMetrics(accuracy=0.52, balanced_accuracy=0.33, macro_f1=0.23, sample_count=290, class_counts={}),
+        ]
+
+        summary = cpcv_summary(model, trivial, groups=6, test_groups=2, embargo_fraction=0.01)
+
+        self.assertEqual(summary["method"], "CPCV_V1")
+        self.assertEqual(summary["splits"], 2)
+        self.assertGreater(summary["macroF1MinusTrivial"]["mean"], 0)
+        self.assertEqual(summary["macroF1WinRateVsTrivial"], 1.0)
+        # The half that matters: fewer rows right than always guessing one class.
+        self.assertLess(summary["accuracyMinusTrivial"]["mean"], 0)
+        self.assertEqual(summary["accuracyWinRateVsTrivial"], 0.0)
+
+    def test_trivial_baseline_predicts_the_training_majority_not_the_holdout_majority(self) -> None:
+        # A deployed constant predictor only knows the training distribution, so
+        # taking the majority from the holdout would give the baseline a peek at the
+        # answers and understate the model's disadvantage.
+        train = [labeled(index, "BULLISH") for index in range(7)] + [labeled(100 + index, "BEARISH") for index in range(3)]
+        validation = [labeled(200 + index, "BEARISH") for index in range(8)] + [labeled(300, "BULLISH")]
+        split = TemporalSplit(train=tuple(train), validation=tuple(validation), purge_count=0)
+
+        baseline = trivial_majority_metrics(split, alphabet=DIRECTIONAL_ALPHABET)
+
+        # Predicts BULLISH throughout (the training majority), so it is right on the
+        # single BULLISH holdout row out of nine.
+        self.assertAlmostEqual(baseline.accuracy, 1 / 9, places=10)
 
     def test_parses_dates_and_utc_timestamps_deterministically(self) -> None:
         self.assertEqual(

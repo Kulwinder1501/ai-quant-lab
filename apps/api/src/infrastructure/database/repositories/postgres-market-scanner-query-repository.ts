@@ -1,10 +1,12 @@
 import type { QueryResultRow } from "pg";
 import type { InstrumentType } from "../../../modules/market-data/domain/instrument.js";
 import type { ModelPredictionLabel, ModelStage } from "../../../modules/model-predictions/domain/model-prediction.js";
-import type {
-  CandlestickPatternCode,
-  PatternDirection,
-  PriceActionEventCode,
+import {
+  candlestickPatternCodes,
+  priceActionEventCodes,
+  type CandlestickPatternCode,
+  type PatternDirection,
+  type PriceActionEventCode,
 } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { IndicatorCode, IndicatorValues } from "../../../modules/technical-analysis/domain/technical-indicator.js";
 import type {
@@ -71,7 +73,7 @@ interface ActiveResearchStrategyRow extends QueryResultRow {
   strategy_version: string | number;
 }
 
-const knownInstrumentTypes = ["INDEX", "EQUITY", "ETF"] as const;
+const knownInstrumentTypes = ["INDEX", "EQUITY", "ETF", "OPTION", "FUTURE"] as const;
 const knownIndicatorCodes = [
   "SMA",
   "EMA",
@@ -81,35 +83,15 @@ const knownIndicatorCodes = [
   "VWAP",
   "BOLLINGER_BANDS",
   "SUPERTREND",
+  "FVG",
+  "BOS",
+  "CHOCH",
+  "LIQUIDITY_SWEEP",
+  "ORDER_BLOCK",
+  "EQUILIBRIUM_ZONE",
 ] as const;
-const knownPatternCodes = [
-  "DOJI",
-  "HAMMER",
-  "HANGING_MAN",
-  "SHOOTING_STAR",
-  "BULLISH_ENGULFING",
-  "BEARISH_ENGULFING",
-  "MORNING_STAR",
-  "EVENING_STAR",
-  "BULLISH_HARAMI",
-  "BEARISH_HARAMI",
-  "THREE_WHITE_SOLDIERS",
-  "THREE_BLACK_CROWS",
-  "INSIDE_BAR",
-  "OUTSIDE_BAR",
-] as const;
-const knownPriceActionEventCodes = [
-  "BREAKOUT",
-  "BREAKDOWN",
-  "SUPPORT",
-  "RESISTANCE",
-  "UPTREND",
-  "DOWNTREND",
-  "RANGE",
-  "PULLBACK",
-  "SWING_HIGH",
-  "SWING_LOW",
-] as const;
+const knownPatternCodes: readonly string[] = candlestickPatternCodes;
+const knownPriceActionEventCodes: readonly string[] = priceActionEventCodes;
 const knownDirections = ["BULLISH", "BEARISH", "NEUTRAL"] as const;
 const knownModelStages = ["CANDIDATE", "PRODUCTION", "REJECTED", "ARCHIVED"] as const;
 
@@ -183,7 +165,7 @@ function asScannerExchange(value: string): ScannerExchange {
 }
 
 function asInstrumentType(value: string): InstrumentType {
-  if (!knownInstrumentTypes.includes(value as InstrumentType)) {
+  if (!(knownInstrumentTypes as readonly string[]).includes(value)) {
     throw new Error("Database returned an invalid instrument type.");
   }
   return value as InstrumentType;
@@ -520,6 +502,12 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
             ON indicator_definitions.id = indicator_snapshots.indicator_definition_id
           WHERE indicator_snapshots.candle_id = c.id
             AND indicator_snapshots.calculated_at <= CURRENT_TIMESTAMP
+            AND (
+              indicator_definitions.indicator_code NOT IN (
+                'FVG', 'BOS', 'CHOCH', 'LIQUIDITY_SWEEP', 'ORDER_BLOCK', 'EQUILIBRIUM_ZONE'
+              )
+              OR indicator_definitions.algorithm_version = 'smc-v2'
+            )
         ), '[]'::jsonb) AS indicators,
         COALESCE((
           SELECT jsonb_agg(
@@ -572,6 +560,11 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           mp.evidence_cutoff_at,
           mp.model_version_id
         FROM model_predictions mp
+        -- PRODUCTION only: with the daily model competition, SECONDARY and
+        -- COMPETITOR pool members shadow-predict on the same candles. Only the
+        -- PRIMARY (the sole PRODUCTION version) may surface a trade direction.
+        INNER JOIN model_versions pmv
+          ON pmv.id = mp.model_version_id AND pmv.stage = 'PRODUCTION'
         WHERE mp.instrument_id = c.instrument_id
           AND mp.source_candle_id = c.id
           AND mp.created_at <= CURRENT_TIMESTAMP

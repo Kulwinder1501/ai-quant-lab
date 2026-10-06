@@ -18,6 +18,7 @@ interface TradeHistoryRow extends QueryResultRow {
   instrument_name: string;
   timeframe: string | null;
   trade_idea_id: string | null;
+  strategy_name: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: string | number;
@@ -32,6 +33,9 @@ interface TradeHistoryRow extends QueryResultRow {
   fees: string | number;
   slippage: string | number;
   notes: string | null;
+  option_type: "CE" | "PE" | null;
+  option_strike: string | number | null;
+  underlying_symbol: string | null;
 }
 
 function asFiniteNumber(value: string | number, field: string): number {
@@ -76,6 +80,7 @@ function toRecord(row: TradeHistoryRow): PaperTradeHistoryRecord {
     instrumentName: row.instrument_name,
     timeframe: row.timeframe,
     tradeIdeaId: row.trade_idea_id,
+    strategyName: row.strategy_name,
     side: row.side,
     status: row.status,
     quantity,
@@ -93,6 +98,9 @@ function toRecord(row: TradeHistoryRow): PaperTradeHistoryRecord {
     fees: asFiniteNumber(row.fees, "paper trade fees"),
     slippage: asFiniteNumber(row.slippage, "paper trade slippage"),
     notes: row.notes ?? "",
+    optionType: row.option_type,
+    optionStrike: asOptionalNumber(row.option_strike, "paper trade option strike"),
+    underlyingSymbol: row.underlying_symbol,
   };
 }
 
@@ -137,6 +145,15 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
       parameters.push(input.openedTo);
       conditions.push(`pt.opened_at <= $${parameters.length}`);
     }
+    if (input.activityFrom !== undefined && input.activityToExclusive !== undefined) {
+      parameters.push(input.activityFrom, input.activityToExclusive);
+      const fromParameter = parameters.length - 1;
+      const toParameter = parameters.length;
+      conditions.push(`(
+        (pt.opened_at >= $${fromParameter} AND pt.opened_at < $${toParameter})
+        OR (pt.closed_at >= $${fromParameter} AND pt.closed_at < $${toParameter})
+      )`);
+    }
     if (input.outcome === "WIN") {
       conditions.push("pt.realized_pnl > 0");
     } else if (input.outcome === "LOSS") {
@@ -144,7 +161,7 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
     } else if (input.outcome === "BREAK_EVEN") {
       conditions.push("pt.realized_pnl = 0");
     }
-    parameters.push(input.limit);
+        parameters.push(input.limit);
 
     const result = await this.database.query<TradeHistoryRow>(`
       SELECT
@@ -154,8 +171,9 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
         pt.instrument_id,
         i.symbol AS instrument_symbol,
         i.display_name AS instrument_name,
-        c.timeframe AS timeframe,
+        COALESCE(c.timeframe, CASE WHEN ti.evidence->>'strategy' = 'momentum-scalp' THEN '1m' ELSE '1d' END) AS timeframe,
         pt.trade_idea_id,
+        s.name AS strategy_name,
         pt.side,
         pt.status,
         pt.quantity,
@@ -169,12 +187,17 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
         pt.realized_pnl,
         pt.fees,
         pt.slippage,
-        pt.notes
+        pt.notes,
+        pt.option_type,
+        pt.option_strike,
+        pt.underlying_symbol
       FROM paper_trades pt
       INNER JOIN paper_accounts pa ON pa.id = pt.account_id
       INNER JOIN instruments i ON i.id = pt.instrument_id
       LEFT JOIN trade_ideas ti ON ti.id = pt.trade_idea_id
       LEFT JOIN candles c ON c.id = ti.source_candle_id
+      LEFT JOIN strategy_versions sv ON sv.id = ti.strategy_version_id
+      LEFT JOIN strategies s ON s.id = sv.strategy_id
       ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
       ORDER BY pt.opened_at DESC, pt.id DESC
       LIMIT $${parameters.length}

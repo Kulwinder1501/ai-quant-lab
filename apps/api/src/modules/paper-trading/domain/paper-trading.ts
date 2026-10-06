@@ -1,20 +1,50 @@
 import type { TradeIdeaStatus, TradeSide } from "../../strategy-engine/domain/strategy.js";
 
-export type PaperTradeStatus = "OPEN" | "CLOSED" | "CANCELLED";
-export type PaperTradeExitReason = "STOP_LOSS" | "TARGET" | "MANUAL" | "CANCELLED";
-export type PaperTradeEventType = "OPENED" | "STOP_LOSS_HIT" | "TARGET_HIT" | "MANUALLY_CLOSED" | "CANCELLED";
+export type PaperTradeStatus = "PENDING" | "OPEN" | "CLOSED" | "CANCELLED";
+export type PaperTradeExitReason =
+  | "STOP_LOSS"
+  | "HARD_STOP"
+  | "TARGET"
+  | "TARGET_REACHED"
+  | "MANUAL"
+  | "CANCELLED"
+  | "EXPIRED"
+  | "TRAP_DETECTED"
+  | "T1_TARGET"
+  | "T2_TARGET"
+  | "RUNNER_TRAIL"
+  | "MOMENTUM_STALL"
+  /** The 15:15 IST intraday square-off. See `domain/session-close.ts`. */
+  | "SESSION_CLOSE"
+  | "UNDERLYING_INVALIDATION"
+  | "TIME_STOP"
+  | "PREMIUM_TOLERANCE";
+export type PaperTradeEventType =
+  | "PENDING_PLACED"
+  | "OPENED"
+  | "STOP_LOSS_HIT"
+  | "TARGET_HIT"
+  | "MANUALLY_CLOSED"
+  | "CANCELLED"
+  | "EXPIRED"
+  | "TRAP_DETECTED"
+  | "PARTIAL_EXIT";
+export type OptionContractType = "CE" | "PE";
 
 export interface PaperAccount {
   id: string;
   name: string;
   openingBalance: number;
-  currency: "INR";
+  /** Every account was INR until AutoBot-Gold's USD-quoted XAU_USD (Twelve Data, direct-fill). */
+  currency: "INR" | "USD";
   isActive: boolean;
 }
 
 export interface CreatePaperAccountInput {
   name: string;
   openingBalance: number;
+  /** Defaults to "INR" at the repository layer so every existing caller is unaffected. */
+  currency?: "INR" | "USD";
 }
 
 export interface PaperAccountRepository {
@@ -30,11 +60,32 @@ export interface PaperTrade {
   instrumentId: string;
   instrumentSymbol?: string;
   timeframe: string | null;
+  /**
+   * The strategy key that produced this trade, or null when the lineage is absent.
+   *
+   * Null is meaningful and must be shown as unknown rather than filled in. The dashboard used to
+   * derive the label from the timeframe -- `timeframe === "1m" ? "momentum-scalp" :
+   * "trend-breakout"` -- so a `momentum-scalp-pattern` position on 5m was displayed as
+   * `trend-breakout`, a strategy marked TERMINAL_UNOWNED and traded by no bot. An invented
+   * attribution is worse than an absent one: it is indistinguishable from a real one.
+   */
+  strategyKey?: string | null;
   side: TradeSide;
   status: PaperTradeStatus;
   quantity: number;
+  remainingQuantity: number;
   entryPrice: number;
   stopLoss: number;
+  /**
+   * The stop the trade OPENED with, which never moves.
+   *
+   * `stopLoss` does move -- break-even advances it at +0.5R -- so anything that needs the trade's
+   * original geometry has to read this instead. The stall rule recomputed risk from the live stop
+   * and switched itself off the moment break-even fired; see migration 106.
+   */
+  initialStopLoss?: number;
+  /** First instant at which the currently persisted stopLoss was active. */
+  stopLossEffectiveAt?: Date;
   targetPrice: number;
   openedAt: Date;
   closedAt: Date | null;
@@ -43,9 +94,71 @@ export interface PaperTrade {
   realizedPnl: number | null;
   /** Total simulated INR costs applied to this trade so far. */
   fees: number;
+  /** Itemised entry/exit fee ledger (Zerodha/NSE options schedule). */
+  feeBreakdown?: Record<string, unknown>;
   /** Total simulated INR slippage costs applied to this trade so far. */
   slippage: number;
   notes: string;
+  /** Option-buyer contract fields; all null for legacy / non-option trades. */
+  optionStrike?: number | null;
+  optionExpiry?: Date | null;
+  optionType?: OptionContractType | null;
+  underlyingSymbol?: string | null;
+  underlyingEntryPrice?: number | null;
+  /**
+   * The underlying's real observed level at the instant this position actually filled, and null
+   * when none was observed.
+   *
+   * Distinct from `underlyingEntryPrice`: that is the idea's signal-candle level, recorded at the
+   * moment the trade idea was generated. Acceptance checks, sizing and cadence put real lag
+   * between a signal and its fill, and the underlying moves in that window -- a gap of 19 to 158
+   * points was measured across 8 recent BANKNIFTY trades. Use this field, not
+   * `underlyingEntryPrice`, for any "did the underlying move during the hold" question; keep using
+   * `underlyingEntryPrice` for anything anchored to the thesis/decision (stop and target distances,
+   * `UnderlyingOutcome.entryReference`, and similar), since those are computed from the signal
+   * candle by construction.
+   *
+   * Populated going forward from the same real-time quote that fills the option leg
+   * (`option_premium_ticks.underlying_value`, or the chain snapshot's `underlying_value` as a
+   * fallback). A historical trade may instead carry a value reconstructed by a one-off backfill
+   * from the nearest tick within tolerance -- see `underlyingFillPriceSource` to tell the two
+   * apart. See migration 120.
+   */
+  underlyingFillPrice?: number | null;
+  /**
+   * Provenance for `underlyingFillPrice`. 'OPTION_CHAIN_QUOTE' / 'OPTION_PREMIUM_TICK_ASK' mean
+   * observed in real time, from the same quote that filled the option. 'BACKFILLED_NEAREST_TICK'
+   * means reconstructed after the fact from the nearest `option_premium_ticks` row -- a weaker
+   * claim. Null exactly when `underlyingFillPrice` is null.
+   */
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  /** Exit state machine version: 'LEGACY' for pre-O1 trades, 'O1' for frozen O1 state machine. */
+  exitEngineVersion?: "LEGACY" | "O1";
+  /** Underlying trade direction captured at entry ('LONG' or 'SHORT'). */
+  underlyingDirection?: "LONG" | "SHORT" | null;
+  /** Observed underlying fill price at entry. */
+  entryUnderlying?: number | null;
+  /** Immutable underlying structural stop price captured at entry from trade idea. */
+  invalidationLevelAtEntry?: number | null;
+  /** Immutable initial risk distance |entryUnderlying - invalidationLevelAtEntry|. */
+  initialRiskDistance?: number | null;
+  /**
+   * The underlying's level observed at the exit instant, and null on an open position.
+   *
+   * Populated only by the observed-tick exit path, from the crossing sample itself. Null on a close
+   * resolved without such a sample, and on every trade closed before migration 089 -- so null means
+   * "not observed", never zero, and the two references must be read as a pair or not at all.
+   */
+  underlyingExitPrice?: number | null;
+  entryIv?: number | null;
+  /**
+   * The regime observed when this trade was opened, for research and audit only.
+   *
+   * Null means the observation was not recorded, never that the market had no regime. No execution
+   * path reads this, and nothing must start: the moment a gate depends on it, an unrecorded
+   * observation becomes a behaviour change rather than a gap in the record.
+   */
+  regimeObservationId?: string | null;
 }
 
 export interface PaperTradeEvent {
@@ -58,6 +171,18 @@ export interface PaperTradeEvent {
   occurredAt: Date;
 }
 
+export interface OptionContractSpec {
+  optionStrike: number;
+  optionExpiry: Date;
+  optionType: OptionContractType;
+  underlyingSymbol: string;
+  underlyingEntryPrice?: number;
+  underlyingFillPrice?: number | null;
+  underlyingFillPriceSource?: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | "BACKFILLED_NEAREST_TICK" | null;
+  invalidationLevelAtEntry?: number | null;
+  entryIv: number;
+}
+
 export interface OpenPaperTradeInput {
   accountId: string;
   tradeIdeaId: string;
@@ -68,16 +193,88 @@ export interface OpenPaperTradeInput {
   entryFees: number;
   entrySlippage: number;
   notes: string;
+  status?: PaperTradeStatus; // If "PENDING", trade waits to be filled
+  /** Optional itemised entry fee ledger persisted on the trade. */
+  feeBreakdown?: Record<string, unknown>;
+  /**
+   * Option-buyer fills store premium-space stop/target and are always LONG
+   * (buying CE or PE). When set, these override the trade idea's index geometry.
+   */
+  stopLossOverride?: number;
+  targetPriceOverride?: number;
+  sideOverride?: TradeSide;
+  /**
+   * The real bullish/bearish thesis direction, persisted as `underlying_direction`.
+   *
+   * Distinct from `sideOverride`: an option buyer's `side` is always `"LONG"` (long the
+   * contract), whichever way the underlying view points, so `sideOverride` can never carry
+   * this. Omit only for a direct-fill (non-option) trade, where the trade's own `side` already
+   * is the thesis direction and the repository falls back to it.
+   */
+  underlyingDirection?: TradeSide | null;
+  /** When set, persists first-class option contract columns for live repricing. */
+  optionContract?: OptionContractSpec;
+  /** Result of the strict 11-factor options entry validation checklist. */
+  optionsValidationResult?: Record<string, unknown>;
+  /**
+   * Regime observed at decision time, stamped for research. Optional by design: a caller that
+   * cannot record an observation still opens the trade, unstamped.
+   */
+  regimeObservationId?: string | null;
 }
 
 export interface ClosePaperTradeInput {
   paperTradeId: string;
   exitPrice: number;
-  exitReason: Exclude<PaperTradeExitReason, "CANCELLED">;
+  exitReason: PaperTradeExitReason;
   closedAt: Date;
   exitFees: number;
   exitSlippage: number;
   details: Record<string, unknown>;
+  /** Optional itemised exit fee ledger merged into fee_breakdown.exit. */
+  feeBreakdown?: Record<string, unknown>;
+  /**
+   * The underlying's observed level at the exit instant, or null when this path observed none.
+   *
+   * Optional because most close paths cannot supply it honestly: only the observed-tick barrier scan
+   * has a sample pairing an option quote to an underlying level at one instant. Omitting it stores
+   * null, which reads as "not observed" rather than zero -- see migration 089.
+   */
+  underlyingExitPrice?: number | null;
+}
+
+export interface PaperTradePartialExit {
+  id: string;
+  paperTradeId: string;
+  exitPrice: number;
+  quantity: number;
+  exitReason: PaperTradeExitReason;
+  exitFees: number;
+  realizedPnl: number;
+  exitedAt: Date;
+  idempotencyKey?: string | null;
+  notes?: string | null;
+  createdAt: Date;
+}
+
+export interface ExecuteExitSliceInput {
+  paperTradeId: string;
+  exitPrice: number;
+  quantity: number;
+  exitReason: PaperTradeExitReason;
+  exitFees: number;
+  exitSlippage?: number;
+  exitedAt: Date;
+  idempotencyKey?: string;
+  notes?: string;
+  details?: Record<string, unknown>;
+  feeBreakdown?: Record<string, unknown>;
+}
+
+export interface FillPendingTradeInput {
+  paperTradeId: string;
+  fillPrice: number;
+  filledAt: Date;
 }
 
 export interface PaperTradeRepository {
@@ -85,8 +282,15 @@ export interface PaperTradeRepository {
   openFromTradeIdea(input: OpenPaperTradeInput): Promise<PaperTrade>;
   findOpenById(id: string): Promise<PaperTrade | null>;
   listOpenByAccount(accountId: string): Promise<PaperTrade[]>;
+  listPendingByAccount(accountId: string): Promise<PaperTrade[]>;
   /** Atomically closes an OPEN trade and records its corresponding exit event. */
   close(input: ClosePaperTradeInput): Promise<PaperTrade>;
+  /** Atomically executes an exit slice, records partial exit, updates remaining_quantity and realized_pnl. */
+  executeExitSlice(input: ExecuteExitSliceInput): Promise<PaperTrade>;
+  /** Lists all partial exits recorded for a given trade id. */
+  listPartialExitsByTradeId(paperTradeId: string): Promise<PaperTradePartialExit[]>;
+  /** Fills a PENDING trade, moving it to OPEN. */
+  fillPendingTrade(input: FillPendingTradeInput): Promise<PaperTrade>;
   updateStopLoss?(id: string, newStopLoss: number, reason?: string): Promise<void>;
   findAccountPerformanceData(accountId: string): Promise<PaperAccountPerformanceData | null>;
 }

@@ -4,12 +4,21 @@ import { decidePaperTradeExit } from "../../paper-trading/domain/paper-trade-exi
 import type { PaperTrade } from "../../paper-trading/domain/paper-trading.js";
 import { calculateBacktestMetrics, calculateMonthlyPerformance, type BacktestCounters } from "./backtest-metrics.js";
 import type { BacktestConfiguration, BacktestEvaluationResult, BacktestExitReason, BacktestTrade } from "./backtesting.js";
+import { detectOpposingLiquiditySweep } from "./opposing-sweep-exit.js";
+import { advanceUnderlyingProtectiveStop } from "./underlying-protective-stop.js";
+import type { ProtectiveStopPolicy } from "../../paper-trading/domain/protective-stop.js";
+import { isMomentumStalled, type MomentumStallPolicy } from "./momentum-stall-exit.js";
 
 export const defaultBacktestConfiguration: BacktestConfiguration = {
   quantity: 1,
   initialCapital: 100_000,
   feePerOrder: 0,
   slippageBps: 0,
+  // Fixed quantity stays the default so previously recorded runs remain
+  // reproducible. Constant-risk sizing has to be asked for.
+  positionSizing: "FIXED_QUANTITY",
+  riskFractionPerTrade: 0.01,
+  marginFraction: 1,
   entryPolicy: "NEXT_CANDLE_OPEN",
   invalidGapPolicy: "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET",
   exitPolicy: "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST",
@@ -27,6 +36,8 @@ interface OpenPosition {
   sourceCandleId: string;
   entryCandleId: string;
   entryFees: number;
+  /** Best price reached in the trade's favour since entry (high for LONG, low for SHORT). */
+  peakFavorable: number;
 }
 
 /** Minimal contract needed by the replay engine, kept injectable for deterministic tests. */
@@ -51,11 +62,17 @@ function assertConfiguration(configuration: BacktestConfiguration): void {
     || !Number.isFinite(configuration.initialCapital) || configuration.initialCapital <= 0
     || !Number.isFinite(configuration.feePerOrder) || configuration.feePerOrder < 0
     || !Number.isFinite(configuration.slippageBps) || configuration.slippageBps < 0 || configuration.slippageBps >= 10_000
+    || (configuration.positionSizing !== "FIXED_QUANTITY" && configuration.positionSizing !== "CONSTANT_RISK_FRACTION")
+    || !Number.isFinite(configuration.riskFractionPerTrade)
+    || configuration.riskFractionPerTrade <= 0 || configuration.riskFractionPerTrade > 1
+    || !Number.isFinite(configuration.marginFraction)
+    || configuration.marginFraction <= 0 || configuration.marginFraction > 1
     || configuration.entryPolicy !== "NEXT_CANDLE_OPEN"
     || configuration.invalidGapPolicy !== "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET"
     || configuration.exitPolicy !== "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST"
     || configuration.endOfDataExitPolicy !== "CLOSE_AT_FINAL_COMPLETED_CANDLE_CLOSE"
-    || configuration.maxConcurrentPositions !== 1) {
+    || !Number.isInteger(configuration.maxConcurrentPositions)
+    || configuration.maxConcurrentPositions < 1) {
     throw new Error("Backtest configuration is invalid.");
   }
 }
@@ -123,16 +140,41 @@ function exitFillPrice(side: PaperTrade["side"], rawExit: number, slippageBps: n
   return side === "LONG" ? roundDownToTick(slipped, tickSize) : roundUpToTick(slipped, tickSize);
 }
 
+/**
+ * Units to fill, or null when the risk budget cannot buy a whole unit.
+ *
+ * Under constant-risk sizing the quantity falls as the stop widens, so the
+ * capital at risk is the same on every trade and a wide-stop trade can no longer
+ * outweigh several narrow-stop ones. Rounding is downward so the realised risk
+ * never exceeds the configured budget.
+ */
+function resolveQuantity(
+  proposal: ProposedTradeIdea,
+  fillPrice: number,
+  configuration: BacktestConfiguration,
+): number | null {
+  if (configuration.positionSizing === "FIXED_QUANTITY") return configuration.quantity;
+  const riskPerUnit = Math.abs(fillPrice - proposal.stopLoss);
+  if (!Number.isFinite(riskPerUnit) || riskPerUnit <= 0) return null;
+  const riskBudget = configuration.initialCapital * configuration.riskFractionPerTrade;
+  const quantity = Math.floor(riskBudget / riskPerUnit);
+  return quantity >= 1 ? quantity : null;
+}
+
+type PositionAttempt = OpenPosition | "INVALID_GAP" | "UNSIZABLE";
+
 function createPosition(
   pending: PendingSignal,
   entryContext: StrategyMarketContext,
   configuration: BacktestConfiguration,
-): OpenPosition | null {
+): PositionAttempt {
   const { proposal } = pending;
   const rawOpen = entryContext.candle.open;
-  if (!isFillInsideRiskGeometry(proposal, rawOpen)) return null;
+  if (!isFillInsideRiskGeometry(proposal, rawOpen)) return "INVALID_GAP";
   const fillPrice = entryFillPrice(proposal.side, rawOpen, configuration.slippageBps, entryContext.candle.tickSize);
-  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !isFillInsideRiskGeometry(proposal, fillPrice)) return null;
+  if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !isFillInsideRiskGeometry(proposal, fillPrice)) return "INVALID_GAP";
+  const quantity = resolveQuantity(proposal, fillPrice, configuration);
+  if (quantity === null) return "UNSIZABLE";
   const paperTrade: PaperTrade = {
     id: `backtest-${pending.sourceContext.candle.id}`,
     accountId: "backtest",
@@ -141,9 +183,11 @@ function createPosition(
     timeframe: entryContext.candle.timeframe,
     side: proposal.side,
     status: "OPEN",
-    quantity: configuration.quantity,
+    quantity,
+    remainingQuantity: quantity,
     entryPrice: fillPrice,
     stopLoss: proposal.stopLoss,
+    initialStopLoss: proposal.stopLoss,
     targetPrice: proposal.targetPrice,
     openedAt: entryContext.candle.openTime,
     closedAt: null,
@@ -159,6 +203,7 @@ function createPosition(
     sourceCandleId: pending.sourceContext.candle.id,
     entryCandleId: entryContext.candle.id,
     entryFees: configuration.feePerOrder,
+    peakFavorable: fillPrice,
   };
 }
 
@@ -199,6 +244,9 @@ function closePosition(input: {
       "Entry policy: next eligible candle open, adjusted adversely for configured slippage.",
       `Entry candle: ${input.position.entryCandleId}; exit candle: ${input.exitContext.candle.id}.`,
       `Exit policy: ${input.fillRule}.`,
+      input.configuration.positionSizing === "FIXED_QUANTITY"
+        ? `Sizing: FIXED_QUANTITY at ${quantity} unit(s).`
+        : `Sizing: CONSTANT_RISK_FRACTION at ${(input.configuration.riskFractionPerTrade * 100).toFixed(4)}% of ${input.configuration.initialCapital} initial capital, giving ${quantity} unit(s).`,
       `Configured costs: ${input.configuration.feePerOrder.toFixed(6)} INR per order and ${input.configuration.slippageBps.toFixed(4)} bps slippage.`,
     ],
   };
@@ -215,7 +263,18 @@ function proposalFor(context: StrategyMarketContext, strategy: BacktestStrategyE
  * are filled only at the next candle open; at most one position may be open.
  */
 export class BacktestEngine {
-  constructor(private readonly strategy: BacktestStrategyEvaluator = new TrendBreakoutStrategy()) {}
+  /**
+   * `earlyExitOnOpposingSweep`, `protectiveStopPolicy` and `momentumStallPolicy` are all off by
+   * default so every existing run stays byte-identical; a caller has to ask for any of them, the
+   * same posture as `--native-htf`/`--higher-timeframes`. See `opposing-sweep-exit.ts`,
+   * `underlying-protective-stop.ts` and `momentum-stall-exit.ts` for what each measures and why.
+   */
+  constructor(
+    private readonly strategy: BacktestStrategyEvaluator = new TrendBreakoutStrategy(),
+    private readonly earlyExitOnOpposingSweep: boolean = false,
+    private readonly protectiveStopPolicy: ProtectiveStopPolicy | null = null,
+    private readonly momentumStallPolicy: MomentumStallPolicy | null = null,
+  ) {}
 
   run(
     contexts: readonly StrategyMarketContext[],
@@ -230,49 +289,129 @@ export class BacktestEngine {
       skippedSignalsWhilePositionOpen: 0,
       skippedSignalsInvalidGap: 0,
       skippedSignalsInsufficientCapital: 0,
+      skippedSignalsUnsizable: 0,
     };
     const trades: BacktestTrade[] = [];
     let realisedEquity = configuration.initialCapital;
     let pending: PendingSignal | null = null;
-    let position: OpenPosition | null = null;
+    /*
+     * Open positions in ENTRY order. `trades` is appended in CLOSE order, because the metrics walk
+     * that array to build the realised-equity curve -- so a drawdown computed from it has to see
+     * closes in the order they happened, not the order the entries did.
+     *
+     * At `maxConcurrentPositions: 1` (the default) this is behaviourally identical to the single
+     * slot it replaces: `committedMargin` is always 0 at the moment a fill is admitted, so the
+     * capital check reduces to the old comparison against `realisedEquity`. Previously recorded runs
+     * stay reproducible, which is why the default is not being raised along with the capability.
+     */
+    const openPositions: OpenPosition[] = [];
+    let committedMargin = 0;
+    const marginFor = (candidate: OpenPosition): number =>
+      candidate.paperTrade.entryPrice * candidate.paperTrade.quantity * configuration.marginFraction;
 
     for (let index = 0; index < contexts.length; index += 1) {
       const context = contexts[index];
       if (pending) {
         const candidate = createPosition(pending, context, configuration);
         pending = null;
-        if (!candidate) {
+        if (candidate === "INVALID_GAP") {
           counters.skippedSignalsInvalidGap += 1;
-        } else if (candidate.paperTrade.entryPrice * candidate.paperTrade.quantity + candidate.entryFees > realisedEquity + 1e-9) {
+        } else if (candidate === "UNSIZABLE") {
+          counters.skippedSignalsUnsizable += 1;
+        } else if (
+          // Available capital, not gross equity: margin already committed to positions still open
+          // cannot fund a new one. With one position this is the old check unchanged, since
+          // `committedMargin` is 0 whenever a fill is admitted.
+          marginFor(candidate) + candidate.entryFees > realisedEquity - committedMargin + 1e-9
+        ) {
           counters.skippedSignalsInsufficientCapital += 1;
         } else {
-          position = candidate;
+          openPositions.push(candidate);
+          committedMargin += marginFor(candidate);
         }
       }
 
-      if (position) {
+      for (let slot = 0; slot < openPositions.length; slot += 1) {
+        const position = openPositions[slot];
         const decision = decidePaperTradeExit(position.paperTrade, context.candle);
-        if (decision) {
-          const exitTime = decision.fillRule.startsWith("OPEN_GAP") ? context.candle.openTime : context.candle.closeTime;
+        // Same-bar priority: a hard stop/target this bar takes precedence over the softer
+        // opposing-sweep read, which only applies when the price geometry did not already decide --
+        // same "checked every bar including the entry bar" convention `decidePaperTradeExit` uses.
+        const sweepExit = !decision && this.earlyExitOnOpposingSweep
+          && detectOpposingLiquiditySweep(context, position.paperTrade.side);
+        if (decision || sweepExit) {
+          const exitTime = decision?.fillRule.startsWith("OPEN_GAP") ? context.candle.openTime : context.candle.closeTime;
           const trade = closePosition({
             position,
             exitContext: context,
-            rawExitPrice: decision.exitPrice,
-            exitReason: decision.reason,
-            exitTime,
-            fillRule: decision.fillRule,
+            rawExitPrice: decision ? decision.exitPrice : context.candle.close,
+            exitReason: decision ? decision.reason : "OPPOSING_LIQUIDITY_SWEEP",
+            exitTime: exitTime ?? context.candle.closeTime,
+            fillRule: decision ? decision.fillRule : "OPPOSING_SWEEP_EXIT",
             configuration,
           });
           trades.push(trade);
           realisedEquity += trade.pnl;
-          position = null;
+          committedMargin -= marginFor(position);
+          openPositions.splice(slot, 1);
+          slot -= 1;
+        } else if (
+          // Same priority as the branch above, checked only after a real stop/target/sweep exit
+          // has already had first refusal this bar -- mirroring the live evaluator's own ordering
+          // comment: the stall rule sits "below the barrier decision... on purpose -- a stop or
+          // target reached at this instant is a real exit and must keep its own reason, or the
+          // ledger would attribute a genuine stop to the clock."
+          this.momentumStallPolicy !== null
+          && isMomentumStalled({
+            side: position.paperTrade.side,
+            entryPrice: position.paperTrade.entryPrice,
+            initialStopLoss: position.paperTrade.initialStopLoss ?? position.paperTrade.stopLoss,
+            targetPrice: position.paperTrade.targetPrice,
+            openedAt: position.paperTrade.openedAt,
+            asOf: context.candle.closeTime,
+            currentPrice: context.candle.close,
+            policy: this.momentumStallPolicy,
+          })
+        ) {
+          const trade = closePosition({
+            position,
+            exitContext: context,
+            rawExitPrice: context.candle.close,
+            exitReason: "MOMENTUM_STALL",
+            exitTime: context.candle.closeTime,
+            fillRule: "MOMENTUM_STALL_EXIT",
+            configuration,
+          });
+          trades.push(trade);
+          realisedEquity += trade.pnl;
+          committedMargin -= marginFor(position);
+          openPositions.splice(slot, 1);
+          slot -= 1;
+        } else if (this.protectiveStopPolicy !== null) {
+          // Not closed this bar: fold this bar's excursion into the peak, then see whether the
+          // policy would tighten the stop for the *next* bar's check -- using the stop already in
+          // force is what keeps the exit above "conservative, stop-first" for this bar.
+          position.peakFavorable = position.paperTrade.side === "LONG"
+            ? Math.max(position.peakFavorable, context.candle.high)
+            : Math.min(position.peakFavorable, context.candle.low);
+          const advanced = advanceUnderlyingProtectiveStop({
+            side: position.paperTrade.side,
+            entryPrice: position.paperTrade.entryPrice,
+            initialStopLoss: position.paperTrade.initialStopLoss ?? position.paperTrade.stopLoss,
+            currentStopLoss: position.paperTrade.stopLoss,
+            peakFavorable: position.peakFavorable,
+            policy: this.protectiveStopPolicy,
+            tickSize: context.candle.tickSize,
+          });
+          if (advanced !== null) position.paperTrade.stopLoss = advanced;
         }
       }
 
       const proposal = proposalFor(context, this.strategy, strategyConfiguration);
       if (!proposal) continue;
       counters.signalCount += 1;
-      if (position || pending) {
+      // A pending fill occupies a slot: it is already committed to open on the next bar.
+      if (openPositions.length + (pending ? 1 : 0) >= configuration.maxConcurrentPositions) {
         counters.skippedSignalsWhilePositionOpen += 1;
       } else if (index === contexts.length - 1) {
         counters.skippedSignalsNoNextCandle += 1;
@@ -281,19 +420,25 @@ export class BacktestEngine {
       }
     }
 
-    if (position && contexts.length > 0) {
+    if (contexts.length > 0) {
+      // Entry order, so an end-of-data flush is deterministic rather than dependent on iteration
+      // order of whatever happened to still be open.
       const lastContext = contexts[contexts.length - 1];
-      const trade = closePosition({
-        position,
-        exitContext: lastContext,
-        rawExitPrice: lastContext.candle.close,
-        exitReason: "END_OF_DATA",
-        exitTime: lastContext.candle.closeTime,
-        fillRule: "END_OF_DATA_CLOSE",
-        configuration,
-      });
-      trades.push(trade);
-      realisedEquity += trade.pnl;
+      for (const position of openPositions) {
+        const trade = closePosition({
+          position,
+          exitContext: lastContext,
+          rawExitPrice: lastContext.candle.close,
+          exitReason: "END_OF_DATA",
+          exitTime: lastContext.candle.closeTime,
+          fillRule: "END_OF_DATA_CLOSE",
+          configuration,
+        });
+        trades.push(trade);
+        realisedEquity += trade.pnl;
+      }
+      openPositions.length = 0;
+      committedMargin = 0;
     }
 
     return {

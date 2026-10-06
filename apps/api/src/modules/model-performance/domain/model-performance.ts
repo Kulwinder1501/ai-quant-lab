@@ -97,6 +97,7 @@ export interface ModelPerformanceQueryRepository {
 const gradientBoostingAlgorithms = new Set([
   "xgboost-gradient-boosting-v1",
   "lightgbm-gradient-boosting-v1",
+  "catboost-gradient-boosting-v1",
 ]);
 const linearAlgorithms = new Set(["sklearn-logistic-regression-v1"]);
 
