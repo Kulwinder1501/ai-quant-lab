@@ -193,6 +193,12 @@ class FibAnchorCalibrationArtifact:
     minRetracementAtrMultiple: float
     maxWindowBars: int
     trainedThrough: int
+    # RETRACEMENT_QUALIFIED has no natural exit besides INVALIDATED (price breaking 2 ticks below
+    # the anchor low). Empirically (see run_phase_c_pipeline.py 2026-10-06 finding), a POI whose
+    # anchor low is never revisited stays qualified forever, blocking all new pivot detection: one
+    # NIFTY50 POI stayed qualified for 92% of a 2.75-year history. This bounds how long a qualified
+    # zone stays live before it is force-expired and the engine re-arms to look for a fresh pivot.
+    maxQualifiedLifetimeBars: int
 
 
 @dataclass
@@ -229,6 +235,7 @@ class StatefulPITFibEngine:
         self.min_retracement_ticks = fib_artifact.minRetracementTicks
         self.min_retracement_atr_multiple = fib_artifact.minRetracementAtrMultiple
         self.max_window_bars = fib_artifact.maxWindowBars
+        self.max_qualified_lifetime_bars = fib_artifact.maxQualifiedLifetimeBars
         self.event_history: List[Dict] = []
         self.reset_engine()
 
@@ -253,6 +260,7 @@ class StatefulPITFibEngine:
         self.anchor_high_available_at: Optional[int] = None
 
         self.active_poi: Optional[FibonacciPOI] = None
+        self.qualified_seq: Optional[int] = None
 
     def emit_event(self, event_type: str, seq: int, event_time: int, decision_at: int, details: str):
         self.event_history.append({
@@ -312,6 +320,23 @@ class StatefulPITFibEngine:
                     latest_bar.identity.closeTimestamp,
                     decision_at,
                     f"Exceeded max window {self.max_window_bars} bars post-MSS"
+                )
+                self.state = FibLifecycleState.EXPIRED
+                self.reset_engine()
+                return True, "EXPIRED"
+
+        # 4. Qualified-Zone Staleness Check (RETRACEMENT_QUALIFIED has no exit besides INVALIDATED;
+        # bound how long a qualified zone can stay live before it is force-expired so the engine can
+        # re-arm and look for a fresh pivot instead of waiting forever on a stale anchor)
+        if self.state == FibLifecycleState.RETRACEMENT_QUALIFIED:
+            qualified_age_bars = latest_bar.identity.sequenceNumber - self.qualified_seq
+            if qualified_age_bars > self.max_qualified_lifetime_bars:
+                self.emit_event(
+                    "EXPIRED",
+                    latest_bar.identity.sequenceNumber,
+                    latest_bar.identity.closeTimestamp,
+                    decision_at,
+                    f"Qualified retracement zone exceeded max lifetime {self.max_qualified_lifetime_bars} bars without invalidation"
                 )
                 self.state = FibLifecycleState.EXPIRED
                 self.reset_engine()
@@ -438,6 +463,7 @@ class StatefulPITFibEngine:
                         direction="BULLISH",
                         isAvailable=is_available
                     )
+                    self.qualified_seq = retracement.sequenceNumber
                     self.emit_event(
                         "RETRACEMENT_QUALIFIED",
                         retracement.sequenceNumber,

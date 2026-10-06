@@ -26,7 +26,7 @@ def sample_artifacts():
     fib_art = FibAnchorCalibrationArtifact(
         calibrationId="FIB_CALIB_V1", featureDefinitionId="FIB_RETRACEMENT_STATEFUL_V1",
         instrument="NIFTY", regime="NORMAL", minRetracementTicks=10.0, minRetracementAtrMultiple=0.5,
-        maxWindowBars=20, trainedThrough=1000000
+        maxWindowBars=20, maxQualifiedLifetimeBars=2000, trainedThrough=1000000
     )
     lambda_art = LambdaCalibrationArtifact(
         calibrationId="LAMBDA_CALIB_V1", featureDefinitionId="LAMBDA_PROXY_RANGE_DELTA_V1",

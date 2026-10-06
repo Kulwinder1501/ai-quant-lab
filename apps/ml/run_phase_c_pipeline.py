@@ -207,6 +207,11 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int) -> 
         minRetracementTicks=10.0,
         minRetracementAtrMultiple=0.5,
         maxWindowBars=20,
+        # Empirically grounded (2026-10-06): the max observed lifetime across all 31 naturally
+        # (non-stuck) invalidated POIs in NIFTY50+BANKNIFTY 5m history was 1,734 bars. 2,000 covers
+        # that with headroom while bounding the two pathological "never invalidated" POIs that had
+        # otherwise occupied 92% (NIFTY50) and 68% (BANKNIFTY) of the dataset.
+        maxQualifiedLifetimeBars=2000,
         trainedThrough=0,
     )
     lambda_art = LambdaCalibrationArtifact(

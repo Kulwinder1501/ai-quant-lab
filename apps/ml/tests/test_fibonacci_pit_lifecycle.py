@@ -26,6 +26,7 @@ def sample_artifact():
         minRetracementTicks=10.0,
         minRetracementAtrMultiple=0.5,
         maxWindowBars=20,
+        maxQualifiedLifetimeBars=2000,
         trainedThrough=1000000000000
     )
 
@@ -233,3 +234,72 @@ def test_canonical_location_evaluation(sample_artifact):
     in_loc, zone = engine.evaluate_location(150.0, decision_at=timestamps[11] + 5000)
     assert in_loc is False
     assert zone == "NONE"
+
+
+def test_qualified_zone_staleness_forces_rearm():
+    """
+    RETRACEMENT_QUALIFIED previously had no exit besides INVALIDATED -- a POI whose anchor low
+    is never revisited stayed qualified forever (real-data finding, 2026-10-06: one NIFTY50 POI
+    stayed qualified for 92% of a 2.75-year history, blocking all new pivot detection). This
+    proves the force-expiry actually re-arms the engine, not just that it stops being
+    RETRACEMENT_QUALIFIED.
+    """
+    artifact = FibAnchorCalibrationArtifact(
+        calibrationId="FIB_CALIB_TEST_V1", featureDefinitionId="FIB_RETRACEMENT_STATEFUL_V1",
+        instrument="NIFTY", regime="NORMAL", minRetracementTicks=10.0, minRetracementAtrMultiple=0.5,
+        maxWindowBars=20, maxQualifiedLifetimeBars=3, trainedThrough=1000000000000,
+    )
+    engine = StatefulPITFibEngine(fib_artifact=artifact, tick_size=0.05)
+    timestamps = [100000 + i * 1000 for i in range(30)]
+
+    candles = [
+        make_bar(1, timestamps[0], 100, 101, 99, 100, timestamps[0]),
+        make_bar(2, timestamps[1], 100, 101, 99, 100, timestamps[1]),
+        make_bar(3, timestamps[2], 100, 101, 99, 100, timestamps[2]),
+        make_bar(4, timestamps[3], 100, 101, 99, 100, timestamps[3]),
+        make_bar(5, timestamps[4], 100, 101, 99, 100, timestamps[4]),
+        make_bar(6, timestamps[5], 100, 101, 99, 100, timestamps[5]),
+        make_bar(7, timestamps[6], 102, 103, 102, 102, timestamps[6]),  # prev (low 102.0)
+        make_bar(8, timestamps[7], 99, 100, 100, 100, timestamps[7]),  # curr (low 100.0)
+        make_bar(9, timestamps[8], 101, 105, 102, 104, timestamps[8]),  # nxt (low 102.0)
+        make_bar(10, timestamps[9], 104, 110, 103, 108, timestamps[9]),
+    ]
+    resistance = StructuralLevel(levelPrice=110.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[9])
+    assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+
+    candles.append(make_bar(11, timestamps[10], 115, 200, 114, 195, timestamps[10]))
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[10])
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+
+    retracement = RetracementObservation(low=135.0, sequenceNumber=12, observedAt=timestamps[11], availableAt=timestamps[11])
+    candles.append(make_bar(12, timestamps[11], 195, 196, 135, 136, timestamps[11]))
+    engine.process_new_candle(candles, resistance, retracement, atr, timestamps[11])
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.qualified_seq == 12
+
+    # Price drifts sideways well above the invalidation level (pendingPivotLow 100 - 2 ticks =
+    # 99.9) without ever revisiting it -- exactly the real-world condition that stalled the engine.
+    for seq in (13, 14, 15):
+        candles.append(make_bar(seq, timestamps[seq - 1], 150, 151, 150.0, 150, timestamps[seq - 1]))
+        engine.process_new_candle(candles, resistance, None, atr, timestamps[seq - 1])
+        assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED, f"should still be qualified at age {seq - 12}"
+
+    # Age now exceeds maxQualifiedLifetimeBars=3 (seq 16 - qualified_seq 12 = 4) -- force-expire.
+    candles.append(make_bar(16, timestamps[15], 150, 151, 150.0, 150, timestamps[15]))
+    _, status = engine.process_new_candle(candles, resistance, None, atr, timestamps[15])
+    assert status == "EXPIRED"
+    assert engine.state == FibLifecycleState.IDLE
+    assert engine.active_poi is None
+    assert engine.qualified_seq is None
+
+    # Re-arm proof: the engine can now detect a brand-new pivot low, which the old, never-exiting
+    # RETRACEMENT_QUALIFIED state would otherwise have blocked forever.
+    candles.append(make_bar(17, timestamps[16], 150, 151, 120, 150, timestamps[16]))  # prev (low 120)
+    candles.append(make_bar(18, timestamps[17], 119, 120, 110, 111, timestamps[17]))  # curr (low 110)
+    candles.append(make_bar(19, timestamps[18], 112, 118, 115, 117, timestamps[18]))  # nxt (low 115)
+    candles.append(make_bar(20, timestamps[19], 117, 119, 108, 109, timestamps[19]))  # latest, close 109 < resistance 110 (no MSS cascade yet)
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[19])
+    assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
