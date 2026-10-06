@@ -252,6 +252,8 @@ class StatefulPITFibEngine:
         self.anchor_high_time: Optional[int] = None
         self.anchor_high_available_at: Optional[int] = None
 
+        self.poi_qualified_seq: Optional[int] = None  # bar at which RETRACEMENT_QUALIFIED was reached
+
         self.active_poi: Optional[FibonacciPOI] = None
 
     def emit_event(self, event_type: str, seq: int, event_time: int, decision_at: int, details: str):
@@ -312,6 +314,29 @@ class StatefulPITFibEngine:
                     latest_bar.identity.closeTimestamp,
                     decision_at,
                     f"Exceeded max window {self.max_window_bars} bars post-MSS"
+                )
+                self.state = FibLifecycleState.EXPIRED
+                self.reset_engine()
+                return True, "EXPIRED"
+
+        # 4. Post-Qualification Shelf-Life Expiry (re-arm rule). Without this, a qualified POI
+        # has no way out except INVALIDATED (price breaking 2 ticks below the anchor low) -- if
+        # price simply never revisits that level, the engine stays stuck on one aging setup
+        # forever and never looks for a fresh one again. Confirmed on real NIFTY50 history: the
+        # only POI qualified in a 15742-bar/~2.75yr series stayed active for the remaining 92% of
+        # it. This reuses max_window_bars (the same calibrated Z parameter that already bounds
+        # pre-qualification windows) as the qualified POI's shelf life, measured from the bar it
+        # qualified on -- not from mss_confirmed_seq, which governs a different, earlier window
+        # (anchorQualificationDeadline) and must stay untouched.
+        if self.state == FibLifecycleState.RETRACEMENT_QUALIFIED:
+            bars_since_qualified = latest_bar.identity.sequenceNumber - self.poi_qualified_seq
+            if bars_since_qualified > self.max_window_bars:
+                self.emit_event(
+                    "EXPIRED",
+                    latest_bar.identity.sequenceNumber,
+                    latest_bar.identity.closeTimestamp,
+                    decision_at,
+                    f"Qualified POI exceeded max shelf life of {self.max_window_bars} bars without invalidation"
                 )
                 self.state = FibLifecycleState.EXPIRED
                 self.reset_engine()
@@ -402,6 +427,7 @@ class StatefulPITFibEngine:
 
                 if qualifies_retracement and 0 < bars_elapsed <= self.max_window_bars:
                     self.state = FibLifecycleState.RETRACEMENT_QUALIFIED
+                    self.poi_qualified_seq = retracement.sequenceNumber
                     diff = self.anchor_high - self.pending_pivot_low
 
                     composite_available_at = max(
