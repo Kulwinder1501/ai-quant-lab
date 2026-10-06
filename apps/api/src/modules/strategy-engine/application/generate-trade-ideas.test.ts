@@ -144,6 +144,7 @@ function recordingIdeas(saved: SaveTradeIdeaProposalInput[]): TradeIdeaRepositor
         expiresAt: input.expiresAt,
       };
     },
+    findActiveDuplicate: async () => null,
   };
 }
 
@@ -188,6 +189,7 @@ describe("GenerateTradeIdeas", () => {
           expiresAt: input.expiresAt,
         };
       },
+      findActiveDuplicate: async () => null,
     };
 
     const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
@@ -228,6 +230,65 @@ describe("GenerateTradeIdeas", () => {
       algorithmVersion: "smc-v2",
       adjustment: 5,
     });
+  });
+
+  it("suppresses a proposal that duplicates an already-active idea instead of saving a new row", async () => {
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    const duplicateQueries: unknown[] = [];
+    const strategyVersions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input) => {
+        saved.push(input);
+        throw new Error("saveProposal must not be called for a suppressed duplicate.");
+      },
+      findActiveDuplicate: async (query) => {
+        duplicateQueries.push(query);
+        return {
+          id: "idea-already-active",
+          instrumentId: query.instrumentId,
+          strategyVersionId: query.strategyVersionId,
+          sourceCandleId: "candle-earlier",
+          side: query.side,
+          status: "PROPOSED",
+          entryPrice: 108,
+          stopLoss: 107,
+          targetPrice: query.targetPrice,
+          riskReward: 2,
+          confidence: 0.8,
+          expiresAt: new Date("2026-07-26T00:00:00Z"),
+        };
+      },
+    };
+
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
+      .execute({ instrumentId: "instrument-1", timeframe: "1d" });
+
+    expect(saved).toHaveLength(0);
+    const trendBreakout = result.find((entry) => entry.strategyKey === "trend-breakout");
+    expect(trendBreakout).toMatchObject({
+      candidatesGenerated: 0,
+      tradeIdeaIds: [],
+      skippedReason: "DUPLICATE_ACTIVE_IDEA",
+    });
+    expect(duplicateQueries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ instrumentId: "instrument-1", side: "LONG", targetPrice: 116 }),
+    ]));
   });
 
   it("scans a window of candles and surfaces SHORT proposals from bearish bars", async () => {
@@ -274,6 +335,7 @@ describe("GenerateTradeIdeas", () => {
           expiresAt: input.expiresAt,
         };
       },
+      findActiveDuplicate: async () => null,
     };
 
     const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
@@ -467,6 +529,7 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
         generatedAt: new Date(),
         expiresAt: input.expiresAt ?? null,
       }),
+      findActiveDuplicate: async () => null,
     };
     const contexts = {
       findLatestCompleted: async () => { const c = contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110); seen.push(c); return c; },
