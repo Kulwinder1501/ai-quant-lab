@@ -217,8 +217,8 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15784,
-        "activePoiBarCount": 5628,
+        "barsEvaluated": 15788,
+        "activePoiBarCount": 5632,
         "poiQualifiedCount": 403,
         "uniqueAnchorsWithValidHorizon": 400,
         "episodesAfterDedup": 400,
@@ -226,12 +226,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14134,
-        "activePoiBarCount": 5180,
+        "barsEvaluated": 14138,
+        "activePoiBarCount": 5184,
         "poiQualifiedCount": 358,
         "uniqueAnchorsWithValidHorizon": 350,
         "episodesAfterDedup": 350,
-        "realOfiAvailableBarFraction": 0.13364935616244517,
+        "realOfiAvailableBarFraction": 0.13389446880746922,
         "realOfiAvailableEpisodeCount": 50
       }
     },
@@ -458,7 +458,7 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15784,
+        "barsEvaluated": 15788,
         "activePoiBarCount": 6016,
         "poiQualifiedCount": 442,
         "uniqueAnchorsWithValidHorizon": 431,
@@ -467,12 +467,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14134,
+        "barsEvaluated": 14138,
         "activePoiBarCount": 4947,
         "poiQualifiedCount": 355,
         "uniqueAnchorsWithValidHorizon": 345,
         "episodesAfterDedup": 345,
-        "realOfiAvailableBarFraction": 0.13364935616244517,
+        "realOfiAvailableBarFraction": 0.13389446880746922,
         "realOfiAvailableEpisodeCount": 43
       }
     },
@@ -482,6 +482,470 @@
       "optionsGexAvailable": false,
       "marketBreadthAvailable": false,
       "note": "OFI, trade-tape footprint/netDelta, options GEX and cross-sectional breadth are not derivable from this OHLCV-only candle feed and were left at honest neutral values rather than fabricated constants. This section therefore tests a LOCATION-ONLY diagnostic (does price reach the Fib zone, what is the raw unconditioned net MFE there) and is NOT a run of the full OFI-conditioned F1-F4 protocol in Research Specification v1.1. It must not be read as Phase C sign-off."
+    }
+  },
+  "basisAlignedDiagnostic_BANKNIFTY_FUT_BULLISH_NOT_PHASE_C_F1_F4": {
+    "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+    "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+    "tradingExecutionAuthorized": false,
+    "familyAResults": [
+      {
+        "experimentId": "F1_GOLDEN_POCKET",
+        "zoneName": "GOLDEN_POCKET",
+        "nTreatmentTotal": 5,
+        "nControlTotal": 25,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 13,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 25,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      },
+      {
+        "experimentId": "F2_OTE",
+        "zoneName": "OTE",
+        "nTreatmentTotal": 8,
+        "nControlTotal": 25,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 33,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 25,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      },
+      {
+        "experimentId": "F3_DEEP_RETRACEMENT",
+        "zoneName": "DEEP_RETRACEMENT",
+        "nTreatmentTotal": 3,
+        "nControlTotal": 25,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 28,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 25,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      }
+    ],
+    "familyBResults": [
+      {
+        "experimentId": "F4_B1_0.618",
+        "boundaryRatio": 0.618,
+        "nTreatmentTotal": 3,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B2_0.65",
+        "boundaryRatio": 0.65,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B3_0.702",
+        "boundaryRatio": 0.702,
+        "nTreatmentTotal": 2,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B4_0.786",
+        "boundaryRatio": 0.786,
+        "nTreatmentTotal": 1,
+        "nControlTotal": 1,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 2,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 1,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B5_0.886",
+        "boundaryRatio": 0.886,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      }
+    ],
+    "zoneBoundingVerdicts": {
+      "GOLDEN_POCKET": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "OTE": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "DEEP_RETRACEMENT": "INCONCLUSIVE_INSUFFICIENT_DATA"
+    },
+    "fibEngineDiagnostics": {
+      "BANKNIFTY_FUT": {
+        "barsEvaluated": 2326,
+        "activePoiBarCount": 845,
+        "poiQualifiedCount": 54,
+        "uniqueAnchorsWithValidHorizon": 53,
+        "episodesAfterDedup": 53,
+        "realOfiAvailableBarFraction": 0.8490971625107481,
+        "realOfiAvailableEpisodeCount": 46
+      }
+    },
+    "dataCompleteness": {
+      "ofiAvailable": true,
+      "footprintTapeAvailable": false,
+      "optionsGexAvailable": false,
+      "marketBreadthAvailable": false,
+      "note": "Trade-tape footprint/netDelta, options GEX and cross-sectional breadth are not derivable from this depth-frame feed and were left at honest neutral values rather than fabricated constants. UNLIKE the BANKNIFTY section above, OFI here IS real and IS conditioned on the same instrument the Fibonacci zone is defined on: this section's candle series is a real OHLC series built from the SAME futures order book its OFI comes from (compute_mid_price_candles), not the cash index -- closing the spot/futures basis gap (persistent ~0.3-0.5% premium) between where the zone was defined and where OFI was read. It still only covers the real captured depth window (2026-08-21 onward), a fraction of BANKNIFTY's own candle history, and GEX/footprint/breadth remain unconditioned -- so it is still a LOCATION-ONLY diagnostic, not a full F1-F4 run, and must not be read as Phase C sign-off."
+    }
+  },
+  "basisAlignedDiagnostic_BANKNIFTY_FUT_BEARISH_NOT_PHASE_C_F1_F4": {
+    "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+    "governanceStatus": "PHASE_C_RESEARCH_EXECUTION_COMPLETE",
+    "tradingExecutionAuthorized": false,
+    "familyAResults": [
+      {
+        "experimentId": "F1_GOLDEN_POCKET",
+        "zoneName": "GOLDEN_POCKET",
+        "nTreatmentTotal": 6,
+        "nControlTotal": 21,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 19,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 21,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      },
+      {
+        "experimentId": "F2_OTE",
+        "zoneName": "OTE",
+        "nTreatmentTotal": 5,
+        "nControlTotal": 21,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 26,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 21,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      },
+      {
+        "experimentId": "F3_DEEP_RETRACEMENT",
+        "zoneName": "DEEP_RETRACEMENT",
+        "nTreatmentTotal": 6,
+        "nControlTotal": 21,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 27,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 21,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "incrementalSurplusPassed": false,
+        "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
+      }
+    ],
+    "familyBResults": [
+      {
+        "experimentId": "F4_B1_0.618",
+        "boundaryRatio": 0.618,
+        "nTreatmentTotal": 1,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B2_0.65",
+        "boundaryRatio": 0.65,
+        "nTreatmentTotal": 3,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B3_0.702",
+        "boundaryRatio": 0.702,
+        "nTreatmentTotal": 1,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B4_0.786",
+        "boundaryRatio": 0.786,
+        "nTreatmentTotal": 1,
+        "nControlTotal": 1,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 2,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 1,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": true,
+        "separationDetected": true,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      },
+      {
+        "experimentId": "F4_B5_0.886",
+        "boundaryRatio": 0.886,
+        "nTreatmentTotal": 0,
+        "nControlTotal": 0,
+        "nTreatmentMatched": 0,
+        "nControlMatched": 0,
+        "trimmedCommonSupportCount": 0,
+        "asmdMax": 0.0,
+        "estimateHatDeltaBps": 0.0,
+        "lowerCiUnadjusted95Bps": 0.0,
+        "pValRaw": 1.0,
+        "controlCovariateSourceCounts": {
+          "ACTIVE_ANCHOR": 0,
+          "SYNTHETIC_FALLBACK": 0
+        },
+        "absoluteSurplusPassed": false,
+        "separationDetected": false,
+        "dataSufficientForVerdict": false,
+        "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
+        "pValHolmAdjusted": 1.0,
+        "boundaryPassed": false,
+        "boundaryDataSufficient": false
+      }
+    ],
+    "zoneBoundingVerdicts": {
+      "GOLDEN_POCKET": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "OTE": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "DEEP_RETRACEMENT": "INCONCLUSIVE_INSUFFICIENT_DATA"
+    },
+    "fibEngineDiagnostics": {
+      "BANKNIFTY_FUT": {
+        "barsEvaluated": 2326,
+        "activePoiBarCount": 835,
+        "poiQualifiedCount": 51,
+        "uniqueAnchorsWithValidHorizon": 48,
+        "episodesAfterDedup": 48,
+        "realOfiAvailableBarFraction": 0.8490971625107481,
+        "realOfiAvailableEpisodeCount": 42
+      }
+    },
+    "dataCompleteness": {
+      "ofiAvailable": true,
+      "footprintTapeAvailable": false,
+      "optionsGexAvailable": false,
+      "marketBreadthAvailable": false,
+      "note": "Trade-tape footprint/netDelta, options GEX and cross-sectional breadth are not derivable from this depth-frame feed and were left at honest neutral values rather than fabricated constants. UNLIKE the BANKNIFTY section above, OFI here IS real and IS conditioned on the same instrument the Fibonacci zone is defined on: this section's candle series is a real OHLC series built from the SAME futures order book its OFI comes from (compute_mid_price_candles), not the cash index -- closing the spot/futures basis gap (persistent ~0.3-0.5% premium) between where the zone was defined and where OFI was read. It still only covers the real captured depth window (2026-08-21 onward), a fraction of BANKNIFTY's own candle history, and GEX/footprint/breadth remain unconditioned -- so it is still a LOCATION-ONLY diagnostic, not a full F1-F4 run, and must not be read as Phase C sign-off."
     }
   },
   "syntheticPipelineSmokeTest_NOT_EVIDENCE": {

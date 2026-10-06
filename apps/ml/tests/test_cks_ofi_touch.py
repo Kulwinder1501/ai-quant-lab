@@ -10,6 +10,7 @@ from ai_quant_lab_ml.cks_ofi_touch import (
     DepthFrameRow,
     OfiWindowObservation,
     _touch_level_delta,
+    compute_mid_price_candles,
     compute_windowed_ofi_series,
     contract_for_date,
     join_nearest_prior,
@@ -109,6 +110,45 @@ def test_contract_for_date_never_blends_a_roll():
     assert contract_for_date("2026-09-15") == "NSE:BANKNIFTY26SEPFUT"
     assert contract_for_date("2026-10-01") == "NSE:BANKNIFTY26OCTFUT"
     assert contract_for_date("2026-08-26") is None  # the one-day gap between Aug and Sep contracts
+
+
+def test_mid_price_candles_bucket_ohlc_and_skip_empty_buckets():
+    """
+    Regression test for the spot/futures basis fix: Fibonacci zones for BANKNIFTY_FUT are now
+    computed from this bucketed mid-price series (the same book OFI reads), instead of the
+    cash index. Verifies real OHLC extraction within a bucket, and that a bucket with zero
+    captured frames is skipped entirely rather than interpolated/forward-filled as a flat
+    candle -- real captured depth has exactly this kind of intraday gap.
+    """
+    frames = [
+        make_frame(0, 100.0, 1.0, 102.0, 1.0),        # t=4:00:00, mid=101 (bucket 1 open)
+        make_frame(60_000, 102.0, 1.0, 104.0, 1.0),   # t=4:01:00, mid=103 (bucket 1 high)
+        make_frame(120_000, 98.0, 1.0, 100.0, 1.0),   # t=4:02:00, mid=99  (bucket 1 low)
+        make_frame(240_000, 101.0, 1.0, 103.0, 1.0),  # t=4:04:00, mid=102 (bucket 1 close)
+        make_frame(300_000, 110.0, 1.0, 112.0, 1.0),  # t=4:05:00, mid=111 (bucket 2, sole frame)
+        # bucket [4:10, 4:15) has zero frames -- a real capture gap.
+        make_frame(900_000, 90.0, 1.0, 92.0, 1.0),    # t=4:15:00, mid=91 (bucket 4, sole frame)
+    ]
+    candles = compute_mid_price_candles(frames, timeframe_minutes=5)
+
+    assert [c.close_time for c in candles] == [
+        T0 + timedelta(minutes=5), T0 + timedelta(minutes=10), T0 + timedelta(minutes=20),
+    ]
+    bucket1 = candles[0]
+    assert (bucket1.open, bucket1.high, bucket1.low, bucket1.close) == (101.0, 103.0, 99.0, 102.0)
+    bucket2 = candles[1]
+    assert (bucket2.open, bucket2.high, bucket2.low, bucket2.close) == (111.0, 111.0, 111.0, 111.0)
+
+
+def test_mid_price_candles_excludes_crossed_or_one_sided_book():
+    frames = [
+        make_frame(0, 100.0, 1.0, 102.0, 1.0),   # mid=101, valid
+        make_frame(60_000, 0.0, 1.0, 102.0, 1.0),  # bid<=0 -> excluded
+        make_frame(120_000, 100.0, 1.0, 0.0, 1.0),  # ask<=0 -> excluded
+    ]
+    candles = compute_mid_price_candles(frames, timeframe_minutes=5)
+    assert len(candles) == 1
+    assert (candles[0].open, candles[0].high, candles[0].low, candles[0].close) == (101.0, 101.0, 101.0, 101.0)
 
 
 def test_join_nearest_prior_respects_staleness_and_no_lookahead():

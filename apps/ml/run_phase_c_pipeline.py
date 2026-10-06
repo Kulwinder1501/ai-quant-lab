@@ -61,6 +61,17 @@ This version:
  - Calibration means/stds for propensity matching are computed from a strict leading
    slice of each instrument's real episodes (calibration period), with the remainder
    used for evaluation, honoring `calibrationEnd < evaluationStart`.
+ - BANKNIFTY's Fibonacci zones were being computed from the CASH INDEX (the only `candles`
+   row for that symbol) while its OFI conditioning comes from the FUTURES order book, which
+   trades at a persistent ~0.3-0.5% premium to spot -- two different instruments' price
+   action feeding one "treatment". Fixed by deriving a real OHLC series directly from the
+   same depth-frame book OFI is computed from (compute_mid_price_candles) and running a
+   second, independent Fibonacci evaluation (BANKNIFTY_FUT) against it, reported in its own
+   clearly labeled section rather than folded into the existing index-based one. Real
+   captured depth has intraday gaps (~6% of consecutive 5m buckets wider than one bar), so
+   the forward-MFE horizon lookahead now also validates elapsed wall time between entry and
+   exit bars (MAX_HORIZON_SLACK_MINUTES) instead of trusting a fixed bar-count offset --
+   this also closes one same-day gap each in the existing NIFTY50/BANKNIFTY index series.
 """
 
 from __future__ import annotations
@@ -81,6 +92,7 @@ from ai_quant_lab_ml.cks_ofi_touch import (
     CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
     DepthFrameRow,
     OfiWindowObservation,
+    compute_mid_price_candles,
     compute_windowed_ofi_series,
     join_nearest_prior,
 )
@@ -109,8 +121,15 @@ TIMEFRAME = "5m"  # single, fixed granularity -- never mix timeframes in one eng
 # loudly (never silently truncated the way an earlier, unrelated pipeline bug once was).
 HISTORY_ROW_LIMIT = 200_000
 HORIZON_MINUTES = 15  # frozen forward evaluation horizon (Research Spec v1.1 protocol item 5)
+# Real captured depth has intraday gaps (BANKNIFTY_FUT's bucketed candle series skips any 5m
+# bucket with zero captured frames rather than interpolating). A fixed bar-count lookahead
+# silently stretches past the frozen 15-minute horizon when the entry/exit bars straddle one
+# of those gaps; this caps how much slack (one bar's worth) is tolerated before an episode's
+# forward-MFE window is rejected as having too stale an exit reference.
+MAX_HORIZON_SLACK_MINUTES = 5
 TIMEFRAME_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 ROUND_TRIP_FRICTION_BPS = 2.0
+BANKNIFTY_FUT_INSTRUMENT_LABEL = "BANKNIFTY_FUT"
 IST_OFFSET_MINUTES = 330  # UTC+5:30
 SESSION_START_MIN = 9 * 60 + 15   # 09:15 IST
 SESSION_END_MIN = 15 * 60 + 30    # 15:30 IST
@@ -216,14 +235,24 @@ def is_near_session_close(dt: datetime, minutes_before_close: int = 15) -> bool:
     return ist_minutes > (SESSION_END_MIN - minutes_before_close)
 
 
-def fetch_banknifty_ofi_observations(connection: psycopg.Connection) -> List[OfiWindowObservation]:
+def fetch_banknifty_futures_depth_series(
+    connection: psycopg.Connection, timeframe_minutes: int
+) -> Tuple[List[OfiWindowObservation], List[Tuple[datetime, float, float, float, float, float]]]:
     """
-    Real touch-level, 5s-window OFI from captured depth, one independent chain per futures
-    contract (never blended across a roll), concatenated in chronological order. Contracts
-    are captured sequentially with no time overlap, so concatenation preserves the ordering
-    `join_nearest_prior` requires.
+    One pass over captured BANKNIFTY futures depth, one independent chain per contract (never
+    blended across a roll), producing BOTH real touch-level 5s-window OFI and a real OHLC
+    candle series built from the exact same book (compute_mid_price_candles) -- so the
+    Fibonacci zones evaluated against this candle series and the OFI conditioning read
+    alongside them describe the same instrument, closing the spot/futures basis gap (see the
+    module docstring's CORRECTIONS note). Both series are concatenated across contracts in
+    chronological order; contracts are captured sequentially with no time overlap, so
+    concatenation preserves the ordering join_nearest_prior/build_instrument_episodes require.
+    Candle rows are shaped (close_time, open, high, low, close, volume) to match the real
+    index-candle query's row shape; volume is honestly 0.0 -- depth frames carry queue
+    quantities, not trade prints, so a real traded-volume figure does not exist here.
     """
     all_observations: List[OfiWindowObservation] = []
+    all_candle_rows: List[Tuple[datetime, float, float, float, float, float]] = []
     cur = connection.cursor()
     for symbol, _start, _end in BANKNIFTY_DEPTH_CONTRACTS:
         try:
@@ -256,14 +285,19 @@ def fetch_banknifty_ofi_observations(connection: psycopg.Connection) -> List[Ofi
             for r in depth_rows
         ]
         contract_observations = compute_windowed_ofi_series(frames)
+        contract_candles = compute_mid_price_candles(frames, timeframe_minutes)
         print(
-            f"Computed {len(contract_observations)} real OFI observations from {len(depth_rows)} "
-            f"depth frames for {symbol}.",
+            f"Computed {len(contract_observations)} real OFI observations and "
+            f"{len(contract_candles)} real futures-mid-price {timeframe_minutes}m candles from "
+            f"{len(depth_rows)} depth frames for {symbol}.",
             file=sys.stderr,
         )
         all_observations.extend(contract_observations)
+        all_candle_rows.extend(
+            (c.close_time, c.open, c.high, c.low, c.close, 0.0) for c in contract_candles
+        )
 
-    return all_observations
+    return all_observations, all_candle_rows
 
 
 _BREADTH_PANEL_SQL = """
@@ -497,7 +531,14 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                     exit_dt = rows[idx + horizon_bars][0]
                     if not isinstance(exit_dt, datetime):
                         exit_dt = datetime.fromtimestamp(exit_dt / 1000.0, tz=timezone.utc)
-                    if exit_dt.strftime("%Y-%m-%d") == session_str:  # else: horizon crosses a session boundary
+                    horizon_minutes_actual = (exit_dt - dt).total_seconds() / 60.0
+                    # Reject if the horizon crosses a session boundary, OR a capture gap between
+                    # entry and the nominal exit bar silently stretched the "15-minute" forward
+                    # window past what a fixed bar-count offset assumes (see MAX_HORIZON_SLACK_MINUTES).
+                    if (
+                        exit_dt.strftime("%Y-%m-%d") == session_str
+                        and horizon_minutes_actual <= HORIZON_MINUTES + MAX_HORIZON_SLACK_MINUTES
+                    ):
                         candidate_records.append({
                             "anchor_id": anchor_id,
                             "idx": idx,
@@ -559,7 +600,11 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                     exit_dt_b = rows[idx + horizon_bars][0]
                     if not isinstance(exit_dt_b, datetime):
                         exit_dt_b = datetime.fromtimestamp(exit_dt_b / 1000.0, tz=timezone.utc)
-                    if exit_dt_b.strftime("%Y-%m-%d") == session_str:
+                    horizon_minutes_actual_b = (exit_dt_b - dt).total_seconds() / 60.0
+                    if (
+                        exit_dt_b.strftime("%Y-%m-%d") == session_str
+                        and horizon_minutes_actual_b <= HORIZON_MINUTES + MAX_HORIZON_SLACK_MINUTES
+                    ):
                         bear_candidate_records.append({
                             "anchor_id": anchor_id_b,
                             "idx": idx,
@@ -667,13 +712,27 @@ def _dedupe_records_to_episodes(records: List[dict], highs: List[float], lows: L
 
 
 def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
-                                      ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict]:
+                                      ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict,
+                                                 List[ObservationEpisode], List[ObservationEpisode], dict]:
+    """
+    Returns (bull_episodes, bear_episodes, per_instrument_diagnostics, fut_bull_episodes,
+    fut_bear_episodes, fut_diagnostics). The BANKNIFTY_FUT pair is returned separately, never
+    pooled into the index-based lists: it covers the same real-world sessions as BANKNIFTY's
+    own index-based episodes, so pooling them would let the matcher pair a BANKNIFTY_FUT
+    treatment against a same-minute BANKNIFTY-index control describing the same underlying
+    price move twice, and would silently change the episode composition (and therefore the
+    numbers) of the already-reported index-based manifest. Kept fully separate and reported
+    in its own manifest section instead.
+    """
     if connection is None:
-        return [], [], {}
+        return [], [], {}, [], [], {}
 
     bull_episodes: List[ObservationEpisode] = []
     bear_episodes: List[ObservationEpisode] = []
     per_instrument_diagnostics: dict = {}
+    fut_bull_episodes: List[ObservationEpisode] = []
+    fut_bear_episodes: List[ObservationEpisode] = []
+    fut_diagnostics: dict = {}
     breadth_contexts = fetch_breadth_contexts(connection)
     print(f"Computed real daily breadth: {len(breadth_contexts)} sessions from {len(BREADTH_UNIVERSE)} stocks.", file=sys.stderr)
     cur = connection.cursor()
@@ -701,11 +760,15 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
             print(f"Notice: query for {instrument} returned: {e}", file=sys.stderr)
             rows = []
 
+        ofi_observations: Optional[List[OfiWindowObservation]] = None
+        fut_rows: List[Tuple[datetime, float, float, float, float, float]] = []
+        if instrument == "BANKNIFTY":
+            ofi_observations, fut_rows = fetch_banknifty_futures_depth_series(connection, TIMEFRAME_MINUTES[TIMEFRAME])
+
         if rows:
             first_date = rows[0][0]
             last_date = rows[-1][0]
             print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument} ({first_date} to {last_date}).", file=sys.stderr)
-            ofi_observations = fetch_banknifty_ofi_observations(connection) if instrument == "BANKNIFTY" else None
             instrument_bull_episodes, instrument_bear_episodes, diag = build_instrument_episodes(
                 rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME],
                 ofi_observations=ofi_observations, breadth_contexts=breadth_contexts,
@@ -714,7 +777,23 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
             bear_episodes.extend(instrument_bear_episodes)
             per_instrument_diagnostics[instrument] = diag
 
-    return bull_episodes, bear_episodes, per_instrument_diagnostics
+        if instrument == "BANKNIFTY" and fut_rows:
+            first_fut_date, last_fut_date = fut_rows[0][0], fut_rows[-1][0]
+            print(
+                f"Built {len(fut_rows)} real futures-mid-price {TIMEFRAME} candles for "
+                f"{BANKNIFTY_FUT_INSTRUMENT_LABEL} ({first_fut_date} to {last_fut_date}) -- "
+                "basis-aligned with its own OFI conditioning.",
+                file=sys.stderr,
+            )
+            instrument_fut_bull_episodes, instrument_fut_bear_episodes, fut_diag = build_instrument_episodes(
+                fut_rows, BANKNIFTY_FUT_INSTRUMENT_LABEL, TIMEFRAME_MINUTES[TIMEFRAME],
+                ofi_observations=ofi_observations, breadth_contexts=breadth_contexts,
+            )
+            fut_bull_episodes.extend(instrument_fut_bull_episodes)
+            fut_bear_episodes.extend(instrument_fut_bear_episodes)
+            fut_diagnostics[BANKNIFTY_FUT_INSTRUMENT_LABEL] = fut_diag
+
+    return bull_episodes, bear_episodes, per_instrument_diagnostics, fut_bull_episodes, fut_bear_episodes, fut_diagnostics
 
 
 def split_calibration_and_evaluation(episodes: List[ObservationEpisode]) -> Tuple[List[ObservationEpisode], List[float], List[float]]:
@@ -838,22 +917,55 @@ def main():
     bull_episodes_db: List[ObservationEpisode] = []
     bear_episodes_db: List[ObservationEpisode] = []
     poi_diagnostics: dict = {}  # {instrument: {"bullish": {...}, "bearish": {...}}}
+    fut_bull_episodes_db: List[ObservationEpisode] = []
+    fut_bear_episodes_db: List[ObservationEpisode] = []
+    fut_poi_diagnostics: dict = {}
     try:
         with psycopg.connect(db_url, connect_timeout=5) as conn:
-            bull_episodes_db, bear_episodes_db, poi_diagnostics = load_historical_episodes_from_db(conn)
+            (bull_episodes_db, bear_episodes_db, poi_diagnostics,
+             fut_bull_episodes_db, fut_bear_episodes_db, fut_poi_diagnostics) = load_historical_episodes_from_db(conn)
     except Exception as e:
         print(f"Notice: Connecting to DB failed ({e}). No real-data evaluation will run.", file=sys.stderr)
 
     bull_diag = {instrument: diag["bullish"] for instrument, diag in poi_diagnostics.items()}
     bear_diag = {instrument: diag["bearish"] for instrument, diag in poi_diagnostics.items()}
+    fut_bull_diag = {instrument: diag["bullish"] for instrument, diag in fut_poi_diagnostics.items()}
+    fut_bear_diag = {instrument: diag["bearish"] for instrument, diag in fut_poi_diagnostics.items()}
 
     manifest_real_bullish = _build_real_data_manifest(bull_episodes_db, bull_diag, "bullish")
     manifest_real_bearish = _build_real_data_manifest(bear_episodes_db, bear_diag, "bearish")
+    manifest_fut_bullish = _build_real_data_manifest(fut_bull_episodes_db, fut_bull_diag, "BANKNIFTY_FUT bullish (basis-aligned)")
+    manifest_fut_bearish = _build_real_data_manifest(fut_bear_episodes_db, fut_bear_diag, "BANKNIFTY_FUT bearish (basis-aligned)")
+    # Unlike every other real-data section, OFI genuinely IS available and genuinely IS the
+    # same instrument the Fib zone is defined on here (see fibEngineDiagnostics.realOfiAvailable*
+    # above) -- the base note's blanket "OFI ... not derivable, left at honest neutral values"
+    # claim would be actively false for this section, so it is replaced rather than appended to.
+    fut_data_completeness_note = (
+        "Trade-tape footprint/netDelta, options GEX and cross-sectional breadth are not "
+        "derivable from this depth-frame feed and were left at honest neutral values rather "
+        "than fabricated constants. UNLIKE the BANKNIFTY section above, OFI here IS real and "
+        "IS conditioned on the same instrument the Fibonacci zone is defined on: this section's "
+        "candle series is a real OHLC series built from the SAME futures order book its OFI "
+        "comes from (compute_mid_price_candles), not the cash index -- closing the spot/futures "
+        "basis gap (persistent ~0.3-0.5% premium) between where the zone was defined and where "
+        "OFI was read. It still only covers the real captured depth window (2026-08-21 onward), "
+        "a fraction of BANKNIFTY's own candle history, and GEX/footprint/breadth remain "
+        "unconditioned -- so it is still a LOCATION-ONLY diagnostic, not a full F1-F4 run, and "
+        "must not be read as Phase C sign-off."
+    )
+    if manifest_fut_bullish is not None:
+        manifest_fut_bullish["dataCompleteness"]["ofiAvailable"] = True
+        manifest_fut_bullish["dataCompleteness"]["note"] = fut_data_completeness_note
+    if manifest_fut_bearish is not None:
+        manifest_fut_bearish["dataCompleteness"]["ofiAvailable"] = True
+        manifest_fut_bearish["dataCompleteness"]["note"] = fut_data_completeness_note
     if not bull_episodes_db and not bear_episodes_db:
         print("Notice: no real episodes available; skipping real-data evaluation.", file=sys.stderr)
 
     bullish_section_label = "realDataLocationOnlyDiagnostic_BULLISH_NOT_PHASE_C_F1_F4"
     bearish_section_label = "realDataLocationOnlyDiagnostic_BEARISH_NOT_PHASE_C_F1_F4"
+    fut_bullish_section_label = "basisAlignedDiagnostic_BANKNIFTY_FUT_BULLISH_NOT_PHASE_C_F1_F4"
+    fut_bearish_section_label = "basisAlignedDiagnostic_BANKNIFTY_FUT_BEARISH_NOT_PHASE_C_F1_F4"
 
     print("Running synthetic pipeline smoke test (non-evidentiary; B=10,000 block bootstrap)...", file=sys.stderr)
     synthetic_episodes = generate_synthetic_smoke_test_episodes()
@@ -870,11 +982,14 @@ def main():
         "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
         "governanceStatus": (
             "PHASE_C_PARTIAL_EXECUTION_LOCATION_ONLY"
-            if (manifest_real_bullish or manifest_real_bearish) else "PHASE_C_NO_REAL_DATA_AVAILABLE"
+            if (manifest_real_bullish or manifest_real_bearish or manifest_fut_bullish or manifest_fut_bearish)
+            else "PHASE_C_NO_REAL_DATA_AVAILABLE"
         ),
         "tradingExecutionAuthorized": False,  # Sole authority behind Phase E!
         bullish_section_label: manifest_real_bullish,
         bearish_section_label: manifest_real_bearish,
+        fut_bullish_section_label: manifest_fut_bullish,
+        fut_bearish_section_label: manifest_fut_bearish,
         "syntheticPipelineSmokeTest_NOT_EVIDENCE": manifest_synthetic,
     }
 
