@@ -623,7 +623,10 @@ describe("IctStructureStrategy Overhaul (v2 Frozen Spec Tests)", () => {
 
   it("produces deterministic setupId in evidence for identical confirmation event", () => {
     const snap = makeValidSnap();
-    snap.structure.lastEvent = {
+    // The strategy hashes `ict.lastConfirmedStructureEvent` (persisted across bars), not
+    // `structure.lastEvent` (ephemeral -- null on every bar it doesn't fire on). See the dedicated
+    // cross-bar test below for why that distinction is the whole point of this identity.
+    snap.lastConfirmedStructureEvent = {
       type: "BOS",
       direction: "BULLISH",
       level: 95,
@@ -639,6 +642,42 @@ describe("IctStructureStrategy Overhaul (v2 Frozen Spec Tests)", () => {
     expect(eval2).toHaveLength(1);
     expect(eval1[0]!.evidence.setupId).toBeDefined();
     expect(eval1[0]!.evidence.setupId).toBe(eval2[0]!.evidence.setupId);
+  });
+
+  it("produces the SAME setupId on the bar after confirmation, when lastEvent has gone ephemeral-null again", () => {
+    // This is the regression case: `IctStructureTracker` only ever sets `structure.lastEvent` on the
+    // bar a BOS/CHOCH/SWEEP actually confirms -- every later bar re-evaluating the same still-open
+    // setup sees `structure.lastEvent === null` again (see config.ts's docstring on
+    // `lastConfirmedStructureEvent`). Hashing the ephemeral field directly would mint a brand-new
+    // setupId on every one of those later bars, which the uniqueness index then can't catch --
+    // reproducing exactly the "proposes the same setup repeatedly" bug this identity exists to close.
+    // A real `IctCompositeEngine` carries `lastConfirmedStructureEvent` forward across both bars
+    // (that persistence is what this test fixes/verifies); these two hand-built snapshots model bar N
+    // (confirmation bar, both fields set) and bar N+1 (same persisted event, ephemeral field reset).
+    const confirmedEvent = {
+      type: "BOS" as const,
+      direction: "BULLISH" as const,
+      level: 95,
+      candleTime: new Date("2026-01-06T03:00:00.000Z"),
+      availableAt: 1767668400000,
+      brokenPivot: { time: new Date("2026-01-06T02:00:00.000Z"), type: "HIGH" as const },
+    };
+
+    const barN = makeValidSnap();
+    barN.structure.lastEvent = confirmedEvent;
+    barN.lastConfirmedStructureEvent = confirmedEvent;
+
+    const barNPlus1 = makeValidSnap();
+    barNPlus1.structure.lastEvent = null; // ephemeral: nothing newly confirmed THIS bar
+    barNPlus1.lastConfirmedStructureEvent = confirmedEvent; // but the engine still remembers it
+
+    const evalN = new IctStructureStrategy().evaluate(makeContext(barN, 98), {});
+    const evalNPlus1 = new IctStructureStrategy().evaluate(makeContext(barNPlus1, 98), {});
+
+    expect(evalN).toHaveLength(1);
+    expect(evalNPlus1).toHaveLength(1);
+    expect(evalN[0]!.evidence.setupId).toBeDefined();
+    expect(evalN[0]!.evidence.setupId).toBe(evalNPlus1[0]!.evidence.setupId);
   });
 
   it("enforces maxTargetR cap of 3.0R on target calculation", () => {

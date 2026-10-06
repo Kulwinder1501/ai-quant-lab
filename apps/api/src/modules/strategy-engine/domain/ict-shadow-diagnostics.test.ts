@@ -23,6 +23,7 @@ function makeSnapshot(overrides: {
     barIndex: 0,
     barTime: new Date("2026-10-05T10:00:00.000Z"),
     atr14: null,
+    lastConfirmedStructureEvent: null,
     structure: {
       trend: overrides.trend ?? "NEUTRAL",
       lastHH: null, lastHL: null, lastLL: null, lastLH: null,
