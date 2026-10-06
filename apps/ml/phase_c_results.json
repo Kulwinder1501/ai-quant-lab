@@ -11,7 +11,7 @@
         "experimentId": "F1_GOLDEN_POCKET",
         "zoneName": "GOLDEN_POCKET",
         "nTreatmentTotal": 78,
-        "nControlTotal": 361,
+        "nControlTotal": 362,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
         "trimmedCommonSupportCount": 87,
@@ -20,13 +20,14 @@
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 361,
+          "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 10,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -34,23 +35,24 @@
       {
         "experimentId": "F2_OTE",
         "zoneName": "OTE",
-        "nTreatmentTotal": 98,
-        "nControlTotal": 361,
+        "nTreatmentTotal": 99,
+        "nControlTotal": 362,
         "nTreatmentMatched": 4,
         "nControlMatched": 4,
-        "trimmedCommonSupportCount": 49,
+        "trimmedCommonSupportCount": 46,
         "asmdMax": 0.6880134281193054,
         "estimateHatDeltaBps": 10.069385658295563,
         "lowerCiUnadjusted95Bps": -1.3743705548312817,
         "pValRaw": 0.1192880711928807,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 361,
+          "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": false,
+        "treatmentsWithTemporalCandidate": 13,
         "pValHolmAdjusted": 0.3578642135786421,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -59,7 +61,7 @@
         "experimentId": "F3_DEEP_RETRACEMENT",
         "zoneName": "DEEP_RETRACEMENT",
         "nTreatmentTotal": 61,
-        "nControlTotal": 361,
+        "nControlTotal": 362,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
         "trimmedCommonSupportCount": 94,
@@ -68,13 +70,14 @@
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 361,
+          "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 4,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -101,6 +104,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -125,6 +129,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -149,6 +154,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -173,6 +179,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -197,6 +204,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -209,22 +217,22 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15736,
-        "activePoiBarCount": 5595,
-        "poiQualifiedCount": 401,
-        "uniqueAnchorsWithValidHorizon": 398,
-        "episodesAfterDedup": 398,
+        "barsEvaluated": 15770,
+        "activePoiBarCount": 5616,
+        "poiQualifiedCount": 402,
+        "uniqueAnchorsWithValidHorizon": 399,
+        "episodesAfterDedup": 399,
         "realOfiAvailableBarFraction": 0.0,
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14086,
-        "activePoiBarCount": 5148,
+        "barsEvaluated": 14120,
+        "activePoiBarCount": 5168,
         "poiQualifiedCount": 357,
-        "uniqueAnchorsWithValidHorizon": 348,
-        "episodesAfterDedup": 348,
-        "realOfiAvailableBarFraction": 0.13069714610251312,
-        "realOfiAvailableEpisodeCount": 48
+        "uniqueAnchorsWithValidHorizon": 349,
+        "episodesAfterDedup": 349,
+        "realOfiAvailableBarFraction": 0.13279036827195467,
+        "realOfiAvailableEpisodeCount": 49
       }
     },
     "dataCompleteness": {
@@ -260,6 +268,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -284,6 +293,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -308,6 +318,7 @@
         "separationDetected": true,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -334,6 +345,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -358,6 +370,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -382,6 +395,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -406,6 +420,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
@@ -430,6 +445,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
+        "treatmentsWithTemporalCandidate": 0,
         "pValHolmAdjusted": 1.0,
         "boundaryPassed": false,
         "boundaryDataSufficient": false
