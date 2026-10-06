@@ -1,11 +1,14 @@
-# Frozen Specification: ICT Strategy Overhaul (v2)
+# Frozen Specification: ICT Strategy Overhaul (v2, final — FROZEN)
 
-> **Status:** Draft v2, pending reviewer sign-off on the 5 items marked `[OPEN — needs reviewer call]` below.
-> **Supersedes:** the v1 draft pasted into this session on 2026-10-06.
-> **What changed from v1:** every claim in v1 was independently re-verified against the live codebase
-> (not re-derived from v1's own wording). All of it checked out — file:line references for every
-> verification are inline below. Five gaps were found that v1 didn't address; each is resolved here
-> with a concrete recommendation, flagged `[OPEN]` where it's a judgment call rather than a fact.
+> **Status:** **FROZEN.** All 5 open items reviewed and approved by the reviewer. Ready for
+> implementation.
+> **Supersedes:** v1 (pasted into this session 2026-10-06).
+> **Revision history:** first pass below independently re-verified every v1 claim against the live
+> codebase and surfaced 5 gaps (2 flagged as open judgment calls). The reviewer then approved items 1-4
+> as written; item 5's recommendation (cleanup) was approved too, but its *mechanism* was independently
+> re-checked against the live DB and corrected (see item 5) — the risk as originally stated doesn't
+> hold, but the real justification is both valid and larger in scope than first written. One
+> verification-test wording improvement from the reviewer adopted as proposed.
 
 ---
 
@@ -107,10 +110,11 @@ code has a *minimum* gate too — `minimumRiskReward: 1.2`, enforced at
 — and v1's 13-step evaluation order has no step for it. Without a floor, a structurally-valid but
 barely-profitable setup (say 1.05R) would pass where today it's vetoed.
 
-**`[OPEN — needs reviewer call]`** Recommendation: keep the floor, carried into the per-instrument
-profile as `minimumRiskReward` rather than a hardcoded constant (since Gold and the indices may
-reasonably want different floors once there's real settled data for each). Defaulted to the existing
-`1.2` for both instrument classes until evidence says otherwise. Added to the geometry above as the
+**`[APPROVED]`** Keep the floor, carried into the per-instrument profile as `minimumRiskReward` rather
+than a hardcoded constant (since Gold and the indices may reasonably want different floors once there's
+real settled data for each). Defaulted to `1.2` for both instrument classes until evidence says
+otherwise — reviewer's framing: this isn't a new trading idea being introduced, it's preserving an
+existing live constraint v1 would otherwise have silently dropped. Added to the geometry above as the
 last step before the final sanity checks.
 
 ---
@@ -150,9 +154,11 @@ all. This confirms v1's framing is accurate (today's `rawStop * 0.9995` is genui
 fixed-0.05%-percentage buffer, not ATR-based) — but it means §2's geometry needs one small, real,
 unlisted prerequisite:
 
-**Action item**: add `atr14: number | null` to `IctStateCompositeSnapshot`, sourced from the tracker
-instance the composite engine already owns. Small, mechanical, not a design question — listed here so
-it's a planned step rather than a mid-implementation surprise.
+**`[APPROVED]`** Action item: add `atr14: number | null` to `IctStateCompositeSnapshot`, sourced from the
+tracker instance the composite engine already owns. Reviewer's addition, correct and binding: the
+strategy must **not** instantiate its own `IctAtrTracker` — consuming the engine's own instance only
+avoids live/replay divergence and duplicate state computation. Small, mechanical, not a design
+question — listed here so it's a planned step rather than a mid-implementation surprise.
 
 ### Deterministic Setup Hash Definition
 
@@ -174,18 +180,19 @@ const setupId = hash({
 
 ### Database Uniqueness Expression Index & Semantics
 
-### [NEW in v2] Item 3 — should this uniqueness be permanent, or scoped to "while still active"?
+### Item 3 — should this uniqueness be permanent, or scoped to "while still active"?
 
 v1's index has no status qualifier: once a `setupId` is ever persisted, it can never be proposed again
 — even after that idea expires unresolved or stops out, and the *same* structural level later gets a
 legitimate second test. That may or may not be the intended behavior.
 
-**`[OPEN — needs reviewer call]`** Recommendation: scope the partial index to `status = 'PROPOSED'`.
-Postgres re-evaluates a partial index's predicate per-row as the row's indexed column changes, so a row
-moving from `PROPOSED` to `EXPIRED`/`REJECTED`/`ACCEPTED` is removed from the index automatically — a
-genuinely new attempt at the same structural level is then free to insert once the first one has
-resolved one way or another, while simultaneous duplicates (the actual bug) are still blocked exactly
-as v1 intended.
+**`[APPROVED]`** Scope the partial index to `status = 'PROPOSED'`. The intended invariant, as stated by
+the reviewer: *same setup + currently active proposal → cannot have two; same setup + previous proposal
+resolved → may be proposed again.* Postgres re-evaluates a partial index's predicate per-row as the
+row's indexed column changes, so a row moving from `PROPOSED` to `EXPIRED`/`REJECTED`/`ACCEPTED` is
+removed from the index automatically — a genuinely new attempt at the same structural level is then
+free to insert once the first one has resolved one way or another, while simultaneous duplicates (the
+actual bug) are still blocked exactly as v1 intended.
 
 ```sql
 CREATE UNIQUE INDEX trade_ideas_strategy_setup_id_idx
@@ -201,30 +208,57 @@ are unaffected, and (new in v2) that a resolved idea never blocks a later, genui
 - **Concurrent duplicate attempts (same setup, still `PROPOSED`)**: exactly 1 successful database insertion
 - **Same setup, after the first attempt resolves**: a new attempt is permitted (this is the v2 change)
 
-### [NEW in v2] Item 4 — relationship to the already-shipped application-level dedup guard
+### Item 4 — relationship to the already-shipped application-level dedup guard
 
 Independently of this plan, an application-level duplicate guard already shipped this session
 (`TradeIdeaRepository.findActiveDuplicate`, fuzzy 0.1%-relative target-price match against
 already-`PROPOSED`, not-yet-expired ideas — PR
-[fix/gold-ict-idea-dedup](https://github.com/Kulwinder1501/ai-quant-lab/pull/new/fix/gold-ict-idea-dedup)).
-The DB-level unique index here is strictly more correct (atomic, exact match on the real structural
-event identity, race-proof under true concurrency vs. the app-level check-then-insert).
+[fix/gold-ict-idea-dedup](https://github.com/Kulwinder1501/ai-quant-lab/pull/new/fix/gold-ict-idea-dedup),
+merged as PR #30). The DB-level unique index here is strictly more correct (atomic, exact match on the
+real structural event identity, race-proof under true concurrency vs. the app-level check-then-insert).
 
-**Recommendation (not open — this one's just a call I'm making)**: keep both. The app-level check stays
-useful as a cheap pre-filter that avoids even attempting an insert the DB is going to reject, and
-neither correctness nor performance is harmed by the overlap. No action needed beyond landing this
-spec's index.
+**`[APPROVED]`** Keep both, layered: application dedup (fast rejection of the obvious case) →
+PostgreSQL unique index (the actual, authoritative concurrency boundary). No conflict, no action needed
+beyond landing this spec's index.
 
-### [NEW in v2] Item 5 — existing duplicate/stale rows are not addressed
+### Item 5 — existing stale rows: cleanup approved, mechanism corrected
 
-Not a flaw in the design, just unaddressed: as of 2026-10-06 the DB already has real duplicate rows (16
-`trade_ideas` sharing one target/stop over 4 hours) and ~97 ideas that timed out unresolved under the
-pre-fix expiry bug. The new unique index applies only to future inserts; it does nothing to this
-existing data.
+**`[APPROVED, mechanism corrected]`** The reviewer's proposed cleanup (mark stale `PROPOSED` rows
+`EXPIRED` before relying on the new invariant) is the right call — but the specific risk cited
+("an old row containing a setupId can block index creation, or continue blocking a future proposal")
+does not hold, and the true scope is larger than ICT alone. Both checked directly against the live DB:
 
-**`[OPEN — needs reviewer call]`**: leave the historical rows as-is (they're inert — `PROPOSED` but past
-`expires_at`, never read again by anything), or run a one-time cleanup marking them `EXPIRED`. Either
-is fine; just worth a deliberate choice rather than silence.
+- **`SELECT count(*) FROM trade_ideas WHERE evidence ? 'setupId'` → 0.** No existing row can carry a
+  `setupId` — that field doesn't exist in the code that wrote them. The partial index's own
+  `WHERE evidence->>'setupId' IS NOT NULL` clause means every pre-existing row is invisible to it
+  regardless of status; `CREATE UNIQUE INDEX` was never at risk, and no old row can collide with a new
+  one via `setupId`.
+- **The real reason to do the cleanup**: stale `PROPOSED` rows are invisible to the *new index*, but not
+  to anything else that queries `status = 'PROPOSED'` expecting "currently live" — including the shadow
+  ledger frontend built this session. Queried live: **1,601 stale `PROPOSED` rows system-wide**, not the
+  108 ICT-only rows this document originally scoped to:
+
+  | Strategy | Stale `PROPOSED` rows |
+  |---|---|
+  | Momentum Scalp (Index) | 679 |
+  | Momentum Scalp | 310 |
+  | Momentum Scalp (Gold) | 247 |
+  | Momentum Scalp v2 (Pattern Confluence) | 129 |
+  | ICT Structural Alignment (V1) | 108 |
+  | Momentum Scalp (Pattern Confluence) | 106 |
+  | AI Autonomous Agent | 22 |
+
+**Approved action**: a one-time, system-wide batch update, using the exact condition this codebase
+already uses everywhere else a trade idea gets marked expired (not a newly-invented rule):
+```sql
+UPDATE trade_ideas
+SET status = 'EXPIRED'
+WHERE status = 'PROPOSED' AND expires_at IS NOT NULL AND expires_at < now();
+```
+(Matches [prepare-option-entry.ts:275,371](apps/api/src/modules/paper-trading/application/prepare-option-entry.ts:275)
+and [postgres-paper-trade-repository.ts:489](apps/api/src/infrastructure/database/repositories/postgres-paper-trade-repository.ts:489).)
+Run this before the index migration ships, system-wide rather than ICT-scoped, since the motivating bug
+(phantom "live" rows in anything reading `status = 'PROPOSED'`) applies equally to every strategy.
 
 ---
 
@@ -258,10 +292,15 @@ Unchanged from v1, plus one addition:
 - **Time Invariance:** Same confirmation with different evaluation times → identical `setupId`.
 - **Directional Safety:** LONG stops must be `< entry`, SHORT stops `> entry`.
 - **Numeric Safety:** Missing ATR, NaN ATR, `<=0` ATR, or invalid targets → NO TRADE.
-- **[NEW] Re-entry after resolution:** an idea that reaches `EXPIRED`/`REJECTED`/`ACCEPTED` for a given
-  `setupId`, followed by a fresh confirmation producing the *same* `setupId`, → a new `PROPOSED` row is
-  permitted (confirms the `status = 'PROPOSED'` scoping in item 3 behaves as intended, not as a
-  permanent block).
+- **[NEW, reviewer-corrected] Re-entry after EXPIRED (the exact regression case the old lifecycle bug
+  lived in):**
+  1. insert `PROPOSED` for `setupId` X
+  2. mark that row `EXPIRED`
+  3. insert a new proposal for the same `setupId` X
+  4. → succeeds, and exactly one *current* `PROPOSED` row exists for `(strategy_version_id, X)`.
+  `EXPIRED` is the case to assert on specifically, not `REJECTED`/`ACCEPTED` generically — it's the
+  state every one of the 1,601 stale rows above is being moved into, so it's the one this test must
+  prove doesn't block re-entry.
 - **[NEW] Minimum R:R floor:** a setup whose capped `takeProfit` yields `riskReward < minimumRiskReward`
   → NO TRADE (confirms item 1's floor is actually wired in, not just documented).
 
@@ -276,15 +315,14 @@ pre-fix geometry) showed the gap between "the code runs" and "the strategy has e
 
 ---
 
-## Summary of open items for the reviewer
+## Final decisions (all approved — spec is frozen)
 
-| # | Item | v1 status | v2 recommendation |
+| # | Item | v1 status | Decision |
 |---|---|---|---|
-| 1 | Minimum risk-reward floor | Missing | Keep it, per-profile, default 1.2 |
-| 2 | ATR not exposed on snapshot | Unlisted prerequisite | Add `atr14` to `IctStateCompositeSnapshot` |
-| 3 | Setup uniqueness scope | Permanent (unstated) | Scope to `status = 'PROPOSED'` |
-| 4 | Overlap with shipped app-level dedup | Not mentioned | Keep both, no conflict |
-| 5 | Existing duplicate/stale rows | Not mentioned | Reviewer's call: leave or one-time cleanup |
+| 1 | Minimum risk-reward floor | Missing | **APPROVED** — keep, per-profile, default 1.2 |
+| 2 | ATR not exposed on snapshot | Unlisted prerequisite | **APPROVED** — add `atr14` to `IctStateCompositeSnapshot`; strategy must consume the engine's own tracker instance, never its own |
+| 3 | Setup uniqueness scope | Permanent (unstated) | **APPROVED** — scope to `status = 'PROPOSED'` |
+| 4 | Overlap with shipped app-level dedup | Not mentioned | **APPROVED** — keep both, layered (app pre-filter → DB authoritative boundary) |
+| 5 | Existing duplicate/stale rows | Not mentioned | **APPROVED, mechanism corrected** — one-time system-wide cleanup (1,601 rows, not 108), `expires_at < now()` → `EXPIRED`, using the codebase's existing rule; not required for index safety (verified 0 existing rows carry `setupId`), but required so `status = 'PROPOSED'` stays truthful everywhere it's read, including the new shadow ledger |
 
-Items 1 and 3 are genuine judgment calls, not facts to verify — flagged for the reviewer rather than
-decided unilaterally here.
+This document is frozen. Implementation can proceed directly against it.
