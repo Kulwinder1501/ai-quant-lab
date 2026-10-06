@@ -29,6 +29,7 @@ def sample_artifact():
         minRetracementTicks=10.0,
         minRetracementAtrMultiple=0.5,
         maxWindowBars=20,
+        maxQualifiedLifetimeBars=20,
         trainedThrough=1000000000000
     )
 
@@ -188,7 +189,8 @@ def test_bearish_qualified_poi_expires_after_shelf_life_without_invalidation(sam
     """
     Regression test mirroring the bullish re-arm/expiry fix: a RETRACEMENT_QUALIFIED bearish POI
     with no further expiry path (only INVALIDATED) could get stuck tracking one stale setup
-    forever if price never revisits the stop. After max_window_bars (20) bars past
+    forever if price never revisits the stop. After maxQualifiedLifetimeBars (20, this
+    fixture's own test value -- production uses 2000, see run_phase_c_pipeline.py) bars past
     qualification with no invalidation, the engine must EXPIRE and re-arm.
     """
     engine = StatefulPITFibEngineBearish(fib_artifact=sample_artifact, tick_size=0.05)
@@ -223,7 +225,7 @@ def test_bearish_qualified_poi_expires_after_shelf_life_without_invalidation(sam
     assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
     assert engine.poi_qualified_seq == 12
 
-    # 21 more bars (> max_window_bars=20), price drifting sideways well below the 105.10 stop --
+    # 21 more bars (> maxQualifiedLifetimeBars=20), price drifting sideways well below the 105.10 stop --
     # never invalidates. No new retracement observations either.
     t = timestamps[11]
     last_status = None
