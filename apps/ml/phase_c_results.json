@@ -27,7 +27,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
-        "treatmentsWithTemporalCandidate": 10,
+        "treatmentsWithTemporalCandidate": 15,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -37,13 +37,13 @@
         "zoneName": "OTE",
         "nTreatmentTotal": 99,
         "nControlTotal": 362,
-        "nTreatmentMatched": 4,
-        "nControlMatched": 4,
+        "nTreatmentMatched": 6,
+        "nControlMatched": 6,
         "trimmedCommonSupportCount": 46,
-        "asmdMax": 0.6880134281193054,
-        "estimateHatDeltaBps": 10.069385658295563,
-        "lowerCiUnadjusted95Bps": -1.3743705548312817,
-        "pValRaw": 0.1192880711928807,
+        "asmdMax": 0.6177224513486187,
+        "estimateHatDeltaBps": 7.142221353170469,
+        "lowerCiUnadjusted95Bps": -0.4489697123927461,
+        "pValRaw": 0.12998700129987,
         "controlCovariateSourceCounts": {
           "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
@@ -52,8 +52,8 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": false,
-        "treatmentsWithTemporalCandidate": 13,
-        "pValHolmAdjusted": 0.3578642135786421,
+        "treatmentsWithTemporalCandidate": 25,
+        "pValHolmAdjusted": 0.38996100389961,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
@@ -77,7 +77,7 @@
         "separationDetected": false,
         "dataSufficientForVerdict": false,
         "balanceAchieved": true,
-        "treatmentsWithTemporalCandidate": 4,
+        "treatmentsWithTemporalCandidate": 14,
         "pValHolmAdjusted": 1.0,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
@@ -217,7 +217,7 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15770,
+        "barsEvaluated": 15771,
         "activePoiBarCount": 5616,
         "poiQualifiedCount": 402,
         "uniqueAnchorsWithValidHorizon": 399,
@@ -226,12 +226,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14120,
+        "barsEvaluated": 14121,
         "activePoiBarCount": 5168,
         "poiQualifiedCount": 357,
         "uniqueAnchorsWithValidHorizon": 349,
         "episodesAfterDedup": 349,
-        "realOfiAvailableBarFraction": 0.13279036827195467,
+        "realOfiAvailableBarFraction": 0.13285178103533743,
         "realOfiAvailableEpisodeCount": 49
       }
     },

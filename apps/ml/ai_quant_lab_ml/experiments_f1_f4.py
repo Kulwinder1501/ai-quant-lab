@@ -15,6 +15,15 @@ from typing import Dict, List, Optional, Tuple
 ASMD_BALANCE_THRESHOLD = 0.10
 MIN_MATCHED_PAIRS_FOR_VERDICT = 20
 
+# Same-session matching window. Widened from the spec's original 30 minutes to 60, a
+# deliberate protocol change (pre-registered here, before the next evaluation run, not derived
+# from having seen F1-F3's result on today's data) after a funnel diagnostic showed temporal
+# locality -- not raw anchor scarcity or the propensity caliper -- as the dominant bottleneck:
+# of 78 Golden Pocket treatment anchors, only 10 had any same-session control within 30
+# minutes at all, before the caliper even applied. See the "study(ml): diagnose why F1-F3 are
+# INCONCLUSIVE" commit for the full funnel numbers this is responding to.
+SAME_SESSION_MATCH_WINDOW_MS = 60 * 60 * 1000
+
 
 @dataclass
 class ObservationEpisode:
@@ -130,17 +139,18 @@ class PropensityMatcher:
                                 control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int], bool, int]:
         """
         Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement.
-        Restricted to same-session observations, delta_t <= 30 minutes.
+        Restricted to same-session observations, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+        (60 minutes; widened from the spec's original 30 -- see that constant's own comment).
         Primary tie-break = logit distance; Secondary tie-break = episodeId ascending.
         Common-support overlap trimmed strictly on logit scores.
 
         Returns (matched_pairs, trimmed_count, asmd_max, control_source_counts,
         separation_detected, treatments_with_temporal_candidate). The last is a diagnostic
         only -- how many in-support treatment episodes had ANY control in the same session
-        within 30 minutes, before the propensity caliper is applied -- so a caller can tell
-        temporal-locality scarcity (anchors are rare events spread across years, so two
-        independent ones rarely fall in the same 30-minute window) apart from the caliper
-        itself being the bottleneck.
+        within the match window, before the propensity caliper is applied -- so a caller can
+        tell temporal-locality scarcity (anchors are rare events spread across years, so two
+        independent ones rarely fall in the same window) apart from the caliper itself being
+        the bottleneck.
         """
         if not treatment_episodes or not control_episodes:
             return [], 0, 0.0, {"ACTIVE_ANCHOR": 0, "SYNTHETIC_FALLBACK": 0}, False, 0
@@ -191,9 +201,10 @@ class PropensityMatcher:
         available_ctrl_indices = set(i for i in range(n_ctrl) if ctrl_in_support_mask[i])
         matched_pairs: List[MatchedPair] = []
         # Diagnostic only (does not affect matching or any verdict): isolates WHY a treatment
-        # episode failed to match -- no control exists in the same session within 30 minutes at
-        # all (temporal-locality scarcity, the dominant bottleneck found when anchors are rare
-        # events spread across years), vs one exists but sits outside the propensity caliper.
+        # episode failed to match -- no control exists in the same session within the match
+        # window at all (temporal-locality scarcity, the dominant bottleneck found when anchors
+        # are rare events spread across years), vs one exists but sits outside the propensity
+        # caliper.
         treatments_with_temporal_candidate = 0
 
         for t_idx in treat_indices:
@@ -205,8 +216,8 @@ class PropensityMatcher:
             for c_idx in available_ctrl_indices:
                 c_ep = control_active[c_idx]
 
-                # Restrictions: Same-session, delta_t <= 30 minutes (1800000 ms)
-                if c_ep.sessionDate == t_ep.sessionDate and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= 1800000:
+                # Restrictions: Same-session, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+                if c_ep.sessionDate == t_ep.sessionDate and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= SAME_SESSION_MATCH_WINDOW_MS:
                     has_temporal_candidate = True
                     dist = abs(t_logit - logits_ctrl[c_idx])
                     if dist <= caliper_dist:
@@ -393,8 +404,8 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "dataSufficientForVerdict": data_sufficient,
             "balanceAchieved": balance_achieved,
             # Diagnostic: isolates temporal-locality scarcity (no control exists in the same
-            # session within 30 minutes) from propensity-caliper tightness as the matching
-            # bottleneck. Does not affect any verdict.
+            # session within the match window) from propensity-caliper tightness as the
+            # matching bottleneck. Does not affect any verdict.
             "treatmentsWithTemporalCandidate": treat_with_temporal_candidate,
         })
         raw_p_family_a.append(p_raw)
