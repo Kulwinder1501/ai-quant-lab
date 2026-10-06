@@ -162,4 +162,9 @@ export interface IctStateCompositeSnapshot {
    * undoing it.
    */
   readonly drawOnLiquidityState: DrawOnLiquidityObservation;
+  /**
+   * Wilder ATR(14) computed incrementally by the composite engine's own `IctAtrTracker`.
+   * Null when insufficient history has elapsed to form the first 14-period window.
+   */
+  readonly atr14: number | null;
 }

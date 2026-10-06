@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   EnsureStrategyVersionInput,
   ProposedTradeIdea,
@@ -11,6 +12,33 @@ import { computeSwingHierarchyFeature, resolveProtectedLevelStatusAt, type Prote
 import type { BalancedPriceRange } from "../../technical-analysis/domain/ict/bpr.js";
 import { LiquidityResponseResolver } from "../../technical-analysis/domain/ict/liquidity-response.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
+
+/**
+ * Computes a deterministic SHA256 setupId for a structural confirmation event.
+ * Canonical identity: strategyId + instrument + timeframe + confirmationCandleTime + brokenPivotTime + eventType + level + direction.
+ */
+export function computeIctSetupId(params: {
+  strategyId: string;
+  instrument: string;
+  timeframe: string;
+  confirmationCandleTime: Date;
+  brokenPivotTime: Date;
+  eventType: string;
+  level: number;
+  direction: string;
+}): string {
+  const payload = [
+    params.strategyId,
+    params.instrument,
+    params.timeframe,
+    params.confirmationCandleTime.toISOString(),
+    params.brokenPivotTime.toISOString(),
+    params.eventType,
+    params.level.toFixed(4),
+    params.direction,
+  ].join("|");
+  return createHash("sha256").update(payload).digest("hex");
+}
 
 /**
  * Which point of interest wins when several are available on the same bar.
@@ -46,14 +74,6 @@ function killzoneAt(instant: Date): string | null {
 /**
  * `expiryCandles` bars of real wall-clock time, derived from the signal candle's own duration
  * rather than a hardcoded 5-minute assumption.
- *
- * This strategy scans both 5m and 15m timeframes, but `expiresAt` used to be computed as
- * `closeTime + expiryCandles * 5 * 60_000` unconditionally -- correct for a 5m candle, but a 3x
- * under-grant for a 15m one (3 bars of real structure-formation time is 45 minutes, not 15).
- * Measured against the live DB (2026-10): 15m-sourced ideas average a *larger* target distance
- * (6.19% vs 5m's 5.12%, since 15m structure targets more distant liquidity) while getting the
- * *shortest* realized window of all (avg 4.6 minutes) -- 96% of this strategy's live ideas timed
- * out UNRESOLVED rather than hitting stop or target, which this directly explains.
  */
 function computeExpiresAt(candle: { openTime: Date; closeTime: Date }, expiryCandles: number): Date {
   const candleDurationMs = candle.closeTime.getTime() - candle.openTime.getTime();
@@ -62,14 +82,6 @@ function computeExpiresAt(candle: { openTime: Date; closeTime: Date }, expiryCan
 
 /**
  * Whether price sits in the 62-79% retracement of the dealing range -- the optimal trade entry.
- *
- * For a long that is the DEEP end of discount: 62-79% back off the range high is 21-38% up from the
- * range low. Mirrored for a short.
- *
- * Registered as `entryPlacement` and implemented as a FILTER, not as placement. See the amendment in
- * the program document: the backtester enters at the next candle's open and cannot rest a limit
- * order at a level, so "enter AT the OTE" is not expressible. This asks instead whether the signal
- * bar is already inside the band, which is a strictly weaker claim.
  */
 function isWithinOte(price: number, rangeLow: number, rangeHigh: number, isBullish: boolean): boolean {
   const span = rangeHigh - rangeLow;
@@ -84,71 +96,22 @@ export interface IctStructureStrategyConfiguration {
   minConfidence: number;
   expiryCandles: number;
   requirePoiReaction: boolean;
-  /** Entry-model arm 1. Defaults to the incumbent order, so an unconfigured run is unchanged. */
   poiPreference: IctPoiPreference;
-  /** Entry-model arm 2. Restricts entries to the pre-registered killzone windows. */
   requireKillzone: boolean;
-  /** Entry-model arm 3. Requires the signal bar to sit inside the 62-79% retracement. */
   requireOte: boolean;
-  /**
-   * Entry-model arm 4: requires the ITH/ITL swing-hierarchy protected level (see swing-hierarchy.ts)
-   * to still be intact. Off by default -- see the docstring at its call site below.
-   *
-   * Measured 2026-09-22 against the two live cells (NIFTY50 15m 2025 + 2026 holdout, BANKNIFTY 5m
-   * 2026), same params as the falsification program (concurrency 5, 2bps slippage): both NIFTY50
-   * windows improve (+937.00 on 85->73 trades; +292.40 on 114->99, still net negative), but BANKNIFTY
-   * flips from +3,832.35 to -537.90 on 102->86 trades -- a -4,370.25 swing. Same non-replication
-   * signature that closed killzone, OTE and poiPreference: one instrument likes the filter, the other
-   * disagrees. Verdict NO_EDGE, matching the pre-registered expectation. Stays in the tree behind
-   * this default-off switch with the measurement attached, not deployed.
-   */
   requireProtectedLevelIntact: boolean;
-  /**
-   * Entry-model arm 5: requires a recent Change in State of Delivery (see cisd.ts) in the trade's own
-   * direction, on top of the POI reaction arm 1 already requires. Off by default -- unmeasured, like
-   * every other arm here, following the same falsification-program discipline: shipped in-tree,
-   * covariates recorded on every approved idea regardless of this switch, so the population needed
-   * to test it exists before the arm is ever turned on.
-   *
-   * Both sources researched for cisd.ts are explicit that CISD alone is weak evidence and gains its
-   * conviction from exactly this pairing: "inside a tap of a daily or 4-hour PD Array, that same
-   * close is a high-probability reversal trigger." This strategy already requires a POI reaction
-   * (arm 1, `requirePoiReaction`) before this gate is even reached, which is the PD-Array tap the
-   * doctrine is describing -- so this arm asks whether *also* requiring the delivery-shift
-   * confirmation on top of that tap improves anything, not whether CISD works standalone.
-   *
-   * Measured 2026-09-23, verdict NO_EDGE -- see Amendment 4 in the falsification program doc. Both
-   * NIFTY50 windows improve (+192.80 on 85->45 trades; +3,850.10 on 114->59) but BANKNIFTY flips from
-   * +4,319.60 to -1,742.50 on 102->85 trades -- a -6,062.10 swing. The same cross-instrument
-   * non-replication signature that closed killzone, OTE, poiPreference and
-   * `requireProtectedLevelIntact` before it -- the fifth arm in a row to show it.
-   */
   requireCisdConfirmation: boolean;
-  /**
-   * How many bars old a CISD event may be and still count as "recent" for arm 5. `cisd` on the
-   * composite snapshot is the most recently confirmed event ever, not per-bar, so an unbounded age
-   * would let a CISD from hundreds of bars ago silently satisfy the gate forever. 10 bars, matching
-   * this codebase's existing `orderBlockLookbackBars`/`LIQUIDITY_LOOKBACK_BARS` precedent for the
-   * same class of bound -- a deliberate, documented limit, not a value tuned against any result.
-   */
   maxCisdAgeBars: number;
-  /**
-   * Entry-model arm 6: considers a Balanced Price Range (see bpr.ts -- the overlap of two opposing
-   * fair value gaps) as a POI candidate, checked ahead of the existing block/gap/sweep search when
-   * enabled. Off by default. Multiple retail sources describe it as ICT's "highest-probability entry
-   * zone" -- doctrine alone, not a measured claim, which is exactly why this shipped as a hypothesis
-   * rather than a default.
-   *
-   * Measured 2026-09-23, verdict NO_EDGE -- untestable by reordering, not merely unreplicated. See
-   * Amendment 5. Byte-identical trade count and P&L to control on all three cells: BPRs form on 87%
-   * of NIFTY50 2025 bars (up to 65 at once), so this is a near-constant descriptor rather than a rare
-   * high-conviction zone, and the 53 bars where a BPR was reached with no other POI also reached never
-   * additionally cleared this strategy's other gates in this sample. Same structural limitation
-   * Amendment 2 recorded for `poiPreference`/OTE: entry/stop/target never consult which POI type
-   * supplied the level, so reordering or adding a candidate can only matter by changing whether ANY
-   * POI was found -- which it did not, here.
-   */
   considerBpr: boolean;
+
+  /** ATR period multiple for volatility stop placement (e.g. 1.5) */
+  atrStopMultiple: number;
+  /** ATR buffer added beyond structural swept low/high level (e.g. 0.25) */
+  structuralBufferAtr: number;
+  /** Maximum target distance cap in terms of Risk R (e.g. 3.0) */
+  maxTargetR: number;
+  /** Maximum risk distance veto in terms of ATR multiples (e.g. 3.5) */
+  maxRiskDistanceAtr: number;
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
@@ -156,10 +119,6 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   minConfidence: 0.7,
   expiryCandles: 3,
   requirePoiReaction: true,
-  /*
-   * All three entry-model arms default OFF, so every arm is exactly one configuration key away from
-   * its own control and a paired same-bar delta is available for Gate 4.
-   */
   poiPreference: "SWEEP_FIRST",
   requireKillzone: false,
   requireOte: false,
@@ -167,7 +126,13 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   requireCisdConfirmation: false,
   maxCisdAgeBars: 10,
   considerBpr: false,
+
+  atrStopMultiple: 1.5,
+  structuralBufferAtr: 0.25,
+  maxTargetR: 3.0,
+  maxRiskDistanceAtr: 6.0,
 };
+
 
 /**
  * What version 2 was REGISTERED with, pinned as its own literal.
@@ -536,6 +501,36 @@ export class IctStructureStrategy implements StrategyEvaluator {
       && cisdAgeBars <= config.maxCisdAgeBars;
     if (config.requireCisdConfirmation && !cisdConfirmed) return [];
 
+    // Gate 6: ATR Validation (Item 2 prerequisite: atr14 must be present and positive)
+    const atr = ict.atr14;
+    if (atr === null || atr <= 0 || Number.isNaN(atr)) return [];
+
+    // Structural Confirmation & PIT Setup Identity (Item 3)
+    const lastEvent = structure.lastEvent;
+    const pitValidEvent = lastEvent && lastEvent.availableAt <= context.candle.closeTime.getTime() ? lastEvent : null;
+
+    const setupId = pitValidEvent
+      ? computeIctSetupId({
+          strategyId: ICT_STRUCTURE_STRATEGY_KEY,
+          instrument: context.candle.instrumentId,
+          timeframe: context.candle.timeframe ?? "15m",
+          confirmationCandleTime: pitValidEvent.candleTime,
+          brokenPivotTime: pitValidEvent.brokenPivot.time,
+          eventType: pitValidEvent.type,
+          level: pitValidEvent.level,
+          direction: pitValidEvent.direction,
+        })
+      : computeIctSetupId({
+          strategyId: ICT_STRUCTURE_STRATEGY_KEY,
+          instrument: context.candle.instrumentId,
+          timeframe: context.candle.timeframe ?? "15m",
+          confirmationCandleTime: context.candle.closeTime,
+          brokenPivotTime: context.candle.openTime,
+          eventType: "GENERAL_STRUCTURE",
+          level: context.candle.close,
+          direction: isBullish ? "BULLISH" : "BEARISH",
+        });
+
     // Trade Geometry
     const entryPrice = currentPrice;
     let stopLoss: number;
@@ -544,14 +539,25 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     if (isBullish) {
       side = "LONG";
-      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 0.995);
-      stopLoss = rawStop * 0.9995; // 0.05% volatility buffer
-      targetPrice = targetPool.price;
+      const sweptLow = pitValidEvent?.direction === "BULLISH" ? pitValidEvent.level : (liquidity.invalidationLevel ?? (entryPrice * 0.995));
+      const atrStop = entryPrice - atr * config.atrStopMultiple;
+      const structuralStop = sweptLow - atr * config.structuralBufferAtr;
+      stopLoss = Math.min(atrStop, structuralStop);
+      const riskDistance = entryPrice - stopLoss;
 
-      if (stopLoss >= entryPrice || targetPrice <= entryPrice) return [];
-      const risk = entryPrice - stopLoss;
-      const reward = targetPrice - entryPrice;
-      const riskReward = Number((reward / risk).toFixed(2));
+      // Gate 9: Risk-distance veto
+      if (riskDistance <= 0 || (riskDistance / atr) > config.maxRiskDistanceAtr) return [];
+      
+      const structuralTarget = targetPool.price;
+      // Gate 10: Opposing liquidity direction check
+      if (structuralTarget <= entryPrice) return [];
+
+      // Gate 11: 3R maximum-target cap
+      const maxTarget = entryPrice + config.maxTargetR * riskDistance;
+      targetPrice = Math.min(structuralTarget, maxTarget);
+
+      // Gate 12: Minimum risk-reward floor check (Item 1)
+      const riskReward = Number(((targetPrice - entryPrice) / riskDistance).toFixed(2));
       if (riskReward < config.minimumRiskReward) return [];
 
       const evidence: TradeIdeaEvidence[] = [
@@ -573,7 +579,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           label: `Targeting ERL ${targetPool.kind}`,
           contribution: 0.35,
           details: {
-            targetPrice: targetPool.price,
+            targetPrice,
             intermediateTarget: liquidity.intermediateTarget,
           },
         },
@@ -585,9 +591,6 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
-          // targets this strategy now takes, so these two flags are the covariates that
-          // hypothesis needs before anyone narrows the population on it.
           details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
@@ -610,6 +613,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           ],
           evidence: {
             strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            setupId,
             engineVersion: ict.engineVersion,
             configHash: ict.configHash,
             bias: bias.bias,
@@ -618,6 +622,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
             targetPrice,
             stopLoss,
             poiEvidence,
+            atr,
           },
           expiresAt,
           evidenceItems: evidence,
@@ -625,14 +630,25 @@ export class IctStructureStrategy implements StrategyEvaluator {
       ];
     } else {
       side = "SHORT";
-      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 1.005);
-      stopLoss = rawStop * 1.0005; // 0.05% volatility buffer
-      targetPrice = targetPool.price;
+      const sweptHigh = pitValidEvent?.direction === "BEARISH" ? pitValidEvent.level : (liquidity.invalidationLevel ?? (entryPrice * 1.005));
+      const atrStop = entryPrice + atr * config.atrStopMultiple;
+      const structuralStop = sweptHigh + atr * config.structuralBufferAtr;
+      stopLoss = Math.max(atrStop, structuralStop);
+      const riskDistance = stopLoss - entryPrice;
 
-      if (stopLoss <= entryPrice || targetPrice >= entryPrice) return [];
-      const risk = stopLoss - entryPrice;
-      const reward = entryPrice - targetPrice;
-      const riskReward = Number((reward / risk).toFixed(2));
+      // Gate 9: Risk-distance veto
+      if (riskDistance <= 0 || (riskDistance / atr) > config.maxRiskDistanceAtr) return [];
+
+      const structuralTarget = targetPool.price;
+      // Gate 10: Opposing liquidity direction check
+      if (structuralTarget >= entryPrice) return [];
+
+      // Gate 11: 3R maximum-target cap
+      const maxTarget = entryPrice - config.maxTargetR * riskDistance;
+      targetPrice = Math.max(structuralTarget, maxTarget);
+
+      // Gate 12: Minimum risk-reward floor check (Item 1)
+      const riskReward = Number(((entryPrice - targetPrice) / riskDistance).toFixed(2));
       if (riskReward < config.minimumRiskReward) return [];
 
       const evidence: TradeIdeaEvidence[] = [
@@ -654,7 +670,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           label: `Targeting ERL ${targetPool.kind}`,
           contribution: 0.35,
           details: {
-            targetPrice: targetPool.price,
+            targetPrice,
             intermediateTarget: liquidity.intermediateTarget,
           },
         },
@@ -666,9 +682,6 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
-          // targets this strategy now takes, so these two flags are the covariates that
-          // hypothesis needs before anyone narrows the population on it.
           details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
@@ -691,6 +704,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           ],
           evidence: {
             strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            setupId,
             engineVersion: ict.engineVersion,
             configHash: ict.configHash,
             bias: bias.bias,
@@ -699,6 +713,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
             targetPrice,
             stopLoss,
             poiEvidence,
+            atr,
           },
           expiresAt,
           evidenceItems: evidence,

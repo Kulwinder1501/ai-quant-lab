@@ -173,6 +173,7 @@ export class IctCompositeEngine {
       htfBias: htfBias ?? null,
       coverage,
       drawOnLiquidityState,
+      atr14,
     };
   }
 }

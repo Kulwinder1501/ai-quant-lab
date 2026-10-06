@@ -123,6 +123,7 @@ import { paperTradeUnderlyingFillQuoteObservedSourceMigration } from "./122-pape
 import { shadowDecisionsMigration } from "./123-shadow-decisions.js";
 import { paperTradeO1ExitReasonMigration } from "./124-paper-trade-o1-exit-reason.js";
 import { dxyFxComponentInstrumentsMigration } from "./125-dxy-fx-component-instruments.js";
+import { tradeIdeaSetupIdUniquenessMigration } from "./126-trade-idea-setup-id-uniqueness.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -250,4 +251,5 @@ export const migrations = [
   shadowDecisionsMigration,
   paperTradeO1ExitReasonMigration,
   dxyFxComponentInstrumentsMigration,
+  tradeIdeaSetupIdUniquenessMigration,
 ];
