@@ -80,6 +80,10 @@ from ai_quant_lab_ml.master_scanner import Master5LayerScanner
 
 INSTRUMENTS = ["NIFTY50", "BANKNIFTY"]
 TIMEFRAME = "5m"  # single, fixed granularity -- never mix timeframes in one engine stream
+# Full real history per instrument at 5m is currently ~14-16k rows (2024/2026 to date). This cap
+# is a generous safety net, not a deliberate window: if a query ever hits it, that is reported
+# loudly (never silently truncated the way an earlier, unrelated pipeline bug once was).
+HISTORY_ROW_LIMIT = 200_000
 HORIZON_MINUTES = 15  # frozen forward evaluation horizon (Research Spec v1.1 protocol item 5)
 TIMEFRAME_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 ROUND_TRIP_FRICTION_BPS = 2.0
@@ -371,17 +375,25 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]) -
                 JOIN instruments i ON c.instrument_id = i.id
                 WHERE i.symbol = %s AND c.timeframe = %s AND c.is_complete = true
                 ORDER BY c.close_time ASC
-                LIMIT 5000;
+                LIMIT %s;
                 """,
-                (instrument, TIMEFRAME),
+                (instrument, TIMEFRAME, HISTORY_ROW_LIMIT),
             )
             rows = cur.fetchall()
+            if len(rows) == HISTORY_ROW_LIMIT:
+                print(
+                    f"WARNING: {instrument} hit HISTORY_ROW_LIMIT={HISTORY_ROW_LIMIT} -- "
+                    "history is being silently truncated. Raise the limit.",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"Notice: query for {instrument} returned: {e}", file=sys.stderr)
             rows = []
 
         if rows:
-            print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument}.", file=sys.stderr)
+            first_date = rows[0][0]
+            last_date = rows[-1][0]
+            print(f"Loaded {len(rows)} real {TIMEFRAME} candles for {instrument} ({first_date} to {last_date}).", file=sys.stderr)
             instrument_episodes, diag = build_instrument_episodes(rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME])
             episodes.extend(instrument_episodes)
             per_instrument_diagnostics[instrument] = diag
