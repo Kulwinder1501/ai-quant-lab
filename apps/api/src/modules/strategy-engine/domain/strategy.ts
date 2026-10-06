@@ -226,7 +226,25 @@ export interface SaveTradeIdeaProposalInput extends ProposedTradeIdea {
   sourceCandleId: string;
 }
 
+export interface ActiveDuplicateQuery {
+  strategyVersionId: string;
+  instrumentId: string;
+  side: TradeSide;
+  targetPrice: number;
+  /** Only a still-live idea counts as a duplicate -- one whose own horizon has already elapsed is not. */
+  asOf: Date;
+}
+
 /** Saves one idempotent proposal and its ordered, human-readable evidence atomically. */
 export interface TradeIdeaRepository {
   saveProposal(input: SaveTradeIdeaProposalInput): Promise<TradeIdea>;
+  /**
+   * An already-PROPOSED, not-yet-expired idea for the same strategy/instrument/side whose target is
+   * within 0.1% of this one -- i.e. the same structural level still being evaluated bar after bar,
+   * not a genuinely new setup. `saveProposal`'s own idempotency key is (strategy_version_id,
+   * source_candle_id, side), which only catches a retried save of the *same* candle; a slower
+   * timeframe's structure can stay valid across many new candles, each of which is a legitimately
+   * different `source_candle_id` and so sails past that key and inserts again.
+   */
+  findActiveDuplicate(query: ActiveDuplicateQuery): Promise<TradeIdea | null>;
 }
