@@ -4,10 +4,14 @@ import type { StrategyMarketContext } from "./strategy.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
 function makeContext(ictSnapshot?: IctStateCompositeSnapshot, close = 100): StrategyMarketContext {
+  // `Partial<...>` here (not the plain interface) because this snapshot often arrives via this
+  // file's own `: any`-typed builder helpers, which can genuinely omit `atr14` at runtime despite
+  // the static type claiming it's required -- the spread then simply leaves the literal default
+  // below in place, same as any other missing-key default merge.
   const snap = ictSnapshot
     ? {
         atr14: 2.0,
-        ...ictSnapshot,
+        ...(ictSnapshot as Partial<IctStateCompositeSnapshot>),
       }
     : undefined;
   return {
