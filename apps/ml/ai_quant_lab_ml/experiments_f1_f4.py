@@ -24,6 +24,16 @@ MIN_MATCHED_PAIRS_FOR_VERDICT = 20
 # INCONCLUSIVE" commit for the full funnel numbers this is responding to.
 SAME_SESSION_MATCH_WINDOW_MS = 60 * 60 * 1000
 
+# Propensity-score caliper, in standard deviations of the logit propensity score. Widened from
+# the spec's original 0.20 to 0.5, a deliberate protocol change (owner decision, pre-registered
+# here before the next evaluation run) after the 60-minute window still left Golden Pocket and
+# Deep Retracement with 0 matched pairs despite 14-15 temporally-eligible candidates each --
+# the caliper, not temporal locality, was then the binding constraint for those two zones. A
+# wider caliper lets in less-comparable pairs; ASMD_BALANCE_THRESHOLD is the check that is
+# supposed to catch it if this goes too far (see OTE's 0.618 ASMD under the narrower caliper --
+# already failing balance before this change, which is its own, separate problem).
+PROPENSITY_CALIPER_SD = 0.5
+
 
 @dataclass
 class ObservationEpisode:
@@ -77,7 +87,7 @@ class ExperimentResult:
 
 
 class PropensityMatcher:
-    def __init__(self, means: np.ndarray, stds: np.ndarray, caliper_sd: float = 0.20):
+    def __init__(self, means: np.ndarray, stds: np.ndarray, caliper_sd: float = PROPENSITY_CALIPER_SD):
         self.means = np.array(means, dtype=np.float64)
         self.stds = np.array(stds, dtype=np.float64)
         self.stds[self.stds == 0] = 1.0
@@ -192,7 +202,10 @@ class PropensityMatcher:
         trimmed_count = int(np.sum(~treat_in_support_mask) + np.sum(~ctrl_in_support_mask))
 
         logit_sd = np.std(logits)
-        caliper_dist = self.caliper_sd * logit_sd if logit_sd > 0 else 0.20
+        # Degenerate fallback (logits all equal -- no spread to scale a caliper by): an absolute
+        # logit-unit distance, kept proportional to the configured caliper_sd rather than a
+        # second independent magic number.
+        caliper_dist = self.caliper_sd * logit_sd if logit_sd > 0 else self.caliper_sd
 
         # Sort treatment episodes deterministically by episodeId ascending
         treat_indices = [i for i in range(n_treat) if treat_in_support_mask[i]]

@@ -12,13 +12,13 @@
         "zoneName": "GOLDEN_POCKET",
         "nTreatmentTotal": 78,
         "nControlTotal": 362,
-        "nTreatmentMatched": 0,
-        "nControlMatched": 0,
+        "nTreatmentMatched": 5,
+        "nControlMatched": 5,
         "trimmedCommonSupportCount": 87,
-        "asmdMax": 0.0,
-        "estimateHatDeltaBps": 0.0,
-        "lowerCiUnadjusted95Bps": 0.0,
-        "pValRaw": 1.0,
+        "asmdMax": 1.246350648174593,
+        "estimateHatDeltaBps": -0.1798531006811345,
+        "lowerCiUnadjusted95Bps": -4.32094520553161,
+        "pValRaw": 0.6361363863613638,
         "controlCovariateSourceCounts": {
           "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
@@ -26,9 +26,9 @@
         "absoluteSurplusPassed": true,
         "separationDetected": false,
         "dataSufficientForVerdict": false,
-        "balanceAchieved": true,
+        "balanceAchieved": false,
         "treatmentsWithTemporalCandidate": 15,
-        "pValHolmAdjusted": 1.0,
+        "pValHolmAdjusted": 0.6361363863613638,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
@@ -37,13 +37,13 @@
         "zoneName": "OTE",
         "nTreatmentTotal": 99,
         "nControlTotal": 362,
-        "nTreatmentMatched": 6,
-        "nControlMatched": 6,
+        "nTreatmentMatched": 12,
+        "nControlMatched": 12,
         "trimmedCommonSupportCount": 46,
-        "asmdMax": 0.6177224513486187,
-        "estimateHatDeltaBps": 7.142221353170469,
-        "lowerCiUnadjusted95Bps": -0.4489697123927461,
-        "pValRaw": 0.12998700129987,
+        "asmdMax": 0.47213504117471017,
+        "estimateHatDeltaBps": 6.434610772437249,
+        "lowerCiUnadjusted95Bps": 0.761969703288418,
+        "pValRaw": 0.0704929507049295,
         "controlCovariateSourceCounts": {
           "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
@@ -53,7 +53,7 @@
         "dataSufficientForVerdict": false,
         "balanceAchieved": false,
         "treatmentsWithTemporalCandidate": 25,
-        "pValHolmAdjusted": 0.38996100389961,
+        "pValHolmAdjusted": 0.2114788521147885,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       },
@@ -62,13 +62,13 @@
         "zoneName": "DEEP_RETRACEMENT",
         "nTreatmentTotal": 61,
         "nControlTotal": 362,
-        "nTreatmentMatched": 0,
-        "nControlMatched": 0,
+        "nTreatmentMatched": 3,
+        "nControlMatched": 3,
         "trimmedCommonSupportCount": 94,
-        "asmdMax": 0.0,
-        "estimateHatDeltaBps": 0.0,
-        "lowerCiUnadjusted95Bps": 0.0,
-        "pValRaw": 1.0,
+        "asmdMax": 1.2358924789172727,
+        "estimateHatDeltaBps": 14.853101104936416,
+        "lowerCiUnadjusted95Bps": -3.92850939916695,
+        "pValRaw": 0.2588741125887411,
         "controlCovariateSourceCounts": {
           "ACTIVE_ANCHOR": 362,
           "SYNTHETIC_FALLBACK": 0
@@ -76,9 +76,9 @@
         "absoluteSurplusPassed": true,
         "separationDetected": false,
         "dataSufficientForVerdict": false,
-        "balanceAchieved": true,
+        "balanceAchieved": false,
         "treatmentsWithTemporalCandidate": 14,
-        "pValHolmAdjusted": 1.0,
+        "pValHolmAdjusted": 0.5177482251774822,
         "incrementalSurplusPassed": false,
         "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA"
       }
@@ -217,7 +217,7 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15771,
+        "barsEvaluated": 15772,
         "activePoiBarCount": 5616,
         "poiQualifiedCount": 402,
         "uniqueAnchorsWithValidHorizon": 399,
@@ -226,12 +226,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14121,
+        "barsEvaluated": 14122,
         "activePoiBarCount": 5168,
         "poiQualifiedCount": 357,
         "uniqueAnchorsWithValidHorizon": 349,
         "episodesAfterDedup": 349,
-        "realOfiAvailableBarFraction": 0.13285178103533743,
+        "realOfiAvailableBarFraction": 0.13291318510126043,
         "realOfiAvailableEpisodeCount": 49
       }
     },
