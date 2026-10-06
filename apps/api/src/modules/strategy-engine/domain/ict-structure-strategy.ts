@@ -44,6 +44,23 @@ function killzoneAt(instant: Date): string | null {
 }
 
 /**
+ * `expiryCandles` bars of real wall-clock time, derived from the signal candle's own duration
+ * rather than a hardcoded 5-minute assumption.
+ *
+ * This strategy scans both 5m and 15m timeframes, but `expiresAt` used to be computed as
+ * `closeTime + expiryCandles * 5 * 60_000` unconditionally -- correct for a 5m candle, but a 3x
+ * under-grant for a 15m one (3 bars of real structure-formation time is 45 minutes, not 15).
+ * Measured against the live DB (2026-10): 15m-sourced ideas average a *larger* target distance
+ * (6.19% vs 5m's 5.12%, since 15m structure targets more distant liquidity) while getting the
+ * *shortest* realized window of all (avg 4.6 minutes) -- 96% of this strategy's live ideas timed
+ * out UNRESOLVED rather than hitting stop or target, which this directly explains.
+ */
+function computeExpiresAt(candle: { openTime: Date; closeTime: Date }, expiryCandles: number): Date {
+  const candleDurationMs = candle.closeTime.getTime() - candle.openTime.getTime();
+  return new Date(candle.closeTime.getTime() + expiryCandles * candleDurationMs);
+}
+
+/**
  * Whether price sits in the 62-79% retracement of the dealing range -- the optimal trade entry.
  *
  * For a long that is the DEEP end of discount: 62-79% back off the range high is 21-38% up from the
@@ -575,9 +592,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
         });
       }
 
-      const expiresAt = new Date(
-        context.candle.closeTime.getTime() + config.expiryCandles * 5 * 60_000
-      );
+      const expiresAt = computeExpiresAt(context.candle, config.expiryCandles);
 
       return [
         {
@@ -658,9 +673,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
         });
       }
 
-      const expiresAt = new Date(
-        context.candle.closeTime.getTime() + config.expiryCandles * 5 * 60_000
-      );
+      const expiresAt = computeExpiresAt(context.candle, config.expiryCandles);
 
       return [
         {
