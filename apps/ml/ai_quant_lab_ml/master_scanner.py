@@ -118,8 +118,16 @@ class Layer2MicrostructureEngine:
         if self.lambda_artifact.instrument != current_instrument or self.lambda_artifact.regime != current_regime:
             return False, "CALIBRATION_CONTEXT_MISMATCH"
 
-        if normalized_ofi.ofi30s <= 0.032:
-            return False, "OFI_BELOW_BASELINE_THRESHOLD"
+        # No validated gate threshold exists on this feature's raw value. "0.032" (Phase 28,
+        # docs/phase-28-microstructure-information-flow.md section 11) is the measured
+        # INFORMATION COEFFICIENT -- a dataset-level rank correlation between this feature and
+        # a 30s-ahead forward return, naturally in [-1, 1] -- not a cutoff on the feature
+        # itself, which is a raw signed sum of order quantities on a completely different
+        # scale. Phase 28 also found the IC's sign is unstable across time windows ("DOES NOT
+        # REPLICATE", doc section 9), so there is no stable direction to gate on even if units
+        # matched. A prior version of this method applied `ofi30s <= 0.032` as if it were a
+        # feature-value threshold; that compared incompatible units and has been removed. The
+        # real value is still recorded in the feature vector for diagnostic/matching use.
 
         price_range = bar.high - bar.low
         DELTA_EPSILON = 1.0
@@ -236,7 +244,7 @@ class Master5LayerScanner:
         )
 
         features_definition_valid = (
-            normalized_ofi.featureDefinitionId == "CKS_OFI_30S_NORMALIZED_TOP5_V1" and
+            normalized_ofi.featureDefinitionId == "CKS_OFI_TOUCH_5S_RAW_V1" and
             atr_obs.featureDefinitionId == "ATR_14_WILDER_V1" and
             l2_depth_liq.featureDefinitionId == "L2_DEPTH_LIQUIDITY_TOP5_V1" and
             self.fib_artifact.featureDefinitionId == "FIB_RETRACEMENT_STATEFUL_V1" and
@@ -269,7 +277,7 @@ class Master5LayerScanner:
         # Feature Provenance Tracking
         provenance = [
             FeatureProvenance("magnitude", "D0_E_MAGNITUDE_V1", magnitude.sourceTimestamp, magnitude.availableAt),
-            FeatureProvenance("normalized_ofi", "CKS_OFI_30S_NORMALIZED_TOP5_V1", normalized_ofi.sourceTimestamp, normalized_ofi.availableAt),
+            FeatureProvenance("normalized_ofi", "CKS_OFI_TOUCH_5S_RAW_V1", normalized_ofi.sourceTimestamp, normalized_ofi.availableAt),
             FeatureProvenance("l2_depth_liquidity", "L2_DEPTH_LIQUIDITY_TOP5_V1", l2_depth_liq.sourceTimestamp, l2_depth_liq.availableAt),
             FeatureProvenance("lambda_proxy", "LAMBDA_PROXY_RANGE_DELTA_V1", bar.identity.closeTimestamp, bar.availableAt),
             FeatureProvenance("footprint_shape", "FP_SHAPE_POC_TAIL_Z_V1", bar.identity.closeTimestamp, bar.availableAt),

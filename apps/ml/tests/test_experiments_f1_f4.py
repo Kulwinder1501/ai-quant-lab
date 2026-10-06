@@ -50,7 +50,7 @@ def test_propensity_matcher_real_active_anchor_restriction():
     c_no_anchor = [make_episode(f"C_noact_{i}", "2026-10-05", 1000000 + i * 1000 + 600, False, "NONE", False, 0.50, 2.0) for i in range(5)]
 
     all_controls = c_active + c_no_anchor
-    pairs, trimmed, asmd, counts, separation = matcher.match_1to1_deterministic(t_eps, all_controls)
+    pairs, trimmed, asmd, counts, separation, _ = matcher.match_1to1_deterministic(t_eps, all_controls)
 
     # Verify synthetic/no-anchor observations were strictly excluded
     assert counts["ACTIVE_ANCHOR"] == 5
@@ -60,6 +60,39 @@ def test_propensity_matcher_real_active_anchor_restriction():
     active_ids = {ep.episodeId for ep in c_active}
     for p in pairs:
         assert p.controlEpisodeId in active_ids
+
+
+def test_temporal_candidate_diagnostic_isolates_locality_from_caliper():
+    """
+    Regression test for the funnel diagnostic added after investigating why real-data F1-F3
+    runs reported INCONCLUSIVE_INSUFFICIENT_DATA despite dozens of treatment anchors: the
+    dominant bottleneck turned out to be temporal locality (no control in the same session
+    within 30 minutes), not raw anchor scarcity or the propensity caliper. This asserts the
+    diagnostic actually separates those two causes rather than conflating them.
+    """
+    means = [10.0, 1.2, 5.0, 0.1, 0.2, 0.5, 500.0]
+    stds = [2.0, 0.3, 2.0, 0.5, 0.5, 0.2, 100.0]
+    matcher = PropensityMatcher(means=means, stds=stds, caliper_sd=0.20)
+
+    t_eps = [
+        make_episode("T_near", "2026-10-05", 1000000, True, "GOLDEN_POCKET", True, 0.62, 5.0),
+        make_episode("T_far", "2026-10-06", 1000000, True, "GOLDEN_POCKET", True, 0.62, 5.0),
+    ]
+    c_eps = [
+        # Same session as T_near, within 30 minutes -> a temporal candidate for it.
+        make_episode("C_same_day", "2026-10-05", 1000000 + 1000, False, "NONE", True, 0.50, 2.0),
+        # A different session entirely -> no temporal candidate for either treatment episode.
+        make_episode("C_other_day", "2026-10-09", 1000000, False, "NONE", True, 0.50, 2.0),
+    ]
+
+    pairs, trimmed, asmd, counts, separation, treat_with_temporal_candidate = (
+        matcher.match_1to1_deterministic(t_eps, c_eps)
+    )
+
+    # T_near has a temporal candidate (same session, 1s apart); T_far does not (no same-session
+    # control at all) -- exactly one of the two should count, regardless of whether a pair
+    # actually formed after the caliper.
+    assert treat_with_temporal_candidate == 1
 
 
 def test_deterministic_matching_tie_break():
@@ -73,7 +106,7 @@ def test_deterministic_matching_tie_break():
     c1 = make_episode("C_B", "2026-10-05", 1000100, False, "NONE", True, 0.50, 2.0)
     c2 = make_episode("C_A", "2026-10-05", 1000100, False, "NONE", True, 0.50, 2.0)
 
-    pairs, trimmed, asmd, counts, separation = matcher.match_1to1_deterministic([t_ep], [c1, c2])
+    pairs, trimmed, asmd, counts, separation, _ = matcher.match_1to1_deterministic([t_ep], [c1, c2])
 
     assert len(pairs) == 1
     # Secondary tie-break = episodeId ascending -> "C_A" must be selected over "C_B"

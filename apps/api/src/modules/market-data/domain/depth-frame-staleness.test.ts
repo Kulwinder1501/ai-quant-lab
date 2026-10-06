@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   DEPTH_STRUCTURAL_SILENCE_MS,
+  canonicalUnderlyingFromTicker,
   describeContractRoll,
   evaluateDepthCaptureStaleness,
   frontMonthFuturesSymbol,
+  futuresTickerUnderlying,
   parseFuturesSymbol,
   type DepthSymbolObservation,
 } from "./depth-frame-staleness.js";
@@ -262,5 +264,42 @@ describe("frontMonthFuturesSymbol", () => {
     expect(frontMonthFuturesSymbol({
       underlying: "   ", now: new Date("2026-08-27T04:00:00.000Z"), expiries: [SEPT],
     })).toBeNull();
+  });
+});
+
+describe("futuresTickerUnderlying / canonicalUnderlyingFromTicker", () => {
+  it("maps NIFTY50 (the calendar's canonical name) to NIFTY (the futures ticker token)", () => {
+    expect(futuresTickerUnderlying("NIFTY50")).toBe("NIFTY");
+  });
+
+  it("is the identity for an underlying whose canonical name and ticker token already match", () => {
+    // BANKNIFTY is why this mismatch went unnoticed for so long: there was nothing to diverge.
+    expect(futuresTickerUnderlying("BANKNIFTY")).toBe("BANKNIFTY");
+  });
+
+  it("is case-insensitive and trims whitespace, like the CLI's own underlying parsing", () => {
+    expect(futuresTickerUnderlying(" nifty50 ")).toBe("NIFTY");
+  });
+
+  it("inverts cleanly: a ticker's own underlying token resolves back to the calendar's canonical name", () => {
+    expect(canonicalUnderlyingFromTicker("NIFTY")).toBe("NIFTY50");
+    expect(canonicalUnderlyingFromTicker("BANKNIFTY")).toBe("BANKNIFTY");
+  });
+
+  it("regression: resolving NIFTY50's front month no longer builds an invented ticker", () => {
+    /*
+     * Before this fix, collect-depth-frames.ts passed the CLI's canonical underlying
+     * ("NIFTY50") straight into frontMonthFuturesSymbol, which built "NSE:NIFTY5026OCTFUT" --
+     * a contract that has never existed, because Fyers' own ticker token is "NIFTY". The feed
+     * would have accepted that subscription and silently delivered nothing, exactly the failure
+     * mode depth-frame-staleness.ts's own module doc describes for a rolled BANKNIFTY contract.
+     */
+    const symbol = frontMonthFuturesSymbol({
+      underlying: futuresTickerUnderlying("NIFTY50"),
+      now: new Date("2026-10-01T04:00:00.000Z"),
+      expiries: ["2026-09-30", "2026-10-28"],
+    });
+    expect(symbol).toBe("NSE:NIFTY26OCTFUT");
+    expect(symbol).not.toContain("NIFTY50");
   });
 });

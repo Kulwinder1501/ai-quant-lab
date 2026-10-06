@@ -179,6 +179,73 @@ def test_candidate_timeout_expiry(sample_artifact):
     assert engine.state == FibLifecycleState.IDLE
 
 
+def test_qualified_poi_expires_after_shelf_life_without_invalidation():
+    """
+    Regression test for the re-arm/expiry fix: a RETRACEMENT_QUALIFIED POI with no further
+    expiry path (only INVALIDATED) can get stuck tracking one stale setup forever if price
+    never revisits the stop -- confirmed on real NIFTY50 history (qualified once at bar 1283
+    of 15742, then stuck for the remaining 92%). After maxQualifiedLifetimeBars (20, this
+    test's own value -- see this artifact's own comment for why it is NOT sample_artifact's
+    production value of 2000) bars past qualification with no invalidation, the engine must
+    now EXPIRE and re-arm (reset to IDLE), rather than silently sitting in
+    RETRACEMENT_QUALIFIED indefinitely.
+    """
+    artifact = FibAnchorCalibrationArtifact(
+        calibrationId="FIB_CALIB_TEST_V1", featureDefinitionId="FIB_RETRACEMENT_STATEFUL_V1",
+        instrument="NIFTY", regime="NORMAL", minRetracementTicks=10.0, minRetracementAtrMultiple=0.5,
+        # Deliberately a small, test-friendly value, not sample_artifact's production 2000 --
+        # this test needs the shelf life short enough to exhaust in a few dozen bars.
+        maxWindowBars=20, maxQualifiedLifetimeBars=20, trainedThrough=1000000000000,
+    )
+    engine = StatefulPITFibEngine(fib_artifact=artifact, tick_size=0.05)
+
+    timestamps = [100000 + i * 1000 for i in range(12)]
+    candles = [
+        make_bar(1, timestamps[0], 100, 101, 99, 100, timestamps[0]),
+        make_bar(2, timestamps[1], 100, 101, 99, 100, timestamps[1]),
+        make_bar(3, timestamps[2], 100, 101, 99, 100, timestamps[2]),
+        make_bar(4, timestamps[3], 100, 101, 99, 100, timestamps[3]),
+        make_bar(5, timestamps[4], 100, 101, 99, 100, timestamps[4]),
+        make_bar(6, timestamps[5], 100, 101, 99, 100, timestamps[5]),
+        make_bar(7, timestamps[6], 100, 101, 98, 100, timestamps[6]),   # prev
+        make_bar(8, timestamps[7], 99, 100, 95, 96, timestamps[7]),     # curr (low 95.0)
+        make_bar(9, timestamps[8], 96, 98, 97, 97, timestamps[8]),      # nxt (candidateAt)
+        make_bar(10, timestamps[9], 97, 99, 96, 98, timestamps[9]),
+    ]
+
+    resistance = StructuralLevel(levelPrice=102.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[9])
+    assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+
+    candles.append(make_bar(11, timestamps[10], 99, 105, 98, 103, timestamps[10]))
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[10])
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+
+    retracement = RetracementObservation(low=97.5, sequenceNumber=12, observedAt=timestamps[11], availableAt=timestamps[11])
+    candles.append(make_bar(12, timestamps[11], 103, 104, 97.5, 98.0, timestamps[11]))
+    engine.process_new_candle(candles, resistance, retracement, atr, timestamps[11])
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.poi_qualified_seq == 12
+
+    # 21 more bars (> maxQualifiedLifetimeBars=20), price drifting sideways well above the 94.90 stop --
+    # never invalidates, so the only way out used to be "never". No new retracement observations
+    # are supplied either, so State 4 cannot re-qualify a (non-existent) new POI in the interim.
+    t = timestamps[11]
+    last_status = None
+    for seq in range(13, 34):
+        t += 1000
+        bar = make_bar(seq, t, 98, 99, 97, 98, t)
+        candles.append(bar)
+        _, last_status = engine.process_new_candle(candles[-20:], resistance, None, atr, t)
+
+    assert last_status == "EXPIRED"
+    assert engine.state == FibLifecycleState.IDLE
+    assert engine.active_poi is None
+    assert engine.poi_qualified_seq is None
+
+
 def test_canonical_location_evaluation(sample_artifact):
     engine = StatefulPITFibEngine(fib_artifact=sample_artifact, tick_size=0.05)
 
@@ -243,6 +310,15 @@ def test_qualified_zone_staleness_forces_rearm():
     stayed qualified for 92% of a 2.75-year history, blocking all new pivot detection). This
     proves the force-expiry actually re-arms the engine, not just that it stops being
     RETRACEMENT_QUALIFIED.
+
+    maxWindowBars=20 and maxQualifiedLifetimeBars=3 are deliberately set to DIFFERENT values
+    here, decoupled from each other: an earlier version of this fix reused max_window_bars as
+    the qualified-zone shelf life, which is wrong (that parameter bounds a different window
+    entirely, and the real lifetime distribution of naturally-invalidated POIs showed 20 bars
+    would force-expire most still-genuinely-active ones). This test would still pass if the
+    engine silently fell back to max_window_bars (since 20 > 3, expiry would just never fire
+    within this test's 4-bar window) -- so it only proves the mechanism if a bug like that
+    is ruled out by also reading the production calibration (2,000) in run_phase_c_pipeline.py.
     """
     artifact = FibAnchorCalibrationArtifact(
         calibrationId="FIB_CALIB_TEST_V1", featureDefinitionId="FIB_RETRACEMENT_STATEFUL_V1",
@@ -278,7 +354,7 @@ def test_qualified_zone_staleness_forces_rearm():
     candles.append(make_bar(12, timestamps[11], 195, 196, 135, 136, timestamps[11]))
     engine.process_new_candle(candles, resistance, retracement, atr, timestamps[11])
     assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
-    assert engine.qualified_seq == 12
+    assert engine.poi_qualified_seq == 12
 
     # Price drifts sideways well above the invalidation level (pendingPivotLow 100 - 2 ticks =
     # 99.9) without ever revisiting it -- exactly the real-world condition that stalled the engine.
@@ -287,13 +363,13 @@ def test_qualified_zone_staleness_forces_rearm():
         engine.process_new_candle(candles, resistance, None, atr, timestamps[seq - 1])
         assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED, f"should still be qualified at age {seq - 12}"
 
-    # Age now exceeds maxQualifiedLifetimeBars=3 (seq 16 - qualified_seq 12 = 4) -- force-expire.
+    # Age now exceeds maxQualifiedLifetimeBars=3 (seq 16 - poi_qualified_seq 12 = 4) -- force-expire.
     candles.append(make_bar(16, timestamps[15], 150, 151, 150.0, 150, timestamps[15]))
     _, status = engine.process_new_candle(candles, resistance, None, atr, timestamps[15])
     assert status == "EXPIRED"
     assert engine.state == FibLifecycleState.IDLE
     assert engine.active_poi is None
-    assert engine.qualified_seq is None
+    assert engine.poi_qualified_seq is None
 
     # Re-arm proof: the engine can now detect a brand-new pivot low, which the old, never-exiting
     # RETRACEMENT_QUALIFIED state would otherwise have blocked forever.
