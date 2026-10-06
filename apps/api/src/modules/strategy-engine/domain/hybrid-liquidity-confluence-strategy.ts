@@ -2,7 +2,14 @@ import type { StrategyEvaluator } from "./strategy-registry.js";
 import type { EnsureStrategyVersionInput, ProposedTradeIdea, StrategyMarketContext } from "./strategy.js";
 
 export const hybridLiquidityConfluenceStrategyKey = "hybrid-liquidity-confluence-v1";
-export const hybridLiquidityConfluenceStrategyVersion = 1;
+// Bumped 1 -> 2: version 1's stored configuration ({"minDiDecay": 0.15, "minLongPcr": 1.2,
+// "maxShortPcr": 0.8, "minRawDiOfi": 0.05, "minIvPercentile": 15}, registered 2026-09-28) predates
+// the thresholds moving inline into evaluate() below (this strategy now declares configuration: {}).
+// `PostgresStrategyVersionRepository.ensure()` correctly refuses to silently rewrite an existing
+// version's immutable configuration, so every live tick failed with STRATEGY_FAILED ("already
+// exists with a different immutable configuration") once the scheduler process restarted and
+// re-ran this check fresh -- this strategy generated zero trade ideas on any tick since.
+export const hybridLiquidityConfluenceStrategyVersion = 2;
 
 export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: hybridLiquidityConfluenceStrategyKey,
