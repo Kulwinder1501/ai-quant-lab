@@ -68,7 +68,16 @@ export const frozenSourceContentDigests = Object.freeze({
   "momentum-scalp-index-strategy.ts": "ecf9fe47c96ddce944c269757a292c5fc647e3d03364d3adab2339024a1f0396",
   // Bumped 2026-09-22 when selectPriorityPattern replaced the alphabetical-arrival trigger pick.
   // See the note on patternDefinition below for why that forced pattern-v5-research rather than a repin.
-  "momentum-scalp-pattern-strategy.ts": "851cb623c2677949d0d949e0008a896634db9883b5a24427513cc489c42fa8f9",
+  //
+  // Re-pinned 2026-10-06 after two 2026-09-30 commits (9143fad, 18b4cc9) drifted this undetected: both
+  // added `config.requireStrictTrendAlignment` gating to trend confirmation (V1's in 9143fad, V2's --
+  // the class patternDefinition actually wraps -- in 18b4cc9, bundled unreviewed into an unrelated Gold-
+  // bot commit). Confirmed a REPIN, not a new research version: the flag is absent from
+  // defaultMomentumScalpPatternStrategyConfiguration (the config patternDefinition uses), so
+  // `config.requireStrictTrendAlignment` reads `undefined` there -- falsy, same branch the old
+  // unconditional OR always took. pattern-v5-research's registered behaviour is unchanged; only the
+  // drift detector's pin was stale.
+  "momentum-scalp-pattern-strategy.ts": "ea75ecaefb5effd0f71abc4ae37572f98412c1e4a9834744f4480baf20b6867c",
 });
 
 export const researchStrategySourceChecksums = Object.freeze({

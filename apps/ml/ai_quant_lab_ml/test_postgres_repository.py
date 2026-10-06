@@ -259,6 +259,9 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                     "fii_options_scale": None,
                 },
             ],
+            # ICT structural features: empty here — a candle never backfilled for this
+            # instrument/timeframe/engine version is simply absent, and evidence.ict stays None.
+            [],
             # Breadth panel: empty here — a panel below the participation floor
             # publishes no context, and the evidence carries breadth=None.
             [],
@@ -341,9 +344,15 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         self.assertIn("ROWS BETWEEN %s PRECEDING AND 1 PRECEDING", flow_sql)
         self.assertEqual(flow_params, (at(31, 23), 20, 5, ["candle-1", "candle-2"]))
 
+        # ICT structural features are resolved through the same loader training and
+        # inference share; an absent backfill must leave evidence.ict as None, not a default.
+        self.assertEqual(connection.calls[7][1], (["candle-1", "candle-2"],))
+        self.assertIsNone(records[0].ict)
+        self.assertIsNone(records[1].ict)
+
         # The breadth panel is loaded under the same as-of discipline: completed
         # daily bars received by the cutoff, warmed up before the window start.
-        breadth_sql, breadth_params = connection.calls[7]
+        breadth_sql, breadth_params = connection.calls[8]
         self.assertIn("candles.timeframe = '1d'", breadth_sql)
         self.assertIn("candles.is_complete = TRUE", breadth_sql)
         self.assertIn("candles.received_at <= %s", breadth_sql)
@@ -589,6 +598,8 @@ class PostgresMlRepositoryTests(unittest.TestCase):
                 "fii_futures_scale": None,
                 "fii_options_scale": None,
             }],
+            # ICT structural features (empty: never backfilled for this candle).
+            [],
             # Breadth panel (empty: below the participation floor, no context).
             [],
         ])
@@ -635,9 +646,13 @@ class PostgresMlRepositoryTests(unittest.TestCase):
         self.assertIsNone(evidence.dii_net_flow_ratio)
         self.assertEqual(connection.calls[6][1], (at(31, 23), 20, 5, ["candle-31"]))
 
+        # ICT structural features go through the same loader as training, too.
+        self.assertEqual(connection.calls[7][1], (["candle-31"],))
+        self.assertIsNone(evidence.ict)
+
         # Breadth is resolved through the shared loader on the inference path
         # too; an unmeasurable panel is absent evidence, never a default.
-        breadth_sql, breadth_params = connection.calls[7]
+        breadth_sql, breadth_params = connection.calls[8]
         self.assertIn("candles.timeframe = '1d'", breadth_sql)
         self.assertEqual(breadth_params[1], at(31, 23))
         self.assertIsNone(evidence.breadth)

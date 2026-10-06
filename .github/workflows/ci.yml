@@ -37,4 +37,5 @@ jobs:
           cache-dependency-path: apps/ml/requirements.txt
       - run: python -m pip install --upgrade pip
       - run: pip install -r apps/ml/requirements.txt
-      - run: python -m unittest discover -s apps/ml -p "test_*.py" -v
+      - run: pip install pytest
+      - run: cd apps/ml && python -m pytest -v
