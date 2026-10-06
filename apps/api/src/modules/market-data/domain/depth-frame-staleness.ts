@@ -241,6 +241,42 @@ export function parseFuturesSymbol(symbol: string): ParsedFuturesSymbol | null {
  * Returns null when no unexpired expiry is listed, rather than guessing. A caller with no front
  * month must refuse to start, not subscribe to something invented.
  */
+/**
+ * Fyers' futures ticker token for an underlying, where it differs from the canonical name this
+ * system stores everywhere else (`option_expiry_calendar.underlying_symbol`,
+ * `collect-option-chain.ts`'s `DEFAULT_UNDERLYINGS`, and so on).
+ *
+ * Only NIFTY50 differs today: its futures ticker is `NSE:NIFTY<year><month>FUT`, not
+ * `NSE:NIFTY50<year><month>FUT`. BANKNIFTY's canonical name and ticker token happen to be
+ * identical, which is exactly why this went unnoticed until a second underlying needed
+ * resolving: passing the canonical name straight into `frontMonthFuturesSymbol` built a ticker
+ * for a contract that does not exist (`NIFTY5026OCTFUT`), while passing the ticker token to the
+ * `option_expiry_calendar` lookup found zero rows (stored under `NIFTY50`). Neither half of
+ * `collect-depth-frames.ts`'s resolution step can use the same string for both.
+ */
+export const FUTURES_TICKER_UNDERLYING_ALIASES: Readonly<Record<string, string>> = {
+  NIFTY50: "NIFTY",
+};
+
+/** Canonical underlying name (as stored in `option_expiry_calendar`) -> its futures ticker token. */
+export function futuresTickerUnderlying(canonicalUnderlying: string): string {
+  const underlying = canonicalUnderlying.trim().toUpperCase();
+  return FUTURES_TICKER_UNDERLYING_ALIASES[underlying] ?? underlying;
+}
+
+/**
+ * The inverse: a futures ticker's own underlying token (e.g. from `parseFuturesSymbol`) back to
+ * the canonical name used in `option_expiry_calendar`. For a caller that only has the captured
+ * symbol, such as the staleness check deriving a roll hint from the last symbol actually seen.
+ */
+export function canonicalUnderlyingFromTicker(tickerUnderlying: string): string {
+  const underlying = tickerUnderlying.trim().toUpperCase();
+  for (const [canonical, alias] of Object.entries(FUTURES_TICKER_UNDERLYING_ALIASES)) {
+    if (alias === underlying) return canonical;
+  }
+  return underlying;
+}
+
 export function frontMonthFuturesSymbol(input: {
   readonly underlying: string;
   readonly now: Date;

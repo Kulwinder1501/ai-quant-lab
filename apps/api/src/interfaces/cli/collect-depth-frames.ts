@@ -12,7 +12,7 @@ import {
 import { summariseSequenceHealth } from "../../modules/market-data/domain/depth-frame-sequencing.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { loadNseHolidays } from "../../modules/market-data/domain/nse-session-calendar.js";
-import { frontMonthFuturesSymbol } from "../../modules/market-data/domain/depth-frame-staleness.js";
+import { frontMonthFuturesSymbol, futuresTickerUnderlying } from "../../modules/market-data/domain/depth-frame-staleness.js";
 
 /**
  * Captures raw order-book depth for a set of contracts and reports the feed's integrity (Phase 28
@@ -156,6 +156,10 @@ async function main(): Promise<void> {
    */
   const resolvedSymbols = options.symbols.length > 0 ? options.symbols : [];
   for (const underlying of options.underlyings) {
+    // The calendar is keyed by the canonical underlying name (e.g. "NIFTY50"), which is not
+    // always the same string as the Fyers futures ticker token (e.g. "NIFTY") -- see
+    // futuresTickerUnderlying's doc comment. Query the calendar with the canonical name; build
+    // the ticker with its alias.
     const expiries = await database.query<{ expiry_date: string }>(
       `SELECT DISTINCT to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date
        FROM option_expiry_calendar
@@ -164,7 +168,7 @@ async function main(): Promise<void> {
       [underlying],
     );
     const symbol = frontMonthFuturesSymbol({
-      underlying,
+      underlying: futuresTickerUnderlying(underlying),
       now: new Date(),
       expiries: expiries.rows.map((row) => row.expiry_date),
     });
