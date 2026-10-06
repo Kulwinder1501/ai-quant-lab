@@ -8,6 +8,13 @@ import numpy as np
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Tuple
 
+# Governance floors (Correction/matching contract #11, balance metric; and a minimum
+# matched-pair sample floor). Neither threshold is in the frozen spec's math, but without
+# them "zero matched pairs" (empty common support) and "failed to balance" silently read as
+# FALSIFIED (p=1.0, CI=0) instead of what they actually are: the test was never run.
+ASMD_BALANCE_THRESHOLD = 0.10
+MIN_MATCHED_PAIRS_FOR_VERDICT = 20
+
 
 @dataclass
 class ObservationEpisode:
@@ -70,9 +77,17 @@ class PropensityMatcher:
     def standardize(self, covariates: np.ndarray) -> np.ndarray:
         return (covariates - self.means) / self.stds
 
-    def fit_logit_propensity(self, X_std: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def fit_logit_propensity(self, X_std: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, bool]:
         """
-        Unregularized Logistic Regression MLE via Newton-Raphson / Iteratively Reweighted Least Squares
+        Unregularized Logistic Regression MLE via Newton-Raphson / Iteratively Reweighted Least Squares.
+
+        Returns (logit_scores, separation_detected). When one or more covariates perfectly or
+        quasi-perfectly separate treatment from control (common with a handful of covariates on
+        modest samples), the MLE does not converge: beta diverges and eta saturates at the +-30
+        clip bound for most observations. That collapses the common-support overlap region to
+        near-empty, so matching silently returns ~0 pairs. Previously this produced an
+        indistinguishable "FALSIFIED" (p=1.0) result from a genuine null effect. We now detect it
+        so the caller can report "untested" instead of "falsified".
         """
         n, p = X_std.shape
         X_design = np.hstack([np.ones((n, 1)), X_std])
@@ -100,19 +115,29 @@ class PropensityMatcher:
                 break
 
         eta_final = np.clip(X_design @ beta, -30.0, 30.0)
-        return eta_final  # Logit propensity scores L = logit(P)
+
+        # Separation heuristic: a well-identified propensity model on standardized covariates
+        # keeps |eta| in a modest range (typically single digits). (Quasi-)complete separation
+        # drives beta towards +-infinity and eta towards the clip bound well before convergence,
+        # or towards unusually extreme values even if it stops short of the bound. Either case
+        # means the fit did not converge to a stable interior estimate.
+        max_abs_eta = float(np.max(np.abs(eta_final))) if eta_final.size else 0.0
+        separation_detected = max_abs_eta >= 15.0
+
+        return eta_final, separation_detected  # Logit propensity scores L = logit(P)
 
     def match_1to1_deterministic(self, treatment_episodes: List[ObservationEpisode],
-                                control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int]]:
+                                control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int], bool]:
         """
         Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement.
         Restricted to same-session observations, delta_t <= 30 minutes.
         Primary tie-break = logit distance; Secondary tie-break = episodeId ascending.
         Common-support overlap trimmed strictly on logit scores.
+
+        Returns (matched_pairs, trimmed_count, asmd_max, control_source_counts, separation_detected).
         """
-        all_episodes = treatment_episodes + control_episodes
         if not treatment_episodes or not control_episodes:
-            return [], 0, 0.0, {"ACTIVE_ANCHOR": 0, "SYNTHETIC_FALLBACK": 0}
+            return [], 0, 0.0, {"ACTIVE_ANCHOR": 0, "SYNTHETIC_FALLBACK": 0}, False
 
         # Filter strictly for real active anchor control population
         control_active = [ep for ep in control_episodes if ep.hasRealActiveAnchor]
@@ -122,7 +147,7 @@ class PropensityMatcher:
         }
 
         if not control_active:
-            return [], 0, 0.0, control_source_counts
+            return [], 0, 0.0, control_source_counts, False
 
         episodes_for_matching = treatment_episodes + control_active
         n_treat = len(treatment_episodes)
@@ -136,7 +161,7 @@ class PropensityMatcher:
         y = np.array([1] * n_treat + [0] * n_ctrl, dtype=int)
 
         X_std = self.standardize(X_raw)
-        logits = self.fit_logit_propensity(X_std, y)
+        logits, separation_detected = self.fit_logit_propensity(X_std, y)
 
         logits_treat = logits[:n_treat]
         logits_ctrl = logits[n_treat:]
@@ -211,7 +236,7 @@ class PropensityMatcher:
         else:
             asmd_max = 0.0
 
-        return matched_pairs, trimmed_count, asmd_max, control_source_counts
+        return matched_pairs, trimmed_count, asmd_max, control_source_counts, separation_detected
 
 
 def run_null_centered_bootstrap(matched_pairs: List[MatchedPair],
@@ -323,10 +348,12 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
 
     for exp_id, zone_name, t_eps in family_a_tasks:
         c_eps = [ep for ep in control_eps_all if ep not in t_eps]
-        pairs, trimmed_cnt, asmd_max, ctrl_counts = matcher.match_1to1_deterministic(t_eps, c_eps)
+        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation = matcher.match_1to1_deterministic(t_eps, c_eps)
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
         abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_eps]) > 0.0) if t_eps else False
+        data_sufficient = len(pairs) >= MIN_MATCHED_PAIRS_FOR_VERDICT and not separation
+        balance_achieved = asmd_max < ASMD_BALANCE_THRESHOLD
 
         family_a_results.append({
             "experimentId": exp_id,
@@ -341,7 +368,10 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "lowerCiUnadjusted95Bps": lower_ci,
             "pValRaw": p_raw,
             "controlCovariateSourceCounts": ctrl_counts,
-            "absoluteSurplusPassed": abs_passed
+            "absoluteSurplusPassed": abs_passed,
+            "separationDetected": separation,
+            "dataSufficientForVerdict": data_sufficient,
+            "balanceAchieved": balance_achieved
         })
         raw_p_family_a.append(p_raw)
 
@@ -351,7 +381,19 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
         res = family_a_results[i]
         p_adj = adj_p_family_a[i]
         res["pValHolmAdjusted"] = p_adj
-        res["incrementalSurplusPassed"] = bool(p_adj < 0.05 and res["lowerCiUnadjusted95Bps"] > 1.0)
+        hurdle_cleared = bool(p_adj < 0.05 and res["lowerCiUnadjusted95Bps"] > 1.0)
+        # A hurdle can only be CLEARED or genuinely FAILED if matching actually produced enough
+        # balanced pairs to test it. Zero/near-zero matched pairs (empty common support or
+        # quasi-separation) previously read identically to "tested, no effect" -- fixed here.
+        res["incrementalSurplusPassed"] = bool(
+            hurdle_cleared and res["dataSufficientForVerdict"] and res["balanceAchieved"]
+        )
+        if not res["dataSufficientForVerdict"] or not res["balanceAchieved"]:
+            res["verdict"] = "INCONCLUSIVE_INSUFFICIENT_DATA"
+        elif res["incrementalSurplusPassed"]:
+            res["verdict"] = "SUPPORTED"
+        else:
+            res["verdict"] = "FALSIFIED"
 
     # Family B: F4 (5 Boundary contrasts)
     boundaries = [0.618, 0.650, 0.702, 0.786, 0.886]
@@ -373,10 +415,12 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             t_b = [ep for ep in valid_episodes if B_k - delta < ep.retracementRatio <= B_k]
             c_b = [ep for ep in valid_episodes if B_k < ep.retracementRatio <= B_k + delta and ep.hasRealActiveAnchor]
 
-        pairs, trimmed_cnt, asmd_max, ctrl_counts = matcher.match_1to1_deterministic(t_b, c_b)
+        pairs, trimmed_cnt, asmd_max, ctrl_counts, separation = matcher.match_1to1_deterministic(t_b, c_b)
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
         abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_b]) > 0.0) if t_b else False
+        data_sufficient = len(pairs) >= MIN_MATCHED_PAIRS_FOR_VERDICT and not separation
+        balance_achieved = asmd_max < ASMD_BALANCE_THRESHOLD
 
         family_b_results.append({
             "experimentId": b_exp_id,
@@ -391,7 +435,10 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "lowerCiUnadjusted95Bps": lower_ci,
             "pValRaw": p_raw,
             "controlCovariateSourceCounts": ctrl_counts,
-            "absoluteSurplusPassed": abs_passed
+            "absoluteSurplusPassed": abs_passed,
+            "separationDetected": separation,
+            "dataSufficientForVerdict": data_sufficient,
+            "balanceAchieved": balance_achieved
         })
         raw_p_family_b.append(p_raw)
 
@@ -401,13 +448,22 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
         res = family_b_results[i]
         p_adj = adj_p_family_b[i]
         res["pValHolmAdjusted"] = p_adj
-        res["boundaryPassed"] = bool(p_adj < 0.05 and res["lowerCiUnadjusted95Bps"] > 1.0)
+        hurdle_cleared = bool(p_adj < 0.05 and res["lowerCiUnadjusted95Bps"] > 1.0)
+        res["boundaryPassed"] = bool(
+            hurdle_cleared and res["dataSufficientForVerdict"] and res["balanceAchieved"]
+        )
+        res["boundaryDataSufficient"] = res["dataSufficientForVerdict"] and res["balanceAchieved"]
 
-    # Zone Bounding Verdicts
-    b_pass = [res["boundaryPassed"] for res in family_b_results]
-    golden_supported = b_pass[0] or b_pass[1]
-    ote_supported = b_pass[2] or b_pass[3]
-    deep_supported = b_pass[3] or b_pass[4]
+    # Zone Bounding Verdicts: SUPPORTED if a bounding boundary cleared the hurdle; FALSIFIED only
+    # if every bounding boundary actually had enough balanced matched data AND failed the hurdle;
+    # otherwise INCONCLUSIVE (the test was never actually run on enough data to say either way).
+    def zone_verdict(idx_a: int, idx_b: int) -> str:
+        a, b = family_b_results[idx_a], family_b_results[idx_b]
+        if a["boundaryPassed"] or b["boundaryPassed"]:
+            return "SUPPORTED"
+        if a["boundaryDataSufficient"] or b["boundaryDataSufficient"]:
+            return "FALSIFIED"
+        return "INCONCLUSIVE_INSUFFICIENT_DATA"
 
     manifest = {
         "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
@@ -416,9 +472,9 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
         "familyAResults": family_a_results,
         "familyBResults": family_b_results,
         "zoneBoundingVerdicts": {
-            "GOLDEN_POCKET": "SUPPORTED" if golden_supported else "FALSIFIED",
-            "OTE": "SUPPORTED" if ote_supported else "FALSIFIED",
-            "DEEP_RETRACEMENT": "SUPPORTED" if deep_supported else "FALSIFIED"
+            "GOLDEN_POCKET": zone_verdict(0, 1),
+            "OTE": zone_verdict(2, 3),
+            "DEEP_RETRACEMENT": zone_verdict(3, 4)
         }
     }
 
