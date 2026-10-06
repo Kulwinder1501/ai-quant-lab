@@ -34,8 +34,8 @@ across a roll (per-contract capture windows below); each is its own OFI chain.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Sequence, Tuple
 
 CKS_OFI_TOUCH_5S_RAW_FEATURE_ID = "CKS_OFI_TOUCH_5S_RAW_V1"
 OFI_WINDOW_MS = 5000  # matches Phase 28's validated evaluate-ofi-signal.ts default
@@ -168,6 +168,61 @@ def compute_windowed_ofi_series(frames: Sequence[DepthFrameRow]) -> List[OfiWind
             observations.append(OfiWindowObservation(at=at, window_sum=window_sum))
 
     return observations
+
+
+@dataclass(frozen=True)
+class FuturesMidCandle:
+    close_time: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+def compute_mid_price_candles(frames: Sequence[DepthFrameRow], timeframe_minutes: int) -> List[FuturesMidCandle]:
+    """
+    Buckets real captured depth frames' touch-level mid-price ((bid+ask)/2) into
+    `timeframe_minutes`-wide OHLC bars, floored to the same UTC-minute grid the rest of this
+    system's candles already use (the 09:15 IST session open is 03:45 UTC, itself a multiple
+    of 5, so a plain floor-to-boundary lines up with the real 5m candle grid with no special
+    casing).
+
+    This exists to close the spot/futures basis gap: BANKNIFTY candles elsewhere in this
+    pipeline are the CASH INDEX, while OFI is computed from the FUTURES order book, which
+    trades at a persistent premium to spot (confirmed directly against real captured data:
+    2026-09-15 09:00 UTC index close 55981.6 vs. the SEPFUT contract's mid-price 56195.9 at
+    the same moment, a 214pt / 0.38% gap). A Fibonacci zone computed on the index's own price
+    levels and an OFI reading computed on the futures order book describe two different
+    instruments; this function derives a real OHLC series from the exact same book OFI is
+    computed from, so a Fibonacci engine run on it and its OFI conditioning are never more
+    than a touch-level spread apart.
+
+    Buckets with zero captured frames are skipped entirely (not interpolated/forward-filled)
+    -- an honest gap in capture, never a fabricated flat candle; real captured depth has
+    intraday gaps (~6% of consecutive 5m buckets here are more than one bar apart), which is
+    why callers that walk this series for a forward-return horizon must validate elapsed wall
+    time between entry and exit bars rather than trusting a fixed bar-count offset. Frames
+    with a crossed or one-sided book (bid<=0 or ask<=0) are excluded from the mid-price,
+    matching `_touch_level_delta`'s own validity check.
+    """
+    bucket_ms = timeframe_minutes * 60_000
+    buckets: Dict[int, List[float]] = {}
+    for frame in frames:
+        if frame.bid_price_0 <= 0 or frame.ask_price_0 <= 0:
+            continue
+        mid = (frame.bid_price_0 + frame.ask_price_0) / 2.0
+        epoch_ms = int(frame.received_at.timestamp() * 1000)
+        bucket_start_ms = (epoch_ms // bucket_ms) * bucket_ms
+        buckets.setdefault(bucket_start_ms, []).append(mid)
+
+    candles: List[FuturesMidCandle] = []
+    for bucket_start_ms in sorted(buckets.keys()):
+        mids = buckets[bucket_start_ms]
+        close_time = datetime.fromtimestamp((bucket_start_ms + bucket_ms) / 1000.0, tz=timezone.utc)
+        candles.append(FuturesMidCandle(
+            close_time=close_time, open=mids[0], high=max(mids), low=min(mids), close=mids[-1],
+        ))
+    return candles
 
 
 def join_nearest_prior(

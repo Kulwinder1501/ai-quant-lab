@@ -16,10 +16,10 @@ from ai_quant_lab_ml.experiments_f1_f4 import (
 
 
 def make_episode(ep_id: str, session: str, timestamp: int, is_treat: bool, zone: str,
-                 has_anchor: bool, r: float, mfe: float) -> ObservationEpisode:
+                 has_anchor: bool, r: float, mfe: float, symbol: str = "NIFTY") -> ObservationEpisode:
     return ObservationEpisode(
         episodeId=ep_id,
-        symbol="NIFTY",
+        symbol=symbol,
         sessionDate=session,
         entryTimestamp=timestamp,
         isSessionCloseExcluded=False,
@@ -92,6 +92,39 @@ def test_temporal_candidate_diagnostic_isolates_locality_from_caliper():
     # T_near has a temporal candidate (same session, 1s apart); T_far does not (no same-session
     # control at all) -- exactly one of the two should count, regardless of whether a pair
     # actually formed after the caliper.
+    assert treat_with_temporal_candidate == 1
+
+
+def test_matching_never_crosses_symbols():
+    """
+    Regression test for the cross-instrument matching bug: callers pool episodes from multiple
+    instruments into one treatment/control list (e.g. NIFTY50 + BANKNIFTY in the index-based
+    manifest, or BANKNIFTY + BANKNIFTY_FUT in the basis-aligned one). Without a symbol check,
+    a treatment anchor on one instrument could be matched to a same-minute control on a
+    completely different one just because their standardized covariates happened to land close
+    together -- not a valid counterfactual. A same-symbol control that is otherwise identical
+    must be preferred even when a different-symbol control is a closer propensity match.
+    """
+    means = [10.0, 1.2, 5.0, 0.1, 0.2, 0.5, 500.0]
+    stds = [2.0, 0.3, 2.0, 0.5, 0.5, 0.2, 100.0]
+    matcher = PropensityMatcher(means=means, stds=stds, caliper_sd=1.0)
+
+    t_ep = make_episode("T_1", "2026-10-05", 1000000, True, "GOLDEN_POCKET", True, 0.62, 5.0, symbol="NIFTY50")
+
+    # Same session/time window, but a different instrument -- must be excluded no matter how
+    # close its covariates are.
+    c_other_symbol = make_episode("C_OTHER_SYMBOL", "2026-10-05", 1000100, False, "NONE", True, 0.50, 2.0, symbol="BANKNIFTY")
+    # Same instrument as the treatment, further in covariate space -- this is the only valid
+    # candidate and must be the one selected.
+    c_same_symbol = make_episode("C_SAME_SYMBOL", "2026-10-05", 1000200, False, "NONE", True, 0.50, 2.0, symbol="NIFTY50")
+
+    pairs, trimmed, asmd, counts, separation, treat_with_temporal_candidate = (
+        matcher.match_1to1_deterministic([t_ep], [c_other_symbol, c_same_symbol])
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].controlEpisodeId == "C_SAME_SYMBOL"
+    # The cross-symbol candidate must not even count as a temporal candidate.
     assert treat_with_temporal_candidate == 1
 
 
