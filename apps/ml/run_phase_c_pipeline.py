@@ -72,6 +72,16 @@ This version:
    the forward-MFE horizon lookahead now also validates elapsed wall time between entry and
    exit bars (MAX_HORIZON_SLACK_MINUTES) instead of trusting a fixed bar-count offset --
    this also closes one same-day gap each in the existing NIFTY50/BANKNIFTY index series.
+ - PropensityMatcher.match_1to1_deterministic (experiments_f1_f4.py) matched purely on
+   session/time window and never checked instrument: this file pools NIFTY50 + BANKNIFTY
+   episodes into one treatment/control list for the index-based manifest, so a NIFTY50
+   treatment anchor could be (and, confirmed against real data, was) matched to a same-minute
+   BANKNIFTY control describing a different underlying's price action. Fixed by adding a
+   same-symbol restriction to that match condition. No verdict in this file's existing
+   manifests flips as a result (matched-pair counts were already below
+   MIN_MATCHED_PAIRS_FOR_VERDICT, so every zone was already INCONCLUSIVE_INSUFFICIENT_DATA),
+   but matched counts and ASMD balance numbers visibly change -- some of what little matched
+   sample existed was cross-instrument contamination, not a real comparable counterfactual.
 """
 
 from __future__ import annotations

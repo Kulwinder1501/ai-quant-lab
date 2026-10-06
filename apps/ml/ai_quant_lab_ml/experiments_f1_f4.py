@@ -149,10 +149,17 @@ class PropensityMatcher:
                                 control_episodes: List[ObservationEpisode]) -> Tuple[List[MatchedPair], int, float, Dict[str, int], bool, int]:
         """
         Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement.
-        Restricted to same-session observations, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+        Restricted to same-symbol, same-session observations, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
         (60 minutes; widened from the spec's original 30 -- see that constant's own comment).
         Primary tie-break = logit distance; Secondary tie-break = episodeId ascending.
         Common-support overlap trimmed strictly on logit scores.
+
+        The symbol restriction matters because callers pool episodes from multiple instruments
+        into one treatment_episodes/control_episodes pair (e.g. NIFTY50 + BANKNIFTY in the
+        index-based manifest, or BANKNIFTY + BANKNIFTY_FUT in the basis-aligned one): without it,
+        a NIFTY50 treatment anchor could be matched against a same-minute BANKNIFTY control (or
+        vice versa) describing a completely different underlying's price action, which is not a
+        comparable counterfactual no matter how close their standardized covariates land.
 
         Returns (matched_pairs, trimmed_count, asmd_max, control_source_counts,
         separation_detected, treatments_with_temporal_candidate). The last is a diagnostic
@@ -229,8 +236,12 @@ class PropensityMatcher:
             for c_idx in available_ctrl_indices:
                 c_ep = control_active[c_idx]
 
-                # Restrictions: Same-session, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
-                if c_ep.sessionDate == t_ep.sessionDate and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= SAME_SESSION_MATCH_WINDOW_MS:
+                # Restrictions: Same-symbol, same-session, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
+                if (
+                    c_ep.symbol == t_ep.symbol
+                    and c_ep.sessionDate == t_ep.sessionDate
+                    and abs(c_ep.entryTimestamp - t_ep.entryTimestamp) <= SAME_SESSION_MATCH_WINDOW_MS
+                ):
                     has_temporal_candidate = True
                     dist = abs(t_logit - logits_ctrl[c_idx])
                     if dist <= caliper_dist:
