@@ -217,8 +217,8 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15796,
-        "activePoiBarCount": 14131,
+        "barsEvaluated": 15799,
+        "activePoiBarCount": 14134,
         "poiQualifiedCount": 61,
         "uniqueAnchorsWithValidHorizon": 61,
         "episodesAfterDedup": 61,
@@ -226,12 +226,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14146,
-        "activePoiBarCount": 12763,
+        "barsEvaluated": 14149,
+        "activePoiBarCount": 12766,
         "poiQualifiedCount": 56,
         "uniqueAnchorsWithValidHorizon": 56,
         "episodesAfterDedup": 56,
-        "realOfiAvailableBarFraction": 0.13438427824119892,
+        "realOfiAvailableBarFraction": 0.13456781397978657,
         "realOfiAvailableEpisodeCount": 19
       }
     },
@@ -458,8 +458,8 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15796,
-        "activePoiBarCount": 14408,
+        "barsEvaluated": 15799,
+        "activePoiBarCount": 14411,
         "poiQualifiedCount": 52,
         "uniqueAnchorsWithValidHorizon": 51,
         "episodesAfterDedup": 51,
@@ -467,12 +467,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14146,
-        "activePoiBarCount": 12316,
+        "barsEvaluated": 14149,
+        "activePoiBarCount": 12319,
         "poiQualifiedCount": 63,
         "uniqueAnchorsWithValidHorizon": 63,
         "episodesAfterDedup": 63,
-        "realOfiAvailableBarFraction": 0.13438427824119892,
+        "realOfiAvailableBarFraction": 0.13456781397978657,
         "realOfiAvailableEpisodeCount": 1
       }
     },
@@ -699,12 +699,12 @@
     },
     "fibEngineDiagnostics": {
       "BANKNIFTY_FUT": {
-        "barsEvaluated": 2334,
-        "activePoiBarCount": 1908,
+        "barsEvaluated": 2337,
+        "activePoiBarCount": 1911,
         "poiQualifiedCount": 14,
         "uniqueAnchorsWithValidHorizon": 14,
         "episodesAfterDedup": 14,
-        "realOfiAvailableBarFraction": 0.8496143958868895,
+        "realOfiAvailableBarFraction": 0.8498074454428755,
         "realOfiAvailableEpisodeCount": 10
       }
     },
@@ -931,12 +931,12 @@
     },
     "fibEngineDiagnostics": {
       "BANKNIFTY_FUT": {
-        "barsEvaluated": 2334,
-        "activePoiBarCount": 2042,
+        "barsEvaluated": 2337,
+        "activePoiBarCount": 2045,
         "poiQualifiedCount": 13,
         "uniqueAnchorsWithValidHorizon": 13,
         "episodesAfterDedup": 13,
-        "realOfiAvailableBarFraction": 0.8496143958868895,
+        "realOfiAvailableBarFraction": 0.8498074454428755,
         "realOfiAvailableEpisodeCount": 12
       }
     },

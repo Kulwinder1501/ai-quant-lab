@@ -485,7 +485,6 @@ class StatefulPITFibEngine:
                         direction="BULLISH",
                         isAvailable=is_available
                     )
-                    self.qualified_seq = retracement.sequenceNumber
                     self.emit_event(
                         "RETRACEMENT_QUALIFIED",
                         retracement.sequenceNumber,
