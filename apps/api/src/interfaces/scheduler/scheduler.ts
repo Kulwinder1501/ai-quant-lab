@@ -837,22 +837,30 @@ async function main(): Promise<void> {
    * no process at all.
    */
   /**
-   * Settles candidates whose horizon has elapsed, so the ledger can say what the trades nobody took
-   * would have done.
+   * Settles candidates as soon as they resolve (or, failing that, once their horizon elapses), so the
+   * ledger can say what the trades nobody took would have done.
    *
    * Research only: nothing reads a settlement at decision time, so this is scheduled where it cannot
-   * compete with execution. Half-hourly through the session picks up short horizons while they are
-   * fresh, and the 16:10 run catches every candidate whose horizon crossed the close.
+   * compete with execution. Deliberately not gated on `fyersTokenService`: this reads stored bars, so
+   * it works on a day the feed never authenticated -- which is exactly a day worth measuring.
    *
-   * Deliberately not gated on `fyersTokenService`: this reads stored bars, so it works on a day the
-   * feed never authenticated -- which is exactly a day worth measuring.
+   * Every 5 minutes, every day of the week -- not NSE-hours-only like the original "15,45 9-15 * * 1-5"
+   * (half-hourly, weekdays, 9am-4pm IST). That schedule was sized for the NIFTY50/BANKNIFTY options
+   * research it was built for, but XAU_USD trades a near-24/5 session: a gold candidate settling (or
+   * resolving its bracket) at 9pm IST, or on a Saturday IST morning that is still Friday in NY, used to
+   * sit unsettled until the next weekday 9:15 IST run -- hours of dashboard-visible lag that had
+   * nothing to do with `settle-candidates` itself being slow. `settle-candidates.ts` now also settles a
+   * candidate the moment its bracket resolves rather than waiting out its full nominal window (see its
+   * own docstring), so a tighter, round-the-clock cadence is what actually gets that improvement onto
+   * the dashboard quickly instead of leaving it to be discovered by the next half-hourly tick.
    */
-  cronSchedule("15,45 9-15 * * 1-5", () => {
+  cronSchedule("*/5 * * * *", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "1000"]);
     });
   });
 
+  // A generous once-daily backstop in case a backlog ever exceeds the 5-minute sweep's own limit.
   cronSchedule("10 16 * * 1-5", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "5000"]);
