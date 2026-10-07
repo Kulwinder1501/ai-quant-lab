@@ -238,9 +238,11 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
-    // Both on a 5-minute cron, same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
-    // to a faster tick: a dead claimant should not hold up more than one tick's worth of gold data
-    // or signal generation.
+    // XAU_CANDLE_COLLECTION moved to a 15-minute cron 2026-10-07 (see that job's own docstring --
+    // Twelve Data's daily free-tier credit cap, not this timeout); PAPER_TRADING_BOT_GOLD still
+    // fires inside the same tick. Same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
+    // down: a dead claimant should not hold up more than one tick's worth of gold data or signal
+    // generation, and 4 minutes clears well inside a 15-minute tick with margin to spare.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
@@ -639,29 +641,43 @@ async function main(): Promise<void> {
    * check the real session themselves and no-op outside it, the same way every job here is
    * written to be a safe no-op off-session rather than relying on the cron pattern alone).
    *
-   * Every 5 minutes, every day: collect fresh 1m/5m candles, recompute indicators over them
-   * (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what `momentum-scalp-gold` reads -- and `smc-v2` --
-   * FVG/BOS/CHoCH/order-block/liquidity-sweep, the default `--family all` computes both), then
-   * run the bot. Without this step `indicator_snapshots` stays empty for XAU_USD and
-   * `momentum-scalp-gold` can never actually evaluate a bar -- confirmed live 2026-09-22: the
-   * first deploy ran clean but every tick's "RULES_NOT_MET" was indicators-absent, not
-   * conditions-failed, since nothing computed them. `applySmcConfluenceToProposal` in
-   * `generate-trade-ideas.ts` already runs unconditionally for every non-ICT strategy, so once
-   * `smc-v2` indicators exist here SMC confluence nudges gold's proposals with no further wiring.
+   * Every 15 minutes, every day: collect fresh 1m candles, derive 5m/15m from them locally,
+   * recompute indicators over all three (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what
+   * `momentum-scalp-gold` reads -- and `smc-v2` -- FVG/BOS/CHoCH/order-block/liquidity-sweep, the
+   * default `--family all` computes both), then run the bot. Without this step
+   * `indicator_snapshots` stays empty for XAU_USD and `momentum-scalp-gold` can never actually
+   * evaluate a bar -- confirmed live 2026-09-22: the first deploy ran clean but every tick's
+   * "RULES_NOT_MET" was indicators-absent, not conditions-failed, since nothing computed them.
+   * `applySmcConfluenceToProposal` in `generate-trade-ideas.ts` already runs unconditionally for
+   * every non-ICT strategy, so once `smc-v2` indicators exist here SMC confluence nudges gold's
+   * proposals with no further wiring.
    *
    * `--skip-existing` makes candle collection idempotent, and a 45-minute lookback window
    * comfortably covers one tick's gap plus retry margin. `INDICATOR_WRITE_LOOKBACK_DAYS` bounds
    * the indicator *write*, mirroring `collectIndicesIntraday`'s own reasoning above: computed
    * over the full series, written only for the last few days, so a missed run heals on the next
-   * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
-   * `twelvedata-quote-client.ts` for where that cap was confirmed live.
+   * pass.
    *
-   * The two `schedule()` calls are sequenced with `await`, not fired as two independent
-   * `void schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
+   * Only 1m is fetched from Twelve Data for XAU_USD itself -- 5m and 15m are derived locally via
+   * `data:derive:higher-timeframes` (see that file's docstring) rather than fetched as their own
+   * `/time_series` calls. Confirmed live 2026-10-07: fetching all three separately, every 5
+   * minutes, cost 9 Twelve Data calls a tick (3 XAU timeframes + 6 DXY component pairs) -- 288
+   * ticks/day * 9 = 2,592 calls against an 800/day free-tier cap, 3.24x over budget regardless of
+   * how well the per-minute spacing below is tuned (996 of 800 daily credits used, HTTP 429 for
+   * the rest of the day, leaving `momentum-scalp-gold` and the settlement sweep both running on
+   * stale data). Dropping to one XAU fetch a tick and widening the cron to 15 minutes brings this
+   * to 96 ticks/day * 7 calls (1 XAU + 6 DXY components) = 672/day, with headroom left for the
+   * quote client's own polling. Only the collection cadence changed -- `momentum-scalp-gold`'s own
+   * entry-side freshness check (`PrepareDirectEntry`'s `MAXIMUM_EXECUTABLE_QUOTE_AGE_MS`) reads a
+   * live quote via a separate, independently-throttled client, not these stored candles, so it is
+   * unaffected by this.
+   *
+   * The `schedule()` calls are sequenced with `await`, not fired as independent `void
+   * schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
    * are safe to run concurrently because they are temporally decoupled by construction --
    * `INDICES_INTRADAY` runs on its own every-minute cron, so by the time `PAPER_TRADING_BOT` fires every
    * five minutes the candles it reads are already several collections old and settled. This block
-   * folds collection and the bot into the *same* five-minute tick, so nothing separates them in
+   * folds collection and the bot into the *same* tick, so nothing separates them in
    * time -- confirmed live 2026-09-22: firing both as `void schedule(...)` let
    * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
    * calculation was still running, which is exactly the read-before-write race this sequencing
@@ -674,7 +690,7 @@ async function main(): Promise<void> {
    * back to `true`, not rebuilding anything.
    */
   const XAU_BOT_ENABLED = true;
-  cronSchedule("*/5 * * * *", () => {
+  cronSchedule("*/15 * * * *", () => {
     if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {
@@ -684,30 +700,40 @@ async function main(): Promise<void> {
 
         /*
          * Spaced to stay under Twelve Data's per-minute credit cap. This loop plus the DXY
-         * component loop below fire 9 `data:collect:historical` calls in total (3 XAU timeframes +
-         * 6 FX pairs) and, with no spacing, all 9 landed inside the same rolling minute -- measured
-         * 2026-10-07 as repeated HTTP 429s ("14 API credits were used, with the current limit being
-         * 8"), which left XAU_USD's own candle stale past `momentum-scalp-gold`'s 300-second
-         * freshness window and blocked every direct-entry idea with NO_FRESH_QUOTE. Indicator
-         * calculation reads already-stored candles rather than calling Twelve Data, so it is not
-         * throttled here. 8s * 9 calls is ~72s of added latency against a 240s claim timeout and a
-         * 300s tick -- comfortable headroom either way.
+         * component loop below fire 7 `data:collect:historical` calls in total (XAU_USD's own 1m
+         * plus 6 FX pairs) and, with no spacing, all of them landed inside the same rolling minute
+         * -- measured 2026-10-07 as repeated HTTP 429s ("14 API credits were used, with the
+         * current limit being 8"), which left XAU_USD's own candle stale past
+         * `momentum-scalp-gold`'s 300-second freshness window and blocked every direct-entry idea
+         * with NO_FRESH_QUOTE. Indicator calculation and the local 5m/15m derivation both read
+         * already-stored candles rather than calling Twelve Data, so neither is throttled here.
          */
         const TWELVEDATA_CALL_SPACING_MS = 8_000;
         const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "twelvedata",
+          "--exchange", "TWELVEDATA",
+          "--instrument", "XAU_USD",
+          "--timeframe", "1m",
+          "--from", from.toISOString(),
+          "--to", to.toISOString(),
+          "--skip-existing",
+        ]);
+        // Guaranteed spacing before the next Twelve Data call (the FX component loop below),
+        // rather than relying on however long the Twelve-Data-free derive/indicator steps in
+        // between happen to take.
+        await sleep(TWELVEDATA_CALL_SPACING_MS);
+        await runCommand("npm", [
+          "run", "data:derive:higher-timeframes", "--",
+          "--exchange", "TWELVEDATA",
+          "--instrument", "XAU_USD",
+          "--timeframes", "5,15",
+          "--from", from.toISOString(),
+          "--to", to.toISOString(),
+        ]);
         for (const timeframe of ["1m", "5m", "15m"]) {
-          await runCommand("npm", [
-            "run", "data:collect:historical", "--",
-            "--provider", "twelvedata",
-            "--exchange", "TWELVEDATA",
-            "--instrument", "XAU_USD",
-            "--timeframe", timeframe,
-            "--from", from.toISOString(),
-            "--to", to.toISOString(),
-            "--skip-existing",
-          ]);
-          await sleep(TWELVEDATA_CALL_SPACING_MS);
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
             "--exchange", "TWELVEDATA",
