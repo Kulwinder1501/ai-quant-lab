@@ -235,6 +235,8 @@ export interface ActiveDuplicateQuery {
   asOf: Date;
 }
 
+export type ActiveSideQuery = Omit<ActiveDuplicateQuery, "targetPrice">;
+
 /** Saves one idempotent proposal and its ordered, human-readable evidence atomically. */
 export interface TradeIdeaRepository {
   saveProposal(input: SaveTradeIdeaProposalInput): Promise<TradeIdea>;
@@ -247,4 +249,15 @@ export interface TradeIdeaRepository {
    * different `source_candle_id` and so sails past that key and inserts again.
    */
   findActiveDuplicate(query: ActiveDuplicateQuery): Promise<TradeIdea | null>;
+  /**
+   * Any already-PROPOSED, not-yet-expired idea for the same strategy/instrument/side, regardless of
+   * target price. Optional and additive -- only `momentum-scalp-gold` reads it (see its call site in
+   * generate-trade-ideas.ts). That strategy re-anchors its stop/target to the current price every
+   * candle, so a persisting trend produces a chain of genuinely different (not within 0.1% of each
+   * other) targets every ~5 minutes, which `findActiveDuplicate` correctly does not treat as
+   * duplicates -- measured live 2026-10-07 as repeated overlapping SHORT scalps stacking on top of
+   * each other while a down-move continued. This is the broader check for strategies where "already
+   * has an unresolved idea in this direction" should itself block a new one, independent of price.
+   */
+  findActiveIdeaForSide?(query: ActiveSideQuery): Promise<TradeIdea | null>;
 }
