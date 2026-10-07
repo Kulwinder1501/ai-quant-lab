@@ -4,7 +4,7 @@ async function main() {
   console.log("Starting stale shadow trade resolution sweep...");
 
   const db = new Pool({
-    connectionString: process.env.DATABASE_URL || "postgresql://postgres:postgres@postgres:5432/ai_quant_lab",
+    connectionString: process.env.DATABASE_URL || "postgresql://ai_quant_lab:2a33c5b07e01286c245ebf92710f8997208e4ff0237126ff06f2a4fcde47e0c8@localhost:5433/ai_quant_lab",
   });
 
   try {
@@ -132,12 +132,9 @@ async function main() {
   }
 }
 
-// Support executing directly via node
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => {
-    console.error("Fatal error in resolution sweep:", err);
-    process.exit(1);
-  });
-}
+void main().catch((err) => {
+  console.error("Fatal error in resolution sweep:", err);
+  process.exitCode = 1;
+});
 
 export { main as sweepUnresolvedShadowTrades };
