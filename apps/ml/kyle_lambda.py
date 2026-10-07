@@ -99,16 +99,26 @@ def estimate_kyle_lambda_summary(
         }
 
     lambda_est = float(cov / var_s)
+    # cov/var_s is the OLS slope of the model WITH an intercept (this docstring's own
+    # Delta_P = alpha + lambda*SignedVolume + eps) -- the intercept itself still has to be
+    # recovered and subtracted before residuals mean anything, otherwise ss_res/r_squared/std_err
+    # are only correct by coincidence, when both series happen to have a near-zero sample mean.
+    alpha_est = float(np.mean(delta_p) - lambda_est * np.mean(s_vol))
 
     # Compute regression diagnostics
     n = len(delta_p)
-    residuals = delta_p - (lambda_est * s_vol)
+    residuals = delta_p - (alpha_est + lambda_est * s_vol)
     ss_res = np.sum(residuals**2)
     ss_tot = np.sum((delta_p - np.mean(delta_p)) ** 2)
     r_squared = float(1.0 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
 
+    # Sxx = sum((s_vol - mean(s_vol))**2) = (n - 1) * var_s (var_s uses ddof=1), the actual
+    # denominator of Var(lambda_hat) = MSE / Sxx -- not n * var_s, which understates the standard
+    # error (and so overstates t_stat) by a factor that shrinks with n but is not negligible on
+    # the small rolling windows this module's own min_periods default anticipates.
     mse = ss_res / max(1, n - 2)
-    std_err = float(np.sqrt(mse / (n * var_s))) if var_s > 0 and mse >= 0 else 0.0
+    sxx = (n - 1) * var_s
+    std_err = float(np.sqrt(mse / sxx)) if sxx > 0 and mse >= 0 else 0.0
     t_stat = float(lambda_est / std_err) if std_err > 0 else 0.0
 
     return {
