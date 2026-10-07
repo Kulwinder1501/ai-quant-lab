@@ -682,6 +682,20 @@ async function main(): Promise<void> {
         const from = new Date(to.getTime() - 45 * 60 * 1000);
         const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
+        /*
+         * Spaced to stay under Twelve Data's per-minute credit cap. This loop plus the DXY
+         * component loop below fire 9 `data:collect:historical` calls in total (3 XAU timeframes +
+         * 6 FX pairs) and, with no spacing, all 9 landed inside the same rolling minute -- measured
+         * 2026-10-07 as repeated HTTP 429s ("14 API credits were used, with the current limit being
+         * 8"), which left XAU_USD's own candle stale past `momentum-scalp-gold`'s 300-second
+         * freshness window and blocked every direct-entry idea with NO_FRESH_QUOTE. Indicator
+         * calculation reads already-stored candles rather than calling Twelve Data, so it is not
+         * throttled here. 8s * 9 calls is ~72s of added latency against a 240s claim timeout and a
+         * 300s tick -- comfortable headroom either way.
+         */
+        const TWELVEDATA_CALL_SPACING_MS = 8_000;
+        const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
         for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
             "run", "data:collect:historical", "--",
@@ -693,6 +707,7 @@ async function main(): Promise<void> {
             "--to", to.toISOString(),
             "--skip-existing",
           ]);
+          await sleep(TWELVEDATA_CALL_SPACING_MS);
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
             "--exchange", "TWELVEDATA",
@@ -716,6 +731,7 @@ async function main(): Promise<void> {
             "--to", to.toISOString(),
             "--skip-existing",
           ]);
+          await sleep(TWELVEDATA_CALL_SPACING_MS);
         }
         await runCommand("npm", [
           "run", "data:compute:synthetic-dxy", "--",
