@@ -242,21 +242,31 @@ export function registerPaperTradingRoutes(
       const client = new Client({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@postgres:5432/ai_quant_lab' });
       await client.connect();
 
+      /*
+       * Scoped to XAU_USD. This page is the "Gold Shadow Ledger", but the strategy filter alone
+       * does not make it one: `ict-structure-v1` (and momentum-scalp-gold) are shared strategy
+       * keys that also run live on NIFTY50 and BANKNIFTY under their own bots
+       * (AutoBot-IctNifty15m, AutoBot-IctBankNifty5m). Without this join, their index-level
+       * trades showed up here mislabelled as gold trades -- measured 2026-10-07. Those NIFTY50/
+       * BANKNIFTY rows are real data for those other bots, not something to delete; this route
+       * just needs to stop pulling them in.
+       */
       // Aggregate stats
       const aggResult = await client.query(`
-        SELECT 
+        SELECT
           cs.outcome,
           COUNT(*) as count,
           SUM(CAST(cs.r_multiple AS FLOAT)) as total_r
         FROM candidate_settlements cs
         JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
-        WHERE ti.evidence->>'strategy' = $1
+        JOIN instruments i ON i.id = ti.instrument_id
+        WHERE ti.evidence->>'strategy' = $1 AND i.symbol = 'XAU_USD'
         GROUP BY cs.outcome;
       `, [strategy]);
 
       // Details
       const detailsResult = await client.query(`
-        SELECT 
+        SELECT
           ti.id as trade_idea_id,
           ti.generated_at,
           ti.side,
@@ -269,7 +279,8 @@ export function registerPaperTradingRoutes(
           cs.settled_at
         FROM candidate_settlements cs
         JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
-        WHERE ti.evidence->>'strategy' = $1
+        JOIN instruments i ON i.id = ti.instrument_id
+        WHERE ti.evidence->>'strategy' = $1 AND i.symbol = 'XAU_USD'
         ORDER BY ti.generated_at DESC
         LIMIT 200;
       `, [strategy]);
