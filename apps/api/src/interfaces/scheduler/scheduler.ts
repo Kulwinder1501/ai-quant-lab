@@ -753,19 +753,6 @@ async function main(): Promise<void> {
   });
 
   /**
-   * Sweeps UNRESOLVED shadow trades from previous sessions and attempts to resolve them 
-   * against newly collected historical candles. This keeps the shadow ledger accurate even if 
-   * live market feeds cut out or rate-limit during the active session.
-   * Runs daily at 08:00 before the new session gets busy.
-   */
-  cronSchedule("0 8 * * *", () => {
-    void schedule("SHADOW_TRADE_SWEEP", async () => {
-      await runCommand("npx", ["tsx", "src/interfaces/cli/resolve-stale-shadow-trades.ts"]);
-    });
-  });
-
-
-  /**
    * Liquidity Intelligence Engine v1 -- daily candidate + contact-label recompute for BANKNIFTY.
    *
    * `generate-liquidity-candidates.ts`/`generate-contact-labels.ts` were built and run once by
@@ -1342,7 +1329,6 @@ async function main(): Promise<void> {
       // so it runs without a live feed. Listing it inside the Fyers-gated group below would
       // misrepresent when it runs.
       "SHADOW_DECISION",
-      "SHADOW_TRADE_SWEEP",
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
            // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
