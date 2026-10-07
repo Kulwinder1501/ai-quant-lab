@@ -129,7 +129,18 @@ export class PostgresCandidateLedgerRepository {
   }
 
   /**
-   * Candidates whose horizon has fully elapsed and which carry no settlement yet (or carry an UNSETTLEABLE initial status).
+   * Candidates that carry no settlement yet (or carry an UNSETTLEABLE initial status), regardless of
+   * whether their horizon has fully elapsed.
+   *
+   * Used to include only candidates whose horizon had already passed -- settling earlier would have
+   * meant reading `settleCandidate`'s "not yet resolved, horizon incomplete" branch as a genuine data
+   * gap (UNSETTLEABLE) when it was really just "hasn't happened yet". The caller (`settle-candidates`)
+   * now draws that line itself: it still settles a not-yet-expired candidate the moment `settleCandidate`
+   * finds a genuine TARGET/STOP touch in the bars observed so far (the verdict is correct and final the
+   * instant it is reached, see that function's own docstring), but discards an UNSETTLEABLE/UNRESOLVED
+   * result for anything whose horizon has not actually elapsed yet, leaving it to be read again next
+   * sweep. This is what lets a target hit on the signal's very first bar settle in minutes instead of
+   * waiting out its full nominal window.
    *
    * Ordered by series so a caller can load each instrument-and-timeframe's bars once instead of once
    * per candidate. Over a backfill that is the difference between one query per series and one per
@@ -164,10 +175,9 @@ export class PostgresCandidateLedgerRepository {
       LEFT JOIN candidate_settlements ON candidate_settlements.trade_idea_id = trade_ideas.id
       WHERE (candidate_settlements.id IS NULL OR candidate_settlements.outcome = 'UNSETTLEABLE')
         AND trade_ideas.expires_at IS NOT NULL
-        AND trade_ideas.expires_at <= $1
       ORDER BY trade_ideas.instrument_id, candles.timeframe, trade_ideas.expires_at
-      LIMIT $2
-    `, [input.settledBefore, Math.max(1, Math.floor(input.limit))]);
+      LIMIT $1
+    `, [Math.max(1, Math.floor(input.limit))]);
 
     return result.rows.map((row) => ({
       tradeIdeaId: row.id,
