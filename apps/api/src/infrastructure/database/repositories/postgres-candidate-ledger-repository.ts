@@ -99,18 +99,37 @@ export class PostgresCandidateLedgerRepository {
         trade_idea_id, outcome, r_multiple, bars_to_resolution, mae_r, mfe_r,
         horizon_end, resolved_timeframe, bars_available, resolver_version
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      ON CONFLICT (trade_idea_id) DO NOTHING
+      ON CONFLICT (trade_idea_id) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        r_multiple = EXCLUDED.r_multiple,
+        bars_to_resolution = EXCLUDED.bars_to_resolution,
+        mae_r = EXCLUDED.mae_r,
+        mfe_r = EXCLUDED.mfe_r,
+        horizon_end = EXCLUDED.horizon_end,
+        resolved_timeframe = EXCLUDED.resolved_timeframe,
+        bars_available = EXCLUDED.bars_available,
+        resolver_version = EXCLUDED.resolver_version,
+        settled_at = NOW()
+      WHERE candidate_settlements.outcome = 'UNSETTLEABLE'
       RETURNING id
     `, [
       tradeIdeaId, settlement.outcome, settlement.rMultiple, settlement.barsToResolution,
       settlement.maeR, settlement.mfeR, settlement.horizonEnd, settlement.resolvedTimeframe,
       settlement.barsAvailable, settlement.resolverVersion,
     ]);
+
+    if (result.rows.length > 0) {
+      await this.database.query(
+        `UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`,
+        [tradeIdeaId],
+      );
+    }
+
     return result.rows.length > 0;
   }
 
   /**
-   * Candidates whose horizon has fully elapsed and which carry no settlement yet.
+   * Candidates whose horizon has fully elapsed and which carry no settlement yet (or carry an UNSETTLEABLE initial status).
    *
    * Ordered by series so a caller can load each instrument-and-timeframe's bars once instead of once
    * per candidate. Over a backfill that is the difference between one query per series and one per
@@ -121,6 +140,14 @@ export class PostgresCandidateLedgerRepository {
    * a window nobody chose.
    */
   async listUnsettledCandidates(input: { settledBefore: Date; limit: number }): Promise<UnsettledCandidate[]> {
+    await this.database.query(`
+      UPDATE trade_ideas
+      SET status = 'EXPIRED'
+      WHERE status = 'PROPOSED'
+        AND expires_at IS NOT NULL
+        AND expires_at <= $1
+    `, [input.settledBefore]);
+
     const result = await this.database.query<CandidateRow>(`
       SELECT
         trade_ideas.id,
@@ -135,7 +162,7 @@ export class PostgresCandidateLedgerRepository {
       FROM trade_ideas
       INNER JOIN candles ON candles.id = trade_ideas.source_candle_id
       LEFT JOIN candidate_settlements ON candidate_settlements.trade_idea_id = trade_ideas.id
-      WHERE candidate_settlements.id IS NULL
+      WHERE (candidate_settlements.id IS NULL OR candidate_settlements.outcome = 'UNSETTLEABLE')
         AND trade_ideas.expires_at IS NOT NULL
         AND trade_ideas.expires_at <= $1
       ORDER BY trade_ideas.instrument_id, candles.timeframe, trade_ideas.expires_at
