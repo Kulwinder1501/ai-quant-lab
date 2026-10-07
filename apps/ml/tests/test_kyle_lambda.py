@@ -5,6 +5,7 @@ Unit tests for Kyle's Lambda price impact estimator.
 import unittest
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from apps.ml.kyle_lambda import (
     compute_signed_volume,
@@ -64,6 +65,32 @@ class TestKyleLambda(unittest.TestCase):
     def test_invalid_window(self):
         with self.assertRaises(ValueError):
             estimate_kyle_lambda_rolling(self.df, window=1)
+
+    def test_summary_diagnostics_match_ols_with_nonzero_means(self):
+        # Regression test: the model this module's own docstring specifies has an intercept
+        # (Delta_P = alpha + lambda*SignedVolume + eps). The original implementation computed
+        # residuals as delta_p - lambda*s_vol with no alpha term, and divided by n instead of
+        # (n - 1) in the standard-error denominator -- both errors are invisible on data whose
+        # sample means happen to be near zero (this file's setUp fixture), which is exactly why
+        # this needs its own case with real, nonzero means: signed volume with a nonzero mean
+        # (e.g. a session with net buying pressure) and a real price drift (alpha != 0).
+        rng = np.random.RandomState(7)
+        n = 200
+        s_vol = rng.randn(n) * 50 + 30
+        price_changes = 2.0 + 0.05 * s_vol + rng.randn(n) * 5
+        prices = 100.0 + np.cumsum(price_changes)
+        df = pd.DataFrame({"close": prices, "signed_volume": s_vol})
+
+        summary = estimate_kyle_lambda_summary(df, price_col="close", signed_flow_col="signed_volume")
+
+        delta_p = df["close"].diff().dropna()
+        s_vol_aligned = df["signed_volume"].loc[delta_p.index]
+        reference = stats.linregress(s_vol_aligned, delta_p)
+
+        self.assertAlmostEqual(summary["kyle_lambda"], reference.slope, places=9)
+        self.assertAlmostEqual(summary["r_squared"], reference.rvalue ** 2, places=9)
+        self.assertAlmostEqual(summary["std_err"], reference.stderr, places=9)
+        self.assertAlmostEqual(summary["t_stat"], reference.slope / reference.stderr, places=9)
 
 
 if __name__ == "__main__":
