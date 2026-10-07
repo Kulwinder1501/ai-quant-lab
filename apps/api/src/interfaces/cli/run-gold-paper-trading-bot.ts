@@ -48,7 +48,16 @@ import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/ap
 const XAU_EXCHANGE = "TWELVEDATA" as const;
 const XAU_SYMBOL = "XAU_USD";
 const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
-const GOLD_STRATEGY_KEY = "ict-structure-v1";
+/**
+ * Every strategy this bot is responsible for executing on gold. `momentum-scalp-gold` was added
+ * 2026-10-07: its own file header says it was forked specifically "so its live record accumulates
+ * independently" of the already-falsified `momentum-scalp-index` verdict on Indian indices, but
+ * until now nothing ever read its ideas past `GenerateTradeIdeas` -- they were generated,
+ * persisted, and silently expired, with no decision of any kind ever logged. Each key below gets
+ * its own independent live-entries switch (see GOLD_LIVE_ENTRIES_ENABLED), so enabling one never
+ * silently re-arms the other's evidence-gathering.
+ */
+const GOLD_STRATEGY_KEYS = ["ict-structure-v1", "momentum-scalp-gold"] as const;
 const MAX_CONCURRENT_POSITIONS = 1;
 const GOLD_ACCOUNT_NAME = "AutoBot-Gold";
 /** Arbitrary, illustrative paper balance -- not derived from any real account. */
@@ -68,6 +77,22 @@ const WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30;
  * Defaults OFF; set to exactly "true" to let the bot open positions on gold.
  */
 const GOLD_ICT_LIVE_ENTRIES_ENABLED = process.env.GOLD_ICT_LIVE_ENTRIES_ENABLED === "true";
+
+/**
+ * `momentum-scalp-gold`'s own independent kill switch -- deliberately NOT
+ * `GOLD_ICT_LIVE_ENTRIES_ENABLED`. The whole point of forking this strategy under its own key
+ * (see the strategy file's header) was to accumulate evidence separately from ICT's; sharing one
+ * switch would mean flipping ICT live also silently arms a strategy with zero evidence of its
+ * own, and vice versa. Defaults OFF, same as every other strategy's first exposure to live
+ * entries this session (ICT included) -- it starts in shadow (REFUSED-logged, not silently
+ * dropped) until it has a real settled record to review.
+ */
+const GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED = process.env.GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED === "true";
+
+const GOLD_LIVE_ENTRIES_ENABLED: Record<(typeof GOLD_STRATEGY_KEYS)[number], boolean> = {
+  "ict-structure-v1": GOLD_ICT_LIVE_ENTRIES_ENABLED,
+  "momentum-scalp-gold": GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
+};
 
 function isUserOperatingWindow(now: Date): boolean {
   const minute = istMinuteOfDay(now);
@@ -186,7 +211,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
         }
 
         const results = await generator.execute({ instrumentId: instrument.id, timeframe, symbol: XAU_SYMBOL });
-        const goldResults = results.filter((result) => result.strategyKey === GOLD_STRATEGY_KEY);
+        const goldResults = results.filter((result) => (GOLD_STRATEGY_KEYS as readonly string[]).includes(result.strategyKey));
 
         for (const result of goldResults) {
           /*
@@ -265,15 +290,19 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
 
             const entry = prepared.entry;
 
-            if (!GOLD_ICT_LIVE_ENTRIES_ENABLED) {
-              // Shadow mode: the signal cleared every gate up to and including sizing, but
-              // GOLD_ICT_LIVE_ENTRIES_ENABLED is off, so no real (paper) position is opened for
-              // an as-yet-unvalidated instrument. Still recorded on the candidate ledger --
-              // as REFUSED, the closest fit the ledger's decision type offers -- so the "would
-              // have opened" signal isn't lost, and still fully logged below.
+            const strategyKey = result.strategyKey as (typeof GOLD_STRATEGY_KEYS)[number];
+            if (!GOLD_LIVE_ENTRIES_ENABLED[strategyKey]) {
+              // Shadow mode: the signal cleared every gate up to and including sizing, but this
+              // strategy's own live-entries switch is off, so no real (paper) position is opened
+              // for an as-yet-unvalidated instrument/strategy pairing. Still recorded on the
+              // candidate ledger -- as REFUSED, the closest fit the ledger's decision type offers
+              // -- so the "would have opened" signal isn't lost, and still fully logged below.
+              const envVarName = strategyKey === "ict-structure-v1"
+                ? "GOLD_ICT_LIVE_ENTRIES_ENABLED"
+                : "GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED";
               refused.push({
-                tradeIdeaId, timeframe, reason: "GOLD_ICT_LIVE_ENTRIES_DISABLED",
-                explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); GOLD_ICT_LIVE_ENTRIES_ENABLED is not "true".`,
+                tradeIdeaId, timeframe, reason: `${envVarName.replace(/_ENABLED$/, "")}_DISABLED`,
+                explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); ${envVarName} is not "true".`,
               });
               continue;
             }
@@ -428,6 +457,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       timestamp: now.toISOString(),
       accountId: account.id,
       goldIctLiveEntriesEnabled: GOLD_ICT_LIVE_ENTRIES_ENABLED,
+      goldMomentumScalpLiveEntriesEnabled: GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
       decisionsRecorded,
       skippedSeries,
       strategyOutcomes,
