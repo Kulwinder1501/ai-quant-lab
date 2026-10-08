@@ -570,6 +570,16 @@ export class IctZoneLedger {
         }
 
         const gapHeight = fvg.top - fvg.bottom;
+
+        const inverts = fvg.type === "BULLISH" ? current.close < fvg.bottom : current.close > fvg.top;
+
+        if (inverts) {
+          const { updatedOriginal, flipped } = this.invertGap(fvg, currentIndex, current.openTime);
+          nextFvgs.push(updatedOriginal);
+          bornThisBar.push(flipped);
+          continue;
+        }
+
         const touches =
           gapHeight > 0 &&
           (fvg.type === "BULLISH"
@@ -583,26 +593,19 @@ export class IctZoneLedger {
         const penetration =
           fvg.type === "BULLISH" ? Math.max(0, fvg.top - current.low) : Math.max(0, current.high - fvg.bottom);
         const pct = Math.max(fvg.fillPercentage, Math.min(1.0, penetration / gapHeight));
-        const inverts = fvg.type === "BULLISH" ? current.close < fvg.bottom : current.close > fvg.top;
-
-        if (inverts) {
-          const { updatedOriginal, flipped } = this.invertGap(fvg, currentIndex, current.openTime);
-          nextFvgs.push(updatedOriginal);
-          bornThisBar.push(flipped);
-        } else {
-          const nextState: ZoneLifecycleState = pct >= 1.0 ? "CONSUMED" : pct > 0 ? "PARTIALLY_FILLED" : fvg.state;
-          const isNewlyTouched = pct > 0 && fvg.fillPercentage === 0;
-          const isNewlyMitigated = pct >= 0.5 && fvg.fillPercentage < 0.5;
-          const isNewlyConsumed = pct >= 1.0 && fvg.fillPercentage < 1.0;
-          nextFvgs.push(pct === fvg.fillPercentage && nextState === fvg.state ? fvg : { 
-            ...fvg, 
-            fillPercentage: pct, 
-            state: nextState,
-            testedAt: isNewlyTouched ? current.openTime.getTime() : fvg.testedAt,
-            mitigatedAt: isNewlyMitigated ? current.openTime.getTime() : fvg.mitigatedAt,
-            invalidatedAt: isNewlyConsumed ? current.openTime.getTime() : fvg.invalidatedAt
-          });
-        }
+        
+        const nextState: ZoneLifecycleState = pct >= 1.0 ? "CONSUMED" : pct > 0 ? "PARTIALLY_FILLED" : fvg.state;
+        const isNewlyTouched = pct > 0 && fvg.fillPercentage === 0;
+        const isNewlyMitigated = pct >= 0.5 && fvg.fillPercentage < 0.5;
+        const isNewlyConsumed = pct >= 1.0 && fvg.fillPercentage < 1.0;
+        nextFvgs.push(pct === fvg.fillPercentage && nextState === fvg.state ? fvg : { 
+          ...fvg, 
+          fillPercentage: pct, 
+          state: nextState,
+          testedAt: isNewlyTouched ? current.openTime.getTime() : fvg.testedAt,
+          mitigatedAt: isNewlyMitigated ? current.openTime.getTime() : fvg.mitigatedAt,
+          invalidatedAt: isNewlyConsumed ? current.openTime.getTime() : fvg.invalidatedAt
+        });
       }
       this.fvgs = [...nextFvgs, ...bornThisBar];
     }
@@ -617,26 +620,27 @@ export class IctZoneLedger {
           continue;
         }
 
+        const fails = ob.type === "BULLISH" ? current.close < ob.meanThreshold : current.close > ob.meanThreshold;
+        if (fails) {
+          const { updatedOriginal, flipped } = this.failBlock(ob, currentIndex, current.openTime);
+          nextObs.push(updatedOriginal);
+          if (flipped) bornThisBar.push(flipped);
+          continue;
+        }
+
         const touches = ob.type === "BULLISH" ? current.low <= ob.top : current.high >= ob.bottom;
         if (!touches) {
           nextObs.push(ob);
           continue;
         }
 
-        const fails = ob.type === "BULLISH" ? current.close < ob.meanThreshold : current.close > ob.meanThreshold;
-        if (fails) {
-          const { updatedOriginal, flipped } = this.failBlock(ob, currentIndex, current.openTime);
-          nextObs.push(updatedOriginal);
-          if (flipped) bornThisBar.push(flipped);
-        } else {
-          const isNewlyTouched = ob.state === "FRESH";
-          nextObs.push(ob.state === "TOUCHED" ? ob : { 
-            ...ob, 
-            state: "TOUCHED",
-            testedAt: isNewlyTouched ? current.openTime.getTime() : ob.testedAt
-          });
-          this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "TOUCHED", barIndex: currentIndex };
-        }
+        const isNewlyTouched = ob.state === "FRESH";
+        nextObs.push(ob.state === "TOUCHED" ? ob : { 
+          ...ob, 
+          state: "TOUCHED",
+          testedAt: isNewlyTouched ? current.openTime.getTime() : ob.testedAt
+        });
+        this.lastEvent = { zoneId: ob.id, zoneKind: "OB", event: "TOUCHED", barIndex: currentIndex };
       }
       this.obs = [...nextObs, ...bornThisBar];
     }

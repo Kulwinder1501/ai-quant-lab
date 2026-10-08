@@ -305,7 +305,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const barLow = context.candle.low;
     const barHigh = context.candle.high;
     const reached = (level: number): boolean =>
-      isBullish ? barLow <= level : barHigh >= level;
+      barLow <= level && barHigh >= level;
 
     /*
      * Entry-model arm 2: killzone.
@@ -565,7 +565,9 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
       // Gate 12: Minimum risk-reward floor check (Item 1)
       const riskReward = Number(((targetPrice - entryPrice) / riskDistance).toFixed(2));
-      if (riskReward < config.minimumRiskReward) return [];
+      if (riskReward < config.minimumRiskReward) {
+        return [];
+      }
 
       const evidence: TradeIdeaEvidence[] = [
         {
