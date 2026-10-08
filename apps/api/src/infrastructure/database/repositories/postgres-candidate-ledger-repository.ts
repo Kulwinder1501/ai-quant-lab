@@ -2,6 +2,7 @@ import type { QueryResultRow } from "pg";
 import type { CandidateSettlement } from "../../../modules/paper-trading/domain/candidate-settlement.js";
 import type { CompletedPriceCandle } from "../../../modules/paper-trading/domain/paper-trade-exit-policy.js";
 import type { TradeSide } from "../../../modules/strategy-engine/domain/strategy.js";
+import type { OptionEntryRejectionProvenance } from "../../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import type { DatabaseQueryable } from "../database.js";
 
 export interface UnsettledCandidate {
@@ -26,6 +27,7 @@ export interface CandidateDecisionInput {
   readonly explanation?: string;
   readonly paperTradeId?: string | null;
   readonly regimeObservationId?: string | null;
+  readonly rejectionProvenance?: OptionEntryRejectionProvenance;
 }
 
 interface CandidateRow extends QueryResultRow {
@@ -77,11 +79,12 @@ export class PostgresCandidateLedgerRepository {
     await this.database.query(`
       INSERT INTO candidate_decisions (
         trade_idea_id, account_id, decided_at, decision, reason, explanation,
-        paper_trade_id, regime_observation_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        paper_trade_id, regime_observation_id, rejection_provenance
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
     `, [
       input.tradeIdeaId, input.accountId, input.decidedAt, input.decision, input.reason,
       input.explanation ?? "", input.paperTradeId ?? null, input.regimeObservationId ?? null,
+      input.rejectionProvenance ? JSON.stringify(input.rejectionProvenance) : null,
     ]);
   }
 

@@ -6,7 +6,7 @@ import { PostgresCandleRepository } from "../../infrastructure/database/reposito
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
-import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
+import { classifyOpenFailure, type OptionEntryRejectionProvenance } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
@@ -648,6 +648,7 @@ async function main(): Promise<void> {
           reason: String(entry.reason),
           explanation: String(entry.explanation ?? ""),
           regimeObservationId: null,
+          rejectionProvenance: entry.rejectionProvenance as OptionEntryRejectionProvenance | undefined,
         })),
       ];
       let decisionsRecorded = 0;

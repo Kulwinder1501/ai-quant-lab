@@ -9,8 +9,9 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
 import { PostgresCandidateLedgerRepository, type CandidateDecisionInput } from "../../infrastructure/database/repositories/postgres-candidate-ledger-repository.js";
+import type { OptionEntryRejectionProvenance } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresShadowDecisionRepository } from "../../infrastructure/database/repositories/postgres-shadow-decision-repository.js";
-import { TwelveDataQuoteClient } from "../../infrastructure/market-data/twelvedata-quote-client.js";
+import { OandaQuoteClient } from "../../infrastructure/market-data/oanda-quote-client.js";
 import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
@@ -124,11 +125,13 @@ async function main(): Promise<void> {
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
-  const twelveDataApiKey = process.env.TWELVEDATA_API_KEY;
-  if (!twelveDataApiKey) {
+  const oandaAccountId = process.env.OANDA_ACCOUNT_ID;
+  const oandaAccessToken = process.env.OANDA_ACCESS_TOKEN;
+  const oandaEnvironment = (process.env.OANDA_ENVIRONMENT ?? "practice") as "practice" | "trade";
+  if (!oandaAccountId || !oandaAccessToken) {
     console.error(JSON.stringify({
       level: "error",
-      message: "TWELVEDATA_API_KEY is not configured; the gold bot cannot fetch a live quote and was skipped.",
+      message: "OANDA_ACCOUNT_ID or OANDA_ACCESS_TOKEN is not configured; the gold bot cannot fetch a live quote and was skipped.",
     }));
     await database.end();
     return;
@@ -153,7 +156,7 @@ async function main(): Promise<void> {
       console.info(JSON.stringify({ level: "info", message: "Created bot account", account: GOLD_ACCOUNT_NAME }));
     }
 
-    const quoteClient = new TwelveDataQuoteClient({ apiKey: twelveDataApiKey });
+    const quoteClient = new OandaQuoteClient({ accountId: oandaAccountId, accessToken: oandaAccessToken, environment: oandaEnvironment });
     const prepareEntry = new PrepareDirectEntry(database, quoteClient);
     const openTrade = new OpenPaperTrade(tradeRepository);
     const ledger = new PostgresCandidateLedgerRepository(database);
@@ -434,6 +437,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
         reason: String(entry.reason),
         explanation: String(entry.explanation ?? ""),
         regimeObservationId: null,
+        rejectionProvenance: entry.rejectionProvenance as OptionEntryRejectionProvenance | undefined,
       })),
     ];
     let decisionsRecorded = 0;

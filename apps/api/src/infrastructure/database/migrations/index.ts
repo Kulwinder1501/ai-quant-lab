@@ -124,6 +124,8 @@ import { shadowDecisionsMigration } from "./123-shadow-decisions.js";
 import { paperTradeO1ExitReasonMigration } from "./124-paper-trade-o1-exit-reason.js";
 import { dxyFxComponentInstrumentsMigration } from "./125-dxy-fx-component-instruments.js";
 import { tradeIdeaSetupIdUniquenessMigration } from "./126-trade-idea-setup-id-uniqueness.js";
+import { oandaInstrumentSupportMigration } from "./127-oanda-instrument-support.js";
+import { candidateDecisionRejectionProvenanceMigration } from "./128-candidate-decision-rejection-provenance.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -252,4 +254,6 @@ export const migrations = [
   paperTradeO1ExitReasonMigration,
   dxyFxComponentInstrumentsMigration,
   tradeIdeaSetupIdUniquenessMigration,
+  oandaInstrumentSupportMigration,
+  candidateDecisionRejectionProvenanceMigration,
 ];

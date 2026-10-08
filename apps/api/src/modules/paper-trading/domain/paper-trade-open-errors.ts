@@ -88,3 +88,32 @@ export function classifyOpenFailure(error: unknown): OpenFailureClassification {
     expected: false,
   };
 }
+
+export interface OptionEntryRejectionProvenance {
+  reasonCode: "NO_OPTION_ENTRY";
+
+  underlyingSymbol: string;
+  underlyingValue: number | null;
+  expiry: string;
+  optionType: "CE" | "PE";
+
+  chainObservedAt: string;
+
+  targetDelta: number;
+  minEntryDelta: number;
+
+  candidateCount: number;
+  deltaAvailableCount: number;
+
+  minAvailableStrike: number | null;
+  maxAvailableStrike: number | null;
+
+  maxAbsDeltaAvailable: number | null;
+
+  liquidityEligibleCount: number;
+  maxAbsDeltaLiquidityEligible: number | null;
+
+  requestedStrikeCount?: number;
+  returnedContractCount?: number;
+  deltaSource?: string;
+}

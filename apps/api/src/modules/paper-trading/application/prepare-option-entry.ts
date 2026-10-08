@@ -162,6 +162,7 @@ export type PrepareOptionEntryResult =
     explanation: string;
     reasons?: string[];
     unchecked?: string[];
+    rejectionProvenance?: import("../domain/paper-trade-open-errors.js").OptionEntryRejectionProvenance;
   };
 
 export interface PrepareOptionEntryInput {
@@ -343,7 +344,7 @@ export class PrepareOptionEntry {
       ? entryChain
       : null;
 
-    if (usableChain === null || usableChain.quotes.length === 0) {
+    if (usableChain === null) {
       return {
         approved: false,
         reason: "NO_OPTION_ENTRY",
@@ -384,35 +385,62 @@ export class PrepareOptionEntry {
       }
     }
 
-    const MIN_ENTRY_DELTA = 0.75;
-    const TARGET_DELTA = 0.75;
+    const MIN_ENTRY_DELTA = 0.55;
+    const TARGET_DELTA = 0.65;
     const matchingQuotes = usableChain.quotes.filter((q) => q.optionType === intendedOptionType);
     const eligible: Array<{
       quote: typeof matchingQuotes[0];
       greeks: NonNullable<ReturnType<typeof solveContractGreeksFromChain>>;
     }> = [];
 
+    let maxAvailableStrike: number | null = null;
+    let minAvailableStrike: number | null = null;
+    let maxAbsDeltaAvailable: number | null = null;
+    let deltaAvailableCount = 0;
+
+    let liquidityEligibleCount = 0;
+    let maxAbsDeltaLiquidityEligible: number | null = null;
+
     for (const q of matchingQuotes) {
-      if (
-        q.bid === null
-        || q.ask === null
-        || !Number.isFinite(q.bid)
-        || !Number.isFinite(q.ask)
-        || !(q.ask > q.bid)
-      ) {
-        continue;
-      }
+      if (maxAvailableStrike === null || q.strikePrice > maxAvailableStrike) maxAvailableStrike = q.strikePrice;
+      if (minAvailableStrike === null || q.strikePrice < minAvailableStrike) minAvailableStrike = q.strikePrice;
+
       const greeks = solveContractGreeksFromChain({
         snapshot: usableChain,
         strikePrice: q.strikePrice,
         optionType: intendedOptionType,
       });
-      if (
-        greeks !== null
-        && Number.isFinite(greeks.delta)
-        && Math.abs(greeks.delta) >= MIN_ENTRY_DELTA
-      ) {
-        eligible.push({ quote: q, greeks });
+
+      let hasValidDelta = false;
+      let absDelta: number | null = null;
+      if (greeks !== null && Number.isFinite(greeks.delta)) {
+        hasValidDelta = true;
+        absDelta = Math.abs(greeks.delta);
+        deltaAvailableCount++;
+        if (maxAbsDeltaAvailable === null || absDelta > maxAbsDeltaAvailable) {
+          maxAbsDeltaAvailable = absDelta;
+        }
+      }
+
+      const passesLiquidity = (
+        q.bid !== null
+        && q.ask !== null
+        && Number.isFinite(q.bid)
+        && Number.isFinite(q.ask)
+        && (q.ask > q.bid)
+      );
+
+      if (passesLiquidity) {
+        liquidityEligibleCount++;
+        if (hasValidDelta) {
+          if (maxAbsDeltaLiquidityEligible === null || absDelta! > maxAbsDeltaLiquidityEligible) {
+            maxAbsDeltaLiquidityEligible = absDelta;
+          }
+        }
+      }
+
+      if (passesLiquidity && hasValidDelta && absDelta! >= MIN_ENTRY_DELTA) {
+        eligible.push({ quote: q, greeks: greeks! });
       }
     }
 
@@ -423,6 +451,24 @@ export class PrepareOptionEntry {
         explanation:
           `No eligible contract found for ${underlyingSymbol} ${settlementExpiry.toISOString().slice(0, 10)} `
           + `${intendedOptionType}: no contract satisfied abs(delta) >= ${MIN_ENTRY_DELTA} with valid two-sided quotes.`,
+        rejectionProvenance: {
+          reasonCode: "NO_OPTION_ENTRY",
+          underlyingSymbol,
+          underlyingValue: currentUnderlyingValue,
+          expiry: settlementExpiry.toISOString(),
+          optionType: intendedOptionType,
+          chainObservedAt: usableChain.observedAt.toISOString(),
+          targetDelta: TARGET_DELTA,
+          minEntryDelta: MIN_ENTRY_DELTA,
+          candidateCount: matchingQuotes.length,
+          deltaAvailableCount,
+          minAvailableStrike,
+          maxAvailableStrike,
+          maxAbsDeltaAvailable,
+          liquidityEligibleCount,
+          maxAbsDeltaLiquidityEligible,
+          deltaSource: "CALCULATED"
+        }
       };
     }
 
@@ -641,7 +687,7 @@ export class PrepareOptionEntry {
           },
           entryProvenance: {
             selectionMode: "O2_CHAIN_ENUMERATION",
-            targetDelta: 0.75,
+            targetDelta: TARGET_DELTA,
             eligibleContractCount: eligible.length,
             chainObservedAt: usableChain.observedAt.toISOString(),
             deltaAtEntry,

@@ -58,6 +58,8 @@ export interface OpenOptionPositionInput {
   maxRegimeAgeMinutes?: number;
 }
 
+import type { OptionEntryRejectionProvenance } from "../domain/paper-trade-open-errors.js";
+
 export type OpenOptionPositionResult =
   | {
     opened: true;
@@ -86,6 +88,7 @@ export type OpenOptionPositionResult =
     explanation: string;
     reasons?: string[];
     unchecked?: string[];
+    rejectionProvenance?: OptionEntryRejectionProvenance;
   };
 
 export class OpenOptionPositionFromIdea {
@@ -122,6 +125,7 @@ export class OpenOptionPositionFromIdea {
         explanation: prepared.explanation,
         ...(prepared.reasons ? { reasons: prepared.reasons } : {}),
         ...(prepared.unchecked ? { unchecked: prepared.unchecked } : {}),
+        ...('rejectionProvenance' in prepared && prepared.rejectionProvenance ? { rejectionProvenance: prepared.rejectionProvenance } : {}),
       };
     }
 
