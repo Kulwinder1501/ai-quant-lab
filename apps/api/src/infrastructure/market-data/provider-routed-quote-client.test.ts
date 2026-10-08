@@ -55,21 +55,21 @@ describe("ProviderRoutedQuoteClient", () => {
     expect(result.get("GC=F")?.provider).toBe("yahoo");
   });
 
-  it("routes a Twelve-Data-mapped symbol there, ahead of the Fyers/Yahoo split", async () => {
+  it("routes an OANDA-mapped symbol there, ahead of the Fyers/Yahoo split", async () => {
     const fyers = reader("fyers-api-v3");
     const foreign = reader("yahoo");
-    const twelveData = reader("twelvedata");
-    const client = new ProviderRoutedQuoteClient(fyers, foreign, twelveData);
+    const oanda = reader("oanda");
+    const client = new ProviderRoutedQuoteClient(fyers, foreign, oanda);
 
     const result = await client.quoteSymbols(["NIFTY50", "^GSPC", "XAU_USD"]);
 
-    expect(twelveData.quoteSymbols).toHaveBeenCalledWith(["XAU_USD"]);
+    expect(oanda.quoteSymbols).toHaveBeenCalledWith(["XAU_USD"]);
     expect(fyers.quoteSymbols).toHaveBeenCalledWith(["NIFTY50"]);
     expect(foreign.quoteSymbols).toHaveBeenCalledWith(["^GSPC"]);
-    expect(result.get("XAU_USD")?.provider).toBe("twelvedata");
+    expect(result.get("XAU_USD")?.provider).toBe("oanda");
   });
 
-  it("never calls Twelve Data when it is unconfigured, even for a symbol it would own", async () => {
+  it("never calls OANDA when it is unconfigured, even for a symbol it would own", async () => {
     const fyers = reader("fyers-api-v3");
     const client = new ProviderRoutedQuoteClient(fyers);
 

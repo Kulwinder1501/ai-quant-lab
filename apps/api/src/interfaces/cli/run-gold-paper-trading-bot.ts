@@ -238,7 +238,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
           });
 
           for (const tradeIdeaId of result.tradeIdeaIds) {
-            // Evaluate DXY_INTERMARKET_V1 observational metadata in SHADOW mode
+            let dxyPayload;
             try {
               const ideaRes = await database.query<{ side: "LONG" | "SHORT" }>(
                 `SELECT side FROM trade_ideas WHERE id = $1`,
@@ -246,37 +246,27 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
               );
               const proposalSide = ideaRes.rows[0]?.side ?? "LONG";
 
-              const dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
+              dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
                 proposalSide,
                 proposalTimeframe: timeframe,
                 candidateAt: now.toISOString(),
                 dataCutoff: now.toISOString(),
                 decisionAt: now.toISOString(),
               });
-              console.info(JSON.stringify({
-                level: "info",
-                message: "DXY_INTERMARKET_V1 Shadow Observation",
-                tradeIdeaId,
-                timeframe,
-                dxyPayload,
-              }));
             } catch (err) {
               console.error(JSON.stringify({
-                level: "error",
-                message: "Failed evaluating DXY_INTERMARKET_V1 shadow observation",
-                tradeIdeaId,
-                error: String(err),
+                level: "error", message: "Failed evaluating DXY_INTERMARKET_V1",
+                tradeIdeaId, error: String(err),
               }));
             }
 
-            if (openPositions >= MAX_CONCURRENT_POSITIONS) {
-              refused.push({
-                tradeIdeaId, timeframe, reason: "POSITION_LIMIT",
-                explanation: `Already holding ${openPositions} position(s), the limit is ${MAX_CONCURRENT_POSITIONS}.`,
-              });
+            // Layer 1: Macro Gate
+            if (!dxyPayload || !dxyPayload.eligible) {
+              refused.push({ tradeIdeaId, timeframe, reason: dxyPayload?.refusalReason ?? "DXY_ERROR", explanation: "DXY Macro Gate refused." });
               continue;
             }
 
+            // Layer 2 & 3: Prepare Entry & Spread Constraint
             const prepared = await prepareEntry.execute({
               tradeIdeaId,
               now,
@@ -286,20 +276,50 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
               riskPercent: GOLD_RISK_PER_TRADE_PERCENT,
               dynamicSizing: true,
             });
+            
             if (!prepared.approved) {
               refused.push({ tradeIdeaId, timeframe, reason: prepared.reason, explanation: prepared.explanation });
               continue;
             }
 
             const entry = prepared.entry;
+            const currentSpread = entry.observedAsk - entry.observedBid;
+            const stopDistance = Math.abs(entry.fillPrice - entry.stopLossOverride);
+            const MAX_ENTRY_LIQUIDITY_RATIO = 0.15;
+            
+            let executionRefused = false;
+            let executionRefusalReason = "";
+            if (stopDistance > 0 && (currentSpread / stopDistance) > MAX_ENTRY_LIQUIDITY_RATIO) {
+              executionRefused = true;
+              executionRefusalReason = "SPREAD_TOO_WIDE";
+            }
+
+            if (executionRefused) {
+              refused.push({ tradeIdeaId, timeframe, reason: executionRefusalReason, explanation: `Spread/StopDistance ratio (${(currentSpread/stopDistance).toFixed(3)}) exceeded limit (${MAX_ENTRY_LIQUIDITY_RATIO}).` });
+              continue;
+            }
+
+            // Layer 3: Risk Veto
+            if (openPositions >= MAX_CONCURRENT_POSITIONS) {
+              refused.push({ tradeIdeaId, timeframe, reason: "POSITION_LIMIT", explanation: `Holding ${openPositions}, limit ${MAX_CONCURRENT_POSITIONS}.` });
+              continue;
+            }
+
+            // Layer 4: Telemetry Check
+            // Pre-trade mandatory data presence
+            if (!dxyPayload.availableAt || !dxyPayload.calculationVersion) {
+              refused.push({ tradeIdeaId, timeframe, reason: "TELEMETRY_MISSING", explanation: "Mandatory pre-trade telemetry missing." });
+              continue;
+            }
+
+            // --- Authorization Passed ---
+            
+            // Client Order ID for Idempotency
+            const signalAt = new Date().toISOString(); // Typically comes from signal generation time, defaulting to now
+            const clientOrderId = `gold-${tradeIdeaId}-${entry.side}-${signalAt}`;
 
             const strategyKey = result.strategyKey as (typeof GOLD_STRATEGY_KEYS)[number];
             if (!GOLD_LIVE_ENTRIES_ENABLED[strategyKey]) {
-              // Shadow mode: the signal cleared every gate up to and including sizing, but this
-              // strategy's own live-entries switch is off, so no real (paper) position is opened
-              // for an as-yet-unvalidated instrument/strategy pairing. Still recorded on the
-              // candidate ledger -- as REFUSED, the closest fit the ledger's decision type offers
-              // -- so the "would have opened" signal isn't lost, and still fully logged below.
               const envVarName = strategyKey === "ict-structure-v1"
                 ? "GOLD_ICT_LIVE_ENTRIES_ENABLED"
                 : "GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED";
@@ -320,7 +340,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal. Required margin: $${entry.requiredMargin?.toFixed(2) ?? "N/A"} (${entry.leverage ?? 20}x leverage).`,
+                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal. Required margin: $${entry.requiredMargin?.toFixed(2) ?? "N/A"} (${entry.leverage ?? 20}x leverage). ClientOrderId: ${clientOrderId}`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,

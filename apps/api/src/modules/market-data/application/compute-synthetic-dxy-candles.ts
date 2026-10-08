@@ -18,7 +18,7 @@ async function loadComponentInstrumentIds(
   database: DatabaseQueryable,
 ): Promise<Record<ComponentSymbol, string>> {
   const result = await database.query<{ symbol: string; id: string }>(
-    `SELECT symbol, id FROM instruments WHERE exchange = 'TWELVEDATA' AND symbol = ANY($1::text[])`,
+    `SELECT symbol, id FROM instruments WHERE exchange = 'OANDA' AND symbol = ANY($1::text[])`,
     [COMPONENT_SYMBOLS],
   );
   const ids = Object.fromEntries(result.rows.map((row) => [row.symbol, row.id])) as Record<ComponentSymbol, string>;
@@ -50,7 +50,7 @@ async function loadComponentSeries(
 
 async function fetchDxyInstrumentId(database: DatabaseQueryable): Promise<string> {
   const result = await database.query<{ id: string }>(
-    `SELECT id FROM instruments WHERE exchange = 'TWELVEDATA' AND symbol = 'DXY'`,
+    `SELECT id FROM instruments WHERE exchange = 'OANDA' AND symbol = 'DXY'`,
   );
   const id = result.rows[0]?.id;
   if (!id) {
@@ -72,7 +72,7 @@ export interface ComputeSyntheticDxyCandlesResult {
  * since fabricating a missing leg's rate would make every downstream DXY bar that minute
  * fictitious rather than reconstructed), then rolls the 1m series up into 5m and 15m via a real
  * OHLC aggregation. The 6 component series must already be collected (via
- * `data:collect:historical --provider twelvedata --instrument EUR_USD ...` etc.) before this
+ * `data:collect:historical --provider oanda --instrument EUR_USD ...` etc.) before this
  * runs; it only reads and recombines what is already in `candles`.
  */
 export async function computeSyntheticDxyCandles(
@@ -135,7 +135,7 @@ export async function computeSyntheticDxyCandles(
         close: bar.close.toFixed(6),
         volume: "0",
         isComplete: true,
-        source: "twelvedata",
+        source: "oanda",
         sourceMetadata: { synthetic: true, formula: "ICE_DXY_V1", components: COMPONENT_SYMBOLS },
       });
     }

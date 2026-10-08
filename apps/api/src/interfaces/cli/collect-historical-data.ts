@@ -14,14 +14,14 @@ import type { Instrument } from "../../modules/market-data/domain/instrument.js"
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 import { YahooHistoricalDataProvider } from "../../infrastructure/market-data/yahoo-historical-data-provider.js";
-import { TwelveDataHistoricalDataProvider } from "../../infrastructure/market-data/twelvedata-historical-data-provider.js";
+import { OandaHistoricalDataProvider } from "../../infrastructure/market-data/oanda-historical-data-provider.js";
 
 function parseExchangeOption(value: string): Instrument["exchange"] {
   const upper = value.toUpperCase();
-  if (upper === "NSE" || upper === "NFO" || upper === "BSE" || upper === "TWELVEDATA") {
+  if (upper === "NSE" || upper === "NFO" || upper === "BSE" || upper === "OANDA") {
     return upper;
   }
-  throw new Error(`Unsupported --exchange "${value}". Use NSE, NFO, BSE, or TWELVEDATA.`);
+  throw new Error(`Unsupported --exchange "${value}". Use NSE, NFO, BSE, or OANDA.`);
 }
 
 function providerFromArguments(
@@ -59,14 +59,15 @@ function providerFromArguments(
   if (provider === "yahoo") {
     return new YahooHistoricalDataProvider();
   }
-  if (provider === "twelvedata") {
-    const apiKey = process.env.TWELVEDATA_API_KEY;
-    if (!apiKey) {
-      throw new Error("Twelve Data collection requires TWELVEDATA_API_KEY in .env.");
+  if (provider === "oanda") {
+    const accessToken = process.env.OANDA_ACCESS_TOKEN;
+    const environment = (process.env.OANDA_ENVIRONMENT ?? "practice") as "practice" | "trade";
+    if (!accessToken) {
+      throw new Error("OANDA collection requires OANDA_ACCESS_TOKEN in .env.");
     }
-    return new TwelveDataHistoricalDataProvider({ apiKey });
+    return new OandaHistoricalDataProvider({ accessToken, environment });
   }
-  throw new Error(`Unsupported provider "${provider}". Use csv, fyers, kite, yahoo, or twelvedata.`);
+  throw new Error(`Unsupported provider "${provider}". Use csv, fyers, kite, yahoo, or oanda.`);
 }
 
 /**

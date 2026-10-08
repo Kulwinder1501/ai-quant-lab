@@ -10,17 +10,17 @@
       {
         "experimentId": "F1_GOLDEN_POCKET",
         "zoneName": "GOLDEN_POCKET",
-        "nTreatmentTotal": 23,
-        "nControlTotal": 43,
+        "nTreatmentTotal": 24,
+        "nControlTotal": 42,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 53,
+        "trimmedCommonSupportCount": 50,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 43,
+          "ACTIVE_ANCHOR": 42,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
@@ -35,17 +35,17 @@
       {
         "experimentId": "F2_OTE",
         "zoneName": "OTE",
-        "nTreatmentTotal": 21,
-        "nControlTotal": 43,
+        "nTreatmentTotal": 22,
+        "nControlTotal": 42,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 35,
+        "trimmedCommonSupportCount": 37,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 43,
+          "ACTIVE_ANCHOR": 42,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
@@ -61,16 +61,16 @@
         "experimentId": "F3_DEEP_RETRACEMENT",
         "zoneName": "DEEP_RETRACEMENT",
         "nTreatmentTotal": 7,
-        "nControlTotal": 43,
+        "nControlTotal": 42,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 28,
+        "trimmedCommonSupportCount": 27,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
         "pValRaw": 1.0,
         "controlCovariateSourceCounts": {
-          "ACTIVE_ANCHOR": 43,
+          "ACTIVE_ANCHOR": 42,
           "SYNTHETIC_FALLBACK": 0
         },
         "absoluteSurplusPassed": true,
@@ -87,11 +87,11 @@
       {
         "experimentId": "F4_B1_0.618",
         "boundaryRatio": 0.618,
-        "nTreatmentTotal": 8,
+        "nTreatmentTotal": 9,
         "nControlTotal": 2,
         "nTreatmentMatched": 0,
         "nControlMatched": 0,
-        "trimmedCommonSupportCount": 10,
+        "trimmedCommonSupportCount": 11,
         "asmdMax": 0.0,
         "estimateHatDeltaBps": 0.0,
         "lowerCiUnadjusted95Bps": 0.0,
@@ -217,21 +217,21 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15804,
-        "activePoiBarCount": 14139,
-        "poiQualifiedCount": 61,
-        "uniqueAnchorsWithValidHorizon": 61,
-        "episodesAfterDedup": 61,
+        "barsEvaluated": 15954,
+        "activePoiBarCount": 14245,
+        "poiQualifiedCount": 62,
+        "uniqueAnchorsWithValidHorizon": 62,
+        "episodesAfterDedup": 62,
         "realOfiAvailableBarFraction": 0.0,
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14154,
-        "activePoiBarCount": 12771,
+        "barsEvaluated": 14304,
+        "activePoiBarCount": 12921,
         "poiQualifiedCount": 56,
         "uniqueAnchorsWithValidHorizon": 56,
         "episodesAfterDedup": 56,
-        "realOfiAvailableBarFraction": 0.13487353398332627,
+        "realOfiAvailableBarFraction": 0.1439457494407159,
         "realOfiAvailableEpisodeCount": 19
       }
     },
@@ -458,8 +458,8 @@
     },
     "fibEngineDiagnostics": {
       "NIFTY50": {
-        "barsEvaluated": 15804,
-        "activePoiBarCount": 14416,
+        "barsEvaluated": 15954,
+        "activePoiBarCount": 14566,
         "poiQualifiedCount": 52,
         "uniqueAnchorsWithValidHorizon": 51,
         "episodesAfterDedup": 51,
@@ -467,12 +467,12 @@
         "realOfiAvailableEpisodeCount": 0
       },
       "BANKNIFTY": {
-        "barsEvaluated": 14154,
-        "activePoiBarCount": 12324,
+        "barsEvaluated": 14304,
+        "activePoiBarCount": 12461,
         "poiQualifiedCount": 63,
         "uniqueAnchorsWithValidHorizon": 63,
         "episodesAfterDedup": 63,
-        "realOfiAvailableBarFraction": 0.13487353398332627,
+        "realOfiAvailableBarFraction": 0.1439457494407159,
         "realOfiAvailableEpisodeCount": 1
       }
     },
@@ -699,12 +699,12 @@
     },
     "fibEngineDiagnostics": {
       "BANKNIFTY_FUT": {
-        "barsEvaluated": 2343,
-        "activePoiBarCount": 1917,
+        "barsEvaluated": 2511,
+        "activePoiBarCount": 2085,
         "poiQualifiedCount": 14,
         "uniqueAnchorsWithValidHorizon": 14,
         "episodesAfterDedup": 14,
-        "realOfiAvailableBarFraction": 0.8506188647033718,
+        "realOfiAvailableBarFraction": 0.8558343289526085,
         "realOfiAvailableEpisodeCount": 10
       }
     },
@@ -931,12 +931,12 @@
     },
     "fibEngineDiagnostics": {
       "BANKNIFTY_FUT": {
-        "barsEvaluated": 2343,
-        "activePoiBarCount": 2051,
+        "barsEvaluated": 2511,
+        "activePoiBarCount": 2219,
         "poiQualifiedCount": 13,
         "uniqueAnchorsWithValidHorizon": 13,
         "episodesAfterDedup": 13,
-        "realOfiAvailableBarFraction": 0.8506188647033718,
+        "realOfiAvailableBarFraction": 0.8558343289526085,
         "realOfiAvailableEpisodeCount": 12
       }
     },

@@ -2,69 +2,69 @@
   "pre_registration": "ORDERBOOK-01",
   "eval_mode": "oos",
   "eval_start": "2026-09-25",
-  "eval_end": "2026-10-06",
+  "eval_end": "2026-10-08",
   "h1_r": {
     "status": "FALSIFIED",
-    "n": 4000,
-    "accuracy": 0.8427,
-    "trivial_baseline_accuracy": 0.9115,
+    "n": 5366,
+    "accuracy": 0.8341,
+    "trivial_baseline_accuracy": 0.9145,
     "vs_baseline_p": 1.0,
-    "mcnemar_n10": 40,
-    "mcnemar_n01": 315,
+    "mcnemar_n10": 60,
+    "mcnemar_n01": 491,
     "levels_passed": 0,
     "per_level": {
-      "ITH": {
-        "n": 311,
-        "accuracy": 0.8167,
-        "trivial_baseline_accuracy": 0.9357,
+      "SWING_LOW": {
+        "n": 916,
+        "accuracy": 0.9301,
+        "trivial_baseline_accuracy": 0.9629,
         "p_value": 1.0,
-        "mcnemar_n10": 8,
-        "mcnemar_n01": 45,
+        "mcnemar_n10": 2,
+        "mcnemar_n01": 32,
         "pass": false
       },
       "ITL": {
-        "n": 331,
-        "accuracy": 0.9124,
-        "trivial_baseline_accuracy": 0.9245,
-        "p_value": 1.0,
-        "mcnemar_n10": 0,
-        "mcnemar_n01": 4,
-        "pass": false
-      },
-      "SESSION_HIGH": {
-        "n": 724,
-        "accuracy": 0.663,
-        "trivial_baseline_accuracy": 0.8964,
-        "p_value": 1.0,
-        "mcnemar_n10": 24,
-        "mcnemar_n01": 193,
-        "pass": false
-      },
-      "SESSION_LOW": {
-        "n": 1218,
-        "accuracy": 0.8563,
-        "trivial_baseline_accuracy": 0.8563,
-        "p_value": 1.0,
-        "mcnemar_n10": 0,
-        "mcnemar_n01": 0,
-        "pass": false
-      },
-      "SWING_LOW": {
-        "n": 703,
-        "accuracy": 0.9417,
-        "trivial_baseline_accuracy": 0.9644,
-        "p_value": 1.0,
-        "mcnemar_n10": 0,
-        "mcnemar_n01": 16,
+        "n": 431,
+        "accuracy": 0.9026,
+        "trivial_baseline_accuracy": 0.9234,
+        "p_value": 0.999512,
+        "mcnemar_n10": 1,
+        "mcnemar_n01": 10,
         "pass": false
       },
       "SWING_HIGH": {
-        "n": 713,
-        "accuracy": 0.8836,
+        "n": 922,
+        "accuracy": 0.872,
         "trivial_baseline_accuracy": 0.9523,
         "p_value": 1.0,
-        "mcnemar_n10": 8,
-        "mcnemar_n01": 57,
+        "mcnemar_n10": 11,
+        "mcnemar_n01": 85,
+        "pass": false
+      },
+      "SESSION_LOW": {
+        "n": 1650,
+        "accuracy": 0.863,
+        "trivial_baseline_accuracy": 0.8673,
+        "p_value": 1.0,
+        "mcnemar_n10": 0,
+        "mcnemar_n01": 7,
+        "pass": false
+      },
+      "ITH": {
+        "n": 405,
+        "accuracy": 0.8099,
+        "trivial_baseline_accuracy": 0.9383,
+        "p_value": 1.0,
+        "mcnemar_n10": 10,
+        "mcnemar_n01": 62,
+        "pass": false
+      },
+      "SESSION_HIGH": {
+        "n": 1042,
+        "accuracy": 0.6516,
+        "trivial_baseline_accuracy": 0.9002,
+        "p_value": 1.0,
+        "mcnemar_n10": 36,
+        "mcnemar_n01": 295,
         "pass": false
       }
     },
@@ -78,12 +78,12 @@
   },
   "h1_m": {
     "status": "FALSIFIED",
-    "n": 7423,
-    "accuracy": 0.9661,
-    "trivial_baseline_accuracy": 0.9722,
+    "n": 9341,
+    "accuracy": 0.9591,
+    "trivial_baseline_accuracy": 0.97,
     "vs_baseline_p": 1.0,
-    "mcnemar_n10": 7,
-    "mcnemar_n01": 53,
+    "mcnemar_n10": 10,
+    "mcnemar_n01": 112,
     "criteria_checks": {
       "acc_ge_0_78": true,
       "acc_gt_trivial_baseline": false,
@@ -92,28 +92,28 @@
     }
   },
   "h2": {
-    "status": "FALSIFIED",
-    "n": 11423,
-    "q4_minus_q1": 0.0463,
+    "status": "PASS",
+    "n": 14707,
+    "q4_minus_q1": 0.0884,
     "permutation_p": 0.0,
     "quartile_accs": [
-      0.8547,
-      0.9832,
-      0.9527,
-      0.901
+      0.8137,
+      0.985,
+      0.9529,
+      0.9021
     ],
     "quartile_counts": [
-      2856,
-      2852,
-      2856,
-      2859
+      3666,
+      3670,
+      3693,
+      3678
     ],
     "criteria_checks": {
-      "diff_ge_0_08": false,
+      "diff_ge_0_08": true,
       "p_le_0_05": true
     }
   },
   "verdict": "CASE E",
   "verdict_description": "FALSIFIED. No robust directional edge found in OOS test.",
-  "executed_at": "2026-10-06T17:18:08.270029+05:30"
+  "executed_at": "2026-10-08T15:37:44.315095+05:30"
 }

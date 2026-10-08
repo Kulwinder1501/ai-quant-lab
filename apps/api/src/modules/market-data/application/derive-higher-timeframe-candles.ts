@@ -71,7 +71,7 @@ export interface DeriveHigherTimeframeCandlesResult {
  * the discrepancy is immaterial at the scale this strategy trades.
  *
  * `volume` is written as "0" unconditionally. XAU_USD (like every Twelve Data FX/metals series)
- * carries no real consolidated volume at 1m either -- see `twelvedata-quote-client.ts`'s own
+ * carries no real consolidated volume at 1m either -- see `oanda-quote-client.ts`'s own
  * docstring -- so there is nothing to aggregate; this only has to not invent a number.
  *
  * Not DXY-specific despite reusing its aggregation helper: this reads and writes ONE instrument's

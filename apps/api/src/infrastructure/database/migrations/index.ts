@@ -126,6 +126,7 @@ import { dxyFxComponentInstrumentsMigration } from "./125-dxy-fx-component-instr
 import { tradeIdeaSetupIdUniquenessMigration } from "./126-trade-idea-setup-id-uniqueness.js";
 import { oandaInstrumentSupportMigration } from "./127-oanda-instrument-support.js";
 import { candidateDecisionRejectionProvenanceMigration } from "./128-candidate-decision-rejection-provenance.js";
+import { oandaBidAskCandlesMigration } from "./129-oanda-bid-ask-candles.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -256,4 +257,5 @@ export const migrations = [
   tradeIdeaSetupIdUniquenessMigration,
   oandaInstrumentSupportMigration,
   candidateDecisionRejectionProvenanceMigration,
+  oandaBidAskCandlesMigration,
 ];

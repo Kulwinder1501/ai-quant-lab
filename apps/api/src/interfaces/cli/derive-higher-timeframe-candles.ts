@@ -12,9 +12,9 @@ import type { Instrument } from "../../modules/market-data/domain/instrument.js"
  * `derive-higher-timeframe-candles.ts` for why. The 1m series must already be collected for this
  * range first, e.g.:
  *
- *   npm run data:collect:historical -- --provider twelvedata --exchange TWELVEDATA \
+ *   npm run data:collect:historical -- --provider oanda --exchange OANDA \
  *     --instrument XAU_USD --timeframe 1m --from <from> --to <to> --skip-existing
- *   npm run data:derive:higher-timeframes -- --exchange TWELVEDATA --instrument XAU_USD \
+ *   npm run data:derive:higher-timeframes -- --exchange OANDA --instrument XAU_USD \
  *     --timeframes 5,15 --from <from> --to <to>
  */
 async function main(): Promise<void> {

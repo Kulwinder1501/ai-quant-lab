@@ -713,8 +713,8 @@ async function main(): Promise<void> {
 
         await runCommand("npm", [
           "run", "data:collect:historical", "--",
-          "--provider", "twelvedata",
-          "--exchange", "TWELVEDATA",
+          "--provider", "oanda",
+          "--exchange", "OANDA",
           "--instrument", "XAU_USD",
           "--timeframe", "1m",
           "--from", from.toISOString(),
@@ -749,8 +749,8 @@ async function main(): Promise<void> {
         for (const component of ["EUR_USD", "USD_JPY", "GBP_USD", "USD_CAD", "USD_SEK", "USD_CHF"]) {
           await runCommand("npm", [
             "run", "data:collect:historical", "--",
-            "--provider", "twelvedata",
-            "--exchange", "TWELVEDATA",
+            "--provider", "oanda",
+            "--exchange", "OANDA",
             "--instrument", component,
             "--timeframe", "1m",
             "--from", from.toISOString(),
