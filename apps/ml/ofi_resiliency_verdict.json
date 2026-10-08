@@ -1,0 +1,34 @@
+{
+  "n_opportunities": 4590,
+  "n_sessions": 6,
+  "primary_inference": {
+    "observed_spearman_rho": 0.0,
+    "exact_permutation_p": 1.0
+  },
+  "quartile_diagnostics": {
+    "Q1": {
+      "n_trades": 1549,
+      "mean_net_return_bps": -1.6040192192669793,
+      "median_net_return_bps": -2.0365748394372534
+    },
+    "Q2": {
+      "n_trades": 851,
+      "mean_net_return_bps": 0.9712513366165848,
+      "median_net_return_bps": 0.17356259588580825
+    },
+    "Q3": {
+      "n_trades": 909,
+      "mean_net_return_bps": -2.542126827222773,
+      "median_net_return_bps": -3.628741127883817
+    },
+    "Q4": {
+      "n_trades": 1281,
+      "mean_net_return_bps": -1.6365873090955736,
+      "median_net_return_bps": -1.3654040019436768
+    }
+  },
+  "gates": {
+    "economic_gate_passed": false,
+    "stat_gate_passed": false
+  }
+}
