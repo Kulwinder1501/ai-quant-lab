@@ -85,9 +85,19 @@ def main():
     m1_data = pd.read_sql("""
         SELECT time, bid_open, bid_high, bid_low, bid_close, ask_open, ask_high, ask_low, ask_close 
         FROM oanda_bid_ask_candles 
-        WHERE instrument = 'XAU_USD' AND granularity = 'M1'
+        WHERE instrument = 'XAU_USD' AND granularity = '1m'
         ORDER BY time ASC
     """, conn, index_col='time', parse_dates=['time'])
+    
+    if m1_data.index.tz is None:
+        m1_data.index = m1_data.index.tz_localize('UTC')
+    else:
+        m1_data.index = m1_data.index.tz_convert('UTC')
+        
+    if xau.index.tz is None:
+        xau.index = xau.index.tz_localize('UTC')
+    else:
+        xau.index = xau.index.tz_convert('UTC')
 
     results = []
     excluded_data_quality = 0
@@ -248,7 +258,7 @@ def main():
         return np.percentile(diffs, 2.5), np.percentile(diffs, 97.5)
         
     ci_lower, ci_upper = bootstrap_diff(valid_set)
-    print(f"Δ Expectancy (Gated - Ungated) 95% CI: [{ci_lower:.3f}, {ci_upper:.3f}] R")
+    print(f"Delta Expectancy (Gated - Ungated) 95% CI: [{ci_lower:.3f}, {ci_upper:.3f}] R")
 
 if __name__ == "__main__":
     main()

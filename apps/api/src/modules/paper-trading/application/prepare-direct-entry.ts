@@ -112,7 +112,9 @@ export class PrepareDirectEntry {
 
     const fresh = observedPrice !== null && observedPrice > 0
       && quoteAgeMs !== null && quoteAgeMs >= 0 && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
-      && observedBid !== undefined && observedAsk !== undefined && observedAsk >= observedBid;
+      && observedBid !== undefined && observedBid !== null 
+      && observedAsk !== undefined && observedAsk !== null 
+      && observedAsk >= observedBid;
       
     if (!fresh) {
       return {
