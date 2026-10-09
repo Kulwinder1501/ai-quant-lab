@@ -20,16 +20,19 @@ async function main() {
     
     // Find gaps larger than 5 minutes. 
     // This will flag periods where the machine was off.
+    // We restrict to the last 14 days to prevent fetching ancient gaps (e.g. from 2020) if bad sparse data exists.
     const gapQuery = `
         WITH lagged AS (
             SELECT time, lag(time) over (order by time) as prev_time
             FROM oanda_bid_ask_candles
             WHERE instrument = 'XAU_USD' AND granularity = '1m'
+              AND time > NOW() - interval '14 days'
         )
         SELECT prev_time as gap_start, time as gap_end, 
                EXTRACT(EPOCH FROM (time - prev_time))/60 as gap_minutes
         FROM lagged
         WHERE time - prev_time > interval '5 minutes'
+          AND prev_time IS NOT NULL
         ORDER BY gap_start ASC
     `;
     
