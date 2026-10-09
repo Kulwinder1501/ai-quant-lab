@@ -11,6 +11,8 @@ export interface BacktestCounters {
   skippedSignalsInvalidGap: number;
   skippedSignalsInsufficientCapital: number;
   skippedSignalsUnsizable: number;
+  skippedSignalsUnfilledLimit?: number;
+  skippedSignalsDuplicateSetup?: number;
 }
 
 function rounded(value: number): number {

@@ -11,6 +11,14 @@ export interface O1ExitEvaluationInput {
   effectivePremiumStop: number;
   effectivePremiumTarget: number;
   currentUnderlyingPrice: number | null;
+  /**
+   * How long a trade may sit under `TIME_STOP_MIN_PROGRESS_R` before the clock ends it. Defaults to
+   * 15 minutes, which is what every strategy had before this field existed -- so omitting it is
+   * byte-identical to the old behaviour. See `o1-exit-timings.ts` for who overrides it and why.
+   */
+  timeStopMinutes?: number;
+  /** Minutes of a flat underlying plus a bleeding premium before PREMIUM_TOLERANCE fires. Default 10. */
+  premiumToleranceMinutes?: number;
 }
 
 export interface O1ExitEvaluationResult {
@@ -79,7 +87,9 @@ export function evaluateO1TradeExit(input: O1ExitEvaluationInput): O1ExitEvaluat
   }
 
   // 3. TIME_STOP: holding > 15m and progressR < 0.30 (skipped if underlying unavailable)
-  if (holdingMinutes > 15 && progressR !== null && progressR < 0.30) {
+  const timeStopMinutes = input.timeStopMinutes ?? 15;
+  const premiumToleranceMinutes = input.premiumToleranceMinutes ?? 10;
+  if (holdingMinutes > timeStopMinutes && progressR !== null && progressR < 0.30) {
     return { shouldExit: true, exitReason: "TIME_STOP", telemetry };
   }
 
@@ -89,7 +99,7 @@ export function evaluateO1TradeExit(input: O1ExitEvaluationInput): O1ExitEvaluat
   if (
     underlyingMoveBps !== null &&
     underlyingMoveBps < 10 &&
-    holdingMinutes > 10 &&
+    holdingMinutes > premiumToleranceMinutes &&
     premiumDrawdownPct !== null &&
     premiumDrawdownPct > 0.25
   ) {

@@ -15,6 +15,7 @@ import {
   priceOptionMarksAtOhlc,
 } from "../domain/option-mark-to-market.js";
 import { evaluateO1TradeExit } from "../domain/o1-exit-state-machine.js";
+import { resolveO1ExitTimings } from "../domain/o1-exit-timings.js";
 import type { ImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { shouldFlattenAtSessionClose } from "../domain/session-close.js";
 import { buildMultiTargetPlan } from "../domain/multi-target-bracket.js";
@@ -553,6 +554,8 @@ export class EvaluateOpenPaperTrades {
       ) {
         throw new Error(`O1 trade ${trade.id} has incomplete entry snapshot fields.`);
       }
+      // Scale-appropriate clock for this strategy/timeframe (15m legacy default for everyone else).
+      const o1Timings = resolveO1ExitTimings(trade.strategyKey, trade.timeframe);
 
       // Step 1: Tick series scan using O1 state machine
       for (const sample of observedSamples) {
@@ -571,6 +574,7 @@ export class EvaluateOpenPaperTrades {
           effectivePremiumStop: trade.stopLoss,
           effectivePremiumTarget: trade.targetPrice,
           currentUnderlyingPrice: sample.underlyingValue ?? null,
+          ...o1Timings,
         });
         if (o1Result.shouldExit && o1Result.exitReason) {
           return closeOption({
@@ -627,6 +631,7 @@ export class EvaluateOpenPaperTrades {
           effectivePremiumStop: trade.stopLoss,
           effectivePremiumTarget: trade.targetPrice,
           currentUnderlyingPrice: liveSpot ?? null,
+          ...o1Timings,
         });
         if (o1Result.shouldExit && o1Result.exitReason) {
           return closeOption({
@@ -689,6 +694,7 @@ export class EvaluateOpenPaperTrades {
           effectivePremiumStop: trade.stopLoss,
           effectivePremiumTarget: trade.targetPrice,
           currentUnderlyingPrice: liveSpot,
+          ...o1Timings,
         });
         if (o1Result.shouldExit && o1Result.exitReason) {
           return closeOption({
@@ -737,6 +743,7 @@ export class EvaluateOpenPaperTrades {
           effectivePremiumStop: trade.stopLoss,
           effectivePremiumTarget: trade.targetPrice,
           currentUnderlyingPrice: candle.close,
+          ...o1Timings,
         });
         if (o1Result.shouldExit && o1Result.exitReason) {
           return closeOption({

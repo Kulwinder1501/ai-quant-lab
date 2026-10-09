@@ -247,8 +247,34 @@ export class IctZoneLedger {
      * matching this codebase's existing `LIQUIDITY_LOOKBACK_BARS` precedent for the same kind of
      * bound -- a deliberate, documented limit, not a value tuned against any result.
      */
-    private readonly orderBlockLookbackBars: number = 10
+    private readonly orderBlockLookbackBars: number = 10,
+    /**
+     * Minimum fair-value-gap height as a fraction of ATR(14). 0 (the default for a directly
+     * constructed ledger) disables it. Replaces `fvgMinTickSizeMultiple`, which was declared on the
+     * engine config but never read: any gap of any size, down to a single tick, became a zone, and
+     * gaps supplied ~85% of all entries (see the entry-model falsification program).
+     */
+    private readonly fvgMinAtrFraction: number = 0,
+    /**
+     * Minimum displacement-candle body as a multiple of ATR(14) for an order block to form. 0
+     * disables it. The pre-existing test compares the displacement body to the ORDER BLOCK candle's
+     * body only, so a tiny block followed by an ordinary candle counted as "displacement".
+     */
+    private readonly obDisplacementMinAtr: number = 0
   ) {}
+
+  /** A gap is admitted when no minimum is configured, or it is at least the configured ATR fraction. Fails closed without an ATR. */
+  private gapBigEnough(gapHeight: number, atr: number | null): boolean {
+    if (this.fvgMinAtrFraction <= 0) return true;
+    if (atr === null || !(atr > 0)) return false;
+    return gapHeight >= this.fvgMinAtrFraction * atr;
+  }
+
+  private displacementBigEnough(body: number, atr: number | null): boolean {
+    if (this.obDisplacementMinAtr <= 0) return true;
+    if (atr === null || !(atr > 0)) return false;
+    return body >= this.obDisplacementMinAtr * atr;
+  }
 
   /**
    * Handles a gap price has closed clean through, which flips which side it serves.
@@ -366,7 +392,9 @@ export class IctZoneLedger {
   processCandle(
     candles: readonly CausalCandle[],
     currentIndex: number,
-    structure: IctStructureSnapshot
+    structure: IctStructureSnapshot,
+    /** ATR(14) as of this bar, for the gap/displacement size filters. Null while warming up. */
+    atr: number | null = null
   ): IctZoneSnapshot {
     this.lastEvent = null;
     const current = candles[currentIndex];
@@ -394,7 +422,7 @@ export class IctZoneLedger {
       const c3 = current;
 
       // Bullish FVG: Low of candle 3 > High of candle 1
-      if (c3.low > c1.high) {
+      if (c3.low > c1.high && this.gapBigEnough(c3.low - c1.high, atr)) {
         const top = c3.low;
         const bottom = c1.high;
         const fvg: FairValueGap = {
@@ -427,7 +455,7 @@ export class IctZoneLedger {
         };
       }
       // Bearish FVG: High of candle 3 < Low of candle 1
-      else if (c3.high < c1.low) {
+      else if (c3.high < c1.low && this.gapBigEnough(c1.low - c3.high, atr)) {
         const top = c1.low;
         const bottom = c3.high;
         const fvg: FairValueGap = {
@@ -501,7 +529,7 @@ export class IctZoneLedger {
         const body = Math.abs(displacementCandle.close - displacementCandle.open);
         const prevBody = Math.abs(obCandle.close - obCandle.open) || 1;
 
-        if (body >= prevBody * this.displacementThreshold) {
+        if (body >= prevBody * this.displacementThreshold && this.displacementBigEnough(body, atr)) {
           const top = obCandle.high;
           const bottom = obCandle.low;
           const ob: OrderBlock = isBullishDisplacement

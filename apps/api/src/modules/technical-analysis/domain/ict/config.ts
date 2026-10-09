@@ -8,12 +8,33 @@ import { createHash } from "node:crypto";
  * bump, 12,622 rows of v1 geometry would keep being served under the same key as new v2 rows and
  * the table would silently hold two incompatible geometries.
  */
-export const ICT_STATE_ENGINE_VERSION = "ict-state-v2";
+/*
+ * v3 (2026-10-09): snapshots gained `mss`, and fair-value-gap / order-block creation gained ATR size
+ * floors, so the zones a given series produces differ from v2's. Bumped for the same reason as v2:
+ * the cache key is (instrument, timeframe, bar_time, engine_version, config_hash), and the config
+ * hash would move with the new keys anyway, but a bump keeps the intent explicit and stops a v2 row
+ * (no `mss`) from ever being served as if it were complete.
+ */
+export const ICT_STATE_ENGINE_VERSION = "ict-state-v3";
 export const ICT_STRUCTURE_STRATEGY_KEY = "ict-structure-v1";
 
 export interface IctEngineConfig {
   readonly pivotLength: number;
+  /** @deprecated Never read. Superseded by `fvgMinAtrFraction`; kept so persisted config hashes stay explainable. */
   readonly fvgMinTickSizeMultiple: number;
+  /** Minimum fair-value-gap height as a fraction of ATR(14); 0 disables. See `IctZoneLedger`. */
+  readonly fvgMinAtrFraction: number;
+  /**
+   * Minimum displacement-candle body, in ATR(14), for an order block to form AND for a market
+   * structure shift's breaking candle. 0 disables the order-block floor. See `mss.ts`.
+   */
+  readonly displacementMinAtr: number;
+  /** A liquidity sweep may be followed by a market structure shift for this many bars. */
+  readonly mssSweepLookbackBars: number;
+  /**
+   * Despite the name this is a ratio against the ORDER BLOCK candle's own body (1.5x), not an ATR
+   * multiple -- the name predates that being noticed. The ATR floor is `displacementMinAtr`.
+   */
   readonly obDisplacementBodyAtrMultiple: number;
   readonly obMeanThresholdFraction: number; // Mean Threshold = 0.50
   readonly equalHighLowTolerancePct: number; // 0.05%
@@ -57,6 +78,12 @@ export interface IctEngineConfig {
 export const defaultIctEngineConfig: IctEngineConfig = {
   pivotLength: 3,
   fvgMinTickSizeMultiple: 1.0,
+  // A structural floor against tick-sized "gaps" and flat "displacement", not a fitted value: a gap
+  // under a tenth of an ATR is inside ordinary bar-to-bar noise, and 0.8 ATR is the lower end of
+  // what reads as a one-sided candle. Neither was chosen by looking at P&L.
+  fvgMinAtrFraction: 0.1,
+  displacementMinAtr: 0.8,
+  mssSweepLookbackBars: 10,
   obDisplacementBodyAtrMultiple: 1.5,
   obMeanThresholdFraction: 0.5,
   equalHighLowTolerancePct: 0.0005, // 0.05%
@@ -147,6 +174,14 @@ export interface IctStateCompositeSnapshot {
    * correct for exactly as long as its constituent gaps remain active and never goes stale.
    */
   readonly balancedPriceRanges: readonly import("./bpr.js").BalancedPriceRange[];
+  /**
+   * The active market structure shift (see mss.ts): a liquidity sweep followed by a displacement
+   * body-close through the preceding swing, with its leg and protective level. Persisted across
+   * bars until a body close beyond `legStart` kills it or a newer shift replaces it; null when none
+   * is live. Optional only so snapshots built before v3 (tests, old cached rows) still type-check;
+   * the engine always sets it and a missing value is read as "no shift".
+   */
+  readonly mss?: import("./mss.js").MssSnapshot | null;
   /**
    * Direction of the higher-timeframe (fractal) bias supplied to the engine, or
    * null when no HTF projection was available. Carried separately from the local

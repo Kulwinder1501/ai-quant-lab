@@ -26,6 +26,20 @@ export interface ConfirmedPivotPair {
 }
 
 /**
+ * A note on every `availableAt` / `confirmedAt` stamp in this module family.
+ *
+ * They are the OPEN time of the bar whose close revealed the fact, not that bar's close time.
+ * That is a labelling convention, not a look-ahead: the whole ICT engine runs on COMPLETE bars
+ * only, so a pivot stamped with the confirming bar's open is first visible when that bar has
+ * closed, which is exactly when the engine and the strategy evaluate it. Every consumer compares
+ * against an instant on the SAME bar (`liquidity.ts` against `current.openTime`; the strategy's
+ * point-in-time check against `candle.closeTime`), so a fact is never visible one bar early.
+ *
+ * What would break the convention is evaluating mid-bar. Do not feed this engine a forming candle;
+ * `availableAt` would then admit a pivot whose confirming bar has not closed.
+ */
+
+/**
  * Strictly causal pivot identification.
  *
  * A pivot at candidateIndex = knownAtIndex - pivotLength is confirmed only when:

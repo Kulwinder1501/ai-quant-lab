@@ -17,6 +17,7 @@ import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
 import { CisdTracker, type CisdEvent } from "./cisd.js";
 import { computeBalancedPriceRanges } from "./bpr.js";
 import { IctAtrTracker } from "./atr-tracker.js";
+import { MssTracker, defaultMssConfig } from "./mss.js";
 import { NSE_IST_PROFILE, type InstrumentProfile } from "../../../platform/calendar/instrument-profile.js";
 
 export class IctCompositeEngine {
@@ -26,6 +27,7 @@ export class IctCompositeEngine {
   private readonly biasTracker: IctBiasTracker;
   private readonly liquidityResolver: IctLiquidityResolver;
   private readonly cisdTracker: CisdTracker;
+  private readonly mssTracker: MssTracker;
   private lastCisdEvent: CisdEvent | null = null;
   /** Persisted across bars -- see `IctStateCompositeSnapshot.lastConfirmedStructureEvent`'s own docstring. */
   private lastConfirmedStructureEvent: StructureEvent | null = null;
@@ -51,8 +53,16 @@ export class IctCompositeEngine {
     this.zoneLedger = new IctZoneLedger(
       config.obDisplacementBodyAtrMultiple,
       config.obMeanThresholdFraction,
-      config.invertedBlocksRemainPoi
+      config.invertedBlocksRemainPoi,
+      undefined,
+      config.fvgMinAtrFraction,
+      config.displacementMinAtr
     );
+    this.mssTracker = new MssTracker({
+      ...defaultMssConfig,
+      displacementMinAtr: config.displacementMinAtr > 0 ? config.displacementMinAtr : defaultMssConfig.displacementMinAtr,
+      sweepLookbackBars: config.mssSweepLookbackBars,
+    });
     this.sessionTracker = new IctSessionLevelTracker(profile);
     this.biasTracker = new IctBiasTracker();
     this.liquidityResolver = new IctLiquidityResolver();
@@ -90,7 +100,17 @@ export class IctCompositeEngine {
     // `confirmedPivotsView()`'s own "use it and drop it" rule, followed here exactly as the
     // liquidity resolver below already does with the same accessor.
     const swingHierarchy = computeSwingHierarchySnapshot(this.structTracker.confirmedPivotsView());
-    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct);
+    // ATR is folded in once per bar, here, because the zone ledger's size floors and the MSS tracker
+    // both need it. It only ever reads the current and previous candle, so moving it up is order-safe.
+    const atr14 = this.atrTracker.processCandle(current);
+    const zones = this.zoneLedger.processCandle(candles, currentIndex, struct, atr14);
+    const mss = this.mssTracker.processCandle(
+      candles,
+      currentIndex,
+      this.structTracker.confirmedPivotsView(),
+      atr14,
+      sessionLevels.lastSweepEvent
+    );
     // htfBias is the bias SOURCE, not a separate confirmation of it. See bias.ts.
     const bias = this.biasTracker.processCandle(candles, currentIndex, struct, sessionLevels, this.config.biasSource, htfBias, this.profile);
 
@@ -124,7 +144,6 @@ export class IctCompositeEngine {
       sessionLevels,
       this.structTracker.confirmedPivotsView()
     );
-    const atr14 = this.atrTracker.processCandle(current);
     const htfDirection: -1 | 0 | 1 = htfBias === "BULLISH" ? 1 : htfBias === "BEARISH" ? -1 : 0;
     const drawOnLiquidity = computeDrawOnLiquidity(
       [...erlPools, ...irlPools],
@@ -170,6 +189,7 @@ export class IctCompositeEngine {
       cisd: this.lastCisdEvent,
       lastConfirmedStructureEvent: this.lastConfirmedStructureEvent,
       balancedPriceRanges: computeBalancedPriceRanges(zones.activeFvgs),
+      mss,
       zones,
       sessionLevels,
       bias,
