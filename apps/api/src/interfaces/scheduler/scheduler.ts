@@ -691,7 +691,7 @@ async function main(): Promise<void> {
    */
   const XAU_BOT_ENABLED = true;
   cronSchedule("*/15 * * * *", () => {
-    if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
+    if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {
         const to = new Date();
@@ -727,7 +727,7 @@ async function main(): Promise<void> {
         await sleep(TWELVEDATA_CALL_SPACING_MS);
         await runCommand("npm", [
           "run", "data:derive:higher-timeframes", "--",
-          "--exchange", "TWELVEDATA",
+          "--exchange", "OANDA",
           "--instrument", "XAU_USD",
           "--timeframes", "5,15",
           "--from", from.toISOString(),
@@ -736,7 +736,7 @@ async function main(): Promise<void> {
         for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
-            "--exchange", "TWELVEDATA",
+            "--exchange", "OANDA",
             "--instrument", "XAU_USD",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
@@ -767,7 +767,7 @@ async function main(): Promise<void> {
         for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
-            "--exchange", "TWELVEDATA",
+            "--exchange", "OANDA",
             "--instrument", "DXY",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
