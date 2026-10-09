@@ -23,6 +23,22 @@ function stalledTradeAfter(minutes: number, timings: { timeStopMinutes?: number;
   });
 }
 
+describe("exit telemetry records the clock that was applied", () => {
+  it("carries the legacy clock when no override is supplied", () => {
+    const { telemetry } = stalledTradeAfter(20, {});
+    expect(telemetry.timeStopMinutes).toBe(15);
+    expect(telemetry.premiumToleranceMinutes).toBe(10);
+  });
+
+  it("carries the ICT clock when it was applied, so a TIME_STOP row is attributable", () => {
+    const timings = resolveO1ExitTimings("ict-structure-v1", "15m");
+    const { telemetry, exitReason } = stalledTradeAfter(75, timings);
+    expect(exitReason).toBe("TIME_STOP");
+    expect(telemetry.timeStopMinutes).toBe(60);
+    expect(telemetry.premiumToleranceMinutes).toBe(40);
+  });
+});
+
 describe("resolveO1ExitTimings", () => {
   it("leaves every other strategy on the legacy 15 minute clock", () => {
     expect(resolveO1ExitTimings("momentum-scalp-v1", "1m")).toEqual(DEFAULT_O1_EXIT_TIMINGS);

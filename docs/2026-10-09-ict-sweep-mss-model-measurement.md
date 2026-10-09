@@ -133,6 +133,77 @@ database on both bot cells (NIFTY50 15m, BANKNIFTY 5m, 2026-09-01..10-08) with n
 | `availableAt` uses bar open | Not a leak: proved by `composite-engine.causality.test.ts` (prefix and future-perturbation invariance across the whole engine). Convention documented in `causal-pivot.ts`. |
 | Killzone / OTE / CISD not gated | Withdrawn as a finding. All were measured NO_EDGE in this repo and are off by evidence. |
 
+## Amendment 3 -- 2026-10-09, replication on instruments never measured (registered BEFORE running)
+
+**Why.** Both earlier programs conclude the binding constraint is power, not features, and name "more
+instruments" as the one step that could change the answer. `FINNIFTY`, `MIDCPNIFTY` and `NIFTYNXT50`
+have 15m candles from 2024-06-03 to 2026-08-07 and daily candles from 2023, and **no ICT result of any
+kind has ever been computed on them**, so all of their eras are unspent. NIFTY50 and BANKNIFTY are
+excluded here: they are the cells every previous result was selected on.
+
+**Design (fixed now).**
+- Instruments: FINNIFTY, MIDCPNIFTY, NIFTYNXT50. Timeframe 15m. Same costs and sizing as every earlier
+  arm: 2 bps slippage, max 5 concurrent positions, `--one-trade-per-setup`, default capital.
+- Two hypotheses, nothing tuned: **H1** the live model (`ALIGNMENT`, engine `ict-state-v3`, i.e. the
+  driver's `floors` arm) has a positive mean per trade; **H2** `SWEEP_MSS_RETRACE` does.
+  `SWEEP_MSS_LIMIT` is not run: it cannot go live.
+- Stage 1, training: 2025-01-01..2025-12-31. Stage 2, confirmation: 2024-06-03..2024-12-31. Stage 3,
+  holdout: 2026-01-01..2026-08-07. Stages 2 and 3 are run **only for a hypothesis that clears stage 1**,
+  each exactly once. A hypothesis that fails stage 1 leaves them unspent.
+- Statistic: mean P&L per trade pooled across the three instruments, session-clustered SE, as before.
+
+**Gates, in order.**
+1. Sign replication: mean > 0 on at least 2 of 3 instruments.
+2. Noise floor: pooled t >= 1.96 (one-sided 2.5%, i.e. 5% Bonferroni-corrected over the two hypotheses).
+3. Confirmation and holdout: pooled mean > 0 in each, no instrument-level reversal that explains it.
+4. Power: a verdict of any kind needs **>= 100 pooled trades over >= 60 sessions** in the stage. Below
+   that the stage is UNDERPOWERED and cannot pass, whatever its t.
+
+**Stated expectation, so it cannot be argued afterward.** `ALIGNMENT` should reach the trade floor easily
+(about 40 a year per instrument). `SWEEP_MSS_RETRACE` produced about 15 per instrument-year on the
+cells already measured, so it is expected to land near 45, below the floor, and to be UNDERPOWERED
+again on stage 1. If so, that is the result: it is not repaired by loosening the model, and the
+confirmation eras stay unspent.
+
+**Live-experiment rule (decided here so the live bots have an end date).** `ict-structure-v1` runs live
+as an unvalidated experiment. Review it at the first of: 60 closed live ICT trades across both bots,
+or 2026-12-31. At review, compare closed-trade P&L by exit reason and by exit clock (the clock is now in
+every exit record's telemetry). Stop the bots if mean P&L per trade is negative and the 2 bps cost
+alone does not explain it; otherwise record the result here. Nothing in this rule changes the bots
+automatically.
+
+### Amendment 3 result -- stage 1 (2025, 15m), run once, as registered
+
+| Hypothesis | Instrument | Trades | Mean / trade | Clustered SE | t | Win | PF |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| H1 live model (`floors`) | FINNIFTY | 41 | -38.10 | 25.04 | -1.52 | 22% | 0.57 |
+| H1 | MIDCPNIFTY | 50 | +8.71 | 16.46 | 0.53 | 26% | 1.25 |
+| H1 | NIFTYNXT50 | 47 | -169.88 | 39.84 | -4.26 | 15% | 0.27 |
+| **H1 pooled** | | **138 (102 sessions)** | **-66.02** | 18.63 | **-3.54** | | |
+| H2 `SWEEP_MSS_RETRACE` | FINNIFTY | 10 | +12.08 | 26.77 | 0.45 | 40% | 1.40 |
+| H2 | MIDCPNIFTY | 19 | +19.87 | 15.98 | 1.24 | 53% | 2.03 |
+| H2 | NIFTYNXT50 | 16 | -35.97 | 68.81 | -0.52 | 31% | 0.75 |
+| **H2 pooled** | | **45 (42 sessions)** | **-1.72** | 26.04 | **-0.07** | | |
+
+**H1: FAILS Gates 1 and 2, and is significantly negative.** One of three instruments is positive (needs
+two). The pooled mean is -66.02 per trade at t = -3.54 on 138 trades over 102 sessions, which clears the
+power floor, so this is not an underpowered null: it is a measured loss. NIFTYNXT50 alone is -169.88 at
+t = -4.26 (15% win rate). Stages 2 and 3 are not run; the confirmation and holdout eras stay unspent.
+
+**H2: UNDERPOWERED, exactly as stated in advance** (45 trades against the 100 floor), with a pooled mean
+indistinguishable from zero. Not repaired, not re-run, eras unspent.
+
+**What this does and does not say.** These three indices are not the two the bots trade, and they are
+thinner and wider-spread, so the loss size should not be transplanted onto NIFTY50 or BANKNIFTY. What it
+does establish is the thing the earlier programs could not: the entry model does not show a positive
+edge on instruments it was never selected on, and on a sample large enough to detect one it shows a
+significantly negative mean. Combined with eight earlier NO_EDGE arms and the negative NIFTY50 2023-24
+confirmation, there is now no instrument or era in this repository where the live model has a
+demonstrated positive expectancy. **Recommendation recorded: stop the two live ICT bots** rather than
+wait for the 60-trade review, since the review rule above exists to catch exactly this and the
+evidence has arrived first. The decision is the owner's, because the strategy was wired live by explicit
+override on 2026-09-21.
+
 ## Results
 
 ### Training era 2025, 15m, after Amendment 1 (one-trade-per-setup, costs as in the earlier arms)

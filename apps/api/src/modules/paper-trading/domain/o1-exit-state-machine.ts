@@ -29,6 +29,13 @@ export interface O1ExitEvaluationResult {
     progressR: number | null;
     underlyingMoveBps: number | null;
     premiumDrawdownPct: number | null;
+    /**
+     * The clock this evaluation actually ran with (after defaults), persisted on every exit record.
+     * Without it a TIME_STOP row cannot say whether the legacy 15-minute rule or the ICT bar-scaled
+     * rule ended the trade, which is exactly what comparing the two needs.
+     */
+    timeStopMinutes: number;
+    premiumToleranceMinutes: number;
   };
 }
 
@@ -62,11 +69,16 @@ export function evaluateO1TradeExit(input: O1ExitEvaluationInput): O1ExitEvaluat
       ? (input.entryOptionPrice - input.currentOptionPrice) / input.entryOptionPrice
       : null;
 
+  const timeStopMinutes = input.timeStopMinutes ?? 15;
+  const premiumToleranceMinutes = input.premiumToleranceMinutes ?? 10;
+
   const telemetry = {
     holdingMinutes,
     progressR,
     underlyingMoveBps,
     premiumDrawdownPct,
+    timeStopMinutes,
+    premiumToleranceMinutes,
   };
 
   // 1. HARD_STOP: option premium hits or falls below option stop loss
@@ -87,8 +99,6 @@ export function evaluateO1TradeExit(input: O1ExitEvaluationInput): O1ExitEvaluat
   }
 
   // 3. TIME_STOP: holding > 15m and progressR < 0.30 (skipped if underlying unavailable)
-  const timeStopMinutes = input.timeStopMinutes ?? 15;
-  const premiumToleranceMinutes = input.premiumToleranceMinutes ?? 10;
   if (holdingMinutes > timeStopMinutes && progressR !== null && progressR < 0.30) {
     return { shouldExit: true, exitReason: "TIME_STOP", telemetry };
   }
