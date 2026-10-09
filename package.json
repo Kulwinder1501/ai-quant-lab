@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "data:sync:gold": "tsx scripts/fetch-missing-gold.ts",
     "dev:api": "npm run dev --workspace @ai-quant-lab/api",
     "dev:web": "npm run dev --workspace @ai-quant-lab/web",
     "db:migrate": "npm run db:migrate --workspace @ai-quant-lab/api",
