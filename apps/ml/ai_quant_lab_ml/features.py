@@ -50,7 +50,9 @@ from .contracts import (
 )
 from .triple_barrier import TripleBarrierError, triple_barrier_label
 from .volatility_expansion import (
+    SessionScopedTrailingWindow,
     VolatilityExpansionError,
+    is_intraday_timeframe,
     trailing_range_of,
     volatility_expansion_label,
 )
@@ -1405,8 +1407,14 @@ def build_volatility_expansion_examples(
     window = request.horizon_bars
     examples: list[LabeledExample] = []
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
-    trailing_highs: collections.deque[float] = collections.deque(maxlen=window)
-    trailing_lows: collections.deque[float] = collections.deque(maxlen=window)
+    # Confined to one session for intraday bars: rolled across the overnight gap, the first
+    # window-1 bars of a session would compare a morning forward range with yesterday's
+    # envelope (EXPANSION/STABLE/CONTRACTION is 13/25/62% at bar 0 and 6/16/78% at bar 4 on
+    # NIFTY 15m h=5, against 30/34/37% from bar 5 on). Those bars are now skipped by the
+    # "trailing window not yet full" rule below. Daily and longer bars roll continuously.
+    trailing = SessionScopedTrailingWindow(
+        window, session_scoped=is_intraday_timeframe(request.timeframe)
+    )
     prior_close = _nan()
     sorted_records = sorted(records, key=lambda candle: candle.close_time)
 
@@ -1419,8 +1427,11 @@ def build_volatility_expansion_examples(
         source_close = _source_number(candle.close, "close")
         # The trailing window advances for every candle, including ones that fail
         # scope validation, so the envelope stays a true picture of recent range.
-        trailing_highs.append(_source_number(candle.high, "high"))
-        trailing_lows.append(_source_number(candle.low, "low"))
+        trailing.push(
+            candle.close_time,
+            _source_number(candle.high, "high"),
+            _source_number(candle.low, "low"),
+        )
 
         try:
             _validate_evidence_scope(candle, request)
@@ -1428,13 +1439,13 @@ def build_volatility_expansion_examples(
             prior_close = source_close
             continue
 
-        if len(trailing_highs) < window:
+        if not trailing.full:
             prior_close = source_close
             continue
 
         try:
             result = volatility_expansion_label(
-                trailing_range=trailing_range_of(list(trailing_highs), list(trailing_lows)),
+                trailing_range=trailing_range_of(trailing.highs, trailing.lows),
                 forward_path=candle.forward_path,
                 expected_forward_bars=window,
                 band=request.expansion_band,

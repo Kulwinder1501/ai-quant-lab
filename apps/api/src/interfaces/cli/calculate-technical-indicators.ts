@@ -9,6 +9,18 @@ import { CalculateTechnicalIndicators } from "../../modules/technical-analysis/a
 import { defaultIndicatorDefinitions, SMC_ALGORITHM_VERSION } from "../../modules/technical-analysis/domain/technical-indicator.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, parseInstrumentExchange, requireOption } from "./arguments.js";
 
+/*
+ * Frozen-feed (flat, zero-volume) bars -- exchange holidays the feed kept printing -- are
+ * excluded from ATR / Bollinger / Supertrend by the indicator engine, and no snapshot is written
+ * for them or for windows that are mostly flat (see `volatilityOnLiveBars`).
+ *
+ * This job only UPSERTS, so snapshots written before that rule existed are neither corrected nor
+ * removed by a plain re-run unless their candle is live. Listing the affected rows, the optional
+ * (never auto-run) cleanup, and the exact recompute commands are in
+ * docs/2026-10-10-volatility-audit-fixes.md. `--from` is the only bound (there is no `--to`):
+ * the whole series is always computed and `--from` limits what is written.
+ */
+
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
   const environment = loadEnvironment();

@@ -5,7 +5,15 @@ import {
   RISK_FREE_RATE,
   yearsToExpiry,
 } from "@ai-quant-lab/pricing";
+import { atmImpliedVolatility, calendarDaysToExpiry } from "../../market-data/domain/atm-implied-volatility.js";
 import { solveContractGreeksFromChain } from "../../market-data/domain/chain-greeks.js";
+import {
+  buildTenorIvHistory,
+  ivPercentileForValidator,
+  summariseTenorMatchedIvPercentile,
+  type DailyChainQuote,
+  type TenorImpliedVolatilityObservation,
+} from "../../market-data/domain/iv-percentile-by-tenor.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import {
   resolveListedExpiry,
@@ -232,6 +240,12 @@ interface ChainReader {
     expiryDate?: string;
     asOf?: Date;
   }): Promise<OptionChainSnapshot | null>;
+  /**
+   * One last-snapshot-of-the-day ATM slice per stored session; supplies the tenor-matched IV
+   * percentile. Optional: a reader without it leaves the percentile unchecked (and recorded as
+   * such), it never silently passes or fails the trade.
+   */
+  dailyAtmQuotes?(input: { underlyingSymbol: string; days: number }): Promise<DailyChainQuote[]>;
 }
 
 interface PremiumTickReader {
@@ -278,6 +292,38 @@ export class PrepareOptionEntry {
     private readonly optionChainRepository: ChainReader,
     private readonly premiumTicks?: PremiumTickReader,
   ) {}
+
+  /**
+   * Tenor-matched ATM IV percentile (0-100) for the expiry this trade settles on, or null when it
+   * cannot be measured. History and live reading go through the same `atmImpliedVolatility`
+   * (parity forward) and the rank is taken only inside the live days-to-expiry bucket, so a 2-DTE
+   * reading is never ranked against 20-DTE history. Null means "unchecked", never "passed".
+   */
+  private async resolveIvPercentile(
+    underlyingSymbol: string,
+    expiryDate: Date,
+    chain: OptionChainSnapshot | undefined,
+  ): Promise<number | null> {
+    if (chain === undefined || this.optionChainRepository.dailyAtmQuotes === undefined) return null;
+    try {
+      const current = atmImpliedVolatility({
+        observedAt: chain.observedAt,
+        expiryDate,
+        quotes: chain.quotes.filter((quote) => quote.expiryDate.getTime() === expiryDate.getTime()),
+      });
+      if (!current.measurable) return null;
+      const history: TenorImpliedVolatilityObservation[] = buildTenorIvHistory(
+        await this.optionChainRepository.dailyAtmQuotes({ underlyingSymbol, days: 400 }),
+      );
+      if (calendarDaysToExpiry(chain.observedAt, expiryDate) < 1) return null;
+      return ivPercentileForValidator(summariseTenorMatchedIvPercentile({
+        history,
+        current: { impliedVolatility: current.impliedVolatility, daysToExpiry: current.daysToExpiry },
+      }));
+    } catch {
+      return null;
+    }
+  }
 
   async execute(input: PrepareOptionEntryInput): Promise<PrepareOptionEntryResult> {
     const now = input.now ?? new Date();
@@ -655,6 +701,7 @@ export class PrepareOptionEntry {
 
     const volume = await this.readSourceBarVolume(idea.source_candle_id, idea.symbol);
     const scheduledMacro = await this.hasScheduledMacroEventToday(now);
+    const ivPercentile = await this.resolveIvPercentile(underlyingSymbol, settlementExpiry, validationChain);
     const entryCheck = validateOptionsEntry({
       proposedIdea: {
         side: idea.side,
@@ -666,6 +713,9 @@ export class PrepareOptionEntry {
       optionChain: validationChain,
       intendedStrike,
       intendedContractDelta: mapped.entryGreeks.delta,
+      // The chain can hold several expiries; pin the validator to the one this trade settles on.
+      intendedExpiryDate: settlementExpiry,
+      ivPercentile,
       ...(scheduledMacro === undefined ? {} : { hasMacroEvent: scheduledMacro }),
     });
     if (!entryCheck.isValid) {

@@ -128,6 +128,9 @@ import { oandaInstrumentSupportMigration } from "./127-oanda-instrument-support.
 import { candidateDecisionRejectionProvenanceMigration } from "./128-candidate-decision-rejection-provenance.js";
 import { oandaBidAskCandlesMigration } from "./129-oanda-bid-ask-candles.js";
 import { openingGapPredictionsMigration } from "./130-opening-gap-predictions.js";
+import { repairMislabelledMonthlyExpiryRowsMigration } from "./131-repair-mislabelled-monthly-expiry-rows.js";
+import { contactLabelVersioningMigration } from "./132-contact-label-versioning.js";
+import { candlestickV2PatternDefinitionsMigration } from "./133-candlestick-v2-pattern-definitions.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -260,4 +263,7 @@ export const migrations = [
   candidateDecisionRejectionProvenanceMigration,
   oandaBidAskCandlesMigration,
   openingGapPredictionsMigration,
+  repairMislabelledMonthlyExpiryRowsMigration,
+  contactLabelVersioningMigration,
+  candlestickV2PatternDefinitionsMigration,
 ];

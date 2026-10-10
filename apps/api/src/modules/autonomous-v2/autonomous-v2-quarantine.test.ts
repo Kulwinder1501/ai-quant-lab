@@ -197,7 +197,11 @@ describe("autonomous-v2 quarantine", () => {
     const matched = (source: string): string[] => FORBIDDEN_PATTERNS
       .filter(({ pattern }) => pattern.test(codeOnly(source))).map(({ why }) => why);
 
-    expect(matched(agent)).toContain("implicit observation selection; the Opportunity Resolver replaces it (I3)");
+    // V1 no longer contains `patterns[0]` (2026-10-10: replaced by `selectDirectionalPattern`, because
+    // alphabetical-first selection was a defect). The regex is therefore proven against a fixture
+    // rather than against code that has, correctly, stopped exhibiting the defect.
+    expect(matched("const chosen = patterns[0];"))
+      .toContain("implicit observation selection; the Opportunity Resolver replaces it (I3)");
     expect(matched(agent)).toContain("in-memory decision idempotency (DELETE FROM V2)");
     expect(matched(agent)).toContain("raw SQL in the decision plane (DELETE FROM V2)");
     expect(matched(scorer)).toContain("composite directional score (QUARANTINE)");

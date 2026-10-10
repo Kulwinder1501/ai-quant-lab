@@ -10,8 +10,17 @@ import { PostgresRiskStateRepository } from "../../infrastructure/database/repos
 import { selectNearestListedExpiry } from "../../modules/market-data/domain/option-expiry-calendar.js";
 import { isVolatilityLabel } from "../../modules/model-predictions/domain/volatility-expansion-label.js";
 import { MINIMUM_DAYS_TO_EXPIRY, PrepareOptionEntry } from "../../modules/paper-trading/application/prepare-option-entry.js";
-import { proposeVolatilityStraddle } from "../../modules/paper-trading/domain/volatility-straddle.js";
-import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
+import {
+  calendarHorizonYears,
+  proposeVolatilityStraddle,
+  tradingHorizonYears,
+  type CalendarYears,
+  type TradingYears,
+} from "../../modules/paper-trading/domain/volatility-straddle.js";
+import {
+  ChainFirstStraddleImpliedVolatilitySource,
+  PostgresIndiaVixImpliedVolatilitySource,
+} from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
 import { VOLATILITY_LABEL_SCHEME } from "../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import type { TradeSide } from "../../modules/strategy-engine/domain/strategy.js";
 import { evaluateRisk } from "../../modules/risk-management/domain/risk.js";
@@ -42,52 +51,21 @@ interface ExpansionRow {
   source_timeframe: string;
 }
 
-/** Bar length in minutes, for the timeframes any volatility model is fitted on. */
-const TIMEFRAME_MINUTES: Readonly<Record<string, number>> = {
-  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
-  // A daily bar is one trading session, not 24 hours. Using 1,440 would inflate the horizon by
-  // almost four times and let a 1d signal clear a gate it had not earned.
-  "1d": 375,
-};
-
-/**
- * How far ahead a prediction reaches, in years, from its bar length and horizon.
+/*
+ * Two clocks (see `volatility-straddle.ts`, which owns the definitions and brands them):
  *
- * Calendar years, matching `yearsToExpiry` and the annualisation convention of the implied
- * volatility it will be multiplied against. Returns null for a timeframe this does not know
- * rather than guessing: the straddle gate depends on this number, and a wrong horizon silently
- * moves the threshold it enforces.
+ *  - `tradingHorizonYears`: bars * minutes / (375 * 252). Volatility accrues in market time, so
+ *    this -- and only this -- scales the implied move the signal is compared against. A daily bar
+ *    is 1/252 of a year, not 375/525,600.
+ *  - `calendarHorizonYears`: bars * calendar minutes / 525,600. Theta runs on the wall clock (an
+ *    option decays overnight), so this drives the tenor ratio and the repriced decay. Five daily
+ *    bars hold 1,875 trading minutes and consume about seven calendar days of a contract's life.
+ *
+ * Intraday the calendar span is exact only while the horizon stays inside one session. A 15m/h5
+ * signal at 15:15 IST reaches into tomorrow, spanning 75 trading minutes but eighteen calendar
+ * hours; the calendar ratio below *overstates* the mismatch in that window (it divides by a span
+ * that is too short).
  */
-function predictionHorizonYears(timeframe: string, horizonBars: number): number | null {
-  const minutes = TIMEFRAME_MINUTES[timeframe];
-  if (minutes === undefined || !Number.isFinite(horizonBars) || horizonBars < 1) return null;
-  return (minutes * horizonBars) / (365 * 24 * 60);
-}
-
-/**
- * Calendar minutes one bar spans, which is a different clock from `TIMEFRAME_MINUTES`.
- *
- * Volatility accumulates in market time -- that is why a daily bar counts as 375 minutes above --
- * but theta runs on the calendar, and an option does not stop decaying overnight. Five daily bars
- * hold 1,875 trading minutes and consume about seven calendar days of a contract's life. The two
- * numbers answer different questions and neither substitutes for the other: the first scales the
- * implied move the signal is compared against, the second measures how much of the contract's
- * remaining life the signal's span covers.
- *
- * Intraday entries are exact only while the horizon stays inside one session. A 15m/h5 signal at
- * 15:15 IST reaches into tomorrow, spanning 75 trading minutes but eighteen calendar hours; the
- * ratio below understates the mismatch in that window rather than overstating it.
- */
-const TIMEFRAME_CALENDAR_MINUTES: Readonly<Record<string, number>> = {
-  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
-  "1d": 1440,
-};
-
-function horizonCalendarYears(timeframe: string, horizonBars: number): number | null {
-  const minutes = TIMEFRAME_CALENDAR_MINUTES[timeframe];
-  if (minutes === undefined || !Number.isFinite(horizonBars) || horizonBars < 1) return null;
-  return (minutes * horizonBars) / (365 * 24 * 60);
-}
 
 /**
  * The most remaining contract life, per unit of prediction horizon, that this path will finance.
@@ -298,18 +276,19 @@ async function main(): Promise<void> {
     const assessed = candidates.map((candidate) => {
       const bars = candidate.horizon_bars === null ? 5 : Number(candidate.horizon_bars);
       const horizonBars = Number.isInteger(bars) ? bars : 5;
-      const calendarYears = horizonCalendarYears(candidate.source_timeframe, horizonBars);
+      const calendarYears = calendarHorizonYears(candidate.source_timeframe, horizonBars);
       return {
         candidate,
         horizonBars,
-        horizonYears: predictionHorizonYears(candidate.source_timeframe, horizonBars),
+        tradingYears: tradingHorizonYears(candidate.source_timeframe, horizonBars),
+        calendarYears,
         // Null tenor means no listed expiry was usable. The ratio is then unknown rather than
         // infinite, and the domain refuses EXPIRY_UNLISTED a few lines below on the same facts.
         tenorRatio: tenorYears === null || calendarYears === null ? null : tenorYears / calendarYears,
       };
     });
-    const unknownHorizon = assessed.filter((entry) => entry.horizonYears === null);
-    const matched = assessed.find((entry) => entry.horizonYears !== null
+    const unknownHorizon = assessed.filter((entry) => entry.tradingYears === null || entry.calendarYears === null);
+    const matched = assessed.find((entry) => entry.tradingYears !== null && entry.calendarYears !== null
       && (entry.tenorRatio === null || entry.tenorRatio <= MAXIMUM_TENOR_HORIZON_RATIO));
 
     if (!matched) {
@@ -359,7 +338,9 @@ async function main(): Promise<void> {
 
     const row = matched.candidate;
     const horizonBars = matched.horizonBars;
-    const horizonYears = matched.horizonYears as number;
+    // `matched` is only selected when both clocks are known.
+    const tradingYears = matched.tradingYears as TradingYears;
+    const calendarYears = matched.calendarYears as CalendarYears;
     const expansionBand = row.expansion_band === null ? null : Number(row.expansion_band);
     let trailingRange = row.realized_trailing_range === null
       ? null
@@ -386,8 +367,21 @@ async function main(): Promise<void> {
       return;
     }
 
-    const ivSource = new PostgresIndiaVixImpliedVolatilitySource(database);
-    const impliedVolatility = await ivSource.resolveAsOf(now);
+    // The contract's own ATM IV at the expiry being priced, from a fresh snapshot, in preference
+    // to India VIX (30-day tenor, prior close). VIX stays as a tagged fallback with a warning.
+    const resolvedIv = expirySelection.usable
+      ? await new ChainFirstStraddleImpliedVolatilitySource(
+        optionChainRepository,
+        new PostgresIndiaVixImpliedVolatilitySource(database),
+      ).resolve({ underlyingSymbol: UNDERLYING, expiryDate: expirySelection.expiryDate, asOf: now })
+      : null;
+    const impliedVolatility = resolvedIv?.impliedVolatility ?? null;
+    const ivProvenance = {
+      impliedVolatilitySource: resolvedIv?.source ?? null,
+      impliedVolatility,
+      impliedVolatilityObservedAt: resolvedIv?.observedAt ?? null,
+      impliedVolatilityWarning: resolvedIv?.tenorWarning ?? null,
+    };
 
     const instrumentMeta = await database.query<{ lot_size: number; strike_step: string | null }>(`
       SELECT lot_size, strike_step FROM instruments WHERE id = $1
@@ -422,7 +416,8 @@ async function main(): Promise<void> {
       expansionBand: expansionBand !== null && Number.isFinite(expansionBand) && expansionBand > 0
         ? expansionBand
         : 0.25,
-      predictionHorizonYears: horizonYears,
+      tradingHorizonYears: tradingYears,
+      calendarHorizonYears: calendarYears,
       now,
     });
 
@@ -436,6 +431,7 @@ async function main(): Promise<void> {
         // Present only for the economics gates, and the reason the refusal is auditable: the
         // horizon terms say what the same signal would have been worth on a matched tenor.
         economics: proposal.economics ?? null,
+        ...ivProvenance,
         sourceTimeframe: row.source_timeframe,
         horizonBars,
         tenorRatio: matched.tenorRatio === null ? null : Number(matched.tenorRatio.toFixed(2)),
@@ -451,6 +447,7 @@ async function main(): Promise<void> {
       actionable: true,
       rationale: proposal.rationale,
       economics: proposal.economics,
+      ...ivProvenance,
       legs: proposal.legs.map((leg) => ({
         optionType: leg.optionType,
         strike: leg.strike,
@@ -488,6 +485,7 @@ async function main(): Promise<void> {
       evidenceCutoffAt: row.evidence_cutoff_at,
       economics: proposal.economics,
       rationale: proposal.rationale,
+      ...ivProvenance,
     };
 
     // LONG thesis → CE; SHORT thesis → PE. Both book as long option positions.

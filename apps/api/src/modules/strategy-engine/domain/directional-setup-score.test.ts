@@ -84,6 +84,43 @@ describe("scoreDirectionalSetup", () => {
     expect(bearish.shortConfidence).toBe(bullish.longConfidence);
   });
 
+  it("treats a NEUTRAL pattern as no evidence at all, for both sides", () => {
+    // Regression: `direction !== "BEARISH"` made every NEUTRAL pattern (a doji is always >= 0.9)
+    // "agree" with a long: +20 for any long, never for a short.
+    for (const code of ["DOJI", "INSIDE_BAR", "SPINNING_TOP"]) {
+      const result = scoreDirectionalSetup(baseInput({
+        pattern: { code, direction: "NEUTRAL", confidence: 0.95 },
+      }));
+      // Identical to no pattern at all: 50 base + 10 in-envelope on both sides, and no reason line.
+      expect(result.longConfidence).toBe(60);
+      expect(result.shortConfidence).toBe(60);
+      expect(result.reasoning.some((line) => line.includes(code))).toBe(false);
+    }
+  });
+
+  it("scores a directional pattern +20 with its side and -20 against it, symmetrically", () => {
+    const bullish = { code: "BULLISH_ENGULFING", direction: "BULLISH", confidence: 0.9 };
+    const bearish = { code: "BEARISH_ENGULFING", direction: "BEARISH", confidence: 0.9 };
+
+    const withBullish = scoreDirectionalSetup(baseInput({ pattern: bullish }));
+    expect(withBullish.longConfidence).toBe(80);
+    expect(withBullish.shortConfidence).toBe(40);
+
+    const withBearish = scoreDirectionalSetup(baseInput({ pattern: bearish }));
+    expect(withBearish.longConfidence).toBe(40);
+    expect(withBearish.shortConfidence).toBe(80);
+  });
+
+  it("does not describe the pattern strength as a certainty or a percentage", () => {
+    const result = scoreDirectionalSetup(baseInput({
+      pattern: { code: "BULLISH_ENGULFING", direction: "BULLISH", confidence: 0.9 },
+    }));
+    const line = result.reasoning.find((entry) => entry.includes("BULLISH_ENGULFING"))!;
+    expect(line).not.toMatch(/certainty|%/);
+    expect(line).toMatch(/heuristic strength 0\.90/);
+    expect(line).toMatch(/uncalibrated/);
+  });
+
   it("applies SMC as the same bounded directional term to both theses", () => {
     const bullish = scoreDirectionalSetup(baseInput({
       smcBias: {

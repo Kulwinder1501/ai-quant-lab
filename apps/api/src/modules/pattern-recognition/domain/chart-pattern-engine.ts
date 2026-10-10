@@ -30,6 +30,16 @@ export interface ChartPatternConfiguration {
   minimumSwingAtr: number;
   atrPeriod: number;
   tickSize: number;
+  /**
+   * A breakout only counts if it arrives within this many pattern-widths after the pattern's last
+   * pivot (width = bars from first to last pivot). Without a limit the double-pattern scan ran to
+   * the end of the series: 30m DOUBLE_BOTTOM breakouts had a median 1,170 minute lag from the right
+   * trough (p90 4,320) and 880 of 1,435 crossed a day -- a price crossing a neckline days later is
+   * not the pattern completing. The absolute one-session ceiling for intraday timeframes is
+   * enforced by the caller handing this engine one IST session at a time
+   * (see `session-segmentation.ts`): the end of the series is the end of the session.
+   */
+  breakoutWindowMultiplier: number;
 }
 
 export const defaultChartPatternConfiguration: ChartPatternConfiguration = {
@@ -55,6 +65,7 @@ export const defaultChartPatternConfiguration: ChartPatternConfiguration = {
   minimumSwingAtr: 0.5,
   atrPeriod: 14,
   tickSize: 0.05,
+  breakoutWindowMultiplier: 3,
 };
 
 function calculatePatternAtr(
@@ -113,6 +124,25 @@ export class ChartPatternEngine {
     this.zigzagEngine = new ZigZagEngine(zigzagConfig);
   }
 
+  /** Index of the candle on which a pivot became knowable. */
+  private confirmationIndexOf(pivot: ZigZagPivot, candleIndexById: Map<string, number>): number {
+    return candleIndexById.get(pivot.confirmationCandleId) ?? pivot.index + this.configuration.swingWindow;
+  }
+
+  /**
+   * Last bar index at which a breakout still belongs to a pattern spanning `firstIndex..lastIndex`:
+   * `breakoutWindowMultiplier` pattern-widths past the last pivot (minimum one bar of width).
+   */
+  private breakoutDeadline(firstIndex: number, lastIndex: number): number {
+    const width = Math.max(1, lastIndex - firstIndex);
+    return lastIndex + Math.ceil(this.configuration.breakoutWindowMultiplier * width);
+  }
+
+  /**
+   * `candles` must be one contiguous series -- for intraday timeframes a single IST session. The
+   * pivot and breakout scans do not check for gaps, so several sessions concatenated would produce
+   * patterns spanning the overnight gap.
+   */
   detect(candles: readonly PatternCandle[]): DetectedPriceActionEvent[] {
     const results: DetectedPriceActionEvent[] = [];
     if (candles.length < 5) return results;
@@ -184,8 +214,9 @@ export class ChartPatternEngine {
           const neckline = pMid.price;
           // Look for breakout candle after p2 confirmation
           const p2ConfIndex = candleIndexById.get(p2.confirmationCandleId) ?? (p2.index + this.configuration.swingWindow);
+          const deadline = this.breakoutDeadline(p1.index, p2.index);
 
-          for (let cIdx = p2ConfIndex; cIdx < candles.length; cIdx += 1) {
+          for (let cIdx = p2ConfIndex; cIdx < candles.length && cIdx <= deadline; cIdx += 1) {
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];
 
@@ -218,8 +249,9 @@ export class ChartPatternEngine {
         if (Math.abs(p1.price - p2.price) <= tolerance) {
           const neckline = pMid.price;
           const p2ConfIndex = candleIndexById.get(p2.confirmationCandleId) ?? (p2.index + this.configuration.swingWindow);
+          const deadline = this.breakoutDeadline(p1.index, p2.index);
 
-          for (let cIdx = p2ConfIndex; cIdx < candles.length; cIdx += 1) {
+          for (let cIdx = p2ConfIndex; cIdx < candles.length && cIdx <= deadline; cIdx += 1) {
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];
 
@@ -268,16 +300,23 @@ export class ChartPatternEngine {
           const channelHighs: ZigZagPivot[] = [];
           const channelLows: ZigZagPivot[] = [];
 
-          for (let j = i + 1; j < pivots.length; j += 1) {
+          // Starts after the pole-end pivot: that pivot ends the pole, and counting it as the first
+          // channel high (bull) / low (bear) made the channel boundary start at the pole's extreme.
+          for (let j = i + 2; j < pivots.length; j += 1) {
             const p = pivots[j];
             if (p.index - pPoleEnd.index > this.configuration.flagMaxBars) break;
             if (p.type === "HIGH") channelHighs.push(p);
             if (p.type === "LOW") channelLows.push(p);
           }
 
+          const channelBars = Math.max(
+            ...channelHighs.map((p) => p.index),
+            ...channelLows.map((p) => p.index),
+          ) - pPoleEnd.index;
           if (
             channelHighs.length >= this.configuration.flagMinBoundaryTouches &&
-            channelLows.length >= this.configuration.flagMinBoundaryTouches
+            channelLows.length >= this.configuration.flagMinBoundaryTouches &&
+            channelBars >= this.configuration.flagMinBars
           ) {
             const h0 = channelHighs[0];
             const h1 = channelHighs[1];
@@ -290,13 +329,23 @@ export class ChartPatternEngine {
 
             if (isDownward && retracement <= this.configuration.flagMaxRetracement) {
               const lastLow = channelLows[channelLows.length - 1];
-              const confIdx = candleIndexById.get(lastLow.confirmationCandleId) ?? lastLow.index + this.configuration.swingWindow;
+              const lastHigh = channelHighs[channelHighs.length - 1];
+              // Both boundaries must be confirmed: the trendline below is fitted through highs, and
+              // the last high can be confirmed later than the last low.
+              const confIdx = Math.max(
+                this.confirmationIndexOf(lastLow, candleIndexById),
+                this.confirmationIndexOf(lastHigh, candleIndexById),
+              );
 
               // Channel upper trendline slope: (h1.price - h0.price) / (h1.index - h0.index)
               const slope = (h1.price - h0.price) / (h1.index - h0.index);
 
+              const deadline = Math.min(
+                pPoleEnd.index + this.configuration.flagMaxBars,
+                this.breakoutDeadline(pPoleEnd.index, Math.max(lastLow.index, lastHigh.index)),
+              );
               for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-                if (cIdx - pPoleEnd.index > this.configuration.flagMaxBars) break;
+                if (cIdx > deadline) break;
                 const current = candles[cIdx];
                 const prev = candles[cIdx - 1];
                 const trendlineAtCurrent = h0.price + slope * (cIdx - h0.index);
@@ -329,16 +378,23 @@ export class ChartPatternEngine {
           const channelHighs: ZigZagPivot[] = [];
           const channelLows: ZigZagPivot[] = [];
 
-          for (let j = i + 1; j < pivots.length; j += 1) {
+          // Starts after the pole-end pivot: that pivot ends the pole, and counting it as the first
+          // channel high (bull) / low (bear) made the channel boundary start at the pole's extreme.
+          for (let j = i + 2; j < pivots.length; j += 1) {
             const p = pivots[j];
             if (p.index - pPoleEnd.index > this.configuration.flagMaxBars) break;
             if (p.type === "HIGH") channelHighs.push(p);
             if (p.type === "LOW") channelLows.push(p);
           }
 
+          const channelBars = Math.max(
+            ...channelHighs.map((p) => p.index),
+            ...channelLows.map((p) => p.index),
+          ) - pPoleEnd.index;
           if (
             channelHighs.length >= this.configuration.flagMinBoundaryTouches &&
-            channelLows.length >= this.configuration.flagMinBoundaryTouches
+            channelLows.length >= this.configuration.flagMinBoundaryTouches &&
+            channelBars >= this.configuration.flagMinBars
           ) {
             const l0 = channelLows[0];
             const l1 = channelLows[1];
@@ -350,13 +406,21 @@ export class ChartPatternEngine {
 
             if (isUpward && retracement <= this.configuration.flagMaxRetracement) {
               const lastHigh = channelHighs[channelHighs.length - 1];
-              const confIdx = candleIndexById.get(lastHigh.confirmationCandleId) ?? lastHigh.index + this.configuration.swingWindow;
+              const lastLow = channelLows[channelLows.length - 1];
+              const confIdx = Math.max(
+                this.confirmationIndexOf(lastHigh, candleIndexById),
+                this.confirmationIndexOf(lastLow, candleIndexById),
+              );
 
               // Channel lower trendline slope: (l1.price - l0.price) / (l1.index - l0.index)
               const slope = (l1.price - l0.price) / (l1.index - l0.index);
 
+              const deadline = Math.min(
+                pPoleEnd.index + this.configuration.flagMaxBars,
+                this.breakoutDeadline(pPoleEnd.index, Math.max(lastHigh.index, lastLow.index)),
+              );
               for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-                if (cIdx - pPoleEnd.index > this.configuration.flagMaxBars) break;
+                if (cIdx > deadline) break;
                 const current = candles[cIdx];
                 const prev = candles[cIdx - 1];
                 const trendlineAtCurrent = l0.price + slope * (cIdx - l0.index);
@@ -423,11 +487,21 @@ export class ChartPatternEngine {
         if (isFlatHighs && isAscendingLows) {
           const resistance = (maxHigh + minHigh) / 2;
           const confIdx = candleIndexById.get(lastPivot.confirmationCandleId) ?? lastPivot.index + this.configuration.swingWindow;
+          const deadline = Math.min(
+            windowPivots[0].index + this.configuration.triangleMaxBars,
+            this.breakoutDeadline(windowPivots[0].index, lastPivot.index),
+          );
+          // The rising lows are the triangle's floor; the last one is its highest.
+          const floor = lows[lows.length - 1].price;
 
           for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-            if (cIdx - windowPivots[0].index > this.configuration.triangleMaxBars) break;
+            if (cIdx > deadline) break;
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];
+
+            // Invalidation: a close below the last higher low before the breakout is a breakdown,
+            // so the pattern no longer expects an upside break.
+            if (current.close < floor) break;
 
             if (current.close > resistance && prev.close <= resistance) {
               results.push(
@@ -459,11 +533,21 @@ export class ChartPatternEngine {
         if (isFlatLows && isDescendingHighs) {
           const support = (maxLow + minLow) / 2;
           const confIdx = candleIndexById.get(lastPivot.confirmationCandleId) ?? lastPivot.index + this.configuration.swingWindow;
+          const deadline = Math.min(
+            windowPivots[0].index + this.configuration.triangleMaxBars,
+            this.breakoutDeadline(windowPivots[0].index, lastPivot.index),
+          );
+          // The falling highs are the triangle's ceiling; the last one is its lowest.
+          const ceiling = highs[highs.length - 1].price;
 
           for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-            if (cIdx - windowPivots[0].index > this.configuration.triangleMaxBars) break;
+            if (cIdx > deadline) break;
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];
+
+            // Invalidation: a close above the last lower high before the breakdown is a breakout
+            // against the pattern's expected direction.
+            if (current.close > ceiling) break;
 
             if (current.close < support && prev.close >= support) {
               results.push(
@@ -522,12 +606,18 @@ export class ChartPatternEngine {
 
           if (meetsNecklineSlope) {
             const confIdx = Math.max(p4.confirmationIndex, candleIndexById.get(p4.confirmationCandleId) ?? p4.index + this.configuration.swingWindow);
+            const deadline = Math.min(
+              p0.index + this.configuration.headShoulderMaxBars,
+              this.breakoutDeadline(p0.index, p4.index),
+            );
 
             for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-              if (cIdx - p0.index > this.configuration.headShoulderMaxBars) break;
+              if (cIdx > deadline) break;
               if (cIdx <= 0) continue;
               const current = candles[cIdx];
               const prev = candles[cIdx - 1];
+              // Invalidation: a new high above the head before the neckline breaks.
+              if (current.high > p2.price) break;
               const necklineCurrent = p1.price + slope * (cIdx - p1.index);
               const necklinePrev = p1.price + slope * (cIdx - 1 - p1.index);
 
@@ -574,12 +664,18 @@ export class ChartPatternEngine {
 
           if (meetsNecklineSlope) {
             const confIdx = Math.max(p4.confirmationIndex, candleIndexById.get(p4.confirmationCandleId) ?? p4.index + this.configuration.swingWindow);
+            const deadline = Math.min(
+              p0.index + this.configuration.headShoulderMaxBars,
+              this.breakoutDeadline(p0.index, p4.index),
+            );
 
             for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-              if (cIdx - p0.index > this.configuration.headShoulderMaxBars) break;
+              if (cIdx > deadline) break;
               if (cIdx <= 0) continue;
               const current = candles[cIdx];
               const prev = candles[cIdx - 1];
+              // Invalidation: a new low below the head before the neckline breaks.
+              if (current.low < p2.price) break;
               const necklineCurrent = p1.price + slope * (cIdx - p1.index);
               const necklinePrev = p1.price + slope * (cIdx - 1 - p1.index);
 
@@ -617,6 +713,7 @@ export class ChartPatternEngine {
       const lows = windowPivots.filter((p) => p.type === "LOW");
 
       if (
+        windowPivots.length >= this.configuration.wedgeMinTotalPivots &&
         highs.length >= this.configuration.wedgeMinTouchesPerBoundary &&
         lows.length >= this.configuration.wedgeMinTouchesPerBoundary
       ) {
@@ -672,12 +769,16 @@ export class ChartPatternEngine {
         if (convergenceRate < this.configuration.wedgeMinConvergenceRate) continue;
 
         const confIdx = Math.max(pLast.confirmationIndex, candleIndexById.get(pLast.confirmationCandleId) ?? pLast.index + this.configuration.swingWindow);
+        const deadline = Math.min(
+          pFirst.index + this.configuration.wedgeMaxBars,
+          this.breakoutDeadline(pFirst.index, pLast.index),
+        );
 
         // --- RISING WEDGE (Bearish breakdown) ---
         // Slopes upward: mLow > mHigh > 0
         if (mLow > mHigh && mHigh > 0) {
           for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-            if (cIdx - pFirst.index > this.configuration.wedgeMaxBars) break;
+            if (cIdx > deadline) break;
             if (cIdx <= 0) continue;
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];
@@ -706,7 +807,7 @@ export class ChartPatternEngine {
         // Slopes downward: mHigh < mLow < 0 (resistance falling steeper than support)
         if (mHigh < mLow && mLow < 0) {
           for (let cIdx = confIdx; cIdx < candles.length; cIdx += 1) {
-            if (cIdx - pFirst.index > this.configuration.wedgeMaxBars) break;
+            if (cIdx > deadline) break;
             if (cIdx <= 0) continue;
             const current = candles[cIdx];
             const prev = candles[cIdx - 1];

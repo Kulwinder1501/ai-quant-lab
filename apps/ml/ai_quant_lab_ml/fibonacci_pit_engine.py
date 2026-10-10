@@ -114,15 +114,40 @@ class MagnitudeEstimate:
     availableAt: int
 
 
-GEXContextState = str  # 'FRESH' | 'STALE' | 'UNAVAILABLE' | 'INVALID'
+OptionsContextState = str  # 'FRESH' | 'STALE' | 'UNAVAILABLE' | 'INVALID'
+# Backward-compatible alias: existing imports and tests keep using the old name.
+GEXContextState = OptionsContextState
 
 
 @dataclass
-class GEXContext:
-    state: GEXContextState
+class OptionsContext:
+    """Freshness envelope of an options snapshot. This is NOT gamma exposure (GEX).
+
+    No GEX model exists in this repository: gamma exposure needs per-strike gamma x open interest
+    x contract multiplier aggregated by dealer-positioning assumptions, and nothing here computes
+    it. What this object carries is only:
+
+    * ``state`` / ``snapshotTimestamp`` / ``availableAt`` -- whether an options snapshot was
+      available, fresh and not future-dated at the decision time. The scanner's Layer 3 reads ONLY
+      these (a freshness flag, ``layer3State``).
+    * ``pcrRatio`` -- a put/call OI ratio, carried but NEVER read by the scanner. If a producer ever
+      fills it, it is a windowed PCR (the collector's +/-strikecount strikes around spot for the
+      nearest un-settled expiry), not a whole-chain PCR and not a gamma measure.
+
+    Historical name: ``GEXContext`` (kept as an alias below). The old name overstated what the data
+    is; tests that construct ``GEXContext("FRESH", 1.0, t, t)`` fabricate the ratio and prove only
+    the freshness logic.
+    """
+
+    state: OptionsContextState
     pcrRatio: Optional[float]
     snapshotTimestamp: Optional[int]
     availableAt: Optional[int]
+
+
+# Backward-compatible alias (same class object): `GEXContext(...)`, isinstance checks and imports
+# in existing callers and tests continue to work unchanged.
+GEXContext = OptionsContext
 
 
 @dataclass
@@ -169,7 +194,9 @@ class FeatureVector:
     yzVolRatio: Optional[float]
     todSin: Optional[float]
     todCos: Optional[float]
-    gexState: GEXContextState
+    # Options-context FRESHNESS state (not gamma exposure). The field name is kept for stored-JSON
+    # compatibility; see `OptionsContext`.
+    gexState: OptionsContextState
 
 
 @dataclass

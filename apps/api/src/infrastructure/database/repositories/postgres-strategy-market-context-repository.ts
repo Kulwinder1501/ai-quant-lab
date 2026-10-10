@@ -25,6 +25,17 @@ import { instrumentProfileForSymbol } from "../../../modules/platform/calendar/i
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
 import { computeHtfBucketBiases, mapBarsToHtfBias, type HtfSourceCandle } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
 import { resolveConfluenceSignalFromDepth } from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
+import {
+  DEPTH_FRAME_MAX_AGE_MS,
+  buildOptionChainSignal,
+  selectNearestUnsettledExpiry,
+  unavailableOptionChainSignal,
+  type OptionChainSignal,
+} from "../../../modules/strategy-engine/domain/option-chain-signal.js";
+import {
+  frontMonthFuturesSymbol,
+  futuresTickerUnderlying,
+} from "../../../modules/market-data/domain/depth-frame-staleness.js";
 
 
 interface CompletedCandleRow extends QueryResultRow {
@@ -57,6 +68,15 @@ interface PatternDetectionRow extends QueryResultRow {
   confidence: string;
   context_candle_ids: string[];
   details: Record<string, unknown>;
+}
+
+interface DepthFrameRow extends QueryResultRow {
+  bid_price: string[];
+  bid_qty: string[];
+  ask_price: string[];
+  ask_qty: string[];
+  total_buy_qty: string | null;
+  total_sell_qty: string | null;
 }
 
 interface PriceActionEventRow extends QueryResultRow {
@@ -95,13 +115,10 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
 /** Reads only completed-candle evidence, so strategy decisions cannot use a forming bar. */
 let ictPersistGrantWarned = false;
 
-/**
- * How stale the most recent option-chain snapshot may be and still count as "known at decision
- * time" for `optionChainSignal`. Matches `apps/ml/oi_pcr_signal_check.py`'s
- * MAXIMUM_SNAPSHOT_AGE_MINUTES -- same collector, same ~7-8 minute polling cadence, no reason to
- * invent a different tolerance for the live path than the one already validated offline.
- */
-const OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES = 15;
+// The option-chain staleness ceiling (20 minutes, with the collector-cadence math) and every other
+// PCR selection rule now live in `option-chain-signal.ts`, shared in intent with
+// `apps/ml/oi_pcr_signal_check.py` and `apps/ml/run_hybrid_confluence_backtest.py`. The live gate
+// used 15 minutes while the backtest used 60, so the validated gate was not the live gate.
 
 /**
  * How many calendar days of trailing history feed the daily HTF-bias derivation
@@ -552,18 +569,69 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
   }
 
   /**
-   * Whole-chain PCR (put OI / call OI, nearest un-expired expiry) as of `candle.close_time`.
+   * The expiries listed for `symbol` as of `asOf`, from the newest `option_expiry_calendar`
+   * observation at or before `asOf` (point-in-time: a calendar observed later is not visible).
    *
-   * Reuses the same as-of join pattern as `resolveConfluenceSignal` below: resolve the
-   * instrument's canonical symbol, then look up the option-chain side by symbol rather than
-   * `instrument_id` (the chain collector keys snapshots by the lab's canonical symbol, not the
-   * instruments table's UUID). Errors degrade to "no signal" rather than failing the whole
-   * context, matching every other optional-evidence resolver on this class.
+   * Falls back to the distinct expiries of snapshots observed in the preceding day when no
+   * calendar observation exists yet (the calendar began ~1.5h after the first snapshots on
+   * 2026-08-04), so early history still resolves rather than going silently unavailable.
+   */
+  private async listExpiryCalendarAsOf(
+    symbol: string,
+    asOf: Date,
+  ): Promise<Array<{ expiryDate: string; expiryKind: string }>> {
+    const calendar = await this.database.query<{ expiry_date: string; expiry_kind: string }>(`
+      SELECT to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date, expiry_kind
+      FROM option_expiry_calendar
+      WHERE underlying_symbol = $1
+        AND observed_at = (
+          SELECT MAX(observed_at)
+          FROM option_expiry_calendar
+          WHERE underlying_symbol = $1 AND observed_at <= $2
+        )
+    `, [symbol, asOf]);
+    if (calendar.rows.length > 0) {
+      return calendar.rows.map((row) => ({ expiryDate: row.expiry_date, expiryKind: row.expiry_kind }));
+    }
+    const fallback = await this.database.query<{ expiry_date: string; expiry_kind: string }>(`
+      SELECT DISTINCT to_char(expiry_date, 'YYYY-MM-DD') AS expiry_date, expiry_kind
+      FROM option_chain_snapshots
+      WHERE underlying_symbol = $1
+        AND observed_at <= $2
+        AND observed_at > $2::timestamptz - INTERVAL '1 day'
+    `, [symbol, asOf]);
+    return fallback.rows.map((row) => ({ expiryDate: row.expiry_date, expiryKind: row.expiry_kind }));
+  }
+
+  /**
+   * Windowed put/call OI ratio for the nearest un-settled expiry, as of `candle.close_time`.
+   *
+   * ## Rule (see `option-chain-signal.ts` for the full statement; mirrored in the two Python scripts)
+   *
+   * 1. Pick the EXPIRY first from the stored calendar: the earliest expiry whose 15:30 IST
+   *    settlement is strictly after the decision time. (The previous join took the latest
+   *    `observed_at` first -- which is the farther "tradable roll" book, stored ~0.2s after the
+   *    front book -- and its inner `MIN(expiry_date)` then had a single expiry to minimise, so it
+   *    was a no-op. It also counted already-settled expiry-day books after 15:30.)
+   * 2. Then take the latest snapshot of THAT (symbol, expiry) observed at or before the close,
+   *    restricted to 09:15-15:30 IST so a 09:11 pre-open poll (prior-day OI) or a 15:53 post-close
+   *    poll can never feed an intraday gate.
+   * 3. Unavailable states are explicit (`unavailableReason`), never a silent null.
+   *
+   * ## What the number is
+   *
+   * The sums cover the collector's spot-recentred strike WINDOW (`strikecount` per side at
+   * collection time), not the whole chain -- hence `pcrWindowed`. `pcr` carries the same value
+   * under the old name so stored JSON consumers keep working.
+   *
+   * Looked up by canonical symbol rather than `instrument_id` (the collector keys snapshots by the
+   * lab's symbol). Errors degrade to "no signal" rather than failing the whole context, matching
+   * every other optional-evidence resolver on this class.
    */
   private async resolveOptionChainSignal(
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
-  ): Promise<StrategyMarketContext["optionChainSignal"]> {
+  ): Promise<OptionChainSignal | undefined> {
     try {
       const instResult = await this.database.query<{ symbol: string }>(
         `SELECT symbol FROM instruments WHERE id = $1`,
@@ -572,45 +640,49 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       const symbol = instResult.rows[0]?.symbol;
       if (!symbol) return undefined;
 
+      const decisionTime = candle.close_time;
+      const calendar = await this.listExpiryCalendarAsOf(symbol, decisionTime);
+      const expiryDate = selectNearestUnsettledExpiry(calendar.map((entry) => entry.expiryDate), decisionTime);
+      if (expiryDate === null) return unavailableOptionChainSignal("NO_UNSETTLED_EXPIRY");
+
       const latestResult = await this.database.query<{ observed_at: Date }>(`
         SELECT observed_at
         FROM option_chain_snapshots
-        WHERE underlying_symbol = $1 AND observed_at <= $2
+        WHERE underlying_symbol = $1
+          AND expiry_date = $2::date
+          AND observed_at <= $3
+          AND (observed_at AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:15:00' AND TIME '15:30:00'
         ORDER BY observed_at DESC
         LIMIT 1
-      `, [symbol, candle.close_time]);
+      `, [symbol, expiryDate, decisionTime]);
       const observedAt = latestResult.rows[0]?.observed_at;
-      if (!observedAt) {
-        return { pcr: null, callOpenInterest: null, putOpenInterest: null, observedAt: null, ageMinutes: null };
-      }
+      if (!observedAt) return unavailableOptionChainSignal("NO_SNAPSHOT", { expiryDate });
 
-      const ageMinutes = (candle.close_time.getTime() - observedAt.getTime()) / 60_000;
-      if (ageMinutes > OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES) {
-        return { pcr: null, callOpenInterest: null, putOpenInterest: null, observedAt: null, ageMinutes: null };
-      }
-
-      // Nearest un-expired expiry at that snapshot, same aggregate definition
-      // `apps/ml/oi_pcr_signal_check.py` and `run_hybrid_confluence_backtest.py` use, so the live
-      // gate and the offline research checks can't silently drift onto two different PCR
-      // definitions.
-      const aggResult = await this.database.query<{ call_oi: string | null; put_oi: string | null }>(`
-        WITH nearest_expiry AS (
-          SELECT MIN(expiry_date) AS expiry_date
-          FROM option_chain_snapshots
-          WHERE underlying_symbol = $1 AND observed_at = $2 AND expiry_date >= observed_at::date
-        )
+      const aggResult = await this.database.query<{
+        call_oi: string | null;
+        put_oi: string | null;
+        contracts: string;
+        missing_oi: string;
+      }>(`
         SELECT
-          SUM(CASE WHEN s.option_type = 'CE' THEN s.open_interest ELSE 0 END) AS call_oi,
-          SUM(CASE WHEN s.option_type = 'PE' THEN s.open_interest ELSE 0 END) AS put_oi
-        FROM option_chain_snapshots s, nearest_expiry ne
-        WHERE s.underlying_symbol = $1 AND s.observed_at = $2 AND s.expiry_date = ne.expiry_date
-      `, [symbol, observedAt]);
+          SUM(CASE WHEN option_type = 'CE' THEN open_interest ELSE 0 END) AS call_oi,
+          SUM(CASE WHEN option_type = 'PE' THEN open_interest ELSE 0 END) AS put_oi,
+          COUNT(*) AS contracts,
+          COUNT(*) FILTER (WHERE open_interest IS NULL) AS missing_oi
+        FROM option_chain_snapshots
+        WHERE underlying_symbol = $1 AND expiry_date = $2::date AND observed_at = $3
+      `, [symbol, expiryDate, observedAt]);
+      const row = aggResult.rows[0];
 
-      const callOi = aggResult.rows[0]?.call_oi != null ? Number(aggResult.rows[0].call_oi) : 0;
-      const putOi = aggResult.rows[0]?.put_oi != null ? Number(aggResult.rows[0].put_oi) : 0;
-      const pcr = callOi > 0 ? putOi / callOi : null;
-
-      return { pcr, callOpenInterest: callOi, putOpenInterest: putOi, observedAt, ageMinutes };
+      return buildOptionChainSignal({
+        expiryDate,
+        observedAt,
+        decisionTime,
+        callOpenInterest: row?.call_oi != null ? Number(row.call_oi) : 0,
+        putOpenInterest: row?.put_oi != null ? Number(row.put_oi) : 0,
+        contracts: row?.contracts != null ? Number(row.contracts) : 0,
+        contractsWithMissingOpenInterest: row?.missing_oi != null ? Number(row.missing_oi) : 0,
+      });
     } catch {
       return undefined;
     }
@@ -658,29 +730,67 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         };
       }
 
-      const depthResult = await this.database.query<{
-        bid_price: string[];
-        bid_qty: string[];
-        ask_price: string[];
-        ask_qty: string[];
-        total_buy_qty: string;
-        total_sell_qty: string;
-      }>(`
-        SELECT bid_price, bid_qty, ask_price, ask_qty, total_buy_qty, total_sell_qty
-        FROM depth_frames
-        WHERE provider_symbol = $1 AND received_at <= $2
-        ORDER BY received_at DESC, sequence_no DESC
-        LIMIT 1
-      `, [symbol.toUpperCase(), candle.close_time]);
+      /*
+       * Depth rows are stored under the FRONT-MONTH FUTURES contract's ticker
+       * (`NSE:BANKNIFTY26OCTFUT`), never under the index/instrument symbol. The previous lookup used
+       * `provider_symbol = symbol.toUpperCase()` ('BANKNIFTY' / 'NIFTY50'), which matches zero rows,
+       * so the live order-book gate NEVER saw depth: a missing book became totalBuy=0, raw_di=0, and
+       * `raw_di || null` downstream hid it.
+       *
+       * The contract is resolved the way `collect-depth-frames.ts` resolves what it subscribes to:
+       * `frontMonthFuturesSymbol` over the calendar -- here the MONTHLY expiries only, because a
+       * futures contract expires with the monthly series, and as of the candle close, not wall-clock
+       * now. An instrument with no depth capture (NIFTY50 has none today; its futures ticker matches
+       * no stored rows) simply yields no qualifying frame.
+       *
+       * A frame qualifies only if received within DEPTH_FRAME_MAX_AGE_MS (5s) at or before the close;
+       * an older book describes a different bar.
+       */
+      const calendar = await this.listExpiryCalendarAsOf(symbol, candle.close_time);
+      const depthSymbol = frontMonthFuturesSymbol({
+        underlying: futuresTickerUnderlying(symbol),
+        now: candle.close_time,
+        expiries: calendar.filter((entry) => entry.expiryKind === "MONTHLY").map((entry) => entry.expiryDate),
+      });
+
+      const depthResult: { rows: DepthFrameRow[] } = depthSymbol === null
+        ? { rows: [] }
+        : await this.database.query<DepthFrameRow>(`
+          SELECT bid_price, bid_qty, ask_price, ask_qty, total_buy_qty, total_sell_qty
+          FROM depth_frames
+          WHERE provider_symbol = $1 AND received_at <= $2 AND received_at >= $3
+          ORDER BY received_at DESC, sequence_no DESC
+          LIMIT 1
+        `, [depthSymbol, candle.close_time, new Date(candle.close_time.getTime() - DEPTH_FRAME_MAX_AGE_MS)]);
 
       const df = depthResult.rows[0];
+      if (!df) {
+        // Explicit "no depth" state. raw_di/di_tilde are null -- NOT 0 -- so no gate can read an
+        // absent book as a perfectly balanced one. `depth_state` is extra to the declared context
+        // type on purpose: it rides along in the captured rawContext for diagnosis.
+        const noDepthSignal = {
+          is_level_proximate: true,
+          nearest_level_type: level.pool_type,
+          nearest_level_price: levelPrice,
+          distance_bps: distanceBps,
+          raw_di: null,
+          di_tilde: null,
+          directional_bias: "NONE",
+          gate_action: "NO_ACTION",
+          depth_state: "NO_DEPTH" as const,
+          depth_symbol: depthSymbol,
+          depth_max_age_ms: DEPTH_FRAME_MAX_AGE_MS,
+        };
+        return noDepthSignal;
+      }
+
       const depthData = {
-        bidPrice: df?.bid_price ? df.bid_price.map(Number) : [],
-        bidQty: df?.bid_qty ? df.bid_qty.map(Number) : [],
-        askPrice: df?.ask_price ? df.ask_price.map(Number) : [],
-        askQty: df?.ask_qty ? df.ask_qty.map(Number) : [],
-        totalBuyQty: df?.total_buy_qty ? Number(df.total_buy_qty) : 0,
-        totalSellQty: df?.total_sell_qty ? Number(df.total_sell_qty) : 0,
+        bidPrice: df.bid_price.map(Number),
+        bidQty: df.bid_qty.map(Number),
+        askPrice: df.ask_price.map(Number),
+        askQty: df.ask_qty.map(Number),
+        totalBuyQty: df.total_buy_qty ? Number(df.total_buy_qty) : 0,
+        totalSellQty: df.total_sell_qty ? Number(df.total_sell_qty) : 0,
       };
 
       return resolveConfluenceSignalFromDepth({

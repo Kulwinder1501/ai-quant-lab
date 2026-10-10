@@ -551,7 +551,8 @@ describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository.optionCha
     await seedCompletedCandle(targetId, "5m", closeTime);
     await seedChainSnapshot({
       underlyingSymbol: symbol,
-      // 90 minutes stale -- past the 60-minute ceiling `resolveOptionChainSignal` enforces.
+      // 90 minutes stale -- past the 20-minute ceiling (OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES).
+      // (Also lands at 07:50 IST, outside the 09:15-15:30 session window; either alone makes it unusable.)
       observedAt: new Date(closeTime.getTime() - 90 * 60_000),
       callOi: 100_000,
       putOi: 140_000,

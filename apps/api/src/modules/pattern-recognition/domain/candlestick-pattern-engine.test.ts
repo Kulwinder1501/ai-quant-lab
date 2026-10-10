@@ -42,7 +42,18 @@ describe("CandlestickPatternEngine", () => {
   it("detects a doji and trend-qualified single-candle reversal shapes", () => {
     const doji = detectionFor(engine, [candle("1", 100, 110, 90, 100.5)], "DOJI", "1", "NEUTRAL");
     expect(doji.contextCandleIds).toEqual(["1"]);
-    expect(doji.confidence).toBeGreaterThan(0.9);
+    // Asserts the definition -- a real body that is small relative to the range -- not the value of
+    // the score. `confidence` is `1 - bodyRatio`, which is >= 0.9 for every doji by construction, so
+    // pinning "> 0.9" only restated the detection threshold.
+    const { bodyRatio, range } = doji.details as { bodyRatio: number; range: number };
+    expect(range).toBe(20);
+    expect(bodyRatio).toBeCloseTo(0.5 / 20, 10);
+    expect(bodyRatio).toBeLessThanOrEqual(0.1);
+    expect(doji.confidence).toBeCloseTo(1 - bodyRatio, 10);
+    expect(doji.details).toMatchObject({ confidenceKind: "HEURISTIC_STRENGTH" });
+
+    // A candle whose body is a large share of its range is not a doji, whatever its confidence.
+    expect(engine.detect([candle("1", 100, 110, 90, 108)]).some((d) => d.patternCode === "DOJI")).toBe(false);
 
     const decline = [
       candle("1", 14.2, 14.5, 13.8, 14),
@@ -331,6 +342,61 @@ describe("CandlestickPatternEngine", () => {
     const onCandle5 = results.filter((d) => d.candleId === "5").map((d) => d.patternCode);
     expect(onCandle5).toContain("SHOOTING_STAR");
     expect(onCandle5).not.toContain("INVERTED_HAMMER");
+  });
+
+  it("requires a doji to span more than two ticks when the tick size is known", () => {
+    const tick = 0.05;
+    // Range 0.10 = 2 ticks (quantisation, not indecision); range 0.15 = 3 ticks.
+    const twoTicks = [candle("1", 100.05, 100.1, 100.0, 100.05)];
+    const threeTicks = [candle("1", 100.05, 100.15, 100.0, 100.05)];
+
+    expect(engine.detect(twoTicks, { tickSize: tick }).some((d) => d.patternCode === "DOJI")).toBe(false);
+    expect(engine.detect(threeTicks, { tickSize: tick }).some((d) => d.patternCode === "DOJI")).toBe(true);
+    // Without a tick size there is no floor (the pre-existing behaviour, e.g. for fixtures).
+    expect(engine.detect(twoTicks).some((d) => d.patternCode === "DOJI")).toBe(true);
+    // The floor also covers the dragonfly/gravestone refinements, which are dojis by construction.
+    const tinyDragonfly = [candle("1", 100.1, 100.1, 100.0, 100.1)];
+    expect(engine.detect(tinyDragonfly, { tickSize: tick }).map((d) => d.patternCode)).toEqual([]);
+  });
+
+  it("uses the supplied prior-trend lookback instead of a three-bar comparison", () => {
+    // Closes: a long flat/rising stretch, then three lower bars, then a hammer-shaped bar. Over the
+    // last 3 bars price fell (downtrend -> HAMMER); over a 12-bar window it did not.
+    const closes = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 111, 110, 109];
+    const series = closes.map((close, i) => candle(String(i + 1), close, close + 0.4, close - 0.4, close));
+    series.push(candle("17", 108.5, 108.65, 106, 108.6)); // hammer shape: long lower shadow, tiny upper
+
+    const shortLookback = engine.detect(series, { trendLookback: 3 }).filter((d) => d.candleId === "17");
+    expect(shortLookback.some((d) => d.patternCode === "HAMMER")).toBe(true);
+
+    const longLookback = engine.detect(series, { trendLookback: 12 }).filter((d) => d.candleId === "17");
+    expect(longLookback.some((d) => d.patternCode === "HAMMER")).toBe(false);
+  });
+
+  it("requires a Piercing Line to open below the prior low and a Dark Cloud to open above the prior high", () => {
+    const decline = [
+      candle("1", 14.2, 14.5, 13.8, 14),
+      candle("2", 13.2, 13.5, 12.8, 13),
+      candle("3", 12.2, 12.5, 11.8, 12),
+      candle("4", 12.0, 12.2, 9.8, 10.0), // bearish, low 9.8, close 10.0
+    ];
+    // Opens at 9.9: below the prior CLOSE (10.0) but not below the prior LOW (9.8). v1 accepted this.
+    const insideRange = [...decline, candle("5", 9.9, 11.8, 9.85, 11.5)];
+    expect(engine.detect(insideRange).some((d) => d.patternCode === "PIERCING_LINE")).toBe(false);
+    // Opens below the prior low: the textbook gap-down open.
+    const gapped = [...decline, candle("5", 9.7, 11.8, 9.6, 11.5)];
+    expect(engine.detect(gapped).some((d) => d.patternCode === "PIERCING_LINE")).toBe(true);
+
+    const advance = [
+      candle("1", 9.8, 10.2, 9.6, 10),
+      candle("2", 10.8, 11.2, 10.6, 11),
+      candle("3", 11.8, 12.2, 11.6, 12),
+      candle("4", 12.0, 14.5, 11.8, 14.0), // bullish, high 14.5, close 14.0
+    ];
+    const darkInside = [...advance, candle("5", 14.1, 14.2, 12.2, 12.5)]; // above prior close, below prior high
+    expect(engine.detect(darkInside).some((d) => d.patternCode === "DARK_CLOUD_COVER")).toBe(false);
+    const darkGapped = [...advance, candle("5", 14.8, 14.9, 12.2, 12.5)];
+    expect(engine.detect(darkGapped).some((d) => d.patternCode === "DARK_CLOUD_COVER")).toBe(true);
   });
 
   it("handles zero range and zero volume candles safely without crashing", () => {

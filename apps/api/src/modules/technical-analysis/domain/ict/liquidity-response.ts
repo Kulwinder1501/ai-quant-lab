@@ -6,7 +6,18 @@
  *   - BREAK_ACCEPTANCE: Price breaches through the pool and accepts beyond it.
  *   - AMBIGUOUS: Indeterminate or insufficient excursion to classify.
  *
- * Empirical calibration derived from the Phase 4 empirical study over BANKNIFTY history:
+ * CAVEAT (2026-10-10): none of the numbers in this file are validated.
+ *   - The baseline rejection priors below came from the Phase 4 study run on the LEGACY
+ *     (`labeling_version = 'v1-legacy'`) contact labels, whose forward window included the
+ *     confirming bar (look-ahead; e.g. 5m SESSION_HIGH/LOW 5646/5646 "contacted", 0 breached) and
+ *     whose candidates were duplicated after PDH/PDL breaches. Treat them as unverified priors.
+ *   - The additive adjustments in `evaluate()` (+0.05 shallow graze, -0.15 heavy penetration,
+ *     +0.10 strong reclaim, -0.25 no close-back-inside) and the 0.70 / 0.60 verdict cut-offs are
+ *     UNVALIDATED HEURISTICS: hand-picked constants, never fitted or calibrated against any
+ *     outcome. They are kept as-is and are NOT a calibration -- do not quote the resulting
+ *     "probabilities" as measured rejection rates.
+ *
+ * Original (uncalibrated) description of the Phase 4 study over BANKNIFTY history:
  *   - SWING_HIGH / SWING_LOW: ~88% - 90% Rejection Rate (High-Probability Sweep)
  *   - ITH / ITL:             ~84% - 90% Rejection Rate (High-Probability Sweep)
  *   - SESSION_HIGH / LOW:    ~86% - 88% Rejection Rate
@@ -50,7 +61,8 @@ export interface EvaluateResponseInput {
 }
 
 /**
- * Baseline empirical rejection priors established from Phase 4 research.
+ * Baseline rejection priors from Phase 4 research on LEGACY (look-ahead) labels -- unverified.
+ * See the caveat in the file header.
  */
 const BASELINE_REJECTION_PRIORS: Record<string, number> = {
   SWING_LOW: 0.90,
@@ -72,6 +84,8 @@ export class LiquidityResponseResolver {
     const basePrior = BASELINE_REJECTION_PRIORS[input.poolType] ?? 0.50;
     let adjustedRejection = basePrior;
 
+    // UNVALIDATED HEURISTIC ADJUSTMENTS (+0.05 / -0.15 / +0.10 / -0.25 below): hand-picked
+    // constants, not calibrated against any outcome. See the file header.
     // Heavy penetration (> 15 bps) indicates aggressive momentum; penalizes sweep probability.
     if (input.penetrationBps > 15) {
       adjustedRejection -= 0.15;

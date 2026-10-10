@@ -145,13 +145,24 @@ export class PostgresCandleRepository implements CandleRepository {
     return result.rows.map(toCandle);
   }
 
-  async listCompleted(instrumentId: string, timeframe: string): Promise<PersistedCandle[]> {
+  /**
+   * Completed candles whose close has actually elapsed.
+   *
+   * `is_complete` alone is not a closed-bar guard: a bar can be flagged complete before its
+   * `close_time` (7% of recent 60m pattern detections had `detected_at < close_time`, i.e. were
+   * computed on a partial bar and later rewritten). `close_time <= now` is therefore required as
+   * well, matching `findLatestCompleted`'s settled-bar rule in the strategy context repository.
+   *
+   * `asOf` is for tests and replay; omitted, the database clock (`CURRENT_TIMESTAMP`) is used.
+   */
+  async listCompleted(instrumentId: string, timeframe: string, asOf?: Date): Promise<PersistedCandle[]> {
     const result = await this.database.query<CandleRow>(`
       SELECT ${returningColumns}
       FROM candles
       WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
+        AND close_time <= COALESCE($3::timestamptz, CURRENT_TIMESTAMP)
       ORDER BY open_time ASC
-    `, [instrumentId, timeframe]);
+    `, [instrumentId, timeframe, asOf ?? null]);
     return result.rows.map(toCandle);
   }
 

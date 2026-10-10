@@ -6,6 +6,7 @@ import {
   PRODUCTION_INDICATOR_VERSION,
 } from "./ai-autonomous-agent.js";
 import type { OpenOptionPositionFromIdea } from "../../paper-trading/application/open-option-position-from-idea.js";
+import { candlestickAlgorithmVersion } from "../../pattern-recognition/domain/market-pattern.js";
 
 /**
  * Covers `tick`'s execution path, which had no tests at all despite being the only code in
@@ -66,7 +67,7 @@ const BULLISH_CONTEXT = {
   ],
   patterns: [
     {
-      code: "BULLISH_ENGULFING", algorithmVersion: "pr-v1", direction: "BULLISH",
+      code: "BULLISH_ENGULFING", algorithmVersion: candlestickAlgorithmVersion, direction: "BULLISH",
       confidence: 0.9, contextCandleIds: ["candle-1"],
     },
   ],
@@ -294,7 +295,7 @@ describe("AiAutonomousAgent.tick", () => {
         { code: "ATR", algorithmVersion: PRODUCTION_INDICATOR_VERSION, parameters: {}, values: { value: 40 } },
       ],
       patterns: [{
-        code: "BEARISH_ENGULFING", algorithmVersion: "pr-v1", direction: "BEARISH",
+        code: "BEARISH_ENGULFING", algorithmVersion: candlestickAlgorithmVersion, direction: "BEARISH",
         confidence: 0.95, contextCandleIds: ["candle-1"],
       }],
     };
@@ -319,6 +320,46 @@ describe("AiAutonomousAgent.tick", () => {
     expect(gatedOut!.confidence).toBeGreaterThanOrEqual(80);
     expect(gatedOut!.details.executableSides).toEqual(["LONG"]);
     expect(gatedOut!.message).toMatch(/not an executable side/i);
+  });
+
+  it("abstains on the pattern when bullish and bearish patterns conflict, instead of taking the alphabetically first", async () => {
+    // Regression: `ctx.patterns[0]` is the pattern_code-ASC first row, so BEARISH_ENGULFING always
+    // beat BULLISH_ENGULFING when both were present.
+    const conflicted = {
+      ...BULLISH_CONTEXT,
+      patterns: [
+        { code: "BEARISH_ENGULFING", algorithmVersion: candlestickAlgorithmVersion, direction: "BEARISH", confidence: 0.8, contextCandleIds: ["candle-0", "candle-1"] },
+        { code: "BULLISH_ENGULFING", algorithmVersion: candlestickAlgorithmVersion, direction: "BULLISH", confidence: 0.9, contextCandleIds: ["candle-0", "candle-1"] },
+      ],
+    };
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent } = buildAgent({ database, context: conflicted });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    const analysis = agent.getThoughts(10).find((t) => t.details.pattern !== undefined);
+    expect(analysis).toBeDefined();
+    expect(analysis!.details.pattern).toBe("NONE");
+  });
+
+  it("ignores patterns stored under a superseded algorithm version", async () => {
+    const stale = {
+      ...BULLISH_CONTEXT,
+      patterns: [{ code: "BULLISH_ENGULFING", algorithmVersion: "candlestick-v1", direction: "BULLISH", confidence: 0.9, contextCandleIds: ["candle-1"] }],
+    };
+    const database = fakePool({
+      instruments: [{ id: "inst-1", lot_size: 75 }],
+      strategyVersions: [{ id: "sv-1" }],
+    });
+    const { agent } = buildAgent({ database, context: stale });
+
+    await agent.tick("NIFTY50", "15m", 24_050);
+
+    const analysis = agent.getThoughts(10).find((t) => t.details.pattern !== undefined);
+    expect(analysis!.details.pattern).toBe("NONE");
   });
 
   it("reports both theses, so the losing side's strength is visible", async () => {

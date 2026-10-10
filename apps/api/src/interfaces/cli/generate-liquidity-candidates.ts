@@ -7,6 +7,7 @@ import type { PersistedCandle } from "../../modules/market-data/domain/candle.js
 import { IctSessionLevelTracker } from "../../modules/technical-analysis/domain/ict/session-levels.js";
 import { findConfirmedPivotAt, type CausalCandle } from "../../modules/technical-analysis/domain/ict/causal-pivot.js";
 import { requireOption, getOption } from "./arguments.js";
+import { CANDIDATE_VERSION_CURRENT } from "../../modules/technical-analysis/domain/ict/liquidity-label-versions.js";
 
 /**
  * Liquidity Intelligence Engine v1 — Phase 1
@@ -18,6 +19,11 @@ import { requireOption, getOption } from "./arguments.js";
  *
  * INVARIANT: candidate.known_at_time >= candidate.created_at_time for every row.
  * This is asserted at write time and will throw if violated.
+ *
+ * Candidates are written as `candidate_version = 'v2-dedup'`: one row per
+ * (instrument, timeframe, pool_type, price, session_date), enforced by a partial UNIQUE index
+ * (migration 132). The legacy generator re-registered a breached PDH/PDL on every later bar;
+ * rows it produced carry `candidate_version = 'v1-legacy'` and must not be mixed with these.
  *
  * Supported pool types (v1 only):
  *   PDH / PDL           - Previous Day High/Low (known at session open)
@@ -67,6 +73,11 @@ export interface LiquidityPoolCandidate {
   readonly invalidatedAtTime: Date | null;
   /** The candle ID that produced this candidate. */
   readonly sourceCandleId: string;
+  /**
+   * Trading-session date (profile calendar) of the bar at which the candidate became known.
+   * Part of the idempotency key (instrument, timeframe, pool_type, price, session_date).
+   */
+  readonly sessionDate: string;
 }
 
 // ─────────────────────────── Helpers ─────────────────────────────────────────
@@ -125,6 +136,9 @@ export function generateCandidates(
   // We keep the most recent active PDH, PDL, session high, session low.
   let activePdh: number | null = null;
   let activePdl: number | null = null;
+  // Session whose PDH / PDL has already been registered (one registration per session, ever).
+  let lastPdhSession: string | null = null;
+  let lastPdlSession: string | null = null;
   let activeSessionHigh: number | null = null;
   let activeSessionHighCandleId: string | null = null;
   let activeSessionLow: number | null = null;
@@ -145,14 +159,26 @@ export function generateCandidates(
     }
   }
 
-  function registerCandidate(candidate: LiquidityPoolCandidate): void {
+  // Session date of the bar currently being processed (set each iteration, before any register).
+  let barSessionDate = "";
+  // One candidate per (pool_type, price, session_date): the in-memory mirror of the v2 UNIQUE
+  // index. A level that already produced a candidate in this session -- breached or not -- is
+  // never registered again in the same session.
+  const registeredLevelSessions = new Set<string>();
+
+  function registerCandidate(input: Omit<LiquidityPoolCandidate, "sessionDate">): boolean {
+    const candidate: LiquidityPoolCandidate = { ...input, sessionDate: barSessionDate };
     assertKnownAtInvariant(candidate);
+    const uniqueKey = `${candidate.poolType}:${candidate.price}:${candidate.sessionDate}`;
+    if (registeredLevelSessions.has(uniqueKey)) return false;
+    registeredLevelSessions.add(uniqueKey);
     const key = `${candidate.poolType}:${candidate.price}`;
     // A candidate at the same price+type that is still active gets invalidated first
-    // (e.g. SESSION_HIGH being re-established at the same level after a brief dip).
+    // (e.g. a level carried over from an earlier session at the same price).
     invalidate(candidate.poolType, candidate.price, candidate.knownAtTime);
     activeByTypeAndPrice.set(key, candidates.length);
     candidates.push(candidate);
+    return true;
   }
 
   // ── Main bar-by-bar walk ───────────────────────────────────────────────────
@@ -173,13 +199,25 @@ export function generateCandidates(
 
     // ── 2. Session levels (PDH/PDL) ────────────────────────────────────────
     const sessionSnap = sessionTracker.processCandle(causalCandles, i);
+    barSessionDate = sessionSnap.currentSessionDate;
 
     if (sessionSnap.levels) {
       const pdh = sessionSnap.levels.pdh;
       const pdl = sessionSnap.levels.pdl;
+      const levelsSession = sessionSnap.levels.sessionDate;
 
-      // Emit PDH if it changed (new session started).
-      if (pdh !== activePdh && pdh > 0) {
+      // Emit PDH/PDL exactly ONCE per session (first bar of the new session). The previous code
+      // keyed on `pdh !== activePdh`, and `activePdh` is nulled on breach -- so after a breach the
+      // SAME level was re-registered on the very next bar (and again, and again): one level-day
+      // produced up to 1,725 rows (5m BANKNIFTY PDL: 104,749 rows for 191 level-days), and the
+      // re-registering bar's own low was at/through the level by construction.
+      if (levelsSession !== lastPdhSession && pdh > 0) {
+        lastPdhSession = levelsSession;
+        // The previous session's level is superseded by this session's level.
+        if (activePdh !== null) {
+          invalidate("PDH", activePdh, bar.openTime);
+          activePdh = null;
+        }
         // PDH becomes knowable at the open of the current session (first bar of new session).
         registerCandidate({
           instrumentId,
@@ -194,9 +232,20 @@ export function generateCandidates(
           sourceCandleId: persisted.id,
         });
         activePdh = pdh;
+        // The registering bar may itself have breached the level; record that instead of leaving
+        // the level "active" until the next bar.
+        if (bar.high >= pdh) {
+          invalidate("PDH", pdh, bar.openTime);
+          activePdh = null;
+        }
       }
 
-      if (pdl !== activePdl && pdl > 0) {
+      if (levelsSession !== lastPdlSession && pdl > 0) {
+        lastPdlSession = levelsSession;
+        if (activePdl !== null) {
+          invalidate("PDL", activePdl, bar.openTime);
+          activePdl = null;
+        }
         registerCandidate({
           instrumentId,
           symbol,
@@ -210,6 +259,10 @@ export function generateCandidates(
           sourceCandleId: persisted.id,
         });
         activePdl = pdl;
+        if (bar.low <= pdl) {
+          invalidate("PDL", pdl, bar.openTime);
+          activePdl = null;
+        }
       }
     }
 
@@ -356,6 +409,55 @@ export function generateCandidates(
 
 // ─────────────────────────── DB Persistence ──────────────────────────────────
 
+const CANDIDATE_COLUMNS_PER_ROW = 13;
+
+/**
+ * Builds the batched, idempotent INSERT. Rows are written with `candidate_version = 'v2-dedup'`
+ * and conflict on the partial UNIQUE index from migration 132
+ * (instrument_id, timeframe, pool_type, price, session_date) WHERE candidate_version = 'v2-dedup',
+ * so re-running the generator never duplicates a level-day. Legacy ('v1-legacy') rows are untouched.
+ */
+export function buildCandidateInsert(
+  batch: readonly LiquidityPoolCandidate[],
+  runId: string
+): { text: string; values: unknown[] } {
+  const values: unknown[] = [];
+  const placeholders = batch.map((c, j) => {
+    const base = j * CANDIDATE_COLUMNS_PER_ROW;
+    values.push(
+      c.instrumentId,       // ::uuid
+      c.symbol,
+      c.timeframe,
+      c.poolType,
+      c.side,
+      c.price,
+      c.createdAtTime,
+      c.knownAtTime,
+      c.invalidatedAtTime,
+      c.sourceCandleId,     // ::uuid
+      runId,
+      c.sessionDate,        // ::date
+      CANDIDATE_VERSION_CURRENT
+    );
+    return (
+      `($${base + 1}::uuid,$${base + 2},$${base + 3},$${base + 4},` +
+      `$${base + 5},$${base + 6},$${base + 7},$${base + 8},` +
+      `$${base + 9},$${base + 10}::uuid,$${base + 11},$${base + 12}::date,$${base + 13})`
+    );
+  });
+
+  const text =
+    `INSERT INTO liquidity_pool_candidates
+       (instrument_id, symbol, timeframe, pool_type, side, price,
+        created_at_time, known_at_time, invalidated_at_time,
+        source_candle_id, generation_run_id, session_date, candidate_version)
+     VALUES ${placeholders.join(",")}
+     ON CONFLICT (instrument_id, timeframe, pool_type, price, session_date)
+       WHERE candidate_version = '${CANDIDATE_VERSION_CURRENT}'
+     DO NOTHING`;
+  return { text, values };
+}
+
 async function persistCandidates(
   database: ReturnType<typeof createDatabasePool>,
   candidates: LiquidityPoolCandidate[],
@@ -366,41 +468,10 @@ async function persistCandidates(
 
   for (let start = 0; start < candidates.length; start += BATCH) {
     const batch = candidates.slice(start, start + BATCH);
-
-    // Build a multi-row INSERT for efficiency.
-    const values: unknown[] = [];
-    const placeholders = batch.map((c, j) => {
-      const base = j * 11; // 11 values per row
-      values.push(
-        c.instrumentId,    // $1  ::uuid
-        c.symbol,          // $2
-        c.timeframe,       // $3
-        c.poolType,        // $4
-        c.side,            // $5
-        c.price,           // $6
-        c.createdAtTime,   // $7
-        c.knownAtTime,     // $8
-        c.invalidatedAtTime, // $9
-        c.sourceCandleId,  // $10 ::uuid
-        runId              // $11
-      );
-      return (
-        `($${base + 1}::uuid,$${base + 2},$${base + 3},$${base + 4},` +
-        `$${base + 5},$${base + 6},$${base + 7},$${base + 8},` +
-        `$${base + 9},$${base + 10}::uuid,$${base + 11})`
-      );
-    });
-
-    await database.query(
-      `INSERT INTO liquidity_pool_candidates
-         (instrument_id, symbol, timeframe, pool_type, side, price,
-          created_at_time, known_at_time, invalidated_at_time,
-          source_candle_id, generation_run_id)
-       VALUES ${placeholders.join(",")}
-       ON CONFLICT DO NOTHING`,
-      values
-    );
-    inserted += batch.length;
+    const { text, values } = buildCandidateInsert(batch, runId);
+    const result = await database.query(text, values);
+    // rowCount = rows actually inserted (conflicts skipped), not rows attempted.
+    inserted += result.rowCount ?? 0;
   }
 
   return inserted;

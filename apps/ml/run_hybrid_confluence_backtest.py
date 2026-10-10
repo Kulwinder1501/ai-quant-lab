@@ -33,8 +33,12 @@ in v1.0.0:
      out to add nothing on top of Pillar A in this feature construction).
      Pillar C is a genuine as-of join against `option_chain_snapshots`,
      modeled on `apps/ml/oi_pcr_signal_check.py`'s bisect-based lookup, with
-     the same 60-minute staleness ceiling and the same "unmeasured stays
-     unmeasured, never defaults to a pass" rule.
+     the same "unmeasured stays unmeasured, never defaults to a pass" rule.
+     (Corrected 2026-10: the staleness ceiling is now ONE shared 20 minutes,
+     not 60, and the PCR is the nearest-un-settled-expiry WINDOWED PCR chosen
+     expiry-first via `ai_quant_lab_ml/option_chain_pcr.py` -- see that module.
+     Results quoted below this line were produced under the old 60-minute,
+     latest-observed_at join and are not directly comparable.)
 
 This script creates no model version, no prediction, no paper trade, and no
 order. It only reads.
@@ -58,6 +62,11 @@ if str(script_dir) not in sys.path:
 
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
+from ai_quant_lab_ml.option_chain_pcr import (
+    MAX_SNAPSHOT_AGE_MINUTES,
+    OptionChainBooks,
+    load_option_chain_books,
+)
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 LOG_FILE = Path(__file__).resolve().parent.parent.parent / "logs" / "hybrid-confluence-backtest.log"
@@ -66,16 +75,20 @@ LOG_FILE = Path(__file__).resolve().parent.parent.parent / "logs" / "hybrid-conf
 # (`hybrid-liquidity-confluence-strategy.ts`, `isOfiAligned`).
 PILLAR_B_RAW_DI_THRESHOLD = 0.05
 
-# Pillar C: whole-chain PCR wall thresholds, matching the TS strategy's
-# docstring ("PCR >= 1.2 for LONG, <= 0.8 for SHORT").
+# Pillar C: windowed PCR wall thresholds, matching the TS strategy's
+# docstring ("PCR >= 1.2 for LONG, <= 0.8 for SHORT"). The PCR is over the
+# collector's +/-strikecount window around spot, not the whole chain.
 PILLAR_C_PCR_LONG_MIN = 1.2
 PILLAR_C_PCR_SHORT_MAX = 0.8
 
 # How stale the most recent option-chain snapshot may be and still count as
-# "known at decision time". Matches `oi_pcr_signal_check.py`'s
-# MAXIMUM_SNAPSHOT_AGE_MINUTES -- same collector, same polling cadence, no
-# reason to invent a different tolerance here.
-PILLAR_C_MAX_SNAPSHOT_AGE_MINUTES = 60.0
+# "known at decision time". ONE ceiling shared with the live gate
+# (OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES in option-chain-signal.ts) and
+# `oi_pcr_signal_check.py`: 20 minutes -- the collector polls every 12 minutes
+# (median) and up to 18 (p90), so 20 admits one healthy cycle plus jitter. This
+# was 60 here while the live gate used 15, so the validated gate was not the
+# gate that runs live. Rationale and the selection rule: ai_quant_lab_ml/option_chain_pcr.py.
+PILLAR_C_MAX_SNAPSHOT_AGE_MINUTES = MAX_SNAPSHOT_AGE_MINUTES
 
 DEFAULT_RESAMPLES = 1000
 DEFAULT_SEED = 42
@@ -151,61 +164,31 @@ def find_nearest_depth_frame(
 
 # --- Pillar C: option-chain PCR, as-of join --------------------------------
 
-_CHAIN_AGGREGATE_SQL = """
-    WITH nearest_expiry AS (
-        SELECT underlying_symbol, observed_at, MIN(expiry_date) AS expiry_date
-        FROM option_chain_snapshots
-        WHERE underlying_symbol = %s AND expiry_date >= observed_at::date
-        GROUP BY underlying_symbol, observed_at
-    )
-    SELECT
-        s.observed_at,
-        SUM(CASE WHEN s.option_type = 'CE' THEN s.open_interest ELSE 0 END) AS call_oi,
-        SUM(CASE WHEN s.option_type = 'PE' THEN s.open_interest ELSE 0 END) AS put_oi
-    FROM option_chain_snapshots s
-    INNER JOIN nearest_expiry ne
-      ON ne.underlying_symbol = s.underlying_symbol
-     AND ne.observed_at = s.observed_at
-     AND ne.expiry_date = s.expiry_date
-    WHERE s.underlying_symbol = %s
-    GROUP BY s.observed_at
-    ORDER BY s.observed_at ASC
-"""
+def fetch_pcr_series(conn: psycopg.Connection, underlying_symbol: str) -> OptionChainBooks:
+    """Per-expiry in-session book series + expiry calendar for the as-of PCR join.
 
-
-def fetch_pcr_series(conn: psycopg.Connection, underlying_symbol: str) -> list[tuple[datetime, float | None]]:
-    """Whole-chain PCR (put OI / call OI) at each observed snapshot, nearest un-expired expiry.
-
-    Same aggregate definition as `oi_pcr_signal_check.py`'s `_CHAIN_AGGREGATE_SQL` --
-    reused rather than reinvented, so this and the earlier gap-analysis check can't
-    silently drift onto two different PCR definitions.
+    The selection rule is shared with the live gate and `oi_pcr_signal_check.py`
+    (`ai_quant_lab_ml/option_chain_pcr.py`): pick the nearest expiry whose 15:30 IST
+    settlement is still ahead of the decision time FIRST, then the latest 09:15-15:30 IST
+    snapshot of that expiry. The old query minimised `expiry_date` per `observed_at`
+    (a no-op: each snapshot holds one expiry) and then took the latest `observed_at`,
+    which is the farther "tradable roll" book. The value is a WINDOWED PCR
+    (collector's +/-strikecount around spot), not a whole-chain PCR.
     """
-    with conn.cursor() as cur:
-        cur.execute(_CHAIN_AGGREGATE_SQL, (underlying_symbol, underlying_symbol))
-        rows = cur.fetchall()
-    series = []
-    for observed_at, call_oi, put_oi in rows:
-        call_oi = float(call_oi or 0)
-        put_oi = float(put_oi or 0)
-        pcr = (put_oi / call_oi) if call_oi > 0 else None
-        ts = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
-        series.append((ts, pcr))
-    return series
+    return load_option_chain_books(conn, underlying_symbol)
 
 
 def pcr_as_of(
-    pcr_times: list[datetime],
-    pcr_values: list[float | None],
+    books: OptionChainBooks,
     as_of: datetime,
     max_age_minutes: float = PILLAR_C_MAX_SNAPSHOT_AGE_MINUTES,
 ) -> float | None:
-    index = bisect_right(pcr_times, as_of) - 1
-    if index < 0:
-        return None
-    age_minutes = (as_of - pcr_times[index]).total_seconds() / 60.0
-    if age_minutes > max_age_minutes:
-        return None
-    return pcr_values[index]
+    """Windowed PCR known at `as_of`, or None when unavailable.
+
+    None is never a pass: the reason (STALE / NO_SNAPSHOT / INCOMPLETE_OPEN_INTEREST / ...)
+    is available from `books.resolve(as_of).reason` and is tallied by the caller.
+    """
+    return books.resolve(as_of, max_age_minutes).pcr_windowed
 
 
 # --- Pillar evaluation -------------------------------------------------------
@@ -336,12 +319,13 @@ def run_backtest(
     events = fetch_contact_events(conn)
     log(f"Loaded {len(events):,} level contact events.")
 
-    pcr_series_by_symbol: dict[str, tuple[list[datetime], list[float | None]]] = {}
+    pcr_books_by_symbol: dict[str, OptionChainBooks] = {}
     if enable_pillar_c:
         for symbol in ("NIFTY50", "BANKNIFTY"):
-            series = fetch_pcr_series(conn, symbol)
-            pcr_series_by_symbol[symbol] = ([s[0] for s in series], [s[1] for s in series])
-            log(f"Pillar C: loaded {len(series):,} chain-derived PCR observations for {symbol}.")
+            books = fetch_pcr_series(conn, symbol)
+            pcr_books_by_symbol[symbol] = books
+            book_count = sum(len(series) for series in books.books_by_expiry.values())
+            log(f"Pillar C: loaded {book_count:,} in-session per-expiry chain books for {symbol}.")
 
     events_by_day: dict[date, list[dict]] = {}
     for ev in events:
@@ -352,6 +336,7 @@ def run_backtest(
     hybrid_trades = []  # Pillar A only (the population this script reported pre-2026-09-28)
     full_pillar_trades = []  # Pillar A + B + C, all real
     pillar_c_unmeasured = 0
+    pillar_c_unavailable_reasons: dict[str, int] = {}
 
     for day in sorted(events_by_day.keys()):
         frames = fetch_depth_frames_for_day(conn, day)
@@ -383,9 +368,11 @@ def run_backtest(
             is_up_level = pool_type in UP_LEVELS
 
             pcr = None
-            if enable_pillar_c and symbol in pcr_series_by_symbol:
-                pcr_times, pcr_values = pcr_series_by_symbol[symbol]
-                pcr = pcr_as_of(pcr_times, pcr_values, contact_time)
+            pcr_reason = None
+            if enable_pillar_c and symbol in pcr_books_by_symbol:
+                resolution = pcr_books_by_symbol[symbol].resolve(contact_time, PILLAR_C_MAX_SNAPSHOT_AGE_MINUTES)
+                pcr = resolution.pcr_windowed
+                pcr_reason = resolution.reason
 
             pillars = evaluate_pillars(di_decay, raw_di, is_up_level, pillar_a_threshold, pcr)
 
@@ -397,6 +384,9 @@ def run_backtest(
 
             if enable_pillar_c and pillars["pillar_a"] and not pillars["pcr_measured"]:
                 pillar_c_unmeasured += 1
+                # Explicit reason (e.g. "STALE"), not a silent drop.
+                reason_key = pcr_reason or "NO_CHAIN_FOR_SYMBOL"
+                pillar_c_unavailable_reasons[reason_key] = pillar_c_unavailable_reasons.get(reason_key, 0) + 1
 
             passes_full = pillars["pillar_a"] and (not enable_pillar_b or pillars["pillar_b"]) \
                 and (not enable_pillar_c or pillars["pillar_c"])
@@ -428,6 +418,7 @@ def run_backtest(
         "pillar_a_only_binomial_p": p_value_hybrid,
         "full_pillar": full_stats,
         "pillar_c_unmeasured_at_pillar_a_pass": pillar_c_unmeasured,
+        "pillar_c_unavailable_reasons": pillar_c_unavailable_reasons,
     }
 
     if not quiet:
@@ -446,7 +437,7 @@ def run_backtest(
                        f"NetR={full_stats['net_r']:+.2f}")
             if enable_pillar_c:
                 log_output(f"   Pillar-A-pass events with no measurable PCR (excluded, not defaulted): "
-                           f"{pillar_c_unmeasured}")
+                           f"{pillar_c_unmeasured} (by reason: {pillar_c_unavailable_reasons})")
 
     if resamples > 0 and full_stats["n"] > 0:
         returns_array = np.array([t["return_r"] for t in standalone_trades])

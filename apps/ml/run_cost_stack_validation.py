@@ -14,7 +14,7 @@ script_dir = Path(r"c:\Users\Kulwinder Singh\Desktop\personal\AI Quant Lab\apps\
 sys.path.insert(0, str(script_dir))
 
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
-from ai_quant_lab_ml.cks_ofi_touch import compute_windowed_ofi_series, DepthFrameRow
+from ai_quant_lab_ml.cks_ofi_touch import compute_windowed_ofi_series, DepthFrameRow, recompute_sequence_flags
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -23,8 +23,16 @@ OFI_THRESHOLD = 0.032
 FORWARD_HORIZON_MINUTES = 15
 
 class FrameRow:
-    __slots__ = ['received_at', 'total_buy_qty', 'total_sell_qty', 'canonical_event_at', 'is_valid', 'bid_price_0', 'ask_price_0', 'bid_qty_0', 'ask_qty_0']
+    __slots__ = ['received_at', 'total_buy_qty', 'total_sell_qty', 'canonical_event_at', 'is_valid', 'bid_price_0', 'ask_price_0', 'bid_qty_0', 'ask_qty_0',
+                 'is_snapshot', 'is_duplicate', 'is_regression', 'gap_before']
     def __init__(self, r):
+        # Real sequence-continuity flags, filled in by get_frames() from sequence_no. They used to be
+        # hard-coded False/False/None when building DepthFrameRow, which let the OFI accumulator
+        # difference across snapshots, duplicates, resets and gaps.
+        self.is_snapshot = False
+        self.is_duplicate = False
+        self.is_regression = False
+        self.gap_before = None
         self.received_at = r[0].astimezone(INDIA_TZ) if r[0].tzinfo else r[0].replace(tzinfo=INDIA_TZ)
         self.total_buy_qty = float(r[1]) if r[1] is not None else 0.0
         self.total_sell_qty = float(r[2]) if r[2] is not None else 0.0
@@ -54,7 +62,8 @@ class FrameRow:
 def get_frames(conn, start_dt, end_dt, session_id=None):
     query = """
         SELECT received_at, total_buy_qty, total_sell_qty, exchange_feed_time, vendor_send_time, 
-               bid_price, bid_qty, ask_price, ask_qty, provider_symbol, capture_session_id
+               bid_price, bid_qty, ask_price, ask_qty, provider_symbol, capture_session_id,
+               sequence_no, is_snapshot
         FROM depth_frames
         WHERE received_at >= %s AND received_at < %s
     """
@@ -68,16 +77,45 @@ def get_frames(conn, start_dt, end_dt, session_id=None):
         cur.execute(query, tuple(params))
         rows = cur.fetchall()
         
-    by_sym = {}
+    return build_frames_by_symbol(rows)
+
+
+def build_frames_by_symbol(rows):
+    """Group raw depth rows by futures symbol and attach REAL sequence-continuity flags.
+
+    Flags are recomputed per symbol over ALL of its frames (valid or not) in received order from
+    sequence_no (cks_ofi_touch.recompute_sequence_flags), so snapshots, duplicates, resets
+    (is_regression) and gaps break the OFI chain. Frames later dropped for an invalid canonical
+    timestamp are NOT silently bridged: the next kept frame gets the dropped count added to its
+    gap_before so the accumulator breaks there too."""
+    raw_by_sym = {}
     for r in rows:
         sym = r[9]
         if "FUT" not in sym:
             continue
-        if sym not in by_sym:
-            by_sym[sym] = []
-        f = FrameRow(r)
-        if f.is_valid:
-            by_sym[sym].append(f)
+        raw_by_sym.setdefault(sym, []).append(r)
+
+    by_sym = {}
+    for sym, sym_rows in raw_by_sym.items():
+        seqs = [(None if r[11] is None else int(r[11]), bool(r[12])) for r in sym_rows]
+        flags = recompute_sequence_flags(seqs)
+        kept = []
+        dropped_since_kept = 0
+        for r, (gap_before, is_dup, is_reg) in zip(sym_rows, flags):
+            f = FrameRow(r)
+            f.is_snapshot = bool(r[12])
+            f.is_duplicate = is_dup
+            f.is_regression = is_reg
+            f.gap_before = gap_before
+            if not f.is_valid:
+                if not is_dup:
+                    dropped_since_kept += 1
+                continue
+            if dropped_since_kept and not (f.is_snapshot or is_dup or is_reg):
+                f.gap_before = (gap_before or 0) + dropped_since_kept
+            dropped_since_kept = 0
+            kept.append(f)
+        by_sym[sym] = kept
     return by_sym
 
 def get_dpre(frames, start_idx, t_start, t_end, get_qty):
@@ -395,9 +433,11 @@ def main():
                 eps_buy = extract_episodes(frames, shock_thresholds, sym, "buy")
                 eps_sell = extract_episodes(frames, shock_thresholds, sym, "sell")
                 
-                dframes = [DepthFrameRow(received_at=f.received_at, is_snapshot=False, is_duplicate=False,
-                            gap_before=None, bid_price_0=f.bid_price_0, bid_qty_0=f.bid_qty_0,
-                            ask_price_0=f.ask_price_0, ask_qty_0=f.ask_qty_0) for f in frames]
+                dframes = [DepthFrameRow(received_at=f.received_at, is_snapshot=f.is_snapshot,
+                            is_duplicate=f.is_duplicate, gap_before=f.gap_before,
+                            bid_price_0=f.bid_price_0, bid_qty_0=f.bid_qty_0,
+                            ask_price_0=f.ask_price_0, ask_qty_0=f.ask_qty_0,
+                            is_regression=f.is_regression) for f in frames]
                     
                 ofi_obs = compute_windowed_ofi_series(dframes)
                 if not ofi_obs: continue

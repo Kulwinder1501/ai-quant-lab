@@ -362,14 +362,16 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     expect(result.reasons?.join(" ")).toContain("Bid-Ask spread");
   });
 
-  it("refuses falling open interest on the intended strike", async () => {
+  it("does not refuse on day-over-day falling open interest (2026-10-10 amendment)", async () => {
+    // `openInterestChange` is the vendor's open_interest minus previous_open_interest -- change
+    // versus the PREVIOUS DAY'S CLOSE, not intraday flow -- and a decline is routine near expiry.
+    // Nothing in the repo shows it predicts worse entries, so it is informational, not a veto.
+    // The informational wording itself is asserted in options-entry-validator.test.ts.
     const falling = chain();
     falling.quotes[0] = { ...falling.quotes[0]!, openInterestChange: -50_000 };
     const result = await service({ snapshot: falling }).execute({ tradeIdeaId: "idea-1", now: NOW });
 
-    expect(result).toMatchObject({ approved: false, reason: "OPTIONS_ENTRY_REJECTED" });
-    if (result.approved) return;
-    expect(result.reasons?.join(" ")).toContain("Open interest is decreasing");
+    expect(result).toMatchObject({ approved: true });
   });
 
   it("refuses a low-confidence idea", async () => {

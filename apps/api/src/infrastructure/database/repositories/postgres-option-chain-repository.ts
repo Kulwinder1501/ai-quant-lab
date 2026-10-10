@@ -229,13 +229,19 @@ export class PostgresOptionChainRepository {
   }
 
   /**
-   * One ATM-ish implied-volatility input per stored day, for the IV percentile.
+   * One chain per stored day (every strike of one expiry), for the IV percentile.
    *
-   * Returns the *last* snapshot of each day, and only the strikes adjacent to that snapshot's
-   * own spot, so the caller solves a handful of contracts per day rather than every strike of
-   * every 15-minute observation. A percentile needs one value per day: intraday snapshots are
-   * autocorrelated, so ranking against all of them would let two sessions look like fifty
-   * independent samples.
+   * Returns the *last* snapshot of each day. A percentile needs one value per day: intraday
+   * snapshots are autocorrelated, so ranking against all of them would let two sessions look
+   * like fifty independent samples.
+   *
+   * The expiry is the nearest one that is still at least one calendar date away
+   * (`expiry_date > session_date`). Expiry-day contracts are excluded from the percentile base
+   * (their IV is gamma/pin-dominated and not comparable with other tenors). The expiry still
+   * rotates from day to day, so the caller must tag each day with its days-to-expiry and rank
+   * only within a tenor bucket -- see `iv-percentile-by-tenor.ts`. All strikes are returned,
+   * not just the ATM ones, because the caller needs two-sided pairs across strikes to recover
+   * the put-call-parity forward on the same basis as the live reading.
    */
   async dailyAtmQuotes(input: { underlyingSymbol: string; days: number }): Promise<Array<{
     date: string;
@@ -262,11 +268,12 @@ export class PostgresOptionChainRepository {
       FROM recent r
       JOIN option_chain_snapshots s
         ON s.underlying_symbol = $1 AND s.observed_at = r.observed_at
-      -- Nearest expiry only: mixing tenors would rank today's front-month IV against a
-      -- previous day's far-month, which is a different quantity.
+      -- Nearest expiry that is not the session's own expiry day. The tenor still differs from
+      -- day to day, so the caller buckets by days-to-expiry rather than ranking across them.
       WHERE s.expiry_date = (
         SELECT min(expiry_date) FROM option_chain_snapshots inner_s
         WHERE inner_s.underlying_symbol = $1 AND inner_s.observed_at = r.observed_at
+          AND inner_s.expiry_date > r.session_date
       )
       ORDER BY r.session_date DESC, s.strike_price, s.option_type
     `, [input.underlyingSymbol, Math.max(1, Math.floor(input.days))]);

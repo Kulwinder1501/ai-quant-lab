@@ -121,6 +121,7 @@ from ai_quant_lab_ml.cks_ofi_touch import (
     compute_mid_price_candles,
     compute_windowed_ofi_series,
     join_nearest_prior,
+    recompute_sequence_flags,
 )
 from ai_quant_lab_ml.contracts import BREADTH_INDEX_PRIMARY, BREADTH_INDEX_SECONDARY, BREADTH_UNIVERSE, BreadthContext
 from ai_quant_lab_ml.experiments_f1_f4 import (
@@ -287,6 +288,51 @@ def is_near_session_close(dt: datetime, minutes_before_close: int = 15) -> bool:
     return ist_minutes > (SESSION_END_MIN - minutes_before_close)
 
 
+def build_depth_frame_rows(depth_rows) -> List[DepthFrameRow]:
+    """
+    Rows (received_at, capture_session_id, sequence_no, is_snapshot, bid_price_0, bid_qty_0,
+    ask_price_0, ask_qty_0) in received order for ONE contract -> DepthFrameRow list.
+
+    * Sequence flags are RECOMPUTED per capture session from sequence_no
+      (cks_ofi_touch.recompute_sequence_flags) -- the stored is_regression is wrong after a reset
+      without snapshot, and the stored gap_before is NULL there. A reset (is_regression), duplicate
+      or gap breaks the OFI chain.
+    * A capture-session boundary is also a chain break: sequence numbers of different sessions are
+      unrelated, so the first frame of every session is treated as a fresh baseline (is_snapshot).
+    * Missing is not zero: a frame where ANY of the four touch fields is NULL is emitted with all
+      four = 0.0, which `_touch_level_delta` / `compute_mid_price_candles` already treat as "not
+      comparable". A NULL qty is never turned into a real zero-size queue.
+    """
+    frames: List[DepthFrameRow] = []
+    session_start = 0
+    n = len(depth_rows)
+    while session_start < n:
+        session_id = depth_rows[session_start][1]
+        session_end = session_start
+        while session_end < n and depth_rows[session_end][1] == session_id:
+            session_end += 1
+        chunk = depth_rows[session_start:session_end]
+        flags = recompute_sequence_flags(
+            [(None if r[2] is None else int(r[2]), bool(r[3])) for r in chunk]
+        )
+        for i, (r, (gap_before, is_dup, is_reg)) in enumerate(zip(chunk, flags)):
+            touch = (r[4], r[5], r[6], r[7])
+            complete = all(v is not None for v in touch)
+            bp, bq, ap, aq = (float(v) for v in touch) if complete else (0.0, 0.0, 0.0, 0.0)
+            frames.append(
+                DepthFrameRow(
+                    received_at=r[0],
+                    is_snapshot=bool(r[3]) or i == 0,
+                    is_duplicate=is_dup,
+                    gap_before=gap_before,
+                    bid_price_0=bp, bid_qty_0=bq, ask_price_0=ap, ask_qty_0=aq,
+                    is_regression=is_reg,
+                )
+            )
+        session_start = session_end
+    return frames
+
+
 def fetch_banknifty_futures_depth_series(
     connection: psycopg.Connection, timeframe_minutes: int
 ) -> Tuple[List[OfiWindowObservation], List[Tuple[datetime, float, float, float, float, float]]]:
@@ -310,11 +356,11 @@ def fetch_banknifty_futures_depth_series(
         try:
             cur.execute(
                 """
-                SELECT received_at, is_snapshot, is_duplicate, gap_before,
+                SELECT received_at, capture_session_id, sequence_no, is_snapshot,
                        bid_price[1], bid_qty[1], ask_price[1], ask_qty[1]
                 FROM depth_frames
                 WHERE provider_symbol = %s
-                ORDER BY received_at ASC;
+                ORDER BY received_at ASC, sequence_no ASC NULLS LAST;
                 """,
                 (symbol,),
             )
@@ -326,16 +372,7 @@ def fetch_banknifty_futures_depth_series(
         if not depth_rows:
             continue
 
-        frames = [
-            DepthFrameRow(
-                received_at=r[0], is_snapshot=bool(r[1]), is_duplicate=bool(r[2]), gap_before=r[3],
-                bid_price_0=float(r[4]) if r[4] is not None else 0.0,
-                bid_qty_0=float(r[5]) if r[5] is not None else 0.0,
-                ask_price_0=float(r[6]) if r[6] is not None else 0.0,
-                ask_qty_0=float(r[7]) if r[7] is not None else 0.0,
-            )
-            for r in depth_rows
-        ]
+        frames = build_depth_frame_rows(depth_rows)
         contract_observations = compute_windowed_ofi_series(frames)
         contract_candles = compute_mid_price_candles(frames, timeframe_minutes)
         print(
@@ -531,12 +568,18 @@ def _scan_direction(rows, instrument: str, direction: str, timeframe_minutes: in
             confidence=0.5, sourceTimestamp=t_ms, availableAt=t_ms,
         )
         ofi_value = ofi_joined[idx]
+        # Missing is None, never a fabricated number: no OFI observation joined => ofi30s=None (it used
+        # to be 0.0, indistinguishable from a real balanced book), and there is NO depth-normalisation
+        # factor in this feed (the feature is RAW touch-level OFI, see CKS_OFI_TOUCH_5S_RAW_V1), so
+        # depthNormFactor is None rather than a made-up 1000.0. These land in Optional featureVector
+        # fields and nothing in Layer 2 reads them numerically; orderFlowAvailable stays False.
         normalized_ofi = NormalizedOFI(
-            ofi30s=ofi_value if ofi_value is not None else 0.0,
-            depthNormFactor=1000.0, sourceTimestamp=t_ms, availableAt=t_ms,
+            ofi30s=ofi_value,
+            depthNormFactor=None, sourceTimestamp=t_ms, availableAt=t_ms,
             featureDefinitionId=CKS_OFI_TOUCH_5S_RAW_FEATURE_ID,
         )
-        l2_depth = L2DepthLiquidityObservation(meanTop5Depth=0.0, sourceTimestamp=t_ms, availableAt=t_ms)
+        # No top-5 depth is computed in this pipeline (only level 0 is read): None, not a fake 0.0.
+        l2_depth = L2DepthLiquidityObservation(meanTop5Depth=None, sourceTimestamp=t_ms, availableAt=t_ms)
         atr_obs = ATRObservation(atr14=atr_val, sourceTimestamp=t_ms, availableAt=t_ms)
         bars_evaluated += 1
 

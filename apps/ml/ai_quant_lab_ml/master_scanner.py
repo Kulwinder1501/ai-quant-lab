@@ -7,7 +7,9 @@ Trade order, in the order the layers are evaluated (see docs/2026-10-10-fibonacc
   Layer 1  location    structure (MSS) -> live anchor -> qualified retracement -> Fibonacci zone
   Layer 2  order flow  footprint shape + price-impact (lambda) proof at the zone; reported as
                        ORDER_FLOW_UNAVAILABLE (unmeasured) when the feed carries no tape
-  Layer 3  options context (GEX); Layer 4 null / execution authorisation (always closed: research only)
+  Layer 3  options-context FRESHNESS (a snapshot-available/fresh/not-future flag only -- NOT gamma exposure;
+           no GEX model exists here and `pcrRatio` is never read); Layer 4 null / execution authorisation
+           (always closed: research only)
 Either direction is supported (`direction="BULLISH"` or `"BEARISH"`); the bearish scanner is the exact
 mirror (breadth veto on strength, P_SHAPE instead of B_SHAPE, zones/targets measured the other way).
 """
@@ -24,7 +26,7 @@ from ai_quant_lab_ml.fibonacci_pit_engine import (
     FeatureVector,
     FibAnchorCalibrationArtifact,
     FootprintBar,
-    GEXContext,
+    GEXContext,  # alias of OptionsContext, kept for existing callers (see fibonacci_pit_engine)
     GEXContextState,
     L2DepthLiquidityObservation,
     LambdaCalibrationArtifact,
@@ -327,7 +329,9 @@ class Master5LayerScanner:
             FeatureProvenance("fib_retracement", "FIB_RETRACEMENT_STATEFUL_V1", bar.identity.closeTimestamp, bar.availableAt),
             FeatureProvenance("breadth", "BREADTH_AD_V1", breadth_source_time, breadth_available_at),
             FeatureProvenance("yz_vol", "YZ_VOL_10P_RATIO_V1", yz_source_time, yz_available_at),
-            FeatureProvenance("gex", "GEX_PCR_15M_V1", gex_context.snapshotTimestamp, gex_context.availableAt)
+            # Honest id: this records the options-context FRESHNESS inputs (timestamps), not a
+            # gamma-exposure feature and not the (unread) pcrRatio. Previously "GEX_PCR_15M_V1".
+            FeatureProvenance("options_context", "OPTIONS_CONTEXT_FRESHNESS_V1", gex_context.snapshotTimestamp, gex_context.availableAt)
         ]
 
         # Multi-State GEX Handling (Future timestamp validation strictly precedes state preservation)

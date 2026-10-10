@@ -2,16 +2,27 @@
 
 Compares two features:
 - total_DI = (total_buy_qty - total_sell_qty) / total
-- l1_3_DI  = (sum(bid_qty[1:3]) - sum(ask_qty[1:3])) / sum  [immediately tradeable book]
+- l1_3_DI  = (sum(bid_qty[:3]) - sum(ask_qty[:3])) / sum  [top three book levels = indices 0..2;
+  the earlier docstring said [1:3] but the code always used [:3]]
 
 Also splits analysis into Tier 1 (Reversal) and Tier 2 (Momentum) level types.
+
+AUDIT FIX NOTE (2026-10-10, docs/2026-10-10-orderbook-liquidity-audit-fixes.md): output of earlier
+runs came from defective code and must not be quoted: the Tier-2 branch used `+di` for PDH (opposite
+to the frozen di_tilde = -DI convention of run_orderbook01_oos.py / the live gate), frames AFTER the
+contact were accepted (abs() gap), depth came from every provider_symbol, missing totals became 0.0,
+raw DI is a per-day constant, labels were the look-ahead v1-legacy ones (a "30s" horizon built from
+1m bars), pooled candidates were not filtered, and the stored is_regression filter dropped sessions.
+Now: front-month future only, recomputed sequence flags, causal within-day detrended DI for BOTH
+features (missing/insufficient history => unavailable, never 0), past-only matching, one population
+(BANKNIFTY / 5m / active / v2-causal; 300s reversal, 60s momentum), one event per level-day, and
+aligned = -DI_detrended for every level and both tiers.
 """
 
 from __future__ import annotations
 import sys, os
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from bisect import bisect_left
 import zoneinfo
 import numpy as np
 from scipy import stats
@@ -21,6 +32,18 @@ sys.path.insert(0, str(REPO_ROOT / "apps/ml"))
 
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
+from ai_quant_lab_ml.orderbook_di import (
+    DEFAULT_SYMBOL,
+    DEFAULT_TIMEFRAME,
+    LABELING_VERSION_CAUSAL,
+    TIER1_HORIZON_SECONDS,
+    TIER2_HORIZON_SECONDS_BY_LABELING_VERSION,
+    causal_detrend_di,
+    collapse_to_level_days,
+    fetch_front_month_depth_rows,
+    latest_value_at_or_before,
+    raw_depth_imbalance,
+)
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 REVERSAL_TYPES  = {"SWING_HIGH", "SWING_LOW", "ITH", "ITL", "SESSION_HIGH", "SESSION_LOW"}
@@ -29,69 +52,69 @@ UP_SIDES   = {"UP"}
 DOWN_SIDES = {"DOWN"}
 
 
-def fetch_contact_events(conn, start, end):
+def fetch_contact_events(
+    conn,
+    start,
+    end,
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    labeling_version: str = LABELING_VERSION_CAUSAL,
+):
+    """One population: one symbol/timeframe, active candidates, one labeling_version; the horizon
+    is 300s for reversal levels and the finest honest v2 horizon (60s) for momentum levels."""
+    tier2_h = TIER2_HORIZON_SECONDS_BY_LABELING_VERSION.get(labeling_version, 60)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT lcl.contact_time, lcl.breached,
-                   lpc.pool_type, lpc.side
+                   lpc.pool_type, lpc.side, lpc.price, lpc.timeframe, lpc.symbol
             FROM liquidity_contact_labels lcl
             JOIN liquidity_pool_candidates lpc ON lpc.id = lcl.candidate_id
             WHERE lcl.contact_time >= %s AND lcl.contact_time <= %s
-              AND lcl.contacted = TRUE AND lcl.horizon_seconds = 30
+              AND lcl.contacted = TRUE
+              AND lcl.is_active_candidate = TRUE
+              AND lcl.breached IS NOT NULL
+              AND lcl.labeling_version = %s
+              AND lpc.symbol = %s AND lpc.timeframe = %s
+              AND lcl.horizon_seconds = CASE WHEN lpc.pool_type IN ('PDH', 'PDL') THEN %s ELSE %s END
             ORDER BY lcl.contact_time ASC
-        """, (start, end))
-        return [{"contact_time": r[0], "breached": r[1], "pool_type": r[2], "side": r[3]}
+        """, (start, end, labeling_version, symbol, timeframe, tier2_h, TIER1_HORIZON_SECONDS))
+        return [{"contact_time": r[0], "breached": r[1], "pool_type": r[2], "side": r[3],
+                 "level_price": float(r[4]), "timeframe": r[5], "symbol": r[6]}
                 for r in cur.fetchall()]
 
 
-def fetch_day_frames(conn, day: date):
-    day_start = datetime.combine(day, datetime.min.time(), tzinfo=zoneinfo.ZoneInfo("UTC"))
-    day_end = day_start + timedelta(days=1)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT received_at, total_buy_qty, total_sell_qty,
-                   bid_qty, ask_qty
-            FROM depth_frames
-            WHERE received_at >= %s AND received_at < %s
-              AND is_duplicate = FALSE AND is_regression = FALSE
-            ORDER BY received_at ASC
-        """, (day_start, day_end))
-        rows = cur.fetchall()
-    frames = []
+def build_day_series(rows):
+    """(times, total_di_detrended, l1_3_di_detrended) from front-month depth rows (pure).
+
+    Missing totals / empty top-of-book stay None (never 0.0); each feature is causally detrended
+    within the day before any sign is taken."""
+    times, total_raw, l13_raw = [], [], []
     for r in rows:
-        buy_qty  = float(r[1]) if r[1] else 0.0
-        sell_qty = float(r[2]) if r[2] else 0.0
-        bid_arr = r[3] or []
-        ask_arr = r[4] or []
-        l1_3_buy  = sum(float(x) for x in bid_arr[:3] if x is not None)
-        l1_3_sell = sum(float(x) for x in ask_arr[:3] if x is not None)
-        frames.append((r[0], buy_qty, sell_qty, l1_3_buy, l1_3_sell))
-    return frames
+        times.append(r["received_at"])
+        total_raw.append(raw_depth_imbalance(r["total_buy_qty"], r["total_sell_qty"]))
+        bids = [float(x) for x in (r.get("bid_qty") or [])[:3] if x is not None]
+        asks = [float(x) for x in (r.get("ask_qty") or [])[:3] if x is not None]
+        l13_raw.append(raw_depth_imbalance(sum(bids), sum(asks)) if bids and asks else None)
+    return times, causal_detrend_di(times, total_raw), causal_detrend_di(times, l13_raw)
 
 
-def find_nearest(frames, ct, max_gap=5.0):
-    if not frames:
-        return None
-    times = [f[0] for f in frames]
-    pos = bisect_left(times, ct)
-    best, best_gap = None, float("inf")
-    for idx in [pos - 1, pos]:
-        if 0 <= idx < len(frames):
-            gap = abs((frames[idx][0] - ct).total_seconds())
-            if gap <= max_gap and gap < best_gap:
-                best_gap = gap
-                best = frames[idx][1:]
-    return best
+def fetch_day_series(conn, day: date):
+    """Front-month future only, IST day, duplicates/resets removed via recomputed sequence flags."""
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=INDIA_TZ)
+    day_end = day_start + timedelta(days=1)
+    return build_day_series(
+        fetch_front_month_depth_rows(conn, day_start, day_end, day.isoformat(), include_levels=True)
+    )
 
 
-def compute_dis(buy, sell, l1_3_buy, l1_3_sell):
-    total_di = (buy - sell) / (buy + sell) if (buy + sell) > 0 else None
-    l1_3_di  = (l1_3_buy - l1_3_sell) / (l1_3_buy + l1_3_sell) if (l1_3_buy + l1_3_sell) > 0 else None
-    return total_di, l1_3_di
+def aligned(di_val, side=None, tier=None):
+    """di_tilde = -DI_detrended for EVERY level and BOTH tiers (ORDERBOOK-01 convention, identical to
+    run_orderbook01_oos.py and the live gate): positive (sell-heavy depth, relative to the day's own
+    recent baseline) predicts REJECTION at reversal levels and a SWEEP at PDL. `side` / `tier` are
+    accepted for call compatibility and intentionally ignored -- the earlier per-side flip (`+di` for
+    PDH) contradicted the frozen sign convention.
 
-
-def aligned(di_val, side, tier):
-    """
+    Historical note (the superseded, inconsistent rule):
     Tier 1 (Reversal): UP side: aligned_di = -di (sell dominance at resistance -> rejection)
                         DOWN side: aligned_di = -di (sell dominance at support -> rejection; calibration confirmed same sign)
     Tier 2 (Momentum): UP (PDH): positive DI (buy pressure) -> sweep. aligned_di = di  
@@ -102,13 +125,7 @@ def aligned(di_val, side, tier):
               PDL aligned = -di (sell dominance -> sweep)
     For Tier 2 we predict SWEEP (not rejection) so aligned_di > 0 -> predict sweep -> correct if breached=True
     """
-    if tier == "reversal":
-        return -di_val  # positive = sell dominates = predicts rejection
-    else:  # momentum
-        if side == "UP":   # PDH
-            return di_val   # positive = buy dominates = predicts sweep (breach)
-        else:              # PDL
-            return -di_val  # positive = sell dominates = predicts sweep (breach)
+    return -di_val
 
 
 def accuracy_for(results, tier):
@@ -162,17 +179,24 @@ def main():
     with psycopg.connect(conn_str) as conn:
         for day in sorted(days_map.keys()):
             day_events = days_map[day]
-            frames = fetch_day_frames(conn, day)
-            if not frames:
+            times, total_series, l13_series = fetch_day_series(conn, day)
+            if not times:
                 continue
+            day_matched = []
             for ev in day_events:
-                match = find_nearest(frames, ev["contact_time"])
-                if not match:
+                # PAST-ONLY, <= 5s old, detrended DI available; missing is skipped, never 0.
+                t_hit = latest_value_at_or_before(times, total_series, ev["contact_time"])
+                l_hit = latest_value_at_or_before(times, l13_series, ev["contact_time"])
+                if t_hit is None and l_hit is None:
                     continue
-                buy, sell, l1_3_buy, l1_3_sell = match
-                total_di, l1_3_di = compute_dis(buy, sell, l1_3_buy, l1_3_sell)
-                if total_di is None and l1_3_di is None:
-                    continue
+                day_matched.append({
+                    **ev,
+                    "total_di": None if t_hit is None else t_hit[0],
+                    "l1_3_di": None if l_hit is None else l_hit[0],
+                })
+            # One event per level-day (repeat contacts are not independent samples).
+            for ev in collapse_to_level_days(day_matched):
+                total_di, l1_3_di = ev["total_di"], ev["l1_3_di"]
                 pt = ev["pool_type"]
                 side = ev["side"]
                 tier = "reversal" if pt in REVERSAL_TYPES else "momentum"

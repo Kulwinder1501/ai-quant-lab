@@ -185,6 +185,14 @@ export interface IctLiquiditySnapshot {
   readonly rationale: string;
 }
 
+/** Highest/lowest prices traded since a pool was first confirmed (inclusive of the current bar). */
+export interface PoolPathExtremes {
+  readonly high: number;
+  readonly low: number;
+}
+
+export type PoolPathExtremesLookup = (kind: LiquidityPoolKind, price: number) => PoolPathExtremes | undefined;
+
 export interface BuiltLiquidityPools {
   readonly erlPools: readonly LiquidityPool[];
   readonly irlPools: readonly LiquidityPool[];
@@ -205,10 +213,27 @@ export function buildIctLiquidityPools(
   zoneSnap: IctZoneSnapshot,
   sessionLevels: SessionLevelsSnapshot,
   /** Passed in rather than read off the snapshot, which no longer carries the history. */
-  confirmedPivots: readonly ConfirmedPivot[] = []
+  confirmedPivots: readonly ConfirmedPivot[] = [],
+  /**
+   * Extreme prices traded since each pool was confirmed. When omitted, swing/EQH/EQL pools fall back
+   * to the legacy current-price-only test (a swept level becomes live again once price retreats) --
+   * `IctLiquidityResolver` always supplies it.
+   */
+  pathExtremes?: PoolPathExtremesLookup
 ): BuiltLiquidityPools {
   const erlPools: LiquidityPool[] = [];
   const irlPools: LiquidityPool[] = [];
+
+  // Swept = the PATH since the level's confirmation traded through it, not merely the current
+  // price. PDH/PDL already use the session path (`currentSessionHigh/Low`); swing, EQH and EQL used
+  // `currentPrice` alone, so a level that had been run through and then left behind reverted to
+  // "live" and could be selected as a target again.
+  const isSwept = (kind: LiquidityPoolKind, price: number, side: "HIGH" | "LOW"): boolean => {
+    const path = pathExtremes?.(kind, price);
+    const high = Math.max(currentPrice, path?.high ?? currentPrice);
+    const low = Math.min(currentPrice, path?.low ?? currentPrice);
+    return side === "HIGH" ? high >= price : low <= price;
+  };
 
   // 1. Collect External Range Liquidity (ERL)
   if (sessionLevels.levels) {
@@ -231,7 +256,7 @@ export function buildIctLiquidityPools(
         id: `erl-hh-${structSnap.lastHH.index}`,
         kind: "ERL_SWING_HIGH",
         price: structSnap.lastHH.price,
-        isMitigated: currentPrice >= structSnap.lastHH.price,
+        isMitigated: isSwept("ERL_SWING_HIGH", structSnap.lastHH.price, "HIGH"),
       });
     }
     if (structSnap.lastHL) {
@@ -239,7 +264,7 @@ export function buildIctLiquidityPools(
         id: `erl-hl-${structSnap.lastHL.index}`,
         kind: "ERL_SWING_LOW",
         price: structSnap.lastHL.price,
-        isMitigated: currentPrice <= structSnap.lastHL.price,
+        isMitigated: isSwept("ERL_SWING_LOW", structSnap.lastHL.price, "LOW"),
       });
     }
     if (structSnap.lastLH) {
@@ -247,7 +272,7 @@ export function buildIctLiquidityPools(
         id: `erl-lh-${structSnap.lastLH.index}`,
         kind: "ERL_SWING_HIGH",
         price: structSnap.lastLH.price,
-        isMitigated: currentPrice >= structSnap.lastLH.price,
+        isMitigated: isSwept("ERL_SWING_HIGH", structSnap.lastLH.price, "HIGH"),
       });
     }
     if (structSnap.lastLL) {
@@ -255,7 +280,7 @@ export function buildIctLiquidityPools(
         id: `erl-ll-${structSnap.lastLL.index}`,
         kind: "ERL_SWING_LOW",
         price: structSnap.lastLL.price,
-        isMitigated: currentPrice <= structSnap.lastLL.price,
+        isMitigated: isSwept("ERL_SWING_LOW", structSnap.lastLL.price, "LOW"),
       });
     }
 
@@ -303,7 +328,7 @@ export function buildIctLiquidityPools(
           id: `erl-${kind === "ERL_EQH" ? "eqh" : "eql"}-${indices[0]}-${indices[indices.length - 1]}`,
           kind,
           price,
-          isMitigated: kind === "ERL_EQH" ? currentPrice >= price : currentPrice <= price,
+          isMitigated: isSwept(kind, price, kind === "ERL_EQH" ? "HIGH" : "LOW"),
         });
       };
       for (let i = 1; i < sorted.length; i += 1) {
@@ -346,6 +371,14 @@ export function buildIctLiquidityPools(
 }
 
 export class IctLiquidityResolver {
+  /**
+   * Running high/low since each swing/EQH/EQL pool was first seen, keyed by `kind:price`. A pool is
+   * first seen on the bar that confirms it, so this IS the path since confirmation. Pruned to the
+   * pools present on the latest call so it cannot outgrow the live pool set. State lives on the
+   * instance: call `resolve()` once per bar, in order, on one resolver.
+   */
+  private readonly poolPath = new Map<string, { high: number; low: number }>();
+
   resolve(
     currentPrice: number,
     biasSnap: IctBiasSnapshot,
@@ -353,15 +386,35 @@ export class IctLiquidityResolver {
     zoneSnap: IctZoneSnapshot,
     sessionLevels: SessionLevelsSnapshot,
     /** Passed in rather than read off the snapshot, which no longer carries the history. */
-    confirmedPivots: readonly ConfirmedPivot[] = []
+    confirmedPivots: readonly ConfirmedPivot[] = [],
+    /** The current bar's range, so intrabar sweeps count; defaults to the close alone. */
+    currentBar?: { readonly high: number; readonly low: number }
   ): IctLiquiditySnapshot {
+    const barHigh = Math.max(currentPrice, currentBar?.high ?? currentPrice);
+    const barLow = Math.min(currentPrice, currentBar?.low ?? currentPrice);
+    const seen = new Set<string>();
+    const pathExtremes: PoolPathExtremesLookup = (kind, price) => {
+      const key = `${kind}:${price}`;
+      seen.add(key);
+      const entry = this.poolPath.get(key);
+      const updated = entry
+        ? { high: Math.max(entry.high, barHigh), low: Math.min(entry.low, barLow) }
+        : { high: barHigh, low: barLow };
+      this.poolPath.set(key, updated);
+      return updated;
+    };
+
     const { erlPools, irlPools } = buildIctLiquidityPools(
       currentPrice,
       structSnap,
       zoneSnap,
       sessionLevels,
-      confirmedPivots
+      confirmedPivots,
+      pathExtremes
     );
+    for (const key of [...this.poolPath.keys()]) {
+      if (!seen.has(key)) this.poolPath.delete(key);
+    }
 
     // 3. Lecture 5 Trend-Aligned Objective Matrix
     const bias = biasSnap.bias;
