@@ -13,6 +13,8 @@ from typing import Any, Sequence
 import numpy as np
 import psycopg
 
+from .session_forward import forward_index_in_session, session_dates_of
+
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
 # Tolerance (as a fraction of price) within which PDH/P4HH (or PDL/P4HL) are
@@ -305,6 +307,7 @@ def run_calibration_experiment(
                 "date": ist_dt.date(),
             })
 
+    bar_session_dates = session_dates_of(bars_5m)
     session_dates = sorted(list(set(b["date"] for b in cal_bars)))
     total_sessions = len(session_dates)
     total_5m_bars = len(cal_bars)
@@ -338,11 +341,19 @@ def run_calibration_experiment(
             b_low = float(bar["low"])
             b_close = float(bar["close"])
 
-            fwd_idx = g_idx + forward_window_bars
+            # The forward bar must be in the SAME IST session: the last `forward_window_bars` bars
+            # of a session get no forward return (None) instead of one measured to the next open.
+            fwd_idx = forward_index_in_session(bar_session_dates, g_idx, forward_window_bars)
             fwd_return_bps = None
-            if fwd_idx < len(bars_5m):
+            if fwd_idx is not None:
                 fwd_close = float(bars_5m[fwd_idx]["close"])
                 fwd_return_bps = ((fwd_close - b_close) / b_close) * 10000.0
+
+            # Unlabelable bar (horizon past the session close, or the end of the data): dropped
+            # from the evaluation -- not recorded as a NEUTRAL event and not allowed to consume
+            # the level's one-per-session trigger.
+            if fwd_return_bps is None:
+                continue
 
             is_prox = False
             for lvl in active_levels:

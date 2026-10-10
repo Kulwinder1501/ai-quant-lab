@@ -20,6 +20,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from ai_quant_lab_ml.contracts import ForwardBar
+from ai_quant_lab_ml.session_forward import crosses_session, is_intraday_label_timeframe
 from ai_quant_lab_ml.volatility_expansion import trailing_range_of, volatility_expansion_label
 
 WINDOW = 5          # horizon_bars, the production default
@@ -108,7 +109,16 @@ def main() -> None:
                 if len(trailing_highs) < WINDOW:
                     continue
                 forward = candles[index + 1: index + 1 + WINDOW]
+                # Intraday (2026-10-10 follow-up, code gaps): the forward window must stay in the
+                # source bar's IST session; a window running past the close is dropped, never
+                # completed with the next morning's bars (that measures the overnight gap).
                 if len(forward) < WINDOW:
+                    continue
+                if is_intraday_label_timeframe(timeframe) and (
+                    # trailing window must also lie in the source's session (no stale envelope)
+                    crosses_session(candles[index - WINDOW + 1]["close_time"], candle["close_time"])
+                    or any(crosses_session(candle["close_time"], bar["close_time"]) for bar in forward)
+                ):
                     continue
 
                 result = volatility_expansion_label(

@@ -62,6 +62,10 @@ if str(script_dir) not in sys.path:
 
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
+from ai_quant_lab_ml.cks_ofi_touch import (
+    drop_reset_and_duplicate_rows,
+    recompute_sequence_flags_by_stream,
+)
 from ai_quant_lab_ml.option_chain_pcr import (
     MAX_SNAPSHOT_AGE_MINUTES,
     OptionChainBooks,
@@ -125,21 +129,45 @@ def fetch_contact_events(conn: psycopg.Connection) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def clean_depth_frames_from_rows(rows: list[tuple]) -> list[tuple[datetime, float, float]]:
+    """Depth-frame rows (received_at, total_buy_qty, total_sell_qty, provider_symbol,
+    capture_session_id, sequence_no, is_snapshot) in received order -> (received_at, buy, sell)
+    for frames that survive the RECOMPUTED sequence flags.
+
+    2026-10-10 follow-up (code gaps): this used to filter on the STORED `is_duplicate = FALSE AND
+    is_regression = FALSE`. Pre-fix rows carry is_regression = TRUE on EVERY frame after a sequence
+    reset without a snapshot, so whole sessions were silently dropped. The flags are now recomputed
+    per (provider_symbol, capture_session_id) stream from raw sequence numbers with
+    cks_ofi_touch.recompute_sequence_flags (the helper the Phase C / ORDERBOOK-01 scripts use) and
+    only duplicates and the single SEQUENCE_RESET frame are dropped. A frame with a NULL total stays
+    missing (skipped), never 0.
+    """
+    flags = recompute_sequence_flags_by_stream(
+        [((r[3], r[4]), None if r[5] is None else int(r[5]), bool(r[6])) for r in rows]
+    )
+    kept = drop_reset_and_duplicate_rows(rows, flags)
+    return [
+        (r[0], float(r[1]), float(r[2]))
+        for r in kept
+        if r[1] is not None and r[2] is not None
+    ]
+
+
 def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> list[tuple[datetime, float, float]]:
     day_start = datetime.combine(day, datetime.min.time(), tzinfo=zoneinfo.ZoneInfo("UTC"))
     day_end = day_start + timedelta(days=1)
     with conn.cursor() as cur:
+        # No stored-flag filter: sequence flags are recomputed from sequence_no in received order.
         cur.execute("""
-            SELECT received_at, total_buy_qty, total_sell_qty
+            SELECT received_at, total_buy_qty, total_sell_qty,
+                   provider_symbol, capture_session_id, sequence_no, is_snapshot
             FROM depth_frames
             WHERE received_at >= %s
               AND received_at < %s
-              AND is_duplicate = FALSE
-              AND is_regression = FALSE
-            ORDER BY received_at ASC
+            ORDER BY received_at ASC, sequence_no ASC NULLS LAST
         """, (day_start, day_end))
         rows = cur.fetchall()
-        return [(r[0], float(r[1]), float(r[2])) for r in rows]
+    return clean_depth_frames_from_rows(rows)
 
 
 def find_nearest_depth_frame(

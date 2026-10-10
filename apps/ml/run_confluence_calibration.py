@@ -30,6 +30,7 @@ from ai_quant_lab_ml.structure_intelligence import (
     DEFAULT_CONFLUENCE_TOLERANCE_PCT,
     StructuralLevel,
 )
+from ai_quant_lab_ml.session_forward import forward_index_in_session, session_dates_of
 from ai_quant_lab_ml.volume_intelligence import assign_rvol_bin
 
 # Confluence-merge tolerance grid swept in
@@ -306,6 +307,8 @@ def main() -> None:
     proximity_bandwidth_bps = 15.0
     forward_window_bars = 3
     
+    bar_session_dates = session_dates_of(bars_5m)
+
     confluence_events = []
     structure_only_events = []
     volume_only_events = []
@@ -340,9 +343,11 @@ def main() -> None:
             b_close = row["close"]
             rvol_bin = row["rvol_bin"]
             
-            fwd_idx = g_idx + forward_window_bars
+            # Same IST session only: the last `forward_window_bars` bars of a session have no label
+            # (they are skipped below), never a return measured to the next morning's open.
+            fwd_idx = forward_index_in_session(bar_session_dates, g_idx, forward_window_bars)
             fwd_return_bps = None
-            if fwd_idx < len(bars_5m):
+            if fwd_idx is not None:
                 fwd_close = float(bars_5m[fwd_idx]["close"])
                 fwd_return_bps = ((fwd_close - b_close) / b_close) * 10000.0
 

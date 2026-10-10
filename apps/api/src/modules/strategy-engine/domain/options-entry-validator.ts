@@ -1,4 +1,4 @@
-import type { ProposedTradeIdea } from "./strategy.js";
+import type { ConfluenceSignal, ProposedTradeIdea } from "./strategy.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import { largestOpenInterestStrikes } from "../../market-data/domain/option-chain.js";
 import { yearsToExpiry } from "@ai-quant-lab/pricing";
@@ -19,16 +19,7 @@ export interface OptionsValidationContext {
   intendedContractDelta?: number | null;
   ivPercentile?: number | null;
   ivPercentileCeiling?: number;
-  confluenceSignal?: {
-    is_level_proximate?: boolean;
-    nearest_level_type?: string | null;
-    nearest_level_price?: number | null;
-    distance_bps?: number | null;
-    raw_di?: number | null;
-    di_tilde?: number | null;
-    directional_bias?: string;
-    gate_action?: string;
-  } | null;
+  confluenceSignal?: ConfluenceSignal | null;
 }
 
 export interface OptionsValidationResult {

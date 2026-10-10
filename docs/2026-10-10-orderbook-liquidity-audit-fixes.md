@@ -116,3 +116,98 @@ python apps/ml/recompute_depth_sequence_flags.py --from 2026-08-21 --to 2026-10-
   `experiments_f1_f4.py`) is untouched because it needs changes in files outside this scope.
 * The migration SQL and the v2 candidate-insert `ON CONFLICT` were reviewed by eye and unit-tested as
   strings only; they were not executed against Postgres (DDL was not permitted in this session).
+* (Superseded for the first bullet's two scripts by the **2026-10-10 follow-up (code gaps)** below.)
+
+## 2026-10-10 follow-up (code gaps)
+
+Three code gaps left by the audit were fixed in `apps/ml`. **Only code and tests changed. No study,
+backtest or experiment was re-run, no database row was read for this work or mutated, no stored result
+JSON was edited, nothing was committed.** Governance is unchanged: dated amendments, no re-scoring of
+earlier results, one exploratory run.
+
+### GAP 1 - hybrid-confluence backtest and OFI-impulse OOS trusted the stored sequence flags
+
+* **What was wrong.** `run_hybrid_confluence_backtest.py` filtered `AND is_duplicate = FALSE AND
+  is_regression = FALSE` in SQL; `run_ofi_impulse_oos.py` hard-coded `is_snapshot=False,
+  is_duplicate=False, gap_before=None` for every frame. After a sequence reset without a snapshot
+  every later pre-fix frame is stored `is_regression = TRUE` (the first script silently dropped the whole
+  rest of such sessions) and neither script treated duplicates, gaps or resets as OFI chain breaks (the
+  second differenced straight across them).
+* **What changed.** Both load frames in received order including `sequence_no` / `is_snapshot` and
+  recompute the flags with the existing `cks_ofi_touch.recompute_sequence_flags` (no logic copied). Two
+  small shared helpers were added next to it: `recompute_sequence_flags_by_stream` (per
+  provider-symbol / capture-session stream, also marks each stream's first row) and
+  `drop_reset_and_duplicate_rows`.
+  * Hybrid backtest: `clean_depth_frames_from_rows` keeps every frame except duplicates and the single
+    SEQUENCE_RESET frame; a NULL total stays missing (skipped, not 0). The SQL no longer references the
+    stored flags. Its population is still "all symbols that day, nearest frame <= 5 s" exactly as before -
+    that separate pre-existing choice was not touched.
+  * OFI-impulse: `build_ofi_frames_and_quote_rows` builds `DepthFrameRow`s with the recomputed
+    `is_duplicate` / `gap_before` / `is_regression`; the first frame of a capture session is a chain
+    baseline (`is_snapshot`), so OFI is never differenced across a reset, duplicate, gap or session
+    start. Duplicate and reset frames are also dropped from the rows used for decision / horizon quotes.
+* **Tests.** `tests/test_depth_flag_recompute_scripts.py`: a reset-without-snapshot stream where the
+  stored-flag filter keeps 3 of 8 frames and the recomputed flags keep 7 of 8; duplicates; snapshots;
+  interleaved streams / capture sessions; the SQL has no stored-flag filter; OFI is not differenced
+  across the reset.
+
+### GAP 2 - the baseline next to a model was only the trivial global majority
+
+* **What changed.** `train.py` now reports, next to the existing `trivial_majority_metrics`, the
+  **time-of-day-stratified majority** (`time_of_day_baseline_metrics`), which reuses
+  `volatility_expansion.time_of_day_majority_predictions` / `time_of_day_key` unchanged (only its type
+  hints were generalised from the volatility alphabet to any label string). Bucket = IST bar-of-day of
+  the example's close over the bar length; per-bucket majority is fitted on the **TRAIN rows only** and
+  applied to the validation rows; an unseen bucket falls back to the global train majority. Daily bars
+  have no time of day, so there the two baselines coincide (stated, not hidden).
+  `compare_to_baselines` reports both and the model's edge over the **stronger** one per metric (ties go
+  to the trivial baseline).
+* **Verdict.** `promotion_assessment(..., baselines=...)` records `assessment["baselines"]` and refuses
+  with `DID_NOT_BEAT_STRONGEST_BASELINE` when the candidate's macro-F1 does not exceed the stronger
+  baseline's macro-F1 (checked before any incumbent comparison). Accuracy edge vs the stronger baseline is
+  reported (`beatsStrongestOnAccuracy`) but is not itself a gate. `main()` always supplies the final-fold
+  baselines and prints them; `cpcv_summary(..., time_of_day_metrics=...)` adds `timeOfDay*`,
+  `strongestBaseline*`, `*MinusStrongest` and `*WinRateVsStrongest` keys (all existing keys unchanged);
+  `backfill_volatility_shadow.py` adds per-window time-of-day numbers and
+  `*WonWindowsVsStrongestBaseline`. Existing `trivial*` keys keep their meaning.
+* **Not changed.** `train_tcn.py` uses its own `trivial_macro_f1` helper; it was not part of this fix.
+* **Tests.** `tests/test_tod_stratified_baseline.py`: label perfectly determined by time of day (trivial
+  accuracy 0.5, stratified 1.0); flipping the holdout labels does not move the baseline (train-only fit);
+  unseen-bucket fallback; daily coincidence; stronger-baseline selection and ties; verdict refuses a model
+  that only beats the trivial baseline; CPCV reports both.
+
+### GAP 3 - forward label windows that crossed the overnight gap
+
+* **Where it was already right.** The SQL loaders (`postgres_repository`) partition the forward `LEAD`
+  and the forward path by IST trading date, and `run_phase_c_pipeline.py` already requires the exit bar
+  on the same date within the horizon. Those were left alone.
+* **Where it was not (intraday only).** `structure_intelligence.run_calibration_experiment` and
+  `run_confluence_calibration.py` took `bars_5m[g_idx + 3]` on the whole series; `run_straddle_confluence_gate.py`
+  took `bars_5m[idx + horizon]`; `volatility_gate.price_straddle` took `records[i + horizon]`;
+  `run_cost_stack_validation.py` took the first frame >= entry + 15 min (even on the next day for a
+  multi-day capture session); `pattern_vs_volatility.py` took `candles[i+1 : i+1+5]` for 15m. The Python
+  builders (`build_labeled_examples`, `build_triple_barrier_examples`, `build_volatility_expansion_examples`)
+  also trusted whatever future close / forward path the loader supplied.
+* **Semantics.** The whole forward window must lie inside the source bar's IST session
+  (`session_forward.py`; "intraday" = minute/hour timeframe, identical to the SQL rule). A row whose full
+  horizon would pass the session close gets **no label and is dropped** (builders: omitted; scripts:
+  skipped / not recorded as a NEUTRAL event and not allowed to consume a level's one-per-session
+  trigger), never filled from the next day. Triple-barrier: the walk stops at the session close, a
+  horizontal touch inside the session still counts, and a VERTICAL (time-out) label on a short path is
+  censored. Daily and longer bars are untouched (one bar per session; the next bar is the horizon).
+* **Existing tests.** No existing test relied on a cross-session intraday label; the full suite passed
+  unchanged before any expectation was edited.
+* **Tests.** `tests/test_session_scoped_forward_labels.py`: last bars of a session get no label in all
+  three builders (with a +50% overnight jump in the fixture that would be visible if it leaked); labels
+  never use next-day prices; helpers; daily bars unaffected; `run_calibration_experiment` drops the
+  last-bar event whose forward bar is on the next day.
+
+### What is NOT re-run, and the status of earlier results
+
+Nothing above was executed against data. **Every earlier result from these scripts remains unreliable
+until re-run under a NEW pre-registration**: hybrid-confluence backtest (stored-flag session loss),
+OFI-impulse OOS (no chain breaks), STRUCTURE-01 / CONFLUENCE calibration, the confluence straddle gate,
+the volatility gate and the cost-stack validation (cross-session forward windows), and any model verdict
+produced by `train.py` / `backfill_volatility_shadow.py` that was judged only against the trivial
+baseline. No result JSON was edited or re-scored; re-running is a separate, pre-registered step
+(one exploratory run).

@@ -220,3 +220,152 @@ describe("resolveConfluenceSignal: depth is looked up on the front-month futures
     expect(signal).toMatchObject({ raw_di: null, depth_state: "NO_DEPTH" });
   });
 });
+
+describe("resolveConfluenceSignal: di_tilde is causally detrended from same-session prior-minute DI", () => {
+  const closeTime = ist("2026-10-09", "11:00:00");
+  const sessionStartUtc = ist("2026-10-09", "00:00:00");
+  const minute = 60_000;
+
+  /** A DISTINCT-ON-per-minute history row, `minutesBefore` whole minutes before the close's minute. */
+  const historyRow = (minutesBefore: number, buy: string, sell: string) => ({
+    received_at: new Date(closeTime.getTime() - minutesBefore * minute - 20_000),
+    total_buy_qty: buy,
+    total_sell_qty: sell,
+  });
+
+  function respond(currentFrame: Record<string, unknown>, history: unknown[]) {
+    return (sql: string) => {
+      if (sql.includes("FROM instruments")) return [{ symbol: "BANKNIFTY" }];
+      if (sql.includes("liquidity_pool_candidates")) return [{ pool_type: "SESSION_HIGH", price: "100.05" }];
+      if (sql.includes("FROM option_expiry_calendar")) return [{ expiry_date: "2026-10-27", expiry_kind: "MONTHLY" }];
+      if (sql.includes("FROM depth_frames") && sql.includes("DISTINCT ON")) return history;
+      if (sql.includes("FROM depth_frames")) return [currentFrame];
+      return [];
+    };
+  }
+
+  // Frame received 2s before the close (the decision cutoff): raw DI = (650-1350)/2000 = -0.35.
+  const currentFrame = (buy = "650", sell = "1350") => ({
+    received_at: new Date(closeTime.getTime() - 2_000),
+    bid_price: ["100"], bid_qty: ["500"], ask_price: ["100.05"], ask_qty: ["100"],
+    total_buy_qty: buy, total_sell_qty: sell,
+  });
+
+  it("returns di_tilde null with UNAVAILABLE_HISTORY (never 0) at the start of a session", async () => {
+    const { database } = fakeDatabase(respond(currentFrame(), [1, 2, 3].map((n) => historyRow(n, "650", "1350"))));
+
+    const signal = await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    expect(signal?.raw_di).toBeCloseTo(-0.35, 12);
+    expect(signal?.di_tilde).toBeNull();
+    expect(signal?.di_status).toBe("UNAVAILABLE_HISTORY");
+    expect(signal?.di_history_count).toBe(3);
+    expect(signal?.gate_action).toBe("NO_ACTION");
+  });
+
+  it("yields di_tilde ~ 0 for a persistently one-sided book, not a constant sign", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => historyRow(i + 1, "650", "1350"));
+    const { database } = fakeDatabase(respond(currentFrame(), rows));
+
+    const signal = await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    expect(signal?.di_status).toBe("OK");
+    expect(Math.abs(signal?.di_tilde as number)).toBeLessThan(1e-9);
+    expect(signal?.gate_action).toBe("NO_ACTION");
+  });
+
+  it("is positive when the book is more sell-heavy than its own trailing baseline", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => historyRow(i + 1, "650", "1350"));
+    const { database } = fakeDatabase(respond(currentFrame("500", "1500"), rows)); // raw DI -0.5 vs -0.35 baseline
+
+    const signal = await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    expect(signal?.di_tilde).toBeCloseTo(0.15, 12);
+    expect(signal?.gate_action).toBe("BUY_PUT_OR_SHORT");
+  });
+
+  it("bounds the history query to this contract, this IST session, and strictly before the decision minute", async () => {
+    const { database, queries } = fakeDatabase(respond(currentFrame(), []));
+
+    await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    const historyQuery = queries.find((q) => q.sql.includes("DISTINCT ON"))!;
+    const [symbol, from, until] = historyQuery.params as [string, Date, Date];
+    expect(symbol).toBe("NSE:BANKNIFTY26OCTFUT");
+    expect(historyQuery.sql).toContain("received_at >= $2");
+    expect(historyQuery.sql).toContain("received_at < $3");
+    // 11:00 close, frame at 10:59:58 -> its minute is 10:59, history ends strictly before it.
+    expect(until.getTime()).toBe(ist("2026-10-09", "10:59:00").getTime());
+    expect(until.getTime()).toBeLessThanOrEqual(closeTime.getTime());
+    expect(from.getTime()).toBe(until.getTime() - 30 * minute);
+    expect(from.getTime()).toBeGreaterThanOrEqual(sessionStartUtc.getTime());
+    // Missing totals are filtered in SQL, never turned into DI = 0.
+    expect(historyQuery.sql).toContain("total_buy_qty IS NOT NULL");
+  });
+
+  it("does not reach back across midnight at the start of the day", async () => {
+    const early = ist("2026-10-09", "00:10:00");
+    const frame = { ...currentFrame(), received_at: new Date(early.getTime() - 2_000) };
+    const { database, queries } = fakeDatabase(respond(frame, []));
+
+    await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", early));
+
+    const [, from] = queries.find((q) => q.sql.includes("DISTINCT ON"))!.params as [string, Date, Date];
+    expect(from.getTime()).toBe(sessionStartUtc.getTime());
+  });
+
+  it("ignores history rows from a previous session or at/after the frame, even if the query returned them", async () => {
+    const stale = Array.from({ length: 30 }, (_, i) => ({
+      ...historyRow(i + 1, "1900", "100"), // very buy-heavy yesterday
+      received_at: new Date(sessionStartUtc.getTime() - (i + 1) * minute),
+    }));
+    const future = [{ ...historyRow(0, "100", "1900"), received_at: new Date(closeTime.getTime() - 1_000) }];
+    const { database } = fakeDatabase(respond(currentFrame(), [...stale, ...future]));
+
+    const signal = await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    expect(signal?.di_history_count).toBe(0);
+    expect(signal?.di_tilde).toBeNull();
+  });
+
+  it("treats a frame with a missing total as no raw DI rather than a one-sided book", async () => {
+    const { database } = fakeDatabase(respond({ ...currentFrame(), total_sell_qty: null }, []));
+
+    const signal = await asPrivate(new PostgresStrategyMarketContextRepository(database))
+      .resolveConfluenceSignal(input, candle("BANKNIFTY", closeTime));
+
+    expect(signal?.raw_di).toBeNull();
+    expect(signal?.di_tilde).toBeNull();
+    expect(signal?.di_status).toBe("UNAVAILABLE_DEPTH");
+  });
+});
+
+describe("point-in-time evidence reads use known_at, not detected_at", () => {
+  it("assembleContext filters pattern_detections and price_action_events on known_at <= the candle close", async () => {
+    const closeTime = ist("2026-10-09", "11:00:00");
+    const { database, queries } = fakeDatabase(() => []);
+    const repository = new PostgresStrategyMarketContextRepository(database);
+
+    // Only the evidence queries issued up front matter here; with an empty fake database the later
+    // optional resolvers (regime / ICT) may give up, which is irrelevant to this assertion.
+    await (repository as unknown as {
+      assembleContext(i: unknown, c: unknown): Promise<unknown>;
+    }).assembleContext(input, candle("BANKNIFTY", closeTime)).catch(() => undefined);
+
+    const strip = (sql: string) => sql.replace(/--.*$/gm, "");
+    const patterns = queries.find((q) => q.sql.includes("FROM pattern_detections"))!;
+    const events = queries.find((q) => q.sql.includes("FROM price_action_events"))!;
+    expect(patterns.sql).toContain("pattern_detections.known_at <= $2");
+    expect(events.sql).toContain("AND known_at <= $2");
+    expect(strip(patterns.sql)).not.toContain("detected_at");
+    expect(strip(events.sql)).not.toContain("detected_at");
+    expect(patterns.params).toEqual(["c1", closeTime]);
+    expect(events.params).toEqual(["c1", closeTime]);
+  });
+});

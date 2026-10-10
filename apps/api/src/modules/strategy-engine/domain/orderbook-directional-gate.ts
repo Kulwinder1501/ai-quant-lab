@@ -39,7 +39,13 @@
  * scale bug also produced 0 for, by coincidence rather than correctness.
  */
 
-import type { ProposedTradeIdea, TradeSide } from "./strategy.js";
+import type {
+  ConfluenceDirectionalBias,
+  ConfluenceGateAction,
+  ConfluenceSignal,
+  ProposedTradeIdea,
+  TradeSide,
+} from "./strategy.js";
 
 /** Same semantics as the options-entry validator: only the exact string "true" enables live effects. */
 export function isOrderbook01LiveGateEnabled(): boolean {
@@ -53,7 +59,7 @@ export interface OrderbookGateResult {
   distanceBps: number | null;
   rawDi: number | null;
   diTilde: number | null;
-  directionalBias: "BULLISH_REJECTION" | "BEARISH_REJECTION" | "BEARISH_SWEEP" | "BULLISH_SWEEP" | "NONE";
+  directionalBias: ConfluenceDirectionalBias;
   recommendedSide: "LONG" | "SHORT" | "NONE";
   gateStatus: "PASS" | "BLOCK" | "NEUTRAL";
   confidenceAdjustment: number; // 0-1 scale, matching ProposedTradeIdea.confidence: e.g. +0.15 for aligned, -0.30 for conflicting
@@ -62,16 +68,7 @@ export interface OrderbookGateResult {
 
 export function evaluateOrderbookDirectionalGate(
   side: TradeSide,
-  confluenceSignal?: {
-    is_level_proximate?: boolean;
-    nearest_level_type?: string | null;
-    nearest_level_price?: number | null;
-    distance_bps?: number | null;
-    raw_di?: number | null;
-    di_tilde?: number | null;
-    directional_bias?: string;
-    gate_action?: string;
-  } | null,
+  confluenceSignal?: ConfluenceSignal | null,
 ): OrderbookGateResult {
   if (!confluenceSignal || !confluenceSignal.is_level_proximate) {
     return {
@@ -90,7 +87,7 @@ export function evaluateOrderbookDirectionalGate(
   }
 
   const action = confluenceSignal.gate_action || "NO_ACTION";
-  const bias = (confluenceSignal.directional_bias || "NONE") as OrderbookGateResult["directionalBias"];
+  const bias: ConfluenceDirectionalBias = confluenceSignal.directional_bias || "NONE";
   // Explicit null checks, never `||`: `||` turns a real 0 (a legitimate raw DI of exactly 0, or a
   // distance of 0 bps) into null, erasing a genuine measurement.
   const levelType = confluenceSignal.nearest_level_type ?? null;
@@ -281,9 +278,18 @@ export function calculateDecayingDepthImbalance(
 
 /** Trailing window of complete prior minutes whose mean is subtracted from the current raw DI. */
 export const DI_STANDARDISATION_WINDOW_MINUTES = 30;
-/** Minimum populated prior minutes required before a standardised DI is published. */
+/**
+ * Minimum populated prior minutes required before a standardised DI is published.
+ *
+ * Justification: a mean of fewer samples is dominated by one or two books (the first minutes after
+ * the 09:15 open), so detrending against it would manufacture a sign from noise -- the same defect
+ * as the constant-sign raw DI this replaces. 10 distinct complete minutes is the floor at which the
+ * baseline reflects more than the opening burst while still letting the gate work from ~09:25.
+ * It is deliberately the SAME value as `DI_MIN_HISTORY_MINUTES` in `apps/ml/ai_quant_lab_ml/orderbook_di.py`
+ * so the live gate and the research that validated the signal use one definition. Not tuned.
+ */
 export const DI_STANDARDISATION_MIN_HISTORY_MINUTES = 10;
-/** Below this std the z-score is undefined (flat history) and reported as null. */
+/** Below this std the z-score is undefined (flat history) and reported as null; also the floor for a di_tilde sign. */
 const DI_STD_EPSILON = 1e-9;
 
 export interface CausalDiStandardisation {
@@ -354,6 +360,37 @@ export function trailingMinuteDiSamples(
   return [...lastPerMinute.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v.di);
 }
 
+const IST_OFFSET_MS = 330 * 60_000;
+const MS_PER_DAY = 24 * 60 * 60_000;
+
+/** Start (00:00 IST, as a UTC instant) of the IST calendar day containing `at`: the session boundary. */
+export function istSessionStart(at: Date): Date {
+  const shifted = at.getTime() + IST_OFFSET_MS;
+  return new Date(Math.floor(shifted / MS_PER_DAY) * MS_PER_DAY - IST_OFFSET_MS);
+}
+
+/**
+ * `trailingMinuteDiSamples` restricted to the SAME IST session (calendar day) as `asOf`.
+ *
+ * The raw DI baseline is a per-day level, so a window reaching back across midnight would blend
+ * yesterday's level into today's mean. Only frames received at or after the session start and
+ * strictly before `asOf` are considered (the minute rule in `trailingMinuteDiSamples` is stricter
+ * still: it also drops the minute containing `asOf`). Nothing after `asOf` can ever be returned.
+ */
+export function trailingSessionMinuteDiSamples(
+  frames: ReadonlyArray<{ receivedAt: Date; rawDi: number | null }>,
+  asOf: Date,
+  windowMinutes: number = DI_STANDARDISATION_WINDOW_MINUTES,
+): number[] {
+  const sessionStartMs = istSessionStart(asOf).getTime();
+  const asOfMs = asOf.getTime();
+  const sameSession = frames.filter((f) => {
+    const t = f.receivedAt.getTime();
+    return Number.isFinite(t) && t >= sessionStartMs && t < asOfMs;
+  });
+  return trailingMinuteDiSamples(sameSession, asOf, windowMinutes);
+}
+
 /**
  * Resolves confluenceSignal from depth frame data and nearest structural level.
  *
@@ -368,7 +405,7 @@ export function resolveConfluenceSignalFromDepth(input: {
   depth: DepthFrameLevelData;
   bandwidthBps?: number;
   priorMinuteDi?: readonly number[] | null;
-}) {
+}): ConfluenceSignal {
   const bandwidthBps = input.bandwidthBps ?? 20.0;
   if (input.distanceBps > bandwidthBps) {
     return {
@@ -398,10 +435,12 @@ export function resolveConfluenceSignalFromDepth(input: {
   // the sign; see the module header.
   const diTilde = standardised.detrendedDi === null ? null : -standardised.detrendedDi;
 
-  let directional_bias = "NONE";
-  let gate_action = "NO_ACTION";
+  let directional_bias: ConfluenceDirectionalBias = "NONE";
+  let gate_action: ConfluenceGateAction = "NO_ACTION";
 
-  if (diTilde !== null && diTilde > 0) {
+  // `> DI_STD_EPSILON`, not `> 0`: a persistently one-sided book detrends to ~1e-17 of floating-point
+  // noise whose sign is arbitrary, and that noise must not be read as a directional signal.
+  if (diTilde !== null && diTilde > DI_STD_EPSILON) {
     if (isTier1) {
       if (input.nearestLevelType.includes("HIGH") || input.nearestLevelType === "ITH") {
         directional_bias = "BEARISH_REJECTION";
@@ -426,6 +465,7 @@ export function resolveConfluenceSignalFromDepth(input: {
     di_tilde: diTilde,
     di_z_score: standardised.zScore,
     di_status: standardised.status,
+    di_history_count: standardised.historyCount,
     directional_bias,
     gate_action,
   };

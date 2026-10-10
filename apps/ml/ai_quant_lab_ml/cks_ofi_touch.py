@@ -104,6 +104,39 @@ def recompute_sequence_flags(
     return out
 
 
+def recompute_sequence_flags_by_stream(
+    frames: Sequence[Tuple[object, Optional[int], bool]],
+) -> List[Tuple[Optional[int], bool, bool, bool]]:
+    """
+    `recompute_sequence_flags` for rows that interleave several independent streams (e.g. several
+    provider symbols and/or capture sessions loaded in ONE received-order query). 2026-10-10
+    follow-up (code gaps): the stored `is_regression` / `gap_before` of pre-fix rows cannot be
+    trusted, and sequence numbers of different streams are unrelated, so the flags must be
+    recomputed per stream.
+
+    `frames` is [(stream_id, sequence_no, is_snapshot)] in received order. Returns, ALIGNED with the
+    input, (gap_before, is_duplicate, is_regression, is_stream_start). `is_stream_start` is True for
+    the first row of each stream: its sequence chain has no predecessor, so callers building an OFI
+    chain should treat it as a baseline (like a snapshot) rather than differencing across streams.
+    """
+    indices_by_stream: Dict[object, List[int]] = {}
+    for index, (stream_id, _seq, _snap) in enumerate(frames):
+        indices_by_stream.setdefault(stream_id, []).append(index)
+
+    out: List[Tuple[Optional[int], bool, bool, bool]] = [(None, False, False, False)] * len(frames)
+    for indices in indices_by_stream.values():
+        stream_flags = recompute_sequence_flags([(frames[i][1], frames[i][2]) for i in indices])
+        for position, (index, (gap, is_dup, is_reg)) in enumerate(zip(indices, stream_flags)):
+            out[index] = (gap, is_dup, is_reg, position == 0)
+    return out
+
+
+def drop_reset_and_duplicate_rows(rows: Sequence, flags: Sequence[Tuple]) -> list:
+    """Rows whose recomputed flags are neither a duplicate nor a SEQUENCE_RESET (is_regression).
+    `flags[i]` must be (gap_before, is_duplicate, is_regression, ...) for `rows[i]`."""
+    return [row for row, flag in zip(rows, flags) if not flag[1] and not flag[2]]
+
+
 @dataclass(frozen=True)
 class DepthFrameRow:
     received_at: datetime

@@ -5,11 +5,13 @@ import {
   causalStandardiseDi,
   DI_STANDARDISATION_MIN_HISTORY_MINUTES,
   evaluateOrderbookDirectionalGate,
+  istSessionStart,
   resolveConfluenceSignalFromDepth,
   trailingMinuteDiSamples,
+  trailingSessionMinuteDiSamples,
   type DepthFrameLevelData,
 } from "./orderbook-directional-gate.js";
-import type { ProposedTradeIdea } from "./strategy.js";
+import type { ConfluenceSignal, ProposedTradeIdea } from "./strategy.js";
 
 function proposal(overrides: Partial<ProposedTradeIdea> = {}): ProposedTradeIdea {
   return {
@@ -351,12 +353,12 @@ describe("causal within-day DI standardisation on a constantly-negative day", ()
 });
 
 describe("applyOrderbookGateToProposal kill switch (ORDERBOOK01_LIVE_GATE_ENABLED)", () => {
-  const passSignal = {
+  const passSignal: ConfluenceSignal = {
     is_level_proximate: true,
     gate_action: "BUY_CALL_OR_LONG",
     directional_bias: "BULLISH_REJECTION",
   };
-  const blockSignal = {
+  const blockSignal: ConfluenceSignal = {
     is_level_proximate: true,
     gate_action: "BUY_PUT_OR_SHORT",
     directional_bias: "BEARISH_REJECTION",
@@ -436,5 +438,106 @@ describe("applyOrderbookGateToProposal kill switch (ORDERBOOK01_LIVE_GATE_ENABLE
       expect(updated.confidence).toBe(0.63);
       expect(updated.evidence.orderbookGate).toMatchObject({ gateStatus: "NEUTRAL", shadowVerdict: "NEUTRAL" });
     });
+  });
+});
+
+/**
+ * Same-IST-session causal history feeding `di_tilde` in the live context
+ * (`PostgresStrategyMarketContextRepository.loadPriorMinuteDi`).
+ */
+describe("trailingSessionMinuteDiSamples / session-bounded causal di_tilde", () => {
+  const minute = 60_000;
+  /** 2026-10-09 00:00 IST == 2026-10-08T18:30:00Z. */
+  const sessionStart = new Date("2026-10-08T18:30:00.000Z").getTime();
+  const open = sessionStart + (9 * 60 + 15) * minute; // 09:15 IST
+
+  const at = (minutesAfterOpen: number, seconds = 0): Date => new Date(open + minutesAfterOpen * minute + seconds * 1000);
+  const frame = (receivedAt: Date, rawDi: number | null) => ({ receivedAt, rawDi });
+  const nearLevel = {
+    nearestLevelType: "SESSION_HIGH",
+    nearestLevelPrice: 100,
+    distanceBps: 1,
+    depth: { totalBuyQty: 1000, totalSellQty: 1000 },
+  };
+
+  it("istSessionStart is 00:00 IST of the IST day (not UTC midnight)", () => {
+    expect(istSessionStart(at(30)).toISOString()).toBe("2026-10-08T18:30:00.000Z");
+    // 23:59 IST is still the same session; 00:00 IST the next day starts a new one.
+    expect(istSessionStart(new Date(sessionStart + 24 * 60 * minute - 1)).getTime()).toBe(sessionStart);
+    expect(istSessionStart(new Date(sessionStart + 24 * 60 * minute)).getTime()).toBe(sessionStart + 24 * 60 * minute);
+  });
+
+  it("returns no samples for the first frames of a session, so di_tilde is null (UNAVAILABLE_HISTORY), never 0", () => {
+    // Previous-day frames exist, and only 3 same-session minutes precede the decision.
+    const prevDay = Array.from({ length: 40 }, (_, i) => frame(new Date(sessionStart - (i + 1) * minute), -0.3));
+    const today = [0, 1, 2].map((m) => frame(at(m, 30), -0.3));
+    const asOf = at(3, 30);
+    const history = trailingSessionMinuteDiSamples([...prevDay, ...today], asOf);
+    expect(history).toHaveLength(3); // prior-day frames are excluded
+    const signal = resolveConfluenceSignalFromDepth({ ...nearLevel, priorMinuteDi: history });
+    expect(signal.di_tilde).toBeNull();
+    expect(signal.di_status).toBe("UNAVAILABLE_HISTORY");
+    expect(signal.di_history_count).toBe(3);
+    expect(signal.gate_action).toBe("NO_ACTION");
+  });
+
+  it("does not blend yesterday's level into today's baseline", () => {
+    const prevDay = Array.from({ length: 30 }, (_, i) => frame(new Date(sessionStart - (i + 1) * minute), 0.9));
+    const today = Array.from({ length: 12 }, (_, m) => frame(at(m, 10), -0.3));
+    const history = trailingSessionMinuteDiSamples([...prevDay, ...today], at(12, 30));
+    expect(history).toHaveLength(12);
+    expect(history.every((v) => v === -0.3)).toBe(true);
+  });
+
+  it("a persistent one-sided book yields di_tilde near 0 instead of a constant sign", () => {
+    const frames = Array.from({ length: 40 }, (_, m) => frame(at(m, 30), -0.35));
+    const asOf = at(40, 30);
+    const history = trailingSessionMinuteDiSamples(frames, asOf);
+    expect(history.length).toBeGreaterThanOrEqual(DI_STANDARDISATION_MIN_HISTORY_MINUTES);
+    // The raw book is still -0.35 (sell-heavy): un-detrended, di_tilde would be +0.35 all day.
+    const signal = resolveConfluenceSignalFromDepth({
+      ...nearLevel,
+      depth: { totalBuyQty: 650, totalSellQty: 1350 }, // raw DI = -0.35
+      priorMinuteDi: history,
+    });
+    expect(signal.raw_di).toBeCloseTo(-0.35, 12);
+    expect(signal.di_tilde).not.toBeNull();
+    expect(Math.abs(signal.di_tilde as number)).toBeLessThan(1e-9);
+    expect(signal.di_status).toBe("OK");
+    expect(signal.gate_action).toBe("NO_ACTION"); // ~0 is not > 0 evidence
+  });
+
+  it("a genuine move against the same-session baseline yields a positive di_tilde", () => {
+    const frames = Array.from({ length: 40 }, (_, m) => frame(at(m, 30), -0.35));
+    const history = trailingSessionMinuteDiSamples(frames, at(40, 30));
+    const signal = resolveConfluenceSignalFromDepth({
+      ...nearLevel,
+      depth: { totalBuyQty: 500, totalSellQty: 1500 }, // raw DI = -0.5, more sell-heavy than the -0.35 baseline
+      priorMinuteDi: history,
+    });
+    expect(signal.di_tilde).toBeCloseTo(0.15, 12);
+    expect(signal.gate_action).toBe("BUY_PUT_OR_SHORT");
+  });
+
+  it("never uses a frame at/after the decision time or in the decision's own minute", () => {
+    const base = Array.from({ length: 20 }, (_, m) => frame(at(m, 30), -0.3));
+    const asOf = at(20, 30);
+    const future = [
+      frame(at(20, 10), 0.99), // same minute as the decision, earlier second: excluded by the minute rule
+      frame(at(20, 30), 0.99), // exactly at the decision
+      frame(at(20, 45), 0.99),
+      frame(at(25), 0.99),
+    ];
+    const withFuture = trailingSessionMinuteDiSamples([...base, ...future], asOf);
+    const withoutFuture = trailingSessionMinuteDiSamples(base, asOf);
+    expect(withFuture).toEqual(withoutFuture);
+    expect(withFuture.every((v) => v === -0.3)).toBe(true);
+  });
+
+  it("skips null-DI frames rather than zero-filling them", () => {
+    const frames = Array.from({ length: 20 }, (_, m) => frame(at(m, 30), m % 2 === 0 ? null : -0.3));
+    const history = trailingSessionMinuteDiSamples(frames, at(20, 30));
+    expect(history).toHaveLength(10);
+    expect(history.every((v) => v === -0.3)).toBe(true);
   });
 });

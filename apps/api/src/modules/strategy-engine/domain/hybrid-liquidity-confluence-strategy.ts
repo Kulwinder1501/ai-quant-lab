@@ -1,7 +1,5 @@
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import type { EnsureStrategyVersionInput, ProposedTradeIdea, StrategyMarketContext } from "./strategy.js";
-import type { OptionChainSignal } from "./option-chain-signal.js";
-
 export const hybridLiquidityConfluenceStrategyKey = "hybrid-liquidity-confluence-v1";
 // Bumped 1 -> 2: version 1's stored configuration ({"minDiDecay": 0.15, "minLongPcr": 1.2,
 // "maxShortPcr": 0.8, "minRawDiOfi": 0.05, "minIvPercentile": 15}, registered 2026-09-28) predates
@@ -100,7 +98,7 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
     // name and `pcr` the same value kept for stored-JSON consumers. When Pillars A and B have both
     // passed and only the PCR is missing, the reason ("PCR unavailable (stale)" etc.) is logged
     // explicitly instead of the proposal vanishing silently.
-    const optionChainSignal = context.optionChainSignal as Partial<OptionChainSignal> | undefined;
+    const optionChainSignal = context.optionChainSignal;
     const pcr = optionChainSignal?.pcr ?? null;
     if (isDepthImbalanceAligned && pcr === null) {
       console.warn(JSON.stringify({

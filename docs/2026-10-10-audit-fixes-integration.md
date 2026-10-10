@@ -82,18 +82,54 @@ The API container runs `migrate.js` before starting the server, so rebuilding th
 Any re-run follows the governance already in force: dated amendment, one exploratory run, no
 re-scoring of earlier results, pattern weight stays zero until v2 outcomes are re-measured.
 
-## 6. Known gaps (code work still open)
+## 6. Code gaps
 
-- Pattern queries in `postgres-strategy-market-context-repository.ts` and the backtest repository
-  should filter on `known_at`, not `detected_at`.
-- `strategy.ts` types are cast for the extra signal fields and `NO_DEPTH`.
-- `priorMinuteDi` is not passed, so `di_tilde` stays null.
-- `run_hybrid_confluence_backtest.py` and `run_ofi_impulse_oos.py` still use the stored
-  `is_regression`.
-- `train.py` majority baseline is not stratified by time of day.
-- The forward label window can cross the overnight gap.
-- `momentum-scalp-pattern-strategy` still defaults to `candlestick-v1` and needs a new research
-  version (see decision 4).
+### Closed in the follow-up (2026-10-10, second pass)
+
+- **Point-in-time reads use `known_at`.** The strategy-context pattern/price-action queries gained a
+  `known_at <= candle.close_time` guard (they had no time predicate); the backtest repository
+  filters `known_at <= cutoff` and deliberately does NOT also require `detected_at <= cutoff`
+  (rebuilds bump `detected_at` and would erase history from every replay); the market scanner and
+  dashboard queries were aligned. The dashboard now reads the current rule set
+  (`candlestickAlgorithmVersion`) instead of hard-coded `candlestick-v1`.
+- **`strategy.ts` types.** `ConfluenceSignal` and related types (`NO_DEPTH`, `di_status`,
+  `depth_state`, ...) replace the casts and the duplicated inline types in the gate, validator and
+  hybrid strategy.
+- **`di_tilde` is no longer always null.** The context repository loads the last raw DI of each
+  complete prior minute (same IST session, front-month future, strictly before the decision minute)
+  and `di_tilde = -(raw_di - mean(history))`. Fewer than 10 minutes of history gives `null` with
+  `UNAVAILABLE_HISTORY`, never 0 (same constants as `orderbook_di.py`: 10 min minimum, 30 min
+  window). A missing total no longer becomes 0, and the gate needs `di_tilde > 1e-9` so float
+  noise on a flat one-sided book cannot fire it. The history query was checked read-only against
+  the real schema: valid, uses `depth_frames_symbol_received_idx`, under 1 ms.
+- **Depth-flag recompute in research scripts.** `run_hybrid_confluence_backtest.py` and
+  `run_ofi_impulse_oos.py` recompute sequence flags from raw `sequence_no` / `is_snapshot` instead
+  of trusting the stored `is_regression`.
+- **Baseline.** `train.py` (and `backfill_volatility_shadow.py`) report a train-fitted
+  time-of-day-stratified majority baseline alongside the trivial one, and promotion now requires
+  beating the stronger of the two (`DID_NOT_BEAT_STRONGEST_BASELINE`).
+- **Overnight labels.** Intraday forward labels must lie inside the source bar's IST session;
+  rows whose horizon passes the close get no label (`session_forward.py`). Daily bars unchanged.
+
+Behaviour changes that mean earlier results from the affected scripts must be re-run under a new
+pre-registration: STRUCTURE-01 calibration (events with no in-session forward bar are dropped
+rather than recorded NEUTRAL), and any promotion decision that relied on the trivial baseline.
+
+### Still open
+
+- `momentum-scalp-pattern-strategy.ts` (and the other frozen `momentum-scalp-*` strategies,
+  `trend-breakout-strategy.ts`) default to `candlestick-v1`. Frozen research versions cannot be
+  edited in place; they need new research versions with new checksums (see decision 4 and the
+  patch file). The ML `contracts.py` / `features.py` / `sequence_inference.py` defaults and the
+  `run-shadow-decisions.ts`, `run-scalp-research-harness.ts` and `verify-live-backfill-parity.ts`
+  layer lists also still name `candlestick-v1`; they should move together with those new versions,
+  after v2 re-detection.
+- `run_hybrid_confluence_backtest.py` still takes the nearest depth frame across all symbols for
+  the day (flags are now recomputed per symbol); restricting to the front-month contract is a
+  separate fix.
+- `train_tcn.py` still uses its own trivial baseline.
+- The API depth history does not drop duplicate/regression frames the way the Python path does;
+  taking the last frame per minute makes this mostly harmless.
 - `iv_compression_signal_check.py` imports `option_chain_pcr.py`; the two must always land together.
 
 ## 7. Housekeeping

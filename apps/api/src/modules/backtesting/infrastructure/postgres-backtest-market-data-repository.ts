@@ -168,7 +168,10 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
         INNER JOIN pattern_definitions
           ON pattern_definitions.id = pattern_detections.pattern_definition_id
         WHERE pattern_detections.candle_id = ANY($1::uuid[])
-          AND pattern_detections.detected_at <= $2
+          -- Point-in-time on known_at (candle close), NOT detected_at. detected_at is a most-recent-write
+          -- field that rebuilds bump past the cutoff; requiring detected_at <= cutoff as well would
+          -- silently erase history from every replay. known_at never moves later.
+          AND pattern_detections.known_at <= $2
         ORDER BY
           pattern_detections.candle_id ASC,
           pattern_definitions.pattern_code ASC,
@@ -185,7 +188,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
           details
         FROM price_action_events
         WHERE candle_id = ANY($1::uuid[])
-          AND detected_at <= $2
+          -- known_at, not detected_at: see the pattern_detections query above.
+          AND known_at <= $2
         ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
       `, [candleIds, input.dataCutoffAt]),
       this.database.query<{ bar_time: Date; snapshot_payload: IctStateCompositeSnapshot }>(`

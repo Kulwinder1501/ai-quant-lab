@@ -15,6 +15,7 @@ sys.path.insert(0, str(script_dir))
 
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
 from ai_quant_lab_ml.cks_ofi_touch import compute_windowed_ofi_series, DepthFrameRow, recompute_sequence_flags
+from ai_quant_lab_ml.session_forward import crosses_session
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -476,7 +477,9 @@ def main():
                             exit_t = t + timedelta(minutes=FORWARD_HORIZON_MINUTES)
                             exit_idx = np.searchsorted(frame_times, exit_t)
                             
-                            if exit_idx < len(frame_times):
+                            # The exit frame must be in the entry's IST session: a capture session that
+                            # spans several days would otherwise "exit" at the next morning's first frame.
+                            if exit_idx < len(frame_times) and not crosses_session(t, frames[exit_idx].received_at):
                                 exit_frame = frames[exit_idx]
                                 q1_events.append({
                                     "sym": sym,

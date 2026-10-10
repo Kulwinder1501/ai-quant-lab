@@ -6,6 +6,7 @@ import type {
   PriceActionEventCode,
 } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type {
+  ConfluenceSignal,
   StrategyMarketContext,
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
@@ -24,7 +25,13 @@ import { IctCompositeEngine } from "../../../modules/technical-analysis/domain/i
 import { instrumentProfileForSymbol } from "../../../modules/platform/calendar/instrument-profile.js";
 import { ICT_STATE_ENGINE_VERSION, computeIctConfigHash, defaultIctEngineConfig, type IctStateCompositeSnapshot } from "../../../modules/technical-analysis/domain/ict/config.js";
 import { computeHtfBucketBiases, mapBarsToHtfBias, type HtfSourceCandle } from "../../../modules/technical-analysis/domain/ict/replay-builder.js";
-import { resolveConfluenceSignalFromDepth } from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
+import {
+  DI_STANDARDISATION_WINDOW_MINUTES,
+  calculateDecayingDepthImbalance,
+  istSessionStart,
+  resolveConfluenceSignalFromDepth,
+  trailingSessionMinuteDiSamples,
+} from "../../../modules/strategy-engine/domain/orderbook-directional-gate.js";
 import {
   DEPTH_FRAME_MAX_AGE_MS,
   buildOptionChainSignal,
@@ -70,7 +77,15 @@ interface PatternDetectionRow extends QueryResultRow {
   details: Record<string, unknown>;
 }
 
+interface PriorDepthTotalsRow extends QueryResultRow {
+  received_at: Date;
+  total_buy_qty: string | null;
+  total_sell_qty: string | null;
+}
+
 interface DepthFrameRow extends QueryResultRow {
+  /** Optional only because older fakes omit it; the real query always selects it. */
+  received_at?: Date;
   bid_price: string[];
   bid_qty: string[];
   ask_price: string[];
@@ -503,14 +518,21 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         INNER JOIN pattern_definitions
           ON pattern_definitions.id = pattern_detections.pattern_definition_id
         WHERE pattern_detections.candle_id = $1
+          -- Point-in-time cutoff = the context candle's close. known_at (the close of the candle the
+          -- row is stored on, never moved later by re-detection) is the field that dates when the
+          -- evidence was knowable; detected_at is a most-recent-write field that rebuilds bump, so
+          -- it is deliberately not used here. Evidence stored on this candle has known_at = close_time.
+          AND pattern_detections.known_at <= $2
         ORDER BY pattern_definitions.pattern_code ASC, pattern_definitions.algorithm_version ASC
-      `, [candle.id]),
+      `, [candle.id, candle.close_time]),
       this.database.query<PriceActionEventRow>(`
         SELECT event_type, algorithm_version, direction, level, confidence, details
         FROM price_action_events
         WHERE candle_id = $1
+          -- known_at, not detected_at: see the pattern_detections query above.
+          AND known_at <= $2
         ORDER BY event_type ASC, algorithm_version ASC
-      `, [candle.id]),
+      `, [candle.id, candle.close_time]),
       /*
        * Skipped outright at a timeframe no registered strategy reads ICT at -- not queried and then
        * discarded. There is nothing to find there, and the miss would send us on to compute it.
@@ -756,7 +778,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       const depthResult: { rows: DepthFrameRow[] } = depthSymbol === null
         ? { rows: [] }
         : await this.database.query<DepthFrameRow>(`
-          SELECT bid_price, bid_qty, ask_price, ask_qty, total_buy_qty, total_sell_qty
+          SELECT received_at, bid_price, bid_qty, ask_price, ask_qty, total_buy_qty, total_sell_qty
           FROM depth_frames
           WHERE provider_symbol = $1 AND received_at <= $2 AND received_at >= $3
           ORDER BY received_at DESC, sequence_no DESC
@@ -764,20 +786,21 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         `, [depthSymbol, candle.close_time, new Date(candle.close_time.getTime() - DEPTH_FRAME_MAX_AGE_MS)]);
 
       const df = depthResult.rows[0];
-      if (!df) {
+      if (!df || depthSymbol === null) {
         // Explicit "no depth" state. raw_di/di_tilde are null -- NOT 0 -- so no gate can read an
         // absent book as a perfectly balanced one. `depth_state` is extra to the declared context
         // type on purpose: it rides along in the captured rawContext for diagnosis.
-        const noDepthSignal = {
+        const noDepthSignal: ConfluenceSignal = {
           is_level_proximate: true,
           nearest_level_type: level.pool_type,
           nearest_level_price: levelPrice,
           distance_bps: distanceBps,
           raw_di: null,
           di_tilde: null,
+          di_status: "UNAVAILABLE_DEPTH",
           directional_bias: "NONE",
           gate_action: "NO_ACTION",
-          depth_state: "NO_DEPTH" as const,
+          depth_state: "NO_DEPTH",
           depth_symbol: depthSymbol,
           depth_max_age_ms: DEPTH_FRAME_MAX_AGE_MS,
         };
@@ -789,19 +812,71 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         bidQty: df.bid_qty.map(Number),
         askPrice: df.ask_price.map(Number),
         askQty: df.ask_qty.map(Number),
-        totalBuyQty: df.total_buy_qty ? Number(df.total_buy_qty) : 0,
-        totalSellQty: df.total_sell_qty ? Number(df.total_sell_qty) : 0,
+        // A missing total stays null (-> raw DI unavailable); it is never coerced to 0, which would
+        // read as a one-sided book.
+        totalBuyQty: df.total_buy_qty === null || df.total_buy_qty === undefined ? null : Number(df.total_buy_qty),
+        totalSellQty: df.total_sell_qty === null || df.total_sell_qty === undefined ? null : Number(df.total_sell_qty),
       };
+
+      // Causal di_tilde: the prior-minute DI history of the SAME contract and the SAME IST session,
+      // strictly before the minute of the frame being standardised (so before the decision time and
+      // never using a later frame). Without it di_tilde stays null: see `causalStandardiseDi`.
+      const frameTime = df.received_at instanceof Date ? df.received_at : candle.close_time;
+      const priorMinuteDi = await this.loadPriorMinuteDi(depthSymbol, frameTime);
 
       return resolveConfluenceSignalFromDepth({
         nearestLevelType: level.pool_type,
         nearestLevelPrice: levelPrice,
         distanceBps,
         depth: depthData,
+        priorMinuteDi,
       });
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The causal DI history behind `di_tilde`: the LAST raw DI of each complete minute of the trailing
+   * `DI_STANDARDISATION_WINDOW_MINUTES`, for `depthSymbol`, within the same IST session as `asOf`,
+   * strictly before the minute containing `asOf` (the minute rule lives in
+   * `trailingSessionMinuteDiSamples`). `asOf` is the received time of the frame being standardised,
+   * which is itself at or before the decision cutoff, so no frame after the decision is ever read.
+   *
+   * Frames without usable totals are filtered in SQL (missing is missing, never DI = 0) BEFORE the
+   * per-minute pick, so a bad last frame does not hide an earlier good one in the same minute.
+   * The result may be shorter than the minimum history; `causalStandardiseDi` then yields null.
+   */
+  private async loadPriorMinuteDi(depthSymbol: string, asOf: Date): Promise<number[]> {
+    const minuteMs = 60_000;
+    const currentMinuteStart = new Date(Math.floor(asOf.getTime() / minuteMs) * minuteMs);
+    const windowStart = new Date(currentMinuteStart.getTime() - DI_STANDARDISATION_WINDOW_MINUTES * minuteMs);
+    const sessionStart = istSessionStart(asOf);
+    const from = windowStart.getTime() > sessionStart.getTime() ? windowStart : sessionStart;
+
+    const result = await this.database.query<PriorDepthTotalsRow>(`
+      SELECT DISTINCT ON (date_trunc('minute', received_at))
+        received_at, total_buy_qty, total_sell_qty
+      FROM depth_frames
+      WHERE provider_symbol = $1
+        AND received_at >= $2
+        AND received_at < $3
+        AND total_buy_qty IS NOT NULL
+        AND total_sell_qty IS NOT NULL
+        AND total_buy_qty + total_sell_qty > 0
+      ORDER BY date_trunc('minute', received_at) ASC, received_at DESC, sequence_no DESC
+    `, [depthSymbol, from, currentMinuteStart]);
+
+    const frames = result.rows
+      .filter((row) => row.received_at instanceof Date)
+      .map((row) => ({
+        receivedAt: row.received_at,
+        rawDi: calculateDecayingDepthImbalance({
+          totalBuyQty: row.total_buy_qty === null ? null : Number(row.total_buy_qty),
+          totalSellQty: row.total_sell_qty === null ? null : Number(row.total_sell_qty),
+        }).rawDi,
+      }));
+    return trailingSessionMinuteDiSamples(frames, asOf);
   }
 
   /**

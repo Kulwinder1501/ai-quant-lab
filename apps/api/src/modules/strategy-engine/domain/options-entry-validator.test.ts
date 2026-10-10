@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { validateOptionsEntry } from "./options-entry-validator.js";
+import type { ConfluenceSignal } from "./strategy.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 
 const EXPIRY = new Date("2026-08-25T10:00:00.000Z");
@@ -381,7 +382,7 @@ describe("validateOptionsEntry", () => {
 
   describe("ORDERBOOK-01 directional gate kill switch", () => {
     // gate_action recommends SHORT; IDEA is LONG, so evaluateOrderbookDirectionalGate returns BLOCK.
-    const BLOCKING_SIGNAL = {
+    const BLOCKING_SIGNAL: ConfluenceSignal = {
       is_level_proximate: true,
       nearest_level_type: "SWING_HIGH",
       nearest_level_price: 57_750,

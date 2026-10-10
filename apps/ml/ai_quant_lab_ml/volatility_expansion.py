@@ -252,10 +252,13 @@ def time_of_day_key(close_time: datetime, bar_minutes: int) -> int:
 def time_of_day_majority_predictions(
     *,
     train_keys: Sequence[int],
-    train_labels: Sequence[VolatilityLabel],
+    train_labels: Sequence[str],
     holdout_keys: Sequence[int],
-) -> list[VolatilityLabel]:
+) -> list[str]:
     """The time-of-day-stratified trivial predictor: the TRAINING majority class per bar-of-day.
+
+    Label-alphabet agnostic (2026-10-10 follow-up): it only counts label strings, so the directional
+    target (BEARISH/NEUTRAL/BULLISH) reuses it unchanged via ``train.time_of_day_baseline_metrics``.
 
     The global majority baseline lets a model that has merely learned the clock beat "trivial":
     the class mix differs sharply by bar of day (see ``SessionScopedTrailingWindow``), so the
@@ -272,8 +275,8 @@ def time_of_day_majority_predictions(
     if not train_labels:
         raise VolatilityExpansionError("A time-of-day baseline needs a non-empty training partition.")
 
-    def majority(counts: dict[str, int]) -> VolatilityLabel:
-        return max(counts.items(), key=lambda entry: (entry[1], entry[0]))[0]  # type: ignore[return-value]
+    def majority(counts: dict[str, int]) -> str:
+        return max(counts.items(), key=lambda entry: (entry[1], entry[0]))[0]
 
     by_key: dict[int, dict[str, int]] = {}
     overall: dict[str, int] = {}

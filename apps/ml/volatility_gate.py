@@ -68,6 +68,7 @@ from ai_quant_lab_ml.straddle_economics import (  # noqa: E402
     clustered_mean_and_standard_error,
     cost_aware_promotion_verdict,
 )
+from ai_quant_lab_ml.session_forward import crosses_session, is_intraday_label_timeframe  # noqa: E402
 from ai_quant_lab_ml.training import predict_labels, train_model  # noqa: E402
 from ai_quant_lab_ml.validation import walk_forward_splits  # noqa: E402
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET  # noqa: E402
@@ -193,6 +194,10 @@ def main() -> int:
         if exit_index >= len(records):
             return None
         entry, exit_bar = records[entry_index], records[exit_index]
+        # Intraday: the hold must end inside the entry's IST session. An exit on a later session
+        # prices the overnight gap, not the horizon -> no trade value (dropped, never filled).
+        if is_intraday_label_timeframe(request.timeframe) and crosses_session(entry.close_time, exit_bar.close_time):
+            return None
         # Match the VIX map's IST session-date key. close_time is tz-aware UTC.
         ist_date = entry.close_time.astimezone(IST).date()
         vix = latest_vix_before_session(vix_history, ist_date)
