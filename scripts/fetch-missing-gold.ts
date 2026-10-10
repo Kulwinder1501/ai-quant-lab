@@ -1,6 +1,79 @@
 import { Client } from 'pg';
 import { execSync } from 'child_process';
 import "dotenv/config";
+import { OandaHistoricalDataProvider } from "../apps/api/src/infrastructure/market-data/oanda-historical-data-provider.js";
+import type { HistoricalMarketCandle } from "../apps/api/src/modules/market-data/domain/historical-data-provider.js";
+
+const OANDA_INSTRUMENT = "XAU_USD";
+const OANDA_GRANULARITY = "1m";
+
+function createOandaProvider(): OandaHistoricalDataProvider {
+    const accessToken = process.env.OANDA_ACCESS_TOKEN;
+    if (!accessToken) {
+        throw new Error("OANDA_ACCESS_TOKEN is not set in the .env file.");
+    }
+    const environment = (process.env.OANDA_ENVIRONMENT ?? "practice") as "practice" | "trade";
+    return new OandaHistoricalDataProvider({ accessToken, environment });
+}
+
+// Mirrors fetch-bid-ask-xauusd.ts's insert path: this is the only table XAU_USD bid/ask
+// candles are stored in, and collect-historical-data.ts never writes to it -- that CLI
+// persists mid-price OHLC into the unrelated `candles` table regardless of provider.
+async function insertBidAskCandles(client: Client, candles: HistoricalMarketCandle[]): Promise<number> {
+    let inserted = 0;
+    for (let i = 0; i < candles.length; i += 2000) {
+        const slice = candles.slice(i, i + 2000);
+        const values: string[] = [];
+        const params: unknown[] = [];
+        let paramIdx = 1;
+
+        for (const c of slice) {
+            // The CHECK constraint on oanda_bid_ask_candles requires complete = true, and a
+            // catch-up fetch to "now" can include the still-forming trailing bar.
+            if (!c.bid || !c.ask || c.complete === false) continue;
+
+            values.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+            params.push(
+                OANDA_INSTRUMENT, OANDA_GRANULARITY, c.openTime,
+                c.bid.open, c.bid.high, c.bid.low, c.bid.close,
+                c.ask.open, c.ask.high, c.ask.low, c.ask.close,
+                parseInt(c.volume, 10), true,
+                "OANDA", "v3",
+            );
+        }
+
+        if (values.length === 0) continue;
+
+        await client.query(
+            `INSERT INTO oanda_bid_ask_candles (
+                instrument, granularity, time,
+                bid_open, bid_high, bid_low, bid_close,
+                ask_open, ask_high, ask_low, ask_close,
+                volume, complete, source, provider_version
+            )
+            VALUES ${values.join(", ")}
+            ON CONFLICT (instrument, granularity, time, source) DO NOTHING`,
+            params,
+        );
+        inserted += values.length;
+    }
+    return inserted;
+}
+
+async function fetchAndStoreBidAskGap(
+    client: Client,
+    provider: OandaHistoricalDataProvider,
+    from: Date,
+    to: Date,
+): Promise<number> {
+    const candles = await provider.fetchCandles({
+        providerInstrumentId: OANDA_INSTRUMENT,
+        timeframe: "1m",
+        from,
+        to,
+    });
+    return insertBidAskCandles(client, candles);
+}
 
 async function main() {
     console.log("==========================================");
@@ -15,6 +88,8 @@ async function main() {
 
     const client = new Client({ connectionString: dbUrl });
     await client.connect();
+
+    const oandaProvider = createOandaProvider();
 
     console.log("\n🔍 Checking for inner gaps in XAU_USD 1m data (machine downtime)...");
     
@@ -46,35 +121,34 @@ async function main() {
     }
     
     for (const gap of gaps) {
-        const fromIso = new Date(gap.gap_start.getTime() + 60000).toISOString(); 
-        const toIso = gap.gap_end.toISOString();
-        
-        console.log(`\n⬇️ Fetching missing data gap: ${fromIso} to ${toIso} (${Math.round(gap.gap_minutes)} min)`);
-        
-        const cmd = `npx tsx apps/api/src/interfaces/cli/collect-historical-data.ts --instrument XAU_USD --exchange OANDA --provider oanda --timeframe 1m --from "${fromIso}" --to "${toIso}" --skip-existing`;
-        
+        const fromDate = new Date(gap.gap_start.getTime() + 60000);
+        const toDate = gap.gap_end;
+
+        console.log(`\n⬇️ Fetching missing data gap: ${fromDate.toISOString()} to ${toDate.toISOString()} (${Math.round(gap.gap_minutes)} min)`);
+
         try {
-            execSync(cmd, { stdio: 'inherit' });
+            const inserted = await fetchAndStoreBidAskGap(client, oandaProvider, fromDate, toDate);
+            console.log(`  -> Inserted ${inserted} bid/ask candles.`);
         } catch (e) {
-            console.error("❌ Failed to fetch data for this gap. It may be a weekend or OANDA returned an error.");
+            console.error("❌ Failed to fetch data for this gap. It may be a weekend or OANDA returned an error.", e);
         }
     }
-    
+
     console.log("\n🔍 Checking for latest missing data (from last recorded candle to NOW)...");
     const maxQuery = `SELECT MAX(time) as max_time FROM oanda_bid_ask_candles WHERE instrument = 'XAU_USD' AND granularity = '1m'`;
     const maxRes = await client.query(maxQuery);
     const maxTime = maxRes.rows[0].max_time;
-    
+
     if (maxTime) {
-        const fromIso = maxTime.toISOString();
-        const toIso = new Date().toISOString();
-        console.log(`\n⬇️ Fetching latest 1m data: ${fromIso} to ${toIso}`);
-        
-        const cmd = `npx tsx apps/api/src/interfaces/cli/collect-historical-data.ts --instrument XAU_USD --exchange OANDA --provider oanda --timeframe 1m --from "${fromIso}" --to "${toIso}" --skip-existing`;
+        const fromDate: Date = maxTime;
+        const toDate = new Date();
+        console.log(`\n⬇️ Fetching latest 1m data: ${fromDate.toISOString()} to ${toDate.toISOString()}`);
+
         try {
-            execSync(cmd, { stdio: 'inherit' });
+            const inserted = await fetchAndStoreBidAskGap(client, oandaProvider, fromDate, toDate);
+            console.log(`  -> Inserted ${inserted} bid/ask candles.`);
         } catch (e) {
-            console.error("❌ Failed to fetch latest 1m data.");
+            console.error("❌ Failed to fetch latest 1m data.", e);
         }
     }
 
