@@ -23,7 +23,8 @@ import {
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../infrastructure/india-vix-implied-volatility-source.js";
 import type { TradeSide } from "../../../strategy-engine/domain/strategy.js";
 
-function parseTradeHistoryQuery(request: Request): {
+/** Exported for reuse by journal.routes.ts, whose query contract is identical. */
+export function parseTradeHistoryQuery(request: Request): {
   accountId?: string;
   instrumentSymbol?: string;
   status?: PaperTradeStatus;

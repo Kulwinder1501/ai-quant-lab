@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Layers,
   Target,
+  BookOpen,
 } from "lucide-react";
 import { classNames } from "../ui/class-names";
 import { type ReactNode } from "react";
@@ -51,6 +52,7 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
       title: "TRADING",
       items: [
         { name: "Portfolio", href: "/portfolio", icon: <ScrollText className="size-5" /> },
+        { name: "Journal", href: "/journal", icon: <BookOpen className="size-5" /> },
         { name: "Gold Shadow Ledger", href: "/gold", icon: <Target className="size-5" /> },
       ],
     },
