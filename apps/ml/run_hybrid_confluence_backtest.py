@@ -63,6 +63,7 @@ if str(script_dir) not in sys.path:
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
 from ai_quant_lab_ml.cks_ofi_touch import (
+    contract_for_date,
     drop_reset_and_duplicate_rows,
     recompute_sequence_flags_by_stream,
 )
@@ -153,7 +154,44 @@ def clean_depth_frames_from_rows(rows: list[tuple]) -> list[tuple[datetime, floa
     ]
 
 
-def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> list[tuple[datetime, float, float]]:
+def clean_depth_frames_by_symbol(rows: list[tuple]) -> dict[str, list[tuple[datetime, float, float]]]:
+    """Same cleaning as `clean_depth_frames_from_rows`, but kept SEPARATE per provider_symbol.
+
+    2026-10-10 follow-up: the backtest used to search ONE pool of frames from every captured symbol
+    for the frame nearest an event, so an event on one underlying could be scored against another
+    contract's book (or against the wrong month's contract around a roll). Each event is now
+    matched only against the book of ITS OWN front-month future (`depth_contract_for_event`).
+    """
+    flags = recompute_sequence_flags_by_stream(
+        [((r[3], r[4]), None if r[5] is None else int(r[5]), bool(r[6])) for r in rows]
+    )
+    by_symbol: dict[str, list[tuple[datetime, float, float]]] = {}
+    for r in drop_reset_and_duplicate_rows(rows, flags):
+        if r[1] is None or r[2] is None:
+            continue
+        by_symbol.setdefault(str(r[3]), []).append((r[0], float(r[1]), float(r[2])))
+    return by_symbol
+
+
+# Underlyings whose futures order book is actually captured. NIFTY50 has no depth capture, so a
+# NIFTY50 contact has NO order book -- it must be excluded from the depth-conditioned populations,
+# not scored against BANKNIFTY's book.
+DEPTH_CAPTURED_UNDERLYINGS = ("BANKNIFTY",)
+
+
+def depth_contract_for_event(symbol: str, contact_time: datetime) -> str | None:
+    """The captured front-month futures contract that describes this event's own instrument, or
+    None when that instrument has no captured depth (or no contract is known for the date).
+
+    The date-to-contract map is the research convention in `cks_ofi_touch.BANKNIFTY_DEPTH_CONTRACTS`
+    (confirmed against real rows, expiry-bounded), keyed on the UTC date like the other scripts.
+    """
+    if symbol not in DEPTH_CAPTURED_UNDERLYINGS:
+        return None
+    return contract_for_date(contact_time.astimezone(zoneinfo.ZoneInfo("UTC")).date().isoformat())
+
+
+def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> dict[str, list[tuple[datetime, float, float]]]:
     day_start = datetime.combine(day, datetime.min.time(), tzinfo=zoneinfo.ZoneInfo("UTC"))
     day_end = day_start + timedelta(days=1)
     with conn.cursor() as cur:
@@ -167,7 +205,7 @@ def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> list[tupl
             ORDER BY received_at ASC, sequence_no ASC NULLS LAST
         """, (day_start, day_end))
         rows = cur.fetchall()
-    return clean_depth_frames_from_rows(rows)
+    return clean_depth_frames_by_symbol(rows)
 
 
 def find_nearest_depth_frame(
@@ -365,6 +403,9 @@ def run_backtest(
     full_pillar_trades = []  # Pillar A + B + C, all real
     pillar_c_unmeasured = 0
     pillar_c_unavailable_reasons: dict[str, int] = {}
+    # Events whose instrument has no captured futures depth (or no known contract for the date):
+    # excluded from the depth-conditioned populations, still counted in the standalone baseline.
+    no_depth_contract = 0
 
     for day in sorted(events_by_day.keys()):
         frames = fetch_depth_frames_for_day(conn, day)
@@ -383,7 +424,11 @@ def run_backtest(
                 "return_r": 1.5 if is_rejection else -1.0,
             })
 
-            frame = find_nearest_depth_frame(frames, contact_time)
+            contract = depth_contract_for_event(symbol, contact_time)
+            if contract is None:
+                no_depth_contract += 1
+                continue
+            frame = find_nearest_depth_frame(frames.get(contract, []), contact_time)
             if frame is None:
                 continue
             buy_qty, sell_qty = frame
@@ -445,6 +490,7 @@ def run_backtest(
         "pillar_a_only": hybrid_stats,
         "pillar_a_only_binomial_p": p_value_hybrid,
         "full_pillar": full_stats,
+        "events_without_depth_contract": no_depth_contract,
         "pillar_c_unmeasured_at_pillar_a_pass": pillar_c_unmeasured,
         "pillar_c_unavailable_reasons": pillar_c_unavailable_reasons,
     }
@@ -452,6 +498,8 @@ def run_backtest(
     if not quiet:
         log_output("\n--- BENCHMARK RESULTS ---")
         log_output(f"Pillar A threshold: {pillar_a_threshold}")
+        log_output(f"Events with no captured futures depth for their own instrument/date "
+                   f"(excluded from depth-conditioned populations): {no_depth_contract:,}")
         log_output(f"1. Standalone baseline: n={standalone_stats['n']:,} "
                    f"WR={standalone_stats['win_rate']:.2f}% PF={standalone_stats['profit_factor']:.2f} "
                    f"NetR={standalone_stats['net_r']:+.2f}")

@@ -105,7 +105,42 @@ def test_hybrid_query_no_longer_filters_on_stored_flags_and_loads_sequence_field
     sql = conn.sql[0]
     assert "is_regression" not in sql and "is_duplicate" not in sql
     assert "sequence_no" in sql and "is_snapshot" in sql and "ORDER BY received_at" in sql
-    assert len(out) == 7
+    assert len(out[SYM]) == 7  # frames are now kept per provider_symbol
+
+
+def test_hybrid_keeps_frames_separate_per_symbol_so_books_are_never_pooled():
+    # Two symbols captured the same day, including an OPTION contract's book as the real table has.
+    fut, opt = "NSE:BANKNIFTY26SEPFUT", "NSE:BANKNIFTY26AUG57700CE"
+    rows = [
+        _hybrid_row(0, 1, symbol=fut, buy=100.0, sell=50.0),
+        _hybrid_row(1, 1, symbol=opt, buy=7.0, sell=7.0),
+        _hybrid_row(2, 2, symbol=fut, buy=110.0, sell=50.0),
+    ]
+    by_symbol = hybrid.clean_depth_frames_by_symbol(rows)
+    assert set(by_symbol) == {fut, opt}
+    assert [f[1] for f in by_symbol[fut]] == [100.0, 110.0]
+    assert [f[1] for f in by_symbol[opt]] == [7.0]
+
+
+def test_event_is_matched_only_to_its_own_front_month_future():
+    in_sep = datetime(2026, 9, 11, 5, 0, tzinfo=timezone.utc)
+    assert hybrid.depth_contract_for_event("BANKNIFTY", in_sep) == "NSE:BANKNIFTY26SEPFUT"
+    # Rolled: the same underlying maps to the OCT contract after the SEP window.
+    assert hybrid.depth_contract_for_event(
+        "BANKNIFTY", datetime(2026, 10, 5, 5, 0, tzinfo=timezone.utc)) == "NSE:BANKNIFTY26OCTFUT"
+    # NIFTY50 has no captured depth: no contract, so its events are excluded, not scored on BANKNIFTY's book.
+    assert hybrid.depth_contract_for_event("NIFTY50", in_sep) is None
+    # A date with no known contract (gap before the first capture) is also no-depth, not a guess.
+    assert hybrid.depth_contract_for_event(
+        "BANKNIFTY", datetime(2026, 7, 1, 5, 0, tzinfo=timezone.utc)) is None
+
+
+def test_nearest_frame_search_cannot_reach_another_contracts_book():
+    fut_frames = [(T0, 100.0, 50.0)]
+    other_frames = [(T0 + timedelta(seconds=1), 1.0, 1.0)]   # closer in time, but a different book
+    by_symbol = {"NSE:BANKNIFTY26SEPFUT": fut_frames, "NSE:BANKNIFTY26AUG57700CE": other_frames}
+    contract = hybrid.depth_contract_for_event("BANKNIFTY", T0 + timedelta(seconds=2))
+    assert hybrid.find_nearest_depth_frame(by_symbol.get(contract, []), T0 + timedelta(seconds=2)) == (100.0, 50.0)
 
 
 def test_stream_helper_aligns_flags_and_marks_each_stream_start():

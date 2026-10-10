@@ -111,6 +111,23 @@ re-scoring of earlier results, pattern weight stays zero until v2 outcomes are r
 - **Overnight labels.** Intraday forward labels must lie inside the source bar's IST session;
   rows whose horizon passes the close get no label (`session_forward.py`). Daily bars unchanged.
 
+- **Hybrid backtest depth matching (third pass).** `run_hybrid_confluence_backtest.py` searched one
+  pool of depth frames from every captured symbol for the frame nearest an event. Read-only
+  check of the real tables: contacted events are BANKNIFTY 3,188,232 and NIFTY50 600,256, while
+  depth exists only for BANKNIFTY futures (SEP, OCT, AUG) plus one BANKNIFTY option contract's
+  book. So about 16% of events were being scored against another instrument's book, and the
+  option book was in the same pool. Frames are now kept per `provider_symbol`, and each event is
+  matched only to its own front-month future (`depth_contract_for_event`, date map from
+  `cks_ofi_touch.BANKNIFTY_DEPTH_CONTRACTS`). Events with no captured depth are excluded from the
+  depth-conditioned populations and counted in the new `events_without_depth_contract` output;
+  the standalone baseline still includes them. Every earlier result from this script is
+  therefore unreliable, and NIFTY50 contributes no depth-conditioned evidence at all.
+- **`train_tcn.py` baseline.** Each fold now also reports the time-of-day-stratified baseline
+  (fitted on the fold's train rows only, reusing `train.time_of_day_baseline_metrics`), and the
+  `cheapAdvances` gate requires beating the STRONGER of the trivial and time-of-day baselines on
+  every fold (`beatsStrongestBaseline`; a NaN baseline is ignored, and with nothing scorable the
+  result is "not beaten"). Existing keys are unchanged.
+
 Behaviour changes that mean earlier results from the affected scripts must be re-run under a new
 pre-registration: STRUCTURE-01 calibration (events with no in-session forward bar are dropped
 rather than recorded NEUTRAL), and any promotion decision that relied on the trivial baseline.
@@ -124,10 +141,6 @@ rather than recorded NEUTRAL), and any promotion decision that relied on the tri
   `run-shadow-decisions.ts`, `run-scalp-research-harness.ts` and `verify-live-backfill-parity.ts`
   layer lists also still name `candlestick-v1`; they should move together with those new versions,
   after v2 re-detection.
-- `run_hybrid_confluence_backtest.py` still takes the nearest depth frame across all symbols for
-  the day (flags are now recomputed per symbol); restricting to the front-month contract is a
-  separate fix.
-- `train_tcn.py` still uses its own trivial baseline.
 - The API depth history does not drop duplicate/regression frames the way the Python path does;
   taking the last frame per minute makes this mostly harmless.
 - `iv_compression_signal_check.py` imports `option_chain_pcr.py`; the two must always land together.
