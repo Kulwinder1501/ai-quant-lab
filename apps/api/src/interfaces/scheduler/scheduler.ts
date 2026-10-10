@@ -1366,10 +1366,10 @@ async function main(): Promise<void> {
       "LIQUIDITY_CANDIDATE_GENERATION",
       "LIQUIDITY_CONTACT_LABELING",
       // Mirrors the runtime gate at this job's own `cronSchedule` callback (`!XAU_BOT_ENABLED ||
-      // !process.env.TWELVEDATA_API_KEY`) so the inventory can't drift the way it did when
+      // !process.env.OANDA_ACCESS_TOKEN`) so the inventory can't drift the way it did when
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
-      ...(XAU_BOT_ENABLED && process.env.TWELVEDATA_API_KEY
+      ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
         ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD"]
         : []),
     ],
