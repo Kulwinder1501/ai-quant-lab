@@ -58,7 +58,7 @@ export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyCon
     ATR: { period: 14, smoothing: "WILDER" },
     SUPERTREND: { atrPeriod: 10, multiplier: 3 },
   },
-  candlestickAlgorithmVersion: "candlestick-v1",
+  candlestickAlgorithmVersion: "candlestick-v2",
   priceActionAlgorithmVersion: "price-action-v2",
   rsiLongMin: 52,
   rsiLongMax: 70,
@@ -73,8 +73,18 @@ export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyCon
   requireTrigger: true,
 };
 
-/** Single source of the version, so persisted evidence cannot drift from the registration. */
-export const trendBreakoutStrategyVersion = 2;
+/**
+ * Single source of the version, so persisted evidence cannot drift from the registration.
+ *
+ * Bumped 2026-10-10: candlestickAlgorithmVersion moved from v1 to v2. v2 fixes four confirmed
+ * defects in v1 -- a real lookahead bug (detections computed on a still-open bar, later silently
+ * rewritten), a scoring bug (NEUTRAL patterns awarded +20 toward long theses), nondeterministic-vs-
+ * priority pattern selection (picked patterns[0] from an alphabetical list instead of the highest-
+ * confidence candidate), and flat/holiday bars poisoning detection. This strategy is TERMINAL_UNOWNED
+ * (see strategy-registry.ts) -- no bot trades it -- so the version bump changes nothing live; it only
+ * keeps its idea-generation and backtest population on the corrected pattern source.
+ */
+export const trendBreakoutStrategyVersion = 3;
 
 export const trendBreakoutStrategyRegistration = {
   strategyKey: "trend-breakout",

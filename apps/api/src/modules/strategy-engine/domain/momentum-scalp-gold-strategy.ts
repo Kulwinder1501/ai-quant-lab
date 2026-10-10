@@ -54,7 +54,17 @@ function timeframeMilliseconds(timeframe: string): number | null {
 
 type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
 
-export const momentumScalpGoldStrategyVersion = 1;
+/**
+ * Bumped 2026-10-10: candlestickAlgorithmVersion moved from v1 to v2. v2 fixes four confirmed
+ * defects in v1 -- a real lookahead bug (detections computed on a still-open bar, later silently
+ * rewritten), a scoring bug (NEUTRAL patterns awarded +20 toward long theses), nondeterministic-vs-
+ * priority pattern selection (picked patterns[0] from an alphabetical list instead of the highest-
+ * confidence candidate), and flat/holiday bars poisoning detection. This strategy's live entries
+ * stay behind GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED (default false, shadow mode) -- see
+ * docker-compose.v2.yml -- so this version bump changes no real paper trade; it only moves idea
+ * generation and shadow settlement onto the corrected pattern source.
+ */
+export const momentumScalpGoldStrategyVersion = 2;
 
 export interface MomentumScalpGoldStrategyConfiguration {
   indicatorAlgorithmVersion: string;
@@ -81,7 +91,7 @@ export const defaultMomentumScalpGoldStrategyConfiguration: MomentumScalpGoldStr
     SUPERTREND: { atrPeriod: 10, multiplier: 3 },
     ATR: { period: 14, smoothing: "WILDER" },
   },
-  candlestickAlgorithmVersion: "candlestick-v1",
+  candlestickAlgorithmVersion: "candlestick-v2",
   priceActionAlgorithmVersion: "price-action-v2",
   rsiLongMin: 55,
   rsiLongMax: 75,
