@@ -140,4 +140,37 @@ describe("IctCompositeEngine", () => {
       expect(nseSnap!.sessionLevels.levels).toBeNull();
     });
   });
+
+  it("persists lastConfirmedStructureEvent across the bar after confirmation, unlike structure.lastEvent", () => {
+    // Same BOS-producing sequence as structure.test.ts's "differentiates body close BOS from
+    // wick-only SWEEP", run through the full engine (not the bare tracker) on one IST trading day.
+    const engine = new IctCompositeEngine({ ...defaultIctEngineConfig, pivotLength: 1 }, NSE_IST_PROFILE);
+    const candles: CausalCandle[] = [
+      makeIstCandle("2026-01-05", 9, 15, 100, 105, 95, 100),
+      makeIstCandle("2026-01-05", 9, 20, 100, 120, 98, 110), // Pivot High candidate (price 120)
+      makeIstCandle("2026-01-05", 9, 25, 110, 115, 105, 108), // Confirms the pivot
+      makeIstCandle("2026-01-05", 9, 30, 108, 109, 100, 101),
+      makeIstCandle("2026-01-05", 9, 35, 101, 122, 100, 118), // Wick past 120, closes below => SWEEP
+      makeIstCandle("2026-01-05", 9, 40, 118, 126, 117, 125), // Body closes above 120 => BOS
+      makeIstCandle("2026-01-05", 9, 45, 125, 127, 122, 126), // Quiet bar: confirms nothing new
+    ];
+
+    let bosSnap: ReturnType<IctCompositeEngine["processCandle"]> | undefined;
+    let quietSnap: ReturnType<IctCompositeEngine["processCandle"]> | undefined;
+    for (let i = 0; i < candles.length; i++) {
+      const snap = engine.processCandle(candles, i);
+      if (i === 5) bosSnap = snap;
+      if (i === 6) quietSnap = snap;
+    }
+
+    expect(bosSnap!.structure.lastEvent?.type).toBe("BOS");
+    expect(bosSnap!.lastConfirmedStructureEvent?.type).toBe("BOS");
+
+    // The bar after confirmation: nothing new fires, so the ephemeral field goes back to null --
+    // but the persisted one must still carry the same BOS event forward, which is the whole point
+    // of this field (see its docstring on IctStateCompositeSnapshot).
+    expect(quietSnap!.structure.lastEvent).toBeNull();
+    expect(quietSnap!.lastConfirmedStructureEvent?.type).toBe("BOS");
+    expect(quietSnap!.lastConfirmedStructureEvent).toEqual(bosSnap!.lastConfirmedStructureEvent);
+  });
 });

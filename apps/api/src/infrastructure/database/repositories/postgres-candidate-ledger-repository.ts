@@ -2,6 +2,7 @@ import type { QueryResultRow } from "pg";
 import type { CandidateSettlement } from "../../../modules/paper-trading/domain/candidate-settlement.js";
 import type { CompletedPriceCandle } from "../../../modules/paper-trading/domain/paper-trade-exit-policy.js";
 import type { TradeSide } from "../../../modules/strategy-engine/domain/strategy.js";
+import type { OptionEntryRejectionProvenance } from "../../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import type { DatabaseQueryable } from "../database.js";
 
 export interface UnsettledCandidate {
@@ -26,6 +27,7 @@ export interface CandidateDecisionInput {
   readonly explanation?: string;
   readonly paperTradeId?: string | null;
   readonly regimeObservationId?: string | null;
+  readonly rejectionProvenance?: OptionEntryRejectionProvenance;
 }
 
 interface CandidateRow extends QueryResultRow {
@@ -77,11 +79,12 @@ export class PostgresCandidateLedgerRepository {
     await this.database.query(`
       INSERT INTO candidate_decisions (
         trade_idea_id, account_id, decided_at, decision, reason, explanation,
-        paper_trade_id, regime_observation_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        paper_trade_id, regime_observation_id, rejection_provenance
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
     `, [
       input.tradeIdeaId, input.accountId, input.decidedAt, input.decision, input.reason,
       input.explanation ?? "", input.paperTradeId ?? null, input.regimeObservationId ?? null,
+      input.rejectionProvenance ? JSON.stringify(input.rejectionProvenance) : null,
     ]);
   }
 
@@ -99,18 +102,48 @@ export class PostgresCandidateLedgerRepository {
         trade_idea_id, outcome, r_multiple, bars_to_resolution, mae_r, mfe_r,
         horizon_end, resolved_timeframe, bars_available, resolver_version
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      ON CONFLICT (trade_idea_id) DO NOTHING
+      ON CONFLICT (trade_idea_id) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        r_multiple = EXCLUDED.r_multiple,
+        bars_to_resolution = EXCLUDED.bars_to_resolution,
+        mae_r = EXCLUDED.mae_r,
+        mfe_r = EXCLUDED.mfe_r,
+        horizon_end = EXCLUDED.horizon_end,
+        resolved_timeframe = EXCLUDED.resolved_timeframe,
+        bars_available = EXCLUDED.bars_available,
+        resolver_version = EXCLUDED.resolver_version,
+        settled_at = NOW()
+      WHERE candidate_settlements.outcome = 'UNSETTLEABLE'
       RETURNING id
     `, [
       tradeIdeaId, settlement.outcome, settlement.rMultiple, settlement.barsToResolution,
       settlement.maeR, settlement.mfeR, settlement.horizonEnd, settlement.resolvedTimeframe,
       settlement.barsAvailable, settlement.resolverVersion,
     ]);
+
+    if (result.rows.length > 0) {
+      await this.database.query(
+        `UPDATE trade_ideas SET status = 'EXPIRED' WHERE id = $1 AND status = 'PROPOSED'`,
+        [tradeIdeaId],
+      );
+    }
+
     return result.rows.length > 0;
   }
 
   /**
-   * Candidates whose horizon has fully elapsed and which carry no settlement yet.
+   * Candidates that carry no settlement yet (or carry an UNSETTLEABLE initial status), regardless of
+   * whether their horizon has fully elapsed.
+   *
+   * Used to include only candidates whose horizon had already passed -- settling earlier would have
+   * meant reading `settleCandidate`'s "not yet resolved, horizon incomplete" branch as a genuine data
+   * gap (UNSETTLEABLE) when it was really just "hasn't happened yet". The caller (`settle-candidates`)
+   * now draws that line itself: it still settles a not-yet-expired candidate the moment `settleCandidate`
+   * finds a genuine TARGET/STOP touch in the bars observed so far (the verdict is correct and final the
+   * instant it is reached, see that function's own docstring), but discards an UNSETTLEABLE/UNRESOLVED
+   * result for anything whose horizon has not actually elapsed yet, leaving it to be read again next
+   * sweep. This is what lets a target hit on the signal's very first bar settle in minutes instead of
+   * waiting out its full nominal window.
    *
    * Ordered by series so a caller can load each instrument-and-timeframe's bars once instead of once
    * per candidate. Over a backfill that is the difference between one query per series and one per
@@ -121,6 +154,14 @@ export class PostgresCandidateLedgerRepository {
    * a window nobody chose.
    */
   async listUnsettledCandidates(input: { settledBefore: Date; limit: number }): Promise<UnsettledCandidate[]> {
+    await this.database.query(`
+      UPDATE trade_ideas
+      SET status = 'EXPIRED'
+      WHERE status = 'PROPOSED'
+        AND expires_at IS NOT NULL
+        AND expires_at <= $1
+    `, [input.settledBefore]);
+
     const result = await this.database.query<CandidateRow>(`
       SELECT
         trade_ideas.id,
@@ -135,12 +176,11 @@ export class PostgresCandidateLedgerRepository {
       FROM trade_ideas
       INNER JOIN candles ON candles.id = trade_ideas.source_candle_id
       LEFT JOIN candidate_settlements ON candidate_settlements.trade_idea_id = trade_ideas.id
-      WHERE candidate_settlements.id IS NULL
+      WHERE (candidate_settlements.id IS NULL OR candidate_settlements.outcome = 'UNSETTLEABLE')
         AND trade_ideas.expires_at IS NOT NULL
-        AND trade_ideas.expires_at <= $1
       ORDER BY trade_ideas.instrument_id, candles.timeframe, trade_ideas.expires_at
-      LIMIT $2
-    `, [input.settledBefore, Math.max(1, Math.floor(input.limit))]);
+      LIMIT $1
+    `, [Math.max(1, Math.floor(input.limit))]);
 
     return result.rows.map((row) => ({
       tradeIdeaId: row.id,

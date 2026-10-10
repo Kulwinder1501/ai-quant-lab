@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   EnsureStrategyVersionInput,
   ProposedTradeIdea,
@@ -10,7 +11,36 @@ import { isDoctrinallyValidFairValueGapCandidate, isDoctrinallyValidOrderBlockCa
 import { computeSwingHierarchyFeature, resolveProtectedLevelStatusAt, type ProtectedLevelStatus, type ProtectedSide } from "../../technical-analysis/domain/ict/swing-hierarchy.js";
 import type { BalancedPriceRange } from "../../technical-analysis/domain/ict/bpr.js";
 import { LiquidityResponseResolver } from "../../technical-analysis/domain/ict/liquidity-response.js";
+import { computeOteBandForLeg, OTE_RETRACE_SWEET_SPOT } from "../../technical-analysis/domain/ict/ote.js";
+import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
+
+/**
+ * Computes a deterministic SHA256 setupId for a structural confirmation event.
+ * Canonical identity: strategyId + instrument + timeframe + confirmationCandleTime + brokenPivotTime + eventType + level + direction.
+ */
+export function computeIctSetupId(params: {
+  strategyId: string;
+  instrument: string;
+  timeframe: string;
+  confirmationCandleTime: Date;
+  brokenPivotTime: Date;
+  eventType: string;
+  level: number;
+  direction: string;
+}): string {
+  const payload = [
+    params.strategyId,
+    params.instrument,
+    params.timeframe,
+    params.confirmationCandleTime.toISOString(),
+    params.brokenPivotTime.toISOString(),
+    params.eventType,
+    params.level.toFixed(4),
+    params.direction,
+  ].join("|");
+  return createHash("sha256").update(payload).digest("hex");
+}
 
 /**
  * Which point of interest wins when several are available on the same bar.
@@ -21,6 +51,8 @@ import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
  * of the gap, which is the order the doctrine states.
  */
 export type IctPoiPreference = "SWEEP_FIRST" | "BLOCK_FIRST";
+
+export type IctEntryModel = "ALIGNMENT" | "SWEEP_MSS_RETRACE" | "SWEEP_MSS_LIMIT";
 
 /**
  * Killzone windows as IST minutes-of-day, half-open [from, to).
@@ -46,14 +78,6 @@ function killzoneAt(instant: Date): string | null {
 /**
  * `expiryCandles` bars of real wall-clock time, derived from the signal candle's own duration
  * rather than a hardcoded 5-minute assumption.
- *
- * This strategy scans both 5m and 15m timeframes, but `expiresAt` used to be computed as
- * `closeTime + expiryCandles * 5 * 60_000` unconditionally -- correct for a 5m candle, but a 3x
- * under-grant for a 15m one (3 bars of real structure-formation time is 45 minutes, not 15).
- * Measured against the live DB (2026-10): 15m-sourced ideas average a *larger* target distance
- * (6.19% vs 5m's 5.12%, since 15m structure targets more distant liquidity) while getting the
- * *shortest* realized window of all (avg 4.6 minutes) -- 96% of this strategy's live ideas timed
- * out UNRESOLVED rather than hitting stop or target, which this directly explains.
  */
 function computeExpiresAt(candle: { openTime: Date; closeTime: Date }, expiryCandles: number): Date {
   const candleDurationMs = candle.closeTime.getTime() - candle.openTime.getTime();
@@ -62,14 +86,6 @@ function computeExpiresAt(candle: { openTime: Date; closeTime: Date }, expiryCan
 
 /**
  * Whether price sits in the 62-79% retracement of the dealing range -- the optimal trade entry.
- *
- * For a long that is the DEEP end of discount: 62-79% back off the range high is 21-38% up from the
- * range low. Mirrored for a short.
- *
- * Registered as `entryPlacement` and implemented as a FILTER, not as placement. See the amendment in
- * the program document: the backtester enters at the next candle's open and cannot rest a limit
- * order at a level, so "enter AT the OTE" is not expressible. This asks instead whether the signal
- * bar is already inside the band, which is a strictly weaker claim.
  */
 function isWithinOte(price: number, rangeLow: number, rangeHigh: number, isBullish: boolean): boolean {
   const span = rangeHigh - rangeLow;
@@ -84,71 +100,55 @@ export interface IctStructureStrategyConfiguration {
   minConfidence: number;
   expiryCandles: number;
   requirePoiReaction: boolean;
-  /** Entry-model arm 1. Defaults to the incumbent order, so an unconfigured run is unchanged. */
   poiPreference: IctPoiPreference;
-  /** Entry-model arm 2. Restricts entries to the pre-registered killzone windows. */
   requireKillzone: boolean;
-  /** Entry-model arm 3. Requires the signal bar to sit inside the 62-79% retracement. */
   requireOte: boolean;
-  /**
-   * Entry-model arm 4: requires the ITH/ITL swing-hierarchy protected level (see swing-hierarchy.ts)
-   * to still be intact. Off by default -- see the docstring at its call site below.
-   *
-   * Measured 2026-09-22 against the two live cells (NIFTY50 15m 2025 + 2026 holdout, BANKNIFTY 5m
-   * 2026), same params as the falsification program (concurrency 5, 2bps slippage): both NIFTY50
-   * windows improve (+937.00 on 85->73 trades; +292.40 on 114->99, still net negative), but BANKNIFTY
-   * flips from +3,832.35 to -537.90 on 102->86 trades -- a -4,370.25 swing. Same non-replication
-   * signature that closed killzone, OTE and poiPreference: one instrument likes the filter, the other
-   * disagrees. Verdict NO_EDGE, matching the pre-registered expectation. Stays in the tree behind
-   * this default-off switch with the measurement attached, not deployed.
-   */
   requireProtectedLevelIntact: boolean;
-  /**
-   * Entry-model arm 5: requires a recent Change in State of Delivery (see cisd.ts) in the trade's own
-   * direction, on top of the POI reaction arm 1 already requires. Off by default -- unmeasured, like
-   * every other arm here, following the same falsification-program discipline: shipped in-tree,
-   * covariates recorded on every approved idea regardless of this switch, so the population needed
-   * to test it exists before the arm is ever turned on.
-   *
-   * Both sources researched for cisd.ts are explicit that CISD alone is weak evidence and gains its
-   * conviction from exactly this pairing: "inside a tap of a daily or 4-hour PD Array, that same
-   * close is a high-probability reversal trigger." This strategy already requires a POI reaction
-   * (arm 1, `requirePoiReaction`) before this gate is even reached, which is the PD-Array tap the
-   * doctrine is describing -- so this arm asks whether *also* requiring the delivery-shift
-   * confirmation on top of that tap improves anything, not whether CISD works standalone.
-   *
-   * Measured 2026-09-23, verdict NO_EDGE -- see Amendment 4 in the falsification program doc. Both
-   * NIFTY50 windows improve (+192.80 on 85->45 trades; +3,850.10 on 114->59) but BANKNIFTY flips from
-   * +4,319.60 to -1,742.50 on 102->85 trades -- a -6,062.10 swing. The same cross-instrument
-   * non-replication signature that closed killzone, OTE, poiPreference and
-   * `requireProtectedLevelIntact` before it -- the fifth arm in a row to show it.
-   */
   requireCisdConfirmation: boolean;
-  /**
-   * How many bars old a CISD event may be and still count as "recent" for arm 5. `cisd` on the
-   * composite snapshot is the most recently confirmed event ever, not per-bar, so an unbounded age
-   * would let a CISD from hundreds of bars ago silently satisfy the gate forever. 10 bars, matching
-   * this codebase's existing `orderBlockLookbackBars`/`LIQUIDITY_LOOKBACK_BARS` precedent for the
-   * same class of bound -- a deliberate, documented limit, not a value tuned against any result.
-   */
   maxCisdAgeBars: number;
-  /**
-   * Entry-model arm 6: considers a Balanced Price Range (see bpr.ts -- the overlap of two opposing
-   * fair value gaps) as a POI candidate, checked ahead of the existing block/gap/sweep search when
-   * enabled. Off by default. Multiple retail sources describe it as ICT's "highest-probability entry
-   * zone" -- doctrine alone, not a measured claim, which is exactly why this shipped as a hypothesis
-   * rather than a default.
-   *
-   * Measured 2026-09-23, verdict NO_EDGE -- untestable by reordering, not merely unreplicated. See
-   * Amendment 5. Byte-identical trade count and P&L to control on all three cells: BPRs form on 87%
-   * of NIFTY50 2025 bars (up to 65 at once), so this is a near-constant descriptor rather than a rare
-   * high-conviction zone, and the 53 bars where a BPR was reached with no other POI also reached never
-   * additionally cleared this strategy's other gates in this sample. Same structural limitation
-   * Amendment 2 recorded for `poiPreference`/OTE: entry/stop/target never consult which POI type
-   * supplied the level, so reordering or adding a candidate can only matter by changing whether ANY
-   * POI was found -- which it did not, here.
-   */
   considerBpr: boolean;
+
+  /**
+   * How a setup is recognised and entered.
+   *
+   * `ALIGNMENT` (default, the original model): fires on any bar where the four pillars agree and
+   * price touches a point of interest, entering at that bar's close.
+   *
+   * `SWEEP_MSS_RETRACE`: the doctrine's sequence. A liquidity sweep, then a displacement body-close
+   * through the opposing swing (a market structure shift, see mss.ts), then a retrace into the OTE
+   * band of THAT leg; enters at the close of the first bar that taps the band and holds it, stop
+   * beyond the sweep extreme. Market entry, so it runs on the existing next-open backtester and on
+   * the live bots unchanged.
+   *
+   * `SWEEP_MSS_LIMIT`: the same setup expressed as a resting limit at the 70.5% retracement, posted
+   * as soon as the shift prints. It needs `--entry-policy limit` in the backtester and a live order
+   * type that does not exist yet, so it is research-only and must not be wired to a live bot.
+   */
+  entryModel: IctEntryModel;
+  /** Bars after the break during which a shift may still be traded. */
+  mssMaxAgeBars: number;
+  /** Stop distance beyond the sweep extreme, in ATR. */
+  mssStopBufferAtr: number;
+  /** Smallest acceptable stop distance, in ATR -- a stop inside one bar's noise is not a stop. */
+  mssMinRiskAtr: number;
+  /** The impulse leg must span at least this many ATR to be worth retracing into. */
+  mssMinLegAtr: number;
+  /** Bars a `SWEEP_MSS_LIMIT` idea stays valid. */
+  mssLimitExpiryBars: number;
+  /**
+   * What `requireOte` measures its band on. `MSS_LEG` uses the displacement leg when a shift is
+   * live and falls back to the dealing range otherwise; `DEALING_RANGE` is the original behaviour.
+   */
+  oteAnchor: "MSS_LEG" | "DEALING_RANGE";
+
+  /** ATR period multiple for volatility stop placement (e.g. 1.5) */
+  atrStopMultiple: number;
+  /** ATR buffer added beyond structural swept low/high level (e.g. 0.25) */
+  structuralBufferAtr: number;
+  /** Maximum target distance cap in terms of Risk R (e.g. 3.0) */
+  maxTargetR: number;
+  /** Maximum risk distance veto in terms of ATR multiples (e.g. 3.5) */
+  maxRiskDistanceAtr: number;
 }
 
 export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfiguration = {
@@ -156,10 +156,6 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   minConfidence: 0.7,
   expiryCandles: 3,
   requirePoiReaction: true,
-  /*
-   * All three entry-model arms default OFF, so every arm is exactly one configuration key away from
-   * its own control and a paired same-bar delta is available for Gate 4.
-   */
   poiPreference: "SWEEP_FIRST",
   requireKillzone: false,
   requireOte: false,
@@ -167,7 +163,20 @@ export const defaultIctStructureStrategyConfiguration: IctStructureStrategyConfi
   requireCisdConfirmation: false,
   maxCisdAgeBars: 10,
   considerBpr: false,
+  entryModel: "ALIGNMENT",
+  mssMaxAgeBars: 12,
+  mssStopBufferAtr: 0.15,
+  mssMinRiskAtr: 0.3,
+  mssMinLegAtr: 1.0,
+  mssLimitExpiryBars: 6,
+  oteAnchor: "MSS_LEG",
+
+  atrStopMultiple: 1.5,
+  structuralBufferAtr: 0.25,
+  maxTargetR: 3.0,
+  maxRiskDistanceAtr: 6.0,
 };
+
 
 /**
  * What version 2 was REGISTERED with, pinned as its own literal.
@@ -188,12 +197,43 @@ const registeredV2Configuration = {
   requirePoiReaction: true,
 };
 
+/**
+ * What version 3 was REGISTERED with, pinned as its own literal for the same reason v2's is.
+ *
+ * Carries v2's four pinned fields forward unchanged and adds the one thing this version actually
+ * changes: `entryModel: "SWEEP_MSS_RETRACE"`. docs/2026-10-09-ict-sweep-mss-model-measurement.md's
+ * Amendment 3 measured the ALIGNMENT model (v2's live behaviour, since it never pinned entryModel
+ * and so always read the code default) significantly negative out of sample and recorded "stop the
+ * two live ICT bots". SWEEP_MSS_RETRACE is not itself validated on NIFTY50/BANKNIFTY -- the same
+ * doc's own training-era arm came back UNDERPOWERED (14-19 trades per instrument against a 60-trade
+ * floor), "not validated, not refuted" -- but the owner's call, 2026-10-10, was to run the doctrine's
+ * actual sequence live rather than either keep running a measured loser or stop the bots outright.
+ * Judge these trades by their own record, same as v2's own live-wiring note already asked for.
+ *
+ * `ensure()` (postgres-strategy-version-repository.ts) handles the v2 -> v3 cutover on its own: it
+ * inserts this version, refuses if v2's row ever changed shape, and atomically deactivates v2 while
+ * activating v3 -- the same mechanism already exercised for momentum-scalp (v2/v3) and
+ * trend-breakout (v1/v2). No manual migration needed, and v2's row stays in place, inert, for lineage.
+ *
+ * Do not "tidy" this into a spread of `registeredV2Configuration` plus an override: the whole point
+ * of a new literal is that v3 is pinned independently of what v2 said or what the code defaults
+ * later become, exactly like v2 was pinned independently of v1's.
+ */
+const registeredV3Configuration = {
+  minimumRiskReward: 1.2,
+  minConfidence: 0.7,
+  expiryCandles: 3,
+  requirePoiReaction: true,
+  entryModel: "SWEEP_MSS_RETRACE",
+};
+
 export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: ICT_STRUCTURE_STRATEGY_KEY,
-  name: "ICT Structural Alignment (V1)",
-  description: "Four-pillar structural strategy strictly trading in alignment with the higher-timeframe trend.",
-  version: 2,
-  configuration: registeredV2Configuration as unknown as Record<string, unknown>,
+  name: "ICT Sweep -> MSS -> Retrace (V3)",
+  description: "Sequence-based structural strategy: a liquidity sweep, then a displacement market "
+    + "structure shift, then an entry on the retrace into that leg's OTE band.",
+  version: 3,
+  configuration: registeredV3Configuration as unknown as Record<string, unknown>,
 };
 export class IctStructureStrategy implements StrategyEvaluator {
   private readonly liquidityResponseResolver = new LiquidityResponseResolver();
@@ -206,6 +246,18 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     const ict = context.ictSnapshot;
     if (!ict) return [];
+
+    /*
+     * Dispatched BEFORE the alignment model's coverage gate, deliberately. That gate requires
+     * `coverage.liquidity` COMPLETE, which is true only when the alignment resolver found a target:
+     * i.e. trend agrees with bias, price is on the correct side of equilibrium, and an ERL lies beyond
+     * it. Those are exactly the conditions a REVERSAL setup violates -- a shift is by definition against
+     * the local trend until structure catches up. Measured on 2025 NIFTY50 15m: 85% of bars carrying a
+     * valid shift were vetoed by that gate alone. The shift models state their own coverage needs.
+     */
+    if (config.entryModel !== "ALIGNMENT") {
+      return this.evaluateSweepMssModel(context, config, ict);
+    }
 
     const { structure, zones, sessionLevels, bias, liquidity, coverage, swingHierarchy, cisd, balancedPriceRanges } = ict;
 
@@ -340,7 +392,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
     const barLow = context.candle.low;
     const barHigh = context.candle.high;
     const reached = (level: number): boolean =>
-      isBullish ? barLow <= level : barHigh >= level;
+      barLow <= level && barHigh >= level;
 
     /*
      * Entry-model arm 2: killzone.
@@ -362,8 +414,16 @@ export class IctStructureStrategy implements StrategyEvaluator {
      */
     let oteOk = true;
     if (config.requireOte) {
-      const range = bias.dealingRange;
-      oteOk = range !== null && isWithinOte(currentPrice, range.rangeLow, range.rangeHigh, isBullish);
+      const mss = ict.mss ?? null;
+      const legMatches = config.oteAnchor === "MSS_LEG" && mss !== null && mss.direction === wantedZone;
+      if (legMatches) {
+        // Retracement of the impulse that actually broke structure, not of the drifting HH/HL range.
+        const band = computeOteBandForLeg(mss.legStart, mss.legEnd, mss.direction);
+        oteOk = band !== null && currentPrice >= band.bandLow && currentPrice <= band.bandHigh;
+      } else {
+        const range = bias.dealingRange;
+        oteOk = range !== null && isWithinOte(currentPrice, range.rangeLow, range.rangeHigh, isBullish);
+      }
       if (!oteOk) return [];
     }
 
@@ -536,6 +596,43 @@ export class IctStructureStrategy implements StrategyEvaluator {
       && cisdAgeBars <= config.maxCisdAgeBars;
     if (config.requireCisdConfirmation && !cisdConfirmed) return [];
 
+    // Gate 6: ATR Validation (Item 2 prerequisite: atr14 must be present and positive)
+    const atr = ict.atr14;
+    if (atr === null || atr <= 0 || Number.isNaN(atr)) return [];
+
+    // Structural Confirmation & PIT Setup Identity (Item 3)
+    //
+    // `structure.lastEvent` is ephemeral -- null on every bar except the one that confirms it (see
+    // its own docstring) -- so hashing it directly would mint a fresh setupId every subsequent bar
+    // the same setup is still being re-evaluated, defeating the uniqueness index this identity
+    // exists to feed. `ict.lastConfirmedStructureEvent` is the persisted-across-bars equivalent
+    // (same pattern as `cisd`), so the setupId stays stable for as long as the confirmed setup is
+    // still the active one.
+    const lastEvent = ict.lastConfirmedStructureEvent;
+    const pitValidEvent = lastEvent && lastEvent.availableAt <= context.candle.closeTime.getTime() ? lastEvent : null;
+
+    const setupId = pitValidEvent
+      ? computeIctSetupId({
+          strategyId: ICT_STRUCTURE_STRATEGY_KEY,
+          instrument: context.candle.instrumentId,
+          timeframe: context.candle.timeframe ?? "15m",
+          confirmationCandleTime: pitValidEvent.candleTime,
+          brokenPivotTime: pitValidEvent.brokenPivot.time,
+          eventType: pitValidEvent.type,
+          level: pitValidEvent.level,
+          direction: pitValidEvent.direction,
+        })
+      : computeIctSetupId({
+          strategyId: ICT_STRUCTURE_STRATEGY_KEY,
+          instrument: context.candle.instrumentId,
+          timeframe: context.candle.timeframe ?? "15m",
+          confirmationCandleTime: context.candle.closeTime,
+          brokenPivotTime: context.candle.openTime,
+          eventType: "GENERAL_STRUCTURE",
+          level: context.candle.close,
+          direction: isBullish ? "BULLISH" : "BEARISH",
+        });
+
     // Trade Geometry
     const entryPrice = currentPrice;
     let stopLoss: number;
@@ -544,15 +641,28 @@ export class IctStructureStrategy implements StrategyEvaluator {
 
     if (isBullish) {
       side = "LONG";
-      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 0.995);
-      stopLoss = rawStop * 0.9995; // 0.05% volatility buffer
-      targetPrice = targetPool.price;
+      const sweptLow = pitValidEvent?.direction === "BULLISH" ? pitValidEvent.level : (liquidity.invalidationLevel ?? (entryPrice * 0.995));
+      const atrStop = entryPrice - atr * config.atrStopMultiple;
+      const structuralStop = sweptLow - atr * config.structuralBufferAtr;
+      stopLoss = Math.min(atrStop, structuralStop);
+      const riskDistance = entryPrice - stopLoss;
 
-      if (stopLoss >= entryPrice || targetPrice <= entryPrice) return [];
-      const risk = entryPrice - stopLoss;
-      const reward = targetPrice - entryPrice;
-      const riskReward = Number((reward / risk).toFixed(2));
-      if (riskReward < config.minimumRiskReward) return [];
+      // Gate 9: Risk-distance veto
+      if (riskDistance <= 0 || (riskDistance / atr) > config.maxRiskDistanceAtr) return [];
+      
+      const structuralTarget = targetPool.price;
+      // Gate 10: Opposing liquidity direction check
+      if (structuralTarget <= entryPrice) return [];
+
+      // Gate 11: 3R maximum-target cap
+      const maxTarget = entryPrice + config.maxTargetR * riskDistance;
+      targetPrice = Math.min(structuralTarget, maxTarget);
+
+      // Gate 12: Minimum risk-reward floor check (Item 1)
+      const riskReward = Number(((targetPrice - entryPrice) / riskDistance).toFixed(2));
+      if (riskReward < config.minimumRiskReward) {
+        return [];
+      }
 
       const evidence: TradeIdeaEvidence[] = [
         {
@@ -573,7 +683,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           label: `Targeting ERL ${targetPool.kind}`,
           contribution: 0.35,
           details: {
-            targetPrice: targetPool.price,
+            targetPrice,
             intermediateTarget: liquidity.intermediateTarget,
           },
         },
@@ -585,9 +695,6 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
-          // targets this strategy now takes, so these two flags are the covariates that
-          // hypothesis needs before anyone narrows the population on it.
           details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
@@ -610,6 +717,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           ],
           evidence: {
             strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            setupId,
             engineVersion: ict.engineVersion,
             configHash: ict.configHash,
             bias: bias.bias,
@@ -618,6 +726,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
             targetPrice,
             stopLoss,
             poiEvidence,
+            atr,
           },
           expiresAt,
           evidenceItems: evidence,
@@ -625,14 +734,25 @@ export class IctStructureStrategy implements StrategyEvaluator {
       ];
     } else {
       side = "SHORT";
-      const rawStop = liquidity.invalidationLevel ?? (entryPrice * 1.005);
-      stopLoss = rawStop * 1.0005; // 0.05% volatility buffer
-      targetPrice = targetPool.price;
+      const sweptHigh = pitValidEvent?.direction === "BEARISH" ? pitValidEvent.level : (liquidity.invalidationLevel ?? (entryPrice * 1.005));
+      const atrStop = entryPrice + atr * config.atrStopMultiple;
+      const structuralStop = sweptHigh + atr * config.structuralBufferAtr;
+      stopLoss = Math.max(atrStop, structuralStop);
+      const riskDistance = stopLoss - entryPrice;
 
-      if (stopLoss <= entryPrice || targetPrice >= entryPrice) return [];
-      const risk = stopLoss - entryPrice;
-      const reward = entryPrice - targetPrice;
-      const riskReward = Number((reward / risk).toFixed(2));
+      // Gate 9: Risk-distance veto
+      if (riskDistance <= 0 || (riskDistance / atr) > config.maxRiskDistanceAtr) return [];
+
+      const structuralTarget = targetPool.price;
+      // Gate 10: Opposing liquidity direction check
+      if (structuralTarget >= entryPrice) return [];
+
+      // Gate 11: 3R maximum-target cap
+      const maxTarget = entryPrice - config.maxTargetR * riskDistance;
+      targetPrice = Math.max(structuralTarget, maxTarget);
+
+      // Gate 12: Minimum risk-reward floor check (Item 1)
+      const riskReward = Number(((entryPrice - targetPrice) / riskDistance).toFixed(2));
       if (riskReward < config.minimumRiskReward) return [];
 
       const evidence: TradeIdeaEvidence[] = [
@@ -654,7 +774,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           label: `Targeting ERL ${targetPool.kind}`,
           contribution: 0.35,
           details: {
-            targetPrice: targetPool.price,
+            targetPrice,
             intermediateTarget: liquidity.intermediateTarget,
           },
         },
@@ -666,9 +786,6 @@ export class IctStructureStrategy implements StrategyEvaluator {
           sourceReference: "POI_CONFIRMATION",
           label: poiEvidence,
           contribution: 0.25,
-          // Recorded, not gated on: lecture 7 pairs the EXTREME order block with the long
-          // targets this strategy now takes, so these two flags are the covariates that
-          // hypothesis needs before anyone narrows the population on it.
           details: { poiEvidence, poiExtreme, poiIdmAdjacent, poiKind, killzone, protectedSide, protectedLevelBreached, cisdConfirmed, cisdAgeBars },
         });
       }
@@ -691,6 +808,7 @@ export class IctStructureStrategy implements StrategyEvaluator {
           ],
           evidence: {
             strategy: ICT_STRUCTURE_STRATEGY_KEY,
+            setupId,
             engineVersion: ict.engineVersion,
             configHash: ict.configHash,
             bias: bias.bias,
@@ -699,11 +817,189 @@ export class IctStructureStrategy implements StrategyEvaluator {
             targetPrice,
             stopLoss,
             poiEvidence,
+            atr,
           },
           expiresAt,
           evidenceItems: evidence,
         },
       ];
     }
+  }
+
+  /**
+   * The doctrine's setup: a liquidity sweep, a displacement shift through the opposing swing, then
+   * a retrace into the OTE band of that leg, with the stop beyond the sweep extreme.
+   *
+   * Why this is a separate path rather than more gates on the alignment model: the alignment model
+   * answers "is the picture roughly right on this bar", and every gate added to it only shrinks
+   * the population it already takes. This answers "has the specific sequence happened", which is a
+   * different population, and its stop comes from structure (the swept extreme) instead of from
+   * ATR -- the thing that lets an ICT setup be both tight and wrong rarely.
+   *
+   * The daily bias must agree with the shift: a shift against the higher-timeframe read is the
+   * counter-trend case the doctrine tells you to skip.
+   */
+  private evaluateSweepMssModel(
+    context: StrategyMarketContext,
+    config: IctStructureStrategyConfiguration,
+    ict: IctStateCompositeSnapshot
+  ): ProposedTradeIdea[] {
+    // Fail closed on the pillars this model actually reads: pivots warmed up (structure), a daily
+    // bias, and the higher-timeframe read. `liquidity`, `zones` and `sessionLevels` are NOT required:
+    // the target comes from the leg and the stop from the sweep, and a missing alignment target is
+    // not evidence against a reversal.
+    const coverage = ict.coverage;
+    if (coverage.structure !== "COMPLETE" || coverage.bias !== "COMPLETE" || coverage.htf !== "COMPLETE") {
+      return [];
+    }
+
+    const mss = ict.mss ?? null;
+    if (mss === null) return [];
+
+    const atr = ict.atr14;
+    if (atr === null || atr <= 0 || Number.isNaN(atr)) return [];
+
+    const isBullish = mss.direction === "BULLISH";
+    if (ict.bias.bias !== mss.direction) return [];
+    if (ict.htfBias && ict.htfBias !== mss.direction) return [];
+
+    if (mss.barsSinceBreak > config.mssMaxAgeBars) return [];
+
+    const bar = context.candle;
+    if (config.requireKillzone && killzoneAt(bar.openTime) === null) return [];
+
+    const band = computeOteBandForLeg(mss.legStart, mss.legEnd, mss.direction);
+    if (band === null || band.span < config.mssMinLegAtr * atr) return [];
+
+    let entryPrice: number;
+    if (config.entryModel === "SWEEP_MSS_RETRACE") {
+      // A retrace needs at least one bar after the break, and it must TAP the band and HOLD it with a
+      // reaction candle in the trade's direction -- a close through the band's far edge is a failed
+      // retrace, not an entry.
+      if (mss.barsSinceBreak < 1) return [];
+      const tappedAndHeld = isBullish
+        ? bar.low <= band.bandHigh && bar.close >= band.bandLow && bar.close > bar.open
+        : bar.high >= band.bandLow && bar.close <= band.bandHigh && bar.close < bar.open;
+      if (!tappedAndHeld) return [];
+      entryPrice = bar.close;
+    } else {
+      // Resting limit at the sweet spot, valid only while price has not yet come back to it.
+      const notYetRetraced = isBullish ? bar.close > band.level : bar.close < band.level;
+      if (!notYetRetraced) return [];
+      entryPrice = band.level;
+    }
+
+    const buffer = config.mssStopBufferAtr * atr;
+    const stopLoss = isBullish ? mss.legStart - buffer : mss.legStart + buffer;
+    if (isBullish ? entryPrice <= stopLoss : entryPrice >= stopLoss) return [];
+    const riskDistance = Math.abs(entryPrice - stopLoss);
+    if (riskDistance < config.mssMinRiskAtr * atr || riskDistance / atr > config.maxRiskDistanceAtr) return [];
+
+    /*
+     * Objective: the far end of the displacement leg -- the swing the sweep-and-shift move created,
+     * which is resting liquidity the doctrine names as the first draw after a shift. Not the
+     * alignment resolver's "farthest ERL beyond equilibrium": that target exists only when trend
+     * agrees with bias and price is on the right side of equilibrium, i.e. it is null for most
+     * reversals, and when present it sits so far from a structural stop that R:R is decided by the
+     * 3R cap rather than by the setup. The cap still applies, so a very long leg cannot promise more
+     * than `maxTargetR`.
+     */
+    const legObjective = mss.legEnd;
+    if (isBullish ? legObjective <= entryPrice : legObjective >= entryPrice) return [];
+    const targetPrice = isBullish
+      ? Math.min(legObjective, entryPrice + config.maxTargetR * riskDistance)
+      : Math.max(legObjective, entryPrice - config.maxTargetR * riskDistance);
+    const riskReward = Number((Math.abs(targetPrice - entryPrice) / riskDistance).toFixed(2));
+    if (riskReward < config.minimumRiskReward) return [];
+
+    // Covariates, recorded but not gated: whether an aligned gap or block sits inside the band.
+    const overlapsBand = (low: number, high: number): boolean => high >= band.bandLow && low <= band.bandHigh;
+    const poiInBand =
+      ict.zones.activeFvgs.some((f) => f.type === mss.direction && overlapsBand(f.bottom, f.top)) ||
+      ict.zones.activeObs.some((o) => o.type === mss.direction && overlapsBand(o.bottom, o.top));
+
+    const setupId = computeIctSetupId({
+      strategyId: ICT_STRUCTURE_STRATEGY_KEY,
+      instrument: bar.instrumentId,
+      timeframe: bar.timeframe ?? "15m",
+      confirmationCandleTime: mss.breakBarTime,
+      brokenPivotTime: mss.brokenPivotTime,
+      eventType: "MSS",
+      level: mss.brokenLevel,
+      direction: mss.direction,
+    });
+
+    const side: "LONG" | "SHORT" = isBullish ? "LONG" : "SHORT";
+    const expiryBars = config.entryModel === "SWEEP_MSS_LIMIT" ? config.mssLimitExpiryBars : config.expiryCandles;
+    const mssDetails = {
+      sweptKind: mss.sweptKind,
+      brokenLevel: mss.brokenLevel,
+      legStart: mss.legStart,
+      legEnd: mss.legEnd,
+      displacementBodyAtr: mss.displacementBodyAtr,
+      hasFvg: mss.hasFvg,
+      barsSinceBreak: mss.barsSinceBreak,
+      oteBandLow: band.bandLow,
+      oteBandHigh: band.bandHigh,
+      oteLevel: band.level,
+      poiInBand,
+      killzone: killzoneAt(bar.openTime),
+    };
+
+    return [
+      {
+        side,
+        entryPrice,
+        stopLoss,
+        targetPrice,
+        riskReward,
+        confidence: Math.max(config.minConfidence, 0.75),
+        reasoning: [
+          `ICT ${side} setup: ${mss.sweptKind} liquidity swept, then a displacement ${mss.direction} shift through ${mss.brokenLevel.toFixed(2)} (${mss.displacementBodyAtr.toFixed(2)} ATR body).`,
+          config.entryModel === "SWEEP_MSS_LIMIT"
+            ? `Resting limit at the ${(OTE_RETRACE_SWEET_SPOT * 100).toFixed(1)}% retracement ${entryPrice.toFixed(2)} of the ${band.span.toFixed(2)}-point leg.`
+            : `Retrace tapped the ${band.bandLow.toFixed(2)}-${band.bandHigh.toFixed(2)} OTE band and held.`,
+          `Stop ${stopLoss.toFixed(2)} beyond the sweep extreme ${mss.legStart.toFixed(2)}; target the leg extreme at ${targetPrice.toFixed(2)}.`,
+          `Risk-Reward ratio: ${riskReward.toFixed(2)}R.`,
+        ],
+        evidence: {
+          strategy: ICT_STRUCTURE_STRATEGY_KEY,
+          setupId,
+          engineVersion: ict.engineVersion,
+          configHash: ict.configHash,
+          entryModel: config.entryModel,
+          bias: ict.bias.bias,
+          targetPoolKind: "LEG_EXTREME",
+          targetPrice,
+          stopLoss,
+          atr,
+          mss: mssDetails,
+        },
+        expiresAt: computeExpiresAt(bar, expiryBars),
+        evidenceItems: [
+          {
+            sourceType: "STRATEGY",
+            sourceReference: "SWEEP_MSS",
+            label: `Liquidity sweep then ${mss.direction} market structure shift`,
+            contribution: 0.4,
+            details: mssDetails,
+          },
+          {
+            sourceType: "STRATEGY",
+            sourceReference: "LIQUIDITY_TARGET",
+            label: "Targeting the displacement leg's extreme",
+            contribution: 0.35,
+            details: { targetPrice, legEnd: mss.legEnd },
+          },
+          {
+            sourceType: "STRATEGY",
+            sourceReference: "OTE_RETRACEMENT",
+            label: config.entryModel === "SWEEP_MSS_LIMIT" ? "Limit at OTE sweet spot" : "OTE band tapped and held",
+            contribution: 0.25,
+            details: { entryPrice, oteBandLow: band.bandLow, oteBandHigh: band.bandHigh, poiInBand },
+          },
+        ],
+      },
+    ];
   }
 }

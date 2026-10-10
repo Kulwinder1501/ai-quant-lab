@@ -144,6 +144,7 @@ function recordingIdeas(saved: SaveTradeIdeaProposalInput[]): TradeIdeaRepositor
         expiresAt: input.expiresAt,
       };
     },
+    findActiveDuplicate: async () => null,
   };
 }
 
@@ -188,6 +189,7 @@ describe("GenerateTradeIdeas", () => {
           expiresAt: input.expiresAt,
         };
       },
+      findActiveDuplicate: async () => null,
     };
 
     const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
@@ -228,6 +230,157 @@ describe("GenerateTradeIdeas", () => {
       algorithmVersion: "smc-v2",
       adjustment: 5,
     });
+  });
+
+  it("suppresses a proposal that duplicates an already-active idea instead of saving a new row", async () => {
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    const duplicateQueries: unknown[] = [];
+    const strategyVersions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [qualifyingContext()],
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input) => {
+        saved.push(input);
+        throw new Error("saveProposal must not be called for a suppressed duplicate.");
+      },
+      findActiveDuplicate: async (query) => {
+        duplicateQueries.push(query);
+        return {
+          id: "idea-already-active",
+          instrumentId: query.instrumentId,
+          strategyVersionId: query.strategyVersionId,
+          sourceCandleId: "candle-earlier",
+          side: query.side,
+          status: "PROPOSED",
+          entryPrice: 108,
+          stopLoss: 107,
+          targetPrice: query.targetPrice,
+          riskReward: 2,
+          confidence: 0.8,
+          expiresAt: new Date("2026-07-26T00:00:00Z"),
+        };
+      },
+    };
+
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
+      .execute({ instrumentId: "instrument-1", timeframe: "1d" });
+
+    expect(saved).toHaveLength(0);
+    const trendBreakout = result.find((entry) => entry.strategyKey === "trend-breakout");
+    expect(trendBreakout).toMatchObject({
+      candidatesGenerated: 0,
+      tradeIdeaIds: [],
+      skippedReason: "DUPLICATE_ACTIVE_IDEA",
+    });
+    expect(duplicateQueries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ instrumentId: "instrument-1", side: "LONG", targetPrice: 116 }),
+    ]));
+  });
+
+  it("suppresses momentum-scalp-gold via findActiveIdeaForSide (any unresolved idea on this side), not the target-tolerance check", async () => {
+    // Qualifies momentum-scalp-gold's LONG rule: Supertrend UP, fast EMA above slow, RSI in band.
+    const goldQualifyingContext = (): StrategyMarketContext => ({
+      candle: {
+        id: "candle-gold-1",
+        instrumentId: "instrument-1",
+        timeframe: "1m",
+        openTime: new Date("2026-07-25T05:00:00Z"),
+        closeTime: new Date("2026-07-25T05:01:00Z"),
+        open: 4_300, high: 4_302, low: 4_298, close: 4_300,
+        volume: 0,
+        tickSize: 0.01,
+      },
+      indicators: [
+        { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 3 }, values: { value: 4_303 } },
+        { code: "EMA", algorithmVersion: "ta-v1", parameters: { period: 8 }, values: { value: 4_300 } },
+        { code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 65 } },
+        { code: "SUPERTREND", algorithmVersion: "ta-v1", parameters: { atrPeriod: 10, multiplier: 3 }, values: { trend: "UP", value: 4_294 } },
+        { code: "ATR", algorithmVersion: "ta-v1", parameters: { period: 14, smoothing: "WILDER" }, values: { value: 6 } },
+      ],
+      patterns: [],
+      priceActionEvents: [],
+    });
+
+    const saved: SaveTradeIdeaProposalInput[] = [];
+    const duplicateQueries: unknown[] = [];
+    const sideQueries: unknown[] = [];
+    const strategyVersions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: `strategy-version-${input.strategyKey}`,
+        strategyId: `strategy-${input.strategyKey}`,
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const contexts: StrategyMarketContextRepository = {
+      findLatestCompleted: async () => goldQualifyingContext(),
+      listCompletedContexts: async () => [goldQualifyingContext()],
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input) => {
+        saved.push(input);
+        throw new Error("saveProposal must not be called for a suppressed momentum-scalp-gold idea.");
+      },
+      findActiveDuplicate: async (query) => {
+        duplicateQueries.push(query);
+        return null;
+      },
+      findActiveIdeaForSide: async (query) => {
+        sideQueries.push(query);
+        return {
+          id: "gold-idea-already-active",
+          instrumentId: query.instrumentId,
+          strategyVersionId: query.strategyVersionId,
+          sourceCandleId: "candle-earlier",
+          side: query.side,
+          status: "PROPOSED",
+          entryPrice: 4_300,
+          stopLoss: 4_294,
+          targetPrice: 4_309,
+          riskReward: 1.5,
+          confidence: 0.6,
+          expiresAt: new Date("2026-07-26T00:00:00Z"),
+        };
+      },
+    };
+
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
+      .execute({ instrumentId: "instrument-1", timeframe: "1m" });
+
+    expect(saved).toHaveLength(0);
+    const gold = result.find((entry) => entry.strategyKey === "momentum-scalp-gold");
+    expect(gold).toMatchObject({
+      candidatesGenerated: 0,
+      tradeIdeaIds: [],
+      skippedReason: "DUPLICATE_ACTIVE_IDEA",
+    });
+    // The broader side-only check fired for momentum-scalp-gold specifically...
+    expect(sideQueries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ strategyVersionId: "strategy-version-momentum-scalp-gold", instrumentId: "instrument-1", side: "LONG" }),
+    ]));
+    // ...and carried no targetPrice field at all, unlike the narrower check.
+    expect(sideQueries[0]).not.toHaveProperty("targetPrice");
+    // momentum-scalp-gold never falls back to the target-tolerance check.
+    expect(duplicateQueries.some((q) => (q as { strategyVersionId: string }).strategyVersionId === "strategy-version-momentum-scalp-gold")).toBe(false);
   });
 
   it("scans a window of candles and surfaces SHORT proposals from bearish bars", async () => {
@@ -274,6 +427,7 @@ describe("GenerateTradeIdeas", () => {
           expiresAt: input.expiresAt,
         };
       },
+      findActiveDuplicate: async () => null,
     };
 
     const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
@@ -467,6 +621,7 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
         generatedAt: new Date(),
         expiresAt: input.expiresAt ?? null,
       }),
+      findActiveDuplicate: async () => null,
     };
     const contexts = {
       findLatestCompleted: async () => { const c = contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110); seen.push(c); return c; },

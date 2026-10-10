@@ -32,3 +32,6 @@ backups/
 # machine output that can run to tens of megabytes.
 logs/
 video_info.json
+
+# Python virtualenv -- accidentally committed in full once (32d2001); never again.
+venv/

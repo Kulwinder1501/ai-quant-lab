@@ -9,8 +9,9 @@ import { PostgresStrategyMarketContextRepository } from "../../infrastructure/da
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
 import { PostgresCandidateLedgerRepository, type CandidateDecisionInput } from "../../infrastructure/database/repositories/postgres-candidate-ledger-repository.js";
+import type { OptionEntryRejectionProvenance } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresShadowDecisionRepository } from "../../infrastructure/database/repositories/postgres-shadow-decision-repository.js";
-import { TwelveDataQuoteClient } from "../../infrastructure/market-data/twelvedata-quote-client.js";
+import { OandaQuoteClient } from "../../infrastructure/market-data/oanda-quote-client.js";
 import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
@@ -48,7 +49,16 @@ import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/ap
 const XAU_EXCHANGE = "TWELVEDATA" as const;
 const XAU_SYMBOL = "XAU_USD";
 const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
-const GOLD_STRATEGY_KEY = "ict-structure-v1";
+/**
+ * Every strategy this bot is responsible for executing on gold. `momentum-scalp-gold` was added
+ * 2026-10-07: its own file header says it was forked specifically "so its live record accumulates
+ * independently" of the already-falsified `momentum-scalp-index` verdict on Indian indices, but
+ * until now nothing ever read its ideas past `GenerateTradeIdeas` -- they were generated,
+ * persisted, and silently expired, with no decision of any kind ever logged. Each key below gets
+ * its own independent live-entries switch (see GOLD_LIVE_ENTRIES_ENABLED), so enabling one never
+ * silently re-arms the other's evidence-gathering.
+ */
+const GOLD_STRATEGY_KEYS = ["ict-structure-v1", "momentum-scalp-gold"] as const;
 const MAX_CONCURRENT_POSITIONS = 1;
 const GOLD_ACCOUNT_NAME = "AutoBot-Gold";
 /** Arbitrary, illustrative paper balance -- not derived from any real account. */
@@ -68,6 +78,22 @@ const WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30;
  * Defaults OFF; set to exactly "true" to let the bot open positions on gold.
  */
 const GOLD_ICT_LIVE_ENTRIES_ENABLED = process.env.GOLD_ICT_LIVE_ENTRIES_ENABLED === "true";
+
+/**
+ * `momentum-scalp-gold`'s own independent kill switch -- deliberately NOT
+ * `GOLD_ICT_LIVE_ENTRIES_ENABLED`. The whole point of forking this strategy under its own key
+ * (see the strategy file's header) was to accumulate evidence separately from ICT's; sharing one
+ * switch would mean flipping ICT live also silently arms a strategy with zero evidence of its
+ * own, and vice versa. Defaults OFF, same as every other strategy's first exposure to live
+ * entries this session (ICT included) -- it starts in shadow (REFUSED-logged, not silently
+ * dropped) until it has a real settled record to review.
+ */
+const GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED = process.env.GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED === "true";
+
+const GOLD_LIVE_ENTRIES_ENABLED: Record<(typeof GOLD_STRATEGY_KEYS)[number], boolean> = {
+  "ict-structure-v1": GOLD_ICT_LIVE_ENTRIES_ENABLED,
+  "momentum-scalp-gold": GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
+};
 
 function isUserOperatingWindow(now: Date): boolean {
   const minute = istMinuteOfDay(now);
@@ -99,11 +125,13 @@ async function main(): Promise<void> {
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
-  const twelveDataApiKey = process.env.TWELVEDATA_API_KEY;
-  if (!twelveDataApiKey) {
+  const oandaAccountId = process.env.OANDA_ACCOUNT_ID;
+  const oandaAccessToken = process.env.OANDA_ACCESS_TOKEN;
+  const oandaEnvironment = (process.env.OANDA_ENVIRONMENT ?? "practice") as "practice" | "trade";
+  if (!oandaAccountId || !oandaAccessToken) {
     console.error(JSON.stringify({
       level: "error",
-      message: "TWELVEDATA_API_KEY is not configured; the gold bot cannot fetch a live quote and was skipped.",
+      message: "OANDA_ACCOUNT_ID or OANDA_ACCESS_TOKEN is not configured; the gold bot cannot fetch a live quote and was skipped.",
     }));
     await database.end();
     return;
@@ -128,7 +156,7 @@ async function main(): Promise<void> {
       console.info(JSON.stringify({ level: "info", message: "Created bot account", account: GOLD_ACCOUNT_NAME }));
     }
 
-    const quoteClient = new TwelveDataQuoteClient({ apiKey: twelveDataApiKey });
+    const quoteClient = new OandaQuoteClient({ accountId: oandaAccountId, accessToken: oandaAccessToken, environment: oandaEnvironment });
     const prepareEntry = new PrepareDirectEntry(database, quoteClient);
     const openTrade = new OpenPaperTrade(tradeRepository);
     const ledger = new PostgresCandidateLedgerRepository(database);
@@ -186,7 +214,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
         }
 
         const results = await generator.execute({ instrumentId: instrument.id, timeframe, symbol: XAU_SYMBOL });
-        const goldResults = results.filter((result) => result.strategyKey === GOLD_STRATEGY_KEY);
+        const goldResults = results.filter((result) => (GOLD_STRATEGY_KEYS as readonly string[]).includes(result.strategyKey));
 
         for (const result of goldResults) {
           /*
@@ -210,7 +238,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
           });
 
           for (const tradeIdeaId of result.tradeIdeaIds) {
-            // Evaluate DXY_INTERMARKET_V1 observational metadata in SHADOW mode
+            let dxyPayload;
             try {
               const ideaRes = await database.query<{ side: "LONG" | "SHORT" }>(
                 `SELECT side FROM trade_ideas WHERE id = $1`,
@@ -218,37 +246,27 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
               );
               const proposalSide = ideaRes.rows[0]?.side ?? "LONG";
 
-              const dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
+              dxyPayload = await buildAndEvaluateDxyIntermarket(database, {
                 proposalSide,
                 proposalTimeframe: timeframe,
                 candidateAt: now.toISOString(),
                 dataCutoff: now.toISOString(),
                 decisionAt: now.toISOString(),
               });
-              console.info(JSON.stringify({
-                level: "info",
-                message: "DXY_INTERMARKET_V1 Shadow Observation",
-                tradeIdeaId,
-                timeframe,
-                dxyPayload,
-              }));
             } catch (err) {
               console.error(JSON.stringify({
-                level: "error",
-                message: "Failed evaluating DXY_INTERMARKET_V1 shadow observation",
-                tradeIdeaId,
-                error: String(err),
+                level: "error", message: "Failed evaluating DXY_INTERMARKET_V1",
+                tradeIdeaId, error: String(err),
               }));
             }
 
-            if (openPositions >= MAX_CONCURRENT_POSITIONS) {
-              refused.push({
-                tradeIdeaId, timeframe, reason: "POSITION_LIMIT",
-                explanation: `Already holding ${openPositions} position(s), the limit is ${MAX_CONCURRENT_POSITIONS}.`,
-              });
+            // Layer 1: Macro Gate
+            if (!dxyPayload || !dxyPayload.eligible) {
+              refused.push({ tradeIdeaId, timeframe, reason: dxyPayload?.refusalReason ?? "DXY_ERROR", explanation: "DXY Macro Gate refused." });
               continue;
             }
 
+            // Layer 2 & 3: Prepare Entry & Spread Constraint
             const prepared = await prepareEntry.execute({
               tradeIdeaId,
               now,
@@ -258,22 +276,56 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
               riskPercent: GOLD_RISK_PER_TRADE_PERCENT,
               dynamicSizing: true,
             });
+            
             if (!prepared.approved) {
               refused.push({ tradeIdeaId, timeframe, reason: prepared.reason, explanation: prepared.explanation });
               continue;
             }
 
             const entry = prepared.entry;
+            const currentSpread = entry.observedAsk - entry.observedBid;
+            const stopDistance = Math.abs(entry.fillPrice - entry.stopLossOverride);
+            const MAX_ENTRY_LIQUIDITY_RATIO = 0.15;
+            
+            let executionRefused = false;
+            let executionRefusalReason = "";
+            if (stopDistance > 0 && (currentSpread / stopDistance) > MAX_ENTRY_LIQUIDITY_RATIO) {
+              executionRefused = true;
+              executionRefusalReason = "SPREAD_TOO_WIDE";
+            }
 
-            if (!GOLD_ICT_LIVE_ENTRIES_ENABLED) {
-              // Shadow mode: the signal cleared every gate up to and including sizing, but
-              // GOLD_ICT_LIVE_ENTRIES_ENABLED is off, so no real (paper) position is opened for
-              // an as-yet-unvalidated instrument. Still recorded on the candidate ledger --
-              // as REFUSED, the closest fit the ledger's decision type offers -- so the "would
-              // have opened" signal isn't lost, and still fully logged below.
+            if (executionRefused) {
+              refused.push({ tradeIdeaId, timeframe, reason: executionRefusalReason, explanation: `Spread/StopDistance ratio (${(currentSpread/stopDistance).toFixed(3)}) exceeded limit (${MAX_ENTRY_LIQUIDITY_RATIO}).` });
+              continue;
+            }
+
+            // Layer 3: Risk Veto
+            if (openPositions >= MAX_CONCURRENT_POSITIONS) {
+              refused.push({ tradeIdeaId, timeframe, reason: "POSITION_LIMIT", explanation: `Holding ${openPositions}, limit ${MAX_CONCURRENT_POSITIONS}.` });
+              continue;
+            }
+
+            // Layer 4: Telemetry Check
+            // Pre-trade mandatory data presence
+            if (!dxyPayload.availableAt || !dxyPayload.calculationVersion) {
+              refused.push({ tradeIdeaId, timeframe, reason: "TELEMETRY_MISSING", explanation: "Mandatory pre-trade telemetry missing." });
+              continue;
+            }
+
+            // --- Authorization Passed ---
+            
+            // Client Order ID for Idempotency
+            const signalAt = new Date().toISOString(); // Typically comes from signal generation time, defaulting to now
+            const clientOrderId = `gold-${tradeIdeaId}-${entry.side}-${signalAt}`;
+
+            const strategyKey = result.strategyKey as (typeof GOLD_STRATEGY_KEYS)[number];
+            if (!GOLD_LIVE_ENTRIES_ENABLED[strategyKey]) {
+              const envVarName = strategyKey === "ict-structure-v1"
+                ? "GOLD_ICT_LIVE_ENTRIES_ENABLED"
+                : "GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED";
               refused.push({
-                tradeIdeaId, timeframe, reason: "GOLD_ICT_LIVE_ENTRIES_DISABLED",
-                explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); GOLD_ICT_LIVE_ENTRIES_ENABLED is not "true".`,
+                tradeIdeaId, timeframe, reason: `${envVarName.replace(/_ENABLED$/, "")}_DISABLED`,
+                explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); ${envVarName} is not "true".`,
               });
               continue;
             }
@@ -288,7 +340,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal. Required margin: $${entry.requiredMargin?.toFixed(2) ?? "N/A"} (${entry.leverage ?? 20}x leverage).`,
+                notes: `Opened by ${GOLD_ACCOUNT_NAME} from a ${timeframe} ${XAU_SYMBOL} signal. Required margin: $${entry.requiredMargin?.toFixed(2) ?? "N/A"} (${entry.leverage ?? 20}x leverage). ClientOrderId: ${clientOrderId}`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,
@@ -405,6 +457,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
         reason: String(entry.reason),
         explanation: String(entry.explanation ?? ""),
         regimeObservationId: null,
+        rejectionProvenance: entry.rejectionProvenance as OptionEntryRejectionProvenance | undefined,
       })),
     ];
     let decisionsRecorded = 0;
@@ -428,6 +481,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       timestamp: now.toISOString(),
       accountId: account.id,
       goldIctLiveEntriesEnabled: GOLD_ICT_LIVE_ENTRIES_ENABLED,
+      goldMomentumScalpLiveEntriesEnabled: GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
       decisionsRecorded,
       skippedSeries,
       strategyOutcomes,

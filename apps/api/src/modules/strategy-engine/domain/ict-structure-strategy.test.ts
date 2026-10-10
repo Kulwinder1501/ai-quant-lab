@@ -4,6 +4,16 @@ import type { StrategyMarketContext } from "./strategy.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
 function makeContext(ictSnapshot?: IctStateCompositeSnapshot, close = 100): StrategyMarketContext {
+  // `Partial<...>` here (not the plain interface) because this snapshot often arrives via this
+  // file's own `: any`-typed builder helpers, which can genuinely omit `atr14` at runtime despite
+  // the static type claiming it's required -- the spread then simply leaves the literal default
+  // below in place, same as any other missing-key default merge.
+  const snap = ictSnapshot
+    ? {
+        atr14: 2.0,
+        ...(ictSnapshot as Partial<IctStateCompositeSnapshot>),
+      }
+    : undefined;
   return {
     candle: {
       id: "c-test-1",
@@ -21,7 +31,7 @@ function makeContext(ictSnapshot?: IctStateCompositeSnapshot, close = 100): Stra
     indicators: [],
     patterns: [],
     priceActionEvents: [],
-    ictSnapshot,
+    ictSnapshot: snap as any,
   };
 }
 
@@ -88,15 +98,12 @@ describe("IctStructureStrategy", () => {
     const idea = proposals[0];
     expect(idea.side).toBe("LONG");
     expect(idea.entryPrice).toBe(98);
-    // 90 x 0.9995. The strategy places the stop a 0.05% volatility buffer BEYOND the structural
-    // invalidation rather than exactly on it -- a stop resting on the level is hit by the move that
-    // merely touches it. This assertion predated the buffer.
-    expect(idea.stopLoss).toBeCloseTo(89.955, 3);
+    // Structural stop = sweptLow (90) - atr (2.0) * structuralBufferAtr (0.25) = 89.5
+    expect(idea.stopLoss).toBeCloseTo(89.5, 3);
     expect(idea.targetPrice).toBe(120);
-    // (120 - 98) / (98 - 89.955) = 22 / 8.045. Follows from the volatility buffer above: the stop
-    // sits past the invalidation, so risk is slightly larger and the ratio slightly lower than the
-    // 2.75 this assertion was written against.
-    expect(idea.riskReward).toBeCloseTo(2.734, 2);
+    // R:R = (120 - 98) / (98 - 89.5) = 22 / 8.5 = 2.59
+    expect(idea.riskReward).toBeCloseTo(2.59, 2);
+    expect(idea.confidence).toBeGreaterThanOrEqual(0.7);
     expect(idea.confidence).toBeGreaterThanOrEqual(0.7);
   });
 
@@ -190,6 +197,7 @@ describe("IctStructureStrategy", () => {
   // pillar and asserts the gate fails closed.
   function alignedLongSnap(): any {
     return {
+      atr14: 2.0,
       coverage: {
         structure: "COMPLETE",
         bias: "COMPLETE",
@@ -257,6 +265,7 @@ describe("IctStructureStrategy", () => {
 /** The aligned-long snapshot the gate tests share, with a zones override for POI cases. */
 function alignedLongSnapshot(overrides: Record<string, unknown> = {}): any {
   return {
+    atr14: 2.0,
     coverage: {
       structure: "COMPLETE", bias: "COMPLETE", zones: "COMPLETE",
       sessionLevels: "COMPLETE", liquidity: "COMPLETE", htf: "COMPLETE",
@@ -564,5 +573,181 @@ describe("IctStructureStrategy Liquidity Response Discrimination", () => {
 
     const proposals = new IctStructureStrategy().evaluate(makeContext(snapshot), {});
     expect(proposals).toHaveLength(0);
+  });
+});
+
+describe("IctStructureStrategy Overhaul (v2 Frozen Spec Tests)", () => {
+  function makeValidSnap(): any {
+    return {
+      atr14: 2.0,
+      coverage: {
+        structure: "COMPLETE",
+        bias: "COMPLETE",
+        zones: "COMPLETE",
+        sessionLevels: "COMPLETE",
+        liquidity: "COMPLETE",
+        htf: "COMPLETE",
+      },
+      htfBias: "BULLISH",
+      bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 105 } },
+      structure: { trend: "BULLISH" },
+      zones: {
+        activeObs: [{ id: "ob-1", type: "BULLISH", state: "TOUCHED", meanThreshold: 98, isExtreme: true, isIdmAdjacent: false }],
+        activeFvgs: [],
+      },
+      sessionLevels: { levels: { pdh: 120, pdl: 90 }, lastSweepEvent: null },
+      liquidity: {
+        alignmentStatus: "ALIGNED_LONG",
+        primaryTarget: { kind: "ERL_PDH", price: 120 },
+        intermediateTarget: 105,
+        invalidationLevel: 90,
+      },
+    };
+  }
+
+  it("rejects proposal when atr14 is null or <= 0 (ATR Gate 6)", () => {
+    const snap1 = makeValidSnap();
+    snap1.atr14 = null;
+    expect(new IctStructureStrategy().evaluate(makeContext(snap1), {})).toHaveLength(0);
+
+    const snap2 = makeValidSnap();
+    snap2.atr14 = 0;
+    expect(new IctStructureStrategy().evaluate(makeContext(snap2), {})).toHaveLength(0);
+  });
+
+  it("rejects proposal when riskReward < minimumRiskReward (Minimum R:R Floor Gate 12)", () => {
+    const snap = makeValidSnap();
+    snap.liquidity.primaryTarget = { kind: "ERL_PDH", price: 100.5 }; // Tiny reward (0.5 vs ~8.5 risk) -> R:R < 1.2
+    expect(new IctStructureStrategy().evaluate(makeContext(snap, 98), { minimumRiskReward: 1.2 })).toHaveLength(0);
+  });
+
+  it("produces deterministic setupId in evidence for identical confirmation event", () => {
+    const snap = makeValidSnap();
+    // The strategy hashes `ict.lastConfirmedStructureEvent` (persisted across bars), not
+    // `structure.lastEvent` (ephemeral -- null on every bar it doesn't fire on). See the dedicated
+    // cross-bar test below for why that distinction is the whole point of this identity.
+    snap.lastConfirmedStructureEvent = {
+      type: "BOS",
+      direction: "BULLISH",
+      level: 95,
+      candleTime: new Date("2026-01-06T03:00:00.000Z"),
+      availableAt: 1767668400000,
+      brokenPivot: { time: new Date("2026-01-06T02:00:00.000Z"), type: "HIGH" },
+    };
+
+    const eval1 = new IctStructureStrategy().evaluate(makeContext(snap, 98), {});
+    const eval2 = new IctStructureStrategy().evaluate(makeContext(snap, 98), {});
+
+    expect(eval1).toHaveLength(1);
+    expect(eval2).toHaveLength(1);
+    expect(eval1[0]!.evidence.setupId).toBeDefined();
+    expect(eval1[0]!.evidence.setupId).toBe(eval2[0]!.evidence.setupId);
+  });
+
+  it("produces the SAME setupId on the bar after confirmation, when lastEvent has gone ephemeral-null again", () => {
+    // This is the regression case: `IctStructureTracker` only ever sets `structure.lastEvent` on the
+    // bar a BOS/CHOCH/SWEEP actually confirms -- every later bar re-evaluating the same still-open
+    // setup sees `structure.lastEvent === null` again (see config.ts's docstring on
+    // `lastConfirmedStructureEvent`). Hashing the ephemeral field directly would mint a brand-new
+    // setupId on every one of those later bars, which the uniqueness index then can't catch --
+    // reproducing exactly the "proposes the same setup repeatedly" bug this identity exists to close.
+    // A real `IctCompositeEngine` carries `lastConfirmedStructureEvent` forward across both bars
+    // (that persistence is what this test fixes/verifies); these two hand-built snapshots model bar N
+    // (confirmation bar, both fields set) and bar N+1 (same persisted event, ephemeral field reset).
+    const confirmedEvent = {
+      type: "BOS" as const,
+      direction: "BULLISH" as const,
+      level: 95,
+      candleTime: new Date("2026-01-06T03:00:00.000Z"),
+      availableAt: 1767668400000,
+      brokenPivot: { time: new Date("2026-01-06T02:00:00.000Z"), type: "HIGH" as const },
+    };
+
+    const barN = makeValidSnap();
+    barN.structure.lastEvent = confirmedEvent;
+    barN.lastConfirmedStructureEvent = confirmedEvent;
+
+    const barNPlus1 = makeValidSnap();
+    barNPlus1.structure.lastEvent = null; // ephemeral: nothing newly confirmed THIS bar
+    barNPlus1.lastConfirmedStructureEvent = confirmedEvent; // but the engine still remembers it
+
+    const evalN = new IctStructureStrategy().evaluate(makeContext(barN, 98), {});
+    const evalNPlus1 = new IctStructureStrategy().evaluate(makeContext(barNPlus1, 98), {});
+
+    expect(evalN).toHaveLength(1);
+    expect(evalNPlus1).toHaveLength(1);
+    expect(evalN[0]!.evidence.setupId).toBeDefined();
+    expect(evalN[0]!.evidence.setupId).toBe(evalNPlus1[0]!.evidence.setupId);
+  });
+
+  it("enforces maxTargetR cap of 3.0R on target calculation", () => {
+    const snap = makeValidSnap();
+    snap.liquidity.primaryTarget = { kind: "ERL_PDH", price: 200 }; // Extremely distant target
+
+    const proposals = new IctStructureStrategy().evaluate(makeContext(snap, 98), { maxTargetR: 3.0 });
+    expect(proposals).toHaveLength(1);
+    const idea = proposals[0]!;
+    const riskDistance = idea.entryPrice - idea.stopLoss;
+    const maxAllowedTarget = idea.entryPrice + 3.0 * riskDistance;
+    expect(idea.targetPrice).toBeLessThanOrEqual(maxAllowedTarget + 0.01);
+  });
+});
+
+
+
+
+
+describe("IctStructureStrategy reached() OHLC-range intersection", () => {
+  // Test matrix for reached() function, reproducing the 4317.65 incident protections.
+  // We test whether a LONG proposal is generated when an FVG with CE=4317 is present.
+  
+  function evaluateWithRange(low: number, high: number): boolean {
+    const snap = alignedLongSnapshot({
+      atr14: 10.0,
+      bias: { bias: "BULLISH", dailyTemplate: "OLHC", dealingRange: { equilibrium: 5000 } },
+      structure: { trend: "BULLISH", lastHL: { price: 4290 } },
+      liquidity: {
+        alignmentStatus: "ALIGNED_LONG",
+        primaryTarget: { kind: "ERL_PDH", price: 5000 },
+        intermediateTarget: 4800,
+        invalidationLevel: 4290,
+      },
+      zones: {
+        activeObs: [],
+        activeFvgs: [{ id: "fvg-1", type: "BULLISH", midpoint: 4317, fillPercentage: 0.1, isExtreme: true, isIdmAdjacent: false }],
+      },
+    });
+    // Replace candle in context to mock the range. Set open = high, close = low to ensure a valid bearish/neutral-body candle inside the range.
+    const ctx = makeContext(snap, low);
+    ctx.candle = { ...ctx.candle, low, high, open: high, close: low }; // Close at low just for safety
+    const proposals = new IctStructureStrategy().evaluate(ctx, {});
+    if (proposals.length === 0) {
+      console.log(`REJECTED for range ${low} to ${high}.`);
+    }
+    return proposals.length > 0;
+  }
+
+  it("rejects when entire candle is below the level (4130 to 4145 vs 4317)", () => {
+    expect(evaluateWithRange(4130, 4145)).toBe(false);
+  });
+
+  it("rejects when candle wicks just under the level (4200 to 4316 vs 4317)", () => {
+    expect(evaluateWithRange(4200, 4316)).toBe(false);
+  });
+
+  it("approves when candle crosses the level (4300 to 4330 vs 4317)", () => {
+    expect(evaluateWithRange(4300, 4330)).toBe(true);
+  });
+
+  it("approves when candle sits exactly on the level with its low (4317 to 4350 vs 4317)", () => {
+    expect(evaluateWithRange(4317, 4350)).toBe(true);
+  });
+
+  it("rejects when entire candle is above the level (4318 to 4400 vs 4317)", () => {
+    expect(evaluateWithRange(4318, 4400)).toBe(false);
+  });
+
+  it("approves when candle sits exactly on the level with its high (4300 to 4317 vs 4317)", () => {
+    expect(evaluateWithRange(4300, 4317)).toBe(true);
   });
 });

@@ -89,7 +89,7 @@ MINIMUM_EXTRINSIC_FOR_IV = 0.05
 
 # How stale the latest option-chain snapshot may be and still count as "known at
 # decision time" -- same value and same reasoning as oi_pcr_signal_check.py.
-MAXIMUM_SNAPSHOT_AGE_MINUTES = 60.0
+MAXIMUM_SNAPSHOT_AGE_MINUTES = 15.0
 
 # A percentile over a handful of days is arithmetically fine and analytically
 # worthless (see market-data/domain/iv-percentile.ts's own docstring). Same

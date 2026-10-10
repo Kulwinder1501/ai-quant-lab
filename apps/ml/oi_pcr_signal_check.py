@@ -45,7 +45,7 @@ ROOT_DIRECTORY = Path(__file__).resolve().parents[2]
 # "known at decision time" -- wide enough to survive the collector's own ~7-8
 # minute polling cadence, narrow enough that a multi-hour outage correctly
 # leaves a candle unlabeled rather than reusing a morning snapshot all day.
-MAXIMUM_SNAPSHOT_AGE_MINUTES = 60.0
+MAXIMUM_SNAPSHOT_AGE_MINUTES = 15.0
 
 _CHAIN_AGGREGATE_SQL = """
     WITH nearest_expiry AS (

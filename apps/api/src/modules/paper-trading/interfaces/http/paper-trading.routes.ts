@@ -234,6 +234,68 @@ export function registerPaperTradingRoutes(
     }
   });
 
+  app.get("/api/v1/gold-shadow", async (request, response, next) => {
+    try {
+      const strategy = (request.query.strategy as string) || 'ict-structure-v1';
+      // Connect to the DB to fetch Gold shadow trades
+      const { Client } = await import('pg');
+      const client = new Client({ connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@postgres:5432/ai_quant_lab' });
+      await client.connect();
+
+      /*
+       * Scoped to XAU_USD. This page is the "Gold Shadow Ledger", but the strategy filter alone
+       * does not make it one: `ict-structure-v1` (and momentum-scalp-gold) are shared strategy
+       * keys that also run live on NIFTY50 and BANKNIFTY under their own bots
+       * (AutoBot-IctNifty15m, AutoBot-IctBankNifty5m). Without this join, their index-level
+       * trades showed up here mislabelled as gold trades -- measured 2026-10-07. Those NIFTY50/
+       * BANKNIFTY rows are real data for those other bots, not something to delete; this route
+       * just needs to stop pulling them in.
+       */
+      // Aggregate stats
+      const aggResult = await client.query(`
+        SELECT
+          cs.outcome,
+          COUNT(*) as count,
+          SUM(CAST(cs.r_multiple AS FLOAT)) as total_r
+        FROM candidate_settlements cs
+        JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
+        JOIN instruments i ON i.id = ti.instrument_id
+        WHERE ti.evidence->>'strategy' = $1 AND i.symbol = 'XAU_USD'
+        GROUP BY cs.outcome;
+      `, [strategy]);
+
+      // Details
+      const detailsResult = await client.query(`
+        SELECT
+          ti.id as trade_idea_id,
+          ti.generated_at,
+          ti.side,
+          ti.entry_price,
+          ti.target_price,
+          ti.stop_loss,
+          ti.risk_reward,
+          cs.outcome,
+          cs.r_multiple,
+          cs.settled_at
+        FROM candidate_settlements cs
+        JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
+        JOIN instruments i ON i.id = ti.instrument_id
+        WHERE ti.evidence->>'strategy' = $1 AND i.symbol = 'XAU_USD'
+        ORDER BY ti.generated_at DESC
+        LIMIT 200;
+      `, [strategy]);
+
+      await client.end();
+
+      response.status(200).json({
+        summary: aggResult.rows,
+        trades: detailsResult.rows
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/v1/paper-accounts", async (_request, response, next) => {
     try {
       response.status(200).json({ data: await dependencies.dashboardRepository.listPaperAccounts() });

@@ -99,6 +99,13 @@ def main():
     else:
         log_message("Verdict file orderbook01_verdict.json not found after run.")
 
+    # Step 5: Phase C Fibonacci Data Accumulation Protocol (Option A Automated Evaluator)
+    log_message("--- Step 5: Running Phase C Data Accumulation Pipeline (Option A) ---")
+    phase_c_cmd = [py_exec, "-u", "apps/ml/run_phase_c_pipeline.py"]
+    code, _ = run_command(phase_c_cmd)
+    if code != 0:
+        log_message(f"WARNING: Phase C pipeline returned exit code {code}")
+
     log_message("==========================================================================")
     log_message("Post-Market Pipeline Completed Successfully")
     log_message("==========================================================================")

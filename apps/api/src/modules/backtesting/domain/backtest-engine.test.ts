@@ -488,3 +488,136 @@ describe("BacktestEngine underlying protective stop", () => {
     expect(result.trades[0].exitPrice).toBe(100.05);
   });
 });
+
+describe("BacktestEngine limit entry (LIMIT_AT_PROPOSAL_ENTRY)", () => {
+  // longProposal(): limit 100, stop 95, target 110. Tick 0.05, so a fill needs low <= 99.95.
+  const limit = { entryPolicy: "LIMIT_AT_PROPOSAL_ENTRY" as const };
+  const signalBar = { open: 104, high: 106, low: 103, close: 105 };
+
+  it("fills at the limit, with no entry slippage, when a later bar trades through it", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 103, high: 104, low: 99, close: 102 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, { ...limit, slippageBps: 10 });
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0].entryPrice).toBe(100);
+    expect(result.trades[0].reasoning.join(" ")).toContain("resting limit");
+  });
+
+  it("fills at the open, not the limit, when a bar gaps through it", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 98, high: 101, low: 97, close: 100 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, limit);
+    expect(result.trades[0].entryPrice).toBe(98);
+  });
+
+  it("does not count a bare touch of the limit as a fill", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 102, high: 103, low: 100, close: 102 }), // touches 100, no tick through
+      context("c3", "2026-01-07", { open: 102, high: 103, low: 101, close: 102 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, { ...limit, limitOrderMaxBars: 1 });
+    expect(result.trades).toHaveLength(0);
+    expect(result.metrics.skippedSignalsUnfilledLimit).toBe(1);
+  });
+
+  it("cancels the order when price reaches the target without ever retracing", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 105, high: 111, low: 104, close: 110 }),
+      // Would have filled here, but the order is already gone.
+      context("c3", "2026-01-07", { open: 104, high: 105, low: 98, close: 99 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, limit);
+    expect(result.trades).toHaveLength(0);
+    expect(result.metrics.skippedSignalsUnfilledLimit).toBe(1);
+  });
+
+  it("does not credit a target on the fill bar, because the order of high and low is unknown", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      // Fills at 100 and also prints 111: the high may have come first, so no TARGET yet.
+      context("c2", "2026-01-06", { open: 108, high: 111, low: 99, close: 105 }),
+      context("c3", "2026-01-07", { open: 105, high: 111, low: 104, close: 109 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, limit);
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0].exitReason).toBe("TARGET");
+    expect(result.trades[0].exitTime).toEqual(contexts[2].candle.closeTime);
+  });
+
+  it("still lets the stop fire on the fill bar", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 101, high: 102, low: 94, close: 96 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() }, limit);
+    expect(result.trades[0].exitReason).toBe("STOP_LOSS");
+    expect(result.trades[0].exitPrice).toBe(95);
+  });
+
+  it("fills a SHORT limit when a bar trades up through it", () => {
+    const shortSignal = longProposal({ side: "SHORT", entryPrice: 100, stopLoss: 105, targetPrice: 90 });
+    const contexts = [
+      context("c1", "2026-01-05", { open: 96, high: 97, low: 95, close: 96 }),
+      context("c2", "2026-01-06", { open: 97, high: 101, low: 96, close: 99 }),
+    ];
+    const result = backtest(contexts, { c1: shortSignal }, limit);
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0].side).toBe("SHORT");
+    expect(result.trades[0].entryPrice).toBe(100);
+  });
+
+  it("holds a slot while the order is working, so a second signal is not accepted on top of it", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", signalBar),
+      context("c3", "2026-01-07", { open: 103, high: 104, low: 99, close: 102 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal(), c2: longProposal() }, limit);
+    expect(result.trades).toHaveLength(1);
+    expect(result.metrics.skippedSignalsWhilePositionOpen).toBe(1);
+  });
+
+  it("leaves a default run's metrics byte-identical: no limit counters appear", () => {
+    const contexts = [
+      context("c1", "2026-01-05", signalBar),
+      context("c2", "2026-01-06", { open: 101, high: 104, low: 98, close: 102 }),
+    ];
+    const result = backtest(contexts, { c1: longProposal() });
+    expect(result.metrics).not.toHaveProperty("skippedSignalsUnfilledLimit");
+    expect(result.metrics).not.toHaveProperty("skippedSignalsDuplicateSetup");
+  });
+});
+
+describe("BacktestEngine oneTradePerSetup", () => {
+  const sameSetup = (): ProposedTradeIdea => longProposal({ evidence: { setupId: "setup-A" } });
+  const stoppedOutBar = { open: 100, high: 101, low: 94, close: 95 };
+  const contexts = (): StrategyMarketContext[] => [
+    context("c1", "2026-01-05", { open: 100, high: 101, low: 99, close: 100 }),
+    context("c2", "2026-01-06", stoppedOutBar), // fills at 100, stops at 95
+    context("c3", "2026-01-07", { open: 100, high: 101, low: 99, close: 100 }),
+    context("c4", "2026-01-08", { open: 100, high: 104, low: 99, close: 102 }),
+  ];
+
+  it("re-enters the same setup after a stop by default (recorded runs keep reproducing)", () => {
+    const result = backtest(contexts(), { c1: sameSetup(), c3: sameSetup() });
+    expect(result.trades).toHaveLength(2);
+  });
+
+  it("takes each setup at most once when asked, as live's unique setup index does", () => {
+    const result = backtest(contexts(), { c1: sameSetup(), c3: sameSetup() }, { oneTradePerSetup: true });
+    expect(result.trades).toHaveLength(1);
+    expect(result.metrics.skippedSignalsDuplicateSetup).toBe(1);
+  });
+
+  it("does not merge different setups", () => {
+    const other = longProposal({ evidence: { setupId: "setup-B" } });
+    const result = backtest(contexts(), { c1: sameSetup(), c3: other }, { oneTradePerSetup: true });
+    expect(result.trades).toHaveLength(2);
+  });
+});

@@ -6,7 +6,7 @@ import { PostgresCandleRepository } from "../../infrastructure/database/reposito
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
-import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
+import { classifyOpenFailure, type OptionEntryRejectionProvenance } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
@@ -297,10 +297,24 @@ async function main(): Promise<void> {
     const regimeRepository = new PostgresRegimeObservationRepository(database);
     const ledger = new PostgresCandidateLedgerRepository(database);
 
+    /*
+     * Excludes momentum-scalp-gold. Its own registration carries no instrument restriction (see its
+     * file header: "it has never traded, on any instrument, under this key"), and GenerateTradeIdeas
+     * has no instrument-aware filtering of its own -- the default liveTradableStrategies() list runs
+     * every live-tradable strategy against whatever instrument this scanner is given. This file's own
+     * SCAN_SYMBOLS is NIFTY50/BANKNIFTY only; momentum-scalp-gold is XAU_USD-only by design (it has
+     * its own scanner in run-gold-paper-trading-bot.ts) and was firing against Indian index bars here,
+     * producing 52 misrouted trade_ideas/trade_idea_evidence rows (measured and cleaned up 2026-10-07)
+     * before this fix.
+     */
+    const nseStrategies = liveTradableStrategies().filter(
+      (strategy) => strategy.registration.strategyKey !== "momentum-scalp-gold",
+    );
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
       new PostgresStrategyMarketContextRepository(database),
       new PostgresTradeIdeaRepository(database),
+      nseStrategies,
     );
 
     // Collect fresh trade ideas per symbol and timeframe once per run
@@ -634,6 +648,7 @@ async function main(): Promise<void> {
           reason: String(entry.reason),
           explanation: String(entry.explanation ?? ""),
           regimeObservationId: null,
+          rejectionProvenance: entry.rejectionProvenance as OptionEntryRejectionProvenance | undefined,
         })),
       ];
       let decisionsRecorded = 0;

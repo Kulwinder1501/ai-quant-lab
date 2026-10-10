@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "data:sync:gold": "tsx scripts/fetch-missing-gold.ts",
     "dev:api": "npm run dev --workspace @ai-quant-lab/api",
     "dev:web": "npm run dev --workspace @ai-quant-lab/web",
     "db:migrate": "npm run db:migrate --workspace @ai-quant-lab/api",
@@ -14,6 +15,7 @@
     "data:register:instrument": "npm run data:register:instrument --workspace @ai-quant-lab/api --",
     "data:collect:historical": "npm run data:collect:historical --workspace @ai-quant-lab/api --",
     "data:compute:synthetic-dxy": "npm run data:compute:synthetic-dxy --workspace @ai-quant-lab/api --",
+    "data:derive:higher-timeframes": "npm run data:derive:higher-timeframes --workspace @ai-quant-lab/api --",
     "data:collect:live": "npm run data:collect:live --workspace @ai-quant-lab/api --",
     "data:collect:institutional": "npm run data:collect:institutional --workspace @ai-quant-lab/api --",
     "data:collect:option-chain": "npm run data:collect:option-chain --workspace @ai-quant-lab/api --",
@@ -89,6 +91,9 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "build:packages": "npm run build --workspace @ai-quant-lab/contracts --if-present && npm run build --workspace @ai-quant-lab/pricing --if-present",
+    "prelint": "npm run build:packages",
+    "pretest": "npm run build:packages",
     "paper:trades:review": "npm run paper:trades:review --workspace @ai-quant-lab/api --",
     "shadow:decisions": "npm run shadow:decisions --workspace @ai-quant-lab/api --",
     "classify:divergence": "npm run classify:divergence --workspace @ai-quant-lab/api --",

@@ -38,7 +38,7 @@ export interface GenerateTradeIdeasResult {
   sourceCandleId: string | null;
   candidatesGenerated: number;
   tradeIdeaIds: string[];
-  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | null;
+  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | "DUPLICATE_ACTIVE_IDEA" | null;
   /** Present only when skippedReason is STRATEGY_FAILED. */
   failureMessage?: string;
   /**
@@ -224,6 +224,46 @@ export class GenerateTradeIdeas {
         if (input.allowedSides) {
           proposals = proposals.filter((proposal) => input.allowedSides!.includes(proposal.side));
         }
+
+        /*
+         * A slower timeframe's structural level can stay the active signal across many new
+         * candles. `saveProposal`'s own idempotency key is (strategy_version_id,
+         * source_candle_id, side), which only catches a retried save of the SAME candle -- it
+         * does nothing once the next candle closes and re-derives the identical geometry.
+         * Measured live: ict-structure-v1 re-proposed one unchanged 15m target/stop as 16
+         * separate trade_ideas rows over 4 hours (2026-10-06) before this guard existed.
+         *
+         * `momentum-scalp-gold` re-anchors its stop/target to the current price every candle, so
+         * a persisting trend produces a chain of genuinely different targets (never within 0.1%
+         * of each other) every ~5 minutes -- `findActiveDuplicate` correctly does not suppress
+         * these, since they are not the same level restated, which is what it is for. Measured
+         * live 2026-10-07: repeated overlapping SHORT scalps stacking on top of each other while
+         * a down-move continued. For this one strategy, "already has an unresolved idea in this
+         * direction" should itself block a new one, independent of price -- `findActiveIdeaForSide`
+         * is the broader check for that, used only here so every other strategy's dedup semantics
+         * are unchanged.
+         */
+        const preDedupCount = proposals.length;
+        const duplicates = await Promise.all(proposals.map((proposal) => {
+          if (registration.strategyKey === "momentum-scalp-gold" && this.tradeIdeaRepository.findActiveIdeaForSide) {
+            return this.tradeIdeaRepository.findActiveIdeaForSide({
+              strategyVersionId: strategyVersion.id,
+              instrumentId: input.instrumentId,
+              side: proposal.side,
+              asOf: context.candle.closeTime,
+            });
+          }
+          return this.tradeIdeaRepository.findActiveDuplicate({
+            strategyVersionId: strategyVersion.id,
+            instrumentId: input.instrumentId,
+            side: proposal.side,
+            targetPrice: proposal.targetPrice,
+            asOf: context.candle.closeTime,
+          });
+        }));
+        proposals = proposals.filter((_, index) => duplicates[index] === null);
+        const suppressedAsDuplicate = preDedupCount - proposals.length;
+
         const tradeIdeas = await Promise.all(proposals.map((proposal) => this.tradeIdeaRepository.saveProposal({
           ...proposal,
           instrumentId: input.instrumentId,
@@ -237,7 +277,9 @@ export class GenerateTradeIdeas {
           sourceCandleId: context.candle.id,
           candidatesGenerated: proposals.length,
           tradeIdeaIds: tradeIdeas.map((idea) => idea.id),
-          skippedReason: proposals.length === 0 ? "RULES_NOT_MET" : null,
+          skippedReason: proposals.length > 0
+            ? null
+            : suppressedAsDuplicate > 0 ? "DUPLICATE_ACTIVE_IDEA" : "RULES_NOT_MET",
           regime: context.regime ?? null,
           shadowDiagnostics: registration.strategyKey === ICT_STRUCTURE_STRATEGY_KEY && context.ictSnapshot
             ? computeIctShadowDiagnostics(context.ictSnapshot, context.candle.close, context.candle.openTime, input.symbol)

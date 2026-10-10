@@ -49,7 +49,31 @@ export interface BacktestConfiguration {
    * strategy would actually be traded in.
    */
   marginFraction: number;
-  entryPolicy: "NEXT_CANDLE_OPEN";
+  /**
+   * `NEXT_CANDLE_OPEN` (default): a signal known at a candle's close fills at the next candle's open.
+   *
+   * `LIMIT_AT_PROPOSAL_ENTRY`: the proposal's `entryPrice` is a RESTING LIMIT, working from the bar
+   * after the signal. It fills on the first bar that trades THROUGH the level by at least one tick
+   * (queue position is unknowable, so a bare touch does not count), at the limit or at the open if the
+   * bar gaps through it. Assumptions, all deliberately pessimistic where they have to choose:
+   *   - no entry slippage (a limit never fills worse than its price); exit slippage and fees unchanged;
+   *   - on the fill bar only the STOP is evaluated -- the bar's high/low ordering is unknown, so a
+   *     target that may have printed before the fill is not credited until the next bar;
+   *   - an unfilled order is cancelled when price reaches the target without retracing, when the
+   *     proposal's `expiresAt` passes, or after `limitOrderMaxBars` bars;
+   *   - a working order occupies a position slot, exactly as a pending market fill does.
+   * This exists because ICT entries are retrace limits and the old policy could not express one, so
+   * the OTE / POI-preference / BPR arms were untestable rather than failed.
+   */
+  entryPolicy: "NEXT_CANDLE_OPEN" | "LIMIT_AT_PROPOSAL_ENTRY";
+  /** Bars a limit order may work before it is cancelled. Read only under `LIMIT_AT_PROPOSAL_ENTRY`. Default 6. */
+  limitOrderMaxBars?: number;
+  /**
+   * Take at most one trade per `evidence.setupId`. Live paper trading already enforces this with a
+   * unique index on the setup identity, so a backtest that re-enters the same setup after a stop
+   * counts trades the live system would never have taken. Off by default so recorded runs reproduce.
+   */
+  oneTradePerSetup?: boolean;
   invalidGapPolicy: "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET";
   exitPolicy: "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST";
   endOfDataExitPolicy: "CLOSE_AT_FINAL_COMPLETED_CANDLE_CLOSE";
@@ -99,6 +123,10 @@ export interface BacktestMetrics {
   skippedSignalsInsufficientCapital: number;
   /** Risk-sized signals whose stop was so wide that the budget bought under one unit. */
   skippedSignalsUnsizable: number;
+  /** Limit orders that never filled (expired, or the target printed without a retrace). Present only under limit entry. */
+  skippedSignalsUnfilledLimit?: number;
+  /** Signals dropped because their setup had already been traded. Present only under `oneTradePerSetup`. */
+  skippedSignalsDuplicateSetup?: number;
   tradeCount: number;
   winningTradeCount: number;
   losingTradeCount: number;

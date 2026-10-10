@@ -23,6 +23,10 @@ export interface BacktestExecutionOverrides {
    * default; a run that raises it is not comparable with one that did not.
    */
   maxConcurrentPositions?: number;
+  /** See `BacktestConfiguration.entryPolicy`. Omit for the next-open default. */
+  entryPolicy?: BacktestConfiguration["entryPolicy"];
+  limitOrderMaxBars?: number;
+  oneTradePerSetup?: boolean;
 }
 
 export interface RunBacktestInput {

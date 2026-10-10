@@ -4,7 +4,7 @@ export type OptionType = "CE" | "PE";
 
 export interface Instrument {
   id: string;
-  exchange: "NSE" | "NFO" | "BSE" | "TWELVEDATA";
+  exchange: "NSE" | "NFO" | "BSE" | "TWELVEDATA" | "OANDA";
   symbol: string;
   displayName: string;
   instrumentType: InstrumentType;

@@ -101,7 +101,7 @@ let ictPersistGrantWarned = false;
  * MAXIMUM_SNAPSHOT_AGE_MINUTES -- same collector, same ~7-8 minute polling cadence, no reason to
  * invent a different tolerance for the live path than the one already validated offline.
  */
-const OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES = 60;
+const OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES = 15;
 
 /**
  * How many calendar days of trailing history feed the daily HTF-bias derivation

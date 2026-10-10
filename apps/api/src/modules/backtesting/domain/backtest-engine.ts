@@ -31,7 +31,16 @@ interface PendingSignal {
   sourceContext: StrategyMarketContext;
 }
 
+/** A resting limit order, working from the bar after `placedAtIndex`. */
+interface WorkingLimitOrder extends PendingSignal {
+  placedAtIndex: number;
+}
+
+const DEFAULT_LIMIT_ORDER_MAX_BARS = 6;
+
 interface OpenPosition {
+  /** Index of the bar a limit order filled on, so that bar can be evaluated stop-only. Undefined for market entries. */
+  limitFillBarIndex?: number;
   paperTrade: PaperTrade;
   sourceCandleId: string;
   entryCandleId: string;
@@ -67,7 +76,9 @@ function assertConfiguration(configuration: BacktestConfiguration): void {
     || configuration.riskFractionPerTrade <= 0 || configuration.riskFractionPerTrade > 1
     || !Number.isFinite(configuration.marginFraction)
     || configuration.marginFraction <= 0 || configuration.marginFraction > 1
-    || configuration.entryPolicy !== "NEXT_CANDLE_OPEN"
+    || (configuration.entryPolicy !== "NEXT_CANDLE_OPEN" && configuration.entryPolicy !== "LIMIT_AT_PROPOSAL_ENTRY")
+    || (configuration.limitOrderMaxBars !== undefined
+      && (!Number.isInteger(configuration.limitOrderMaxBars) || configuration.limitOrderMaxBars < 1))
     || configuration.invalidGapPolicy !== "SKIP_IF_NEXT_OPEN_IS_NOT_STRICTLY_INSIDE_SOURCE_STOP_TARGET"
     || configuration.exitPolicy !== "GAP_AT_OPEN_THEN_CONSERVATIVE_STOP_FIRST"
     || configuration.endOfDataExitPolicy !== "CLOSE_AT_FINAL_COMPLETED_CANDLE_CLOSE"
@@ -167,11 +178,15 @@ function createPosition(
   pending: PendingSignal,
   entryContext: StrategyMarketContext,
   configuration: BacktestConfiguration,
+  /** A limit fill: the exact price, with no entry slippage. Omitted for a next-open market fill. */
+  limitFill?: number,
 ): PositionAttempt {
   const { proposal } = pending;
-  const rawOpen = entryContext.candle.open;
+  const rawOpen = limitFill ?? entryContext.candle.open;
   if (!isFillInsideRiskGeometry(proposal, rawOpen)) return "INVALID_GAP";
-  const fillPrice = entryFillPrice(proposal.side, rawOpen, configuration.slippageBps, entryContext.candle.tickSize);
+  const fillPrice = limitFill !== undefined
+    ? rounded(limitFill)
+    : entryFillPrice(proposal.side, rawOpen, configuration.slippageBps, entryContext.candle.tickSize);
   if (!Number.isFinite(fillPrice) || fillPrice <= 0 || !isFillInsideRiskGeometry(proposal, fillPrice)) return "INVALID_GAP";
   const quantity = resolveQuantity(proposal, fillPrice, configuration);
   if (quantity === null) return "UNSIZABLE";
@@ -241,7 +256,9 @@ function closePosition(input: {
     exitReason: input.exitReason,
     reasoning: [
       `Signal source candle: ${input.position.sourceCandleId}.`,
-      "Entry policy: next eligible candle open, adjusted adversely for configured slippage.",
+      input.position.limitFillBarIndex !== undefined
+        ? "Entry policy: resting limit at the proposal's entry price, filled on a bar that traded through it (no entry slippage)."
+        : "Entry policy: next eligible candle open, adjusted adversely for configured slippage.",
       `Entry candle: ${input.position.entryCandleId}; exit candle: ${input.exitContext.candle.id}.`,
       `Exit policy: ${input.fillRule}.`,
       input.configuration.positionSizing === "FIXED_QUANTITY"
@@ -294,6 +311,13 @@ export class BacktestEngine {
     const trades: BacktestTrade[] = [];
     let realisedEquity = configuration.initialCapital;
     let pending: PendingSignal | null = null;
+    const limitMode = configuration.entryPolicy === "LIMIT_AT_PROPOSAL_ENTRY";
+    const limitMaxBars = configuration.limitOrderMaxBars ?? DEFAULT_LIMIT_ORDER_MAX_BARS;
+    let working: WorkingLimitOrder | null = null;
+    const tradedSetups = new Set<string>();
+    // Optional counters exist only when their feature is on, so a default run's metrics are unchanged.
+    if (limitMode) counters.skippedSignalsUnfilledLimit = 0;
+    if (configuration.oneTradePerSetup === true) counters.skippedSignalsDuplicateSetup = 0;
     /*
      * Open positions in ENTRY order. `trades` is appended in CLOSE order, because the metrics walk
      * that array to build the realised-equity curve -- so a drawdown computed from it has to see
@@ -331,9 +355,53 @@ export class BacktestEngine {
         }
       }
 
+      if (working) {
+        const order: WorkingLimitOrder = working;
+        const { proposal } = order;
+        const bar = context.candle;
+        const isLong = proposal.side === "LONG";
+        const expired = index - order.placedAtIndex > limitMaxBars
+          || (proposal.expiresAt !== null && bar.openTime.getTime() >= proposal.expiresAt.getTime());
+        // Trade THROUGH the level by a tick: a bare touch does not prove a fill (queue position).
+        const tradedThrough = isLong
+          ? bar.low <= proposal.entryPrice - bar.tickSize
+          : bar.high >= proposal.entryPrice + bar.tickSize;
+        if (expired) {
+          counters.skippedSignalsUnfilledLimit = (counters.skippedSignalsUnfilledLimit ?? 0) + 1;
+          working = null;
+        } else if (tradedThrough) {
+          // A bar that opens beyond the limit fills at the open (better than the limit), never worse.
+          const fillAt = isLong ? Math.min(bar.open, proposal.entryPrice) : Math.max(bar.open, proposal.entryPrice);
+          const candidate = createPosition(order, context, configuration, fillAt);
+          working = null;
+          if (candidate === "INVALID_GAP") {
+            counters.skippedSignalsInvalidGap += 1;
+          } else if (candidate === "UNSIZABLE") {
+            counters.skippedSignalsUnsizable += 1;
+          } else if (marginFor(candidate) + candidate.entryFees > realisedEquity - committedMargin + 1e-9) {
+            counters.skippedSignalsInsufficientCapital += 1;
+          } else {
+            candidate.limitFillBarIndex = index;
+            openPositions.push(candidate);
+            committedMargin += marginFor(candidate);
+          }
+        } else if (isLong ? bar.high >= proposal.targetPrice : bar.low <= proposal.targetPrice) {
+          // The move the order was waiting to join has already played out without a retrace.
+          counters.skippedSignalsUnfilledLimit = (counters.skippedSignalsUnfilledLimit ?? 0) + 1;
+          working = null;
+        }
+      }
+
       for (let slot = 0; slot < openPositions.length; slot += 1) {
         const position = openPositions[slot];
-        const decision = decidePaperTradeExit(position.paperTrade, context.candle);
+        // On a limit's fill bar the high/low ORDER is unknown: a target that printed before the fill
+        // must not be credited. Cap the favourable extreme at the fill price so only the stop can fire.
+        const barForExit = position.limitFillBarIndex === index
+          ? (position.paperTrade.side === "LONG"
+            ? { ...context.candle, high: Math.min(context.candle.high, position.paperTrade.entryPrice) }
+            : { ...context.candle, low: Math.max(context.candle.low, position.paperTrade.entryPrice) })
+          : context.candle;
+        const decision = decidePaperTradeExit(position.paperTrade, barForExit);
         // Same-bar priority: a hard stop/target this bar takes precedence over the softer
         // opposing-sweep read, which only applies when the price geometry did not already decide --
         // same "checked every bar including the entry bar" convention `decidePaperTradeExit` uses.
@@ -410,13 +478,21 @@ export class BacktestEngine {
       const proposal = proposalFor(context, this.strategy, strategyConfiguration);
       if (!proposal) continue;
       counters.signalCount += 1;
-      // A pending fill occupies a slot: it is already committed to open on the next bar.
-      if (openPositions.length + (pending ? 1 : 0) >= configuration.maxConcurrentPositions) {
+      const setupId = typeof proposal.evidence?.setupId === "string" ? proposal.evidence.setupId : null;
+      // A pending fill or a working limit occupies a slot: it is already committed to open.
+      if (configuration.oneTradePerSetup === true && setupId !== null && tradedSetups.has(setupId)) {
+        counters.skippedSignalsDuplicateSetup = (counters.skippedSignalsDuplicateSetup ?? 0) + 1;
+      } else if (openPositions.length + (pending ? 1 : 0) + (working ? 1 : 0) >= configuration.maxConcurrentPositions) {
         counters.skippedSignalsWhilePositionOpen += 1;
       } else if (index === contexts.length - 1) {
         counters.skippedSignalsNoNextCandle += 1;
       } else {
-        pending = { proposal, sourceContext: context };
+        if (setupId !== null) tradedSetups.add(setupId);
+        if (limitMode) {
+          working = { proposal, sourceContext: context, placedAtIndex: index };
+        } else {
+          pending = { proposal, sourceContext: context };
+        }
       }
     }
 
