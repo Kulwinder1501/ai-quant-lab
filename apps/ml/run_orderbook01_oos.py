@@ -537,6 +537,12 @@ def main():
     if eval_start > eval_end:
         print(f"WARNING: Selected evaluation start ({eval_start}) is past the latest event date ({eval_end}).")
         print(f"Database latest contact_time is {max_date}. Labeling pipeline has not produced post-{max_date} events yet.")
+        # An inverted window used to fall through and write an "INCONCLUSIVE / zero events" verdict
+        # file (apps/ml/orderbook01_oos_rerun_2026-09-26.json: eval_start 2026-09-26 > eval_end
+        # 2026-09-24) that reads like a real result. An invalid window is an error, not a verdict:
+        # write nothing and exit non-zero.
+        print("ERROR: invalid evaluation window (start is after end); no result file written.")
+        sys.exit(2)
 
     print(f"Evaluation Window: {mode_str}")
     print("-" * 80)

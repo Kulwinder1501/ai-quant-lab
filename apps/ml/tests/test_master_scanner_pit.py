@@ -67,36 +67,26 @@ def test_immediate_candle_depth_safeguard_empty_list(sample_artifacts):
     assert sig.rejectReason == "INSUFFICIENT_DATA_CANDLE_COUNT"
 
 
-def test_layer0_tod_sin_and_cos_evaluation():
+def test_layer0_tod_edge_veto_basic_evaluation():
+    """
+    Time-of-day gate: the session open/close (sin, cos) = (0, 1) are vetoed; mid-session values
+    with extreme sin or cos are NOT (the earlier rule vetoed those and never the real edges --
+    see tests/test_master_scanner_direction.py for the exhaustive per-minute check).
+    """
     evaluator = Layer0RegimeEvaluator(friction_hurdle_bps=2.0)
     mag = MagnitudeEstimate(5.0, 0.9, 1000, 1000)
 
-    # 1. Normal ToD: tod_sin = 0.5, tod_cos = 0.5 -> PASS
-    pass_l0, reason = evaluator.evaluate_regime(
-        magnitude=mag, direction="BULLISH", breadth_ad=0.2, breadth_available_at=1000,
-        yz_vol_ratio=1.2, yz_available_at=1000, vp_label="TRENDING", vp_available_at=1000,
-        tod_sin=0.5, tod_cos=0.5, decision_at=1000
-    )
-    assert pass_l0 is True
-    assert reason == "NONE"
+    def run(tod_sin, tod_cos):
+        return evaluator.evaluate_regime(
+            magnitude=mag, direction="BULLISH", breadth_ad=0.2, breadth_available_at=1000,
+            yz_vol_ratio=1.2, yz_available_at=1000, vp_label="TRENDING", vp_available_at=1000,
+            tod_sin=tod_sin, tod_cos=tod_cos, decision_at=1000,
+        )
 
-    # 2. Extreme tod_sin veto (> 0.95): tod_sin = 0.98 -> VETO
-    pass_l0, reason = evaluator.evaluate_regime(
-        magnitude=mag, direction="BULLISH", breadth_ad=0.2, breadth_available_at=1000,
-        yz_vol_ratio=1.2, yz_available_at=1000, vp_label="TRENDING", vp_available_at=1000,
-        tod_sin=0.98, tod_cos=0.0, decision_at=1000
-    )
-    assert pass_l0 is False
-    assert reason == "TOD_SESSION_BOUNDARY_VETO"
-
-    # 3. Extreme tod_cos veto (< -0.95): tod_cos = -0.98 -> VETO
-    pass_l0, reason = evaluator.evaluate_regime(
-        magnitude=mag, direction="BULLISH", breadth_ad=0.2, breadth_available_at=1000,
-        yz_vol_ratio=1.2, yz_available_at=1000, vp_label="TRENDING", vp_available_at=1000,
-        tod_sin=0.0, tod_cos=-0.98, decision_at=1000
-    )
-    assert pass_l0 is False
-    assert reason == "TOD_SESSION_BOUNDARY_VETO"
+    assert run(0.5, 0.5) == (True, "NONE")
+    assert run(0.98, 0.0) == (True, "NONE")      # quarter-session point: tradeable
+    assert run(0.0, -0.98) == (True, "NONE")     # mid-session: tradeable
+    assert run(0.0, 1.0) == (False, "TOD_SESSION_BOUNDARY_VETO")   # open / close edge
 
 
 def test_future_gex_anomaly_logging(sample_artifacts):
