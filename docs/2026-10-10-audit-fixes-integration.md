@@ -50,7 +50,7 @@ the live database.** Research posture is unchanged: no live registration, kill-s
 - `npx tsc --noEmit -p apps/api`: clean.
 - `npx vitest run` (apps/api): 327 files passed, 9 skipped; 3,496 tests passed, 65 skipped.
 - ML suite in the `aiquantlab-api-v2` image: 527 passed.
-- All 135 migrations applied from scratch on a throwaway `pgvector/pgvector:pg16` database.
+- All 133 migrations applied from scratch on a throwaway `pgvector/pgvector:pg16` database.
 - Migration 131 exercised on seeded data: a mislabelled monthly row is re-filed onto the monthly
   date, a duplicate whose correct slot was occupied is deleted, a genuine weekly row is untouched,
   and a second run is a no-op.

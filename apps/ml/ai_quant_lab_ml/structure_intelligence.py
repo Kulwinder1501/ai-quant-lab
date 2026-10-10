@@ -41,9 +41,9 @@ DEFAULT_CONFLUENCE_TOLERANCE_PCT = 0.0005
 def get_db_connection_string() -> str:
     import os
     db_url = os.environ.get("DATABASE_URL")
-    if db_url:
-        return db_url
-    return "postgresql://ai_quant_lab:2a33c5b07e01286c245ebf92710f8997208e4ff0237126ff06f2a4fcde47e0c8@localhost:5433/ai_quant_lab"
+    if not db_url:
+        raise RuntimeError("DATABASE_URL is not set; refusing to fall back to a built-in credential.")
+    return db_url
 
 
 @dataclass(frozen=True)
