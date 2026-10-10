@@ -83,17 +83,16 @@ export interface BotSandboxSpec {
  * and 09-03 while every other strategy's ideas were being acted on. It was generating signals into
  * a void, and the proposals grid displayed them indistinguishably from ideas a bot would take.
  */
+/**
+ * `AutoBot-Classic` was removed on request (2026-10-10). It ran `momentum-scalp-index`, the
+ * Classic side of the Classic-vs-Sniper comparison this header describes -- removing it means
+ * that comparison no longer runs going forward, and `momentum-scalp-index` is now unowned (still
+ * registered, so idea generation still raises its proposals for research, but no bot acts on
+ * them, the same position `trend-breakout` has been in since 2026-08-17). Its 272 historical
+ * trades and account row are untouched; only future trading stopped. If the comparison is wanted
+ * again later, restore this spec rather than inventing a new name -- its account already exists.
+ */
 export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
-  {
-    name: "AutoBot-Classic",
-    allowedStrategies: ["momentum-scalp-index"],
-    allowedSeries: [
-      { symbol: "BANKNIFTY", timeframe: "1m" },
-      { symbol: "BANKNIFTY", timeframe: "5m" },
-      { symbol: "NIFTY50", timeframe: "5m" },
-    ],
-    initialBalance: 1_000_000,
-  },
   {
     name: "AutoBot-Sniper",
     // Patterns only. `momentum-scalp-index` was here from 2026-08-17 to 2026-08-19 to make the arms

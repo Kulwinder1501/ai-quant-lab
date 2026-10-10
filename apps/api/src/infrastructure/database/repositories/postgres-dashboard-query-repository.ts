@@ -283,6 +283,10 @@ export class PostgresDashboardQueryRepository {
     
     const params: any[] = [limit];
     const conditions: string[] = [];
+    // No bot has ever owned this cell -- see DISABLED_SERIES in run-paper-trading-bot.ts, which
+    // stops generating these going forward. Filtered here too so the proposals grid also stops
+    // showing the ones already written before that took effect.
+    conditions.push(`NOT (i.symbol = 'NIFTY50' AND c.timeframe = '1m')`);
     if (!includeExpired) {
       // NULL expiry is treated as still live (agent/manual rows without a clock).
       conditions.push(`(ti.expires_at IS NULL OR ti.expires_at > CURRENT_TIMESTAMP)`);
