@@ -88,7 +88,10 @@ def main() -> None:
                 chains: dict[tuple, list] = {}
                 for sym, sess, seq, snap, dup, reg in cur.fetchall():
                     chains.setdefault((sym, sess), []).append((seq, snap, dup, reg))
-            for (sym, sess), rows in sorted(chains.items()):
+            # capture_session_id is NULL for some frames; None and str are not orderable in
+            # Python 3, so sorting the raw tuples throws. Treat a missing session as the empty
+            # string for ordering purposes only -- this is a print-order choice, not a data change.
+            for (sym, sess), rows in sorted(chains.items(), key=lambda item: (item[0][0], item[0][1] or "")):
                 s = summarise_chain(rows)
                 flag = "  <-- stored regression flags differ" if s["stored_regression"] != s["recomputed_regression"] else ""
                 print(
