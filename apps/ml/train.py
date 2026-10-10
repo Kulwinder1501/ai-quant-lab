@@ -51,7 +51,12 @@ from ai_quant_lab_ml.features import (
 )
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
 from ai_quant_lab_ml.reference_data import build_reference_metadata
-from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
+from ai_quant_lab_ml.volatility_expansion import (
+    VOLATILITY_ALPHABET,
+    time_of_day_key,
+    time_of_day_majority_predictions,
+    timeframe_minutes,
+)
 from ai_quant_lab_ml.training import (
     BaselineTrainingResult,
     evaluate_predictions,
@@ -425,6 +430,77 @@ def trivial_majority_metrics(
     return evaluate_predictions(actual, [majority] * len(actual), alphabet=alphabet)
 
 
+def time_of_day_baseline_metrics(
+    split: TemporalSplit,
+    *,
+    alphabet: LabelAlphabet,
+    timeframe: str,
+) -> EvaluationMetrics:
+    """Score the time-of-day-STRATIFIED majority predictor on a split's holdout.
+
+    2026-10-10 follow-up (code gaps): ``trivial_majority_metrics`` predicts one global class, so a
+    model that has merely learned the clock can "beat trivial" -- the class mix differs sharply by
+    bar of day (see ``SessionScopedTrailingWindow``), exactly as the volatility track found. The
+    honest trivial competitor is the best constant PER BAR-OF-DAY BUCKET. This reuses
+    ``volatility_expansion.time_of_day_majority_predictions`` unchanged: the per-bucket majority is
+    fitted on the TRAIN rows only and applied to the validation rows (a bucket never seen in train
+    falls back to the global train majority), so the holdout labels never influence the baseline.
+
+    The bucket is the IST bar-of-day of the example's ``observed_at`` (the bar close) over the bar
+    length. Daily and longer timeframes have no time of day (one bar per session), so every row
+    shares one bucket and this equals the trivial baseline there -- reported, not hidden.
+    """
+
+    bar_minutes = timeframe_minutes(timeframe)
+
+    def bucket(item: LabeledExample) -> int:
+        return 0 if bar_minutes is None else time_of_day_key(item.observed_at, bar_minutes)
+
+    predicted = time_of_day_majority_predictions(
+        train_keys=[bucket(item) for item in split.train],
+        train_labels=[item.label for item in split.train],
+        holdout_keys=[bucket(item) for item in split.validation],
+    )
+    actual = [item.label for item in split.validation]
+    return evaluate_predictions(actual, predicted, alphabet=alphabet)
+
+
+def compare_to_baselines(
+    model: EvaluationMetrics,
+    trivial: EvaluationMetrics,
+    time_of_day: EvaluationMetrics,
+) -> dict[str, Any]:
+    """Report BOTH baselines and compare the model against the STRONGER of the two.
+
+    "Stronger" is decided per metric on this holdout (ties go to the trivial baseline, the simpler
+    predictor): the macro-F1 comparison is against the larger macro-F1 of the two baselines, the
+    accuracy comparison against the larger accuracy. A model that beats the trivial predictor but
+    not the time-of-day one has learned the clock, not a signal.
+    """
+
+    def stronger(metric: str) -> tuple[str, float]:
+        trivial_value = getattr(trivial, metric)
+        time_of_day_value = getattr(time_of_day, metric)
+        if time_of_day_value > trivial_value:
+            return "TIME_OF_DAY", time_of_day_value
+        return "TRIVIAL", trivial_value
+
+    strongest_macro_name, strongest_macro = stronger("macro_f1")
+    strongest_accuracy_name, strongest_accuracy = stronger("accuracy")
+    return {
+        "trivial": {"accuracy": trivial.accuracy, "macroF1": trivial.macro_f1},
+        "timeOfDay": {"accuracy": time_of_day.accuracy, "macroF1": time_of_day.macro_f1},
+        "strongestMacroF1Baseline": strongest_macro_name,
+        "strongestMacroF1": strongest_macro,
+        "strongestAccuracyBaseline": strongest_accuracy_name,
+        "strongestAccuracy": strongest_accuracy,
+        "macroF1MinusStrongest": model.macro_f1 - strongest_macro,
+        "accuracyMinusStrongest": model.accuracy - strongest_accuracy,
+        "beatsStrongestOnMacroF1": model.macro_f1 > strongest_macro,
+        "beatsStrongestOnAccuracy": model.accuracy > strongest_accuracy,
+    }
+
+
 def _percentile(values: Sequence[float], fraction: float) -> float:
     ranked = sorted(values)
     size = len(ranked)
@@ -460,8 +536,13 @@ def cpcv_summary(
     groups: int,
     test_groups: int,
     embargo_fraction: float,
+    time_of_day_metrics: Sequence[EvaluationMetrics] | None = None,
 ) -> dict[str, Any]:
     """Summarise a CPCV score distribution against its per-split trivial baseline.
+
+    When ``time_of_day_metrics`` (the per-split time-of-day-stratified baseline) is supplied, the
+    summary ALSO reports it and the per-split STRONGER of the two baselines, with the model's edge
+    and win rate measured against that stronger one. The original trivial-only keys are unchanged.
 
     Reported as a distribution rather than a headline number on purpose. The
     walk-forward score answers "how did this model do on the most recent block";
@@ -492,7 +573,7 @@ def cpcv_summary(
     macro_f1_deltas = [model - trivial for model, trivial in zip(macro_f1, trivial_macro_f1)]
     accuracy_deltas = [model - trivial for model, trivial in zip(accuracy, trivial_accuracy)]
 
-    return {
+    summary: dict[str, Any] = {
         # Carried so nothing ever ranks a CPCV score against a walk-forward score:
         # they average over different test distributions and are not comparable.
         "method": CPCV_METHOD_NAME,
@@ -511,6 +592,29 @@ def cpcv_summary(
         "macroF1WinRateVsTrivial": sum(1 for delta in macro_f1_deltas if delta > 0) / len(macro_f1_deltas),
         "accuracyWinRateVsTrivial": sum(1 for delta in accuracy_deltas if delta > 0) / len(accuracy_deltas),
     }
+    if time_of_day_metrics is not None:
+        if len(time_of_day_metrics) != len(model_metrics):
+            raise ValueError("time_of_day_metrics must have one entry per CPCV split.")
+        tod_macro_f1 = [metrics.macro_f1 for metrics in time_of_day_metrics]
+        tod_accuracy = [metrics.accuracy for metrics in time_of_day_metrics]
+        # Per split, the stronger of the two baselines (per metric).
+        strongest_macro_f1 = [max(a, b) for a, b in zip(trivial_macro_f1, tod_macro_f1)]
+        strongest_accuracy = [max(a, b) for a, b in zip(trivial_accuracy, tod_accuracy)]
+        macro_f1_vs_strongest = [model - base for model, base in zip(macro_f1, strongest_macro_f1)]
+        accuracy_vs_strongest = [model - base for model, base in zip(accuracy, strongest_accuracy)]
+        summary.update(
+            {
+                "timeOfDayMacroF1": _distribution(tod_macro_f1),
+                "timeOfDayAccuracy": _distribution(tod_accuracy),
+                "strongestBaselineMacroF1": _distribution(strongest_macro_f1),
+                "strongestBaselineAccuracy": _distribution(strongest_accuracy),
+                "macroF1MinusStrongest": _distribution(macro_f1_vs_strongest),
+                "accuracyMinusStrongest": _distribution(accuracy_vs_strongest),
+                "macroF1WinRateVsStrongest": sum(1 for d in macro_f1_vs_strongest if d > 0) / len(macro_f1_vs_strongest),
+                "accuracyWinRateVsStrongest": sum(1 for d in accuracy_vs_strongest if d > 0) / len(accuracy_vs_strongest),
+            }
+        )
+    return summary
 
 
 def feature_schema_rows(schema: Sequence[str], schema_version: str) -> list[dict[str, str]]:
@@ -790,8 +894,14 @@ def promotion_assessment(
     minimum_validation_rows: int = MINIMUM_VALIDATION_ROWS,
     minimum_directional_predictions: int = MINIMUM_DIRECTIONAL_PREDICTIONS,
     folds: Mapping[str, Any] | None = None,
+    baselines: Mapping[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Decide promotion from unseen-data evidence alone.
+
+    ``baselines`` is the ``compare_to_baselines`` report for the candidate's final-fold holdout: the
+    trivial global-majority AND the time-of-day-stratified majority fitted on train only. When given
+    it is recorded under ``assessment["baselines"]`` and the candidate must beat the STRONGER of the
+    two on macro-F1 (the gate metric) or the decision is ``DID_NOT_BEAT_STRONGEST_BASELINE``.
 
     The order of the checks is deliberate. Sample-size sufficiency comes first,
     because a score computed on too few rows is not weak evidence but absent
@@ -817,6 +927,8 @@ def promotion_assessment(
     }
     if folds is not None:
         assessment["walkForward"] = dict(folds)
+    if baselines is not None:
+        assessment["baselines"] = dict(baselines)
 
     # Sample-size sufficiency first: a score on too few rows is absent evidence,
     # not weak evidence, and every check below it would be reading noise.
@@ -862,6 +974,18 @@ def promotion_assessment(
         assessment["reason"] = (
             "The holdout score exceeds the training score, which usually means the "
             "model saw information it should not have."
+        )
+        return False, assessment
+
+    # A model that does not beat the STRONGER baseline (global majority or time-of-day majority)
+    # has not been shown to know more than the class mix and the clock. Checked before any
+    # incumbent comparison: beating a weak incumbent is no evidence either.
+    if baselines is not None and not baselines.get("beatsStrongestOnMacroF1", True):
+        assessment["decision"] = "DID_NOT_BEAT_STRONGEST_BASELINE"
+        assessment["reason"] = (
+            f"Macro-F1 {candidate.validation_metrics.macro_f1:.4f} does not exceed the stronger of the "
+            f"trivial and time-of-day baselines ({baselines.get('strongestMacroF1Baseline')}: "
+            f"{float(baselines.get('strongestMacroF1', float('nan'))):.4f})."
         )
         return False, assessment
 
@@ -1148,6 +1272,7 @@ def main() -> int:
             print(f"Running CPCV over {len(cpcv_splits)} combination(s).", file=sys.stderr)
             cpcv_model_metrics: list[EvaluationMetrics] = []
             cpcv_trivial_metrics: list[EvaluationMetrics] = []
+            cpcv_time_of_day_metrics: list[EvaluationMetrics] = []
             for index, split in enumerate(cpcv_splits, start=1):
                 cpcv_result = train_model(
                     args.algorithm,
@@ -1160,6 +1285,9 @@ def main() -> int:
                 trivial = trivial_majority_metrics(split, alphabet=alphabet)
                 cpcv_model_metrics.append(cpcv_result.validation_metrics)
                 cpcv_trivial_metrics.append(trivial)
+                cpcv_time_of_day_metrics.append(
+                    time_of_day_baseline_metrics(split, alphabet=alphabet, timeframe=request.timeframe)
+                )
                 print(
                     f"CPCV {index}/{len(cpcv_splits)} "
                     f"macroF1 {cpcv_result.validation_metrics.macro_f1:.4f} vs {trivial.macro_f1:.4f} | "
@@ -1172,6 +1300,13 @@ def main() -> int:
                 groups=args.cpcv_groups,
                 test_groups=args.cpcv_test_groups,
                 embargo_fraction=args.cpcv_embargo_fraction,
+                time_of_day_metrics=cpcv_time_of_day_metrics,
+            )
+            print(
+                f"CPCV macro-F1 vs STRONGEST baseline (trivial / time-of-day) "
+                f"{cpcv['macroF1MinusStrongest']['mean']:+.4f}, "
+                f"won {cpcv['macroF1WinRateVsStrongest'] * 100:.0f}% of splits",
+                file=sys.stderr,
             )
             print(
                 f"CPCV macro-F1 {cpcv['macroF1']['mean']:.4f} "
@@ -1261,6 +1396,20 @@ def main() -> int:
                 alphabet=alphabet,
             )
 
+        # Both baselines on the final-fold holdout, each fitted on that fold's TRAIN rows only; the
+        # candidate is compared against the stronger of the two.
+        baselines = compare_to_baselines(
+            result.validation_metrics,
+            trivial_majority_metrics(final_split, alphabet=alphabet),
+            time_of_day_baseline_metrics(final_split, alphabet=alphabet, timeframe=request.timeframe),
+        )
+        print(
+            f"Baselines (macro-F1): trivial {baselines['trivial']['macroF1']:.4f}, "
+            f"time-of-day {baselines['timeOfDay']['macroF1']:.4f}; candidate "
+            f"{result.validation_metrics.macro_f1:.4f} ({baselines['macroF1MinusStrongest']:+.4f} vs strongest).",
+            file=sys.stderr,
+        )
+
         qualifies_for_promotion, assessment = promotion_assessment(
             candidate=result,
             incumbent=incumbent,
@@ -1273,6 +1422,7 @@ def main() -> int:
             minimum_validation_rows=args.minimum_validation_rows,
             minimum_directional_predictions=args.minimum_directional_predictions,
             folds=folds,
+            baselines=baselines,
         )
 
         # The audit is expensive — it fits three extra models — so it only runs
@@ -1371,6 +1521,7 @@ def main() -> int:
             "purgeBars": final_split.purge_count,
             "validationMetrics": metrics_to_mapping(result.validation_metrics),
             "walkForward": folds,
+            "baselines": baselines,
             "promotionRequested": args.promote,
             "promotionEligible": qualifies_for_promotion,
             "promotionAssessment": assessment,

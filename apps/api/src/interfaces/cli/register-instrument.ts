@@ -3,14 +3,7 @@ import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { instrumentTypes, type Instrument, type InstrumentType } from "../../modules/market-data/domain/instrument.js";
-import { getOption, requireOption } from "./arguments.js";
-
-function parseExchange(value: string): Instrument["exchange"] {
-  if (value === "NSE" || value === "NFO" || value === "BSE" || value === "TWELVEDATA") {
-    return value;
-  }
-  throw new Error("Unsupported exchange. Use NSE, NFO, BSE, or TWELVEDATA.");
-}
+import { getOption, parseInstrumentExchange, requireOption } from "./arguments.js";
 
 function parseCurrency(value: string): Instrument["currency"] {
   if (value === "INR" || value === "USD") {
@@ -43,7 +36,7 @@ async function main(): Promise<void> {
   const database = createDatabasePool(environment.DATABASE_URL);
   try {
     const instrument = await new PostgresInstrumentRepository(database).upsert({
-      exchange: parseExchange((getOption(argumentsList, "exchange") ?? "NSE").toUpperCase()),
+      exchange: parseInstrumentExchange(getOption(argumentsList, "exchange") ?? "NSE"),
       symbol: requireOption(argumentsList, "symbol"),
       displayName: requireOption(argumentsList, "name"),
       instrumentType: parseInstrumentType((getOption(argumentsList, "type") ?? "EQUITY").toUpperCase()),

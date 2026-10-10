@@ -1,8 +1,20 @@
 """
 Master 5-Layer Scanner Core & Exhaustive Rejection Mapping
 Implementation Contract v1.4.1 & Research Specification v1.1
+
+Trade order, in the order the layers are evaluated (see docs/2026-10-10-fibonacci-order-flow-realignment.md):
+  Layer 0  regime      expected move vs friction, breadth, volatility, volume profile, session edges
+  Layer 1  location    structure (MSS) -> live anchor -> qualified retracement -> Fibonacci zone
+  Layer 2  order flow  footprint shape + price-impact (lambda) proof at the zone; reported as
+                       ORDER_FLOW_UNAVAILABLE (unmeasured) when the feed carries no tape
+  Layer 3  options-context FRESHNESS (a snapshot-available/fresh/not-future flag only -- NOT gamma exposure;
+           no GEX model exists here and `pcrRatio` is never read); Layer 4 null / execution authorisation
+           (always closed: research only)
+Either direction is supported (`direction="BULLISH"` or `"BEARISH"`); the bearish scanner is the exact
+mirror (breadth veto on strength, P_SHAPE instead of B_SHAPE, zones/targets measured the other way).
 """
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -14,7 +26,7 @@ from ai_quant_lab_ml.fibonacci_pit_engine import (
     FeatureVector,
     FibAnchorCalibrationArtifact,
     FootprintBar,
-    GEXContext,
+    GEXContext,  # alias of OptionsContext, kept for existing callers (see fibonacci_pit_engine)
     GEXContextState,
     L2DepthLiquidityObservation,
     LambdaCalibrationArtifact,
@@ -22,6 +34,7 @@ from ai_quant_lab_ml.fibonacci_pit_engine import (
     NormalizedOFI,
     RetracementObservation,
     StatefulPITFibEngine,
+    StatefulPITFibEngineBearish,
     StructuralLevel,
 )
 
@@ -29,13 +42,25 @@ SignalRejectReason = str
 # Taxonomy:
 # 'NONE' | 'PIT_FUTURE_DATA_REJECTION' | 'PIT_TIMESTAMP_INCONSISTENCY' | 'SEQUENCE_ORDER_VIOLATION'
 # 'FEATURE_DEFINITION_MISMATCH' | 'MAGNITUDE_HURDLE_FAILED' | 'BREADTH_DETERIORATING_VETO'
-# 'VOLATILITY_EXPANSION_VETO' | 'VOLUME_PROFILE_STABLE_VETO' | 'TOD_SESSION_BOUNDARY_VETO'
-# 'LOCATION_NOT_IN_FIB_ZONE' | 'OFI_BELOW_BASELINE_THRESHOLD' | 'LAMBDA_PROXY_PROOF_FAILED'
-# 'FOOTPRINT_SHAPE_UNQUALIFIED' | 'STRUCTURAL_INVALIDATION' | 'CALIBRATION_CONTEXT_MISMATCH'
+# 'BREADTH_IMPROVING_VETO' | 'VOLATILITY_EXPANSION_VETO' | 'VOLUME_PROFILE_STABLE_VETO'
+# 'TOD_SESSION_BOUNDARY_VETO' | 'LOCATION_NOT_IN_FIB_ZONE' | 'OFI_BELOW_BASELINE_THRESHOLD'
+# 'LAMBDA_PROXY_PROOF_FAILED' | 'FOOTPRINT_SHAPE_UNQUALIFIED' | 'ORDER_FLOW_UNAVAILABLE'
+# 'STRUCTURAL_INVALIDATION' | 'CALIBRATION_CONTEXT_MISMATCH'
 # 'INSUFFICIENT_DATA_LAYER4_NULL' | 'INSUFFICIENT_DATA_CANDLE_COUNT' | 'CONTRACT_VIOLATION_UNKNOWN'
 
 SignalState = str
 # 'QUALIFIED_FOR_RESEARCH' | 'NOT_QUALIFIED' | 'INSUFFICIENT_DATA' | 'STALE_CONTEXT' | 'INVALIDATED'
+# ORDER_FLOW_UNAVAILABLE is reported as 'INSUFFICIENT_DATA' (the layer could not be measured), never
+# as 'NOT_QUALIFIED' (measured and rejected).
+
+# Session-edge veto. Layer 0 vetoes the first and last SESSION_EDGE_VETO_MINUTES of the NSE session
+# (375 minutes, 09:15-15:30 IST). The time-of-day feature is (sin, cos) of 2*pi*fraction-of-session,
+# so BOTH session edges map to (sin, cos) = (0, 1): the edge zone is simply cos > cos(2*pi*m/375).
+# (The previous rule, |sin| > 0.95 or cos < -0.95, vetoed 10:30-11:10, 12:05-12:45 and 13:40-14:20
+# IST -- the quarter points and the midpoint of the session -- and never the open or the close.)
+NSE_SESSION_MINUTES = 375.0
+SESSION_EDGE_VETO_MINUTES = 15.0
+TOD_EDGE_COS_THRESHOLD = math.cos(2.0 * math.pi * SESSION_EDGE_VETO_MINUTES / NSE_SESSION_MINUTES)
 
 
 @dataclass
@@ -44,7 +69,7 @@ class CandidateSignal:
     timestamp: int
     signalState: SignalState
     rejectReason: SignalRejectReason
-    signalType: str  # 'BULLISH_CANDIDATE' | 'NO_SIGNAL'
+    signalType: str  # 'BULLISH_CANDIDATE' | 'BEARISH_CANDIDATE' | 'NO_SIGNAL'
     macroZone: str   # 'GOLDEN_POCKET' | 'OTE' | 'DEEP_RETRACEMENT' | 'NONE'
     entryPrice: float
     exitGeometry: ExitGeometry
@@ -71,9 +96,11 @@ class Layer0RegimeEvaluator:
         if magnitude.expectedMoveBps < self.friction_hurdle_bps:
             return False, "EXPECTED_MOVE_BELOW_FRICTION_HURDLE"
 
-        # 2. Breadth Gate
+        # 2. Breadth Gate (mirror for shorts: do not short into broad strength)
         if direction == "BULLISH" and breadth_ad < -0.5:
             return False, "BREADTH_DETERIORATING_LONG_VETO"
+        if direction == "BEARISH" and breadth_ad > 0.5:
+            return False, "BREADTH_IMPROVING_SHORT_VETO"
 
         # 3. Volatility Expansion Veto
         if yz_vol_ratio > 2.5:
@@ -83,8 +110,9 @@ class Layer0RegimeEvaluator:
         if vp_label == "BALANCED_RANGE":
             return False, "VOLUME_PROFILE_STABLE_BALANCE_VETO"
 
-        # 5. Time of Day Prior Gate (Veto illiquid market open/close boundary windows)
-        if abs(tod_sin) > 0.95 or tod_cos < -0.95:
+        # 5. Time of Day Prior Gate: veto the illiquid open/close edge windows. Both edges encode to
+        # (sin, cos) = (0, 1), so the edge zone is cos > TOD_EDGE_COS_THRESHOLD (see module top).
+        if tod_cos > TOD_EDGE_COS_THRESHOLD:
             return False, "TOD_SESSION_BOUNDARY_VETO"
 
         return True, "NONE"
@@ -107,7 +135,7 @@ class Layer2MicrostructureEngine:
 
     def evaluate_microstructure(self, bar: FootprintBar, normalized_ofi: NormalizedOFI,
                                 current_instrument: str, current_regime: str,
-                                decision_at: int) -> Tuple[bool, SignalRejectReason]:
+                                decision_at: int, direction: str = "BULLISH") -> Tuple[bool, SignalRejectReason]:
         if bar.availableAt > decision_at or normalized_ofi.availableAt > decision_at:
             return False, "PIT_FUTURE_DATA_REJECTION"
 
@@ -129,6 +157,12 @@ class Layer2MicrostructureEngine:
         # feature-value threshold; that compared incompatible units and has been removed. The
         # real value is still recorded in the feature vector for diagnostic/matching use.
 
+        # No tape, no verdict. A feed without trade-tape/footprint data carries placeholder zeros
+        # in netDelta / pocDisplacementZ / tailVolumeRatio; letting those fail the gates below
+        # reported "order flow rejected the setup" when order flow was never measured at all.
+        if not bar.orderFlowAvailable:
+            return False, "ORDER_FLOW_UNAVAILABLE"
+
         price_range = bar.high - bar.low
         DELTA_EPSILON = 1.0
         lambda_proxy = (price_range / abs(bar.netDelta)) if abs(bar.netDelta) >= DELTA_EPSILON else None
@@ -136,8 +170,11 @@ class Layer2MicrostructureEngine:
         if lambda_proxy is None or lambda_proxy >= self.lambda_artifact.threshold:
             return False, "LAMBDA_PROXY_PROOF_FAILED"
 
+        # Bullish: B_SHAPE (volume concentrated low with a rejection tail). Bearish: the exact
+        # mirror, P_SHAPE (volume concentrated high with a rejection tail).
+        required_shape = "B_SHAPE" if direction == "BULLISH" else "P_SHAPE"
         shape = self.classify_footprint_shape(bar)
-        if shape == "B_SHAPE":
+        if shape == required_shape:
             return True, "NONE"
 
         return False, "FOOTPRINT_SHAPE_UNQUALIFIED"
@@ -146,14 +183,19 @@ class Layer2MicrostructureEngine:
 class Master5LayerScanner:
     def __init__(self, lambda_artifact: LambdaCalibrationArtifact,
                  fib_artifact: FibAnchorCalibrationArtifact,
-                 calibration_end: int, evaluation_start: int, tick_size: float = 0.05):
+                 calibration_end: int, evaluation_start: int, tick_size: float = 0.05,
+                 direction: str = "BULLISH", pivot_width: int = 1):
+        if direction not in ("BULLISH", "BEARISH"):
+            raise ValueError(f"direction must be BULLISH or BEARISH, got {direction!r}")
+        self.direction = direction
         self.tick_size = tick_size
         self.fib_artifact = fib_artifact
         self.calibration_end = calibration_end
         self.evaluation_start = evaluation_start
         self.audit_log: List[Dict] = []
         self.layer0 = Layer0RegimeEvaluator()
-        self.layer1 = StatefulPITFibEngine(fib_artifact=fib_artifact, tick_size=tick_size)
+        engine_cls = StatefulPITFibEngine if direction == "BULLISH" else StatefulPITFibEngineBearish
+        self.layer1 = engine_cls(fib_artifact=fib_artifact, tick_size=tick_size, pivot_width=pivot_width)
         self.layer2 = Layer2MicrostructureEngine(lambda_artifact=lambda_artifact)
 
     def emit_audit_event(self, event_type: str, decision_at: int, details: str):
@@ -179,11 +221,14 @@ class Master5LayerScanner:
         # Aborts IMMEDIATELY before mutating Fib engine if ANY input is future-dated,
         # uncalibrated, mismatched, timestamp-inconsistent, or insufficient depth.
         # ---------------------------------------------------------------------
+        is_bullish = self.direction == "BULLISH"
+        anchor_type = "BULLISH_IMPULSE" if is_bullish else "BEARISH_IMPULSE"
+        direction_sign = 1 if is_bullish else -1
         null_exit_geom = ExitGeometry(
             structuralStop=None, opposingLiquidity=None, candidateFibTargets=[], barrierFree=None, pathScore=None, availableAt=None
         )
         dummy_feat_vec_empty = FeatureVector(
-            decisionAt=decision_at, fibAnchorType="BULLISH_IMPULSE", fibDirection=1,
+            decisionAt=decision_at, fibAnchorType=anchor_type, fibDirection=direction_sign,
             fibAnchorAvailableAt=None, fibZone="NONE", fibRetracement=None, distanceTo618=None,
             distanceTo650=None, distanceTo702=None, distanceTo786=None, distanceTo886=None,
             inGoldenPocket=False, inOTE=False, inDeepRetracement=False, anchorLow=None,
@@ -284,7 +329,9 @@ class Master5LayerScanner:
             FeatureProvenance("fib_retracement", "FIB_RETRACEMENT_STATEFUL_V1", bar.identity.closeTimestamp, bar.availableAt),
             FeatureProvenance("breadth", "BREADTH_AD_V1", breadth_source_time, breadth_available_at),
             FeatureProvenance("yz_vol", "YZ_VOL_10P_RATIO_V1", yz_source_time, yz_available_at),
-            FeatureProvenance("gex", "GEX_PCR_15M_V1", gex_context.snapshotTimestamp, gex_context.availableAt)
+            # Honest id: this records the options-context FRESHNESS inputs (timestamps), not a
+            # gamma-exposure feature and not the (unread) pcrRatio. Previously "GEX_PCR_15M_V1".
+            FeatureProvenance("options_context", "OPTIONS_CONTEXT_FRESHNESS_V1", gex_context.snapshotTimestamp, gex_context.availableAt)
         ]
 
         # Multi-State GEX Handling (Future timestamp validation strictly precedes state preservation)
@@ -308,7 +355,7 @@ class Master5LayerScanner:
                 gex_state_eval: GEXContextState = "FRESH"
 
         dummy_feat_vec = FeatureVector(
-            decisionAt=decision_at, fibAnchorType="BULLISH_IMPULSE", fibDirection=1,
+            decisionAt=decision_at, fibAnchorType=anchor_type, fibDirection=direction_sign,
             fibAnchorAvailableAt=None, fibZone="NONE", fibRetracement=None, distanceTo618=None,
             distanceTo650=None, distanceTo702=None, distanceTo786=None, distanceTo886=None,
             inGoldenPocket=False, inOTE=False, inDeepRetracement=False, anchorLow=None,
@@ -342,9 +389,11 @@ class Master5LayerScanner:
         # ---------------------------------------------------------------------
         # STEP 2: MUTATE STATE ENGINE (Only after PIT bundle is 100% valid)
         # ---------------------------------------------------------------------
+        # `structural_resistance` is the structural level the MSS must break: the confirmed swing
+        # high for a bullish scan, the confirmed swing low (support) for a bearish one.
         engine_updated, engine_reason = self.layer1.process_new_candle(
-            current_candles, structural_resistance=structural_resistance,
-            retracement=retracement, atr_obs=atr_obs, decision_at=decision_at
+            current_candles, structural_resistance,
+            retracement, atr_obs, decision_at
         )
 
         if not engine_updated:
@@ -366,17 +415,26 @@ class Master5LayerScanner:
 
         anchor_range_price = (poi.anchorHigh - poi.anchorLow) if poi else None
         anchor_range_ticks = (anchor_range_price / self.tick_size) if poi else None
-        fib_retracement_val = ((poi.anchorHigh - bar.close) / anchor_range_price) if (poi and anchor_range_price and anchor_range_price > 0) else None
+        if poi and anchor_range_price and anchor_range_price > 0:
+            if is_bullish:  # pulled back DOWN from the impulse high
+                fib_retracement_val = (poi.anchorHigh - bar.close) / anchor_range_price
+            else:           # pulled back UP from the impulse low
+                fib_retracement_val = (bar.close - poi.anchorLow) / anchor_range_price
+        else:
+            fib_retracement_val = None
         range_atr_ratio = (anchor_range_price / atr_obs.atr14) if (anchor_range_price and atr_obs.atr14 > 0) else None
 
-        anchor_age_bars = (bar.identity.sequenceNumber - self.layer1.mss_confirmed_seq) if (poi and self.layer1.mss_confirmed_seq) else None
-        impulse_duration_bars = (poi.anchorHighBarIndex - poi.anchorLowBarIndex + 1) if poi else None
+        # Age of the pullback: bars since the impulse EXTREME (the live anchor). With anchor
+        # re-anchoring this is the age of the current leg's top/bottom, not of the original MSS.
+        anchor_extreme_seq = (poi.anchorHighBarIndex if is_bullish else poi.anchorLowBarIndex) if poi else None
+        anchor_age_bars = (bar.identity.sequenceNumber - anchor_extreme_seq) if anchor_extreme_seq is not None else None
+        impulse_duration_bars = (abs(poi.anchorHighBarIndex - poi.anchorLowBarIndex) + 1) if poi else None
         impulse_velocity = (anchor_range_price / impulse_duration_bars) if (anchor_range_price and impulse_duration_bars and impulse_duration_bars >= 1) else None
 
         feat_vector = FeatureVector(
             decisionAt=decision_at,
-            fibAnchorType="BULLISH_IMPULSE",
-            fibDirection=1,
+            fibAnchorType=anchor_type,
+            fibDirection=direction_sign,
             fibAnchorAvailableAt=(poi.timestamps.availableAt if poi else None),
             fibZone=zone_name,
             fibRetracement=fib_retracement_val,
@@ -409,7 +467,13 @@ class Master5LayerScanner:
             gexState=gex_state_eval
         )
 
-        cand_targets = [poi.anchorHigh + anchor_range_price * 0.272, poi.anchorHigh + anchor_range_price * 0.618] if poi and anchor_range_price else []
+        if poi and anchor_range_price:
+            if is_bullish:   # extension targets beyond the impulse high
+                cand_targets = [poi.anchorHigh + anchor_range_price * 0.272, poi.anchorHigh + anchor_range_price * 0.618]
+            else:            # extension targets beyond the impulse low
+                cand_targets = [poi.anchorLow - anchor_range_price * 0.272, poi.anchorLow - anchor_range_price * 0.618]
+        else:
+            cand_targets = []
 
         active_exit_geom = ExitGeometry(
             structuralStop=(poi.invalidation if poi else None),
@@ -422,7 +486,7 @@ class Master5LayerScanner:
 
         # Layer 0 Evaluation & Exhaustive Fail-Closed Rejection Mapping
         l0_pass, l0_reason = self.layer0.evaluate_regime(
-            magnitude=magnitude, direction="BULLISH", breadth_ad=breadth_ad,
+            magnitude=magnitude, direction=self.direction, breadth_ad=breadth_ad,
             breadth_available_at=breadth_available_at, yz_vol_ratio=yz_vol,
             yz_available_at=yz_available_at, vp_label=vp_label,
             vp_available_at=vp_available_at, tod_sin=tod_sin, tod_cos=tod_cos,
@@ -432,6 +496,7 @@ class Master5LayerScanner:
         l0_reject_map: Dict[str, SignalRejectReason] = {
             "EXPECTED_MOVE_BELOW_FRICTION_HURDLE": "MAGNITUDE_HURDLE_FAILED",
             "BREADTH_DETERIORATING_LONG_VETO": "BREADTH_DETERIORATING_VETO",
+            "BREADTH_IMPROVING_SHORT_VETO": "BREADTH_IMPROVING_VETO",
             "VOLATILITY_EXPANSION_MEAN_REVERSION_VETO": "VOLATILITY_EXPANSION_VETO",
             "VOLUME_PROFILE_STABLE_BALANCE_VETO": "VOLUME_PROFILE_STABLE_VETO",
             "TOD_SESSION_BOUNDARY_VETO": "TOD_SESSION_BOUNDARY_VETO"
@@ -462,21 +527,23 @@ class Master5LayerScanner:
         # Layer 2 Evaluation & Exhaustive Rejection Mapping
         l2_pass, l2_reason = self.layer2.evaluate_microstructure(
             bar=bar, normalized_ofi=normalized_ofi, current_instrument=current_instrument,
-            current_regime=current_regime, decision_at=decision_at
+            current_regime=current_regime, decision_at=decision_at, direction=self.direction
         )
 
         if not l2_pass:
             valid_rejections = [
                 "OFI_BELOW_BASELINE_THRESHOLD", "LAMBDA_PROXY_PROOF_FAILED",
                 "FOOTPRINT_SHAPE_UNQUALIFIED", "PIT_FUTURE_DATA_REJECTION",
-                "CALIBRATION_CONTEXT_MISMATCH"
+                "CALIBRATION_CONTEXT_MISMATCH", "ORDER_FLOW_UNAVAILABLE"
             ]
             if l2_reason not in valid_rejections:
                 raise ValueError(f"ContractViolation: Unknown Layer 2 rejection reason: {l2_reason}")
 
             return CandidateSignal(
                 symbol=current_instrument, timestamp=decision_at,
-                signalState="NOT_QUALIFIED", rejectReason=l2_reason,
+                # Unmeasured (no tape in the feed) is "insufficient data", not "not qualified".
+                signalState="INSUFFICIENT_DATA" if l2_reason == "ORDER_FLOW_UNAVAILABLE" else "NOT_QUALIFIED",
+                rejectReason=l2_reason,
                 signalType="NO_SIGNAL", macroZone=zone_name, entryPrice=0,
                 exitGeometry=null_exit_geom, featureVector=feat_vector,
                 provenance=provenance, layer0Status=True, layer1Status=True,
@@ -489,7 +556,7 @@ class Master5LayerScanner:
             timestamp=decision_at,
             signalState="INSUFFICIENT_DATA",
             rejectReason="INSUFFICIENT_DATA_LAYER4_NULL",
-            signalType="BULLISH_CANDIDATE",
+            signalType="BULLISH_CANDIDATE" if is_bullish else "BEARISH_CANDIDATE",
             macroZone=zone_name,
             entryPrice=bar.close,
             exitGeometry=active_exit_geom,

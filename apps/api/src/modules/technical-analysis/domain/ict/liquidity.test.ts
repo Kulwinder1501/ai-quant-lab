@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { IctLiquidityResolver } from "./liquidity.js";
+import { IctLiquidityResolver, buildIctLiquidityPools } from "./liquidity.js";
 import type { IctStructureSnapshot } from "./structure.js";
 import type { IctZoneSnapshot } from "./zones.js";
 import type { SessionLevelsSnapshot } from "./session-levels.js";
@@ -305,5 +305,96 @@ describe("intermediate target: internal-range waypoint", () => {
     };
     const snap = new IctLiquidityResolver().resolve(98, bullBias(105), struct(120, 90), zonesWithConsumedFvg, session(108, 100));
     expect(snap.intermediateTarget).toBe(105);
+  });
+});
+
+describe("swept swing / EQH / EQL pools stay mitigated after price retreats", () => {
+  /*
+   * Before this fix `isMitigated` for swing/EQH/EQL used only the CURRENT price, so a level that
+   * price had run through and left behind became a live target again (PDH/PDL already used the
+   * session path). The resolver now tracks the high/low since each pool was first confirmed.
+   */
+  const pivot = (index: number, price: number, type: "HIGH" | "LOW") => {
+    const confirmedAtTime = new Date();
+    return {
+      index, time: new Date(), price, type, confirmedAtIndex: index + 2, confirmedAtTime,
+      availableAt: confirmedAtTime.getTime(),
+    };
+  };
+  const zones: IctZoneSnapshot = { activeFvgs: [], activeObs: [], lastZoneEvent: null };
+  const bullBias: IctBiasSnapshot = {
+    bias: "BULLISH",
+    dailyTemplate: "OLHC",
+    dealingRange: {
+      rangeHigh: 125, rangeLow: 90, equilibrium: 105,
+      isPremium: (price: number) => price >= 105,
+      isDiscount: (price: number) => price < 105,
+    },
+    reasons: ["Bullish bias"],
+  };
+  const session: SessionLevelsSnapshot = {
+    levels: { sessionDate: "2026-01-06", priorSessionDate: "2026-01-05", pdh: 108, pdl: 90, pdc: 100, pdo: 95, eq: 105 },
+    lastSweepEvent: null,
+    currentSessionHigh: 100,
+    currentSessionLow: 92,
+    currentSessionOpen: 96,
+    currentSessionDate: "2026-01-06",
+  };
+  const struct: IctStructureSnapshot = {
+    trend: "BULLISH",
+    lastHH: pivot(10, 120, "HIGH"),
+    lastHL: pivot(5, 90, "LOW"),
+    lastLH: null, lastLL: null, idm: null, bosLevel: null, chochLevel: null,
+    internalVsExternal: "EXTERNAL", lastEvent: null, confirmedPivotCount: 0,
+  };
+
+  it("does not revive a swing high that a later bar traded through once price falls back below it", () => {
+    const resolver = new IctLiquidityResolver();
+    // Bar 1: price 98, swing high 120 is the external objective.
+    expect(resolver.resolve(98, bullBias, struct, zones, session).primaryTarget?.price).toBe(120);
+    // Bar 2: price runs through 120 (premium -> entries blocked, but the path is recorded).
+    expect(resolver.resolve(121, bullBias, struct, zones, session).alignmentStatus).toBe("BLOCKED_PREMIUM_LONG");
+    // Bar 3: price retreats to 98. The old current-price test said 120 was live again.
+    const after = resolver.resolve(98, bullBias, struct, zones, session);
+    expect(after.alignmentStatus).toBe("ALIGNED_LONG");
+    expect(after.primaryTarget?.price).toBe(108); // falls back to the still-unswept PDH
+  });
+
+  it("counts an intrabar sweep (bar high) even when the bar closes back below the level", () => {
+    const resolver = new IctLiquidityResolver();
+    const snap = resolver.resolve(98, bullBias, struct, zones, session, [], { high: 121, low: 97 });
+    expect(snap.primaryTarget?.price).toBe(108);
+  });
+
+  it("leaves an untouched swing high live across bars", () => {
+    const resolver = new IctLiquidityResolver();
+    resolver.resolve(98, bullBias, struct, zones, session);
+    resolver.resolve(110, bullBias, struct, zones, session);
+    expect(resolver.resolve(99, bullBias, struct, zones, session).primaryTarget?.price).toBe(120);
+  });
+
+  it("drops path state for pools that disappear (no unbounded growth)", () => {
+    const resolver = new IctLiquidityResolver();
+    resolver.resolve(98, bullBias, struct, zones, session);
+    const noStructure: IctStructureSnapshot = { ...struct, lastHH: null, lastHL: null };
+    resolver.resolve(98, bullBias, noStructure, zones, session);
+    expect((resolver as unknown as { poolPath: Map<string, unknown> }).poolPath.size).toBe(0);
+  });
+
+  it("buildIctLiquidityPools: swing low swept on the path stays mitigated; legacy callers keep the spot test", () => {
+    const lowStruct: IctStructureSnapshot = { ...struct, lastHH: null, lastHL: pivot(5, 95, "LOW") };
+    const withPath = buildIctLiquidityPools(100, lowStruct, zones, session, [], () => ({ high: 101, low: 94 }));
+    expect(withPath.erlPools.find((p) => p.kind === "ERL_SWING_LOW")?.isMitigated).toBe(true);
+    const spotOnly = buildIctLiquidityPools(100, lowStruct, zones, session);
+    expect(spotOnly.erlPools.find((p) => p.kind === "ERL_SWING_LOW")?.isMitigated).toBe(false);
+  });
+
+  it("applies the same path rule to equal highs / equal lows", () => {
+    const pivots = [pivot(1, 119.97, "HIGH"), pivot(4, 120, "HIGH")].map((p) => ({ ...p, type: "HIGH" as const }));
+    const noSwing: IctStructureSnapshot = { ...struct, lastHH: null, lastHL: null };
+    const swept = buildIctLiquidityPools(100, noSwing, zones, session, pivots, () => ({ high: 121, low: 99 }));
+    expect(swept.erlPools.find((p) => p.kind === "ERL_EQH")?.isMitigated).toBe(true);
+    const live = buildIctLiquidityPools(100, noSwing, zones, session, pivots, () => ({ high: 110, low: 99 }));
+    expect(live.erlPools.find((p) => p.kind === "ERL_EQH")?.isMitigated).toBe(false);
   });
 });

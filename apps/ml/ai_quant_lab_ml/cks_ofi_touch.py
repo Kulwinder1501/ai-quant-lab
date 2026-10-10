@@ -46,7 +46,11 @@ OFI_WINDOW_MS = 5000  # matches Phase 28's validated evaluate-ofi-signal.ts defa
 BANKNIFTY_DEPTH_CONTRACTS: List[Tuple[str, str, str]] = [
     ("NSE:BANKNIFTY26AUGFUT", "2026-08-21", "2026-08-25"),
     ("NSE:BANKNIFTY26SEPFUT", "2026-08-27", "2026-09-29"),
-    ("NSE:BANKNIFTY26OCTFUT", "2026-09-30", "2026-12-31"),  # open-ended: current contract
+    # Valid to its REAL expiry: NSE BANKNIFTY monthly futures expire on the last Tuesday of the
+    # month; Oct 2026's last Tuesday is the 27th. This was "2026-12-31", which kept a dead
+    # contract mapped for two months past expiry. The next contract (NOV) has no captured depth
+    # yet; add it when it does.
+    ("NSE:BANKNIFTY26OCTFUT", "2026-09-30", "2026-10-27"),
 ]
 
 
@@ -56,6 +60,81 @@ def contract_for_date(session_date: str) -> Optional[str]:
         if start <= session_date <= end:
             return symbol
     return None
+
+
+def recompute_sequence_flags(
+    frames: Sequence[Tuple[Optional[int], bool]],
+) -> List[Tuple[Optional[int], bool, bool]]:
+    """
+    Recompute (gap_before, is_duplicate, is_regression) from raw sequence numbers.
+
+    `frames` is ONE symbol's (sequence_no, is_snapshot) pairs in received order (one trading day
+    is the intended unit: a feed restart overnight resets the chain anyway). This mirrors the
+    FIXED capture-time rule in `capture-depth-frames.ts` (marker always follows the last usable
+    sequence number, so a reset is flagged ONCE and later frames are clean):
+
+      * no usable sequence (None / negative)  -> (None, False, False), marker unchanged
+      * snapshot frame                        -> (None, False, False), marker re-based
+      * first usable frame                    -> (None, False, False)
+      * seq == marker                         -> (0, True, False)   duplicate
+      * seq <  marker                         -> (None, False, True) regression / reset
+      * seq >  marker                         -> (seq - marker - 1, False, False)
+
+    Why this exists: depth_frames rows captured BEFORE the capture fix carry `is_regression=TRUE`
+    on EVERY frame after a reset-without-snapshot (e.g. 29,954 frames on 2026-09-11), and their
+    stored `gap_before` is NULL there. Research that filters `is_regression = FALSE` silently drops
+    those sessions. Stored flags are NOT mutated; recompute from `sequence_no` instead.
+    """
+    out: List[Tuple[Optional[int], bool, bool]] = []
+    marker: Optional[int] = None
+    for seq, is_snapshot in frames:
+        usable = seq is not None and seq >= 0
+        if not usable:
+            out.append((None, False, False))
+            continue
+        if is_snapshot or marker is None:
+            out.append((None, False, False))
+        elif seq == marker:
+            out.append((0, True, False))
+        elif seq < marker:
+            out.append((None, False, True))
+        else:
+            out.append((seq - marker - 1, False, False))
+        marker = seq
+    return out
+
+
+def recompute_sequence_flags_by_stream(
+    frames: Sequence[Tuple[object, Optional[int], bool]],
+) -> List[Tuple[Optional[int], bool, bool, bool]]:
+    """
+    `recompute_sequence_flags` for rows that interleave several independent streams (e.g. several
+    provider symbols and/or capture sessions loaded in ONE received-order query). 2026-10-10
+    follow-up (code gaps): the stored `is_regression` / `gap_before` of pre-fix rows cannot be
+    trusted, and sequence numbers of different streams are unrelated, so the flags must be
+    recomputed per stream.
+
+    `frames` is [(stream_id, sequence_no, is_snapshot)] in received order. Returns, ALIGNED with the
+    input, (gap_before, is_duplicate, is_regression, is_stream_start). `is_stream_start` is True for
+    the first row of each stream: its sequence chain has no predecessor, so callers building an OFI
+    chain should treat it as a baseline (like a snapshot) rather than differencing across streams.
+    """
+    indices_by_stream: Dict[object, List[int]] = {}
+    for index, (stream_id, _seq, _snap) in enumerate(frames):
+        indices_by_stream.setdefault(stream_id, []).append(index)
+
+    out: List[Tuple[Optional[int], bool, bool, bool]] = [(None, False, False, False)] * len(frames)
+    for indices in indices_by_stream.values():
+        stream_flags = recompute_sequence_flags([(frames[i][1], frames[i][2]) for i in indices])
+        for position, (index, (gap, is_dup, is_reg)) in enumerate(zip(indices, stream_flags)):
+            out[index] = (gap, is_dup, is_reg, position == 0)
+    return out
+
+
+def drop_reset_and_duplicate_rows(rows: Sequence, flags: Sequence[Tuple]) -> list:
+    """Rows whose recomputed flags are neither a duplicate nor a SEQUENCE_RESET (is_regression).
+    `flags[i]` must be (gap_before, is_duplicate, is_regression, ...) for `rows[i]`."""
+    return [row for row, flag in zip(rows, flags) if not flag[1] and not flag[2]]
 
 
 @dataclass(frozen=True)
@@ -68,6 +147,10 @@ class DepthFrameRow:
     bid_qty_0: float
     ask_price_0: float
     ask_qty_0: float
+    # A sequence reset without a snapshot (see `recompute_sequence_flags`). Treated as a chain
+    # break exactly like a snapshot: the frame becomes the new baseline and contributes no delta.
+    # Defaults False so callers that never carried the flag keep their behaviour.
+    is_regression: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,7 +186,7 @@ def _touch_level_delta(previous: DepthFrameRow, current: DepthFrameRow) -> Optio
 def _split_into_segments(frames: Sequence[DepthFrameRow]) -> List[List[Tuple[datetime, float]]]:
     """
     Port of accumulateOrderFlowImbalance's segmenting: a snapshot, a duplicate, a sequence gap,
-    or a one-sided (not comparable) book all break the chain. The opening frame of the whole
+    a sequence reset (regression) or a one-sided (not comparable) book all break the chain. The opening frame of the whole
     series (or of a segment) establishes a baseline and contributes no observation of its own.
     """
     segments: List[List[Tuple[datetime, float]]] = []
@@ -114,6 +197,7 @@ def _split_into_segments(frames: Sequence[DepthFrameRow]) -> List[List[Tuple[dat
         breaks_chain = (
             "DUPLICATE" if frame.is_duplicate
             else "SNAPSHOT" if frame.is_snapshot
+            else "SEQUENCE_RESET" if frame.is_regression
             else "SEQUENCE_GAP" if (frame.gap_before is not None and frame.gap_before > 0)
             else None
         )

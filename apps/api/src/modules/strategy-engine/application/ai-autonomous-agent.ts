@@ -8,6 +8,7 @@ import type { NewsRepository } from "../../news-sentiment/domain/news-article.js
 import type { PostgresAiJournalRepository } from "../../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
 import { PostgresTradeReviewRepository } from "../../../infrastructure/database/repositories/postgres-trade-review-repository.js";
 import { scoreDirectionalSetup } from "../domain/directional-setup-score.js";
+import { selectDirectionalPattern } from "../domain/select-directional-pattern.js";
 import { assessContractSize } from "../../paper-trading/domain/contract-specs.js";
 import { calculateExitFees } from "../../paper-trading/domain/brokerage-calculator.js";
 import { isOptionBuyerTrade } from "../../paper-trading/domain/option-mark-to-market.js";
@@ -626,7 +627,11 @@ export class AiAutonomousAgent {
     // configuration, so it pins it here.
     const rsiObj = ctx.indicators.find((i) => i.code === "RSI" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
     const bbObj = ctx.indicators.find((i) => i.code === "BOLLINGER_BANDS" && i.algorithmVersion === PRODUCTION_INDICATOR_VERSION);
-    const latestPattern = ctx.patterns[0];
+    // `ctx.patterns` is ordered by pattern_code ASC, so `[0]` was the alphabetically first code
+    // (BEARISH_* beat everything). Selected deterministically instead: current candlestick version,
+    // latest candle only, NEUTRAL dropped, conflicting directions abstain, then highest strength
+    // (ties: longer formation, then code). See `selectDirectionalPattern`.
+    const latestPattern = selectDirectionalPattern(ctx.patterns, ctx.candle.id);
 
     // Reads `value`, the key RSI snapshots are actually written under. This read
     // `values["rsi"]`, which is never present, so every RSI branch below saw a

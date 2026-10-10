@@ -62,6 +62,7 @@ from typing import Any, Literal, Mapping, Sequence
 from ai_quant_lab_ml.contracts import ALGORITHM_CHOICES, LABEL_SCHEME_VOLATILITY_EXPANSION, DatasetRequest
 from ai_quant_lab_ml.features import build_volatility_expansion_examples
 from ai_quant_lab_ml.leakage import run_leakage_audit
+from ai_quant_lab_ml.option_chain_pcr import MAX_SNAPSHOT_AGE_MINUTES
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
 from train import non_blank, non_negative_float, parse_timestamp, positive_int, strict_unit_interval
@@ -88,8 +89,19 @@ MAXIMUM_ITERATIONS = 100
 MINIMUM_EXTRINSIC_FOR_IV = 0.05
 
 # How stale the latest option-chain snapshot may be and still count as "known at
-# decision time" -- same value and same reasoning as oi_pcr_signal_check.py.
-MAXIMUM_SNAPSHOT_AGE_MINUTES = 15.0
+# decision time": the shared 20-minute ceiling (one 15-minute poll cycle plus jitter; a
+# snapshot that has missed a poll is >= ~24 minutes old and is refused). It is imported, not
+# restated, so this script, oi_pcr_signal_check.py, the hybrid backtest and the live
+# TypeScript `OPTION_CHAIN_MAX_SNAPSHOT_AGE_MINUTES` cannot drift apart again -- this file
+# previously used 15 while its write-up (docs/2026-09-29-...) said 60.
+MAXIMUM_SNAPSHOT_AGE_MINUTES = MAX_SNAPSHOT_AGE_MINUTES
+
+# A two-sided quote only yields a usable mid when it is tight. Measured on the stored chain
+# (near-ATM, |K - S| / S < 0.3%, unexpired): relative spread (ask - bid) / mid has p99 of
+# 2.6% (BANKNIFTY) and 2.2% (NIFTY50), so 5% sits well outside normal index quoting while
+# still refusing a book that is effectively one-sided. A wider quote makes the mid -- and any
+# IV solved from it -- noise. This is a judgement threshold, not a calibrated one.
+MAXIMUM_RELATIVE_SPREAD = 0.05
 
 # A percentile over a handful of days is arithmetically fine and analytically
 # worthless (see market-data/domain/iv-percentile.ts's own docstring). Same
@@ -201,15 +213,26 @@ def solve_implied_volatility(
     return None
 
 
-def _mid(bid: float | None, ask: float | None) -> float | None:
-    """Mid of a two-sided quote, or None. A one-sided market cannot be solved honestly."""
+def _mid(
+    bid: float | None,
+    ask: float | None,
+    max_relative_spread: float | None = None,
+) -> float | None:
+    """Mid of a two-sided quote, or None. A one-sided market cannot be solved honestly.
+
+    With ``max_relative_spread`` set, a quote whose ``(ask - bid) / mid`` exceeds it is also
+    refused: a wide book has no meaningful mid (see ``MAXIMUM_RELATIVE_SPREAD``).
+    """
     if bid is None or ask is None:
         return None
     if not (math.isfinite(bid) and math.isfinite(ask)):
         return None
     if bid <= 0 or ask <= 0 or ask < bid:
         return None
-    return (bid + ask) / 2.0
+    mid = (bid + ask) / 2.0
+    if max_relative_spread is not None and (ask - bid) / mid > max_relative_spread:
+        return None
+    return mid
 
 
 @dataclasses.dataclass(frozen=True)
@@ -294,7 +317,7 @@ def build_atm_iv_series(rows: Sequence[ChainRow]) -> list[AtmIvSnapshot]:
         for quote, option_type in ((call, "CE"), (put, "PE")):
             if quote is None:
                 continue
-            mid = _mid(quote.bid, quote.ask)
+            mid = _mid(quote.bid, quote.ask, MAXIMUM_RELATIVE_SPREAD)
             if mid is None:
                 continue
             solved = solve_implied_volatility(
@@ -354,6 +377,33 @@ def iv_features_as_of(
         "iv.percentile": percentile,
         "iv.level": current.implied_volatility,
         "iv.change_vs_prior_day_bps": change_bps,
+    }
+
+
+def sample_size_limits(series: Sequence[AtmIvSnapshot], examples: Sequence[Any]) -> dict[str, Any]:
+    """What the sample can and cannot support, reported with every result.
+
+    The unit of independent information is the trading day (a percentile is ranked on one
+    representative IV per day), not the 15-minute row. A leakage-audit PASS or FAIL on a few
+    dozen days is an exploratory screen, not evidence of an edge, and the percentile is not
+    tenor-matched (it ranks the nearest expiry's IV across days whose nearest expiry sits at
+    different distances).
+    """
+    chain_days = {snapshot.observed_at.date() for snapshot in series}
+    example_days = {example.observed_at.date() for example in examples}
+    return {
+        "distinctChainDays": len(chain_days),
+        "distinctExampleDays": len(example_days),
+        "minimumHistoryDaysForPercentile": MINIMUM_DISTINCT_DAYS,
+        "maximumSnapshotAgeMinutes": MAXIMUM_SNAPSHOT_AGE_MINUTES,
+        "maximumRelativeSpread": MAXIMUM_RELATIVE_SPREAD,
+        "caveat": (
+            f"Only {len(chain_days)} distinct option-chain trading days exist and "
+            f"{len(example_days)} of them produce examples after the {MINIMUM_DISTINCT_DAYS}-day "
+            "percentile warm-up; rows within a day are autocorrelated, so the effective sample is "
+            "days, not rows. Treat the audit as an exploratory screen. The percentile is not "
+            "tenor-matched (nearest expiry only)."
+        ),
     }
 
 
@@ -488,8 +538,10 @@ def main() -> int:
             "chainRows": len(chain_rows),
             "solvableIvSnapshots": len(iv_series),
             "usableExamples": len(examples),
+            "usableExampleDays": len({example.observed_at.date() for example in examples}),
         },
         "featureSchema": list(IV_FEATURE_SCHEMA),
+        "sampleLimits": sample_size_limits(iv_series, examples),
         "audit": audit,
         "modelVersionCreated": False,
         "predictionCreated": False,

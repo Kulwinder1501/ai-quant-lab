@@ -41,6 +41,11 @@ class FootprintBar:
     pocDisplacementZ: float
     tailVolumeRatio: float
     availableAt: int
+    # False when the source feed has no trade-tape / footprint data (e.g. an OHLCV-only candle
+    # series): netDelta / pocDisplacementZ / tailVolumeRatio are then placeholders, NOT readings.
+    # Layer 2 reports such bars as ORDER_FLOW_UNAVAILABLE (unmeasured) rather than letting the
+    # zeros fail a gate and be misread as "order flow tested and rejected".
+    orderFlowAvailable: bool = True
 
 
 @dataclass(frozen=True)
@@ -109,15 +114,40 @@ class MagnitudeEstimate:
     availableAt: int
 
 
-GEXContextState = str  # 'FRESH' | 'STALE' | 'UNAVAILABLE' | 'INVALID'
+OptionsContextState = str  # 'FRESH' | 'STALE' | 'UNAVAILABLE' | 'INVALID'
+# Backward-compatible alias: existing imports and tests keep using the old name.
+GEXContextState = OptionsContextState
 
 
 @dataclass
-class GEXContext:
-    state: GEXContextState
+class OptionsContext:
+    """Freshness envelope of an options snapshot. This is NOT gamma exposure (GEX).
+
+    No GEX model exists in this repository: gamma exposure needs per-strike gamma x open interest
+    x contract multiplier aggregated by dealer-positioning assumptions, and nothing here computes
+    it. What this object carries is only:
+
+    * ``state`` / ``snapshotTimestamp`` / ``availableAt`` -- whether an options snapshot was
+      available, fresh and not future-dated at the decision time. The scanner's Layer 3 reads ONLY
+      these (a freshness flag, ``layer3State``).
+    * ``pcrRatio`` -- a put/call OI ratio, carried but NEVER read by the scanner. If a producer ever
+      fills it, it is a windowed PCR (the collector's +/-strikecount strikes around spot for the
+      nearest un-settled expiry), not a whole-chain PCR and not a gamma measure.
+
+    Historical name: ``GEXContext`` (kept as an alias below). The old name overstated what the data
+    is; tests that construct ``GEXContext("FRESH", 1.0, t, t)`` fabricate the ratio and prove only
+    the freshness logic.
+    """
+
+    state: OptionsContextState
     pcrRatio: Optional[float]
     snapshotTimestamp: Optional[int]
     availableAt: Optional[int]
+
+
+# Backward-compatible alias (same class object): `GEXContext(...)`, isinstance checks and imports
+# in existing callers and tests continue to work unchanged.
+GEXContext = OptionsContext
 
 
 @dataclass
@@ -164,7 +194,9 @@ class FeatureVector:
     yzVolRatio: Optional[float]
     todSin: Optional[float]
     todCos: Optional[float]
-    gexState: GEXContextState
+    # Options-context FRESHNESS state (not gamma exposure). The field name is kept for stored-JSON
+    # compatibility; see `OptionsContext`.
+    gexState: OptionsContextState
 
 
 @dataclass
@@ -238,10 +270,42 @@ class RunCalibrationManifest:
     covariateStandardizationStds: List[float]
 
 
+def _fractal_wings(candles: List[FootprintBar], width: int):
+    """
+    Returns (left_wing, pivot_candidate, right_wing) for a `width`-bar fractal whose right wing
+    ends at candles[-2] (the newest bar, candles[-1], is the decision bar and is NOT part of the
+    fractal -- the pivot is only knowable once its whole right wing has closed). width=1 is the
+    original 3-bar fractal (candles[-4], candles[-3], candles[-2]); width=2 is the standard
+    5-bar (Williams) fractal. Returns None when there is not enough history.
+    """
+    if width < 1 or len(candles) < 2 * width + 2:
+        return None
+    pivot = candles[-(width + 2)]
+    left = candles[-(2 * width + 2):-(width + 2)]
+    right = candles[-(width + 1):-1]
+    return left, pivot, right
+
+
 class StatefulPITFibEngine:
-    def __init__(self, fib_artifact: FibAnchorCalibrationArtifact, tick_size: float = 0.05):
+    """
+    Bullish engine: an impulse UP (MSS above a confirmed swing high), then a retracement DOWN
+    into a Fibonacci zone.
+
+    Anchor lifecycle (2026-10-10 correction): the impulse's anchor high is the highest high of
+    the CURRENT leg. The original engine froze the anchor the first time price paused, and then
+    kept measuring zones against that frozen leg for up to `maxQualifiedLifetimeBars` bars no
+    matter how far price had run past it (measured on NIFTY50 5m: price ran >1 ATR past the
+    frozen anchor in 57% of qualified setups and >5 ATR in 38%). A new high above the anchor now
+    means the leg extended: the engine re-enters IMPULSE_TRACKING with the new anchor and discards
+    the superseded POI, so a zone only ever exists for the leg that is actually still live.
+    Likewise a break below the pivot low invalidates the setup in EVERY post-MSS state, not only
+    after a POI qualified.
+    """
+
+    def __init__(self, fib_artifact: FibAnchorCalibrationArtifact, tick_size: float = 0.05, pivot_width: int = 1):
         self.tick_size = tick_size
         self.fib_artifact = fib_artifact
+        self.pivot_width = pivot_width
         self.min_retracement_ticks = fib_artifact.minRetracementTicks
         self.min_retracement_atr_multiple = fib_artifact.minRetracementAtrMultiple
         self.max_window_bars = fib_artifact.maxWindowBars
@@ -251,6 +315,9 @@ class StatefulPITFibEngine:
 
     def reset_engine(self):
         self.state = FibLifecycleState.IDLE
+        # Sequence number the post-MSS windows are measured from: the MSS bar initially, then the
+        # bar of the latest anchor extension (a leg that keeps extending has not "timed out").
+        self.window_origin_seq: Optional[int] = None
         self.pending_pivot_low: Optional[float] = None
         self.pending_pivot_seq: Optional[int] = None
         self.pending_pivot_time: Optional[int] = None
@@ -306,6 +373,25 @@ class StatefulPITFibEngine:
             self.reset_engine()
             return True, "INVALIDATED"
 
+        # 1b. Pre-POI structural invalidation. After MSS, the origin pivot low is the leg's
+        # structural stop whether or not a POI has qualified yet; with re-anchoring a leg can live
+        # for many bars, so price breaking the pivot before any pullback qualified must kill the
+        # setup too (previously only a qualified POI could be invalidated).
+        if (self.active_poi is None
+                and self.state in (FibLifecycleState.IMPULSE_TRACKING, FibLifecycleState.ANCHOR_HIGH_FORMED)
+                and self.pending_pivot_low is not None
+                and latest_bar.low <= self.pending_pivot_low - 2 * self.tick_size):
+            self.emit_event(
+                "INVALIDATED",
+                latest_bar.identity.sequenceNumber,
+                latest_bar.identity.closeTimestamp,
+                decision_at,
+                "Price broke the origin pivot low before any retracement qualified"
+            )
+            self.state = FibLifecycleState.INVALIDATED
+            self.reset_engine()
+            return True, "INVALIDATED"
+
         # 2. Candidate Timeout Check (Pivot low candidate must achieve MSS within 10 bars)
         if self.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED:
             candidate_age_bars = latest_bar.identity.sequenceNumber - self.pending_pivot_seq
@@ -321,9 +407,9 @@ class StatefulPITFibEngine:
                 self.reset_engine()
                 return True, "EXPIRED"
 
-        # 3. Post-MSS Independent Expiry Check (Window origin locked strictly to mss_confirmed_seq)
+        # 3. Post-MSS Independent Expiry Check (window origin = MSS bar, then the latest anchor extension)
         if self.state in [FibLifecycleState.IMPULSE_TRACKING, FibLifecycleState.ANCHOR_HIGH_FORMED]:
-            bars_elapsed = latest_bar.identity.sequenceNumber - self.mss_confirmed_seq
+            bars_elapsed = latest_bar.identity.sequenceNumber - self.window_origin_seq
             if bars_elapsed > self.max_window_bars:
                 self.emit_event(
                     "EXPIRED",
@@ -364,16 +450,16 @@ class StatefulPITFibEngine:
                 return True, "EXPIRED"
 
         # State 1: Pivot Low Candidate Detection (Fractal detection with formedAt extremum)
-        if self.state == FibLifecycleState.IDLE:
-            curr = candles[-3]
-            prev = candles[-4]
-            nxt = candles[-2]
+        wings = _fractal_wings(candles, self.pivot_width) if self.state == FibLifecycleState.IDLE else None
+        if wings is not None:
+            left, curr, right = wings
+            nxt = right[-1]
             candidate_at = nxt.identity.closeTimestamp
 
-            if curr.low < prev.low and curr.low < nxt.low:
-                if (prev.availableAt <= candidate_at and
+            if all(curr.low < b.low for b in left) and all(curr.low < b.low for b in right):
+                if (all(b.availableAt <= candidate_at for b in left) and
+                    all(b.availableAt <= candidate_at for b in right) and
                     curr.availableAt <= candidate_at and
-                    nxt.availableAt <= candidate_at and
                     structural_resistance.sourceTimestamp <= candidate_at and
                     structural_resistance.availableAt <= candidate_at):
 
@@ -404,6 +490,7 @@ class StatefulPITFibEngine:
                 self.anchor_high_seq = latest_bar.identity.sequenceNumber
                 self.anchor_high_time = latest_bar.identity.closeTimestamp
                 self.anchor_high_available_at = latest_bar.availableAt
+                self.window_origin_seq = latest_bar.identity.sequenceNumber
 
                 self.state = FibLifecycleState.IMPULSE_TRACKING
                 self.emit_event(
@@ -414,6 +501,29 @@ class StatefulPITFibEngine:
                     "Market Structure Shift confirmed"
                 )
 
+        # State 2b: Anchor extension. A new high above the anchor means the leg is still live, so
+        # the retracement measured so far (and any POI built on it) belongs to a superseded leg.
+        # Re-enter impulse tracking with the new extreme and drop the stale POI -- never keep
+        # measuring Fibonacci zones against a swing price has already run away from.
+        if (self.state in (FibLifecycleState.ANCHOR_HIGH_FORMED, FibLifecycleState.RETRACEMENT_QUALIFIED)
+                and latest_bar.high > self.anchor_high):
+            superseded_poi = self.active_poi is not None
+            self.anchor_high = latest_bar.high
+            self.anchor_high_seq = latest_bar.identity.sequenceNumber
+            self.anchor_high_time = latest_bar.identity.closeTimestamp
+            self.anchor_high_available_at = latest_bar.availableAt
+            self.window_origin_seq = latest_bar.identity.sequenceNumber
+            self.active_poi = None
+            self.poi_qualified_seq = None
+            self.state = FibLifecycleState.IMPULSE_TRACKING
+            self.emit_event(
+                "ANCHOR_EXTENDED",
+                latest_bar.identity.sequenceNumber,
+                latest_bar.identity.closeTimestamp,
+                decision_at,
+                f"Leg extended to {self.anchor_high}" + ("; superseded the previous POI" if superseded_poi else "")
+            )
+
         # State 3: Dynamic Anchor High Tracking Post-MSS
         if self.state == FibLifecycleState.IMPULSE_TRACKING:
             if latest_bar.high > self.anchor_high:
@@ -421,6 +531,7 @@ class StatefulPITFibEngine:
                 self.anchor_high_seq = latest_bar.identity.sequenceNumber
                 self.anchor_high_time = latest_bar.identity.closeTimestamp
                 self.anchor_high_available_at = latest_bar.availableAt
+                self.window_origin_seq = latest_bar.identity.sequenceNumber
             elif (retracement and
                   self.anchor_high_time < retracement.observedAt <= retracement.availableAt <= decision_at):
                 self.state = FibLifecycleState.ANCHOR_HIGH_FORMED
@@ -439,11 +550,15 @@ class StatefulPITFibEngine:
                 atr_obs.sourceTimestamp <= retracement.observedAt and
                 atr_obs.availableAt <= retracement.observedAt):
 
-                bars_elapsed = retracement.sequenceNumber - self.mss_confirmed_seq
+                bars_elapsed = retracement.sequenceNumber - self.window_origin_seq
                 actual_retracement_ticks = (self.anchor_high - retracement.low) / self.tick_size
                 actual_retracement_atr = ((self.anchor_high - retracement.low) / atr_obs.atr14) if atr_obs.atr14 > 0 else 0.0
 
-                qualifies_retracement = (actual_retracement_ticks >= self.min_retracement_ticks or
+                # BOTH floors must hold. The original `or` let the tick floor (10 ticks = 0.5 index
+                # points on NIFTY) qualify any one-bar pause, because the ATR floor then never
+                # bound: median MSS-to-qualification was 2 bars. The tick floor is a guard against
+                # a collapsed ATR; the ATR floor is what makes a pullback structurally meaningful.
+                qualifies_retracement = (actual_retracement_ticks >= self.min_retracement_ticks and
                                          actual_retracement_atr >= self.min_retracement_atr_multiple)
 
                 if qualifies_retracement and 0 < bars_elapsed <= self.max_window_bars:
@@ -548,9 +663,10 @@ class StatefulPITFibEngineBearish:
     direction-specific.
     """
 
-    def __init__(self, fib_artifact: FibAnchorCalibrationArtifact, tick_size: float = 0.05):
+    def __init__(self, fib_artifact: FibAnchorCalibrationArtifact, tick_size: float = 0.05, pivot_width: int = 1):
         self.tick_size = tick_size
         self.fib_artifact = fib_artifact
+        self.pivot_width = pivot_width
         self.min_retracement_ticks = fib_artifact.minRetracementTicks
         self.min_retracement_atr_multiple = fib_artifact.minRetracementAtrMultiple
         self.max_window_bars = fib_artifact.maxWindowBars
@@ -560,6 +676,7 @@ class StatefulPITFibEngineBearish:
 
     def reset_engine(self):
         self.state = FibLifecycleState.IDLE
+        self.window_origin_seq: Optional[int] = None  # MSS bar, then the latest anchor extension
         self.pending_pivot_high: Optional[float] = None
         self.pending_pivot_seq: Optional[int] = None
         self.pending_pivot_time: Optional[int] = None
@@ -615,6 +732,23 @@ class StatefulPITFibEngineBearish:
             self.reset_engine()
             return True, "INVALIDATED"
 
+        # 1b. Pre-POI structural invalidation (mirror of the bullish engine): price breaking the
+        # origin pivot HIGH kills the setup in every post-MSS state, not only once a POI qualified.
+        if (self.active_poi is None
+                and self.state in (FibLifecycleState.IMPULSE_TRACKING, FibLifecycleState.ANCHOR_LOW_FORMED)
+                and self.pending_pivot_high is not None
+                and latest_bar.high >= self.pending_pivot_high + 2 * self.tick_size):
+            self.emit_event(
+                "INVALIDATED",
+                latest_bar.identity.sequenceNumber,
+                latest_bar.identity.closeTimestamp,
+                decision_at,
+                "Price broke the origin pivot high before any retracement qualified"
+            )
+            self.state = FibLifecycleState.INVALIDATED
+            self.reset_engine()
+            return True, "INVALIDATED"
+
         # 2. Candidate Timeout Check (identical to bullish: 10 bars to reach MSS)
         if self.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED:
             candidate_age_bars = latest_bar.identity.sequenceNumber - self.pending_pivot_seq
@@ -632,7 +766,7 @@ class StatefulPITFibEngineBearish:
 
         # 3. Post-MSS Independent Expiry Check (identical structure to bullish)
         if self.state in [FibLifecycleState.IMPULSE_TRACKING, FibLifecycleState.ANCHOR_LOW_FORMED]:
-            bars_elapsed = latest_bar.identity.sequenceNumber - self.mss_confirmed_seq
+            bars_elapsed = latest_bar.identity.sequenceNumber - self.window_origin_seq
             if bars_elapsed > self.max_window_bars:
                 self.emit_event(
                     "EXPIRED",
@@ -663,16 +797,16 @@ class StatefulPITFibEngineBearish:
                 return True, "EXPIRED"
 
         # State 1: Pivot High Candidate Detection (fractal high; mirror of fractal low)
-        if self.state == FibLifecycleState.IDLE:
-            curr = candles[-3]
-            prev = candles[-4]
-            nxt = candles[-2]
+        wings = _fractal_wings(candles, self.pivot_width) if self.state == FibLifecycleState.IDLE else None
+        if wings is not None:
+            left, curr, right = wings
+            nxt = right[-1]
             candidate_at = nxt.identity.closeTimestamp
 
-            if curr.high > prev.high and curr.high > nxt.high:
-                if (prev.availableAt <= candidate_at and
+            if all(curr.high > b.high for b in left) and all(curr.high > b.high for b in right):
+                if (all(b.availableAt <= candidate_at for b in left) and
+                    all(b.availableAt <= candidate_at for b in right) and
                     curr.availableAt <= candidate_at and
-                    nxt.availableAt <= candidate_at and
                     structural_support.sourceTimestamp <= candidate_at and
                     structural_support.availableAt <= candidate_at):
 
@@ -703,6 +837,7 @@ class StatefulPITFibEngineBearish:
                 self.anchor_low_seq = latest_bar.identity.sequenceNumber
                 self.anchor_low_time = latest_bar.identity.closeTimestamp
                 self.anchor_low_available_at = latest_bar.availableAt
+                self.window_origin_seq = latest_bar.identity.sequenceNumber
 
                 self.state = FibLifecycleState.IMPULSE_TRACKING
                 self.emit_event(
@@ -713,6 +848,27 @@ class StatefulPITFibEngineBearish:
                     "Market Structure Shift confirmed"
                 )
 
+        # State 2b: Anchor extension (mirror of the bullish engine): a new LOW below the anchor
+        # low means the down-leg is still live; supersede any POI built on the old extreme.
+        if (self.state in (FibLifecycleState.ANCHOR_LOW_FORMED, FibLifecycleState.RETRACEMENT_QUALIFIED)
+                and latest_bar.low < self.anchor_low):
+            superseded_poi = self.active_poi is not None
+            self.anchor_low = latest_bar.low
+            self.anchor_low_seq = latest_bar.identity.sequenceNumber
+            self.anchor_low_time = latest_bar.identity.closeTimestamp
+            self.anchor_low_available_at = latest_bar.availableAt
+            self.window_origin_seq = latest_bar.identity.sequenceNumber
+            self.active_poi = None
+            self.poi_qualified_seq = None
+            self.state = FibLifecycleState.IMPULSE_TRACKING
+            self.emit_event(
+                "ANCHOR_EXTENDED",
+                latest_bar.identity.sequenceNumber,
+                latest_bar.identity.closeTimestamp,
+                decision_at,
+                f"Leg extended to {self.anchor_low}" + ("; superseded the previous POI" if superseded_poi else "")
+            )
+
         # State 3: Dynamic Anchor Low Tracking Post-MSS (mirror of anchor high tracking)
         if self.state == FibLifecycleState.IMPULSE_TRACKING:
             if latest_bar.low < self.anchor_low:
@@ -720,6 +876,7 @@ class StatefulPITFibEngineBearish:
                 self.anchor_low_seq = latest_bar.identity.sequenceNumber
                 self.anchor_low_time = latest_bar.identity.closeTimestamp
                 self.anchor_low_available_at = latest_bar.availableAt
+                self.window_origin_seq = latest_bar.identity.sequenceNumber
             elif (retracement and
                   self.anchor_low_time < retracement.observedAt <= retracement.availableAt <= decision_at):
                 self.state = FibLifecycleState.ANCHOR_LOW_FORMED
@@ -738,11 +895,12 @@ class StatefulPITFibEngineBearish:
                 atr_obs.sourceTimestamp <= retracement.observedAt and
                 atr_obs.availableAt <= retracement.observedAt):
 
-                bars_elapsed = retracement.sequenceNumber - self.mss_confirmed_seq
+                bars_elapsed = retracement.sequenceNumber - self.window_origin_seq
                 actual_retracement_ticks = (retracement.high - self.anchor_low) / self.tick_size
                 actual_retracement_atr = ((retracement.high - self.anchor_low) / atr_obs.atr14) if atr_obs.atr14 > 0 else 0.0
 
-                qualifies_retracement = (actual_retracement_ticks >= self.min_retracement_ticks or
+                # BOTH floors must hold (see the bullish engine for why `or` was a defect).
+                qualifies_retracement = (actual_retracement_ticks >= self.min_retracement_ticks and
                                          actual_retracement_atr >= self.min_retracement_atr_multiple)
 
                 if qualifies_retracement and 0 < bars_elapsed <= self.max_window_bars:

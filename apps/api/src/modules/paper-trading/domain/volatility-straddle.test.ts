@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { proposeVolatilityStraddle, type ProposeStraddleInput } from "./volatility-straddle.js";
+import { yearsToExpiry } from "@ai-quant-lab/pricing";
+import {
+  calendarHorizonYears,
+  proposeVolatilityStraddle,
+  tradingHorizonYears,
+  tradingYearsToMinutes,
+  type CalendarYears,
+  type ProposeStraddleInput,
+  type TradingYears,
+} from "./volatility-straddle.js";
+
+// 5 bars of 15m = 75 minutes, the shape of the models that actually feed this.
+const TRADING_75M = tradingHorizonYears("15m", 5) as TradingYears;
+const CALENDAR_75M = calendarHorizonYears("15m", 5) as CalendarYears;
 
 const NOW = new Date("2026-07-01T04:00:00Z");
 const EXPIRY = new Date("2026-07-09T10:00:00Z");
@@ -19,8 +32,8 @@ function input(overrides: Partial<ProposeStraddleInput> = {}): ProposeStraddleIn
     // so cases about other conditions are not silently also testing the economics gates.
     trailingRange: 1_400,
     expansionBand: 0.25,
-    // 5 bars of 15m = 75 minutes, the shape of the models that actually feed this.
-    predictionHorizonYears: (15 * 5) / (365 * 24 * 60),
+    tradingHorizonYears: TRADING_75M,
+    calendarHorizonYears: CALENDAR_75M,
     now: NOW,
     ...overrides,
   };
@@ -156,10 +169,9 @@ describe("proposeVolatilityStraddle", () => {
       // out. Measured live 2026-08-17: every evaluation refused at a predicted 43.44 against a
       // full-life implied move of 408.18 -- roughly 9x, which is the horizon ratio and not a
       // market judgment, so the straddle could never fire whatever the signal said.
-      const horizonYears = (15 * 5) / (365 * 24 * 60);
       const spot = 24_300;
       const iv = 0.1134;
-      const overHorizon = spot * iv * Math.sqrt(horizonYears);
+      const overHorizon = spot * iv * Math.sqrt(TRADING_75M);
       const overOptionLife = spot * iv * Math.sqrt(8 / 365);
 
       // A range that beats implied over 75 minutes but not over eight days: previously refused.
@@ -171,7 +183,6 @@ describe("proposeVolatilityStraddle", () => {
         underlyingSpot: spot,
         impliedVolatility: iv,
         trailingRange,
-        predictionHorizonYears: horizonYears,
       }));
 
       // It must get past this gate now. Whether it survives the premium gates is a separate
@@ -186,12 +197,11 @@ describe("proposeVolatilityStraddle", () => {
       // the implied move used to pass, crediting the signal with twice the displacement it claims.
       const spot = 24_000;
       const iv = 0.14;
-      const horizonYears = (15 * 5) / (365 * 24 * 60);
-      const impliedOverHorizon = spot * iv * Math.sqrt(horizonYears);
+      const impliedOverHorizon = spot * iv * Math.sqrt(TRADING_75M);
       // Range beats implied; half-range does not. This is the window the old comparison let through.
       const trailingRange = (impliedOverHorizon * 1.5) / 1.25;
 
-      const proposal = proposeVolatilityStraddle(input({ trailingRange, predictionHorizonYears: horizonYears }));
+      const proposal = proposeVolatilityStraddle(input({ trailingRange }));
 
       expect(proposal).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
       if (proposal.actionable) return;
@@ -268,20 +278,23 @@ describe("proposeVolatilityStraddle", () => {
       expect(proposal.explanation).toMatch(/tenor penalty/);
     });
 
-    // Two independent derivations of the same condition: the closed-form gate compares the
-    // half-range against sigma*sqrt(dt), the economics reprice both legs dt later. For an
-    // at-the-money straddle gamma gain and decay cross exactly where those are equal, so the sign
-    // of the repriced net has to follow the gate. If these ever disagree, one of them is wrong.
-    it("agrees with the closed-form implied-move gate about where the horizon stops paying", () => {
+    // Two derivations of one condition. The closed-form gate compares the half-range against
+    // sigma*sqrt(dt) in TRADING time; the economics reprice both legs one CALENDAR dt later. When
+    // trading and calendar time coincide (a daily-style 1:1 clock, built here by hand) gamma gain
+    // and decay cross exactly where the two are equal, so the repriced net follows the gate. If
+    // these ever disagree on one clock, one of them is wrong.
+    it("agrees with the closed-form implied-move gate on a common clock", () => {
       const spot = 24_000;
       const iv = 0.14;
-      const horizonYears = (15 * 5) / (365 * 24 * 60);
-      const impliedOverHorizon = spot * iv * Math.sqrt(horizonYears);
+      const years = (15 * 5) / (365 * 24 * 60);
+      const impliedOverHorizon = spot * iv * Math.sqrt(years);
       const atExcursionMultiple = (multiple: number) => {
         const proposal = proposeVolatilityStraddle(input({
           underlyingSpot: spot,
           impliedVolatility: iv,
-          predictionHorizonYears: horizonYears,
+          // One clock for both, to isolate the agreement from the intended clock difference.
+          tradingHorizonYears: years as TradingYears,
+          calendarHorizonYears: years as CalendarYears,
           // conservativeExcursion is half the range, so a multiple of the implied move needs twice that.
           trailingRange: (impliedOverHorizon * multiple * 2) / 1.25,
         }));
@@ -306,11 +319,36 @@ describe("proposeVolatilityStraddle", () => {
       expect(atExcursionMultiple(4).net).toBeGreaterThan(over.net);
     });
 
+    it("on the real clocks the trading-time gate is the stricter test: a signal it passes nets positive", () => {
+      const spot = 24_000;
+      const iv = 0.14;
+      const impliedTrading = spot * iv * Math.sqrt(TRADING_75M);
+      const run = (multiple: number) => proposeVolatilityStraddle(input({
+        underlyingSpot: spot,
+        impliedVolatility: iv,
+        trailingRange: (impliedTrading * multiple * 2) / 1.25,
+      }));
+
+      const passes = run(1.1);
+      const economicsOfPass = passes.actionable ? passes.economics : passes.economics!;
+      expect(!passes.actionable && passes.reason === "MARKET_ALREADY_PRICES_THE_MOVE").toBe(false);
+      expect(economicsOfPass.horizonNetPerUnit).toBeGreaterThan(0);
+      // Between the calendar-time and the trading-time implied move: the old gate passed this,
+      // the corrected one refuses it, because the market prices that much movement in 75 minutes.
+      const calendarImplied = spot * iv * Math.sqrt(CALENDAR_75M);
+      expect(calendarImplied).toBeLessThan(impliedTrading);
+      const between = run(((calendarImplied + impliedTrading) / 2) / impliedTrading);
+      expect(between).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
+    });
+
     it("values a horizon that overruns the expiry at the expiry payoff", () => {
       // A 20-day horizon on an 8-day contract: there is no mark-to-market left to take, and the
       // straddle is worth its intrinsic value. Repricing at a negative remaining life would be
       // meaningless, so the excursion itself is the answer.
-      const proposal = proposeVolatilityStraddle(input({ predictionHorizonYears: 20 / 365 }));
+      const proposal = proposeVolatilityStraddle(input({
+        tradingHorizonYears: (20 / 365) as TradingYears,
+        calendarHorizonYears: (20 / 365) as CalendarYears,
+      }));
       if (!proposal.actionable) throw new Error(`expected actionable, got ${proposal.reason}`);
       const { economics } = proposal;
 
@@ -363,5 +401,77 @@ describe("proposeVolatilityStraddle", () => {
     const strike = nifty.legs[0].strike;
     expect(economics.breakevenUpper).toBe(strike + economics.totalPremium);
     expect(economics.breakevenLower).toBe(strike - economics.totalPremium);
+  });
+});
+
+describe("two clocks: trading time for the implied move, calendar time for theta", () => {
+  it("builds the horizons on their own clocks, including the daily bar", () => {
+    // 75 minutes: 75 / (375 * 252) trading years, 75 / 525,600 calendar years.
+    expect(tradingHorizonYears("15m", 5)).toBeCloseTo(75 / 94_500, 12);
+    expect(calendarHorizonYears("15m", 5)).toBeCloseTo(75 / 525_600, 12);
+    // A daily bar is 1/252 of a trading year, and a calendar day of contract life.
+    expect(tradingHorizonYears("1d", 1)).toBeCloseTo(1 / 252, 12);
+    expect(calendarHorizonYears("1d", 1)).toBeCloseTo(1 / 365, 12);
+    expect(tradingHorizonYears("1w", 1)).toBeNull();
+    expect(calendarHorizonYears("15m", 0)).toBeNull();
+    // The two clocks differ by sqrt(525,600 / 94,500) = 2.36x in implied-move terms.
+    expect(Math.sqrt((tradingHorizonYears("15m", 5) as number) / (calendarHorizonYears("15m", 5) as number)))
+      .toBeCloseTo(Math.sqrt(525_600 / 94_500), 9);
+    expect(tradingYearsToMinutes(TRADING_75M)).toBeCloseTo(75, 9);
+  });
+
+  it("prices the NIFTY 23,400 / 13% IV / 75-minute implied move at 85.7 points, not 36.5", () => {
+    // Refuse on purpose with a tiny range so the economics are reported on the refusal.
+    const proposal = proposeVolatilityStraddle(input({
+      underlyingSpot: 23_400, impliedVolatility: 0.13, trailingRange: 10,
+    }));
+    expect(proposal).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
+    if (proposal.actionable) return;
+    expect(proposal.economics!.impliedMoveOverHorizon).toBeCloseTo(85.7, 1);
+    // What the calendar-minute scaling used to say.
+    expect(23_400 * 0.13 * Math.sqrt(75 / 525_600)).toBeCloseTo(36.3, 0);
+    expect(proposal.explanation).toMatch(/75 trading minutes/);
+  });
+
+  it("refuses a half-range between the old calendar-time move and the trading-time move", () => {
+    // Half-range 60: above 36.5 (old gate would pass) and below 85.7 (the corrected gate refuses).
+    const proposal = proposeVolatilityStraddle(input({
+      underlyingSpot: 23_400, impliedVolatility: 0.13, trailingRange: 120 / 1.25,
+    }));
+    expect(proposal).toMatchObject({ actionable: false, reason: "MARKET_ALREADY_PRICES_THE_MOVE" });
+  });
+
+  it("leaves theta, time-to-expiry-at-horizon and the tenor penalty on the calendar clock", () => {
+    const base = proposeVolatilityStraddle(input({ trailingRange: 1_400 }));
+    // Changing ONLY the trading clock must not move any theta-driven quantity...
+    const otherTrading = proposeVolatilityStraddle(input({
+      trailingRange: 1_400, tradingHorizonYears: (TRADING_75M * 2) as TradingYears,
+    }));
+    if (!base.actionable || !otherTrading.actionable) throw new Error("expected actionable");
+    expect(otherTrading.economics.timeToExpiryAtHorizonYears).toBe(base.economics.timeToExpiryAtHorizonYears);
+    expect(otherTrading.economics.decayCostOverHorizon).toBe(base.economics.decayCostOverHorizon);
+    expect(otherTrading.economics.horizonExitValue).toBe(base.economics.horizonExitValue);
+    // ...while it does scale the implied move by sqrt(2).
+    expect(otherTrading.economics.impliedMoveOverHorizon)
+      .toBeCloseTo(base.economics.impliedMoveOverHorizon * Math.SQRT2, 8);
+
+    // And changing ONLY the calendar clock moves time-to-expiry at the horizon, not the implied move.
+    const otherCalendar = proposeVolatilityStraddle(input({
+      trailingRange: 1_400, calendarHorizonYears: (CALENDAR_75M * 4) as CalendarYears,
+    }));
+    if (!otherCalendar.actionable) throw new Error("expected actionable");
+    expect(otherCalendar.economics.impliedMoveOverHorizon).toBe(base.economics.impliedMoveOverHorizon);
+    expect(base.economics.timeToExpiryAtHorizonYears - otherCalendar.economics.timeToExpiryAtHorizonYears)
+      .toBeCloseTo(CALENDAR_75M * 3, 12);
+    expect(otherCalendar.economics.decayCostOverHorizon).toBeGreaterThan(base.economics.decayCostOverHorizon);
+  });
+
+  it("states the tenor penalty from the calendar span and prints trading minutes", () => {
+    const proposal = proposeVolatilityStraddle(input({ trailingRange: 320 }));
+    expect(proposal).toMatchObject({ actionable: false, reason: "PREMIUM_EXCEEDS_PREDICTED_MOVE" });
+    if (proposal.actionable) return;
+    const expectedPenalty = Math.sqrt(yearsToExpiry(NOW, EXPIRY) / CALENDAR_75M).toFixed(1);
+    expect(proposal.explanation).toContain("75-trading-minute prediction");
+    expect(proposal.explanation).toContain(`${expectedPenalty}x tenor penalty`);
   });
 });

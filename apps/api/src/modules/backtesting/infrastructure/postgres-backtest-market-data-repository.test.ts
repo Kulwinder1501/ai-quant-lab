@@ -226,8 +226,13 @@ describe("PostgresBacktestMarketDataRepository", () => {
     expect(candleQuery?.text).toContain("candles.received_at <= $5");
     expect(candleQuery?.values).toEqual(["instrument-1", "1d", dataWindowStart, dataWindowEnd, dataCutoffAt]);
     expect(indicatorQuery?.text).toContain("indicator_snapshots.calculated_at <= $2");
-    expect(patternQuery?.text).toContain("pattern_detections.detected_at <= $2");
-    expect(priceActionQuery?.text).toContain("AND detected_at <= $2");
+    // known_at (candle close), not detected_at: rebuilds bump detected_at past the cutoff and a
+    // detected_at predicate (alone or in addition) would silently erase history from every replay.
+    expect(patternQuery?.text).toContain("pattern_detections.known_at <= $2");
+    expect(priceActionQuery?.text).toContain("AND known_at <= $2");
+    const withoutSqlComments = (sql: string | undefined): string => (sql ?? "").replace(/--.*$/gm, "");
+    expect(withoutSqlComments(patternQuery?.text)).not.toContain("detected_at");
+    expect(withoutSqlComments(priceActionQuery?.text)).not.toContain("detected_at");
     expect(indicatorQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);
     expect(patternQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);
     expect(priceActionQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);

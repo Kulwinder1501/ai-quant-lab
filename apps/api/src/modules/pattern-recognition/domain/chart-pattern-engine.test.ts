@@ -126,8 +126,11 @@ test("ChartPatternEngine detects BULL_FLAG on upper channel breakout", () => {
     makeCandle("C13", 126, 127, 118, 120, 13),
     makeCandle("C14", 120, 121, 115, 118, 14), // Flag Low 1 (115)
     makeCandle("C15", 118, 128, 117, 126, 15),
-    makeCandle("C16", 126, 130, 124, 128, 16), // Inside channel (close 128 <= 130.8)
-    makeCandle("C17", 128, 145, 127, 144, 17), // Breakout above channel (close 144 > 130.0)
+    makeCandle("C16", 126, 131, 124, 128, 16), // Flag High 2 (131 - lower than 135): second channel high
+    makeCandle("C17", 128, 129, 123, 124, 17),
+    makeCandle("C18", 124, 126, 122, 123, 18), // Confirms C16
+    makeCandle("C19", 123, 128, 122, 127, 19), // Inside channel (close 127 <= 128.6)
+    makeCandle("C20", 127, 150, 126, 148, 20), // Breakout above channel (close 148 > 127.8)
   ];
 
   const events = engine.detect(candles);
@@ -135,7 +138,87 @@ test("ChartPatternEngine detects BULL_FLAG on upper channel breakout", () => {
 
   expect(bullFlags.length).toBe(1);
   expect(bullFlags[0].direction).toBe("BULLISH");
-  expect(bullFlags[0].candleId).toBe("C17");
+  expect(bullFlags[0].candleId).toBe("C20");
+});
+
+test("ChartPatternEngine does not count the pole-end pivot as a flag channel high", () => {
+  const engine = new ChartPatternEngine({
+    ...defaultChartPatternConfiguration,
+    flagPoleMinAtr: 1.5,
+    flagMaxRetracement: 0.5,
+    flagMinBoundaryTouches: 2,
+    swingWindow: 2,
+    minimumSwingAtr: 0.3,
+    atrPeriod: 3,
+  });
+
+  // The original bull-flag fixture: after the pole peak (C5) there is only ONE genuine channel high
+  // (C11). Before the fix the pole-end pivot itself was channelHighs[0], so this passed as a flag
+  // with a "channel" whose upper boundary started at the pole's own peak.
+  const candles: PatternCandle[] = [
+    makeCandle("C0", 90, 92, 88, 90, 0),
+    makeCandle("C1", 90, 92, 84, 86, 1),
+    makeCandle("C2", 86, 88, 80, 85, 2),
+    makeCandle("C3", 85, 105, 84, 102, 3),
+    makeCandle("C4", 102, 125, 100, 122, 4),
+    makeCandle("C5", 122, 140, 120, 138, 5),
+    makeCandle("C6", 137, 138, 128, 130, 6),
+    makeCandle("C7", 130, 132, 122, 124, 7),
+    makeCandle("C8", 124, 125, 120, 122, 8),
+    makeCandle("C9", 122, 130, 121, 128, 9),
+    makeCandle("C10", 128, 134, 127, 132, 10),
+    makeCandle("C11", 132, 135, 130, 134, 11),
+    makeCandle("C12", 134, 134, 124, 126, 12),
+    makeCandle("C13", 126, 127, 118, 120, 13),
+    makeCandle("C14", 120, 121, 115, 118, 14),
+    makeCandle("C15", 118, 128, 117, 126, 15),
+    makeCandle("C16", 126, 130, 124, 128, 16),
+    makeCandle("C17", 128, 145, 127, 144, 17),
+  ];
+
+  const events = engine.detect(candles);
+  expect(events.filter((e) => e.eventCode === "BULL_FLAG")).toEqual([]);
+});
+
+test("ChartPatternEngine requires flagMinBars between the pole end and the last channel pivot", () => {
+  const candles: PatternCandle[] = [
+    makeCandle("C0", 90, 92, 88, 90, 0),
+    makeCandle("C1", 90, 92, 84, 86, 1),
+    makeCandle("C2", 86, 88, 80, 85, 2),
+    makeCandle("C3", 85, 105, 84, 102, 3),
+    makeCandle("C4", 102, 125, 100, 122, 4),
+    makeCandle("C5", 122, 140, 120, 138, 5),
+    makeCandle("C6", 137, 138, 128, 130, 6),
+    makeCandle("C7", 130, 132, 122, 124, 7),
+    makeCandle("C8", 124, 125, 120, 122, 8),
+    makeCandle("C9", 122, 130, 121, 128, 9),
+    makeCandle("C10", 128, 134, 127, 132, 10),
+    makeCandle("C11", 132, 135, 130, 134, 11),
+    makeCandle("C12", 134, 134, 124, 126, 12),
+    makeCandle("C13", 126, 127, 118, 120, 13),
+    makeCandle("C14", 120, 121, 115, 118, 14),
+    makeCandle("C15", 118, 128, 117, 126, 15),
+    makeCandle("C16", 126, 131, 124, 128, 16),
+    makeCandle("C17", 128, 129, 123, 124, 17),
+    makeCandle("C18", 124, 126, 122, 123, 18),
+    makeCandle("C19", 123, 128, 122, 127, 19),
+    makeCandle("C20", 127, 150, 126, 148, 20),
+  ];
+  const base = {
+    ...defaultChartPatternConfiguration,
+    flagPoleMinAtr: 1.5,
+    flagMaxRetracement: 0.5,
+    flagMinBoundaryTouches: 2,
+    swingWindow: 2,
+    minimumSwingAtr: 0.3,
+    atrPeriod: 3,
+  };
+
+  // The channel's last pivot (the C18 low) is 13 bars after the pole end (C5).
+  expect(new ChartPatternEngine({ ...base, flagMinBars: 13 }).detect(candles)
+    .some((e) => e.eventCode === "BULL_FLAG")).toBe(true);
+  expect(new ChartPatternEngine({ ...base, flagMinBars: 14 }).detect(candles)
+    .some((e) => e.eventCode === "BULL_FLAG")).toBe(false);
 });
 
 test("ChartPatternEngine detects BEAR_FLAG on lower channel breakdown", () => {
@@ -175,7 +258,10 @@ test("ChartPatternEngine detects BEAR_FLAG on lower channel breakdown", () => {
     makeCandle("C14", 100, 105, 99, 103, 14), // Flag High 1 (105)
     makeCandle("C15", 103, 104, 94, 95, 15),
     makeCandle("C16", 95, 96, 88, 90, 16), // Confirms C14
-    makeCandle("C17", 90, 91, 75, 76, 17), // Breakdown below channel (close 76)
+    makeCandle("C17", 90, 92, 87, 91, 17), // Flag Low 2 (87 - higher than 85): second channel low
+    makeCandle("C18", 91, 96, 88, 94, 18),
+    makeCandle("C19", 94, 97, 92, 95, 19), // Confirms C17
+    makeCandle("C20", 95, 96, 74, 75, 20), // Breakdown below channel (close 75 < 88)
   ];
 
   const events = engine.detect(candles);
@@ -183,7 +269,7 @@ test("ChartPatternEngine detects BEAR_FLAG on lower channel breakdown", () => {
 
   expect(bearFlags.length).toBe(1);
   expect(bearFlags[0].direction).toBe("BEARISH");
-  expect(bearFlags[0].candleId).toBe("C17");
+  expect(bearFlags[0].candleId).toBe("C20");
 });
 
 test("ChartPatternEngine detects ASCENDING_TRIANGLE on resistance breakout", () => {
@@ -368,9 +454,10 @@ test("ChartPatternEngine detects INVERSE_HEAD_AND_SHOULDERS on neckline breakout
   expect(ihs[0].candleId).toBe("C17");
 });
 
-test("ChartPatternEngine detects RISING_WEDGE on support breakdown", () => {
+test("ChartPatternEngine detects RISING_WEDGE on support breakdown (four pivots, minimum lowered)", () => {
   const engine = new ChartPatternEngine({
     ...defaultChartPatternConfiguration,
+    wedgeMinTotalPivots: 4,
     swingWindow: 2,
     minimumSwingAtr: 0.3,
     atrPeriod: 3,
@@ -410,9 +497,10 @@ test("ChartPatternEngine detects RISING_WEDGE on support breakdown", () => {
   expect(wedges[0].candleId).toBe("C14");
 });
 
-test("ChartPatternEngine detects FALLING_WEDGE on resistance breakout", () => {
+test("ChartPatternEngine detects FALLING_WEDGE on resistance breakout (four pivots, minimum lowered)", () => {
   const engine = new ChartPatternEngine({
     ...defaultChartPatternConfiguration,
+    wedgeMinTotalPivots: 4,
     swingWindow: 2,
     minimumSwingAtr: 0.3,
     atrPeriod: 3,
@@ -450,6 +538,79 @@ test("ChartPatternEngine detects FALLING_WEDGE on resistance breakout", () => {
   expect(wedges.length).toBe(1);
   expect(wedges[0].direction).toBe("BULLISH");
   expect(wedges[0].candleId).toBe("C14");
+});
+
+/**
+ * Five pivots (L, H, L, H, L): lows rise 100 -> 115 -> 129.5 (slope ~2.46), highs rise 120 -> 132
+ * (slope 2.0), so the boundaries converge. Price stays above the rising support until it closes
+ * through it on C16, the bar on which the last low (C14) is confirmed.
+ */
+function risingWedgeFivePivots(): PatternCandle[] {
+  return [
+    makeCandle("C0", 104, 108, 104, 106, 0),
+    makeCandle("C1", 106, 107, 102, 103, 1),
+    makeCandle("C2", 103, 104, 100, 101, 2), // Low 0 (100)
+    makeCandle("C3", 101, 112, 105, 110, 3),
+    makeCandle("C4", 110, 118, 108, 116, 4),
+    makeCandle("C5", 116, 120, 114, 118, 5), // High 0 (120)
+    makeCandle("C6", 118, 119, 116, 117, 6),
+    makeCandle("C7", 117, 118, 116, 117, 7),
+    makeCandle("C8", 117, 118, 115, 116, 8), // Low 1 (115)
+    makeCandle("C9", 116, 126, 118, 124, 9),
+    makeCandle("C10", 124, 130, 123, 128, 10),
+    makeCandle("C11", 128, 132, 127, 130, 11), // High 1 (132)
+    makeCandle("C12", 130, 131, 130.5, 130.8, 12),
+    makeCandle("C13", 130.8, 131.5, 130.4, 131, 13),
+    makeCandle("C14", 131, 131.6, 129.5, 130.9, 14), // Low 2 (129.5)
+    makeCandle("C15", 130.9, 133, 130.6, 132.5, 15), // Close 132.5 >= support 131.96
+    makeCandle("C16", 132.5, 134, 130.8, 133, 16), // Close 133 < support 134.4 -> breakdown
+  ];
+}
+
+/** The mirror image (price -> 250 - price) of a candle series: a rising wedge becomes a falling one. */
+function mirrored(candles: readonly PatternCandle[]): PatternCandle[] {
+  return candles.map((c) => ({
+    ...c,
+    open: 250 - c.open,
+    high: 250 - c.low,
+    low: 250 - c.high,
+    close: 250 - c.close,
+  }));
+}
+
+const wedgeConfiguration = {
+  ...defaultChartPatternConfiguration,
+  swingWindow: 2,
+  minimumSwingAtr: 0.3,
+  atrPeriod: 3,
+};
+
+test("ChartPatternEngine detects RISING_WEDGE with the default five-pivot minimum", () => {
+  const events = new ChartPatternEngine(wedgeConfiguration).detect(risingWedgeFivePivots());
+  const wedges = events.filter((e) => e.eventCode === "RISING_WEDGE");
+
+  expect(wedges.length).toBe(1);
+  expect(wedges[0].candleId).toBe("C16");
+});
+
+test("ChartPatternEngine detects FALLING_WEDGE with the default five-pivot minimum", () => {
+  const events = new ChartPatternEngine(wedgeConfiguration).detect(mirrored(risingWedgeFivePivots()));
+  const wedges = events.filter((e) => e.eventCode === "FALLING_WEDGE");
+
+  expect(wedges.length).toBe(1);
+  expect(wedges[0].candleId).toBe("C16");
+});
+
+test("ChartPatternEngine enforces wedgeMinTotalPivots (a four-pivot wedge is rejected by default)", () => {
+  // Same shape as the five-pivot wedge but cut at four pivots, then run with the default minimum.
+  const fourPivots = risingWedgeFivePivots().slice(0, 14);
+  const lowered = new ChartPatternEngine({ ...wedgeConfiguration, wedgeMinTotalPivots: 4 }).detect(fourPivots);
+  const strict = new ChartPatternEngine(wedgeConfiguration).detect(fourPivots);
+
+  expect(strict.filter((e) => e.eventCode === "RISING_WEDGE")).toEqual([]);
+  // Control: the rejection is the pivot count, not the data (lowering the minimum may or may not
+  // fire on this truncated series, but it can never fire *less* than the strict run).
+  expect(lowered.length).toBeGreaterThanOrEqual(strict.length);
 });
 
 test("Macro pattern never fires at or before finalPivot.confirmationIndex (Anti-Lookahead Guarantee)", () => {
@@ -524,3 +685,179 @@ test("ChartPatternEngine rejects non-converging channel for Wedge detection", ()
   expect(wedges.length).toBe(0);
 });
 
+/** C0..C10 of the double-bottom fixture: left trough C2, neckline 110 at C5, right trough C8. */
+function doubleBottomBase(): PatternCandle[] {
+  return [
+    makeCandle("C0", 100, 102, 98, 100, 0),
+    makeCandle("C1", 99, 100, 92, 94, 1),
+    makeCandle("C2", 94, 95, 80, 85, 2),
+    makeCandle("C3", 85, 96, 84, 94, 3),
+    makeCandle("C4", 95, 104, 94, 102, 4),
+    makeCandle("C5", 102, 110, 100, 108, 5),
+    makeCandle("C6", 107, 108, 98, 100, 6),
+    makeCandle("C7", 100, 101, 88, 90, 7),
+    makeCandle("C8", 90, 92, 81, 86, 8),
+    makeCandle("C9", 86, 98, 85, 96, 9),
+    makeCandle("C10", 96, 108, 95, 105, 10),
+  ];
+}
+
+/** Flat bars below the neckline (close 105), then a breakout bar closing at 115, at `breakoutIndex`. */
+function doubleBottomWithBreakoutAt(breakoutIndex: number): PatternCandle[] {
+  const candles = doubleBottomBase();
+  for (let i = 11; i < breakoutIndex; i += 1) candles.push(makeCandle(`C${i}`, 105, 106, 104, 105, i));
+  candles.push(makeCandle(`C${breakoutIndex}`, 106, 116, 104, 115, breakoutIndex));
+  return candles;
+}
+
+const doubleConfiguration = {
+  ...defaultChartPatternConfiguration,
+  doublePatternTolerance: 0.20,
+  swingWindow: 2,
+  minimumSwingAtr: 0.5,
+  atrPeriod: 3,
+};
+
+test("ChartPatternEngine only accepts a double-bottom breakout within 3x the pattern width", () => {
+  // Width = right trough (C8) - left trough (C2) = 6 bars, so the window closes at C8 + 18 = C26.
+  const engine = new ChartPatternEngine(doubleConfiguration);
+
+  const inside = engine.detect(doubleBottomWithBreakoutAt(26)).filter((e) => e.eventCode === "DOUBLE_BOTTOM");
+  expect(inside.map((e) => e.candleId)).toEqual(["C26"]);
+
+  // One bar later the same crossing is a stale neckline touch, not the pattern completing.
+  const outside = engine.detect(doubleBottomWithBreakoutAt(27)).filter((e) => e.eventCode === "DOUBLE_BOTTOM");
+  expect(outside).toEqual([]);
+});
+
+test("ChartPatternEngine honours breakoutWindowMultiplier", () => {
+  const candles = doubleBottomWithBreakoutAt(15);
+  const tight = new ChartPatternEngine({ ...doubleConfiguration, breakoutWindowMultiplier: 1 });
+  const loose = new ChartPatternEngine({ ...doubleConfiguration, breakoutWindowMultiplier: 2 });
+
+  // 1 width (6) -> window closes at C14; 2 widths (12) -> C20.
+  expect(tight.detect(candles).some((e) => e.eventCode === "DOUBLE_BOTTOM")).toBe(false);
+  expect(loose.detect(candles).some((e) => e.eventCode === "DOUBLE_BOTTOM")).toBe(true);
+});
+
+const headAndShouldersConfiguration = {
+  ...defaultChartPatternConfiguration,
+  swingWindow: 2,
+  minimumSwingAtr: 0.3,
+  atrPeriod: 3,
+};
+
+/** C0..C16 of the H&S fixture: head 140 at C8, shoulders 120, neckline 100, right shoulder confirmed at C16. */
+function headAndShouldersBase(): PatternCandle[] {
+  return [
+    makeCandle("C0", 100, 105, 98, 102, 0),
+    makeCandle("C1", 102, 115, 100, 112, 1),
+    makeCandle("C2", 112, 120, 110, 118, 2),
+    makeCandle("C3", 118, 119, 106, 108, 3),
+    makeCandle("C4", 108, 109, 102, 104, 4),
+    makeCandle("C5", 104, 105, 100, 102, 5),
+    makeCandle("C6", 102, 120, 101, 118, 6),
+    makeCandle("C7", 118, 135, 116, 132, 7),
+    makeCandle("C8", 132, 140, 130, 138, 8),
+    makeCandle("C9", 138, 139, 120, 122, 9),
+    makeCandle("C10", 122, 123, 108, 110, 10),
+    makeCandle("C11", 110, 112, 100, 102, 11),
+    makeCandle("C12", 102, 114, 101, 112, 12),
+    makeCandle("C13", 112, 119, 110, 118, 13),
+    makeCandle("C14", 118, 120, 116, 118, 14),
+    makeCandle("C15", 118, 119, 108, 110, 15),
+    makeCandle("C16", 110, 111, 101, 102, 16),
+  ];
+}
+
+test("ChartPatternEngine invalidates head and shoulders when price makes a new high above the head first", () => {
+  const engine = new ChartPatternEngine(headAndShouldersConfiguration);
+
+  // Control: the plain breakdown on the next bar is detected.
+  const control = [...headAndShouldersBase(), makeCandle("C17", 102, 103, 94, 95, 17)];
+  expect(engine.detect(control).some((e) => e.eventCode === "HEAD_AND_SHOULDERS")).toBe(true);
+
+  // Same breakdown close, but the bar first trades above the 140 head: the structure is void.
+  const invalidated = [...headAndShouldersBase(), makeCandle("C17", 102, 145, 94, 95, 17)];
+  expect(engine.detect(invalidated).filter((e) => e.eventCode === "HEAD_AND_SHOULDERS")).toEqual([]);
+});
+
+test("ChartPatternEngine invalidates inverse head and shoulders when price makes a new low below the head first", () => {
+  const engine = new ChartPatternEngine(headAndShouldersConfiguration);
+  // Mirror of the head-and-shoulders fixture: price -> 200 - price turns it into an inverse pattern.
+  const mirror = (candles: PatternCandle[]): PatternCandle[] => candles.map((c) => ({
+    ...c, open: 200 - c.open, high: 200 - c.low, low: 200 - c.high, close: 200 - c.close,
+  }));
+
+  const control = mirror([...headAndShouldersBase(), makeCandle("C17", 102, 103, 94, 95, 17)]);
+  expect(engine.detect(control).some((e) => e.eventCode === "INVERSE_HEAD_AND_SHOULDERS")).toBe(true);
+
+  const invalidated = mirror([...headAndShouldersBase(), makeCandle("C17", 102, 145, 94, 95, 17)]);
+  expect(engine.detect(invalidated).filter((e) => e.eventCode === "INVERSE_HEAD_AND_SHOULDERS")).toEqual([]);
+});
+
+const triangleConfiguration = {
+  ...defaultChartPatternConfiguration,
+  triangleHorizontalToleranceAtr: 0.30,
+  triangleMinTouches: 2,
+  swingWindow: 2,
+  minimumSwingAtr: 0.3,
+  atrPeriod: 3,
+};
+
+/** C0..C16 of the ascending-triangle fixture: flat highs at 120, rising lows 80/95/105, last low confirmed at C16. */
+function ascendingTriangleBase(): PatternCandle[] {
+  return [
+    makeCandle("C0", 95, 98, 92, 95, 0),
+    makeCandle("C1", 95, 96, 88, 90, 1),
+    makeCandle("C2", 90, 92, 80, 85, 2),
+    makeCandle("C3", 85, 105, 84, 100, 3),
+    makeCandle("C4", 100, 115, 98, 112, 4),
+    makeCandle("C5", 112, 120, 110, 118, 5),
+    makeCandle("C6", 118, 119, 108, 110, 6),
+    makeCandle("C7", 110, 112, 98, 100, 7),
+    makeCandle("C8", 100, 102, 95, 98, 8),
+    makeCandle("C9", 98, 110, 97, 108, 9),
+    makeCandle("C10", 108, 116, 107, 114, 10),
+    makeCandle("C11", 114, 120, 112, 118, 11),
+    makeCandle("C12", 118, 119, 110, 112, 12),
+    makeCandle("C13", 112, 114, 106, 108, 13),
+    makeCandle("C14", 108, 110, 105, 108, 14),
+    makeCandle("C15", 108, 115, 107, 114, 15),
+    makeCandle("C16", 114, 120, 113, 118, 16),
+  ];
+}
+
+test("ChartPatternEngine invalidates an ascending triangle that breaks down before it breaks out", () => {
+  const engine = new ChartPatternEngine(triangleConfiguration);
+
+  // Control: straight breakout on C17.
+  const control = [...ascendingTriangleBase(), makeCandle("C17", 118, 128, 117, 126, 17)];
+  expect(engine.detect(control).some((e) => e.eventCode === "ASCENDING_TRIANGLE")).toBe(true);
+
+  // A close at 102 (below the last higher low, 105) first, then the same breakout a bar later.
+  const brokeDown = [
+    ...ascendingTriangleBase(),
+    makeCandle("C17", 118, 119, 100, 102, 17),
+    makeCandle("C18", 102, 128, 101, 126, 18),
+  ];
+  expect(engine.detect(brokeDown).filter((e) => e.eventCode === "ASCENDING_TRIANGLE")).toEqual([]);
+});
+
+test("ChartPatternEngine invalidates a descending triangle that breaks out before it breaks down", () => {
+  const engine = new ChartPatternEngine(triangleConfiguration);
+  // Mirror of the ascending triangle (price -> 200 - price): flat lows, falling highs.
+  const mirror = (candles: PatternCandle[]): PatternCandle[] => candles.map((c) => ({
+    ...c, open: 200 - c.open, high: 200 - c.low, low: 200 - c.high, close: 200 - c.close,
+  }));
+
+  const control = mirror([...ascendingTriangleBase(), makeCandle("C17", 118, 128, 117, 126, 17)]);
+  expect(engine.detect(control).some((e) => e.eventCode === "DESCENDING_TRIANGLE")).toBe(true);
+
+  const brokeOut = mirror([
+    ...ascendingTriangleBase(),
+    makeCandle("C17", 118, 119, 100, 102, 17),
+    makeCandle("C18", 102, 128, 101, 126, 18),
+  ]);
+  expect(engine.detect(brokeOut).filter((e) => e.eventCode === "DESCENDING_TRIANGLE")).toEqual([]);
+});

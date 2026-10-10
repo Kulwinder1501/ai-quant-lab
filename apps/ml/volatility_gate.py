@@ -15,6 +15,18 @@ long-vol payoff the signal is meant to harvest. IV is held flat over the hold (a
 window is far too short for the multi-day mean reversion the equity study modelled);
 that omits any vega gain during an expansion, so it is if anything conservative.
 
+LIMITS that the verdict carries in its own output (``limitations``), not just here:
+  * IV is India VIX's PRIOR daily close x --iv-scale. VIX is a ~30-day constant-maturity
+    figure, while the priced contract is --days-to-expiry (default 7). The live system now
+    prefers the option chain's own ATM IV at the contract's expiry (see
+    ``ChainFirstStraddleImpliedVolatilitySource``), which this offline study cannot do:
+    no historical per-expiry chain exists. Measured live, chain ATM minus prior VIX has
+    median -1.4 vol points (p10/p90 -3.0/+1.6), so the VIX proxy over-prices short-dated
+    straddles on average and the book's P&L is biased towards the buyer losing. Treat the
+    verdict as a screen, not a live-economics estimate.
+  * Entries are overlapping and clustered by session, so the promotion verdict's standard
+    error is the day-clustered one (``standardErrorBasis``), not sd/sqrt(n).
+
 Buyer-only mapping: EXPANSION -> buy the straddle; STABLE/CONTRACTION -> stay flat
 (you cannot write options). The model's value is concentrating entries in the windows
 that expand and skipping the theta-bleed windows.
@@ -53,8 +65,10 @@ from ai_quant_lab_ml.features import build_volatility_expansion_examples, featur
 from ai_quant_lab_ml.postgres_repository import PostgresMlRepository  # noqa: E402
 from ai_quant_lab_ml.straddle_economics import (  # noqa: E402
     black_scholes_straddle,
+    clustered_mean_and_standard_error,
     cost_aware_promotion_verdict,
 )
+from ai_quant_lab_ml.session_forward import crosses_session, is_intraday_label_timeframe  # noqa: E402
 from ai_quant_lab_ml.training import predict_labels, train_model  # noqa: E402
 from ai_quant_lab_ml.validation import walk_forward_splits  # noqa: E402
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET  # noqa: E402
@@ -89,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--folds", type=positive_int, default=10)
     parser.add_argument("--validation-fraction", type=strict_unit_interval, default=0.2)
     parser.add_argument("--algorithm", choices=ALGORITHM_CHOICES, default="xgboost")
-    parser.add_argument("--days-to-expiry", type=positive_int, default=7, help="Tradable tenor in calendar days (NIFTY weekly=7; BANKNIFTY monthly=30).")
+    parser.add_argument("--days-to-expiry", type=positive_int, default=7, help="Tradable tenor in calendar days (NIFTY weekly=7; BANKNIFTY monthly=30). NOTE: IV is still India VIX's 30-day figure, so a short tenor here mixes tenors; see the module docstring.")
     parser.add_argument("--iv-scale", type=positive_float, default=1.0, help="Multiplier on India VIX for this instrument's IV (1.0 for NIFTY; >1 for BANKNIFTY).")
     parser.add_argument("--fee-bps", type=non_negative_float, default=5.0, help="Round-trip execution cost applied by the promotion verdict (default: 5bps of spot).")
     parser.add_argument("--minimum-scored", type=positive_int, default=300, help="Minimum out-of-sample opportunities required by the promotion verdict.")
@@ -180,6 +194,10 @@ def main() -> int:
         if exit_index >= len(records):
             return None
         entry, exit_bar = records[entry_index], records[exit_index]
+        # Intraday: the hold must end inside the entry's IST session. An exit on a later session
+        # prices the overnight gap, not the horizon -> no trade value (dropped, never filled).
+        if is_intraday_label_timeframe(request.timeframe) and crosses_session(entry.close_time, exit_bar.close_time):
+            return None
         # Match the VIX map's IST session-date key. close_time is tz-aware UTC.
         ist_date = entry.close_time.astimezone(IST).date()
         vix = latest_vix_before_session(vix_history, ist_date)
@@ -203,8 +221,9 @@ def main() -> int:
     )
     print(f"Gating {len(examples)} rows across {len(splits)} forward windows.", file=sys.stderr)
 
-    # Per out-of-sample entry: (predicted_label, is_actual_expansion, straddle_pnl_fraction)
-    scored: list[tuple[str, bool, float]] = []
+    # Per out-of-sample entry: (predicted_label, is_actual_expansion, straddle_pnl_fraction,
+    # IST session date). The date is the cluster key for the promotion standard error.
+    scored: list[tuple[str, bool, float, date]] = []
     for index, split in enumerate(splits, start=1):
         result = train_model(args.algorithm, split, schema=schema, random_state=42, alphabet=alphabet)
         predicted = predict_labels(result.model, split.validation, schema=schema, alphabet=alphabet)
@@ -215,27 +234,31 @@ def main() -> int:
             pnl = price_straddle(entry_index)
             if pnl is None:
                 continue
-            scored.append((str(prediction), str(example.label) == EXPANSION, pnl))
+            session_date = records[entry_index].close_time.astimezone(IST).date()
+            scored.append((str(prediction), str(example.label) == EXPANSION, pnl, session_date))
         print(f"  window {index}/{len(splits)} scored (running entries: {len(scored)})", file=sys.stderr)
 
     if not scored:
         parser.error("No entries could be priced (India VIX only covers 2023-01 onward; check the window).")
 
-    expansion_pnls = [pnl for _, expanded, pnl in scored if expanded]
-    other_pnls = [pnl for _, expanded, pnl in scored if not expanded]
+    expansion_pnls = [pnl for _, expanded, pnl, _ in scored if expanded]
+    other_pnls = [pnl for _, expanded, pnl, _ in scored if not expanded]
     mean_win = _mean(expansion_pnls)
     mean_loss = _mean(other_pnls)
     breakeven_precision = None
     if mean_win is not None and mean_loss is not None and mean_win > 0 > mean_loss:
         breakeven_precision = -mean_loss / (mean_win - mean_loss)
 
-    gated = [(pnl, expanded) for label, expanded, pnl in scored if label == EXPANSION]
-    gated_pnls = [pnl for pnl, _ in gated]
-    all_pnls = [pnl for _, _, pnl in scored]
-    model_precision = (sum(1 for _, expanded in gated if expanded) / len(gated)) if gated else None
-    base_rate = sum(1 for _, expanded, _ in scored if expanded) / len(scored)
+    gated = [(pnl, expanded, day) for label, expanded, pnl, day in scored if label == EXPANSION]
+    gated_pnls = [pnl for pnl, _, _ in gated]
+    gated_days = [day for _, _, day in gated]
+    all_pnls = [pnl for _, _, pnl, _ in scored]
+    all_days = [day for _, _, _, day in scored]
+    model_precision = (sum(1 for _, expanded, _ in gated if expanded) / len(gated)) if gated else None
+    base_rate = sum(1 for _, expanded, _, _ in scored if expanded) / len(scored)
     promotion_verdict = cost_aware_promotion_verdict(
         gated_pnls=gated_pnls,
+        gated_clusters=gated_days,
         always_enter_pnls=all_pnls,
         fee_bps=args.fee_bps,
         minimum_scored=args.minimum_scored,
@@ -243,13 +266,19 @@ def main() -> int:
         confidence_z=args.confidence_z,
     )
 
-    def net_table(pnls: list[float]) -> dict[str, object]:
+    def net_table(pnls: list[float], days: list[date]) -> dict[str, object]:
         mean = _mean(pnls)
-        se = _std_error(pnls)
+        # Day-clustered: entries within a session overlap, so sd/sqrt(n) overstates the evidence.
+        _, se, day_count = clustered_mean_and_standard_error(pnls, days)
         return {
             "entries": len(pnls),
+            "tradingDays": day_count,
             "grossMeanBps": round(mean * 10_000, 2) if mean is not None else None,
             "stdErrorBps": round(se * 10_000, 2) if se is not None else None,
+            "stdErrorBasis": "CLUSTERED_BY_TRADING_DAY",
+            "iidStdErrorBps": (
+                round(_std_error(pnls) * 10_000, 2) if _std_error(pnls) is not None else None
+            ),
             "netMeanBpsByFee": {
                 f"{int(fee)}bps": round((mean - fee / 10_000) * 10_000, 2) if mean is not None else None
                 for fee in FEE_SWEEP_BPS
@@ -266,7 +295,19 @@ def main() -> int:
             "daysToExpiry": args.days_to_expiry,
             "ivScale": args.iv_scale,
             "expansionBand": request.expansion_band,
+            "impliedVolatilitySource": "INDIA_VIX_30D_PRIOR_CLOSE",
         },
+        "limitations": [
+            (
+                f"IV is India VIX (30-day, prior close) x {args.iv_scale} pricing a "
+                f"{args.days_to_expiry}-day contract: a tenor mismatch. Live, chain ATM IV at the "
+                "contract's expiry is preferred and sat a median 1.4 vol points below prior VIX."
+            ),
+            (
+                "Entries overlap within a session; standard errors are clustered by trading day "
+                "(promotionVerdict.standardErrorBasis), not i.i.d."
+            ),
+        ],
         "entriesScored": len(scored),
         "expansionBaseRate": round(base_rate, 4),
         "straddleEconomics": {
@@ -283,8 +324,8 @@ def main() -> int:
         "clearsBreakeven": promotion_verdict["decision"] == "COST_GATE_PASSED",
         "promotionVerdict": promotion_verdict,
         "pnl": {
-            "modelGated": net_table(gated_pnls),
-            "alwaysEnter": net_table(all_pnls),
+            "modelGated": net_table(gated_pnls, gated_days),
+            "alwaysEnter": net_table(all_pnls, all_days),
             "neverEnter": {"entries": 0, "grossMeanBps": 0.0, "netMeanBpsByFee": {f"{int(f)}bps": 0.0 for f in FEE_SWEEP_BPS}},
         },
         "modelVersionCreated": False,

@@ -1,0 +1,304 @@
+﻿diff --git a/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.test.ts b/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.test.ts
+index 4b42b84..169a863 100644
+--- a/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.test.ts
++++ b/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.test.ts
+@@ -4,6 +4,7 @@ import {
+   MomentumScalpPatternStrategy,
+   MomentumScalpPatternStrategyV2,
+   computeConfigurationHash,
++  nearestConfirmedLevelDistancesAtr,
+ } from "./momentum-scalp-pattern-strategy.js";
+ import type { StrategyMarketContext } from "./strategy.js";
+ 
+@@ -482,6 +483,111 @@ describe("MomentumScalpPatternStrategy", () => {
+   });
+ });
+ 
++/** A completed bar `barsBefore` bars before the default test candle (04:00Z open), 5m apart. */
++function priorBar(
++  barsBefore: number,
++  close: number,
++  priceActionEvents: StrategyMarketContext["priceActionEvents"] = [],
++): StrategyMarketContext {
++  const base = createContext({ close, priceActionEvents });
++  const openTime = new Date(base.candle.openTime.getTime() - barsBefore * 5 * 60 * 1000);
++  return {
++    ...base,
++    candle: { ...base.candle, id: `prior-${barsBefore}`, openTime, closeTime: new Date(openTime.getTime() + 5 * 60 * 1000) },
++  };
++}
++
++const supportAt = (level: number): StrategyMarketContext["priceActionEvents"][number] => ({
++  eventCode: "SUPPORT",
++  algorithmVersion: "price-action-v2",
++  direction: "BULLISH",
++  level,
++  confidence: 0.8,
++  details: {},
++});
++
++const resistanceAt = (level: number): StrategyMarketContext["priceActionEvents"][number] => ({
++  eventCode: "RESISTANCE",
++  algorithmVersion: "price-action-v2",
++  direction: "BEARISH",
++  level,
++  confidence: 0.8,
++  details: {},
++});
++
++describe("support / resistance from a bounded lookback of confirmed pivots", () => {
++  const config = { ...defaultMomentumScalpPatternStrategyConfiguration };
++  const atr = 20;
++
++  it("finds a level confirmed on an earlier bar that the current candle alone cannot see", () => {
++    const current = createContext({ close: 24_000 });
++    const history = [priorBar(6, 24_005, [supportAt(23_990), resistanceAt(24_060)]), priorBar(1, 24_000)];
++
++    expect(nearestConfirmedLevelDistancesAtr(current, [], config, atr)).toEqual({
++      nearestSupportDistanceAtr: Infinity,
++      nearestResistanceDistanceAtr: Infinity,
++    });
++    expect(nearestConfirmedLevelDistancesAtr(current, history, config, atr)).toEqual({
++      nearestSupportDistanceAtr: 0.5,
++      nearestResistanceDistanceAtr: 3,
++    });
++  });
++
++  it("is bounded: a level older than srLookbackBars is not read", () => {
++    const current = createContext({ close: 24_000 });
++    const old = priorBar(30, 24_000, [supportAt(23_990)]);
++    const filler = Array.from({ length: 29 }, (_, i) => priorBar(29 - i, 24_000));
++    const history = [old, ...filler];
++
++    expect(nearestConfirmedLevelDistancesAtr(current, history, { ...config, srLookbackBars: 10 }, atr).nearestSupportDistanceAtr).toBe(Infinity);
++    expect(nearestConfirmedLevelDistancesAtr(current, history, { ...config, srLookbackBars: 40 }, atr).nearestSupportDistanceAtr).toBe(0.5);
++  });
++
++  it("drops a level that price has since closed through", () => {
++    const current = createContext({ close: 24_000 });
++    // Support at 23,990 confirmed, then a bar closes at 23,980 (through it), then price recovers.
++    const history = [priorBar(6, 24_005, [supportAt(23_990)]), priorBar(4, 23_980), priorBar(2, 24_000)];
++    expect(nearestConfirmedLevelDistancesAtr(current, history, config, atr).nearestSupportDistanceAtr).toBe(Infinity);
++
++    // The same support survives when no later close violated it.
++    const intact = [priorBar(6, 24_005, [supportAt(23_990)]), priorBar(4, 23_995), priorBar(2, 24_000)];
++    expect(nearestConfirmedLevelDistancesAtr(current, intact, config, atr).nearestSupportDistanceAtr).toBe(0.5);
++  });
++
++  it("never reads a context that closes after the decision bar (no look-ahead)", () => {
++    const current = createContext({ close: 24_000 });
++    const future = priorBar(-3, 24_000, [supportAt(23_990)]); // closes three bars after the decision bar
++    expect(nearestConfirmedLevelDistancesAtr(current, [future], config, atr).nearestSupportDistanceAtr).toBe(Infinity);
++  });
++
++  it("ignores levels from another price-action algorithm version", () => {
++    const current = createContext({ close: 24_000 });
++    const foreign = priorBar(3, 24_000, [{ ...supportAt(23_990), algorithmVersion: "price-action-v1" }]);
++    expect(nearestConfirmedLevelDistancesAtr(current, [foreign], config, atr).nearestSupportDistanceAtr).toBe(Infinity);
++  });
++
++  it("lets evaluate() count a support confirmed earlier, and is unchanged when no history is supplied", () => {
++    const strategy = new MomentumScalpPatternStrategy();
++    const pattern = {
++      code: "HAMMER" as const,
++      algorithmVersion: "candlestick-v1",
++      direction: "BULLISH" as const,
++      confidence: 0.85,
++      contextCandleIds: ["candle-1"],
++      details: {},
++    };
++    const current = createContext({ close: 24_000, atr, patterns: [pattern] });
++    const history = [priorBar(5, 24_000, [supportAt(23_990)])];
++
++    const without = strategy.evaluate(current, CONFIGURATION);
++    const withHistory = strategy.evaluate(current, CONFIGURATION, history);
++    expect(without).toEqual(strategy.evaluate(current, CONFIGURATION, []));
++    // The earlier support is worth confluence points that the current candle alone cannot supply.
++    expect(withHistory.length).toBe(1);
++    expect(withHistory[0]!.confidence).toBeGreaterThan(without[0]?.confidence ?? 0);
++  });
++});
++
+ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
+   const strategyV2 = new MomentumScalpPatternStrategyV2();
+ 
+diff --git a/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.ts b/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.ts
+index b7c14f2..78d262b 100644
+--- a/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.ts
++++ b/apps/api/src/modules/strategy-engine/domain/momentum-scalp-pattern-strategy.ts
+@@ -139,6 +139,13 @@ export interface MomentumScalpPatternStrategyConfiguration {
+    * `requireStrictTrendAlignment`.
+    */
+   enableSrVeto?: boolean;
++  /**
++   * How many prior completed bars to search for a still-standing support/resistance level
++   * (default `DEFAULT_SR_LOOKBACK_BARS`). Optional and absent from the frozen default for the same
++   * immutable-version reason as the two flags above; only read when the caller passes
++   * `priorContexts` to `evaluate`.
++   */
++  srLookbackBars?: number;
+ }
+ 
+ export const defaultMomentumScalpPatternStrategyConfiguration: MomentumScalpPatternStrategyConfiguration = {
+@@ -230,6 +237,61 @@ function findIndicator(
+   return indicators.find((ind) => ind.code === code && ind.algorithmVersion === algorithmVersion);
+ }
+ 
++/** How many prior completed bars are searched for still-standing support/resistance. */
++export const DEFAULT_SR_LOOKBACK_BARS = 20;
++
++/**
++ * Distance, in ATR, from the close to the nearest confirmed support and resistance level.
++ *
++ * SUPPORT / RESISTANCE events are stored on the pivot's *confirmation* bar (the pivot is not
++ * knowable earlier), so they exist on a handful of bars and a read of the current candle alone
++ * finds a level on almost none of them -- "near support" was almost never true. This reads the
++ * levels confirmed on any of the last `srLookbackBars` completed bars up to and including the
++ * decision bar. Everything used was stored on a bar that had already closed at decision time, so
++ * there is no look-ahead: contexts closing after the decision bar are ignored.
++ *
++ * A level that has since been closed through is a broken level, not a standing one: a support is
++ * dropped once any later close (up to the current bar) is below it, a resistance once any later
++ * close is above it.
++ */
++export function nearestConfirmedLevelDistancesAtr(
++  context: StrategyMarketContext,
++  priorContexts: readonly StrategyMarketContext[],
++  config: MomentumScalpPatternStrategyConfiguration,
++  atr: number,
++): { nearestSupportDistanceAtr: number; nearestResistanceDistanceAtr: number } {
++  const lookback = Math.max(0, Math.floor(config.srLookbackBars ?? DEFAULT_SR_LOOKBACK_BARS));
++  const decisionClose = context.candle.closeTime.getTime();
++  const history = priorContexts
++    .filter((prior) => (
++      prior.candle.id !== context.candle.id
++      && prior.candle.instrumentId === context.candle.instrumentId
++      && prior.candle.timeframe === context.candle.timeframe
++      && prior.candle.closeTime.getTime() <= decisionClose
++    ))
++    .sort((a, b) => a.candle.closeTime.getTime() - b.candle.closeTime.getTime());
++  // The window is the last `lookback` eligible bars plus the decision bar, oldest first.
++  const window = [...(lookback > 0 ? history.slice(-lookback) : []), context];
++
++  const distances = { support: Infinity, resistance: Infinity };
++  window.forEach((bar, barIndex) => {
++    for (const event of bar.priceActionEvents) {
++      if (event.level === null || event.algorithmVersion !== config.priceActionAlgorithmVersion) continue;
++      if (event.eventCode !== "SUPPORT" && event.eventCode !== "RESISTANCE") continue;
++      const level = event.level;
++      const later = window.slice(barIndex + 1);
++      const broken = event.eventCode === "SUPPORT"
++        ? later.some((laterBar) => laterBar.candle.close < level)
++        : later.some((laterBar) => laterBar.candle.close > level);
++      if (broken) continue;
++      const distance = Math.abs(context.candle.close - level) / atr;
++      if (event.eventCode === "SUPPORT") distances.support = Math.min(distances.support, distance);
++      else distances.resistance = Math.min(distances.resistance, distance);
++    }
++  });
++  return { nearestSupportDistanceAtr: distances.support, nearestResistanceDistanceAtr: distances.resistance };
++}
++
+ function parseConfig(raw: Record<string, unknown>): MomentumScalpPatternStrategyConfiguration {
+   return {
+     indicatorAlgorithmVersion: typeof raw.indicatorAlgorithmVersion === "string" ? raw.indicatorAlgorithmVersion : defaultMomentumScalpPatternStrategyConfiguration.indicatorAlgorithmVersion,
+@@ -243,11 +305,25 @@ function parseConfig(raw: Record<string, unknown>): MomentumScalpPatternStrategy
+     expiryCandles: typeof raw.expiryCandles === "number" ? raw.expiryCandles : defaultMomentumScalpPatternStrategyConfiguration.expiryCandles,
+     requireStrictTrendAlignment: typeof raw.requireStrictTrendAlignment === "boolean" ? raw.requireStrictTrendAlignment : false,
+     enableSrVeto: typeof raw.enableSrVeto === "boolean" ? raw.enableSrVeto : false,
++    // Only present when supplied, so the configuration hash of an unchanged configuration does not move.
++    ...(typeof raw.srLookbackBars === "number" && Number.isFinite(raw.srLookbackBars)
++      ? { srLookbackBars: raw.srLookbackBars }
++      : {}),
+   };
+ }
+ 
+ export class MomentumScalpPatternStrategy {
+-  evaluate(context: StrategyMarketContext, rawConfiguration: Record<string, unknown>): ProposedTradeIdea[] {
++  /**
++   * `priorContexts` is the bounded history of completed contexts of the same instrument and
++   * timeframe that the caller already holds (oldest first). Optional: omitted, support/resistance
++   * is read from this candle only, as before. See `nearestConfirmedLevelDistancesAtr` for why
++   * that is almost never enough.
++   */
++  evaluate(
++    context: StrategyMarketContext,
++    rawConfiguration: Record<string, unknown>,
++    priorContexts: readonly StrategyMarketContext[] = [],
++  ): ProposedTradeIdea[] {
+     const config = parseConfig(rawConfiguration);
+     const { candle } = context;
+     const tickSize = candle.tickSize > 0 ? candle.tickSize : 0.05;
+@@ -266,22 +342,12 @@ export class MomentumScalpPatternStrategy {
+     const emaFastInd = findIndicator(context.indicators, "EMA", config.indicatorAlgorithmVersion);
+     const emaFast = typeof emaFastInd?.values.value === "number" ? emaFastInd.values.value : null;
+ 
+-    // Price action support / resistance levels
+-    const supportEvents = context.priceActionEvents.filter(
+-      (e) => e.eventCode === "SUPPORT" && e.level !== null && e.algorithmVersion === config.priceActionAlgorithmVersion,
+-    );
+-    const resistanceEvents = context.priceActionEvents.filter(
+-      (e) => e.eventCode === "RESISTANCE" && e.level !== null && e.algorithmVersion === config.priceActionAlgorithmVersion,
++    // Price action support / resistance levels: the confirmed pivots of the bounded lookback, not
++    // only the ones stamped on this very candle. See `nearestConfirmedLevelDistancesAtr`.
++    const { nearestSupportDistanceAtr, nearestResistanceDistanceAtr } = nearestConfirmedLevelDistancesAtr(
++      context, priorContexts, config, atr,
+     );
+ 
+-    const nearestSupportDistanceAtr = supportEvents.length > 0
+-      ? Math.min(...supportEvents.map((e) => Math.abs(candle.close - (e.level ?? candle.close)) / atr))
+-      : Infinity;
+-
+-    const nearestResistanceDistanceAtr = resistanceEvents.length > 0
+-      ? Math.min(...resistanceEvents.map((e) => Math.abs((e.level ?? candle.close) - candle.close) / atr))
+-      : Infinity;
+-
+     // Candlestick pattern detections on current candle
+     const patterns = context.patterns.filter(
+       (p) => p.algorithmVersion === config.candlestickAlgorithmVersion,
+@@ -553,7 +619,17 @@ const BEARISH_CHART_PATTERNS: readonly PriceActionEventCode[] = [
+ ];
+ 
+ export class MomentumScalpPatternStrategyV2 {
+-  evaluate(context: StrategyMarketContext, rawConfiguration: Record<string, unknown>): ProposedTradeIdea[] {
++  /**
++   * `priorContexts` is the bounded history of completed contexts of the same instrument and
++   * timeframe that the caller already holds (oldest first). Optional: omitted, support/resistance
++   * is read from this candle only, as before. See `nearestConfirmedLevelDistancesAtr` for why
++   * that is almost never enough.
++   */
++  evaluate(
++    context: StrategyMarketContext,
++    rawConfiguration: Record<string, unknown>,
++    priorContexts: readonly StrategyMarketContext[] = [],
++  ): ProposedTradeIdea[] {
+     const config = parseConfig(rawConfiguration);
+     const configurationHash = computeConfigurationHash(config as unknown as Record<string, unknown>);
+     const { candle } = context;
+@@ -573,22 +649,12 @@ export class MomentumScalpPatternStrategyV2 {
+     const emaFastInd = findIndicator(context.indicators, "EMA", config.indicatorAlgorithmVersion);
+     const emaFast = typeof emaFastInd?.values.value === "number" ? emaFastInd.values.value : null;
+ 
+-    // Price action support / resistance levels
+-    const supportEvents = context.priceActionEvents.filter(
+-      (e) => e.eventCode === "SUPPORT" && e.level !== null && e.algorithmVersion === config.priceActionAlgorithmVersion,
+-    );
+-    const resistanceEvents = context.priceActionEvents.filter(
+-      (e) => e.eventCode === "RESISTANCE" && e.level !== null && e.algorithmVersion === config.priceActionAlgorithmVersion,
++    // Price action support / resistance levels: the confirmed pivots of the bounded lookback, not
++    // only the ones stamped on this very candle. See `nearestConfirmedLevelDistancesAtr`.
++    const { nearestSupportDistanceAtr, nearestResistanceDistanceAtr } = nearestConfirmedLevelDistancesAtr(
++      context, priorContexts, config, atr,
+     );
+ 
+-    const nearestSupportDistanceAtr = supportEvents.length > 0
+-      ? Math.min(...supportEvents.map((e) => Math.abs(candle.close - (e.level ?? candle.close)) / atr))
+-      : Infinity;
+-
+-    const nearestResistanceDistanceAtr = resistanceEvents.length > 0
+-      ? Math.min(...resistanceEvents.map((e) => Math.abs((e.level ?? candle.close) - candle.close) / atr))
+-      : Infinity;
+-
+     // Candlestick pattern detections on current candle
+     const patterns = context.patterns.filter(
+       (p) => p.algorithmVersion === config.candlestickAlgorithmVersion,

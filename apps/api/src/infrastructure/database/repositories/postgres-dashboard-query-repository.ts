@@ -1,5 +1,9 @@
 import type { QueryResultRow } from "pg";
 import type { DatabaseQueryable } from "../database.js";
+// The dashboard shows the CURRENT rule set only. `candlestick-v1` rows are a mixture of two rule
+// sets (see market-pattern.ts) and are superseded; until v2 re-detection has run the panel is empty,
+// which is the honest state rather than a display of mixed-rule evidence.
+import { candlestickAlgorithmVersion } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 
 export interface DashboardPaperAccountSummary {
   id: string;
@@ -507,8 +511,8 @@ export class PostgresDashboardQueryRepository {
         FROM pattern_detections pd
         JOIN pattern_definitions pdf ON pdf.id = pd.pattern_definition_id
         WHERE pd.candle_id = ANY($1::uuid[])
-          AND pdf.algorithm_version = 'candlestick-v1'
-      `, [candleIds]),
+          AND pdf.algorithm_version = $2
+      `, [candleIds, candlestickAlgorithmVersion]),
     ]);
 
     const indicatorsByCandle = new Map<string, Record<string, unknown>>();

@@ -15,24 +15,38 @@ from typing import Dict, List, Optional, Tuple
 ASMD_BALANCE_THRESHOLD = 0.10
 MIN_MATCHED_PAIRS_FOR_VERDICT = 20
 
-# Same-session matching window. Widened from the spec's original 30 minutes to 60, a
-# deliberate protocol change (pre-registered here, before the next evaluation run, not derived
-# from having seen F1-F3's result on today's data) after a funnel diagnostic showed temporal
-# locality -- not raw anchor scarcity or the propensity caliper -- as the dominant bottleneck:
-# of 78 Golden Pocket treatment anchors, only 10 had any same-session control within 30
-# minutes at all, before the caliper even applied. See the "study(ml): diagnose why F1-F3 are
-# INCONCLUSIVE" commit for the full funnel numbers this is responding to.
-SAME_SESSION_MATCH_WINDOW_MS = 60 * 60 * 1000
+# The 0.10 rule of thumb is a LARGE-SAMPLE convention: with n matched pairs, even two groups drawn
+# from the IDENTICAL distribution show a standardized mean difference of about sqrt(2/n) per
+# covariate by chance alone -- 0.28 at n=26, before taking the maximum over 7 covariates. Applied
+# literally at the sample sizes this study can reach (tens of pairs), "ASMD < 0.10" is not a
+# balance test, it is a coin flip that almost always fails: the synthetic validation (treatments
+# and controls identical by construction) measured max ASMD of 0.22 to 0.66 at 23-26 pairs and
+# could never reach a verdict. Balance is therefore judged against max(0.10, the chance range):
+# the Bonferroni (7 covariates, two-sided 5%, z = 2.69) bound on a max-of-7 ASMD under perfect
+# balance. This is a floor on what can be distinguished from chance, NOT a claim that a
+# difference below it is harmless; asmdMax and the threshold used are both reported per result.
+ASMD_CHANCE_Z = 2.69
 
-# Propensity-score caliper, in standard deviations of the logit propensity score. Widened from
-# the spec's original 0.20 to 0.5, a deliberate protocol change (owner decision, pre-registered
-# here before the next evaluation run) after the 60-minute window still left Golden Pocket and
-# Deep Retracement with 0 matched pairs despite 14-15 temporally-eligible candidates each --
-# the caliper, not temporal locality, was then the binding constraint for those two zones. A
-# wider caliper lets in less-comparable pairs; ASMD_BALANCE_THRESHOLD is the check that is
-# supposed to catch it if this goes too far (see OTE's 0.618 ASMD under the narrower caliper --
-# already failing balance before this change, which is its own, separate problem).
-PROPENSITY_CALIPER_SD = 0.5
+
+def asmd_balance_threshold(n_pairs: int) -> float:
+    if n_pairs <= 0:
+        return ASMD_BALANCE_THRESHOLD
+    return max(ASMD_BALANCE_THRESHOLD, ASMD_CHANCE_Z * float(np.sqrt(2.0 / n_pairs)))
+
+# Same-session matching window and propensity caliper: the Research Specification v1.1 values
+# (30 minutes, 0.20 SD). An earlier revision widened them to 60 minutes / 0.50 SD after seeing that
+# matching returned almost nothing. That was treating a symptom: the scarcity came from how
+# controls were SAMPLED (one control per never-touched anchor, always at the anchor's first bar,
+# so controls were systematically younger than treatments and could not be matched on
+# anchorAgeBars), not from the window or the caliper -- and widening them did not produce a single
+# matched pair. Controls are now drawn from the same anchors at the same ages (see
+# run_phase_c_pipeline._select_episodes), so the spec values are restored. See
+# docs/2026-10-10-fibonacci-order-flow-realignment.md.
+SAME_SESSION_MATCH_WINDOW_MS = 30 * 60 * 1000
+PROPENSITY_CALIPER_SD = 0.20
+
+# One-sided alpha = 0.05 and 80% power: minimum detectable effect = (z_0.95 + z_0.80) * SE.
+MDE_Z_FACTOR = 1.6449 + 0.8416
 
 
 @dataclass
@@ -46,7 +60,12 @@ class ObservationEpisode:
     fibZone: str  # 'GOLDEN_POCKET' | 'OTE' | 'DEEP_RETRACEMENT' | 'NONE'
     hasRealActiveAnchor: bool  # Strictly true for ACTIVE_ANCHOR observations
     retracementRatio: float
-    mfeNetBps: float  # MFE_gross - 2.0 bp friction
+    # TRADEABLE outcome: signed (long for bullish, short for bearish) return from the entry price
+    # (next bar's open) to the close of the frozen horizon bar, minus round-trip friction, in bps.
+    # It replaced a forward MFE (best excursion inside the window) that was positive for ~80% of
+    # random bars -- no trader can capture an excursion, and any "surplus above zero" test on it
+    # was passed by noise.
+    netReturnBps: float
 
     # 7 Standardized Covariates (Raw values)
     impulseRange: float
@@ -64,7 +83,7 @@ class MatchedPair:
     controlEpisodeId: str
     sessionDate: str
     logitDistance: float
-    deltaMfeNetBps: float  # MFE_net(T) - MFE_net(C)
+    deltaNetReturnBps: float  # netReturn(T) - netReturn(C)
 
 
 @dataclass
@@ -257,13 +276,13 @@ class PropensityMatcher:
                 available_ctrl_indices.remove(best_c_idx)
                 c_ep = control_active[best_c_idx]
 
-                delta_mfe = t_ep.mfeNetBps - c_ep.mfeNetBps
+                delta_mfe = t_ep.netReturnBps - c_ep.netReturnBps
                 matched_pairs.append(MatchedPair(
                     treatmentEpisodeId=t_ep.episodeId,
                     controlEpisodeId=c_ep.episodeId,
                     sessionDate=t_ep.sessionDate,
                     logitDistance=float(best_dist),
-                    deltaMfeNetBps=float(delta_mfe)
+                    deltaNetReturnBps=float(delta_mfe)
                 ))
 
         # Balance Metric: Calculate post-match ASMD across all 7 covariates
@@ -292,6 +311,39 @@ class PropensityMatcher:
         )
 
 
+def _session_bootstrap_means(matched_pairs: List[MatchedPair], B: int, seed: int) -> np.ndarray:
+    """Session-block bootstrap distribution of the mean matched delta (sessions are the resampling unit)."""
+    session_map: Dict[str, List[float]] = {}
+    for pair in matched_pairs:
+        session_map.setdefault(pair.sessionDate, []).append(pair.deltaNetReturnBps)
+    sessions = sorted(session_map.keys())
+    n_sessions = len(sessions)
+    rng = np.random.RandomState(seed)
+    means = []
+    for _ in range(B):
+        resampled = rng.choice(sessions, size=n_sessions, replace=True)
+        boot = []
+        for s in resampled:
+            boot.extend(session_map[s])
+        means.append(np.mean(boot))
+    return np.array(means)
+
+
+def minimum_detectable_effect_bps(matched_pairs: List[MatchedPair], B: int = 2000, seed: int = 42) -> Optional[float]:
+    """
+    Smallest true effect (bps) this matched sample could detect with 80% power at one-sided
+    alpha = 0.05, from the session-block bootstrap standard error. Returned so a reader can see
+    whether a result is even resolvable BEFORE reading its verdict: the real sample sizes in this
+    study (about 30-40 zone contacts per cell) imply an MDE of many bps, far above the 1.0 bp
+    hurdle, and "not significant" at that power is not evidence of "no effect".
+    Returns None when there are fewer than 2 sessions (no variance estimate exists).
+    """
+    if len({p.sessionDate for p in matched_pairs}) < 2:
+        return None
+    se = float(np.std(_session_bootstrap_means(matched_pairs, B, seed), ddof=1))
+    return MDE_Z_FACTOR * se
+
+
 def run_null_centered_bootstrap(matched_pairs: List[MatchedPair],
                                 B: int = 10000,
                                 seed: int = 42) -> Tuple[float, float, float]:
@@ -303,27 +355,9 @@ def run_null_centered_bootstrap(matched_pairs: List[MatchedPair],
     if not matched_pairs:
         return 0.0, 0.0, 1.0
 
-    session_map: Dict[str, List[float]] = {}
-    for pair in matched_pairs:
-        session_map.setdefault(pair.sessionDate, []).append(pair.deltaMfeNetBps)
-
-    sessions = sorted(list(session_map.keys()))
-    n_sessions = len(sessions)
-
-    sample_deltas = [p.deltaMfeNetBps for p in matched_pairs]
+    sample_deltas = [p.deltaNetReturnBps for p in matched_pairs]
     hat_delta = float(np.mean(sample_deltas))
-
-    rng = np.random.RandomState(seed)
-    bootstrap_deltas = []
-
-    for _ in range(B):
-        resampled_sessions = rng.choice(sessions, size=n_sessions, replace=True)
-        boot_deltas = []
-        for s in resampled_sessions:
-            boot_deltas.extend(session_map[s])
-        bootstrap_deltas.append(np.mean(boot_deltas))
-
-    boot_deltas_arr = np.array(bootstrap_deltas)
+    boot_deltas_arr = _session_bootstrap_means(matched_pairs, B, seed)
 
     # Shift distribution to represent the 1.0 bp null boundary
     null_centered_deltas = boot_deltas_arr - hat_delta + 1.0
@@ -379,7 +413,8 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
     # 1. Filter out session close excluded observations
     valid_episodes = [ep for ep in episodes if not ep.isSessionCloseExcluded]
 
-    # Baseline control pool (OFI > 0.032 AND NOT Treatment)
+    # Control pool: every non-treatment observation on an active anchor. Location is the only
+    # thing controls differ in; Layer 0/2 are not extra filters (protocol amendment #2).
     treatment_eps_all = [ep for ep in valid_episodes if ep.isTreatment]
     control_eps_all = [ep for ep in valid_episodes if not ep.isTreatment]
 
@@ -406,9 +441,10 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
         )
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
-        abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_eps]) > 0.0) if t_eps else False
+        abs_passed = bool(np.mean([ep.netReturnBps for ep in t_eps]) > 0.0) if t_eps else False
         data_sufficient = len(pairs) >= MIN_MATCHED_PAIRS_FOR_VERDICT and not separation
-        balance_achieved = asmd_max < ASMD_BALANCE_THRESHOLD
+        balance_threshold = asmd_balance_threshold(len(pairs))
+        balance_achieved = asmd_max < balance_threshold
 
         family_a_results.append({
             "experimentId": exp_id,
@@ -427,10 +463,12 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "separationDetected": separation,
             "dataSufficientForVerdict": data_sufficient,
             "balanceAchieved": balance_achieved,
+            "asmdBalanceThreshold": balance_threshold,
             # Diagnostic: isolates temporal-locality scarcity (no control exists in the same
             # session within the match window) from propensity-caliper tightness as the
             # matching bottleneck. Does not affect any verdict.
             "treatmentsWithTemporalCandidate": treat_with_temporal_candidate,
+            "minDetectableEffectBps": minimum_detectable_effect_bps(pairs, seed=seed),
         })
         raw_p_family_a.append(p_raw)
 
@@ -479,9 +517,10 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
         )
         hat_delta, lower_ci, p_raw = run_null_centered_bootstrap(pairs, B=B, seed=seed)
 
-        abs_passed = bool(np.mean([ep.mfeNetBps for ep in t_b]) > 0.0) if t_b else False
+        abs_passed = bool(np.mean([ep.netReturnBps for ep in t_b]) > 0.0) if t_b else False
         data_sufficient = len(pairs) >= MIN_MATCHED_PAIRS_FOR_VERDICT and not separation
-        balance_achieved = asmd_max < ASMD_BALANCE_THRESHOLD
+        balance_threshold = asmd_balance_threshold(len(pairs))
+        balance_achieved = asmd_max < balance_threshold
 
         family_b_results.append({
             "experimentId": b_exp_id,
@@ -500,7 +539,9 @@ def run_phase_c_experiments(episodes: List[ObservationEpisode],
             "separationDetected": separation,
             "dataSufficientForVerdict": data_sufficient,
             "balanceAchieved": balance_achieved,
+            "asmdBalanceThreshold": balance_threshold,
             "treatmentsWithTemporalCandidate": treat_with_temporal_candidate,
+            "minDetectableEffectBps": minimum_detectable_effect_bps(pairs, seed=seed),
         })
         raw_p_family_b.append(p_raw)
 

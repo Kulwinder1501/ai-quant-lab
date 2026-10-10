@@ -1,4 +1,21 @@
 import { supportedHistoricalTimeframes, type HistoricalTimeframe } from "../../modules/market-data/domain/historical-data-provider.js";
+import { instrumentExchanges, type Instrument } from "../../modules/market-data/domain/instrument.js";
+
+/**
+ * Every CLI that addresses a stored instrument must accept every exchange the `Instrument` type
+ * (and the database) supports. `calculate-technical-indicators` kept its own copy of this list
+ * and fell behind when OANDA was added: the scheduler's XAU_CANDLE_COLLECTION job passes
+ * `--exchange OANDA`, the CLI rejected it with exit code 1, and because the job runs its steps in
+ * sequence that one rejection stopped the DXY component collection after it too (observed
+ * 2026-10-10: 8 failures in 24 hours). One shared list cannot drift per-script.
+ */
+export function parseInstrumentExchange(value: string): Instrument["exchange"] {
+  const upper = value.trim().toUpperCase();
+  if ((instrumentExchanges as readonly string[]).includes(upper)) {
+    return upper as Instrument["exchange"];
+  }
+  throw new Error(`Unsupported --exchange "${value}". Use ${instrumentExchanges.join(", ")}.`);
+}
 
 export function getOption(argumentsList: string[], name: string): string | undefined {
   const index = argumentsList.indexOf(`--${name}`);

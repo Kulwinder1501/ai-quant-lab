@@ -5,7 +5,15 @@ import {
   RISK_FREE_RATE,
   yearsToExpiry,
 } from "@ai-quant-lab/pricing";
+import { atmImpliedVolatility, calendarDaysToExpiry } from "../../market-data/domain/atm-implied-volatility.js";
 import { solveContractGreeksFromChain } from "../../market-data/domain/chain-greeks.js";
+import {
+  buildTenorIvHistory,
+  ivPercentileForValidator,
+  summariseTenorMatchedIvPercentile,
+  type DailyChainQuote,
+  type TenorImpliedVolatilityObservation,
+} from "../../market-data/domain/iv-percentile-by-tenor.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import {
   resolveListedExpiry,
@@ -103,6 +111,48 @@ export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE = 25 * 1000;
  */
 export const MAXIMUM_IDEA_PRICE_DRIFT_FRACTION = 0.01;
 
+/**
+ * How deep ITM a contract must be (`minEntryDelta`) to qualify at all, and which delta the
+ * ranking among qualifying contracts aims for (`targetDelta`). One shared pair of constants
+ * here used to block BANKNIFTY outright: see `docs/2026-10-10-option-entry-delta-threshold-
+ * review.md` for the measurement.
+ *
+ * NIFTY50's weekly expiry keeps time-to-expiry short, so its delta/strike slope is steep and
+ * a 0.75-delta contract is essentially always available -- a live chain sampled 2026-10-09
+ * carried a liquid, two-sided quote up to abs(delta) 0.974. There is no reachability problem
+ * to accommodate, so NIFTY50 keeps the original, strict 0.75/0.75.
+ *
+ * BANKNIFTY only has a monthly expiry, so days-to-expiry is routinely 15-30 and the delta
+ * curve is far shallower. Replaying the real option chain through this file's own
+ * `solveContractGreeksFromChain` at every live refusal between 2026-10-05 and 2026-10-08
+ * found the deepest liquid, two-sided strike topped out at 0.70-0.748 -- never once reaching
+ * 0.75 -- which is why the live bot took zero BANKNIFTY trades that week. The same replay
+ * against the prior (2026-09-29) monthly expiry's own chain shows this is purely a
+ * days-to-expiry effect, not a permanent ceiling: measured abs(delta) at the chain's deepest
+ * liquid strike rose from 0.76 at DTE~25 to 0.81 at DTE~14, 0.90 at DTE~11, and 0.92-0.96
+ * inside DTE~10 -- comfortably clearing 0.75 well before expiry. So BANKNIFTY uses a lower
+ * floor (0.55, with margin under the measured 0.70-0.748 far-dated ceiling) most of the time,
+ * and only switches to NIFTY50's strict 0.75/0.75 once its own listed expiry is within 10
+ * days, which both sampled near-expiry points (DTE 10.98 and 7.17) confirm is comfortably
+ * inside the window where 0.75 is actually on offer -- rather than inventing a parallel,
+ * untested "deep ITM but not 0.75" target for that stretch.
+ *
+ * Any other underlying falls back to BANKNIFTY's permissive pair; in practice nothing else
+ * reaches this gate today (gold trades spot via `PrepareDirectEntry`, never an option strike).
+ */
+export function resolveOptionEntryDeltaThresholds(
+  underlyingSymbol: string,
+  daysToExpiry: number,
+): { minEntryDelta: number; targetDelta: number } {
+  if (underlyingSymbol === "NIFTY50") {
+    return { minEntryDelta: 0.75, targetDelta: 0.75 };
+  }
+  if (underlyingSymbol === "BANKNIFTY" && daysToExpiry <= 10) {
+    return { minEntryDelta: 0.75, targetDelta: 0.75 };
+  }
+  return { minEntryDelta: 0.55, targetDelta: 0.65 };
+}
+
 export interface PreparedOptionEntry {
   tradeIdeaId: string;
   underlyingSymbol: string;
@@ -190,6 +240,12 @@ interface ChainReader {
     expiryDate?: string;
     asOf?: Date;
   }): Promise<OptionChainSnapshot | null>;
+  /**
+   * One last-snapshot-of-the-day ATM slice per stored session; supplies the tenor-matched IV
+   * percentile. Optional: a reader without it leaves the percentile unchecked (and recorded as
+   * such), it never silently passes or fails the trade.
+   */
+  dailyAtmQuotes?(input: { underlyingSymbol: string; days: number }): Promise<DailyChainQuote[]>;
 }
 
 interface PremiumTickReader {
@@ -236,6 +292,38 @@ export class PrepareOptionEntry {
     private readonly optionChainRepository: ChainReader,
     private readonly premiumTicks?: PremiumTickReader,
   ) {}
+
+  /**
+   * Tenor-matched ATM IV percentile (0-100) for the expiry this trade settles on, or null when it
+   * cannot be measured. History and live reading go through the same `atmImpliedVolatility`
+   * (parity forward) and the rank is taken only inside the live days-to-expiry bucket, so a 2-DTE
+   * reading is never ranked against 20-DTE history. Null means "unchecked", never "passed".
+   */
+  private async resolveIvPercentile(
+    underlyingSymbol: string,
+    expiryDate: Date,
+    chain: OptionChainSnapshot | undefined,
+  ): Promise<number | null> {
+    if (chain === undefined || this.optionChainRepository.dailyAtmQuotes === undefined) return null;
+    try {
+      const current = atmImpliedVolatility({
+        observedAt: chain.observedAt,
+        expiryDate,
+        quotes: chain.quotes.filter((quote) => quote.expiryDate.getTime() === expiryDate.getTime()),
+      });
+      if (!current.measurable) return null;
+      const history: TenorImpliedVolatilityObservation[] = buildTenorIvHistory(
+        await this.optionChainRepository.dailyAtmQuotes({ underlyingSymbol, days: 400 }),
+      );
+      if (calendarDaysToExpiry(chain.observedAt, expiryDate) < 1) return null;
+      return ivPercentileForValidator(summariseTenorMatchedIvPercentile({
+        history,
+        current: { impliedVolatility: current.impliedVolatility, daysToExpiry: current.daysToExpiry },
+      }));
+    } catch {
+      return null;
+    }
+  }
 
   async execute(input: PrepareOptionEntryInput): Promise<PrepareOptionEntryResult> {
     const now = input.now ?? new Date();
@@ -385,8 +473,9 @@ export class PrepareOptionEntry {
       }
     }
 
-    const MIN_ENTRY_DELTA = 0.55;
-    const TARGET_DELTA = 0.65;
+    const daysToExpiry = (settlementExpiry.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
+    const { minEntryDelta: MIN_ENTRY_DELTA, targetDelta: TARGET_DELTA } =
+      resolveOptionEntryDeltaThresholds(underlyingSymbol, daysToExpiry);
     const matchingQuotes = usableChain.quotes.filter((q) => q.optionType === intendedOptionType);
     const eligible: Array<{
       quote: typeof matchingQuotes[0];
@@ -612,6 +701,7 @@ export class PrepareOptionEntry {
 
     const volume = await this.readSourceBarVolume(idea.source_candle_id, idea.symbol);
     const scheduledMacro = await this.hasScheduledMacroEventToday(now);
+    const ivPercentile = await this.resolveIvPercentile(underlyingSymbol, settlementExpiry, validationChain);
     const entryCheck = validateOptionsEntry({
       proposedIdea: {
         side: idea.side,
@@ -623,6 +713,9 @@ export class PrepareOptionEntry {
       optionChain: validationChain,
       intendedStrike,
       intendedContractDelta: mapped.entryGreeks.delta,
+      // The chain can hold several expiries; pin the validator to the one this trade settles on.
+      intendedExpiryDate: settlementExpiry,
+      ivPercentile,
       ...(scheduledMacro === undefined ? {} : { hasMacroEvent: scheduledMacro }),
     });
     if (!entryCheck.isValid) {
@@ -694,7 +787,7 @@ export class PrepareOptionEntry {
             thetaAtEntry,
             vegaAtEntry,
             IVAtEntry: mapped.impliedVolatility,
-            DTE: (settlementExpiry.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
+            DTE: daysToExpiry,
             optionSpread: observedFill.bid != null && Number.isFinite(observedFill.bid)
               ? Number((observedFill.premium - observedFill.bid).toFixed(4))
               : null,

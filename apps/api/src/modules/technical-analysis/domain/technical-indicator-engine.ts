@@ -1,3 +1,4 @@
+import { MAXIMUM_FLAT_SHARE_OF_WINDOW, flatShareOfWindow, withoutFlatBars } from "../../market-data/domain/flat-bar.js";
 import type { IndicatorCandle, IndicatorDefinitionSpec, IndicatorPoint, IndicatorValues } from "./technical-indicator.js";
 
 type OptionalNumber = number | null;
@@ -55,6 +56,16 @@ function exponentialMovingAverage(values: readonly number[], period: number): Op
   return result;
 }
 
+/**
+ * Wilder true range per bar.
+ *
+ * The first bar of a session deliberately uses the PRIOR session's close, so its TR can exceed
+ * the bar's own high-low range (about 570 of 935 sessions, median 1.55x on NIFTY50 5m/15m).
+ * That is the correct Wilder definition: the overnight gap is real movement a stop has to
+ * survive. It is kept on purpose; do not "fix" it by resetting at the session boundary.
+ *
+ * Flat (frozen-feed) bars never reach this function -- see `volatilityOnLiveBars`.
+ */
 function trueRanges(candles: readonly IndicatorCandle[]): number[] {
   return candles.map((candle, index) => {
     if (index === 0) {
@@ -484,6 +495,37 @@ function equilibriumZone(candles: readonly IndicatorCandle[], pivotLength: numbe
   return valuesToPoints(candles, result);
 }
 
+/**
+ * Runs a volatility-based indicator (ATR, Bollinger, Supertrend) over the LIVE bars only.
+ *
+ * Frozen-feed bars (`high == low && volume == 0`, e.g. an exchange holiday the feed kept
+ * printing) are removed from the input, not smoothed through: zero true ranges folded into
+ * Wilder's average collapsed the stored 15m ATR from 37.5 to 8.5 in one holiday session, which
+ * made every ATR-multiple stop 2-4x too tight. A flat bar gets no snapshot of its own, and the
+ * first live bar after a frozen stretch measures its true range against the last LIVE close,
+ * i.e. the real gap.
+ *
+ * A snapshot is also withheld when more than half of the trailing `window` RAW bars ending at it
+ * are flat: right after a long frozen stretch the lookback is mostly feed artefact, and an
+ * average that straddles it is not a measurement of the current market. The window is the
+ * indicator's own period.
+ *
+ * With no flat bars this is exactly `compute(candles)`.
+ */
+function volatilityOnLiveBars(
+  candles: readonly IndicatorCandle[],
+  window: number,
+  compute: (live: readonly IndicatorCandle[]) => IndicatorPoint[],
+): IndicatorPoint[] {
+  const live = withoutFlatBars(candles);
+  if (live.length === candles.length) return compute(candles);
+  const rawIndexById = new Map(candles.map((candle, index) => [candle.id, index] as const));
+  return compute(live).filter((point) => {
+    const rawIndex = rawIndexById.get(point.candleId);
+    return rawIndex !== undefined && flatShareOfWindow(candles, rawIndex, window) <= MAXIMUM_FLAT_SHARE_OF_WINDOW;
+  });
+}
+
 export class TechnicalIndicatorEngine {
   calculate(candles: readonly IndicatorCandle[], definition: IndicatorDefinitionSpec): IndicatorPoint[] {
     for (let index = 1; index < candles.length; index += 1) {
@@ -501,18 +543,21 @@ export class TechnicalIndicatorEngine {
         positiveIntegerParameter(definition.parameters, "slowPeriod"),
         positiveIntegerParameter(definition.parameters, "signalPeriod"),
       );
-      case "ATR": return atr(candles, positiveIntegerParameter(definition.parameters, "period"));
+      case "ATR": {
+        const period = positiveIntegerParameter(definition.parameters, "period");
+        return volatilityOnLiveBars(candles, period, (live) => atr(live, period));
+      }
       case "VWAP": return vwap(candles);
-      case "BOLLINGER_BANDS": return bollingerBands(
-        candles,
-        positiveIntegerParameter(definition.parameters, "period"),
-        numberParameter(definition.parameters, "standardDeviations", 0),
-      );
-      case "SUPERTREND": return supertrend(
-        candles,
-        positiveIntegerParameter(definition.parameters, "atrPeriod"),
-        numberParameter(definition.parameters, "multiplier", 0),
-      );
+      case "BOLLINGER_BANDS": {
+        const period = positiveIntegerParameter(definition.parameters, "period");
+        const standardDeviations = numberParameter(definition.parameters, "standardDeviations", 0);
+        return volatilityOnLiveBars(candles, period, (live) => bollingerBands(live, period, standardDeviations));
+      }
+      case "SUPERTREND": {
+        const atrPeriod = positiveIntegerParameter(definition.parameters, "atrPeriod");
+        const multiplier = numberParameter(definition.parameters, "multiplier", 0);
+        return volatilityOnLiveBars(candles, atrPeriod, (live) => supertrend(live, atrPeriod, multiplier));
+      }
       case "FVG": return fvg(candles);
       case "BOS": return bos(
         candles,

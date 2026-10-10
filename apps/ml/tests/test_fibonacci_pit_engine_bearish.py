@@ -301,3 +301,98 @@ def test_bearish_canonical_location_evaluation(sample_artifact):
     in_loc, zone = engine.evaluate_location(150.0, decision_at=timestamps[11] + 5000)
     assert in_loc is False
     assert zone == "NONE"
+
+# ---------------------------------------------------------------------------------------------
+# 2026-10-10 realignment regression tests (mirrors of the bullish ones).
+# ---------------------------------------------------------------------------------------------
+
+def _bearish_engine_at_mss(sample_artifact, pivot_width: int = 1):
+    engine = StatefulPITFibEngineBearish(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=pivot_width)
+    timestamps = [100000 + i * 1000 for i in range(20)]
+    candles = [
+        make_bar(1, timestamps[0], 100, 101, 99, 100, timestamps[0]),
+        make_bar(2, timestamps[1], 100, 101, 99, 100, timestamps[1]),
+        make_bar(3, timestamps[2], 100, 101, 99, 100, timestamps[2]),
+        make_bar(4, timestamps[3], 100, 101, 99, 100, timestamps[3]),
+        make_bar(5, timestamps[4], 100, 101, 99, 100, timestamps[4]),
+        make_bar(6, timestamps[5], 100, 101, 99, 100, timestamps[5]),
+        make_bar(7, timestamps[6], 100, 102, 99, 100, timestamps[6]),
+        make_bar(8, timestamps[7], 101, 105, 100, 104, timestamps[7]),   # pivot high 105
+        make_bar(9, timestamps[8], 104, 103, 102, 103, timestamps[8]),
+        make_bar(10, timestamps[9], 103, 102, 96, 99, timestamps[9]),
+    ]
+    support = StructuralLevel(levelPrice=98.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+    engine.process_new_candle(candles, support, None, atr, timestamps[9])
+    assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+    candles.append(make_bar(11, timestamps[10], 97, 98, 95, 95, timestamps[10]))
+    engine.process_new_candle(candles, support, None, atr, timestamps[10])
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.anchor_low == 95
+    return engine, candles, support, atr, timestamps
+
+
+def _bear_process(engine, candles, support, atr, ts, seq, o, h, l, c, retr_high=None):
+    candles.append(make_bar(seq, ts, o, h, l, c, ts))
+    retr = (RetracementObservation(low=0.0, high=retr_high, sequenceNumber=seq, observedAt=ts, availableAt=ts)
+            if retr_high is not None else None)
+    return engine.process_new_candle(candles[-20:], support, retr, atr, ts)
+
+
+def test_bearish_new_low_after_qualification_reanchors_and_supersedes_the_stale_poi(sample_artifact):
+    engine, candles, support, atr, ts = _bearish_engine_at_mss(sample_artifact)
+    _bear_process(engine, candles, support, atr, ts[11], 12, 95, 99.5, 96.0, 99.0, retr_high=99.5)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.active_poi.anchorLow == 95
+
+    # The down-leg extends to 90.
+    _bear_process(engine, candles, support, atr, ts[12], 13, 95, 96, 90, 91)
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.active_poi is None
+    assert engine.poi_qualified_seq is None
+    assert engine.anchor_low == 90
+    assert engine.event_history[-1]["eventType"] == "ANCHOR_EXTENDED"
+
+    _bear_process(engine, candles, support, atr, ts[13], 14, 91, 96.5, 91, 96, retr_high=96.5)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.active_poi.anchorLow == 90
+    assert engine.active_poi.anchorHigh == 105
+    # r = (price - 90) / 15 ; 0.62 -> 99.3
+    assert engine.evaluate_location(99.3, ts[13] + 5000)[1] == "GOLDEN_POCKET"
+
+
+def test_bearish_break_of_pivot_high_before_any_poi_invalidates(sample_artifact):
+    engine, candles, support, atr, ts = _bearish_engine_at_mss(sample_artifact)
+    assert engine.active_poi is None
+    # Pivot high 105 + 2 ticks = 105.10; a high of 105.15 breaks it.
+    _, status = _bear_process(engine, candles, support, atr, ts[11], 12, 100, 105.15, 99, 100)
+    assert status == "INVALIDATED"
+    assert engine.state == FibLifecycleState.IDLE
+
+
+def test_bearish_qualification_needs_both_floors(sample_artifact):
+    engine, candles, support, atr, ts = _bearish_engine_at_mss(sample_artifact)
+    # 0.6 points = 12 ticks (>= 10) but only 0.3 ATR (< 0.5).
+    _bear_process(engine, candles, support, atr, ts[11], 12, 95, 95.6, 95.1, 95.2, retr_high=95.6)
+    assert engine.state == FibLifecycleState.ANCHOR_LOW_FORMED
+    assert engine.active_poi is None
+    _bear_process(engine, candles, support, atr, ts[12], 13, 95.2, 97.0, 95.2, 96.8, retr_high=97.0)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+
+
+def test_bearish_fractal_width_two_ignores_a_three_bar_pivot(sample_artifact):
+    base = [make_bar(i + 1, 100000 + i * 1000, 100, 101, 99, 100, 100000 + i * 1000) for i in range(6)]
+    candles = base + [
+        make_bar(7, 106000, 100, 102, 99, 100, 106000),
+        make_bar(8, 107000, 101, 105, 100, 104, 107000),
+        make_bar(9, 108000, 104, 103, 102, 103, 108000),
+        make_bar(10, 109000, 103, 102, 101, 102, 109000),
+    ]
+    support = StructuralLevel(levelPrice=95.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+    narrow = StatefulPITFibEngineBearish(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=1)
+    narrow.process_new_candle(candles, support, None, atr, 109000)
+    assert narrow.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+    wide = StatefulPITFibEngineBearish(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=2)
+    wide.process_new_candle(candles, support, None, atr, 109000)
+    assert wide.state == FibLifecycleState.IDLE

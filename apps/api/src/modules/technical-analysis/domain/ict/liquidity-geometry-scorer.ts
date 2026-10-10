@@ -10,7 +10,30 @@
  *
  * Proves that observable pool level geometry (distance in bps, pool identity, side, session context)
  * provides > 93% predictive power for near-term liquidity pool contact.
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════════════════════╗
+ * ║ WARNING -- TRAINED ON LEAKY LEGACY LABELS (`labeling_version = 'v1-legacy'`). DO NOT     ║
+ * ║ TRUST THE AUC / PROBABILITIES BELOW.                                                     ║
+ * ╚══════════════════════════════════════════════════════════════════════════════════════════╝
+ * The weights and the "AUC 0.93" were fitted on `liquidity_contact_labels` produced by the
+ * defective legacy labeler: its forward window started at the OPEN of the confirming bar, so the
+ * confirming bar itself was credited as "contact" (5m SESSION_HIGH/LOW: 5646 of 5646 contacted),
+ * and the "30s" horizon was really a 60s span from 1m bars. The candidates were also massively
+ * duplicated after PDH/PDL breaches (one level-day -> up to 1,725 rows). The large positive
+ * SESSION_HIGH/LOW weights below largely encode that leakage (the level IS the bar that was just
+ * traded), not market behaviour. This scorer has NOT been retrained on `v2-causal` labels over
+ * `v2-dedup` candidates -- see `liquidity-label-versions.ts` and
+ * docs/2026-10-10-orderbook-liquidity-audit-fixes.md. Consumers can detect this programmatically
+ * through `GEOMETRY_SCORER_TRAINED_ON_LABELING_VERSION` / `GEOMETRY_SCORER_IS_TRAINED_ON_LEGACY_LABELS`
+ * and every score carries `trainedOnLabelingVersion`.
  */
+
+import { LABELING_VERSION_LEGACY } from "./liquidity-label-versions.js";
+
+/** The labeling_version the weights below were fitted on. NOT `v2-causal`: they are not retrained. */
+export const GEOMETRY_SCORER_TRAINED_ON_LABELING_VERSION = LABELING_VERSION_LEGACY;
+/** True while the weights come from the leaky legacy labels; flips only when retrained on v2-causal. */
+export const GEOMETRY_SCORER_IS_TRAINED_ON_LEGACY_LABELS = true;
 
 export type LiquidityPoolType =
   | "PDH"
@@ -42,11 +65,15 @@ export interface LiquidityGeometryScore {
   readonly distanceBps: number;
   readonly horizonSeconds: number;
   readonly rationale: string;
+  /** Always the legacy (leaky) labeling version until the scorer is retrained; see the file header. */
+  readonly trainedOnLabelingVersion: string;
+  readonly isTrainedOnLegacyLabels: boolean;
 }
 
 /**
- * Empirically calibrated logistic regression weights for 300s horizon (Stage B baseline).
- * Derived from Phase 3 train dataset (Jan 2026 - Jun 2026).
+ * Logistic regression weights for 300s horizon (Stage B baseline).
+ * Derived from Phase 3 train dataset (Jan 2026 - Jun 2026) on LEGACY (`v1-legacy`) labels, which
+ * leak look-ahead -- see the warning in the file header. Not calibrated on causal labels.
  */
 const INTERCEPT_300S = 2.45;
 const COEFF_LOG_DIST_300S = -1.82; // Distance decay
@@ -114,6 +141,8 @@ export class LiquidityGeometryScorer {
       distanceBps: distBps,
       horizonSeconds: horizon,
       rationale,
+      trainedOnLabelingVersion: GEOMETRY_SCORER_TRAINED_ON_LABELING_VERSION,
+      isTrainedOnLegacyLabels: GEOMETRY_SCORER_IS_TRAINED_ON_LEGACY_LABELS,
     };
   }
 }

@@ -200,6 +200,10 @@ async function main(): Promise<void> {
     EOD_PIPELINE: 6 * 60 * 60 * 1000,
     INSTITUTIONAL_FLOWS: 30 * 60 * 1000,
     INSTITUTIONAL_FLOWS_RETRY: 30 * 60 * 1000,
+    // Two Yahoo quotes and an upsert; a dead claimant should not hold the next day's slot.
+    OPENING_GAP_PREDICTION: 5 * 60 * 1000,
+    // Reads stored candles only, same patience as AUXILIARY_PREDICTION_SETTLEMENT.
+    OPENING_GAP_SETTLEMENT: 10 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -373,6 +377,31 @@ async function main(): Promise<void> {
   // retries close the gap the original one-shot 18:30 schedule left overnight.
   cronSchedule("15 19,20 * * 1-5", () => {
     void schedule("INSTITUTIONAL_FLOWS_RETRY", () => runCommand("npm", ["run", "data:collect:institutional"]));
+  });
+
+  /**
+   * Predicts NIFTY50/BANKNIFTY's opening gap from the S&P 500's own overnight change, 25
+   * minutes before the 09:15 IST open -- see `opening-gap-classifier.ts` for why the driver
+   * is the S&P 500 and not GIFT Nifty (no free GIFT Nifty feed exists anywhere this codebase
+   * can reach). Reads a live Yahoo quote and writes one row per instrument; ungated, like
+   * `INSTITUTIONAL_FLOWS`, since it depends on neither the Fyers token nor the option chain.
+   */
+  cronSchedule("50 8 * * 1-5", () => {
+    void schedule("OPENING_GAP_PREDICTION", () => runCommand("npm", ["run", "data:predict:opening-gap"]));
+  });
+
+  /**
+   * Settles opening-gap predictions against the real 09:15 IST open once the session's first
+   * 1-minute candle has landed. Three tries through the morning (the candle can lag the open
+   * by a minute or two under load) plus one EOD catch-all, the same shape as
+   * `AUXILIARY_PREDICTION_SETTLEMENT` and for the same reason: a stalled claim must not block
+   * the next day's prediction, so it gets its own job type rather than riding on another one.
+   */
+  cronSchedule("20,30,45 9 * * 1-5", () => {
+    void schedule("OPENING_GAP_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:opening-gap"]));
+  });
+  cronSchedule("20 16 * * 1-5", () => {
+    void schedule("OPENING_GAP_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:opening-gap"]));
   });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
@@ -1335,6 +1364,8 @@ async function main(): Promise<void> {
       "INDICES_INTRADAY",
       "INSTITUTIONAL_FLOWS",
       "INSTITUTIONAL_FLOWS_RETRY",
+      "OPENING_GAP_PREDICTION",
+      "OPENING_GAP_SETTLEMENT",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",

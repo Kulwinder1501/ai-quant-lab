@@ -1,4 +1,4 @@
-import type { ProposedTradeIdea } from "./strategy.js";
+import type { ConfluenceSignal, ProposedTradeIdea } from "./strategy.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import { largestOpenInterestStrikes } from "../../market-data/domain/option-chain.js";
 import { yearsToExpiry } from "@ai-quant-lab/pricing";
@@ -10,20 +10,16 @@ export interface OptionsValidationContext {
   volumeAbsenceReason?: string;
   optionChain?: OptionChainSnapshot;
   intendedStrike?: number;
+  /**
+   * Expiry of the intended contract. When absent and the chain spans several expiries, the nearest
+   * one is assumed and the assumption is reported in `unchecked`.
+   */
+  intendedExpiryDate?: Date;
   hasMacroEvent?: boolean;
   intendedContractDelta?: number | null;
   ivPercentile?: number | null;
   ivPercentileCeiling?: number;
-  confluenceSignal?: {
-    is_level_proximate?: boolean;
-    nearest_level_type?: string | null;
-    nearest_level_price?: number | null;
-    distance_bps?: number | null;
-    raw_di?: number | null;
-    di_tilde?: number | null;
-    directional_bias?: string;
-    gate_action?: string;
-  } | null;
+  confluenceSignal?: ConfluenceSignal | null;
 }
 
 export interface OptionsValidationResult {
@@ -35,6 +31,16 @@ export interface OptionsValidationResult {
    * is a weaker statement than `isValid: true` with an empty one.
    */
   unchecked: string[];
+}
+
+/**
+ * Epoch ms of the expiry the intended contract is on: the caller's, else the nearest expiry present
+ * in the chain. Null for a chain with no quotes.
+ */
+function resolveIntendedExpiryMs(chain: OptionChainSnapshot, intended: Date | undefined): number | null {
+  if (intended) return intended.getTime();
+  const expiries = chain.quotes.map(q => q.expiryDate.getTime());
+  return expiries.length === 0 ? null : Math.min(...expiries);
 }
 
 export function validateOptionsEntry(context: OptionsValidationContext): OptionsValidationResult {
@@ -83,26 +89,70 @@ export function validateOptionsEntry(context: OptionsValidationContext): Options
 
   if (optionChain && optionChain.quotes.length > 0) {
     // 8: Open Interest (OI)
-    const { call, put } = largestOpenInterestStrikes(optionChain.quotes);
-    
+    //
+    // The heaviest-OI strike is only "support" (put wall) if it sits at or BELOW spot and only
+    // "resistance" (call wall) if it sits at or ABOVE spot. A put wall above spot is not support
+    // and a call wall below spot is not resistance, so the wall is compared with spot before it
+    // is labelled. Without a spot reading the position is unknown and is reported as unchecked.
+    // Informational either way: this never rejects an entry.
+    //
+    // The walls are taken over the intended expiry's book only: largest OI across several expiries
+    // would mix different contracts.
+    const intendedExpiryMs = resolveIntendedExpiryMs(optionChain, context.intendedExpiryDate);
+    const wallQuotes = intendedExpiryMs === null
+      ? optionChain.quotes
+      : optionChain.quotes.filter(q => q.expiryDate.getTime() === intendedExpiryMs);
+    const { call, put } = largestOpenInterestStrikes(wallQuotes);
+    const spot = optionChain.underlyingValue;
+    const hasSpot = spot != null && Number.isFinite(spot);
+
     if (proposedIdea.side === "LONG") {
       if (put && put.openInterest > 0) {
-        reasons.push(`Confirmed strong Put OI support at strike ${put.strikePrice}.`);
+        if (!hasSpot) {
+          unchecked.push(`Put OI wall at strike ${put.strikePrice}: no underlying value in the chain, so it cannot be classed as support or not.`);
+        } else if (put.strikePrice <= spot) {
+          reasons.push(`Strong Put OI support at strike ${put.strikePrice} (at or below spot ${spot}).`);
+        } else {
+          reasons.push(`Largest Put OI is at strike ${put.strikePrice}, ABOVE spot ${spot}: not support. Informational only.`);
+        }
       }
     } else {
       if (call && call.openInterest > 0) {
-        reasons.push(`Confirmed strong Call OI resistance at strike ${call.strikePrice}.`);
+        if (!hasSpot) {
+          unchecked.push(`Call OI wall at strike ${call.strikePrice}: no underlying value in the chain, so it cannot be classed as resistance or not.`);
+        } else if (call.strikePrice >= spot) {
+          reasons.push(`Strong Call OI resistance at strike ${call.strikePrice} (at or above spot ${spot}).`);
+        } else {
+          reasons.push(`Largest Call OI is at strike ${call.strikePrice}, BELOW spot ${spot}: not resistance. Informational only.`);
+        }
       }
     }
 
     if (intendedStrike) {
+      // Match on expiry as well as strike and side: the same strike exists on every listed
+      // expiry, and `find(strike && type)` returned whichever came first.
       const intendedContract = optionChain.quotes.find(
-        q => q.strikePrice === intendedStrike && q.optionType === (proposedIdea.side === "LONG" ? "CE" : "PE")
+        q => q.strikePrice === intendedStrike
+          && q.optionType === (proposedIdea.side === "LONG" ? "CE" : "PE")
+          && (intendedExpiryMs === null || q.expiryDate.getTime() === intendedExpiryMs),
       );
+      if (!context.intendedExpiryDate && new Set(optionChain.quotes.map(q => q.expiryDate.getTime())).size > 1) {
+        unchecked.push(
+          `Intended expiry: not supplied and the chain spans several expiries, so the nearest expiry (${new Date(intendedExpiryMs ?? 0).toISOString().slice(0, 10)}) was assumed.`,
+        );
+      }
       if (intendedContract) {
+        // Informational, deliberately NOT a rejection. `openInterestChange` is the vendor's
+        // open_interest - previous_open_interest, i.e. change versus the PREVIOUS DAY's close, not
+        // a poll-to-poll flow. Falling day-over-day OI is read by direction of the price move:
+        // unwinding on a rising premium is short-covering, on a falling one is long liquidation,
+        // so the sign alone says nothing about whether to buy. It also fires on nearly every
+        // contract close to expiry, where positions are closed out routinely. Nothing in this repo
+        // shows that an OI decline predicts worse entries, so it no longer blocks.
         if (intendedContract.openInterestChange !== null && intendedContract.openInterestChange < 0) {
-          isValid = false;
-          reasons.push(`Open interest is decreasing on the intended strike ${intendedStrike}. Avoid entry.`);
+          reasons.push(
+            `Open interest on the intended strike ${intendedStrike} is down ${Math.abs(intendedContract.openInterestChange)} versus the previous day's close. Informational only: day-over-day OI change is not a rejection signal.`,
+          );
         }
 
         // Spread & Liquidity Check (Max 3%)

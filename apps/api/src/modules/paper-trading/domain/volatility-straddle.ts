@@ -8,6 +8,72 @@ import {
 import type { VolatilityLabel } from "../../model-predictions/domain/volatility-expansion-label.js";
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
+/*
+ * Two clocks, kept apart in the type system so they cannot be mixed again.
+ *
+ * An annualised implied volatility is quoted per *trading* year: volatility accrues while the
+ * market is open (NSE: 375 minutes a session, ~252 sessions a year = 94,500 minutes), not while
+ * it is shut. Scaling an intraday implied move by calendar minutes (525,600 a year) understates
+ * it by sqrt(525,600 / 94,500) = 2.36x. Theta, time to expiry and the tenor ratio, on the other
+ * hand, run on the calendar: an option decays overnight.
+ *
+ *   - `TradingYears`  -> ONLY for `spot * sigma * sqrt(t)` comparisons (the implied-move gate).
+ *   - `CalendarYears` -> theta repricing, time to expiry at the horizon, tenor ratio.
+ *
+ * The brands are phantom: a plain number does not type-check where either is required, and one
+ * brand does not satisfy the other. Build them with `tradingHorizonYears` / `calendarHorizonYears`.
+ */
+export type TradingYears = number & { readonly __clock: "trading" };
+export type CalendarYears = number & { readonly __clock: "calendar" };
+
+export const TRADING_MINUTES_PER_SESSION = 375;
+export const TRADING_SESSIONS_PER_YEAR = 252;
+const TRADING_MINUTES_PER_YEAR = TRADING_MINUTES_PER_SESSION * TRADING_SESSIONS_PER_YEAR;
+const CALENDAR_MINUTES_PER_YEAR = 365 * 24 * 60;
+
+/** Trading minutes one bar spans. A daily bar is one session (375), not a 24-hour day. */
+const TRADING_MINUTES_PER_BAR: Readonly<Record<string, number>> = {
+  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
+  "1d": TRADING_MINUTES_PER_SESSION,
+};
+
+/** Calendar minutes one bar spans: a daily bar consumes a full calendar day of contract life. */
+const CALENDAR_MINUTES_PER_BAR: Readonly<Record<string, number>> = {
+  "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "60m": 60,
+  "1d": 1440,
+};
+
+function barSpan(table: Readonly<Record<string, number>>, timeframe: string, horizonBars: number): number | null {
+  const minutes = table[timeframe];
+  if (minutes === undefined || !Number.isFinite(horizonBars) || horizonBars < 1) return null;
+  return minutes * horizonBars;
+}
+
+/**
+ * The horizon in trading years: `bars * minutes / (375 * 252)`, so a daily bar is 1/252 of a year.
+ * Null for a timeframe this does not know rather than a guess.
+ */
+export function tradingHorizonYears(timeframe: string, horizonBars: number): TradingYears | null {
+  const minutes = barSpan(TRADING_MINUTES_PER_BAR, timeframe, horizonBars);
+  return minutes === null ? null : (minutes / TRADING_MINUTES_PER_YEAR) as TradingYears;
+}
+
+/** The horizon in calendar years (`/ 525,600`), the clock of theta and time to expiry. */
+export function calendarHorizonYears(timeframe: string, horizonBars: number): CalendarYears | null {
+  const minutes = barSpan(CALENDAR_MINUTES_PER_BAR, timeframe, horizonBars);
+  return minutes === null ? null : (minutes / CALENDAR_MINUTES_PER_YEAR) as CalendarYears;
+}
+
+/** Trading minutes in a trading-year horizon, for messages. */
+export function tradingYearsToMinutes(years: TradingYears): number {
+  return years * TRADING_MINUTES_PER_YEAR;
+}
+
+/** Calendar minutes in a calendar-year horizon, for messages. */
+export function calendarYearsToMinutes(years: CalendarYears): number {
+  return years * CALENDAR_MINUTES_PER_YEAR;
+}
+
 /**
  * Turns a volatility-regime prediction into a costed long-straddle proposal.
  *
@@ -151,7 +217,9 @@ export interface ProposeStraddleInput {
   /** The model's own `validationProtocol.expansionBand`, never a default. */
   expansionBand: number;
   /**
-   * How far ahead the prediction reaches, in years: `horizonBars * barLength`.
+   * How far ahead the prediction reaches, in TRADING years: `horizonBars * barMinutes / (375 * 252)`.
+   * Used only to scale the implied move the prediction is compared against (`spot * sigma *
+   * sqrt(t)`), because volatility accrues in market time. Never use it for theta.
    *
    * Required rather than optional, because the alternative was silently wrong.
    * `predictedForwardRange` is scaled to this horizon -- a 15m model at h5 predicts the next 75
@@ -160,8 +228,17 @@ export interface ProposeStraddleInput {
    * measured 2026-08-17, every live evaluation refused MARKET_ALREADY_PRICES_THE_MOVE at 43.44
    * against 408.18, a ratio that is horizon mismatch rather than market judgment. A default here
    * would let a caller reintroduce that silently.
+   *
+   * Scaling by calendar minutes instead (the previous behaviour) understated the 75-minute
+   * implied move 2.36x: NIFTY 23,400 at 13% IV is 85.7 points in trading time, 36.5 in calendar
+   * time, so the "market already prices the move" refusal almost never fired.
    */
-  predictionHorizonYears: number;
+  tradingHorizonYears: TradingYears;
+  /**
+   * The same horizon in CALENDAR years. Drives theta (`timeToExpiryAtHorizonYears`, decay cost,
+   * the horizon exit value) and the tenor penalty, all of which run on the wall clock.
+   */
+  calendarHorizonYears: CalendarYears;
   now?: Date;
   riskFreeRate?: number;
 }
@@ -315,9 +392,10 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
    * eight-day option to express a seventy-five-minute view. Re-scaling the comparison does not
    * make that mismatch disappear -- it moves it to where it belongs, which is the economics.
    */
+  // Trading time: volatility accrues while the market is open.
   const impliedMoveOverHorizon = input.underlyingSpot
     * input.impliedVolatility
-    * Math.sqrt(input.predictionHorizonYears);
+    * Math.sqrt(input.tradingHorizonYears);
 
   /*
    * Mark-to-market at the horizon.
@@ -331,7 +409,8 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
    * one basis: the entry premium was priced at `underlyingSpot`, which sits within half a strike
    * step of `strike`.
    */
-  const timeToExpiryAtHorizonYears = timeToExpiryYears - input.predictionHorizonYears;
+  // Calendar time: theta does not stop overnight.
+  const timeToExpiryAtHorizonYears = timeToExpiryYears - input.calendarHorizonYears;
   const excursion = predictedForwardRange / 2;
   const decayCostOverHorizon = totalPremium - straddleValueAt(input.underlyingSpot, timeToExpiryAtHorizonYears);
   const upValue = straddleValueAt(input.underlyingSpot + excursion, timeToExpiryAtHorizonYears);
@@ -388,11 +467,16 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
    * the rest of the module already uses for exactly this reason.
    *
    * The correction is not cosmetic: it is the condition the repriced mark-to-market independently
-   * arrives at. Gamma gain over the horizon is about `0.5 * gamma * displacement^2` and decay is
-   * about `premium * dt / (2 * T)`; for an at-the-money straddle those cross precisely where the
-   * displacement equals `spot * sigma * sqrt(dt)`. So this gate and the sign of
-   * `horizonNetPerUnit` are the same statement, one closed-form and one repriced, and the test
-   * suite asserts they agree.
+   * arrives at when both run on one clock. Gamma gain over the horizon is about
+   * `0.5 * gamma * displacement^2` and decay is about `premium * dt / (2 * T)`; for an
+   * at-the-money straddle those cross where the displacement equals `spot * sigma * sqrt(dt)`.
+   *
+   * The two clocks are not one clock, though. The gate scales dt in TRADING time (volatility
+   * accrues only while the market is open); the repriced `horizonNetPerUnit` decays the option on
+   * the CALENDAR, as theta does. Intraday the trading-time gate is therefore up to 2.36x stricter
+   * than the sign of `horizonNetPerUnit`: the gate is the binding test, and a positive net on a
+   * refused signal means "positive only if the option decayed on calendar time", not an edge.
+   * The test suite asserts the one-directional relation: a signal the gate passes nets > 0.
    */
   if (economics.conservativeExcursion <= impliedMoveOverHorizon) {
     return refuse(
@@ -400,7 +484,7 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
       `The predicted range ${predictedForwardRange.toFixed(2)} gives a half-range displacement of `
       + `${economics.conservativeExcursion.toFixed(2)}, which does not exceed the `
       + `${impliedMoveOverHorizon.toFixed(2)} the option chain prices over the same `
-      + `${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)} minutes (the full-life implied move to `
+      + `${tradingYearsToMinutes(input.tradingHorizonYears).toFixed(0)} trading minutes (the full-life implied move to `
       + `expiry is ${impliedMove.toFixed(2)}). Buying premium here bets that realised volatility beats `
       + "implied volatility, and this signal does not claim that.",
       economics,
@@ -422,16 +506,18 @@ export function proposeVolatilityStraddle(input: ProposeStraddleInput): Straddle
    * is what the same signal is worth when the position is released at the horizon instead.
    */
   if (economics.conservativeExcursion <= totalPremium) {
-    // Exact while the horizon lies inside one session, where trading and calendar time coincide;
-    // for a daily-bar horizon the elapsed calendar span is longer and the penalty smaller.
-    const tenorPenalty = Math.sqrt(timeToExpiryYears / input.predictionHorizonYears);
+    // A calendar-over-calendar ratio: remaining contract life against the calendar span the
+    // horizon covers. It is a nominal figure, not an exact one: a horizon that crosses the close
+    // (a 15:15 entry reaching into tomorrow) spans more calendar time than the bar length says,
+    // and this ratio does not model that, so the penalty is overstated in that window.
+    const tenorPenalty = Math.sqrt(timeToExpiryYears / input.calendarHorizonYears);
     return refuse(
       "PREMIUM_EXCEEDS_PREDICTED_MOVE",
       `The two legs cost ${totalPremium.toFixed(2)} but the conservative half-range excursion is only `
       + `${economics.conservativeExcursion.toFixed(2)} (from a ${predictedForwardRange.toFixed(2)} predicted range). `
       + "The expected directional move does not reach breakeven, so this loses money when the signal is correct. "
       + `The contract has ${(timeToExpiryYears * 365).toFixed(1)} days left against a `
-      + `${(input.predictionHorizonYears * 365 * 24 * 60).toFixed(0)}-minute prediction, which is a `
+      + `${tradingYearsToMinutes(input.tradingHorizonYears).toFixed(0)}-trading-minute prediction, which is a `
       + `${tenorPenalty.toFixed(1)}x tenor penalty on the required move. Released at the horizon the same `
       + `signal nets ${economics.horizonNetPerUnit.toFixed(2)} per unit `
       + `(${economics.horizonExitValue.toFixed(2)} exit value against ${totalPremium.toFixed(2)} paid, after `

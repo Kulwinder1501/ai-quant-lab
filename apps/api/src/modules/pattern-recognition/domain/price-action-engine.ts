@@ -1,4 +1,5 @@
 import { atrSeries } from "./atr-series.js";
+import { isIntradayTimeframe } from "./session-segmentation.js";
 import type { DetectedPriceActionEvent, PatternCandle, PatternDirection, PriceActionEventCode } from "./market-pattern.js";
 
 /**
@@ -54,6 +55,20 @@ export const atrPriceActionConfiguration: PriceActionConfiguration = {
   ...defaultConfiguration,
   thresholdMode: "ATR",
 };
+
+/**
+ * The configuration `price-action-v3` uses for a timeframe: ATR units on intraday, percent on daily.
+ *
+ * The percent unit made the trend rule "1% over 20 bars", which on 1m is a violent session rather
+ * than a trend (and only the percent variant was ever stored; the ATR variant was never run), so
+ * intraday trend/breakout/pullback rules were effectively silent. `v3` therefore defines the unit
+ * by timeframe -- the same unit-count thresholds, measured in the volatility of the bar size being
+ * read. Every event records `thresholdMode` in its details, so a stored row states which unit
+ * produced it.
+ */
+export function priceActionConfigurationForTimeframe(timeframe: string): PriceActionConfiguration {
+  return isIntradayTimeframe(timeframe) ? atrPriceActionConfiguration : defaultConfiguration;
+}
 
 type Trend = "UPTREND" | "DOWNTREND" | "RANGE";
 

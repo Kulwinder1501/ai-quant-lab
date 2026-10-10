@@ -110,7 +110,14 @@ export function atmStrikeOf(quotes: readonly OptionChainQuote[], underlyingValue
 }
 
 export interface PutCallRatios {
-  /** Total put OI over total call OI. Null when call OI is zero — undefined, not infinite. */
+  /**
+   * Total put OI over total call OI. Null when call OI is zero — undefined, not infinite — or when
+   * any contract in the set has missing OI (the sums below then treat it as 0 and would
+   * understate that side; the ratio refuses rather than report a biased figure).
+   *
+   * Computed over whichever quotes were passed, which for the stored chain is the collector's
+   * +/-strikeCount window around spot, NOT the whole exchange chain.
+   */
   openInterestRatio: number | null;
   /** Same over traded volume: today's activity rather than carried positioning. */
   volumeRatio: number | null;
@@ -134,7 +141,10 @@ export function putCallRatios(quotes: readonly OptionChainQuote[]): PutCallRatio
   let callVolume = 0;
   let putVolume = 0;
 
+  let anyOpenInterestMissing = false;
+
   for (const quote of quotes) {
+    if (!isFiniteNonNegative(quote.openInterest)) anyOpenInterestMissing = true;
     const openInterest = isFiniteNonNegative(quote.openInterest) ? quote.openInterest : 0;
     const volume = isFiniteNonNegative(quote.volume) ? quote.volume : 0;
     if (quote.optionType === "CE") {
@@ -148,7 +158,11 @@ export function putCallRatios(quotes: readonly OptionChainQuote[]): PutCallRatio
 
   return {
     // Division by zero is undefined, not infinite: a chain with no call OI has no ratio.
-    openInterestRatio: callOpenInterest > 0 ? putOpenInterest / callOpenInterest : null,
+    // Null when ANY contract lacks OI: coercing it to 0 would understate that side, so a missing
+    // put OI produced a PCR near 0 that passes a SHORT gate (<= 0.8). Unknown is not zero.
+    openInterestRatio: !anyOpenInterestMissing && callOpenInterest > 0
+      ? putOpenInterest / callOpenInterest
+      : null,
     volumeRatio: callVolume > 0 ? putVolume / callVolume : null,
     callOpenInterest,
     putOpenInterest,

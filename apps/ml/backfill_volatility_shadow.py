@@ -49,7 +49,16 @@ from ai_quant_lab_ml.training import (  # noqa: E402
 )
 from ai_quant_lab_ml.validation import walk_forward_splits  # noqa: E402
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET  # noqa: E402
-from train import positive_float, positive_int, non_blank, parse_timestamp, strict_unit_interval, trivial_majority_metrics  # noqa: E402
+from train import (  # noqa: E402
+    compare_to_baselines,
+    non_blank,
+    parse_timestamp,
+    positive_float,
+    positive_int,
+    strict_unit_interval,
+    time_of_day_baseline_metrics,
+    trivial_majority_metrics,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -124,6 +133,8 @@ def main() -> int:
     pooled_predicted: list = []
     accuracy_wins = 0
     macro_f1_wins = 0
+    accuracy_wins_vs_strongest = 0
+    macro_f1_wins_vs_strongest = 0
 
     for index, split in enumerate(splits, start=1):
         result = train_model(
@@ -137,6 +148,13 @@ def main() -> int:
         actual = [item.label for item in split.validation]
         model_metrics = evaluate_predictions(actual, predicted, alphabet=alphabet)
         trivial = trivial_majority_metrics(split, alphabet=alphabet)
+        # 2026-10-10 follow-up: the time-of-day-stratified majority (train-only fit) is reported
+        # alongside the trivial one, and wins are ALSO counted against the stronger of the two.
+        baselines = compare_to_baselines(
+            model_metrics,
+            trivial,
+            time_of_day_baseline_metrics(split, alphabet=alphabet, timeframe=request.timeframe),
+        )
 
         pooled_actual.extend(actual)
         pooled_predicted.extend(predicted)
@@ -146,6 +164,10 @@ def main() -> int:
             accuracy_wins += 1
         if f1_delta > 0:
             macro_f1_wins += 1
+        if baselines["beatsStrongestOnAccuracy"]:
+            accuracy_wins_vs_strongest += 1
+        if baselines["beatsStrongestOnMacroF1"]:
+            macro_f1_wins_vs_strongest += 1
 
         expansion = model_metrics.per_class.get("EXPANSION")
         windows.append({
@@ -158,6 +180,10 @@ def main() -> int:
             "modelMacroF1": round(model_metrics.macro_f1, 4),
             "trivialMacroF1": round(trivial.macro_f1, 4),
             "macroF1Delta": round(f1_delta, 4),
+            "timeOfDayAccuracy": round(baselines["timeOfDay"]["accuracy"], 4),
+            "timeOfDayMacroF1": round(baselines["timeOfDay"]["macroF1"], 4),
+            "accuracyDeltaVsStrongest": round(baselines["accuracyMinusStrongest"], 4),
+            "macroF1DeltaVsStrongest": round(baselines["macroF1MinusStrongest"], 4),
             "expansionF1": round(expansion.f1, 4) if expansion is not None else None,
         })
         print(
@@ -185,6 +211,9 @@ def main() -> int:
         "settledPredictions": len(pooled_actual),
         "accuracyWonWindows": f"{accuracy_wins}/{len(splits)}",
         "macroF1WonWindows": f"{macro_f1_wins}/{len(splits)}",
+        # Against the stronger of {trivial, time-of-day-stratified} per window (the honest bar).
+        "accuracyWonWindowsVsStrongestBaseline": f"{accuracy_wins_vs_strongest}/{len(splits)}",
+        "macroF1WonWindowsVsStrongestBaseline": f"{macro_f1_wins_vs_strongest}/{len(splits)}",
         "pooled": {
             "accuracy": round(pooled.accuracy, 4),
             "balancedAccuracy": round(pooled.balanced_accuracy, 4),

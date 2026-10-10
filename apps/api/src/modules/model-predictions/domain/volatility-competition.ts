@@ -52,6 +52,57 @@ export interface VolatilityStanding {
   scoredDays: number;
   /** Most recent day this model settled anything, or null if never. */
   lastScoredDate: string | null;
+  /**
+   * Accuracy and macro-F1 of the time-of-day-stratified trivial predictor over this model's
+   * settled window -- see `computeTimeOfDayBaseline`. Optional because the repository has
+   * to be given the training-only per-bar majorities before it can fill it in.
+   */
+  timeOfDayBaseline?: TimeOfDayBaseline | null;
+}
+
+export interface TimeOfDayBaseline {
+  accuracy: number | null;
+  macroF1: number | null;
+}
+
+/** One settled-outcome bucket: how often a bar of this time of day realised this label. */
+export interface BarOfDayOutcome {
+  /** Bar-of-day key (`time_of_day_key` in `volatility_expansion.py`: IST open minute // bar minutes). */
+  barOfDay: number;
+  realizedLabel: VolatilityLabel;
+  count: number;
+}
+
+/**
+ * The trivial predictor the expansion label is actually up against.
+ *
+ * The label is not stationary across the session: on NIFTY 15m h=5, EXPANSION/STABLE/CONTRACTION
+ * is 13/25/62% at bar 0 and 6/16/78% at bar 4 but about 30/34/37% from bar 5 on. A model that
+ * has learned only the clock therefore beats "always predict the global majority" while having
+ * no information about volatility. This baseline predicts, for each bar of the day, the majority
+ * label of that bar **in the training data** (`trainingMajorityByBar`, never the settled window
+ * being scored), falling back to `fallbackLabel` -- the global training majority -- for a bar the
+ * training data never saw. It is scored against the realised outcomes with the same metrics code
+ * as the model, so the two numbers are directly comparable.
+ */
+export function computeTimeOfDayBaseline(input: {
+  outcomes: readonly BarOfDayOutcome[];
+  trainingMajorityByBar: ReadonlyMap<number, VolatilityLabel>;
+  fallbackLabel: VolatilityLabel;
+}): TimeOfDayBaseline {
+  const cells = new Map<string, VolatilityConfusionCell>();
+  for (const outcome of input.outcomes) {
+    const prediction = input.trainingMajorityByBar.get(outcome.barOfDay) ?? input.fallbackLabel;
+    const key = `${prediction}|${outcome.realizedLabel}`;
+    const existing = cells.get(key);
+    if (existing) {
+      existing.count += outcome.count;
+    } else {
+      cells.set(key, { prediction, realizedLabel: outcome.realizedLabel, count: outcome.count });
+    }
+  }
+  const metrics = computeVolatilitySettledMetrics([...cells.values()]);
+  return { accuracy: metrics.accuracy, macroF1: metrics.macroF1 };
 }
 
 export interface VolatilityCompetitionRules {
@@ -71,6 +122,12 @@ export interface VolatilityCompetitionRules {
   promotionMargin: number;
   /** Days without a settled prediction before a PRIMARY is treated as silent. */
   silenceToleranceDays: number;
+  /**
+   * When true, a standing with no `timeOfDayBaseline` cannot qualify. Default off until the
+   * repository supplies the baseline (it needs the training-only per-bar majorities); with it
+   * off, a baseline that IS present is still enforced -- only its absence is tolerated.
+   */
+  requireTimeOfDayBaseline?: boolean;
 }
 
 /**
@@ -175,7 +232,25 @@ export interface VolatilityCompetitionDecision {
  * class discrimination than trivial. The volatility target passes both, which is why it
  * is here at all.
  */
-function beatsTrivial(metrics: VolatilitySettledMetrics): boolean {
+function beatsTrivial(standing: VolatilityStanding, rules: VolatilityCompetitionRules): boolean {
+  const { metrics } = standing;
+  if (!beatsGlobalTrivial(metrics)) {
+    return false;
+  }
+  // The stratified baseline is the stricter of the two whenever the label drifts with the time
+  // of day, so a model must clear it as well as the global majority -- not instead of it.
+  const clock = standing.timeOfDayBaseline ?? null;
+  if (clock === null) {
+    return rules.requireTimeOfDayBaseline !== true;
+  }
+  if (clock.accuracy === null || clock.macroF1 === null) {
+    return false;
+  }
+  return metrics.accuracy !== null && metrics.macroF1 !== null
+    && metrics.accuracy > clock.accuracy && metrics.macroF1 > clock.macroF1;
+}
+
+function beatsGlobalTrivial(metrics: VolatilitySettledMetrics): boolean {
   if (
     metrics.macroF1 === null
     || metrics.accuracy === null
@@ -232,7 +307,7 @@ export function decideVolatilityCompetition(input: {
   const incumbent = input.standings.find((standing) => standing.role === "PRIMARY") ?? null;
 
   const withSample = input.standings.filter((standing) => hasEnoughSample(standing, rules));
-  const qualifying = withSample.filter((standing) => beatsTrivial(standing.metrics));
+  const qualifying = withSample.filter((standing) => beatsTrivial(standing, rules));
   const ranking = [...qualifying].sort((left, right) => {
     const gap = (right.metrics.macroF1 ?? 0) - (left.metrics.macroF1 ?? 0);
     // Ties break on the larger settled sample: the better-evidenced model wins.
@@ -265,7 +340,7 @@ export function decideVolatilityCompetition(input: {
   // An incumbent that has fallen to or below the trivial predictor is vacated even if no
   // challenger qualifies. Keeping it would leave risk consumers reading a model that is
   // measurably worse than guessing the commonest outcome.
-  if (incumbent && hasEnoughSample(incumbent, rules) && !beatsTrivial(incumbent.metrics)) {
+  if (incumbent && hasEnoughSample(incumbent, rules) && !beatsTrivial(incumbent, rules)) {
     return {
       ...base,
       reason: "PRIMARY_QUARANTINED_BELOW_TRIVIAL",

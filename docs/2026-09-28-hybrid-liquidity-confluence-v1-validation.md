@@ -122,3 +122,24 @@ It is also not, by itself, a green light. Per Section 5, `executableSides: []` i
 ## 6. What would need to happen before this could go live
 
 Per this project's own standard, and independent of this document's verdict: shadow-run the fixed strategy, settle its predictions against real fills, and re-measure out-of-sample before ever removing the `executableSides: []` gate. An IV-percentile pipeline would need to be built from scratch if Pillar C's "volatility regime" half is ever revisited rather than dropped.
+
+---
+
+## Amendment (2026-10-10): the "29 standard deviations" figure is not evidence of an edge
+
+A senior-quant review of this validation found the headline "+953R, ~29 SD above the null" must not be read as
+validation, for reasons that the caveats above only partly capture:
+
+1. **The null does not match the test.** It draws size-matched random subsets of *all* contact events. The three
+   pillars are a conjunction of event-level conditions, and 1,122 passing events are highly clustered (many share
+   one slow-moving PCR snapshot, one level, one session). A random subset has no such clustering, so it understates
+   the variance of the statistic and a z-score against it overstates significance. The honest null is a
+   session/level-block resample (or a permutation of the pillar flags within session).
+2. **The outcome is a fixed +1.5R / -1.0R label with no costs**, and the 33.9% baseline is *below* the
+   break-even win rate of that payoff; the "73.98% win rate" is therefore a property of how rejection/breach
+   labels were produced, which was not shown to be executable.
+3. **In-sample and a selected window**: the thresholds and Pillar C were fixed in the same window they were
+   scored on.
+
+Status is unchanged: **both sides stay disabled (`executableSides: []`)**. The "29 SD" number is retained above
+as history only; it was not re-derived and must not be cited as support for enabling the strategy.

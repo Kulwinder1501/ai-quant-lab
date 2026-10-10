@@ -30,6 +30,32 @@ export const candlestickPatternCodes = [
 export type CandlestickPatternCode = (typeof candlestickPatternCodes)[number];
 export type PatternDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
 
+/**
+ * The candlestick rule set that detection writes and consumers must read.
+ *
+ * `candlestick-v1` rows are a mixture of two rule sets: commit 2772538 gated INVERTED_HAMMER on a
+ * downtrend without changing the version, and upserts never delete, so 19,928 of 20,153 stored
+ * INVERTED_HAMMER rows pre-date the gate and 9,461 candles carry both INVERTED_HAMMER (bullish)
+ * and SHOOTING_STAR (bearish). v2 additionally restates the rules (session-local series, intraday
+ * prior-trend lookback, textbook open-gap for Piercing/Dark Cloud, tick floor for Doji, suppressed
+ * zero-volume bars). v1 rows are marked superseded by migration 133 and must not be read.
+ */
+export const candlestickAlgorithmVersion = "candlestick-v2";
+export const supersededCandlestickAlgorithmVersions = ["candlestick-v1"] as const;
+
+/**
+ * The price-action / chart-pattern rule set that detection writes and consumers must read.
+ *
+ * v3 = the v2 rules with: session-local series for intraday timeframes, a timeframe-aware distance
+ * unit (ATR on intraday, percent on daily), bounded chart-pattern breakout windows, and the
+ * invalidation rules in `chart-pattern-engine.ts`. `price-action-v2` rows were written under the
+ * old behaviour and are superseded by convention (the table has no definitions registry).
+ * `price-action-v3-atr` is the forced-ATR variant for a daily series.
+ */
+export const priceActionAlgorithmVersion = "price-action-v3";
+export const priceActionAtrAlgorithmVersion = "price-action-v3-atr";
+export const supersededPriceActionAlgorithmVersions = ["price-action-v2", "price-action-v2-atr"] as const;
+
 export const priceActionEventCodes = [
   "BREAKOUT",
   "BREAKDOWN",
@@ -69,6 +95,12 @@ export interface DetectedCandlestickPattern {
   candleId: string;
   patternCode: CandlestickPatternCode;
   direction: PatternDirection;
+  /**
+   * A bounded rule-strength score in [0, 1] -- an uncalibrated heuristic, NOT a probability of
+   * the pattern working. The name is kept because it is the persisted column. For DOJI it is
+   * `1 - bodyRatio` and, since a doji requires `bodyRatio <= 0.1`, it is always >= 0.9: it
+   * restates the detection threshold and carries no information beyond "this is a doji".
+   */
   confidence: number;
   contextCandleIds: string[];
   details: Record<string, unknown>;

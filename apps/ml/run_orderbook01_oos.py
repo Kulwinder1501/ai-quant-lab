@@ -37,6 +37,24 @@ throughout apps/ml/train.py (`trivial_majority_metrics`): every hypothesis here 
 against the real majority-class baseline computed from the same population, using a one-sided
 exact McNemar test on paired model-vs-baseline correctness (see `mcnemar_one_sided_p`) rather
 than a one-sample test against an arbitrary null proportion.
+
+Population / causality fixes (2026-10-10) -- see docs/2026-10-10-orderbook-liquidity-audit-fixes.md.
+VERDICTS PRODUCED BY EARLIER VERSIONS OF THIS SCRIPT (orderbook01_verdict.json and the
+orderbook01_*_rerun_*.json files) CAME FROM DEFECTIVE CODE AND LABELS and must not be quoted as
+evidence either way. The defects were:
+  * contact labels looked ahead (window started at the candidate's OPEN stamp, "30s" horizon built
+    from 1m bars) -- this script now reads only labeling_version = 'v2-causal';
+  * all candidate rows, instruments and both 1m/5m timeframes were pooled, including duplicate
+    candidates after a PDH/PDL breach -- now one instrument, one timeframe, is_active_candidate only,
+    and events are collapsed to ONE per level-day (the reported n is the effective independent n and
+    the pre-registered n-floors are enforced on it);
+  * depth frames were taken from every provider_symbol -- now the front-month BANKNIFTY future only;
+  * missing totals became DI = 0.0, and raw DI is a per-day constant (so its sign was a day label):
+    now missing is skipped and DI is causally detrended within the day before the sign is taken
+    (orderbook_di.causal_detrend_di; events without enough history are UNAVAILABLE, never 0);
+  * Tier-2 used a "30s" horizon that no honest 1m-bar label can provide -- v2 labels use 60s.
+Sign convention for ALL levels and tiers: di_tilde = -DI_detrended (matches the live gate).
+When the n-floor is the only failed criterion the status is INSUFFICIENT_DATA, not FALSIFIED.
 """
 
 from __future__ import annotations
@@ -47,7 +65,7 @@ import sys
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import zoneinfo
-from bisect import bisect_left
+from bisect import bisect_right
 import json
 
 import numpy as np
@@ -59,6 +77,19 @@ if str(script_dir) not in sys.path:
 
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
+from ai_quant_lab_ml.orderbook_di import (
+    DEFAULT_SYMBOL,
+    DEFAULT_TIMEFRAME,
+    LABELING_VERSION_CAUSAL,
+    TIER1_HORIZON_SECONDS,
+    TIER2_HORIZON_SECONDS_BY_LABELING_VERSION,
+    causal_detrend_di,
+    collapse_to_level_days,
+    fetch_front_month_depth_rows,
+    latest_value_at_or_before,
+    level_day_key,
+    raw_depth_imbalance,
+)
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
@@ -73,8 +104,14 @@ def fetch_contact_events(
     end_dt: datetime,
     horizon_seconds: int,
     level_types: set[str],
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    labeling_version: str = LABELING_VERSION_CAUSAL,
 ) -> list[dict]:
-    """Fetch labeled contact events for specified level types and horizon."""
+    """Fetch labeled contact events for ONE population: one instrument symbol, one candidate
+    timeframe, active candidates only, one labeling_version (default the causal v2 labels).
+    Pooling 1m + 5m rows, inactive candidates or legacy/causal labels double-counts the same
+    level-day and mixes look-ahead labels with clean ones."""
     placeholders = ", ".join(["%s"] * len(level_types))
     query = f"""
         SELECT
@@ -85,17 +122,24 @@ def fetch_contact_events(
             lcl.horizon_seconds,
             lpc.pool_type,
             lpc.side,
-            lpc.price AS level_price
+            lpc.price AS level_price,
+            lpc.symbol,
+            lpc.timeframe
         FROM liquidity_contact_labels lcl
         JOIN liquidity_pool_candidates lpc ON lpc.id = lcl.candidate_id
         WHERE lcl.contacted = TRUE
+          AND lcl.is_active_candidate = TRUE
+          AND lcl.breached IS NOT NULL
+          AND lcl.labeling_version = %s
+          AND lpc.symbol = %s
+          AND lpc.timeframe = %s
           AND lcl.horizon_seconds = %s
           AND lcl.contact_time >= %s
           AND lcl.contact_time < %s
           AND lpc.pool_type IN ({placeholders})
         ORDER BY lcl.contact_time ASC;
     """
-    params = [horizon_seconds, start_dt, end_dt] + list(level_types)
+    params = [labeling_version, symbol, timeframe, horizon_seconds, start_dt, end_dt] + list(level_types)
     with conn.cursor() as cur:
         cur.execute(query, params)
         rows = cur.fetchall()
@@ -109,6 +153,8 @@ def fetch_contact_events(
                 "pool_type": r[5],
                 "side": r[6],
                 "level_price": float(r[7]),
+                "symbol": r[8],
+                "timeframe": r[9],
             }
             for r in rows
         ]
@@ -142,63 +188,67 @@ def compute_decaying_di(bid_p, bid_q, ask_p, ask_q, raw_di: float, lambda_bps: f
         return raw_di
 
 
-def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> tuple[list[datetime], list[float]]:
-    """Fetch all depth frames for a single day, sorted by received_at, calculating decaying DI."""
+def build_day_di_series(
+    frames: list[dict],
+) -> tuple[list[datetime], list[float | None], list[float | None]]:
+    """(times, raw_di, detrended_di) from front-month depth rows (pure -- unit-testable).
+
+    raw_di is None where the totals are missing / both zero (NEVER 0.0). detrended_di is the raw DI
+    minus the trailing mean of the previous complete minutes (orderbook_di.causal_detrend_di) and is
+    None until enough history exists -- so the first ~10 minutes of each day are UNAVAILABLE.
+    """
+    times: list[datetime] = []
+    raw: list[float | None] = []
+    for f in frames:
+        t = f["received_at"]
+        t = t.astimezone(INDIA_TZ) if t.tzinfo else t.replace(tzinfo=INDIA_TZ)
+        times.append(t)
+        raw.append(raw_depth_imbalance(f["total_buy_qty"], f["total_sell_qty"]))
+    return times, raw, causal_detrend_di(times, raw)
+
+
+def fetch_depth_frames_for_day(
+    conn: psycopg.Connection, day: date
+) -> tuple[list[datetime], list[float | None], list[float | None]]:
+    """Front-month BANKNIFTY-futures depth frames for one IST day -> (times, raw_di, detrended_di).
+
+    Only the contract that is live on `day` (cks_ofi_touch.contract_for_date) is read -- no option
+    books, no other expiry. Duplicates and sequence resets are removed using flags recomputed from
+    sequence_no (the stored is_regression flag is unreliable)."""
     start_dt = datetime.combine(day, datetime.min.time(), tzinfo=INDIA_TZ)
     end_dt = start_dt + timedelta(days=1)
-    query = """
-        SELECT received_at, total_buy_qty, total_sell_qty, bid_price, bid_qty, ask_price, ask_qty
-        FROM depth_frames
-        WHERE received_at >= %s AND received_at < %s
-        ORDER BY received_at ASC;
-    """
-    with conn.cursor() as cur:
-        cur.execute(query, (start_dt, end_dt))
-        rows = cur.fetchall()
-
-    times = []
-    dis = []
-    for r in rows:
-        t = r[0].astimezone(INDIA_TZ) if r[0].tzinfo else r[0].replace(tzinfo=INDIA_TZ)
-        tb = float(r[1]) if r[1] is not None else 0.0
-        ts = float(r[2]) if r[2] is not None else 0.0
-        raw_di = (tb - ts) / (tb + ts) if (tb + ts > 0) else 0.0
-
-        times.append(t)
-        dis.append(raw_di)
-    return times, dis
+    frames = fetch_front_month_depth_rows(conn, start_dt, end_dt, day.isoformat())
+    return build_day_di_series(frames)
 
 
 def match_events_to_depth(
     events: list[dict],
     depth_times: list[datetime],
-    depth_dis: list[float],
+    depth_raw_dis: list[float | None],
+    depth_detrended_dis: list[float | None],
 ) -> list[dict]:
-    """Match each contact event to the nearest past depth_frame (received_at <= contact_time)."""
+    """Match each contact event to the latest PAST depth frame (received_at <= contact_time, at most
+    5s old) that has a DETRENDED DI. Events with no such frame are dropped as UNAVAILABLE -- never
+    scored as DI = 0.
+
+    di_tilde = -detrended_di for every level type and tier (the documented ORDERBOOK-01 convention,
+    identical to the live gate). `raw_di` is kept for diagnostics only; it is not what is thresholded.
+    """
     if not depth_times:
         return []
 
     matched = []
     for ev in events:
         ctime = ev["contact_time"]
-        min_allowed_time = ctime - timedelta(seconds=5)
-
-        idx = bisect_left(depth_times, ctime)
-        best_idx = None
-        best_diff = 999.0
-
-        for check_idx in range(max(0, idx - 20), min(len(depth_times), idx + 1)):
-            dt_time = depth_times[check_idx]
-            if dt_time <= ctime and dt_time >= min_allowed_time:
-                diff = (ctime - dt_time).total_seconds()
-                if diff < best_diff:
-                    best_diff = diff
-                    best_idx = check_idx
-
-        if best_idx is not None:
-            di = depth_dis[best_idx]
-            di_tilde = -di
-            matched.append({**ev, "raw_di": di, "di_tilde": di_tilde, "lag_sec": (ctime - depth_times[best_idx]).total_seconds()})
+        hit = latest_value_at_or_before(depth_times, depth_detrended_dis, ctime, max_gap_seconds=5.0)
+        if hit is None:
+            continue
+        detrended, lag = hit
+        idx = bisect_right(depth_times, ctime) - 1
+        raw = depth_raw_dis[idx] if idx >= 0 else None
+        matched.append(
+            {**ev, "raw_di": raw, "di_detrended": detrended, "di_tilde": -detrended, "lag_sec": lag}
+        )
 
     return matched
 
@@ -253,6 +303,19 @@ def mcnemar_one_sided_p(model_correct: list[bool], baseline_correct: list[bool])
     return p_val, n10, n01
 
 
+def effective_independent_n(matched: list[dict]) -> int:
+    """Number of distinct level-days among the events: the effective independent sample size."""
+    return len({level_day_key(e) for e in matched})
+
+
+def verdict_status(is_pass: bool, pass_n: bool) -> str:
+    """PASS / FALSIFIED / INSUFFICIENT_DATA. When the effective-n floor is not met the sample cannot
+    support a FALSIFIED claim either, so it is reported as INSUFFICIENT_DATA (-> INCONCLUSIVE)."""
+    if is_pass:
+        return "PASS"
+    return "FALSIFIED" if pass_n else "INSUFFICIENT_DATA"
+
+
 def evaluate_h1_r(tier1_matched: list[dict], is_oos: bool = True) -> dict:
     """Evaluate Hypothesis 1-R (Tier 1 Reversal DI Accuracy)."""
     n = len(tier1_matched)
@@ -302,17 +365,21 @@ def evaluate_h1_r(tier1_matched: list[dict], is_oos: bool = True) -> dict:
     levels_passed = sum(1 for r in level_results.values() if r["pass"])
 
     min_n = 3000 if is_oos else 1000
+    # The floor applies to the EFFECTIVE independent n (distinct level-days), not raw event count:
+    # repeated contacts of one level on one day are one market situation.
+    n_independent = effective_independent_n(tier1_matched)
     pass_acc = bool(overall_acc >= 0.72)
     pass_baseline = bool(overall_acc > overall_baseline_acc)
     pass_p = bool(vs_baseline_p <= 0.01)
-    pass_n = bool(n >= min_n)
+    pass_n = bool(n_independent >= min_n)
     pass_levels = bool(levels_passed >= 4)
 
     is_pass = pass_acc and pass_baseline and pass_p and pass_n and pass_levels
 
     return {
-        "status": "PASS" if is_pass else "FALSIFIED",
+        "status": verdict_status(is_pass, pass_n),
         "n": n,
+        "n_independent_level_days": n_independent,
         "accuracy": round(overall_acc, 4),
         "trivial_baseline_accuracy": round(overall_baseline_acc, 4),
         "vs_baseline_p": round(vs_baseline_p, 6),
@@ -363,13 +430,15 @@ def evaluate_h1_m(tier2_matched: list[dict], is_oos: bool = True) -> dict:
     pass_acc = bool(acc >= 0.78)
     pass_baseline = bool(acc > baseline_acc)
     pass_p = bool(vs_baseline_p <= 0.01)
-    pass_n = bool(n >= min_n)
+    n_independent = effective_independent_n(tier2_matched)
+    pass_n = bool(n_independent >= min_n)
 
     is_pass = pass_acc and pass_baseline and pass_p and pass_n
 
     return {
-        "status": "PASS" if is_pass else "FALSIFIED",
+        "status": verdict_status(is_pass, pass_n),
         "n": n,
+        "n_independent_level_days": n_independent,
         "accuracy": round(acc, 4),
         "trivial_baseline_accuracy": round(baseline_acc, 4),
         "vs_baseline_p": round(vs_baseline_p, 6),
@@ -498,12 +567,24 @@ def main():
     parser.add_argument("--start-oos", type=str, default="2026-09-26", help="OOS start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", type=str, default=None, help="Optional end date (YYYY-MM-DD)")
     parser.add_argument("--eval-mode", choices=["oos", "calibration", "all"], default="oos", help="Evaluation mode")
+    parser.add_argument("--symbol", type=str, default=DEFAULT_SYMBOL, help="Candidate symbol (one instrument only)")
+    parser.add_argument("--timeframe", type=str, default=DEFAULT_TIMEFRAME, help="Candidate timeframe (one only; never pool 1m+5m)")
+    parser.add_argument(
+        "--labeling-version",
+        type=str,
+        default=LABELING_VERSION_CAUSAL,
+        help="Contact-label version. Default v2-causal; v1-legacy labels look ahead and are NOT valid evidence.",
+    )
     args = parser.parse_args()
 
     conn_str = get_db_connection_string()
     with psycopg.connect(conn_str) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT MIN(contact_time), MAX(contact_time) FROM liquidity_contact_labels WHERE contacted = TRUE;")
+            cur.execute(
+                "SELECT MIN(contact_time), MAX(contact_time) FROM liquidity_contact_labels "
+                "WHERE contacted = TRUE AND is_active_candidate = TRUE AND labeling_version = %s;",
+                (args.labeling_version,),
+            )
             min_dt, max_dt = cur.fetchone()
 
     if not min_dt or not max_dt:
@@ -537,6 +618,12 @@ def main():
     if eval_start > eval_end:
         print(f"WARNING: Selected evaluation start ({eval_start}) is past the latest event date ({eval_end}).")
         print(f"Database latest contact_time is {max_date}. Labeling pipeline has not produced post-{max_date} events yet.")
+        # An inverted window used to fall through and write an "INCONCLUSIVE / zero events" verdict
+        # file (apps/ml/orderbook01_oos_rerun_2026-09-26.json: eval_start 2026-09-26 > eval_end
+        # 2026-09-24) that reads like a real result. An invalid window is an error, not a verdict:
+        # write nothing and exit non-zero.
+        print("ERROR: invalid evaluation window (start is after end); no result file written.")
+        sys.exit(2)
 
     print(f"Evaluation Window: {mode_str}")
     print("-" * 80)
@@ -545,12 +632,19 @@ def main():
     end_dt = datetime.combine(eval_end + timedelta(days=1), datetime.min.time(), tzinfo=INDIA_TZ)
 
     with psycopg.connect(conn_str) as conn:
-        print("Fetching Tier 1 events (300s horizon)...")
-        t1_events = fetch_contact_events(conn, start_dt, end_dt, horizon_seconds=300, level_types=TIER1_LEVELS)
+        tier2_horizon = TIER2_HORIZON_SECONDS_BY_LABELING_VERSION.get(args.labeling_version, 60)
+        pop = dict(symbol=args.symbol, timeframe=args.timeframe, labeling_version=args.labeling_version)
+        print(f"Population: symbol={args.symbol} timeframe={args.timeframe} labeling_version={args.labeling_version}")
+        print(f"Fetching Tier 1 events ({TIER1_HORIZON_SECONDS}s horizon)...")
+        t1_events = fetch_contact_events(
+            conn, start_dt, end_dt, horizon_seconds=TIER1_HORIZON_SECONDS, level_types=TIER1_LEVELS, **pop
+        )
         print(f"-> {len(t1_events)} Tier 1 events fetched.")
 
-        print("Fetching Tier 2 events (30s horizon)...")
-        t2_events = fetch_contact_events(conn, start_dt, end_dt, horizon_seconds=30, level_types=TIER2_LEVELS)
+        print(f"Fetching Tier 2 events ({tier2_horizon}s horizon)...")
+        t2_events = fetch_contact_events(
+            conn, start_dt, end_dt, horizon_seconds=tier2_horizon, level_types=TIER2_LEVELS, **pop
+        )
         print(f"-> {len(t2_events)} Tier 2 (PDL) events fetched.")
 
         # Gather matched data day by day
@@ -560,16 +654,21 @@ def main():
 
         print(f"Matching depth frames across {len(all_dates)} trading sessions...")
         for day in all_dates:
-            depth_times, depth_dis = fetch_depth_frames_for_day(conn, day)
+            depth_times, depth_raw, depth_detrended = fetch_depth_frames_for_day(conn, day)
             if not depth_times:
                 continue
             day_t1 = [e for e in t1_events if e["contact_time"].date() == day]
             day_t2 = [e for e in t2_events if e["contact_time"].date() == day]
 
-            t1_matched.extend(match_events_to_depth(day_t1, depth_times, depth_dis))
-            t2_matched.extend(match_events_to_depth(day_t2, depth_times, depth_dis))
+            t1_matched.extend(match_events_to_depth(day_t1, depth_times, depth_raw, depth_detrended))
+            t2_matched.extend(match_events_to_depth(day_t2, depth_times, depth_raw, depth_detrended))
 
-    print(f"-> Matched {len(t1_matched)} Tier 1 events and {len(t2_matched)} Tier 2 events.")
+    print(f"-> Matched {len(t1_matched)} Tier 1 events and {len(t2_matched)} Tier 2 events (before level-day collapse).")
+    # One event per level-day: repeated contacts of the same level on the same day are not
+    # independent samples. After this, len(...) IS the effective independent n.
+    t1_matched = collapse_to_level_days(t1_matched)
+    t2_matched = collapse_to_level_days(t2_matched)
+    print(f"-> Effective independent n (distinct level-days): Tier 1 = {len(t1_matched)}, Tier 2 = {len(t2_matched)}.")
     print("=" * 80)
 
     # Evaluate Hypotheses
@@ -626,6 +725,14 @@ def main():
     res_payload = {
         "pre_registration": "ORDERBOOK-01",
         "eval_mode": eval_mode,
+        "population": {
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "labeling_version": args.labeling_version,
+            "depth_source": "front-month BANKNIFTY future only (contract_for_date)",
+            "di": "causal within-day detrended DI; di_tilde = -DI for all levels",
+            "independence": "one event per level-day; n floors apply to distinct level-days",
+        },
         "eval_start": str(eval_start),
         "eval_end": str(eval_end),
         "h1_r": h1_r,
