@@ -2,11 +2,16 @@ import { istSessionDate } from "../../platform/calendar/trading-session.js";
 import { OPENING_GAP_CLASSIFIER_INSTRUMENTS } from "../domain/opening-gap-classifier.js";
 import { buildOpeningGapPrediction, type OpeningGapPrediction, type OpeningGapPredictionDraft } from "../domain/opening-gap-prediction.js";
 
-/** The S&P 500's own prior-session change is the driver; see opening-gap-classifier.ts for why. */
-export const OPENING_GAP_DRIVER_SYMBOL = "^GSPC";
+/**
+ * GIFT Nifty's own overnight change is the driver (read from NSE IX, not Yahoo -- see
+ * `nse-ix-client.ts`). Not a real Yahoo/resolver symbol; it is this module's own label for
+ * whichever `GlobalCueSource` the CLI wires up, so the CLI can route it to a different client
+ * than the supplementary symbols below without this file knowing the difference.
+ */
+export const OPENING_GAP_DRIVER_SYMBOL = "GIFT_NIFTY";
 
 /** Collected alongside the driver but not used by the classification rule -- see the migration. */
-export const OPENING_GAP_SUPPLEMENTARY_SYMBOLS = ["^N225", "^HSI"] as const;
+export const OPENING_GAP_SUPPLEMENTARY_SYMBOLS = ["^GSPC", "^N225", "^HSI"] as const;
 
 export interface GlobalCueQuote {
   changePercent: number | null;
@@ -29,12 +34,12 @@ export interface PredictOpeningGapResult {
 }
 
 /**
- * Predicts the opening gap for NIFTY50 and BANKNIFTY from free, already-live global cue data.
+ * Predicts the opening gap for NIFTY50 and BANKNIFTY from GIFT Nifty's own overnight change.
  *
- * Writes nothing when the driver quote is unavailable (a Yahoo outage, a US market holiday with
- * a stale `regularMarketChangePercent`, etc.) rather than persisting a prediction built on an
- * absent number -- the same "absent data is an absent row, not a fabricated value" rule this
- * codebase applies to GIFT Nifty itself.
+ * Writes nothing when the driver quote is unavailable (NSE IX down, outside its trading hours,
+ * an unparseable payload, etc.) rather than persisting a prediction built on an absent number --
+ * the same "absent data is an absent row, not a fabricated value" rule this codebase applies
+ * everywhere else.
  */
 export class PredictOpeningGap {
   constructor(

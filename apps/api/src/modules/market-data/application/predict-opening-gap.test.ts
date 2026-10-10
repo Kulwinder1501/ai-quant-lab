@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PredictOpeningGap, type GlobalCueSource, type OpeningGapPredictionStore } from "./predict-opening-gap.js";
+import {
+  PredictOpeningGap,
+  OPENING_GAP_DRIVER_SYMBOL,
+  type GlobalCueSource,
+  type OpeningGapPredictionStore,
+} from "./predict-opening-gap.js";
 import type { OpeningGapPredictionDraft, OpeningGapPrediction } from "../domain/opening-gap-prediction.js";
 
 const NOW = new Date("2026-10-12T03:10:00.000Z"); // 08:40 IST
@@ -16,11 +21,12 @@ function fakeStore(): OpeningGapPredictionStore & { saved: OpeningGapPredictionD
 }
 
 describe("PredictOpeningGap", () => {
-  it("predicts both instruments from the S&P 500 driver and stores supplementary cues", async () => {
+  it("predicts both instruments from the GIFT Nifty driver and stores supplementary cues", async () => {
     const cues: GlobalCueSource = {
       async getChangePercents() {
         return new Map([
-          ["^GSPC", { changePercent: 0.4 }],
+          [OPENING_GAP_DRIVER_SYMBOL, { changePercent: 0.4 }],
+          ["^GSPC", { changePercent: 0.59 }],
           ["^N225", { changePercent: -0.6 }],
           ["^HSI", { changePercent: null }],
         ]);
@@ -35,7 +41,8 @@ describe("PredictOpeningGap", () => {
     const nifty = store.saved.find((p) => p.instrumentSymbol === "NIFTY50")!;
     expect(nifty.expectation).toBe("GAP_UP");
     expect(nifty.driverChangePct).toBe(0.4);
-    expect(nifty.supplementaryCues).toEqual({ "^N225": -0.6, "^HSI": null });
+    expect(nifty.driverSymbol).toBe(OPENING_GAP_DRIVER_SYMBOL);
+    expect(nifty.supplementaryCues).toEqual({ "^GSPC": 0.59, "^N225": -0.6, "^HSI": null });
     const banknifty = store.saved.find((p) => p.instrumentSymbol === "BANKNIFTY")!;
     // Same 0.4% driver change clears BANKNIFTY's wider 0.35% threshold too.
     expect(banknifty.expectation).toBe("GAP_UP");
@@ -44,7 +51,7 @@ describe("PredictOpeningGap", () => {
   it("writes nothing when the driver quote is unavailable", async () => {
     const cues: GlobalCueSource = {
       async getChangePercents() {
-        return new Map([["^GSPC", { changePercent: null }]]);
+        return new Map([[OPENING_GAP_DRIVER_SYMBOL, { changePercent: null }]]);
       },
     };
     const store = fakeStore();

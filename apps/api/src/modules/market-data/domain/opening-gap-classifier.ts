@@ -1,23 +1,22 @@
 /**
  * Deterministic opening-gap classifier for NIFTY50 and BANKNIFTY.
  *
- * The original idea for this was to threshold GIFT Nifty's overnight change, but GIFT Nifty has
- * no free, live, machine-readable feed anywhere this codebase can reach -- `institutional-flow-
- * summary.ts`'s `GiftNiftyUnavailableReason` docstring already records seven Yahoo tickers tried
- * and rejected (`GIFTNIFTY`, `NIFTY_F1`, `^NSEIX`, `GIFT=F`, `SGXNIFTY`, `IN50=F`, `NIFTYF.NS`),
- * and NSE's own public site was independently checked for this feature (2026-10-10) and does not
- * publish it either -- GIFT Nifty trades on NSE IX, a separate IFSC exchange.
+ * Thresholds GIFT Nifty's own overnight percentage change (`driverSymbol: "GIFT_NIFTY"` in
+ * `predict-opening-gap.ts`, read live from NSE IX's own public homepage API via
+ * `NseIxClient.getGiftNiftyFuturesQuote` -- see `nse-ix-client.ts`).
  *
- * This classifier instead thresholds the S&P 500's own prior-session percentage change, used as a
- * free proxy driver: published research and desk practice both treat the prior US close as the
- * dominant single overnight input to India's open, with Asian markets acting as a confirming
- * factor rather than the primary driver.
+ * This briefly ran on the S&P 500's own change as a free proxy, because GIFT Nifty appeared to
+ * have no free, live, machine-readable feed anywhere this codebase could reach:
+ * `institutional-flow-summary.ts`'s `GiftNiftyUnavailableReason` docstring records seven Yahoo
+ * tickers tried and rejected, and NSE's main site was checked and does not publish it either.
+ * NSE IX -- the actual IFSC exchange GIFT Nifty trades on -- was checked afterwards (2026-10-10)
+ * and does carry a real, free, unauthenticated feed; see `nse-ix-client.ts` for how it was found
+ * and verified. The S&P 500 is now a supplementary cue alongside Nikkei/Hang Seng instead of the
+ * driver.
  *
- * The thresholds below are carried over unchanged from the original GIFT-Nifty-denominated plan
- * and applied directly to the S&P 500's raw percentage change, not to a GIFT-Nifty-equivalent
- * figure -- GIFT Nifty itself typically moves at roughly 0.6-0.8x of a same-day S&P 500 move per
- * external sources, which is not yet verified against this system's own data. They are a starting
- * point to be recalibrated once enough settled predictions exist, not a validated rule.
+ * The thresholds below are the original plan's (NIFTY50 +/-0.25%, BANKNIFTY +/-0.35%), applied
+ * to GIFT Nifty's own change as intended -- not yet verified against this system's own settled
+ * data, so still a starting point to be recalibrated, not a validated rule.
  */
 
 export type GapExpectation = "GAP_UP" | "GAP_DOWN" | "FLAT";
