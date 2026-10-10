@@ -5,6 +5,7 @@ import {
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS,
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE,
   MAXIMUM_IDEA_PRICE_DRIFT_FRACTION,
+  resolveOptionEntryDeltaThresholds,
 } from "./prepare-option-entry.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import type { OptionExpiryCalendar } from "../../market-data/domain/option-expiry-calendar.js";
@@ -721,6 +722,87 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
     expect(result.approved).toBe(true);
     if (!result.approved) return;
     expect(result.entry.optionContract.optionStrike).toBe(56800);
+  });
+
+  it("holds NIFTY50 to 0.75, even on a contract BANKNIFTY's 0.55 floor would accept", async () => {
+    // 56800 CE ~0.64 and 57300 CE ~0.58 -- both clear BANKNIFTY's 0.55 floor but not NIFTY50's 0.75.
+    const shallowChain = chain({
+      underlyingSymbol: "NIFTY50",
+      quotes: [
+        {
+          strikePrice: 56800,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:NIFTY26082556800CE",
+          providerToken: null,
+          lastPrice: 2550,
+          bid: 2540,
+          ask: 2560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+        {
+          strikePrice: 57300,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:NIFTY26082557300CE",
+          providerToken: null,
+          lastPrice: 1550,
+          bid: 1540,
+          ask: 1560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ idea: { ...IDEA, symbol: "NIFTY50" }, snapshot: shallowChain })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(false);
+    if (result.approved) return;
+    expect(result.reason).toBe("NO_OPTION_ENTRY");
+    expect(result.rejectionProvenance).toMatchObject({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("approves NIFTY50 once a 0.75+ delta contract is actually on offer", async () => {
+    // 56000 CE has delta ~0.76, clearing NIFTY50's 0.75 floor.
+    const deepChain = chain({ underlyingSymbol: "NIFTY50" });
+
+    const result = await service({ idea: { ...IDEA, symbol: "NIFTY50" }, snapshot: deepChain })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionStrike).toBe(56000);
+    expect((result.entry.feeBreakdown as any).entryProvenance.targetDelta).toBe(0.75);
+  });
+});
+
+describe("resolveOptionEntryDeltaThresholds", () => {
+  it("holds NIFTY50 to 0.75/0.75 regardless of days to expiry", () => {
+    expect(resolveOptionEntryDeltaThresholds("NIFTY50", 25)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+    expect(resolveOptionEntryDeltaThresholds("NIFTY50", 2)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("gives BANKNIFTY the permissive 0.55/0.65 pair far from its own expiry", () => {
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 25)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 11)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
+  });
+
+  it("switches BANKNIFTY to NIFTY50's strict 0.75/0.75 once its own expiry is within 10 days", () => {
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 10)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 1)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("falls back to the permissive pair for any other underlying", () => {
+    expect(resolveOptionEntryDeltaThresholds("XAU_USD", 25)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
   });
 });
 
