@@ -46,7 +46,7 @@ import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/ap
  *   once this bot has its own trade history to guard against.
  */
 
-const XAU_EXCHANGE = "TWELVEDATA" as const;
+const XAU_EXCHANGE = "OANDA" as const;
 const XAU_SYMBOL = "XAU_USD";
 const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
 /**
