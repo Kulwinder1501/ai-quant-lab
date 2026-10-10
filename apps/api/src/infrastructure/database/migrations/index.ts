@@ -127,6 +127,7 @@ import { tradeIdeaSetupIdUniquenessMigration } from "./126-trade-idea-setup-id-u
 import { oandaInstrumentSupportMigration } from "./127-oanda-instrument-support.js";
 import { candidateDecisionRejectionProvenanceMigration } from "./128-candidate-decision-rejection-provenance.js";
 import { oandaBidAskCandlesMigration } from "./129-oanda-bid-ask-candles.js";
+import { openingGapPredictionsMigration } from "./130-opening-gap-predictions.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -258,4 +259,5 @@ export const migrations = [
   oandaInstrumentSupportMigration,
   candidateDecisionRejectionProvenanceMigration,
   oandaBidAskCandlesMigration,
+  openingGapPredictionsMigration,
 ];
