@@ -67,7 +67,21 @@ function timeframeMilliseconds(timeframe: string): number | null {
 
 type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
 
-export const momentumScalpPatternStrategyVersion = 1;
+/**
+ * Bumped 2026-10-10: candlestickAlgorithmVersion moved from v1 to v2. v2 fixes four confirmed
+ * defects in v1 -- a real lookahead bug (detections computed on a still-open bar, later silently
+ * rewritten), a scoring bug (NEUTRAL patterns awarded +20 toward long theses), nondeterministic-vs-
+ * priority pattern selection (picked patterns[0] from an alphabetical list instead of the highest-
+ * confidence candidate), and flat/holiday bars poisoning detection. This is live on AutoBot-Sniper
+ * today (re-enabled 2026-09-26), so this version bump takes effect immediately. The frozen
+ * `pattern-v5-research` cohort in research-strategies.ts was given its own explicit
+ * `candlestickAlgorithmVersion: "candlestick-v1"` pin in the same change, so it keeps measuring
+ * exactly what it always has. `momentumScalpPatternStrategyV2Version` below (the disabled
+ * `momentum-scalp-pattern-v2` registration, `executableSides: []` since 2026-09-02) is bumped
+ * alongside this one purely because it shares this file's default config -- it carries no live
+ * trades and no checksummed research cohort, so no pin was needed for it.
+ */
+export const momentumScalpPatternStrategyVersion = 2;
 
 export interface MomentumScalpPatternStrategyConfiguration {
   indicatorAlgorithmVersion: string;
@@ -143,7 +157,7 @@ export interface MomentumScalpPatternStrategyConfiguration {
 
 export const defaultMomentumScalpPatternStrategyConfiguration: MomentumScalpPatternStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
-  candlestickAlgorithmVersion: "candlestick-v1",
+  candlestickAlgorithmVersion: "candlestick-v2",
   priceActionAlgorithmVersion: "price-action-v2",
   scoreThreshold: 5,
   atrStopMultiple: 1.0,
@@ -526,7 +540,8 @@ export class MomentumScalpPatternStrategy {
   }
 }
 
-export const momentumScalpPatternStrategyV2Version = 2;
+/** Bumped alongside momentumScalpPatternStrategyVersion above -- same shared default, same reason. */
+export const momentumScalpPatternStrategyV2Version = 3;
 
 export const momentumScalpPatternStrategyV2Registration = {
   strategyKey: "momentum-scalp-pattern-v2",

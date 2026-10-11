@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresModelTrainingRecencyRepository } from "../../infrastructure/database/repositories/postgres-model-training-recency-repository.js";
+import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
+import { awaitFyersAccess } from "../../modules/market-data/application/await-fyers-access.js";
 import { buildEodTrainingPlan, selectDueTrainingSteps } from "./eod-training-plan.js";
 
 /**
@@ -106,6 +108,50 @@ async function runTrainingStep(description: string, args: string[]): Promise<voi
 
 const collectionFailures: string[] = [];
 
+const FYERS_WAIT_BUDGET_MS = 45 * 60_000;
+const FYERS_WAIT_POLL_MS = 3 * 60_000;
+
+/**
+ * Whether Fyers will hand out a token right now, waiting up to 45 minutes for it to.
+ *
+ * Every Fyers collection step below spawns its own process, and each one asks the token service
+ * for a token. When Fyers' refresh endpoint is refusing (code -16, "disabled to comply with SEBI
+ * regulations"), all of them fail instantly: 2026-10-08 produced 31 failed collection steps from
+ * one refusal, and the equities' latest 1d bars were absent when the volatility models predicted,
+ * so that day's equity predictions were never written. The refusal has cleared within ~19 minutes
+ * before, so one bounded wait up front is cheap on a bad day and free on a good one (a valid
+ * stored token is a single database read).
+ *
+ * Returns true when Fyers is not configured here, leaving that case to fail the way it always did.
+ */
+async function waitForFyersBeforeCollection(): Promise<boolean> {
+  const appId = process.env.FYERS_APP_ID;
+  const appSecret = process.env.FYERS_APP_SECRET;
+  if (!appId || !appSecret) return true;
+
+  const database = createDatabasePool(loadEnvironment().DATABASE_URL);
+  try {
+    const tokenService = new FyersTokenService({ pool: database, appId, appSecret, pin: process.env.FYERS_PIN ?? "" });
+    const outcome = await awaitFyersAccess(() => tokenService.getAccessToken(), {
+      maxWaitMs: FYERS_WAIT_BUDGET_MS,
+      pollIntervalMs: FYERS_WAIT_POLL_MS,
+      onRetry: (attempt, error) => {
+        console.warn(`\n⏳ Fyers unavailable (attempt ${attempt}); waiting before collection — ${error}`);
+      },
+    });
+    if (!outcome.available) {
+      collectionFailures.push(
+        `Fyers still unavailable after ${outcome.attempts} attempts over ${FYERS_WAIT_BUDGET_MS / 60_000} minutes, `
+        + `so every Fyers collection step was skipped: ${outcome.lastError ?? "unknown error"}`,
+      );
+      console.error("\n⚠️ Fyers unavailable — skipping all Fyers collection steps this run.");
+    }
+    return outcome.available;
+  } finally {
+    await database.end();
+  }
+}
+
 /**
  * Collection steps are isolated for the same reason training steps are, and the omission was
  * expensive. This pipeline failed all four of its runs in the week to 2026-08-16, and two of
@@ -141,13 +187,15 @@ async function main(): Promise<void> {
 
     console.info("============== EOD PIPELINE STARTED ==============");
 
+    const fyersAvailable = await waitForFyersBeforeCollection();
+
     // 1. Heal the intraday index series from settled Fyers history. The live
     // collector owns current bars, while this pass fills any windows missed by a
     // restart. 30m and 60m are model-research inputs and need the same recovery
     // path as 15m rather than relying on a permanently running process.
     const intradayIndexSeries = ["NIFTY50", "BANKNIFTY"] as const;
     const intradayTimeframes = ["15m", "30m", "60m"] as const;
-    for (const instrument of intradayIndexSeries) {
+    for (const instrument of fyersAvailable ? intradayIndexSeries : []) {
       for (const timeframe of intradayTimeframes) {
         await runCollectionStep(`heal ${instrument} ${timeframe}`, [
           "run", "data:collect:historical", "--",
@@ -169,7 +217,7 @@ async function main(): Promise<void> {
       ...RESEARCH_EQUITY_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
       ...RESEARCH_INDEX_POOL.map((symbol) => ({ symbol, provider: "fyers" })),
     ];
-    for (const { symbol, provider } of allDailySeries) {
+    for (const { symbol, provider } of fyersAvailable ? allDailySeries : []) {
       await runCollectionStep(`collect ${symbol} 1d`, [
         "run", "data:collect:historical", "--",
         "--provider", provider,

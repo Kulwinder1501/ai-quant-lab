@@ -107,6 +107,7 @@ export class PostgresDashboardQueryRepository {
     const result = await this.database.query<QueryResultRow>(`
       SELECT id, name, opening_balance, currency, is_active
       FROM paper_accounts
+      WHERE is_active = TRUE
       ORDER BY name ASC
     `);
     return result.rows.map((row) => ({

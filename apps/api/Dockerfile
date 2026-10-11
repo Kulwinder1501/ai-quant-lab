@@ -34,8 +34,8 @@ COPY apps/ml/requirements-dl.txt ./apps/ml/requirements-dl.txt
 # Torch is required so volatility-shadow scoring can run Stage 5/6 sequence
 # candidates (TCN / OOF stack). Kept as a separate requirements file so the
 # default tree path remains documentable without DL deps.
-RUN /opt/venv/bin/pip install --no-cache-dir -r apps/ml/requirements.txt \
-  && /opt/venv/bin/pip install --no-cache-dir \
+RUN /opt/venv/bin/pip install --no-cache-dir --timeout 120 --retries 5 -r apps/ml/requirements.txt \
+  && /opt/venv/bin/pip install --no-cache-dir --timeout 120 --retries 5 \
     --index-url https://download.pytorch.org/whl/cpu \
     -r apps/ml/requirements-dl.txt
 

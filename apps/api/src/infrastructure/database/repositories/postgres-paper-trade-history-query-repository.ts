@@ -210,6 +210,7 @@ export class PostgresPaperTradeHistoryQueryRepository implements PaperTradeHisto
     const result = await this.database.query<QueryResultRow>(`
       SELECT id, name
       FROM paper_accounts
+      WHERE is_active = TRUE
       ORDER BY name ASC
     `);
     return result.rows.map((row) => ({ id: String(row.id), name: String(row.name) }));
