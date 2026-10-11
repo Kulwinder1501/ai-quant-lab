@@ -197,12 +197,43 @@ const registeredV2Configuration = {
   requirePoiReaction: true,
 };
 
+/**
+ * What version 3 was REGISTERED with, pinned as its own literal for the same reason v2's is.
+ *
+ * Carries v2's four pinned fields forward unchanged and adds the one thing this version actually
+ * changes: `entryModel: "SWEEP_MSS_RETRACE"`. docs/2026-10-09-ict-sweep-mss-model-measurement.md's
+ * Amendment 3 measured the ALIGNMENT model (v2's live behaviour, since it never pinned entryModel
+ * and so always read the code default) significantly negative out of sample and recorded "stop the
+ * two live ICT bots". SWEEP_MSS_RETRACE is not itself validated on NIFTY50/BANKNIFTY -- the same
+ * doc's own training-era arm came back UNDERPOWERED (14-19 trades per instrument against a 60-trade
+ * floor), "not validated, not refuted" -- but the owner's call, 2026-10-10, was to run the doctrine's
+ * actual sequence live rather than either keep running a measured loser or stop the bots outright.
+ * Judge these trades by their own record, same as v2's own live-wiring note already asked for.
+ *
+ * `ensure()` (postgres-strategy-version-repository.ts) handles the v2 -> v3 cutover on its own: it
+ * inserts this version, refuses if v2's row ever changed shape, and atomically deactivates v2 while
+ * activating v3 -- the same mechanism already exercised for momentum-scalp (v2/v3) and
+ * trend-breakout (v1/v2). No manual migration needed, and v2's row stays in place, inert, for lineage.
+ *
+ * Do not "tidy" this into a spread of `registeredV2Configuration` plus an override: the whole point
+ * of a new literal is that v3 is pinned independently of what v2 said or what the code defaults
+ * later become, exactly like v2 was pinned independently of v1's.
+ */
+const registeredV3Configuration = {
+  minimumRiskReward: 1.2,
+  minConfidence: 0.7,
+  expiryCandles: 3,
+  requirePoiReaction: true,
+  entryModel: "SWEEP_MSS_RETRACE",
+};
+
 export const ictStructureStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: ICT_STRUCTURE_STRATEGY_KEY,
-  name: "ICT Structural Alignment (V1)",
-  description: "Four-pillar structural strategy strictly trading in alignment with the higher-timeframe trend.",
-  version: 2,
-  configuration: registeredV2Configuration as unknown as Record<string, unknown>,
+  name: "ICT Sweep -> MSS -> Retrace (V3)",
+  description: "Sequence-based structural strategy: a liquidity sweep, then a displacement market "
+    + "structure shift, then an entry on the retrace into that leg's OTE band.",
+  version: 3,
+  configuration: registeredV3Configuration as unknown as Record<string, unknown>,
 };
 export class IctStructureStrategy implements StrategyEvaluator {
   private readonly liquidityResponseResolver = new LiquidityResponseResolver();
