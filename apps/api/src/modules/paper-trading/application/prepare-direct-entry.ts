@@ -15,6 +15,8 @@ export interface PreparedDirectEntry {
   feeBreakdown: Record<string, unknown>;
   requiredMargin?: number;
   leverage?: number;
+  observedBid: number;
+  observedAsk: number;
 }
 
 export type PrepareDirectEntryResult =
@@ -105,8 +107,15 @@ export class PrepareDirectEntry {
     const quote = await this.quoteReader.quoteSymbol(symbol).catch(() => null);
     const quoteAgeMs = quote?.regularMarketTime ? now.getTime() - quote.regularMarketTime.getTime() : null;
     const observedPrice = quote?.regularMarketPrice ?? null;
+    const observedBid = quote?.bid ?? observedPrice;
+    const observedAsk = quote?.ask ?? observedPrice;
+
     const fresh = observedPrice !== null && observedPrice > 0
-      && quoteAgeMs !== null && quoteAgeMs >= 0 && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS;
+      && quoteAgeMs !== null && quoteAgeMs >= 0 && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
+      && observedBid !== undefined && observedBid !== null 
+      && observedAsk !== undefined && observedAsk !== null 
+      && observedAsk >= observedBid;
+      
     if (!fresh) {
       return {
         approved: false,
@@ -124,7 +133,11 @@ export class PrepareDirectEntry {
     const rewardDistance = Math.abs(ideaTarget - ideaEntry);
 
     const side = idea.side;
-    const entry = roundToTick(observedPrice, tickSize);
+    const entry = roundToTick(side === "LONG" ? observedAsk! : observedBid!, tickSize);
+    
+    // The stop/target levels travel with the fill. 
+    // For LONG: entry is at ASK, SL/TP trigger at BID. 
+    // The SL threshold should be set relative to the entry price to maintain risk distance.
     const stopLoss = roundToTick(side === "LONG" ? entry - riskDistance : entry + riskDistance, tickSize);
     const targetPrice = roundToTick(side === "LONG" ? entry + rewardDistance : entry - rewardDistance, tickSize);
 
@@ -184,9 +197,11 @@ export class PrepareDirectEntry {
         entryFees: 0,
         requiredMargin,
         leverage,
+        observedBid: observedBid!,
+        observedAsk: observedAsk!,
         feeBreakdown: {
           entryChecks: {
-            fillSource: "TWELVEDATA_QUOTE",
+            fillSource: "OANDA_QUOTE",
             observedPrice,
             quoteObservedAt: quote?.regularMarketTime?.toISOString() ?? null,
             costModel: "NONE_MODELLED",

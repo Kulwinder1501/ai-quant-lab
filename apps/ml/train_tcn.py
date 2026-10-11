@@ -51,7 +51,14 @@ from ai_quant_lab_ml.tcn_explain import temporal_occlusion_contributions
 from ai_quant_lab_ml.tcn_model import TCN_ALGORITHM, TcnDependencyError
 from ai_quant_lab_ml.tcn_training import predict_tcn_proba, train_lag_lightgbm_baseline, train_tcn_classifier
 from ai_quant_lab_ml.volatility_expansion import VOLATILITY_ALPHABET
-from train import DEFAULT_ARTIFACT_DIRECTORY, json_output, parse_timestamp, positive_int, strict_unit_interval
+from train import (
+    DEFAULT_ARTIFACT_DIRECTORY,
+    json_output,
+    parse_timestamp,
+    positive_int,
+    strict_unit_interval,
+    time_of_day_baseline_metrics,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -120,6 +127,33 @@ def trivial_macro_f1(labels: list[str], alphabet_labels: tuple[str, ...]) -> flo
     from ai_quant_lab_ml.training import evaluate_predictions
 
     return evaluate_predictions(labels, predicted, alphabet=VOLATILITY_ALPHABET).macro_f1
+
+
+def time_of_day_macro_f1(split: Any, timeframe: str) -> float:
+    """Macro-F1 of the time-of-day-STRATIFIED majority predictor on a fold's holdout.
+
+    2026-10-10 follow-up (code gaps): the lone trivial baseline above predicts one constant, so a
+    network that has only learned the clock (the class mix differs sharply by bar of day) can "beat
+    trivial". The per-bucket majority is fitted on the fold's TRAIN rows only
+    (``train.time_of_day_baseline_metrics``; ``SequenceSplit`` exposes the same ``train`` /
+    ``validation`` / ``label`` / ``observed_at`` it reads).
+    """
+    return time_of_day_baseline_metrics(
+        split, alphabet=VOLATILITY_ALPHABET, timeframe=timeframe,
+    ).macro_f1
+
+
+def strongest_baseline_macro_f1(trivial: float, time_of_day: float) -> float:
+    """The larger of the two baseline macro-F1s, ignoring NaN (an unscorable baseline is not a
+    baseline of 0). NaN only when neither baseline could be scored."""
+    scored = [value for value in (trivial, time_of_day) if not math.isnan(value)]
+    return max(scored) if scored else float("nan")
+
+
+def beats_strongest_baseline(model_macro_f1: float, trivial: float, time_of_day: float) -> bool:
+    """True only when the model beats BOTH baselines; False when no baseline could be scored."""
+    strongest = strongest_baseline_macro_f1(trivial, time_of_day)
+    return (not math.isnan(strongest)) and model_macro_f1 > strongest
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 val_labels = [example.label for example in split.validation]
                 trivial = trivial_macro_f1(val_labels, VOLATILITY_ALPHABET.labels)
+                time_of_day = time_of_day_macro_f1(split, AUTHORIZED_TIMEFRAME)
+                strongest = strongest_baseline_macro_f1(trivial, time_of_day)
                 explanation = temporal_occlusion_contributions(
                     tcn.model,
                     split.validation[0],
@@ -283,6 +319,10 @@ def main(argv: list[str] | None = None) -> int:
                     },
                     "trivialMacroF1": trivial,
                     "beatsTrivial": tcn.validation_metrics.macro_f1 > trivial,
+                    "timeOfDayMacroF1": time_of_day,
+                    "strongestBaselineMacroF1": strongest,
+                    "beatsStrongestBaseline": beats_strongest_baseline(
+                        tcn.validation_metrics.macro_f1, trivial, time_of_day),
                     "beatsLagBaseline": tcn.validation_metrics.macro_f1 > baseline.validation_metrics.macro_f1,
                     "explanationSample": {
                         "contributionMethod": explanation["contributionMethod"],
@@ -293,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"  TCN macro-F1={tcn.validation_metrics.macro_f1:.4f} "
                     f"lag-LGBM={baseline.validation_metrics.macro_f1:.4f} "
-                    f"trivial={trivial:.4f} params={tcn.parameter_count}",
+                    f"trivial={trivial:.4f} time-of-day={time_of_day:.4f} params={tcn.parameter_count}",
                     file=sys.stderr,
                 )
 
@@ -311,8 +351,10 @@ def main(argv: list[str] | None = None) -> int:
             mean_tcn = sum(row["tcn"]["macroF1"] for row in fold_rows) / len(fold_rows)
             mean_lgbm = sum(row["lagLightgbm"]["macroF1"] for row in fold_rows) / len(fold_rows)
             mean_trivial = sum(row["trivialMacroF1"] for row in fold_rows) / len(fold_rows)
+            mean_time_of_day = sum(row["timeOfDayMacroF1"] for row in fold_rows) / len(fold_rows)
             cheap_advances = (
-                all(row["beatsTrivial"] for row in fold_rows)
+                # The bar is the STRONGER of the trivial and time-of-day baselines, not trivial alone.
+                all(row["beatsStrongestBaseline"] for row in fold_rows)
                 and mean_tcn > mean_lgbm
             )
             fold_variability = fold_improvement_significance(fold_rows)
@@ -408,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                     "meanTcnMacroF1": mean_tcn,
                     "meanLagLightgbmMacroF1": mean_lgbm,
                     "meanTrivialMacroF1": mean_trivial,
+                    "meanTimeOfDayMacroF1": mean_time_of_day,
                     "cheapAdvances": cheap_advances,
                     "foldVariability": fold_variability,
                     "calibration": calibration,
@@ -422,11 +465,11 @@ def main(argv: list[str] | None = None) -> int:
                 "enrollment": {
                     "eod": False,
                     "reason": (
-                        "TCN beat lag LightGBM and trivial on every fold, its improvement exceeded "
+                        "TCN beat lag LightGBM and the stronger of the trivial / time-of-day baselines on every fold, its improvement exceeded "
                         "fold-to-fold noise, and it cleared the leakage and explanation sanity checks"
                         if advances
                         else (
-                            "TCN did not clear Stage 5 acceptance vs lag baseline/trivial"
+                            "TCN did not clear Stage 5 acceptance vs lag baseline / the stronger of trivial and time-of-day"
                             if not cheap_advances
                             else (
                                 "The leakage audit and explanation sanity check were skipped "
@@ -454,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
                 "meanTcnMacroF1": mean_tcn,
                 "meanLagLightgbmMacroF1": mean_lgbm,
                 "meanTrivialMacroF1": mean_trivial,
+                "meanTimeOfDayMacroF1": mean_time_of_day,
                 "foldVariability": fold_variability,
                 "calibration": calibration,
                 "costRelevantPrecision": cost_report,

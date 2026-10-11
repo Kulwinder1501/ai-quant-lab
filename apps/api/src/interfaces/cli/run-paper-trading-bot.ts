@@ -6,7 +6,7 @@ import { PostgresCandleRepository } from "../../infrastructure/database/reposito
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-repository.js";
-import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
+import { classifyOpenFailure, type OptionEntryRejectionProvenance } from "../../modules/paper-trading/domain/paper-trade-open-errors.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { PostgresTradeIdeaRepository } from "../../infrastructure/database/repositories/postgres-trade-idea-repository.js";
@@ -144,6 +144,19 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * pre-registered backtest that was already ruled unreliable.
  */
 const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
+
+/**
+ * Series excluded from idea generation outright, even though both their symbol and timeframe are
+ * otherwise scanned.
+ *
+ * `NIFTY50 1m`: no bot has ever owned this cell (`momentum-scalp`, the only 1m-capable strategy, is
+ * scoped to `BANKNIFTY 1m`/`BANKNIFTY 5m`/`NIFTY50 5m` via `AutoBot-Scalp1m`'s `allowedSeries` --
+ * see bot-sandboxes.ts), so every idea this cell raised was pure noise on the Strategy & Ideas
+ * proposals grid: a signal nothing could ever act on, indistinguishable there from one a bot would
+ * take. Removed on request rather than left to accumulate the way `trend-breakout` and
+ * (pre-2026-09-03) `momentum-scalp` did.
+ */
+const DISABLED_SERIES = new Set(["NIFTY50:1m"]);
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
@@ -297,10 +310,24 @@ async function main(): Promise<void> {
     const regimeRepository = new PostgresRegimeObservationRepository(database);
     const ledger = new PostgresCandidateLedgerRepository(database);
 
+    /*
+     * Excludes momentum-scalp-gold. Its own registration carries no instrument restriction (see its
+     * file header: "it has never traded, on any instrument, under this key"), and GenerateTradeIdeas
+     * has no instrument-aware filtering of its own -- the default liveTradableStrategies() list runs
+     * every live-tradable strategy against whatever instrument this scanner is given. This file's own
+     * SCAN_SYMBOLS is NIFTY50/BANKNIFTY only; momentum-scalp-gold is XAU_USD-only by design (it has
+     * its own scanner in run-gold-paper-trading-bot.ts) and was firing against Indian index bars here,
+     * producing 52 misrouted trade_ideas/trade_idea_evidence rows (measured and cleaned up 2026-10-07)
+     * before this fix.
+     */
+    const nseStrategies = liveTradableStrategies().filter(
+      (strategy) => strategy.registration.strategyKey !== "momentum-scalp-gold",
+    );
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
       new PostgresStrategyMarketContextRepository(database),
       new PostgresTradeIdeaRepository(database),
+      nseStrategies,
     );
 
     // Collect fresh trade ideas per symbol and timeframe once per run
@@ -326,6 +353,10 @@ async function main(): Promise<void> {
         if (!instrument) continue;
 
         for (const timeframe of SCAN_TIMEFRAMES) {
+          if (DISABLED_SERIES.has(`${symbol}:${timeframe}`)) {
+            continue;
+          }
+
           const latest = await database.query<{ close_time: Date }>(
             `SELECT close_time FROM candles
              WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
@@ -634,6 +665,7 @@ async function main(): Promise<void> {
           reason: String(entry.reason),
           explanation: String(entry.explanation ?? ""),
           regimeObservationId: null,
+          rejectionProvenance: entry.rejectionProvenance as OptionEntryRejectionProvenance | undefined,
         })),
       ];
       let decisionsRecorded = 0;

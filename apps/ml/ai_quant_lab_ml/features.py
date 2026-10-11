@@ -48,9 +48,12 @@ from .contracts import (
     MarketLabel,
     schema_version_for,
 )
+from .session_forward import crosses_session, is_intraday_label_timeframe, same_session_prefix
 from .triple_barrier import TripleBarrierError, triple_barrier_label
 from .volatility_expansion import (
+    SessionScopedTrailingWindow,
     VolatilityExpansionError,
+    is_intraday_timeframe,
     trailing_range_of,
     volatility_expansion_label,
 )
@@ -1192,6 +1195,7 @@ def build_labeled_examples(
 
     _validate_request(request)
     examples: list[LabeledExample] = []
+    intraday_labels = is_intraday_label_timeframe(request.timeframe)
 
     # The window advances one bar at a time, so a feature can only ever see bars
     # at or before the candle it describes.
@@ -1240,6 +1244,13 @@ def build_labeled_examples(
             )
         if candle.future_close_time <= candle.close_time:
             raise FeatureConstructionError(f"Candle {candle.candle_id} future_close_time must be after close_time.")
+        # Intraday: the horizon must stay inside the source bar's IST session. A future close on a
+        # later session is the overnight jump, not the intended horizon -> no label (never filled).
+        if intraday_labels and crosses_session(candle.close_time, candle.future_close_time):
+            prior_close = _source_number(candle.close, "close")
+            prior_high = _source_number(candle.high, "high")
+            prior_low = _source_number(candle.low, "low")
+            continue
         if candle.future_close_time > request.data_window_end:
             raise FeatureConstructionError(f"Candle {candle.candle_id} label falls outside the requested data window.")
 
@@ -1299,6 +1310,7 @@ def build_triple_barrier_examples(records: Sequence[CandleEvidence], request: Da
         raise FeatureConstructionError("barrier_lower_multiple must be finite and greater than zero.")
 
     examples: list[LabeledExample] = []
+    intraday_labels = is_intraday_label_timeframe(request.timeframe)
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
     prior_close = _nan()
     sorted_records = sorted(records, key=lambda candle: candle.close_time)
@@ -1324,13 +1336,21 @@ def build_triple_barrier_examples(records: Sequence[CandleEvidence], request: Da
             prior_close = source_close
             continue
 
+        # Intraday: the walk stops at the session close. A horizontal touch inside the session is
+        # still valid; with none, the short path makes a VERTICAL label censored (omitted) below
+        # instead of being decided by the next morning's bars.
+        forward_path = (
+            same_session_prefix(candle.close_time, candle.forward_path)
+            if intraday_labels
+            else candle.forward_path
+        )
         try:
             result = triple_barrier_label(
                 source_close=source_close,
                 atr=atr_value,
                 upper_multiple=request.barrier_upper_multiple,
                 lower_multiple=request.barrier_lower_multiple,
-                forward_path=candle.forward_path,
+                forward_path=forward_path,
             )
         except TripleBarrierError as error:
             raise FeatureConstructionError(f"Candle {candle.candle_id} has a malformed forward path: {error}") from error
@@ -1344,7 +1364,7 @@ def build_triple_barrier_examples(records: Sequence[CandleEvidence], request: Da
         # simply ended early -- a later bar could still have touched a barrier, so
         # this is unknown, not a genuine time-out. A horizontal touch inside a
         # short path is still valid (the barrier was reached before data ran out).
-        if result.touched == "VERTICAL" and len(candle.forward_path) < request.horizon_bars:
+        if result.touched == "VERTICAL" and len(forward_path) < request.horizon_bars:
             prior_close = source_close
             continue
 
@@ -1405,8 +1425,14 @@ def build_volatility_expansion_examples(
     window = request.horizon_bars
     examples: list[LabeledExample] = []
     volume_window: collections.deque[float] = collections.deque(maxlen=VOLUME_MEDIAN_WINDOW)
-    trailing_highs: collections.deque[float] = collections.deque(maxlen=window)
-    trailing_lows: collections.deque[float] = collections.deque(maxlen=window)
+    # Confined to one session for intraday bars: rolled across the overnight gap, the first
+    # window-1 bars of a session would compare a morning forward range with yesterday's
+    # envelope (EXPANSION/STABLE/CONTRACTION is 13/25/62% at bar 0 and 6/16/78% at bar 4 on
+    # NIFTY 15m h=5, against 30/34/37% from bar 5 on). Those bars are now skipped by the
+    # "trailing window not yet full" rule below. Daily and longer bars roll continuously.
+    trailing = SessionScopedTrailingWindow(
+        window, session_scoped=is_intraday_timeframe(request.timeframe)
+    )
     prior_close = _nan()
     sorted_records = sorted(records, key=lambda candle: candle.close_time)
 
@@ -1419,8 +1445,11 @@ def build_volatility_expansion_examples(
         source_close = _source_number(candle.close, "close")
         # The trailing window advances for every candle, including ones that fail
         # scope validation, so the envelope stays a true picture of recent range.
-        trailing_highs.append(_source_number(candle.high, "high"))
-        trailing_lows.append(_source_number(candle.low, "low"))
+        trailing.push(
+            candle.close_time,
+            _source_number(candle.high, "high"),
+            _source_number(candle.low, "low"),
+        )
 
         try:
             _validate_evidence_scope(candle, request)
@@ -1428,14 +1457,21 @@ def build_volatility_expansion_examples(
             prior_close = source_close
             continue
 
-        if len(trailing_highs) < window:
+        if not trailing.full:
             prior_close = source_close
             continue
 
+        # Intraday: the forward window is the K bars AFTER the source inside its own session; a
+        # window that would run past the close is short, hence censored (no label).
+        forward_path = (
+            same_session_prefix(candle.close_time, candle.forward_path)
+            if is_intraday_label_timeframe(request.timeframe)
+            else candle.forward_path
+        )
         try:
             result = volatility_expansion_label(
-                trailing_range=trailing_range_of(list(trailing_highs), list(trailing_lows)),
-                forward_path=candle.forward_path,
+                trailing_range=trailing_range_of(trailing.highs, trailing.lows),
+                forward_path=forward_path,
                 expected_forward_bars=window,
                 band=request.expansion_band,
             )

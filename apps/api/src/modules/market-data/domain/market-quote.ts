@@ -1,6 +1,6 @@
 export interface MarketQuote {
   symbol: string;
-  provider: "fyers-api-v3" | "yahoo" | "twelvedata";
+  provider: "fyers-api-v3" | "yahoo" | "oanda";
   shortName: string | null;
   exchange: string | null;
   regularMarketPrice: number | null;
@@ -12,6 +12,8 @@ export interface MarketQuote {
   regularMarketDayLow: number | null;
   regularMarketVolume: number | null;
   regularMarketTime: Date | null;
+  bid?: number;
+  ask?: number;
 }
 
 export interface MarketQuoteReader {

@@ -9,12 +9,20 @@ import { settleCandidate } from "../../modules/paper-trading/domain/candidate-se
 import type { CompletedPriceCandle } from "../../modules/paper-trading/domain/paper-trade-exit-policy.js";
 
 /**
- * Settles every candidate whose horizon has elapsed, recording what it would have done.
+ * Settles every candidate it can, recording what it would have done.
+ *
+ * A candidate settles the moment its bracket genuinely resolves (TARGET or STOP touched in the bars
+ * observed so far), even if its own nominal horizon has not elapsed yet -- waiting out the full window
+ * once the answer is already final only delays the ledger, it never changes the verdict (see
+ * `settleCandidate`'s own docstring: a result reached inside the available bars stands regardless of
+ * what is missing afterwards). A candidate that has NOT resolved yet is only settled (as UNRESOLVED or
+ * UNSETTLEABLE) once its horizon has actually elapsed -- anything short of that is read as still open,
+ * not as a verdict, and is left for the next sweep.
  *
  * The same command serves the scheduled sweep and the historical backfill: a backfill is only this
- * sweep with a larger `--limit`, because the selection is "horizon elapsed and not yet settled" and
- * that is true of history as much as of the last five minutes. Two commands would be two behaviours
- * to keep in step.
+ * sweep with a larger `--limit`, because the selection ("not yet settled, or settled UNSETTLEABLE") is
+ * true of history as much as of the last five minutes. Two commands would be two behaviours to keep in
+ * step.
  *
  * Bars are loaded once per series rather than once per candidate. With thousands of candidates over
  * one instrument and timeframe that is the difference between a few queries and a few thousand.
@@ -73,6 +81,14 @@ async function main(): Promise<void> {
     let written = 0;
     let alreadySettled = 0;
     let failures = 0;
+    /**
+     * A candidate whose horizon has not elapsed yet and whose bars observed so far show no TARGET/STOP
+     * touch -- genuinely still open, not a data gap. `settleCandidate` cannot express this third state
+     * on its own (it only ever returns a resolved outcome or UNSETTLEABLE), so the gate below decides
+     * it at the call site instead of writing a premature UNSETTLEABLE/UNRESOLVED verdict for something
+     * that simply hasn't happened yet. Left for the next sweep to re-check.
+     */
+    let stillPending = 0;
 
     // One bar load per series, covering the union of every candidate's window in that series.
     const bySeries = new Map<string, UnsettledCandidate[]>();
@@ -123,6 +139,17 @@ async function main(): Promise<void> {
             resolvedTimeframe: candidate.timeframe,
             forwardCandles,
           });
+
+          const resolvedEarly = settlement.outcome === "TARGET" || settlement.outcome === "STOP";
+          const horizonElapsed = candidate.horizonEnd.getTime() <= asOf.getTime() - INGESTION_GRACE_MS;
+          if (!resolvedEarly && !horizonElapsed) {
+            // Genuinely still open: no touch in the bars seen so far, and its own nominal window
+            // hasn't elapsed yet, so an UNSETTLEABLE/UNRESOLVED verdict here would be premature, not
+            // a real data gap. Leave it for the next sweep -- cheap, since nothing was written.
+            stillPending += 1;
+            continue;
+          }
+
           const inserted = await ledger.recordSettlement(candidate.tradeIdeaId, settlement);
           if (inserted) {
             written += 1;
@@ -150,6 +177,7 @@ async function main(): Promise<void> {
       seriesLoaded: bySeries.size,
       settlementsWritten: written,
       alreadySettled,
+      stillPending,
       failures,
       outcomes,
       // Stated rather than left to be inferred from the count: a sweep that hits its limit has left

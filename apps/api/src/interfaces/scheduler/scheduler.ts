@@ -200,6 +200,10 @@ async function main(): Promise<void> {
     EOD_PIPELINE: 6 * 60 * 60 * 1000,
     INSTITUTIONAL_FLOWS: 30 * 60 * 1000,
     INSTITUTIONAL_FLOWS_RETRY: 30 * 60 * 1000,
+    // Two Yahoo quotes and an upsert; a dead claimant should not hold the next day's slot.
+    OPENING_GAP_PREDICTION: 5 * 60 * 1000,
+    // Reads stored candles only, same patience as AUXILIARY_PREDICTION_SETTLEMENT.
+    OPENING_GAP_SETTLEMENT: 10 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -238,11 +242,17 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
-    // Both on a 5-minute cron, same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
-    // to a faster tick: a dead claimant should not hold up more than one tick's worth of gold data
-    // or signal generation.
+    // XAU_CANDLE_COLLECTION moved to a 15-minute cron 2026-10-07 (see that job's own docstring --
+    // Twelve Data's daily free-tier credit cap, not this timeout); PAPER_TRADING_BOT_GOLD still
+    // fires inside the same tick. Same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
+    // down: a dead claimant should not hold up more than one tick's worth of gold data or signal
+    // generation, and 4 minutes clears well inside a 15-minute tick with margin to spare.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
+    // Hourly XAU_USD backfill of holes the 45-minute collection window cannot reach; most runs only
+    // scan, and a real heal derives and recomputes indicators over the healed window, so it gets
+    // far more room than a collection tick.
+    XAU_GAP_HEAL: 20 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
     // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
     // stalled claimant just means the next day's run picks up everything since the last success.
@@ -373,6 +383,31 @@ async function main(): Promise<void> {
     void schedule("INSTITUTIONAL_FLOWS_RETRY", () => runCommand("npm", ["run", "data:collect:institutional"]));
   });
 
+  /**
+   * Predicts NIFTY50/BANKNIFTY's opening gap from the S&P 500's own overnight change, 25
+   * minutes before the 09:15 IST open -- see `opening-gap-classifier.ts` for why the driver
+   * is the S&P 500 and not GIFT Nifty (no free GIFT Nifty feed exists anywhere this codebase
+   * can reach). Reads a live Yahoo quote and writes one row per instrument; ungated, like
+   * `INSTITUTIONAL_FLOWS`, since it depends on neither the Fyers token nor the option chain.
+   */
+  cronSchedule("50 8 * * 1-5", () => {
+    void schedule("OPENING_GAP_PREDICTION", () => runCommand("npm", ["run", "data:predict:opening-gap"]));
+  });
+
+  /**
+   * Settles opening-gap predictions against the real 09:15 IST open once the session's first
+   * 1-minute candle has landed. Three tries through the morning (the candle can lag the open
+   * by a minute or two under load) plus one EOD catch-all, the same shape as
+   * `AUXILIARY_PREDICTION_SETTLEMENT` and for the same reason: a stalled claim must not block
+   * the next day's prediction, so it gets its own job type rather than riding on another one.
+   */
+  cronSchedule("20,30,45 9 * * 1-5", () => {
+    void schedule("OPENING_GAP_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:opening-gap"]));
+  });
+  cronSchedule("20 16 * * 1-5", () => {
+    void schedule("OPENING_GAP_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:opening-gap"]));
+  });
+
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
     const now = new Date();
     const lookback = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
@@ -494,11 +529,54 @@ async function main(): Promise<void> {
    *
    * Cost measured before adding them, because this helper rescans the full completed series on
    * every invocation and that is what once let a per-minute job reach 330 concurrent runs: 5m is
-   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. Four passes at a
-   * fifteen-minute cadence is well inside the 20-minute abandoned-claim horizon for this job.
+   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. That cost was measured
+   * for a fifteen-minute cadence; 1m and 5m now run every five minutes -- see the next block.
    */
-  cronSchedule("*/15 9-15 * * 1-5", () => {
-    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
+  /*
+   * Pattern detection for the 1m and 5m series runs every five minutes, immediately ahead of the
+   * shadow decision pass in the same tick; 15m stays on the quarter hour.
+   *
+   * It used to run every fifteen minutes for all three timeframes while `SHADOW_DECISION` decided a
+   * fresh 1m and 5m bar every five. A bar closing off the quarter hour had no pattern coverage yet,
+   * so V2.2's opportunity resolver deferred it (`PATTERN_LAYER_NOT_COMPUTED`) and nothing ever
+   * retried it. Measured 2026-10-11 over the ledger since Oct 1: every decision at :04, :05, :09,
+   * :10 and :14 deferred (about 69% of resolved candidates), and even at the :00 mark 106 of 302
+   * deferred because detection and the shadow pass started together.
+   *
+   * Detection is deterministic for a closed bar -- every engine reads indices at or before the bar --
+   * so running it sooner changes when the layer becomes available, never what it contains.
+   *
+   * Sequenced with `await`, not fired as independent `void schedule(...)` calls: that is the
+   * read-before-write race this closes, the same one the XAU block's own comment describes. The
+   * shadow pass runs whether or not detection succeeded, because a deferral recorded honestly is
+   * better than a missing decision, and `schedule()` already contains a failed run.
+   *
+   * Cost: 1m + 5m for both indices measured about 25s on average (77s worst) per run, well inside
+   * the five-minute cadence and the 3-minute (1m) / 7-minute (5m) bar-age ceilings the shadow pass
+   * enforces.
+   *
+   * Side effect to know about: the same pattern tables feed the pattern-gated live bots, so their 1m
+   * and 5m patterns are now at most one tick old instead of up to fifteen minutes old.
+   */
+  cronSchedule("*/5 9-15 * * 1-5", () => {
+    void (async () => {
+      const onQuarterHour = new Date().getMinutes() % 15 === 0;
+      await schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(
+        onQuarterHour ? ["1m", "5m", "15m"] : ["1m", "5m"],
+      ));
+      /*
+       * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
+       *
+       * Same five-minute cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the
+       * same decision points, and a shadow run on a different rhythm would produce records V1 has no
+       * counterpart for -- unpairable rows that look like coverage.
+       *
+       * Not gated on `fyersTokenService`, unlike the bot. It reads stored contexts and places no
+       * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
+       * differential record on exactly the days the token lapses, which are the days worth comparing.
+       */
+      await schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
+    })();
   });
 
   /**
@@ -617,18 +695,6 @@ async function main(): Promise<void> {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
-    /*
-     * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
-     *
-     * On the same cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the same
-     * decision points, and a shadow run on a different rhythm would produce records V1 has no
-     * counterpart for -- unpairable rows that look like coverage.
-     *
-     * Not gated on `fyersTokenService`, unlike the bot above. It reads stored contexts and places no
-     * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
-     * differential record on exactly the days the token lapses, which are the days worth comparing.
-     */
-    void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
   });
 
   /**
@@ -639,29 +705,43 @@ async function main(): Promise<void> {
    * check the real session themselves and no-op outside it, the same way every job here is
    * written to be a safe no-op off-session rather than relying on the cron pattern alone).
    *
-   * Every 5 minutes, every day: collect fresh 1m/5m candles, recompute indicators over them
-   * (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what `momentum-scalp-gold` reads -- and `smc-v2` --
-   * FVG/BOS/CHoCH/order-block/liquidity-sweep, the default `--family all` computes both), then
-   * run the bot. Without this step `indicator_snapshots` stays empty for XAU_USD and
-   * `momentum-scalp-gold` can never actually evaluate a bar -- confirmed live 2026-09-22: the
-   * first deploy ran clean but every tick's "RULES_NOT_MET" was indicators-absent, not
-   * conditions-failed, since nothing computed them. `applySmcConfluenceToProposal` in
-   * `generate-trade-ideas.ts` already runs unconditionally for every non-ICT strategy, so once
-   * `smc-v2` indicators exist here SMC confluence nudges gold's proposals with no further wiring.
+   * Every 15 minutes, every day: collect fresh 1m candles, derive 5m/15m from them locally,
+   * recompute indicators over all three (both `ta-v1` -- EMA/RSI/Supertrend/ATR, what
+   * `momentum-scalp-gold` reads -- and `smc-v2` -- FVG/BOS/CHoCH/order-block/liquidity-sweep, the
+   * default `--family all` computes both), then run the bot. Without this step
+   * `indicator_snapshots` stays empty for XAU_USD and `momentum-scalp-gold` can never actually
+   * evaluate a bar -- confirmed live 2026-09-22: the first deploy ran clean but every tick's
+   * "RULES_NOT_MET" was indicators-absent, not conditions-failed, since nothing computed them.
+   * `applySmcConfluenceToProposal` in `generate-trade-ideas.ts` already runs unconditionally for
+   * every non-ICT strategy, so once `smc-v2` indicators exist here SMC confluence nudges gold's
+   * proposals with no further wiring.
    *
    * `--skip-existing` makes candle collection idempotent, and a 45-minute lookback window
    * comfortably covers one tick's gap plus retry margin. `INDICATOR_WRITE_LOOKBACK_DAYS` bounds
    * the indicator *write*, mirroring `collectIndicesIntraday`'s own reasoning above: computed
    * over the full series, written only for the last few days, so a missed run heals on the next
-   * pass. Two `/time_series` requests well within Twelve Data's 8-credits/minute cap -- see
-   * `twelvedata-quote-client.ts` for where that cap was confirmed live.
+   * pass.
    *
-   * The two `schedule()` calls are sequenced with `await`, not fired as two independent
-   * `void schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
+   * Only 1m is fetched from Twelve Data for XAU_USD itself -- 5m and 15m are derived locally via
+   * `data:derive:higher-timeframes` (see that file's docstring) rather than fetched as their own
+   * `/time_series` calls. Confirmed live 2026-10-07: fetching all three separately, every 5
+   * minutes, cost 9 Twelve Data calls a tick (3 XAU timeframes + 6 DXY component pairs) -- 288
+   * ticks/day * 9 = 2,592 calls against an 800/day free-tier cap, 3.24x over budget regardless of
+   * how well the per-minute spacing below is tuned (996 of 800 daily credits used, HTTP 429 for
+   * the rest of the day, leaving `momentum-scalp-gold` and the settlement sweep both running on
+   * stale data). Dropping to one XAU fetch a tick and widening the cron to 15 minutes brings this
+   * to 96 ticks/day * 7 calls (1 XAU + 6 DXY components) = 672/day, with headroom left for the
+   * quote client's own polling. Only the collection cadence changed -- `momentum-scalp-gold`'s own
+   * entry-side freshness check (`PrepareDirectEntry`'s `MAXIMUM_EXECUTABLE_QUOTE_AGE_MS`) reads a
+   * live quote via a separate, independently-throttled client, not these stored candles, so it is
+   * unaffected by this.
+   *
+   * The `schedule()` calls are sequenced with `await`, not fired as independent `void
+   * schedule(...)` calls the way `PAPER_TRADING_BOT`/`SHADOW_DECISION` are above. Those two
    * are safe to run concurrently because they are temporally decoupled by construction --
    * `INDICES_INTRADAY` runs on its own every-minute cron, so by the time `PAPER_TRADING_BOT` fires every
    * five minutes the candles it reads are already several collections old and settled. This block
-   * folds collection and the bot into the *same* five-minute tick, so nothing separates them in
+   * folds collection and the bot into the *same* tick, so nothing separates them in
    * time -- confirmed live 2026-09-22: firing both as `void schedule(...)` let
    * "Gold paper trading bot run complete" print while that tick's own XAU_USD indicator
    * calculation was still running, which is exactly the read-before-write race this sequencing
@@ -674,28 +754,53 @@ async function main(): Promise<void> {
    * back to `true`, not rebuilding anything.
    */
   const XAU_BOT_ENABLED = true;
-  cronSchedule("*/5 * * * *", () => {
-    if (!XAU_BOT_ENABLED || !process.env.TWELVEDATA_API_KEY) return;
+  cronSchedule("*/15 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {
         const to = new Date();
         const from = new Date(to.getTime() - 45 * 60 * 1000);
         const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
+        /*
+         * Spaced to stay under Twelve Data's per-minute credit cap. This loop plus the DXY
+         * component loop below fire 7 `data:collect:historical` calls in total (XAU_USD's own 1m
+         * plus 6 FX pairs) and, with no spacing, all of them landed inside the same rolling minute
+         * -- measured 2026-10-07 as repeated HTTP 429s ("14 API credits were used, with the
+         * current limit being 8"), which left XAU_USD's own candle stale past
+         * `momentum-scalp-gold`'s 300-second freshness window and blocked every direct-entry idea
+         * with NO_FRESH_QUOTE. Indicator calculation and the local 5m/15m derivation both read
+         * already-stored candles rather than calling Twelve Data, so neither is throttled here.
+         */
+        const TWELVEDATA_CALL_SPACING_MS = 8_000;
+        const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "oanda",
+          "--exchange", "OANDA",
+          "--instrument", "XAU_USD",
+          "--timeframe", "1m",
+          "--from", from.toISOString(),
+          "--to", to.toISOString(),
+          "--skip-existing",
+        ]);
+        // Guaranteed spacing before the next Twelve Data call (the FX component loop below),
+        // rather than relying on however long the Twelve-Data-free derive/indicator steps in
+        // between happen to take.
+        await sleep(TWELVEDATA_CALL_SPACING_MS);
+        await runCommand("npm", [
+          "run", "data:derive:higher-timeframes", "--",
+          "--exchange", "OANDA",
+          "--instrument", "XAU_USD",
+          "--timeframes", "5,15",
+          "--from", from.toISOString(),
+          "--to", to.toISOString(),
+        ]);
         for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
-            "run", "data:collect:historical", "--",
-            "--provider", "twelvedata",
-            "--exchange", "TWELVEDATA",
-            "--instrument", "XAU_USD",
-            "--timeframe", timeframe,
-            "--from", from.toISOString(),
-            "--to", to.toISOString(),
-            "--skip-existing",
-          ]);
-          await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
-            "--exchange", "TWELVEDATA",
+            "--exchange", "OANDA",
             "--instrument", "XAU_USD",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
@@ -708,14 +813,15 @@ async function main(): Promise<void> {
         for (const component of ["EUR_USD", "USD_JPY", "GBP_USD", "USD_CAD", "USD_SEK", "USD_CHF"]) {
           await runCommand("npm", [
             "run", "data:collect:historical", "--",
-            "--provider", "twelvedata",
-            "--exchange", "TWELVEDATA",
+            "--provider", "oanda",
+            "--exchange", "OANDA",
             "--instrument", component,
             "--timeframe", "1m",
             "--from", from.toISOString(),
             "--to", to.toISOString(),
             "--skip-existing",
           ]);
+          await sleep(TWELVEDATA_CALL_SPACING_MS);
         }
         await runCommand("npm", [
           "run", "data:compute:synthetic-dxy", "--",
@@ -725,7 +831,7 @@ async function main(): Promise<void> {
         for (const timeframe of ["1m", "5m", "15m"]) {
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
-            "--exchange", "TWELVEDATA",
+            "--exchange", "OANDA",
             "--instrument", "DXY",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
@@ -737,17 +843,24 @@ async function main(): Promise<void> {
   });
 
   /**
-   * Sweeps UNRESOLVED shadow trades from previous sessions and attempts to resolve them 
-   * against newly collected historical candles. This keeps the shadow ledger accurate even if 
-   * live market feeds cut out or rate-limit during the active session.
-   * Runs daily at 08:00 before the new session gets busy.
+   * Hourly backfill of XAU_USD 1m holes.
+   *
+   * `XAU_CANDLE_COLLECTION` above only ever fetches the last 45 minutes, so any outage longer than
+   * that (the host sleeping overnight, a scheduler restart) leaves the missed bars missing
+   * permanently, and the 5m/15m series and indicators the gold strategies read inherit the hole.
+   * `data:heal-gold-gaps` finds missing minutes that fall inside gold's real session (the weekend
+   * close and the daily New York break are not gaps), fetches them append-only, and only then
+   * derives higher timeframes and recomputes indicators over the healed window. A run with
+   * nothing to heal is a single query.
+   *
+   * Offset to :07 so it never lands inside the :00/:15/:30/:45 collection ticks it complements.
    */
-  cronSchedule("0 8 * * *", () => {
-    void schedule("SHADOW_TRADE_SWEEP", async () => {
-      await runCommand("npx", ["tsx", "src/interfaces/cli/resolve-stale-shadow-trades.ts"]);
-    });
+  cronSchedule("7 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
+    void schedule("XAU_GAP_HEAL", () => runCommand("npm", [
+      "run", "data:heal-gold-gaps", "--", "--apply", "--lookback-days", "7",
+    ]));
   });
-
 
   /**
    * Liquidity Intelligence Engine v1 -- daily candidate + contact-label recompute for BANKNIFTY.
@@ -821,22 +934,30 @@ async function main(): Promise<void> {
    * no process at all.
    */
   /**
-   * Settles candidates whose horizon has elapsed, so the ledger can say what the trades nobody took
-   * would have done.
+   * Settles candidates as soon as they resolve (or, failing that, once their horizon elapses), so the
+   * ledger can say what the trades nobody took would have done.
    *
    * Research only: nothing reads a settlement at decision time, so this is scheduled where it cannot
-   * compete with execution. Half-hourly through the session picks up short horizons while they are
-   * fresh, and the 16:10 run catches every candidate whose horizon crossed the close.
+   * compete with execution. Deliberately not gated on `fyersTokenService`: this reads stored bars, so
+   * it works on a day the feed never authenticated -- which is exactly a day worth measuring.
    *
-   * Deliberately not gated on `fyersTokenService`: this reads stored bars, so it works on a day the
-   * feed never authenticated -- which is exactly a day worth measuring.
+   * Every 5 minutes, every day of the week -- not NSE-hours-only like the original "15,45 9-15 * * 1-5"
+   * (half-hourly, weekdays, 9am-4pm IST). That schedule was sized for the NIFTY50/BANKNIFTY options
+   * research it was built for, but XAU_USD trades a near-24/5 session: a gold candidate settling (or
+   * resolving its bracket) at 9pm IST, or on a Saturday IST morning that is still Friday in NY, used to
+   * sit unsettled until the next weekday 9:15 IST run -- hours of dashboard-visible lag that had
+   * nothing to do with `settle-candidates` itself being slow. `settle-candidates.ts` now also settles a
+   * candidate the moment its bracket resolves rather than waiting out its full nominal window (see its
+   * own docstring), so a tighter, round-the-clock cadence is what actually gets that improvement onto
+   * the dashboard quickly instead of leaving it to be discovered by the next half-hourly tick.
    */
-  cronSchedule("15,45 9-15 * * 1-5", () => {
+  cronSchedule("*/5 * * * *", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "1000"]);
     });
   });
 
+  // A generous once-daily backstop in case a backlog ever exceeds the 5-minute sweep's own limit.
   cronSchedule("10 16 * * 1-5", () => {
     void schedule("CANDIDATE_SETTLEMENT", async () => {
       await runCommand("npm", ["run", "research:settle-candidates", "--", "--limit", "5000"]);
@@ -1298,6 +1419,8 @@ async function main(): Promise<void> {
       "INDICES_INTRADAY",
       "INSTITUTIONAL_FLOWS",
       "INSTITUTIONAL_FLOWS_RETRY",
+      "OPENING_GAP_PREDICTION",
+      "OPENING_GAP_SETTLEMENT",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
@@ -1318,7 +1441,6 @@ async function main(): Promise<void> {
       // so it runs without a live feed. Listing it inside the Fyers-gated group below would
       // misrepresent when it runs.
       "SHADOW_DECISION",
-      "SHADOW_TRADE_SWEEP",
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
            // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
@@ -1330,11 +1452,11 @@ async function main(): Promise<void> {
       "LIQUIDITY_CANDIDATE_GENERATION",
       "LIQUIDITY_CONTACT_LABELING",
       // Mirrors the runtime gate at this job's own `cronSchedule` callback (`!XAU_BOT_ENABLED ||
-      // !process.env.TWELVEDATA_API_KEY`) so the inventory can't drift the way it did when
+      // !process.env.OANDA_ACCESS_TOKEN`) so the inventory can't drift the way it did when
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
-      ...(XAU_BOT_ENABLED && process.env.TWELVEDATA_API_KEY
-        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD"]
+      ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
+        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL"]
         : []),
     ],
     timezone: IST,

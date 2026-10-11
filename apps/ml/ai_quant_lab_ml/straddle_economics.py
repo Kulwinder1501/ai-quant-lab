@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Hashable, Iterable, Mapping, Sequence
 
 TRADING_DAYS_PER_YEAR = 252
 CALENDAR_DAYS_PER_YEAR = 365.0
@@ -42,6 +42,45 @@ def _mean_and_standard_error(values: Sequence[float]) -> tuple[float | None, flo
     return mean, math.sqrt(variance / len(values))
 
 
+def clustered_mean_and_standard_error(
+    values: Sequence[float],
+    clusters: Sequence[Hashable],
+) -> tuple[float | None, float | None, int]:
+    """Mean and cluster-robust standard error of the mean, plus the cluster count.
+
+    Intraday entries on the same session are not independent: bars two hours apart share
+    the day's volatility regime, and with a multi-bar hold neighbouring entries share bars
+    outright. The i.i.d. formula ``sd / sqrt(n)`` then counts one day's worth of evidence
+    many times over and hands the promotion gate a standard error that is too small.
+
+    This is the one-way cluster-robust (CR1) estimator of the variance of the mean::
+
+        SE = sqrt( G/(G-1) * sum_g (sum_{i in g}(x_i - mean))^2 ) / n
+
+    with ``G`` clusters (one per trading day) and ``n`` entries. Properties worth knowing:
+    each cluster contributes through its *summed* deviation, so duplicating or overlapping
+    entries inside a day cannot shrink it; with one entry per cluster it reduces exactly to
+    the i.i.d. ``sd / sqrt(n)``; and it needs at least two clusters, otherwise the SE is
+    None (fail closed -- one day of evidence has no measurable spread).
+    """
+
+    if len(values) != len(clusters):
+        raise ValueError("values and clusters must have the same length.")
+    if not values:
+        return None, None, 0
+    n = len(values)
+    mean = sum(values) / n
+    cluster_deviation: dict[Hashable, float] = {}
+    for value, cluster in zip(values, clusters):
+        cluster_deviation[cluster] = cluster_deviation.get(cluster, 0.0) + (value - mean)
+    cluster_count = len(cluster_deviation)
+    if cluster_count < 2:
+        return mean, None, cluster_count
+    sum_squares = sum(deviation * deviation for deviation in cluster_deviation.values())
+    variance_of_mean = (cluster_count / (cluster_count - 1)) * sum_squares / (n * n)
+    return mean, math.sqrt(variance_of_mean), cluster_count
+
+
 def cost_aware_promotion_verdict(
     *,
     gated_pnls: Sequence[float],
@@ -50,6 +89,7 @@ def cost_aware_promotion_verdict(
     minimum_scored: int = 300,
     minimum_gated: int = 60,
     confidence_z: float = 1.96,
+    gated_clusters: Sequence[Hashable] | None = None,
 ) -> dict[str, object]:
     """Fail-closed economic gate for a shadow volatility strategy.
 
@@ -57,6 +97,12 @@ def cost_aware_promotion_verdict(
     positive fee-adjusted mean, a positive lower confidence bound, and an
     improvement over entering on every opportunity. Precision alone is not an
     economic verdict because the label and option payoff are different targets.
+
+    ``gated_clusters`` gives each gated entry's trading day (any hashable). When supplied the
+    lower bound uses the day-clustered standard error, because entries within a session
+    overlap and an i.i.d. SE overstates the evidence. When omitted the i.i.d. SE is used and
+    the result says so (``standardErrorBasis``): that is only appropriate for entries that
+    are genuinely independent, and every caller with intraday entries should pass clusters.
     """
 
     if not math.isfinite(fee_bps) or fee_bps < 0:
@@ -66,7 +112,15 @@ def cost_aware_promotion_verdict(
     if not math.isfinite(confidence_z) or confidence_z <= 0:
         raise ValueError("confidence_z must be a positive finite number.")
 
-    gated_mean, gated_se = _mean_and_standard_error(gated_pnls)
+    if gated_clusters is None:
+        gated_mean, gated_se = _mean_and_standard_error(gated_pnls)
+        gated_cluster_count = None
+        standard_error_basis = "IID_ENTRIES"
+    else:
+        gated_mean, gated_se, gated_cluster_count = clustered_mean_and_standard_error(
+            gated_pnls, gated_clusters
+        )
+        standard_error_basis = "CLUSTERED_BY_TRADING_DAY"
     always_mean, _ = _mean_and_standard_error(always_enter_pnls)
     fee_fraction = fee_bps / 10_000
     gated_net = None if gated_mean is None else gated_mean - fee_fraction
@@ -92,6 +146,9 @@ def cost_aware_promotion_verdict(
         "minimumScored": minimum_scored,
         "minimumGated": minimum_gated,
         "confidenceZ": confidence_z,
+        "standardErrorBasis": standard_error_basis,
+        "gatedClusterCount": gated_cluster_count,
+        "gatedStandardErrorBps": None if gated_se is None else gated_se * 10_000,
         "gatedNetMeanBps": None if gated_net is None else gated_net * 10_000,
         "alwaysEnterNetMeanBps": None if always_net is None else always_net * 10_000,
         "gatedNetLowerBoundBps": None if lower_bound is None else lower_bound * 10_000,

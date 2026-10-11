@@ -108,6 +108,7 @@ export class FyersOptionChainClient {
     }
 
     const expiryKindByDate = new Map<string, ExpiryKind>();
+    const weeklyAlsoMonthly = new Set<string>();
     const expiryByEpoch = new Map<string, Date>();
     const epochByExpiryKey = new Map<string, string>();
     for (const entry of payload.data.expiryData ?? []) {
@@ -117,7 +118,12 @@ export class FyersOptionChainClient {
       // W and M are the provider's own flags. Recorded rather than inferred from the
       // weekday: NSE moved weeklies to a single index and to Tuesday, so any weekday
       // rule is already stale.
-      expiryKindByDate.set(key, entry.expiry_flag === "W" ? "WEEKLY" : "MONTHLY");
+      const kind: ExpiryKind = entry.expiry_flag === "W" ? "WEEKLY" : "MONTHLY";
+      // The same date listed as both W and M (last weekly == monthly) resolves to MONTHLY
+      // regardless of the order the header lists them in, so the stored kind is deterministic.
+      const previousKind = expiryKindByDate.get(key);
+      if (previousKind !== undefined && previousKind !== kind) weeklyAlsoMonthly.add(key);
+      expiryKindByDate.set(key, previousKind === "MONTHLY" ? "MONTHLY" : kind);
       if (entry.expiry) {
         expiryByEpoch.set(entry.expiry, parsed);
         // Kept so a caller can ask for this expiry's book. Without it, only whichever expiry the
@@ -143,7 +149,7 @@ export class FyersOptionChainClient {
         continue;
       }
 
-      const expiryDate = expiryFromSymbol(row.symbol, expiryKindByDate);
+      const expiryDate = expiryFromSymbol(row.symbol, expiryKindByDate, weeklyAlsoMonthly);
       if (expiryDate === null) continue;
       const expiryKey = expiryDate.toISOString().slice(0, 10);
 
@@ -203,6 +209,24 @@ function parseExpiryDate(value: string | undefined): Date | null {
  * expiry — which is what a single request returns — the header's own date is
  * unambiguous and is used directly, which avoids depending on a symbol-format parse.
  *
+ * ## Weekly token vs monthly token (2026-10 audit fix)
+ *
+ * The two symbol formats are matched against DIFFERENT subsets of the header, never the whole
+ * list. A weekly symbol carries the full date (yy, month code, dd) and can only belong to a date
+ * the header flags WEEKLY. A monthly symbol carries only year + month name (`26SEP`), so it is
+ * resolved to the one date the header flags MONTHLY in that month. The old loop tested the monthly
+ * token against every date in ascending order, so the 29-Sep monthly book matched the first
+ * September date -- the 22-Sep weekly -- and was stored under the wrong expiry (51 snapshots /
+ * 3,162 NIFTY50 rows; migration 131 repairs them).
+ *
+ * If a month lists more than one MONTHLY date the monthly token is ambiguous and the row is
+ * dropped (null) rather than guessed.
+ *
+ * Deterministic rule for the "last weekly == monthly" case: the header flags one date with both
+ * W and M. `expiryKindByDate` records MONTHLY for it (a monthly flag wins), and that date accepts
+ * BOTH the monthly month-name token and its full weekly-style date token, so a contract is
+ * attributed to it whichever way the vendor spells it.
+ *
  * The weekly `M` slot is fixed-width (one character) so the symbol length does not vary
  * by month: single digit `1`-`9` for January-September, but `O`/`N`/`D` for October,
  * November, December -- not `10`/`11`/`12`. Confirmed live 2026-10-05 against
@@ -216,24 +240,45 @@ function parseExpiryDate(value: string | undefined): Date | null {
 function expiryFromSymbol(
   symbol: string | undefined,
   expiryKindByDate: Map<string, ExpiryKind>,
+  /** Dates the header listed with BOTH a W and an M flag (last weekly == monthly). */
+  weeklyAlsoMonthly: ReadonlySet<string> = new Set(),
 ): Date | null {
   const dates = [...expiryKindByDate.keys()].sort();
   if (dates.length === 0) return null;
   if (dates.length === 1) return new Date(`${dates[0]}T10:00:00.000Z`);
 
-  // More than one expiry in the header: prefer a symbol match so rows are not all
-  // attributed to the nearest expiry.
+  // More than one expiry in the header: parse the symbol so rows are not all attributed to the
+  // nearest expiry.
   if (symbol) {
     const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
     // Index 0 is unused (months are 1-indexed); 10/11/12 are the single-letter codes above.
     const weeklyMonthCodes = ["", "1", "2", "3", "4", "5", "6", "7", "8", "9", "O", "N", "D"];
-    for (const date of dates) {
-      const [year, month, day] = date.split("-") as [string, string, string];
-      const yy = year.slice(2);
-      const weekly = `${yy}${weeklyMonthCodes[Number(month)]}${day}`;
-      const monthly = `${yy}${monthNames[Number(month) - 1]}`;
-      if (symbol.includes(weekly) || symbol.includes(monthly)) {
-        return new Date(`${date}T10:00:00.000Z`);
+    // Underlying names are letters only (NIFTY, BANKNIFTY, SBIN, M&M), so the first digit pair
+    // after them is always the 2-digit year. Anchored on the CE/PE suffix so a strike that happens
+    // to look like a date code (26922) can never be read as one.
+    const parsed = /^(?:[A-Z]+:)?[A-Z&-]+(\d{2})(?:([1-9OND])(\d{2})|([A-Z]{3}))\d+(?:\.\d+)?(?:CE|PE)$/
+      .exec(symbol.trim().toUpperCase());
+    if (parsed) {
+      const [, yy, weeklyMonthCode, weeklyDay, monthName] = parsed;
+      if (weeklyMonthCode !== undefined && weeklyDay !== undefined) {
+        const monthIndex = weeklyMonthCodes.indexOf(weeklyMonthCode);
+        const date = `20${yy}-${String(monthIndex).padStart(2, "0")}-${weeklyDay}`;
+        // A weekly-style token names one exact date, which must be a WEEKLY one (or the
+        // dual weekly+monthly date, recorded as MONTHLY -- see the doc comment).
+        const kind = expiryKindByDate.get(date);
+        if (kind === "WEEKLY" || (kind === "MONTHLY" && weeklyAlsoMonthly.has(date))) {
+          return new Date(`${date}T10:00:00.000Z`);
+        }
+      } else if (monthName !== undefined) {
+        const monthIndex = monthNames.indexOf(monthName);
+        if (monthIndex >= 0) {
+          const prefix = `20${yy}-${String(monthIndex + 1).padStart(2, "0")}-`;
+          const monthlyDates = dates.filter(
+            (date) => date.startsWith(prefix) && expiryKindByDate.get(date) === "MONTHLY",
+          );
+          // Exactly one monthly expiry exists per contract month; anything else is ambiguous.
+          if (monthlyDates.length === 1) return new Date(`${monthlyDates[0]}T10:00:00.000Z`);
+        }
       }
     }
   }

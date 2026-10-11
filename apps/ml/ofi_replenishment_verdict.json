@@ -1,0 +1,13 @@
+{
+  "n_opportunities": 2270,
+  "n_valid_state": 1990,
+  "n_state_unavailable": 280,
+  "coverage_pct": 87.66519823788546,
+  "q1_mean_bps": 6.420972076581095,
+  "q2_mean_bps": -2.119563288621704,
+  "q3_mean_bps": -1.0354755270527443,
+  "q4_mean_bps": -1.7313589401569935,
+  "q4_minus_q1_bps": -8.152331016738088,
+  "omnibus_statistic": 12.300628675754409,
+  "permutation_p_value": 0.01357
+}

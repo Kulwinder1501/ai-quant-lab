@@ -1,0 +1,22 @@
+{
+  "n_opportunities": 2370,
+  "n_baseline_trades": 2370,
+  "n_conditional_trades": 1245,
+  "conditional_coverage_pct": 52.53164556962025,
+  "baseline_trade_rate_pct": 100.0,
+  "avoided_baseline_trades": 1125,
+  "delta_mean_per_opportunity_bps": 1.4349456781635317,
+  "conditional_mean_per_trade_bps": -1.4140744022142304,
+  "baseline_mean_per_trade_bps": -2.1777822312254376,
+  "hac_t_stat": 2.031614302421908,
+  "bootstrap_ci": {
+    "lower": 0.0609448373634484,
+    "upper": 2.8286895112070636
+  },
+  "n_sessions": 7,
+  "gates": {
+    "sign_gate_passed": false,
+    "economic_gate_passed": false,
+    "stat_gate_passed": false
+  }
+}

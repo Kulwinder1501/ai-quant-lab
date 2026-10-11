@@ -16,6 +16,9 @@ export interface HistoricalMarketCandle {
   low: string;
   close: string;
   volume: string;
+  bid?: { open: string; high: string; low: string; close: string };
+  ask?: { open: string; high: string; low: string; close: string };
+  complete?: boolean;
 }
 
 /** A provider port. Implementations may use a licensed HTTP API or a local export file. */

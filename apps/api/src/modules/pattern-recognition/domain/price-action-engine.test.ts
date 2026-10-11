@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PriceActionEngine, type PriceActionConfiguration } from "./price-action-engine.js";
+import { PriceActionEngine, priceActionConfigurationForTimeframe, type PriceActionConfiguration } from "./price-action-engine.js";
 import type { DetectedPriceActionEvent, PatternCandle } from "./market-pattern.js";
 
 const testConfiguration: PriceActionConfiguration = {
@@ -235,5 +235,25 @@ describe("PriceActionEngine", () => {
       details: { pivotCandleId: "3", confirmationCandleId: "5", touches: 1, swingWindow: 2 },
     });
     expect(eventFor(swingLowEvents, "SUPPORT", "5")).toMatchObject({ direction: "BULLISH", level: 5 });
+  });
+});
+
+describe("priceActionConfigurationForTimeframe", () => {
+  it("measures distances in ATR units on every intraday timeframe", () => {
+    for (const timeframe of ["1m", "5m", "15m", "1h"]) {
+      expect(priceActionConfigurationForTimeframe(timeframe).thresholdMode).toBe("ATR");
+    }
+  });
+
+  it("keeps the percent unit for daily bars, so the daily rules are unchanged", () => {
+    for (const timeframe of ["1d", "1440m"]) {
+      expect(priceActionConfigurationForTimeframe(timeframe).thresholdMode).toBe("PERCENT");
+    }
+  });
+
+  it("shares every unit-count threshold between the two modes, changing only the unit", () => {
+    const { thresholdMode: _intradayMode, ...intraday } = priceActionConfigurationForTimeframe("5m");
+    const { thresholdMode: _dailyMode, ...daily } = priceActionConfigurationForTimeframe("1d");
+    expect(intraday).toEqual(daily);
   });
 });

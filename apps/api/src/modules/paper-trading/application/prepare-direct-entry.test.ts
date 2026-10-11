@@ -35,7 +35,7 @@ function fakeQuoteReader(quote: MarketQuote | null): MarketQuoteReader {
 function freshQuote(overrides: Partial<MarketQuote> = {}): MarketQuote {
   return {
     symbol: "XAU_USD",
-    provider: "twelvedata",
+    provider: "oanda",
     shortName: null,
     exchange: null,
     regularMarketPrice: 4302.5,

@@ -5,7 +5,7 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresStrategyVersionRepository } from "../../infrastructure/database/repositories/postgres-strategy-version-repository.js";
 import { RunBacktest } from "../../modules/backtesting/application/run-backtest.js";
 import { BacktestEngine, defaultBacktestConfiguration } from "../../modules/backtesting/domain/backtest-engine.js";
-import type { BacktestPositionSizing } from "../../modules/backtesting/domain/backtesting.js";
+import type { BacktestConfiguration, BacktestPositionSizing } from "../../modules/backtesting/domain/backtesting.js";
 import { requireRegisteredStrategy } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { PostgresBacktestMarketDataRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-market-data-repository.js";
 import type { BacktestMarketDataRepository } from "../../modules/backtesting/domain/backtesting.js";
@@ -232,12 +232,64 @@ function parseNativeHtfTimeframes(argumentsList: string[]): readonly string[] | 
  * a cached snapshot.
  */
 function parseIctEngineConfig(argumentsList: string[]): IctEngineConfig {
+  let config: IctEngineConfig = defaultIctEngineConfig;
+
+  // `--ict-engine-config '{"fvgMinAtrFraction":0,"displacementMinAtr":0}'` overrides engine keys, which is
+  // how the pre-2026-10-09 zone population is reproduced as a control arm. It lands in the config hash.
+  const overrideRaw = getOption(argumentsList, "ict-engine-config")?.trim();
+  if (overrideRaw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(overrideRaw);
+    } catch {
+      throw new Error(`--ict-engine-config must be valid JSON, received "${overrideRaw}".`);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("--ict-engine-config must be a JSON object of engine setting overrides.");
+    }
+    const unknownKeys = Object.keys(parsed).filter((key) => !(key in defaultIctEngineConfig));
+    if (unknownKeys.length > 0) {
+      throw new Error(`--ict-engine-config has unknown keys: ${unknownKeys.join(", ")}.`);
+    }
+    config = { ...config, ...(parsed as Partial<IctEngineConfig>) };
+  }
+
   const raw = getOption(argumentsList, "ict-inverted-poi")?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return defaultIctEngineConfig;
+  if (raw === undefined || raw === "") return config;
   if (raw !== "true" && raw !== "false") {
     throw new Error(`--ict-inverted-poi must be true or false; received "${raw}".`);
   }
-  return { ...defaultIctEngineConfig, invertedBlocksRemainPoi: raw === "true" };
+  return { ...config, invertedBlocksRemainPoi: raw === "true" };
+}
+
+/**
+ * `--entry-policy next-open|limit` selects how a signal becomes a fill, `--limit-order-max-bars N`
+ * bounds how long a limit may rest, and `--one-trade-per-setup` mirrors live's unique-setup index.
+ * Only keys that were actually passed are returned: the execution override is spread over the
+ * defaults, so an explicit `undefined` would overwrite one.
+ */
+function parseEntryExecutionOptions(argumentsList: string[]): {
+  entryPolicy?: BacktestConfiguration["entryPolicy"];
+  limitOrderMaxBars?: number;
+  oneTradePerSetup?: boolean;
+} {
+  const result: { entryPolicy?: BacktestConfiguration["entryPolicy"]; limitOrderMaxBars?: number; oneTradePerSetup?: boolean } = {};
+  const policy = getOption(argumentsList, "entry-policy")?.trim().toLowerCase();
+  if (policy !== undefined && policy !== "") {
+    if (policy === "next-open") result.entryPolicy = "NEXT_CANDLE_OPEN";
+    else if (policy === "limit") result.entryPolicy = "LIMIT_AT_PROPOSAL_ENTRY";
+    else throw new Error(`--entry-policy must be next-open or limit; received "${policy}".`);
+  }
+  const maxBars = getOption(argumentsList, "limit-order-max-bars")?.trim();
+  if (maxBars) {
+    const value = Number(maxBars);
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`--limit-order-max-bars must be an integer >= 1; received "${maxBars}".`);
+    }
+    result.limitOrderMaxBars = value;
+  }
+  if (argumentsList.includes("--one-trade-per-setup")) result.oneTradePerSetup = true;
+  return result;
 }
 
 function parseConcurrency(raw: string | undefined): number {
@@ -498,6 +550,7 @@ async function main(): Promise<void> {
         // recorded before the engine supported it. Persisted in the run's `configuration` jsonb,
         // so a concurrent run is never mistaken for a sequential one.
         maxConcurrentPositions: parseConcurrency(getOption(argumentsList, "max-concurrent-positions")),
+        ...parseEntryExecutionOptions(argumentsList),
       },
     });
 

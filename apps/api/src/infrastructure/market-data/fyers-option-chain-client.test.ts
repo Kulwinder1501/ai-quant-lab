@@ -192,6 +192,138 @@ describe("FyersOptionChainClient", () => {
       .toBe(true);
   });
 
+  // Regression for the 2026-09 audit: the monthly token (`26SEP`) was tested against EVERY header
+  // date in ascending order, so the 29-Sep monthly book matched the 22-Sep weekly and was stored
+  // (and flagged WEEKLY) under the wrong expiry -- 51 snapshots / 3,162 NIFTY50 rows.
+  describe("expiry attribution with several header expiries", () => {
+    function chainWithSymbols(
+      expiryData: Array<{ date: string; expiry_flag: string }>,
+      symbols: string[],
+    ) {
+      return build(async () => new Response(JSON.stringify({
+        s: "ok",
+        code: 200,
+        data: {
+          expiryData: expiryData.map((entry, index) => ({ ...entry, expiry: String(index + 1) })),
+          optionsChain: [
+            { strike_price: 0, ltp: 22_600, symbol: "NSE:NIFTY50-INDEX" },
+            ...symbols.map((symbol) => ({
+              strike_price: 22_600,
+              option_type: symbol.endsWith("CE") ? "CE" : "PE",
+              symbol,
+              ltp: 100, bid: 99, ask: 101, volume: 1, oi: 10, prev_oi: 9, oich: 1,
+            })),
+          ],
+        },
+      }), { status: 200 }));
+    }
+
+    const septemberHeader = [
+      { date: "08-09-2026", expiry_flag: "W" },
+      { date: "15-09-2026", expiry_flag: "W" },
+      { date: "22-09-2026", expiry_flag: "W" },
+      { date: "29-09-2026", expiry_flag: "M" },
+    ];
+
+    it("files a monthly-token symbol under the MONTHLY date, not the first date of the month", async () => {
+      const client = chainWithSymbols(septemberHeader, ["NSE:NIFTY26SEP22600CE"]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes).toHaveLength(1);
+      expect(snapshot.quotes[0]!.expiryDate.toISOString().slice(0, 10)).toBe("2026-09-29");
+      expect(snapshot.quotes[0]!.expiryKind).toBe("MONTHLY");
+    });
+
+    it("files a weekly-token symbol under its exact WEEKLY date", async () => {
+      const client = chainWithSymbols(septemberHeader, ["NSE:NIFTY2692222600CE"]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes[0]!.expiryDate.toISOString().slice(0, 10)).toBe("2026-09-22");
+      expect(snapshot.quotes[0]!.expiryKind).toBe("WEEKLY");
+    });
+
+    it("keeps weekly and monthly books apart when both appear in one response", async () => {
+      const client = chainWithSymbols(septemberHeader, [
+        "NSE:NIFTY2692222600CE",
+        "NSE:NIFTY26SEP22600CE",
+        "NSE:NIFTY26SEP22600PE",
+      ]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes.map((quote) => [quote.providerSymbol, quote.expiryDate.toISOString().slice(0, 10)])).toEqual([
+        ["NSE:NIFTY2692222600CE", "2026-09-22"],
+        ["NSE:NIFTY26SEP22600CE", "2026-09-29"],
+        ["NSE:NIFTY26SEP22600PE", "2026-09-29"],
+      ]);
+    });
+
+    it("resolves the October monthly token past the October weekly, and O/N/D weekly codes", async () => {
+      const client = chainWithSymbols([
+        { date: "06-10-2026", expiry_flag: "W" },
+        { date: "13-10-2026", expiry_flag: "W" },
+        { date: "27-10-2026", expiry_flag: "M" },
+        { date: "03-11-2026", expiry_flag: "W" },
+        { date: "24-11-2026", expiry_flag: "M" },
+        { date: "01-12-2026", expiry_flag: "W" },
+        { date: "29-12-2026", expiry_flag: "M" },
+      ], [
+        "NSE:NIFTY26OCT22600CE",
+        "NSE:NIFTY26O1322600CE",
+        "NSE:NIFTY26N0322600CE",
+        "NSE:NIFTY26NOV22600PE",
+        "NSE:NIFTY26D0122600CE",
+        "NSE:NIFTY26DEC22600PE",
+      ]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes.map((quote) => quote.expiryDate.toISOString().slice(0, 10))).toEqual([
+        "2026-10-27", "2026-10-13", "2026-11-03", "2026-11-24", "2026-12-01", "2026-12-29",
+      ]);
+    });
+
+    it("drops a weekly-style symbol that names a date the header only lists as MONTHLY, rather than guess", async () => {
+      const client = chainWithSymbols(septemberHeader, [
+        "NSE:NIFTY2692922600CE", // names 29-Sep with the weekly spelling; header says monthly-only
+        "NSE:NIFTY26SEP22600PE",
+      ]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes.map((quote) => quote.providerSymbol)).toEqual(["NSE:NIFTY26SEP22600PE"]);
+    });
+
+    it("accepts either spelling for a date listed as BOTH weekly and monthly, and records MONTHLY", async () => {
+      // Last weekly == monthly. Deterministic regardless of header order: MONTHLY wins.
+      for (const order of [["W", "M"], ["M", "W"]] as const) {
+        const client = chainWithSymbols([
+          { date: "22-09-2026", expiry_flag: "W" },
+          { date: "29-09-2026", expiry_flag: order[0] },
+          { date: "29-09-2026", expiry_flag: order[1] },
+        ], ["NSE:NIFTY26SEP22600CE", "NSE:NIFTY2692922600PE"]);
+
+        const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+        expect(snapshot.quotes.map((quote) => [quote.expiryDate.toISOString().slice(0, 10), quote.expiryKind]))
+          .toEqual([["2026-09-29", "MONTHLY"], ["2026-09-29", "MONTHLY"]]);
+      }
+    });
+
+    it("drops a monthly-token symbol when the header lists no MONTHLY date in that month", async () => {
+      const client = chainWithSymbols([
+        { date: "08-09-2026", expiry_flag: "W" },
+        { date: "22-09-2026", expiry_flag: "W" },
+      ], ["NSE:NIFTY26SEP22600CE", "NSE:NIFTY2690822600CE"]);
+
+      const snapshot = await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+
+      expect(snapshot.quotes.map((quote) => quote.providerSymbol)).toEqual(["NSE:NIFTY2690822600CE"]);
+    });
+  });
+
   it("sends the colon-joined Fyers authorization header", async () => {
     let authorization: string | undefined;
     const client = build(async (_input, init) => {

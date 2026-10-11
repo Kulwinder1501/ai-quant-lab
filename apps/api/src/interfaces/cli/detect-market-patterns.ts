@@ -10,24 +10,32 @@ import { PostgresPriceActionEventRepository } from "../../infrastructure/databas
 import { DetectMarketPatterns } from "../../modules/pattern-recognition/application/detect-market-patterns.js";
 import { atrPriceActionConfiguration, PriceActionEngine } from "../../modules/pattern-recognition/domain/price-action-engine.js";
 import { CandlestickPatternEngine } from "../../modules/pattern-recognition/domain/candlestick-pattern-engine.js";
+import {
+  priceActionAlgorithmVersion,
+  priceActionAtrAlgorithmVersion,
+} from "../../modules/pattern-recognition/domain/market-pattern.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 /**
- * ATR-measured distances are a different interpretation of the same rules, so their
- * evidence has to be stored under its own algorithm version. Pairing the two here
- * means a run cannot write ATR-mode events under the percentage-mode label.
+ * Without `--threshold-mode` the use case picks the `price-action-v3` engine for the timeframe
+ * (ATR units on intraday, percent on daily) and stores under `price-action-v3`; that is the
+ * normal run. `--threshold-mode atr` forces ATR units on any timeframe and is stored under its own
+ * `price-action-v3-atr` version, because a different unit is a different interpretation of the
+ * rules. `--threshold-mode percent` is only accepted for the daily timeframe, where it is what the
+ * default already does: forcing percent units onto an intraday series under the `price-action-v3`
+ * label would re-create the mixed-rule rows the version bump exists to end.
  */
 const priceActionVariants = {
-  percent: { engine: () => new PriceActionEngine(), algorithmVersion: "price-action-v2" },
-  atr: { engine: () => new PriceActionEngine(atrPriceActionConfiguration), algorithmVersion: "price-action-v2-atr" },
+  atr: { engine: () => new PriceActionEngine(atrPriceActionConfiguration), algorithmVersion: priceActionAtrAlgorithmVersion },
 } as const;
 
-function parseThresholdMode(value: string | undefined): keyof typeof priceActionVariants {
-  const normalized = (value ?? "percent").trim().toLowerCase();
+function parseThresholdMode(value: string | undefined): "default" | "atr" {
+  if (value === undefined) return "default";
+  const normalized = value.trim().toLowerCase();
   if (normalized !== "percent" && normalized !== "atr") {
     throw new Error(`Unsupported --threshold-mode "${value}". Use: percent, atr.`);
   }
-  return normalized;
+  return normalized === "atr" ? "atr" : "default";
 }
 
 async function main(): Promise<void> {
@@ -37,10 +45,17 @@ async function main(): Promise<void> {
   try {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
-    const thresholdMode = parseThresholdMode(getOption(argumentsList, "threshold-mode"));
+    const requestedMode = getOption(argumentsList, "threshold-mode");
+    const thresholdMode = parseThresholdMode(requestedMode);
+    if (requestedMode?.trim().toLowerCase() === "percent" && timeframe !== "1d") {
+      throw new Error(
+        `--threshold-mode percent is only valid for --timeframe 1d (got ${timeframe}); `
+        + "omit the flag for the timeframe-appropriate default.",
+      );
+    }
     const fromArg = getOption(argumentsList, "from");
     const since = fromArg ? parseDateOption(fromArg, false) : undefined;
-    const variant = priceActionVariants[thresholdMode];
+    const variant = thresholdMode === "atr" ? priceActionVariants.atr : null;
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
       throw new Error(`NSE instrument "${symbol}" is not registered.`);
@@ -51,7 +66,7 @@ async function main(): Promise<void> {
       new PostgresPatternDetectionRepository(database),
       new PostgresPriceActionEventRepository(database),
       new CandlestickPatternEngine(),
-      variant.engine(),
+      variant ? variant.engine() : null,
       undefined,
       // Records that this window was processed, which is what lets the scalp research harness
       // tell "no pattern here" from "not detected yet" and stop capturing half-built contexts.
@@ -59,8 +74,11 @@ async function main(): Promise<void> {
     ).execute({
       instrumentId: instrument.id,
       timeframe,
-      priceActionAlgorithmVersion: variant.algorithmVersion,
+      priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
       since,
+      tickSize: Number.isFinite(Number(instrument.tickSize)) && Number(instrument.tickSize) > 0
+        ? Number(instrument.tickSize)
+        : undefined,
     });
     console.info(JSON.stringify({
       level: "info",
@@ -69,7 +87,7 @@ async function main(): Promise<void> {
       timeframe,
       since: since?.toISOString(),
       thresholdMode,
-      priceActionAlgorithmVersion: variant.algorithmVersion,
+      priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
       ...result,
     }));
   } finally {

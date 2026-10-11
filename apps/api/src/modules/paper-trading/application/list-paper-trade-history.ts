@@ -15,12 +15,20 @@ export const maximumTradeHistoryLimit = 500;
 /** Raised for a client query that cannot be safely interpreted as a read-only filter. */
 export class InvalidTradeHistoryQueryError extends Error {}
 
-const statuses: readonly PaperTradeStatus[] = ["OPEN", "CLOSED", "CANCELLED"];
-const sides: readonly TradeSide[] = ["LONG", "SHORT"];
-const exitReasons: readonly PaperTradeExitReason[] = ["STOP_LOSS", "TARGET", "MANUAL", "CANCELLED", "EXPIRED"];
-const outcomes: readonly TradeOutcomeFilter[] = ["WIN", "LOSS", "BREAK_EVEN"];
+// Exported so the Journal's query validation (list-journal.ts) can reuse exactly this allow-list
+// and parsing logic instead of carrying a second copy that could drift from this one.
+export const tradeHistoryStatuses: readonly PaperTradeStatus[] = ["OPEN", "CLOSED", "CANCELLED"];
+export const tradeHistorySides: readonly TradeSide[] = ["LONG", "SHORT"];
+export const tradeHistoryExitReasons: readonly PaperTradeExitReason[] =
+  ["STOP_LOSS", "TARGET", "MANUAL", "CANCELLED", "EXPIRED"];
+export const tradeHistoryOutcomes: readonly TradeOutcomeFilter[] = ["WIN", "LOSS", "BREAK_EVEN"];
 
-function normalizeOptionalText(value: string | undefined, field: string): string | undefined {
+const statuses = tradeHistoryStatuses;
+const sides = tradeHistorySides;
+const exitReasons = tradeHistoryExitReasons;
+const outcomes = tradeHistoryOutcomes;
+
+export function normalizeOptionalText(value: string | undefined, field: string): string | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -31,7 +39,7 @@ function normalizeOptionalText(value: string | undefined, field: string): string
   return normalized;
 }
 
-function requireMember<T extends string>(
+export function requireMember<T extends string>(
   value: string | undefined,
   allowed: readonly T[],
   field: string,
@@ -45,7 +53,7 @@ function requireMember<T extends string>(
   return value as T;
 }
 
-function requireTimestamp(value: Date | undefined, field: string): Date | undefined {
+export function requireTimestamp(value: Date | undefined, field: string): Date | undefined {
   if (value === undefined) {
     return undefined;
   }

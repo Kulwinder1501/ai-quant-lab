@@ -27,7 +27,7 @@ def make_episode(ep_id: str, session: str, timestamp: int, is_treat: bool, zone:
         fibZone=zone,
         hasRealActiveAnchor=has_anchor,
         retracementRatio=r,
-        mfeNetBps=mfe,
+        netReturnBps=mfe,
         impulseRange=10.0,
         yzVolRatio=1.2,
         anchorAgeBars=5.0,
@@ -226,14 +226,14 @@ def test_quasi_separation_reports_inconclusive_not_falsified():
         episodes.append(ObservationEpisode(
             episodeId=f"T_{s}", symbol="NIFTY", sessionDate=session_str, entryTimestamp=t_base + 1000,
             isSessionCloseExcluded=False, isTreatment=True, fibZone="GOLDEN_POCKET", hasRealActiveAnchor=True,
-            retracementRatio=0.62, mfeNetBps=5.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
+            retracementRatio=0.62, netReturnBps=5.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
             todSin=0.10, todCos=0.20, breadthAd=0.30, l2DepthLiquidity=500.0
         ))
         # ...control group pinned to a different constant -> perfect separation on that feature alone.
         episodes.append(ObservationEpisode(
             episodeId=f"C_{s}", symbol="NIFTY", sessionDate=session_str, entryTimestamp=t_base + 1100,
             isSessionCloseExcluded=False, isTreatment=False, fibZone="NONE", hasRealActiveAnchor=True,
-            retracementRatio=0.50, mfeNetBps=1.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
+            retracementRatio=0.50, netReturnBps=1.0, impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0,
             todSin=0.12, todCos=0.22, breadthAd=0.32, l2DepthLiquidity=500.0
         ))
 

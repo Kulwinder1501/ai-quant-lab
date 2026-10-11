@@ -523,7 +523,9 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           INNER JOIN pattern_definitions
             ON pattern_definitions.id = pattern_detections.pattern_definition_id
           WHERE pattern_detections.candle_id = c.id
-            AND pattern_detections.detected_at <= CURRENT_TIMESTAMP
+            -- Live "now" read. known_at (candle close) is the point-in-time field; detected_at is a
+            -- most-recent-write field (bumped by rebuilds) that cannot date when evidence was knowable.
+            AND pattern_detections.known_at <= CURRENT_TIMESTAMP
         ), '[]'::jsonb) AS patterns,
         COALESCE((
           SELECT jsonb_agg(
@@ -538,7 +540,7 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           )
           FROM price_action_events
           WHERE price_action_events.candle_id = c.id
-            AND price_action_events.detected_at <= CURRENT_TIMESTAMP
+            AND price_action_events.known_at <= CURRENT_TIMESTAMP
         ), '[]'::jsonb) AS price_action_events,
         latest_prediction.id AS prediction_id,
         latest_prediction.prediction AS prediction_label,

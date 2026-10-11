@@ -1,6 +1,7 @@
 import type { QueryResultRow } from "pg";
 import type {
   ActiveDuplicateQuery,
+  ActiveSideQuery,
   SaveTradeIdeaProposalInput,
   TradeIdea,
   TradeIdeaRepository,
@@ -192,6 +193,22 @@ export class PostgresTradeIdeaRepository implements TradeIdeaRepository {
       ORDER BY generated_at DESC
       LIMIT 1
     `, [query.strategyVersionId, query.instrumentId, query.side, query.targetPrice, query.asOf]);
+    const row = result.rows[0];
+    return row ? toTradeIdea(row) : null;
+  }
+
+  async findActiveIdeaForSide(query: ActiveSideQuery): Promise<TradeIdea | null> {
+    const result = await this.database.query<TradeIdeaRow>(`
+      SELECT ${returningColumns}
+      FROM trade_ideas
+      WHERE strategy_version_id = $1
+        AND instrument_id = $2
+        AND side = $3
+        AND status = 'PROPOSED'
+        AND (expires_at IS NULL OR expires_at > $4)
+      ORDER BY generated_at DESC
+      LIMIT 1
+    `, [query.strategyVersionId, query.instrumentId, query.side, query.asOf]);
     const row = result.rows[0];
     return row ? toTradeIdea(row) : null;
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_VOLATILITY_COMPETITION_RULES,
+  computeTimeOfDayBaseline,
   computeVolatilitySettledMetrics,
   decideVolatilityCompetition,
   type VolatilityConfusionCell,
@@ -346,5 +347,97 @@ describe("decideVolatilityCompetition", () => {
     });
 
     expect(decision.ranking[0]!.modelVersionId).toBe("deep");
+  });
+});
+
+describe("time-of-day-stratified trivial baseline", () => {
+  const trainingMajorityByBar = new Map<number, "CONTRACTION" | "STABLE" | "EXPANSION">([
+    [0, "CONTRACTION"],
+    [5, "EXPANSION"],
+  ]);
+  const outcomes = [
+    { barOfDay: 0, realizedLabel: "CONTRACTION", count: 70 },
+    { barOfDay: 0, realizedLabel: "STABLE", count: 20 },
+    { barOfDay: 0, realizedLabel: "EXPANSION", count: 10 },
+    { barOfDay: 5, realizedLabel: "EXPANSION", count: 70 },
+    { barOfDay: 5, realizedLabel: "STABLE", count: 20 },
+    { barOfDay: 5, realizedLabel: "CONTRACTION", count: 10 },
+  ] as const;
+
+  it("scores the per-bar training majority against the realised outcomes, in closed form", () => {
+    const baseline = computeTimeOfDayBaseline({
+      outcomes,
+      trainingMajorityByBar,
+      fallbackLabel: "STABLE",
+    });
+
+    // 70 + 70 of 200 correct.
+    expect(baseline.accuracy).toBeCloseTo(0.7, 10);
+    // CONTRACTION and EXPANSION: tp 70, predicted 100, realized 80 -> F1 = 140/180. STABLE: 0.
+    expect(baseline.macroF1).toBeCloseTo(((140 / 180) * 2) / 3, 10);
+  });
+
+  it("is far stricter than the global majority on the same outcomes", () => {
+    // Global majority is CONTRACTION/EXPANSION at 80 of 200 -> 0.40 accuracy.
+    const global = computeVolatilitySettledMetrics(
+      outcomes.map((outcome) => ({
+        prediction: "EXPANSION" as const,
+        realizedLabel: outcome.realizedLabel,
+        count: outcome.count,
+      })),
+    );
+    const stratified = computeTimeOfDayBaseline({ outcomes, trainingMajorityByBar, fallbackLabel: "STABLE" });
+
+    expect(global.accuracy).toBeCloseTo(0.4, 10);
+    expect(stratified.accuracy!).toBeGreaterThan(global.accuracy! + 0.25);
+  });
+
+  it("uses the fallback label for a bar the training data never saw", () => {
+    const baseline = computeTimeOfDayBaseline({
+      outcomes: [{ barOfDay: 40, realizedLabel: "STABLE", count: 10 }],
+      trainingMajorityByBar,
+      fallbackLabel: "STABLE",
+    });
+
+    expect(baseline.accuracy).toBe(1);
+  });
+
+  it("excludes a model that beats the global majority but not the time-of-day baseline", () => {
+    const clockOnly = standing({ timeOfDayBaseline: { accuracy: 0.97, macroF1: 0.5 } });
+
+    const decision = decideVolatilityCompetition({ standings: [clockOnly], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("NO_QUALIFYING_MODEL");
+    expect(decision.excludedBelowTrivial).toBe(1);
+  });
+
+  it("qualifies a model that clears both baselines", () => {
+    const real = standing({ timeOfDayBaseline: { accuracy: 0.7, macroF1: 0.5 } });
+
+    const decision = decideVolatilityCompetition({ standings: [real], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("INITIAL_PRIMARY_ESTABLISHED");
+  });
+
+  it("vacates an incumbent that falls below the time-of-day baseline", () => {
+    const incumbent = standing({ role: "PRIMARY", timeOfDayBaseline: { accuracy: 0.97, macroF1: 0.5 } });
+
+    const decision = decideVolatilityCompetition({ standings: [incumbent], asOfDate: TODAY });
+
+    expect(decision.reason).toBe("PRIMARY_QUARANTINED_BELOW_TRIVIAL");
+  });
+
+  it("tolerates a missing baseline by default and refuses it when required", () => {
+    const withoutBaseline = standing();
+
+    expect(decideVolatilityCompetition({ standings: [withoutBaseline], asOfDate: TODAY }).reason)
+      .toBe("INITIAL_PRIMARY_ESTABLISHED");
+    expect(
+      decideVolatilityCompetition({
+        standings: [withoutBaseline],
+        asOfDate: TODAY,
+        rules: { ...DEFAULT_VOLATILITY_COMPETITION_RULES, requireTimeOfDayBaseline: true },
+      }).reason,
+    ).toBe("NO_QUALIFYING_MODEL");
   });
 });

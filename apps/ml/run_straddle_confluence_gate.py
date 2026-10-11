@@ -38,6 +38,7 @@ from ai_quant_lab_ml.structure_intelligence import (
     StructuralLevel,
 )
 from ai_quant_lab_ml.straddle_economics import black_scholes_straddle
+from ai_quant_lab_ml.session_forward import forward_index_in_session, session_dates_of
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 CALENDAR_DAYS_PER_YEAR = 365.0
@@ -141,11 +142,14 @@ def main():
     print(f"Evaluating {len(eval_bars)} 5m bars in window...")
 
     # Run Regimes Backtest
+    bar_session_dates = session_dates_of(bars_5m)
     trades_r1, trades_r2, trades_r3, trades_r4 = [], [], [], []
 
     for idx_in_all, c, ot_ist in eval_bars:
-        exit_idx = idx_in_all + args.horizon_bars
-        if exit_idx >= len(bars_5m):
+        # The hold must end inside the entry bar's IST session; otherwise the "horizon" would be
+        # the overnight gap. Such entries are dropped, not priced against the next open.
+        exit_idx = forward_index_in_session(bar_session_dates, idx_in_all, args.horizon_bars)
+        if exit_idx is None:
             continue
 
         spot = float(c["close"])

@@ -258,8 +258,10 @@ describe("PostgresMarketScannerQueryRepository", () => {
     expect(query.indexOf("c.received_at <= CURRENT_TIMESTAMP")).toBeLessThan(latestCandleOrdering);
 
     expect(query).toContain("indicator_snapshots.calculated_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("pattern_detections.detected_at <= CURRENT_TIMESTAMP");
-    expect(query).toContain("price_action_events.detected_at <= CURRENT_TIMESTAMP");
+    // known_at (candle close, never moves later), not the most-recent-write detected_at.
+    expect(query).toContain("pattern_detections.known_at <= CURRENT_TIMESTAMP");
+    expect(query).toContain("price_action_events.known_at <= CURRENT_TIMESTAMP");
+    expect(query).not.toMatch(/(pattern_detections|price_action_events)\.detected_at/);
     expect(query).toContain("mp.created_at <= CURRENT_TIMESTAMP");
     expect(query).toContain("mp.evidence_cutoff_at <= CURRENT_TIMESTAMP");
   });

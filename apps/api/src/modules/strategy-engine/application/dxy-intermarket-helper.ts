@@ -1,15 +1,23 @@
 import type { Pool } from "pg";
 import type { TradeSide } from "../domain/strategy.js";
-import {
-  DxyIntermarketEvaluator,
-  type DxyEvaluatorInputs,
-  type DxyIntermarketPayload,
-  type ConfirmedSwing,
-  type Bar1m,
-  type DxyStructure,
-  type DxyLocation,
-} from "../domain/dxy-intermarket-evaluator.js";
-import { findConfirmedPivotAt, type CausalCandle } from "../../technical-analysis/domain/ict/causal-pivot.js";
+
+export type DxyGateStatus = "CONFLUENT" | "CONTRADICTORY" | "NEUTRAL" | "UNAVAILABLE" | "STALE" | "INVALID";
+export type DxyRefusalReason = "DXY_MISALIGNMENT" | "DXY_NO_CONFIRMATION" | "DXY_UNAVAILABLE" | "DXY_STALE" | "DXY_INVALID";
+
+export interface DxyGateDecision {
+  status: DxyGateStatus;
+  eligible: boolean;
+  refusalReason?: DxyRefusalReason;
+  direction: "LONG" | "SHORT";
+  evaluationInstant: string;
+  candleTime: string;
+  availableAt: string;
+  syntheticDxy?: number;
+  structuralTrend?: "BULLISH" | "BEARISH" | "NEUTRAL";
+  volatilityState?: "EXPANDING" | "NOT_EXPANDING";
+  componentCoverage: { instrument: string; candleTime: string; complete: boolean }[];
+  calculationVersion: string;
+}
 
 export interface BuildDxyInputsOptions {
   proposalSide: TradeSide;
@@ -20,227 +28,284 @@ export interface BuildDxyInputsOptions {
 }
 
 interface DbCandleRow {
+  instrument_id: string;
   open_time: Date;
   close_time: Date;
   open: string;
   high: string;
   low: string;
   close: string;
-  volume: string;
+  is_complete: boolean;
 }
 
-function computeEma(prices: number[], period: number): number[] {
-  if (prices.length < period) return [];
-  const k = 2 / (period + 1);
-  const result: number[] = new Array(prices.length);
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += prices[i];
-  result[period - 1] = sum / period;
+const COMPONENTS = [
+  "EUR_USD",
+  "USD_JPY",
+  "GBP_USD",
+  "USD_CAD",
+  "USD_SEK",
+  "USD_CHF"
+] as const;
 
-  for (let i = period; i < prices.length; i++) {
-    result[i] = prices[i] * k + result[i - 1] * (1 - k);
-  }
-  return result;
-}
-
-function computeAtr14(candles: { high: number; low: number; close: number }[]): number {
-  if (candles.length < 15) return 2.5; // Fallback
-  const trs: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const tr = Math.max(
-      candles[i].high - candles[i].low,
-      Math.abs(candles[i].high - candles[i - 1].close),
-      Math.abs(candles[i].low - candles[i - 1].close)
-    );
-    trs.push(tr);
-  }
-  const last14 = trs.slice(-14);
-  return last14.reduce((sum, v) => sum + v, 0) / last14.length;
-}
-
-function extractPivots(candles: DbCandleRow[], pivotLength = 2): ConfirmedSwing[] {
-  const causalCandles: CausalCandle[] = candles.map((c, idx) => ({
-    id: `bar-${idx}`,
-    openTime: new Date(c.close_time), // Available at bar close
-    open: Number(c.open),
-    high: Number(c.high),
-    low: Number(c.low),
-    close: Number(c.close),
-    volume: Number(c.volume),
-  }));
-
-  const swings: ConfirmedSwing[] = [];
-  for (let i = pivotLength; i < causalCandles.length; i++) {
-    const pair = findConfirmedPivotAt(causalCandles, i, pivotLength);
-    if (pair.high) {
-      swings.push({
-        type: "HIGH",
-        price: pair.high.price,
-        swingAt: pair.high.time.toISOString(),
-        confirmedAt: pair.high.confirmedAtTime.toISOString(),
-      });
-    }
-    if (pair.low) {
-      swings.push({
-        type: "LOW",
-        price: pair.low.price,
-        swingAt: pair.low.time.toISOString(),
-        confirmedAt: pair.low.confirmedAtTime.toISOString(),
-      });
-    }
-  }
-  return swings;
+function calculateSyntheticDxy(
+  eur: number,
+  jpy: number,
+  gbp: number,
+  cad: number,
+  sek: number,
+  chf: number
+): number {
+  return 50.14348112 *
+    Math.pow(eur, -0.576) *
+    Math.pow(jpy, 0.136) *
+    Math.pow(gbp, -0.119) *
+    Math.pow(cad, 0.091) *
+    Math.pow(sek, 0.042) *
+    Math.pow(chf, 0.036);
 }
 
 export async function buildAndEvaluateDxyIntermarket(
   db: Pool,
   options: BuildDxyInputsOptions
-): Promise<DxyIntermarketPayload> {
-  const { proposalSide, proposalTimeframe, candidateAt, dataCutoff, decisionAt } = options;
+): Promise<DxyGateDecision> {
+  const { proposalSide, proposalTimeframe, dataCutoff, decisionAt } = options;
+  const version = "synth-dxy-ice-v1";
+  
+  const fail = (
+    status: DxyGateStatus, 
+    refusal: DxyRefusalReason, 
+    coverage: any[] = []
+  ): DxyGateDecision => ({
+    status,
+    eligible: false,
+    refusalReason: refusal,
+    direction: proposalSide,
+    evaluationInstant: decisionAt,
+    candleTime: "",
+    availableAt: "",
+    componentCoverage: coverage,
+    calculationVersion: version
+  });
 
-  // 1. Get instrument IDs
-  const dxyInstRes = await db.query<{ id: string }>(
-    `SELECT id FROM instruments WHERE exchange = 'TWELVEDATA' AND symbol = 'DXY' LIMIT 1`
+  // 1. Get instrument IDs for OANDA components
+  const instRes = await db.query<{ id: string; symbol: string }>(
+    `SELECT id, symbol FROM instruments WHERE exchange = 'OANDA' AND symbol = ANY($1)`,
+    [COMPONENTS]
   );
-  const xauInstRes = await db.query<{ id: string }>(
-    `SELECT id FROM instruments WHERE symbol IN ('XAU_USD', 'XAU/USD') LIMIT 1`
+  
+  if (instRes.rows.length !== COMPONENTS.length) {
+    return fail("UNAVAILABLE", "DXY_UNAVAILABLE");
+  }
+  
+  const idToSymbol = new Map(instRes.rows.map(r => [r.id, r.symbol]));
+  const ids = instRes.rows.map(r => r.id);
+
+  // 2. Fetch recent 15m candles (Approx 40 days = 3840 candles)
+  // Ensure we only look at candles that closed <= dataCutoff (strictly no look-ahead)
+  const candlesRes = await db.query<DbCandleRow>(
+    `SELECT instrument_id, open_time, close_time, open, high, low, close, is_complete
+     FROM candles
+     WHERE instrument_id = ANY($1) AND timeframe = '15m' AND close_time <= $2
+     ORDER BY close_time DESC LIMIT 30000`,
+    [ids, dataCutoff]
   );
 
-  const dxyId = dxyInstRes.rows[0]?.id;
-  const xauId = xauInstRes.rows[0]?.id;
+  // Group by open_time
+  const candlesByTime = new Map<number, Record<string, DbCandleRow>>();
+  for (const row of candlesRes.rows) {
+    const timeMs = row.open_time.getTime();
+    if (!candlesByTime.has(timeMs)) candlesByTime.set(timeMs, {});
+    candlesByTime.get(timeMs)![idToSymbol.get(row.instrument_id)!] = row;
+  }
 
-  if (!dxyId || !xauId) {
-    // Missing instruments -> fallback unavailable payload
-    const evaluator = new DxyIntermarketEvaluator();
-    return evaluator.evaluate({
-      proposalSide,
-      proposalTimeframe,
-      candidateAt,
-      dataCutoff,
-      decisionAt,
+  // Sort times ascending
+  const times = Array.from(candlesByTime.keys()).sort((a, b) => a - b);
+  
+  if (times.length === 0) {
+    return fail("UNAVAILABLE", "DXY_UNAVAILABLE");
+  }
+
+  // Build synchronous DXY series
+  const dxySeries: { time: number; closeTime: number; close: number; open: number; high: number; low: number; complete: boolean }[] = [];
+  
+  // Track coverage for the most recent evaluated candle
+  const latestCoverage: { instrument: string; candleTime: string; complete: boolean }[] = [];
+
+  for (const t of times) {
+    const group = candlesByTime.get(t)!;
+    let hasAll = true;
+    let allComplete = true;
+    let maxCloseTime = 0;
+    
+    for (const sym of COMPONENTS) {
+      if (!group[sym]) {
+        hasAll = false;
+        break;
+      }
+      if (!group[sym].is_complete) {
+        allComplete = false;
+      }
+      maxCloseTime = Math.max(maxCloseTime, group[sym].close_time.getTime());
+    }
+    
+    if (t === times[times.length - 1]) {
+      for (const sym of COMPONENTS) {
+        latestCoverage.push({
+          instrument: sym,
+          candleTime: new Date(t).toISOString(),
+          complete: group[sym]?.is_complete ?? false
+        });
+      }
+    }
+
+    if (!hasAll) continue;
+
+    // Use strictly midpoint M15 close (which is what `close` is when using OANDA generic candles without specific bid/ask selection in the old pipeline)
+    const o = calculateSyntheticDxy(
+      Number(group.EUR_USD.open), Number(group.USD_JPY.open), Number(group.GBP_USD.open), 
+      Number(group.USD_CAD.open), Number(group.USD_SEK.open), Number(group.USD_CHF.open)
+    );
+    const h = calculateSyntheticDxy(
+      Number(group.EUR_USD.high), Number(group.USD_JPY.high), Number(group.GBP_USD.high), 
+      Number(group.USD_CAD.high), Number(group.USD_SEK.high), Number(group.USD_CHF.high)
+    );
+    const l = calculateSyntheticDxy(
+      Number(group.EUR_USD.low), Number(group.USD_JPY.low), Number(group.GBP_USD.low), 
+      Number(group.USD_CAD.low), Number(group.USD_SEK.low), Number(group.USD_CHF.low)
+    );
+    const c = calculateSyntheticDxy(
+      Number(group.EUR_USD.close), Number(group.USD_JPY.close), Number(group.GBP_USD.close), 
+      Number(group.USD_CAD.close), Number(group.USD_SEK.close), Number(group.USD_CHF.close)
+    );
+    
+    dxySeries.push({
+      time: t,
+      closeTime: maxCloseTime,
+      open: o, high: Math.max(o, h, l, c), low: Math.min(o, h, l, c), close: c,
+      complete: allComplete
     });
   }
 
-  // 2. Fetch completed DXY candles <= dataCutoff
-  const dxyCandlesRes = await db.query<DbCandleRow>(
-    `SELECT open_time, close_time, open, high, low, close, volume
-     FROM candles
-     WHERE instrument_id = $1 AND timeframe = $2 AND close_time <= $3 AND is_complete = TRUE
-     ORDER BY close_time ASC LIMIT 100`,
-    [dxyId, proposalTimeframe, dataCutoff]
-  );
-
-  // 3. Fetch completed XAU candles <= dataCutoff
-  const xauCandlesRes = await db.query<DbCandleRow>(
-    `SELECT open_time, close_time, open, high, low, close, volume
-     FROM candles
-     WHERE instrument_id = $1 AND timeframe = $2 AND close_time <= $3 AND is_complete = TRUE
-     ORDER BY close_time ASC LIMIT 100`,
-    [xauId, proposalTimeframe, dataCutoff]
-  );
-
-  // 4. Fetch XAU 1m bars starting around decisionAt for outcome evaluation
-  const xau1mRes = await db.query<DbCandleRow>(
-    `SELECT open_time, close_time, open, high, low, close, volume
-     FROM candles
-     WHERE instrument_id = $1 AND timeframe = '1m' AND open_time >= $2
-     ORDER BY open_time ASC LIMIT 30`,
-    [xauId, decisionAt]
-  );
-
-  const dxyCandles = dxyCandlesRes.rows;
-  const xauCandles = xauCandlesRes.rows;
-
-  const dxyCloses = dxyCandles.map((c) => Number(c.close));
-  const xauCloses = xauCandles.map((c) => Number(c.close));
-
-  // Compute DXY EMA 20 & 50
-  const ema20Arr = computeEma(dxyCloses, 20);
-  const ema50Arr = computeEma(dxyCloses, 50);
-
-  const latestDxyCandle = dxyCandles[dxyCandles.length - 1];
-  const dxyCandleAvailableAt = latestDxyCandle ? new Date(latestDxyCandle.close_time).toISOString() : undefined;
-
-  let dxyEma20Val: number | undefined = undefined;
-  let dxyEma50Val: number | undefined = undefined;
-  let dxyEma20Slope: number | undefined = undefined;
-
-  if (ema20Arr.length > 0 && ema50Arr.length > 0) {
-    const lastEma20 = ema20Arr[ema20Arr.length - 1];
-    const prevEma20 = ema20Arr[ema20Arr.length - 2] ?? lastEma20;
-    dxyEma20Val = lastEma20;
-    dxyEma50Val = ema50Arr[ema50Arr.length - 1];
-    dxyEma20Slope = lastEma20 - prevEma20;
+  if (dxySeries.length === 0) {
+    return fail("UNAVAILABLE", "DXY_UNAVAILABLE", latestCoverage);
   }
 
-  // Compute DXY ROC3 & ROC5
-  let dxyRoc3Val: number | undefined = undefined;
-  let dxyRoc5Val: number | undefined = undefined;
-  if (dxyCloses.length >= 6) {
-    const curr = dxyCloses[dxyCloses.length - 1];
-    const c3 = dxyCloses[dxyCloses.length - 4];
-    const c5 = dxyCloses[dxyCloses.length - 6];
-    if (c3 > 0) dxyRoc3Val = (curr - c3) / c3;
-    if (c5 > 0) dxyRoc5Val = (curr - c5) / c5;
+  const currentDxy = dxySeries[dxySeries.length - 1];
+  
+  if (!currentDxy.complete) {
+    return fail("STALE", "DXY_STALE", latestCoverage);
+  }
+  
+  if (currentDxy.closeTime > new Date(decisionAt).getTime()) {
+     // Strict temporal invariant: availableAt <= evaluationInstant
+     return fail("INVALID", "DXY_INVALID", latestCoverage);
+  }
+  
+  // 3. Calculate 50 SMA (Structural Trend)
+  const closes = dxySeries.map(d => d.close);
+  let trend: "BULLISH" | "BEARISH" | "NEUTRAL" = "NEUTRAL";
+  if (closes.length >= 50) {
+    const sma50 = closes.slice(-50).reduce((a, b) => a + b, 0) / 50;
+    if (currentDxy.close > sma50) trend = "BULLISH";
+    else if (currentDxy.close < sma50) trend = "BEARISH";
+  } else {
+    return fail("INVALID", "DXY_INVALID", latestCoverage); 
+  }
+  
+  // 4. Calculate Rolling 20-day Yang-Zhang Volatility 
+  const dailyBars = new Map<string, { o: number; h: number; l: number; c: number }>();
+  for (const d of dxySeries) {
+    const dateStr = new Date(d.time).toISOString().split("T")[0];
+    if (!dailyBars.has(dateStr)) {
+      dailyBars.set(dateStr, { o: d.open, h: d.high, l: d.low, c: d.close });
+    } else {
+      const b = dailyBars.get(dateStr)!;
+      b.h = Math.max(b.h, d.high);
+      b.l = Math.min(b.l, d.low);
+      b.c = d.close;
+    }
+  }
+  
+  const dailyArr = Array.from(dailyBars.values());
+  let volatilityState: "EXPANDING" | "NOT_EXPANDING" = "NOT_EXPANDING";
+  
+  if (dailyArr.length > 21) {
+    const N = 20;
+    const yzVols: number[] = [];
+    
+    for (let endIdx = 20; endIdx < dailyArr.length; endIdx++) {
+      const window = dailyArr.slice(endIdx - 20, endIdx + 1);
+      const oVars: number[] = [];
+      const cVars: number[] = [];
+      const rsVars: number[] = [];
+      for (let i = 1; i <= 20; i++) {
+        const today = window[i];
+        const prev = window[i-1];
+        oVars.push(Math.pow(Math.log(today.o / prev.c), 2));
+        cVars.push(Math.pow(Math.log(today.c / today.o), 2));
+        rsVars.push(Math.log(today.h / today.o) * Math.log(today.h / today.c) + Math.log(today.l / today.o) * Math.log(today.l / today.c));
+      }
+      const oVarN = oVars.reduce((a, b) => a + b, 0) / N;
+      const cVarN = cVars.reduce((a, b) => a + b, 0) / N;
+      const rsVarN = rsVars.reduce((a, b) => a + b, 0) / N;
+      const k = 0.34 / (1.34 + (N + 1) / (N - 1));
+      yzVols.push(Math.sqrt(oVarN + k * cVarN + (1 - k) * rsVarN));
+    }
+    
+    if (yzVols.length > 0) {
+      const currentYz = yzVols[yzVols.length - 1];
+      const prevYzVols = yzVols.slice(0, -1);
+      if (prevYzVols.length > 0) {
+         const sorted = [...prevYzVols].sort((a, b) => a - b);
+         const mid = Math.floor(sorted.length / 2);
+         const medianYz = sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0;
+         if (currentYz > medianYz) {
+            volatilityState = "EXPANDING";
+         }
+      } else {
+         volatilityState = "EXPANDING";
+      }
+    }
   }
 
-  // Compute ATR14
-  const xauAtr = computeAtr14(xauCandles.map((c) => ({ high: Number(c.high), low: Number(c.low), close: Number(c.close) })));
-  const dxyAtr = computeAtr14(dxyCandles.map((c) => ({ high: Number(c.high), low: Number(c.low), close: Number(c.close) })));
+  let status: DxyGateStatus = "NEUTRAL";
+  let refusalReason: DxyRefusalReason | undefined = "DXY_NO_CONFIRMATION";
+  
+  if (volatilityState !== "EXPANDING") {
+    status = "NEUTRAL";
+    refusalReason = "DXY_NO_CONFIRMATION";
+  } else {
+    if (proposalSide === "LONG") {
+      if (trend === "BEARISH") {
+        status = "CONFLUENT";
+        refusalReason = undefined;
+      } else {
+        status = "CONTRADICTORY";
+        refusalReason = "DXY_MISALIGNMENT";
+      }
+    } else if (proposalSide === "SHORT") {
+      if (trend === "BULLISH") {
+        status = "CONFLUENT";
+        refusalReason = undefined;
+      } else {
+        status = "CONTRADICTORY";
+        refusalReason = "DXY_MISALIGNMENT";
+      }
+    }
+  }
 
-  // Extract Swings
-  const xauSwings = extractPivots(xauCandles, 2);
-  const dxySwings = extractPivots(dxyCandles, 2);
-
-  // Format 1m bars
-  const xau1mBars: Bar1m[] = xau1mRes.rows.map((r) => ({
-    openAt: new Date(r.open_time).toISOString(),
-    closeAt: new Date(r.close_time).toISOString(),
-    open: Number(r.open),
-    high: Number(r.high),
-    low: Number(r.low),
-    close: Number(r.close),
-  }));
-
-  const latestXauCandle = xauCandles[xauCandles.length - 1];
-  const xauCandleAvailableAt = latestXauCandle ? new Date(latestXauCandle.close_time).toISOString() : undefined;
-
-  const inputs: DxyEvaluatorInputs = {
-    proposalSide,
-    proposalTimeframe,
-    candidateAt,
-    dataCutoff,
-    decisionAt,
-
-    dxyCandleAvailableAt,
-    dxyEma20: dxyEma20Val !== undefined && dxyCandleAvailableAt ? { value: dxyEma20Val, availableAt: dxyCandleAvailableAt } : undefined,
-    dxyEma50: dxyEma50Val !== undefined && dxyCandleAvailableAt ? { value: dxyEma50Val, availableAt: dxyCandleAvailableAt } : undefined,
-    dxyEma20Slope,
-    dxyRoc3: dxyRoc3Val !== undefined && dxyCandleAvailableAt ? { value: dxyRoc3Val, availableAt: dxyCandleAvailableAt } : undefined,
-    dxyRoc5: dxyRoc5Val !== undefined && dxyCandleAvailableAt ? { value: dxyRoc5Val, availableAt: dxyCandleAvailableAt } : undefined,
-
-    // KNOWN STUB, deliberate: real BOS/CHoCH structure detection and order-block/FVG location
-    // detection on DXY have not been implemented -- that's a substantial, separately-validated
-    // undertaking, out of scope here. These two fields are hardcoded to their "nothing
-    // detected" values rather than left undefined (undefined would mark the feature
-    // FEATURE_UNAVAILABLE via the completeness check below), so in practice dxyBias collapses
-    // to momentum (ROC)-only. `dxyStructureDataComputed: false` discloses this on the output
-    // payload (`dxy.structureDataComputed`) so nobody downstream mistakes this hardcoded
-    // "NONE"/"OPEN_SPACE" for an evaluated absence of structure.
-    dxyStructure: dxyCandleAvailableAt ? { event: "NONE", confirmedAt: dxyCandleAvailableAt } : undefined,
-    dxyLocation: dxyCandleAvailableAt ? { location: "OPEN_SPACE", availableAt: dxyCandleAvailableAt } : undefined,
-    dxyStructureDataComputed: false,
-
-    xauCandleAvailableAt,
-    xauATR14: xauCandleAvailableAt ? { value: xauAtr, availableAt: xauCandleAvailableAt } : undefined,
-    dxyATR14: dxyCandleAvailableAt ? { value: dxyAtr, availableAt: dxyCandleAvailableAt } : undefined,
-
-    xauSwings,
-    dxySwings,
-
-    xau1mBars,
+  return {
+    status,
+    eligible: status === "CONFLUENT",
+    refusalReason,
+    direction: proposalSide,
+    evaluationInstant: decisionAt,
+    candleTime: new Date(currentDxy.time).toISOString(),
+    availableAt: new Date(currentDxy.closeTime).toISOString(),
+    syntheticDxy: currentDxy.close,
+    structuralTrend: trend,
+    volatilityState: volatilityState,
+    componentCoverage: latestCoverage,
+    calculationVersion: version
   };
-
-  const evaluator = new DxyIntermarketEvaluator();
-  return evaluator.evaluate(inputs);
 }

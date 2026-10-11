@@ -1,0 +1,4217 @@
+{
+  "slip_0.0bps": {
+    "n_events": 52,
+    "mean_gross_mid_bps": 8.420972076581096,
+    "mean_spread_bps": 2.454867162518008,
+    "mean_slippage_bps": 0.0,
+    "mean_statutory_exchange_broker_bps": 6.232423771106166,
+    "mean_true_net_bps": -0.26631885704307784,
+    "quoted_spread_coverage_pct": 100.0,
+    "per_trade_logs": [
+      {
+        "gross_mid_bps": 51.39750233625064,
+        "spread_crossing_bps": 3.9337650009424245,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.233877909059232,
+        "true_net_bps": 41.229859426248986,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 406.0485,
+          "stamp_duty": 16.16484,
+          "sebi": 1.620339,
+          "nse": 29.6522037,
+          "brokerage": 40.0,
+          "gst": 12.829057686
+        }
+      },
+      {
+        "gross_mid_bps": 47.505455459246846,
+        "spread_crossing_bps": 3.307458781488108,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.234124157691258,
+        "true_net_bps": 37.96387252006748,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.837,
+          "stamp_duty": 16.161720000000003,
+          "sebi": 1.6197599999999999,
+          "nse": 29.641608,
+          "brokerage": 40.0,
+          "gst": 12.82704624
+        }
+      },
+      {
+        "gross_mid_bps": 48.20795385044525,
+        "spread_crossing_bps": 2.1618745114976274,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.2343837968552425,
+        "true_net_bps": 39.81169554209238,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.858,
+          "stamp_duty": 16.159560000000003,
+          "sebi": 1.619694,
+          "nse": 29.640400200000002,
+          "brokerage": 40.0,
+          "gst": 12.826816955999998
+        }
+      },
+      {
+        "gross_mid_bps": -2.8941949128955944,
+        "spread_crossing_bps": 2.4489341570651915,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238424651911219,
+        "true_net_bps": -11.581553721872005,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.181,
+          "stamp_duty": 16.175880000000003,
+          "sebi": 1.617156,
+          "nse": 29.593954800000002,
+          "brokerage": 40.0,
+          "gst": 12.817999944
+        }
+      },
+      {
+        "gross_mid_bps": -1.0018980401763813,
+        "spread_crossing_bps": 1.0761127098179764,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.239359473719039,
+        "true_net_bps": -8.317370223713397,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2305,
+          "stamp_duty": 16.17258,
+          "sebi": 1.61709,
+          "nse": 29.592747000000003,
+          "brokerage": 40.0,
+          "gst": 12.817770659999999
+        }
+      },
+      {
+        "gross_mid_bps": 2.6720404368788815,
+        "spread_crossing_bps": 2.4493704004715204,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.239045966715779,
+        "true_net_bps": -6.016375930308419,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.163,
+          "stamp_duty": 16.16616,
+          "sebi": 1.616634,
+          "nse": 29.5844022,
+          "brokerage": 40.0,
+          "gst": 12.816186516
+        }
+      },
+      {
+        "gross_mid_bps": 3.1534857147110618,
+        "spread_crossing_bps": 2.151790252391236,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238805468193695,
+        "true_net_bps": -5.237110005873869,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2905,
+          "stamp_duty": 16.17,
+          "sebi": 1.617081,
+          "nse": 29.592582300000004,
+          "brokerage": 40.0,
+          "gst": 12.817739394
+        }
+      },
+      {
+        "gross_mid_bps": -1.1504020840827194,
+        "spread_crossing_bps": 1.6699385091531187,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238956923503209,
+        "true_net_bps": -9.059297516739047,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.1705,
+          "stamp_duty": 16.171380000000003,
+          "sebi": 1.6169099999999998,
+          "nse": 29.589453,
+          "brokerage": 40.0,
+          "gst": 12.817145339999998
+        }
+      },
+      {
+        "gross_mid_bps": -0.5197109664587657,
+        "spread_crossing_bps": 3.118265798749893,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238337606223663,
+        "true_net_bps": -9.876314371432322,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 403.974,
+          "stamp_duty": 16.16484,
+          "sebi": 1.61619,
+          "nse": 29.576277,
+          "brokerage": 40.0,
+          "gst": 12.81464406
+        }
+      },
+      {
+        "gross_mid_bps": 11.864598748182981,
+        "spread_crossing_bps": 2.0238517426480254,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.245667716643426,
+        "true_net_bps": 3.5950792888915304,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.3865,
+          "stamp_duty": 16.159560000000003,
+          "sebi": 1.6167509999999998,
+          "nse": 29.586543300000002,
+          "brokerage": 40.0,
+          "gst": 12.816592974
+        }
+      },
+      {
+        "gross_mid_bps": 7.982875803160847,
+        "spread_crossing_bps": 2.561946187991696,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.243505590327478,
+        "true_net_bps": -0.822575975158327,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2815,
+          "stamp_duty": 16.1625,
+          "sebi": 1.616688,
+          "nse": 29.5853904,
+          "brokerage": 40.0,
+          "gst": 12.816374112
+        }
+      },
+      {
+        "gross_mid_bps": 5.902727505596996,
+        "spread_crossing_bps": 2.7100572824433855,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.242368204172499,
+        "true_net_bps": -3.049697981018889,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.26050000000004,
+          "stamp_duty": 16.16526,
+          "sebi": 1.616784,
+          "nse": 29.587147200000004,
+          "brokerage": 40.0,
+          "gst": 12.816707615999999
+        }
+      },
+      {
+        "gross_mid_bps": -35.95264322277811,
+        "spread_crossing_bps": 4.70235395395793,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238124006528992,
+        "true_net_bps": -46.89312118326503,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.99850000000004,
+          "stamp_duty": 16.26582,
+          "sebi": 1.623288,
+          "nse": 29.7061704,
+          "brokerage": 40.0,
+          "gst": 12.839302511999998
+        }
+      },
+      {
+        "gross_mid_bps": -34.03312952957307,
+        "spread_crossing_bps": 3.481081801718254,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.238812257530925,
+        "true_net_bps": -43.753023588822245,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.9805,
+          "stamp_duty": 16.26,
+          "sebi": 1.6229609999999999,
+          "nse": 29.7001863,
+          "brokerage": 40.0,
+          "gst": 12.838166514
+        }
+      },
+      {
+        "gross_mid_bps": 8.861939440963187,
+        "spread_crossing_bps": 1.98566277930331,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.232778438178167,
+        "true_net_bps": 0.6434982234817106,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.856,
+          "stamp_duty": 16.30302,
+          "sebi": 1.630863,
+          "nse": 29.8447929,
+          "brokerage": 40.0,
+          "gst": 12.865618061999998
+        }
+      },
+      {
+        "gross_mid_bps": 16.192293130129897,
+        "spread_crossing_bps": 3.4737155523210403,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.232610673949828,
+        "true_net_bps": 6.485966903859029,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 408.0165,
+          "stamp_duty": 16.2999,
+          "sebi": 1.631028,
+          "nse": 29.847812400000002,
+          "brokerage": 40.0,
+          "gst": 12.866191271999998
+        }
+      },
+      {
+        "gross_mid_bps": 17.97956065895561,
+        "spread_crossing_bps": 3.0517454697203505,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.232066914458595,
+        "true_net_bps": 8.695748274776665,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.8725,
+          "stamp_duty": 16.29054,
+          "sebi": 1.630272,
+          "nse": 29.833977600000004,
+          "brokerage": 40.0,
+          "gst": 12.863564928
+        }
+      },
+      {
+        "gross_mid_bps": 15.347825847209176,
+        "spread_crossing_bps": 3.731267840699293,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.232435096611653,
+        "true_net_bps": 5.384122909898231,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.9715,
+          "stamp_duty": 16.2999,
+          "sebi": 1.630938,
+          "nse": 29.846165400000004,
+          "brokerage": 40.0,
+          "gst": 12.865878612
+        }
+      },
+      {
+        "gross_mid_bps": 17.021714634446464,
+        "spread_crossing_bps": 2.095545862124379,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.23275182587607,
+        "true_net_bps": 8.693416946446016,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.9715,
+          "stamp_duty": 16.294500000000003,
+          "sebi": 1.630668,
+          "nse": 29.8412244,
+          "brokerage": 40.0,
+          "gst": 12.864940632
+        }
+      },
+      {
+        "gross_mid_bps": 30.641390891083013,
+        "spread_crossing_bps": 2.611691180391917,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.23207546232758,
+        "true_net_bps": 21.79762424836352,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7135,
+          "stamp_duty": 16.26282,
+          "sebi": 1.628568,
+          "nse": 29.802794400000003,
+          "brokerage": 40.0,
+          "gst": 12.857645232000001
+        }
+      },
+      {
+        "gross_mid_bps": 33.82180927368523,
+        "spread_crossing_bps": 3.218497347956847,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.2321801660131575,
+        "true_net_bps": 24.371131759715226,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.748,
+          "stamp_duty": 16.26,
+          "sebi": 1.628496,
+          "nse": 29.801476800000003,
+          "brokerage": 40.0,
+          "gst": 12.857395104
+        }
+      },
+      {
+        "gross_mid_bps": 39.18849833205057,
+        "spread_crossing_bps": 3.071083632777439,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.231620751600213,
+        "true_net_bps": 29.885793947672923,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.766,
+          "stamp_duty": 16.251720000000002,
+          "sebi": 1.6281179999999997,
+          "nse": 29.794559400000004,
+          "brokerage": 40.0,
+          "gst": 12.856081931999999
+        }
+      },
+      {
+        "gross_mid_bps": 61.69435191517184,
+        "spread_crossing_bps": 3.1251608538674787,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.230541796832681,
+        "true_net_bps": 52.338649264471684,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.91450000000003,
+          "stamp_duty": 16.221,
+          "sebi": 1.6268789999999997,
+          "nse": 29.771885700000002,
+          "brokerage": 40.0,
+          "gst": 12.851777646
+        }
+      },
+      {
+        "gross_mid_bps": -9.252408989195981,
+        "spread_crossing_bps": 3.0720179158646514,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.222064556705391,
+        "true_net_bps": -18.546491461766024,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.1625,
+          "stamp_duty": 16.50684,
+          "sebi": 1.649667,
+          "nse": 30.188906100000004,
+          "brokerage": 40.0,
+          "gst": 12.930943158
+        }
+      },
+      {
+        "gross_mid_bps": -2.5992911024271397,
+        "spread_crossing_bps": 2.5265836590010324,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.225238422369657,
+        "true_net_bps": -11.351113183797828,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.4355,
+          "stamp_duty": 16.50588,
+          "sebi": 1.6501649999999999,
+          "nse": 30.1980195,
+          "brokerage": 40.0,
+          "gst": 12.932673209999999
+        }
+      },
+      {
+        "gross_mid_bps": 0.49088231550953393,
+        "spread_crossing_bps": 2.563496536552287,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.226692140986251,
+        "true_net_bps": -8.299306362029004,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.452,
+          "stamp_duty": 16.5015,
+          "sebi": 1.649979,
+          "nse": 30.1946157,
+          "brokerage": 40.0,
+          "gst": 12.932027046
+        }
+      },
+      {
+        "gross_mid_bps": 17.644191241203863,
+        "spread_crossing_bps": 2.4010651998335786,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.236934872028074,
+        "true_net_bps": 9.00619116934221,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.0265,
+          "stamp_duty": 16.49592,
+          "sebi": 1.650849,
+          "nse": 30.210536700000002,
+          "brokerage": 40.0,
+          "gst": 12.935049425999999
+        }
+      },
+      {
+        "gross_mid_bps": 13.723163389365489,
+        "spread_crossing_bps": 2.7664732562112944,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.234039890336029,
+        "true_net_bps": 4.7226502428181645,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.5375,
+          "stamp_duty": 16.48344,
+          "sebi": 1.649247,
+          "nse": 30.1812201,
+          "brokerage": 40.0,
+          "gst": 12.929484077999998
+        }
+      },
+      {
+        "gross_mid_bps": 23.80722522873645,
+        "spread_crossing_bps": 3.6976792053806937,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.2402656493373625,
+        "true_net_bps": 13.869280374018391,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.653,
+          "stamp_duty": 16.473000000000003,
+          "sebi": 1.648956,
+          "nse": 30.175894800000002,
+          "brokerage": 40.0,
+          "gst": 12.928473144000002
+        }
+      },
+      {
+        "gross_mid_bps": 25.723050914151518,
+        "spread_crossing_bps": 1.4209617360514226,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.241674451958134,
+        "true_net_bps": 18.060414726141964,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.7115,
+          "stamp_duty": 16.46844,
+          "sebi": 1.6488450000000001,
+          "nse": 30.173863500000003,
+          "brokerage": 40.0,
+          "gst": 12.92808753
+        }
+      },
+      {
+        "gross_mid_bps": 15.083148357046952,
+        "spread_crossing_bps": 2.165132273207208,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.235552576519535,
+        "true_net_bps": 6.682463507320208,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.806,
+          "stamp_duty": 16.490940000000002,
+          "sebi": 1.650159,
+          "nse": 30.197909700000004,
+          "brokerage": 40.0,
+          "gst": 12.932652366
+        }
+      },
+      {
+        "gross_mid_bps": -7.67861886756695,
+        "spread_crossing_bps": 4.87646885428509,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.22684873496877,
+        "true_net_bps": -18.78193645682081,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.0575,
+          "stamp_duty": 16.503,
+          "sebi": 1.6492649999999998,
+          "nse": 30.181549500000003,
+          "brokerage": 40.0,
+          "gst": 12.92954661
+        }
+      },
+      {
+        "gross_mid_bps": -9.186545076830443,
+        "spread_crossing_bps": 1.9464560855853266,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.22807359748137,
+        "true_net_bps": -17.36107475989714,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.266,
+          "stamp_duty": 16.509,
+          "sebi": 1.649982,
+          "nse": 30.194670600000002,
+          "brokerage": 40.0,
+          "gst": 12.932037468
+        }
+      },
+      {
+        "gross_mid_bps": -17.398869073509957,
+        "spread_crossing_bps": 2.9119446148134265,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.227579933983788,
+        "true_net_bps": -26.53839362230717,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.99,
+          "stamp_duty": 16.513080000000002,
+          "sebi": 1.6496339999999998,
+          "nse": 30.188302200000003,
+          "brokerage": 40.0,
+          "gst": 12.930828516
+        }
+      },
+      {
+        "gross_mid_bps": -17.635015241822003,
+        "spread_crossing_bps": 2.2021020064604477,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.228224423798474,
+        "true_net_bps": -26.065341672080923,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.05,
+          "stamp_duty": 16.5147,
+          "sebi": 1.649835,
+          "nse": 30.1919805,
+          "brokerage": 40.0,
+          "gst": 12.93152679
+        }
+      },
+      {
+        "gross_mid_bps": -0.5994855324163464,
+        "spread_crossing_bps": 3.324419770668742,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.226805892010251,
+        "true_net_bps": -10.15071119509534,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.8195,
+          "stamp_duty": 16.519260000000003,
+          "sebi": 1.651602,
+          "nse": 30.2243166,
+          "brokerage": 40.0,
+          "gst": 12.937665348000001
+        }
+      },
+      {
+        "gross_mid_bps": 6.359889810366258,
+        "spread_crossing_bps": 1.417346872025009,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.230403150483473,
+        "true_net_bps": -1.287860212142224,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9875,
+          "stamp_duty": 16.51134,
+          "sebi": 1.651542,
+          "nse": 30.223218600000003,
+          "brokerage": 40.0,
+          "gst": 12.937456908
+        }
+      },
+      {
+        "gross_mid_bps": 6.323409698802715,
+        "spread_crossing_bps": 1.5990231422263692,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.23027662421987,
+        "true_net_bps": -1.5058900676435245,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9875,
+          "stamp_duty": 16.5117,
+          "sebi": 1.65156,
+          "nse": 30.223548,
+          "brokerage": 40.0,
+          "gst": 12.937519439999999
+        }
+      },
+      {
+        "gross_mid_bps": 4.86999122311204,
+        "spread_crossing_bps": 3.670665026375562,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.229232663370336,
+        "true_net_bps": -5.029906466633858,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.878,
+          "stamp_duty": 16.51314,
+          "sebi": 1.6514129999999998,
+          "nse": 30.220857900000002,
+          "brokerage": 40.0,
+          "gst": 12.937008762
+        }
+      },
+      {
+        "gross_mid_bps": 8.810988847286488,
+        "spread_crossing_bps": 1.0355182768970586,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.231620594435936,
+        "true_net_bps": 1.543849975953493,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.18850000000003,
+          "stamp_duty": 16.5147,
+          "sebi": 1.6521119999999998,
+          "nse": 30.2336496,
+          "brokerage": 40.0,
+          "gst": 12.939437087999998
+        }
+      },
+      {
+        "gross_mid_bps": 10.066376304405898,
+        "spread_crossing_bps": 3.416026615936888,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.231652248030183,
+        "true_net_bps": 0.4186974404388275,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.103,
+          "stamp_duty": 16.51314,
+          "sebi": 1.651863,
+          "nse": 30.2290929,
+          "brokerage": 40.0,
+          "gst": 12.938572062
+        }
+      },
+      {
+        "gross_mid_bps": 6.120084409948381,
+        "spread_crossing_bps": 3.1054434246332163,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.22988225812349,
+        "true_net_bps": -3.2152412728083246,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.2095,
+          "stamp_duty": 16.523400000000002,
+          "sebi": 1.6525889999999999,
+          "nse": 30.242378700000003,
+          "brokerage": 40.0,
+          "gst": 12.941094185999999
+        }
+      },
+      {
+        "gross_mid_bps": 3.4506242905788875,
+        "spread_crossing_bps": 2.070374574347597,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.228443697446841,
+        "true_net_bps": -4.848193981215551,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.082,
+          "stamp_duty": 16.521,
+          "sebi": 1.6522139999999998,
+          "nse": 30.2355162,
+          "brokerage": 40.0,
+          "gst": 12.939791435999998
+        }
+      },
+      {
+        "gross_mid_bps": 5.248371461208625,
+        "spread_crossing_bps": 1.761564123658962,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.229090722634768,
+        "true_net_bps": -2.7422833850851056,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.154,
+          "stamp_duty": 16.520400000000002,
+          "sebi": 1.6523279999999998,
+          "nse": 30.2376024,
+          "brokerage": 40.0,
+          "gst": 12.940187472
+        }
+      },
+      {
+        "gross_mid_bps": 2.9969267878043744,
+        "spread_crossing_bps": 2.161419925749133,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.228458581503088,
+        "true_net_bps": -5.392951719447847,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.031,
+          "stamp_duty": 16.51986,
+          "sebi": 1.6520549999999998,
+          "nse": 30.232606500000003,
+          "brokerage": 40.0,
+          "gst": 12.939239069999998
+        }
+      },
+      {
+        "gross_mid_bps": -0.5983192667874625,
+        "spread_crossing_bps": 0.9246752304886354,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.225643308790155,
+        "true_net_bps": -7.748637806066252,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.628,
+          "stamp_duty": 16.54764,
+          "sebi": 1.6546379999999998,
+          "nse": 30.2798754,
+          "brokerage": 40.0,
+          "gst": 12.948212412
+        }
+      },
+      {
+        "gross_mid_bps": -1.2327952544626526,
+        "spread_crossing_bps": 0.9789844667800576,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.224875724061746,
+        "true_net_bps": -8.436655445304456,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6085,
+          "stamp_duty": 16.548000000000002,
+          "sebi": 1.654617,
+          "nse": 30.2794911,
+          "brokerage": 40.0,
+          "gst": 12.948139458
+        }
+      },
+      {
+        "gross_mid_bps": -4.838911371803661,
+        "spread_crossing_bps": 0.851793387546847,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.2229784829499355,
+        "true_net_bps": -11.913683242300444,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.61150000000004,
+          "stamp_duty": 16.553880000000003,
+          "sebi": 1.6549169999999997,
+          "nse": 30.284981100000003,
+          "brokerage": 40.0,
+          "gst": 12.949181657999999
+        }
+      },
+      {
+        "gross_mid_bps": 0.34444563288285684,
+        "spread_crossing_bps": 0.7432774183253316,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.225834591671788,
+        "true_net_bps": -6.624666377114263,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.7,
+          "stamp_duty": 16.54866,
+          "sebi": 1.654833,
+          "nse": 30.2834439,
+          "brokerage": 40.0,
+          "gst": 12.948889842
+        }
+      },
+      {
+        "gross_mid_bps": 3.482190951019786,
+        "spread_crossing_bps": 0.9068205601611965,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.227775167819235,
+        "true_net_bps": -3.652404776960646,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.658,
+          "stamp_duty": 16.542060000000003,
+          "sebi": 1.6544189999999999,
+          "nse": 30.2758677,
+          "brokerage": 40.0,
+          "gst": 12.947451606000001
+        }
+      },
+      {
+        "gross_mid_bps": 4.823261903121076,
+        "spread_crossing_bps": 0.8340979230959077,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.228198293121353,
+        "true_net_bps": -2.2390343130961843,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.79,
+          "stamp_duty": 16.545,
+          "sebi": 1.65483,
+          "nse": 30.283389,
+          "brokerage": 40.0,
+          "gst": 12.94887942
+        }
+      },
+      {
+        "gross_mid_bps": 5.658539770284521,
+        "spread_crossing_bps": 2.1400887592750015,
+        "slippage_bps": 0.0,
+        "statutory_exchange_broker_bps": 6.228819991451736,
+        "true_net_bps": -2.710368980442217,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.73900000000003,
+          "stamp_duty": 16.54374,
+          "sebi": 1.654665,
+          "nse": 30.2803695,
+          "brokerage": 40.0,
+          "gst": 12.94830621
+        }
+      }
+    ]
+  },
+  "slip_0.25bps": {
+    "n_events": 52,
+    "mean_gross_mid_bps": 8.420972076581096,
+    "mean_spread_bps": 2.454867162518008,
+    "mean_slippage_bps": 0.5,
+    "mean_statutory_exchange_broker_bps": 6.232303739255494,
+    "mean_true_net_bps": -0.7661988251924048,
+    "quoted_spread_coverage_pct": 100.0,
+    "per_trade_logs": [
+      {
+        "gross_mid_bps": 51.39750233625064,
+        "spread_crossing_bps": 3.9337650009424245,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.233757873374083,
+        "true_net_bps": 40.729979461934136,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 406.0383487875,
+          "stamp_duty": 16.165244121,
+          "sebi": 1.620338903625,
+          "nse": 29.6522019363375,
+          "brokerage": 40.0,
+          "gst": 12.82905735119325
+        }
+      },
+      {
+        "gross_mid_bps": 47.505455459246846,
+        "spread_crossing_bps": 3.307458781488108,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.234004129275102,
+        "true_net_bps": 37.46399254848364,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.82685407499997,
+          "stamp_duty": 16.162124043,
+          "sebi": 1.6197599102999998,
+          "nse": 29.641606358489998,
+          "brokerage": 40.0,
+          "gst": 12.8270459283822
+        }
+      },
+      {
+        "gross_mid_bps": 48.20795385044525,
+        "spread_crossing_bps": 2.1618745114976274,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.234263759367596,
+        "true_net_bps": 39.31181557958003,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.84785354999997,
+          "stamp_duty": 16.159963989,
+          "sebi": 1.6196939065499998,
+          "nse": 29.640398489865,
+          "brokerage": 40.0,
+          "gst": 12.826816631354697
+        }
+      },
+      {
+        "gross_mid_bps": -2.8941949128955944,
+        "spread_crossing_bps": 2.4489341570651915,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.238304680333193,
+        "true_net_bps": -12.081433750293979,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.17089547499995,
+          "stamp_duty": 16.176284397,
+          "sebi": 1.6171560107999996,
+          "nse": 29.593954997639997,
+          "brokerage": 40.0,
+          "gst": 12.817999981519199
+        }
+      },
+      {
+        "gross_mid_bps": -1.0018980401763813,
+        "spread_crossing_bps": 1.0761127098179764,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.239239476609092,
+        "true_net_bps": -8.81725022660345,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2203942375,
+          "stamp_duty": 16.1729843145,
+          "sebi": 1.6170900041999996,
+          "nse": 29.59274707686,
+          "brokerage": 40.0,
+          "gst": 12.8177706745908
+        }
+      },
+      {
+        "gross_mid_bps": 2.6720404368788815,
+        "spread_crossing_bps": 2.4493704004715204,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.238925973157769,
+        "true_net_bps": -6.516255936750408,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.15289592500005,
+          "stamp_duty": 16.166564154,
+          "sebi": 1.6166339995499999,
+          "nse": 29.584402191765,
+          "brokerage": 40.0,
+          "gst": 12.8161865144367
+        }
+      },
+      {
+        "gross_mid_bps": 3.1534857147110618,
+        "spread_crossing_bps": 2.151790252391236,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.2386854742457,
+        "true_net_bps": -5.736990011925874,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2803927375,
+          "stamp_duty": 16.17040425,
+          "sebi": 1.6170809979749996,
+          "nse": 29.5925822629425,
+          "brokerage": 40.0,
+          "gst": 12.81773938696515
+        }
+      },
+      {
+        "gross_mid_bps": -1.1504020840827194,
+        "spread_crossing_bps": 1.6699385091531187,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.238836937206748,
+        "true_net_bps": -9.559177530442586,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.1603957375,
+          "stamp_duty": 16.171784284500003,
+          "sebi": 1.6169100056999999,
+          "nse": 29.589453104310003,
+          "brokerage": 40.0,
+          "gst": 12.8171453598018
+        }
+      },
+      {
+        "gross_mid_bps": -0.5197109664587657,
+        "spread_crossing_bps": 3.118265798749893,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.238217638846526,
+        "true_net_bps": -10.376194404055184,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 403.96390064999997,
+          "stamp_duty": 16.165244121,
+          "sebi": 1.6161900073499997,
+          "nse": 29.576277134505,
+          "brokerage": 40.0,
+          "gst": 12.814644085533901
+        }
+      },
+      {
+        "gross_mid_bps": 11.864598748182981,
+        "spread_crossing_bps": 2.0238517426480254,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.245547571320556,
+        "true_net_bps": 3.0951994342143996,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.37639033749997,
+          "stamp_duty": 16.159963989,
+          "sebi": 1.616750980125,
+          "nse": 29.5865429362875,
+          "brokerage": 40.0,
+          "gst": 12.816592904954248
+        }
+      },
+      {
+        "gross_mid_bps": 7.982875803160847,
+        "spread_crossing_bps": 2.561946187991696,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.243385497869991,
+        "true_net_bps": -1.3224558827008401,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2713929625,
+          "stamp_duty": 16.162904062499997,
+          "sebi": 1.6166879890499999,
+          "nse": 29.585390199615,
+          "brokerage": 40.0,
+          "gst": 12.816374073959699
+        }
+      },
+      {
+        "gross_mid_bps": 5.902727505596996,
+        "spread_crossing_bps": 2.7100572824433855,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.242248138389977,
+        "true_net_bps": -3.5495779152363665,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.25039348750005,
+          "stamp_duty": 16.165664131499998,
+          "sebi": 1.61678399355,
+          "nse": 29.587147081965,
+          "brokerage": 40.0,
+          "gst": 12.8167075935927
+        }
+      },
+      {
+        "gross_mid_bps": -35.95264322277811,
+        "spread_crossing_bps": 4.70235395395793,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.23800408488229,
+        "true_net_bps": -47.39300126161833,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.9883750375,
+          "stamp_duty": 16.2662266455,
+          "sebi": 1.6232880823499998,
+          "nse": 29.706171907005,
+          "brokerage": 40.0,
+          "gst": 12.8393027980839
+        }
+      },
+      {
+        "gross_mid_bps": -34.03312952957307,
+        "spread_crossing_bps": 3.481081801718254,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.238692317200058,
+        "true_net_bps": -44.252903648491376,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.9703754875,
+          "stamp_duty": 16.260406500000002,
+          "sebi": 1.6229610759749997,
+          "nse": 29.700187690342503,
+          "brokerage": 40.0,
+          "gst": 12.83816677793715
+        }
+      },
+      {
+        "gross_mid_bps": 8.861939440963187,
+        "spread_crossing_bps": 1.98566277930331,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.232658450902276,
+        "true_net_bps": 0.14361821075760162,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.8458036,
+          "stamp_duty": 16.303427575500002,
+          "sebi": 1.630862985975,
+          "nse": 29.8447926433425,
+          "brokerage": 40.0,
+          "gst": 12.86561801327715
+        }
+      },
+      {
+        "gross_mid_bps": 16.192293130129897,
+        "spread_crossing_bps": 3.4737155523210403,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.232490674464632,
+        "true_net_bps": 5.9860869033442246,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 408.00629958749994,
+          "stamp_duty": 16.300307497499997,
+          "sebi": 1.6310279740499998,
+          "nse": 29.847811925114996,
+          "brokerage": 40.0,
+          "gst": 12.866191181849699
+        }
+      },
+      {
+        "gross_mid_bps": 17.97956065895561,
+        "spread_crossing_bps": 3.0517454697203505,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.231946925189115,
+        "true_net_bps": 8.195868264046144,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.8623031875,
+          "stamp_duty": 16.2909472635,
+          "sebi": 1.6302719695499999,
+          "nse": 29.833977042765,
+          "brokerage": 40.0,
+          "gst": 12.8635648222167
+        }
+      },
+      {
+        "gross_mid_bps": 15.347825847209176,
+        "spread_crossing_bps": 3.731267840699293,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.232315103819998,
+        "true_net_bps": 4.884242902689886,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.96130071249996,
+          "stamp_duty": 16.300307497499997,
+          "sebi": 1.6309379762999998,
+          "nse": 29.846164966289997,
+          "brokerage": 40.0,
+          "gst": 12.8658785296662
+        }
+      },
+      {
+        "gross_mid_bps": 17.021714634446464,
+        "spread_crossing_bps": 2.095545862124379,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.232631820723374,
+        "true_net_bps": 8.193536951598713,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.96130071249996,
+          "stamp_duty": 16.2949073625,
+          "sebi": 1.6306679695499997,
+          "nse": 29.841223842764997,
+          "brokerage": 40.0,
+          "gst": 12.864940526216698
+        }
+      },
+      {
+        "gross_mid_bps": 30.641390891083013,
+        "spread_crossing_bps": 2.611691180391917,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.231955452438295,
+        "true_net_bps": 21.297744258252802,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7033071625,
+          "stamp_duty": 16.2632265705,
+          "sebi": 1.6285679428499997,
+          "nse": 29.802793354155,
+          "brokerage": 40.0,
+          "gst": 12.8576450334609
+        }
+      },
+      {
+        "gross_mid_bps": 33.82180927368523,
+        "spread_crossing_bps": 3.218497347956847,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.232060148294901,
+        "true_net_bps": 23.871251777433482,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7378063,
+          "stamp_duty": 16.260406500000002,
+          "sebi": 1.6284959375999999,
+          "nse": 29.80147565808,
+          "brokerage": 40.0,
+          "gst": 12.8573948872224
+        }
+      },
+      {
+        "gross_mid_bps": 39.18849833205057,
+        "spread_crossing_bps": 3.071083632777439,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.231500733721663,
+        "true_net_bps": 29.38591396555147,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.75580585,
+          "stamp_duty": 16.252126293,
+          "sebi": 1.6281179263499999,
+          "nse": 29.794558052205,
+          "brokerage": 40.0,
+          "gst": 12.856081676139901
+        }
+      },
+      {
+        "gross_mid_bps": 61.69435191517184,
+        "spread_crossing_bps": 3.1251608538674787,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.230421753173281,
+        "true_net_bps": 51.838769308131084,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.9043021375,
+          "stamp_duty": 16.221405524999998,
+          "sebi": 1.6268788805249996,
+          "nse": 29.7718835136075,
+          "brokerage": 40.0,
+          "gst": 12.851777230943847
+        }
+      },
+      {
+        "gross_mid_bps": -9.252408989195981,
+        "spread_crossing_bps": 3.0720179158646514,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.221944695746364,
+        "true_net_bps": -19.046371600807,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.1521959375,
+          "stamp_duty": 16.507252671000003,
+          "sebi": 1.6496670254249999,
+          "nse": 30.1889065652775,
+          "brokerage": 40.0,
+          "gst": 12.930943246326452
+        }
+      },
+      {
+        "gross_mid_bps": -2.5992911024271397,
+        "spread_crossing_bps": 2.5265836590010324,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.225118479327881,
+        "true_net_bps": -11.850993240756052,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.4251891125,
+          "stamp_duty": 16.506292647000002,
+          "sebi": 1.6501650105749999,
+          "nse": 30.1980196935225,
+          "brokerage": 40.0,
+          "gst": 12.932673246737547
+        }
+      },
+      {
+        "gross_mid_bps": 0.49088231550953393,
+        "spread_crossing_bps": 2.563496536552287,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.22657216371057,
+        "true_net_bps": -8.799186384753323,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.44168869999993,
+          "stamp_duty": 16.5019125375,
+          "sebi": 1.6499790042749998,
+          "nse": 30.194615778232496,
+          "brokerage": 40.0,
+          "gst": 12.932027060851349
+        }
+      },
+      {
+        "gross_mid_bps": 17.644191241203863,
+        "spread_crossing_bps": 2.4010651998335786,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.23681464923623,
+        "true_net_bps": 8.506311392134055,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.01617433749993,
+          "stamp_duty": 16.496332398,
+          "sebi": 1.6508489685749996,
+          "nse": 30.2105361249225,
+          "brokerage": 40.0,
+          "gst": 12.93504931682955
+        }
+      },
+      {
+        "gross_mid_bps": 13.723163389365489,
+        "spread_crossing_bps": 2.7664732562112944,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.233919744518341,
+        "true_net_bps": 4.222770388635852,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.5271865625,
+          "stamp_duty": 16.483852086000002,
+          "sebi": 1.6492469774249998,
+          "nse": 30.1812196868775,
+          "brokerage": 40.0,
+          "gst": 12.929483999574451
+        }
+      },
+      {
+        "gross_mid_bps": 23.80722522873645,
+        "spread_crossing_bps": 3.6976792053806937,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.24014536313039,
+        "true_net_bps": 13.369400660225365,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.642683675,
+          "stamp_duty": 16.473411825,
+          "sebi": 1.6489559585999998,
+          "nse": 30.17589404238,
+          "brokerage": 40.0,
+          "gst": 12.928473000176401
+        }
+      },
+      {
+        "gross_mid_bps": 25.723050914151518,
+        "spread_crossing_bps": 1.4209617360514226,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.241554129098997,
+        "true_net_bps": 17.5605350490011,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.7011822125,
+          "stamp_duty": 16.468851711,
+          "sebi": 1.648844949975,
+          "nse": 30.173862584542498,
+          "brokerage": 40.0,
+          "gst": 12.928087356213148
+        }
+      },
+      {
+        "gross_mid_bps": 15.083148357046952,
+        "spread_crossing_bps": 2.165132273207208,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.235432390659515,
+        "true_net_bps": 6.182583693180229,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.79567985,
+          "stamp_duty": 16.491352273500002,
+          "sebi": 1.650158973375,
+          "nse": 30.197909212762504,
+          "brokerage": 40.0,
+          "gst": 12.932652273504752
+        }
+      },
+      {
+        "gross_mid_bps": -7.67861886756695,
+        "spread_crossing_bps": 4.87646885428509,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.226728785077244,
+        "true_net_bps": -19.28181650692928,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.04719856249994,
+          "stamp_duty": 16.503412575,
+          "sebi": 1.6492650258749997,
+          "nse": 30.181549973512496,
+          "brokerage": 40.0,
+          "gst": 12.92954669988975
+        }
+      },
+      {
+        "gross_mid_bps": -9.186545076830443,
+        "spread_crossing_bps": 1.9464560855853266,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.227953615716975,
+        "true_net_bps": -17.860954778132744,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.25569334999994,
+          "stamp_duty": 16.509412725,
+          "sebi": 1.6499820229499997,
+          "nse": 30.194671019985,
+          "brokerage": 40.0,
+          "gst": 12.932037547728298
+        }
+      },
+      {
+        "gross_mid_bps": -17.398869073509957,
+        "spread_crossing_bps": 2.9119446148134265,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.227459986496973,
+        "true_net_bps": -27.038273674820353,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.97970025,
+          "stamp_duty": 16.513492827,
+          "sebi": 1.6496340418499997,
+          "nse": 30.188302965855,
+          "brokerage": 40.0,
+          "gst": 12.930828661386899
+        }
+      },
+      {
+        "gross_mid_bps": -17.635015241822003,
+        "spread_crossing_bps": 2.2021020064604477,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.228104461390567,
+        "true_net_bps": -26.56522170967302,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.03969875,
+          "stamp_duty": 16.5151128675,
+          "sebi": 1.6498350408749998,
+          "nse": 30.191981248012503,
+          "brokerage": 40.0,
+          "gst": 12.93152693199975
+        }
+      },
+      {
+        "gross_mid_bps": -0.5994855324163464,
+        "spread_crossing_bps": 3.324419770668742,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.226685906234035,
+        "true_net_bps": -10.650591209319124,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.80917951249995,
+          "stamp_duty": 16.5196729815,
+          "sebi": 1.6516020080999998,
+          "nse": 30.22431674823,
+          "brokerage": 40.0,
+          "gst": 12.937665376139401
+        }
+      },
+      {
+        "gross_mid_bps": 6.359889810366258,
+        "spread_crossing_bps": 1.417346872025009,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.2302830741127675,
+        "true_net_bps": -1.7877401357715188,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9771753125,
+          "stamp_duty": 16.5117527835,
+          "sebi": 1.6515419897999999,
+          "nse": 30.22321841334,
+          "brokerage": 40.0,
+          "gst": 12.9374568725652
+        }
+      },
+      {
+        "gross_mid_bps": 6.323409698802715,
+        "spread_crossing_bps": 1.5990231422263692,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.230156550700583,
+        "true_net_bps": -2.005769994124237,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9771753125,
+          "stamp_duty": 16.5121127925,
+          "sebi": 1.6515599902499998,
+          "nse": 30.223547821575,
+          "brokerage": 40.0,
+          "gst": 12.9375194061285
+        }
+      },
+      {
+        "gross_mid_bps": 4.86999122311204,
+        "spread_crossing_bps": 3.670665026375562,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.229112619566272,
+        "true_net_bps": -5.529786422829794,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.86767805,
+          "stamp_duty": 16.513552828500003,
+          "sebi": 1.651412997525,
+          "nse": 30.220857854707504,
+          "brokerage": 40.0,
+          "gst": 12.93700875340185
+        }
+      },
+      {
+        "gross_mid_bps": 8.810988847286488,
+        "spread_crossing_bps": 1.0355182768970586,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.231500483877432,
+        "true_net_bps": 1.0439700865119974,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.1781702875,
+          "stamp_duty": 16.5151128675,
+          "sebi": 1.6521119839499998,
+          "nse": 30.233649306285002,
+          "brokerage": 40.0,
+          "gst": 12.9394370322423
+        }
+      },
+      {
+        "gross_mid_bps": 10.066376304405898,
+        "spread_crossing_bps": 3.416026615936888,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.231532141272408,
+        "true_net_bps": -0.08118245280339753,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.092672425,
+          "stamp_duty": 16.513552828500003,
+          "sebi": 1.6518629862749998,
+          "nse": 30.229092648832502,
+          "brokerage": 40.0,
+          "gst": 12.938572014319352
+        }
+      },
+      {
+        "gross_mid_bps": 6.120084409948381,
+        "spread_crossing_bps": 3.1054434246332163,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.2297621895220265,
+        "true_net_bps": -3.7151212042068615,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.1991697625,
+          "stamp_duty": 16.523813085,
+          "sebi": 1.6525889937749998,
+          "nse": 30.242378586082502,
+          "brokerage": 40.0,
+          "gst": 12.94109416437435
+        }
+      },
+      {
+        "gross_mid_bps": 3.4506242905788875,
+        "spread_crossing_bps": 2.070374574347597,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.228323663062812,
+        "true_net_bps": -5.348073946831522,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.07167295,
+          "stamp_duty": 16.521413024999998,
+          "sebi": 1.6522139971499996,
+          "nse": 30.235516147844997,
+          "brokerage": 40.0,
+          "gst": 12.9397914260991
+        }
+      },
+      {
+        "gross_mid_bps": 5.248371461208625,
+        "spread_crossing_bps": 1.761564123658962,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.22897066987292,
+        "true_net_bps": -3.2421633323232575,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.14367114999993,
+          "stamp_duty": 16.520813009999998,
+          "sebi": 1.6523279927999996,
+          "nse": 30.237602268239996,
+          "brokerage": 40.0,
+          "gst": 12.940187446987197
+        }
+      },
+      {
+        "gross_mid_bps": 2.9969267878043744,
+        "spread_crossing_bps": 2.161419925749133,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.228338549223645,
+        "true_net_bps": -5.892831687168403,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.02067422500005,
+          "stamp_duty": 16.5202729965,
+          "sebi": 1.652054998275,
+          "nse": 30.2326064684325,
+          "brokerage": 40.0,
+          "gst": 12.93923906400735
+        }
+      },
+      {
+        "gross_mid_bps": -0.5983192667874625,
+        "spread_crossing_bps": 0.9246752304886354,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.2255233193391675,
+        "true_net_bps": -8.248517816615266,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6176593,
+          "stamp_duty": 16.548053691,
+          "sebi": 1.65463800315,
+          "nse": 30.279875457645,
+          "brokerage": 40.0,
+          "gst": 12.9482124229431
+        }
+      },
+      {
+        "gross_mid_bps": -1.2327952544626526,
+        "spread_crossing_bps": 0.9789844667800576,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.224755751227855,
+        "true_net_bps": -8.936535472470565,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.59815978750004,
+          "stamp_duty": 16.5484137,
+          "sebi": 1.654617004575,
+          "nse": 30.279491183722502,
+          "brokerage": 40.0,
+          "gst": 12.94813947389355
+        }
+      },
+      {
+        "gross_mid_bps": -4.838911371803661,
+        "spread_crossing_bps": 0.851793387546847,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.222858553191644,
+        "true_net_bps": -12.413563312542152,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.60115971249996,
+          "stamp_duty": 16.554293847,
+          "sebi": 1.6549170117749998,
+          "nse": 30.284981315482497,
+          "brokerage": 40.0,
+          "gst": 12.949181698906349
+        }
+      },
+      {
+        "gross_mid_bps": 0.34444563288285684,
+        "spread_crossing_bps": 0.7432774183253316,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.225714594491268,
+        "true_net_bps": -7.124546379933743,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.68965749999995,
+          "stamp_duty": 16.5490737165,
+          "sebi": 1.6548330008249998,
+          "nse": 30.2834439150975,
+          "brokerage": 40.0,
+          "gst": 12.94888984486605
+        }
+      },
+      {
+        "gross_mid_bps": 3.482190951019786,
+        "spread_crossing_bps": 0.9068205601611965,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.227655128719895,
+        "true_net_bps": -4.152284737861305,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.64765855,
+          "stamp_duty": 16.5424735515,
+          "sebi": 1.6544189946749999,
+          "nse": 30.2758676025525,
+          "brokerage": 40.0,
+          "gst": 12.94745158750095
+        }
+      },
+      {
+        "gross_mid_bps": 4.823261903121076,
+        "spread_crossing_bps": 0.8340979230959077,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.228078239680027,
+        "true_net_bps": -2.7389142596548584,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.77965525,
+          "stamp_duty": 16.545413625,
+          "sebi": 1.6548299917499998,
+          "nse": 30.283388849025002,
+          "brokerage": 40.0,
+          "gst": 12.948879391339498
+        }
+      },
+      {
+        "gross_mid_bps": 5.658539770284521,
+        "spread_crossing_bps": 2.1400887592750015,
+        "slippage_bps": 0.5,
+        "statutory_exchange_broker_bps": 6.2286999282746125,
+        "true_net_bps": -3.210248917265093,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.728656525,
+          "stamp_duty": 16.544153593500003,
+          "sebi": 1.654664992725,
+          "nse": 30.280369366867504,
+          "brokerage": 40.0,
+          "gst": 12.94830618472665
+        }
+      }
+    ]
+  },
+  "slip_0.5bps": {
+    "n_events": 52,
+    "mean_gross_mid_bps": 8.420972076581096,
+    "mean_spread_bps": 2.454867162518008,
+    "mean_slippage_bps": 1.0,
+    "mean_statutory_exchange_broker_bps": 6.232183707404823,
+    "mean_true_net_bps": -1.266078793341732,
+    "quoted_spread_coverage_pct": 100.0,
+    "per_trade_logs": [
+      {
+        "gross_mid_bps": 51.39750233625064,
+        "spread_crossing_bps": 3.9337650009424245,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.233637837688936,
+        "true_net_bps": 40.23009949761928,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 406.0281975750001,
+          "stamp_duty": 16.165648242000007,
+          "sebi": 1.6203388072500002,
+          "nse": 29.652200172675006,
+          "brokerage": 40.0,
+          "gst": 12.8290570163865
+        }
+      },
+      {
+        "gross_mid_bps": 47.505455459246846,
+        "spread_crossing_bps": 3.307458781488108,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.233884100858946,
+        "true_net_bps": 36.964112576899794,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.81670814999995,
+          "stamp_duty": 16.162528086000002,
+          "sebi": 1.6197598206,
+          "nse": 29.641604716979998,
+          "brokerage": 40.0,
+          "gst": 12.827045616764398
+        }
+      },
+      {
+        "gross_mid_bps": 48.20795385044525,
+        "spread_crossing_bps": 2.1618745114976274,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.234143721879949,
+        "true_net_bps": 38.811935617067675,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.8377071,
+          "stamp_duty": 16.160367978000004,
+          "sebi": 1.6196938131,
+          "nse": 29.640396779730004,
+          "brokerage": 40.0,
+          "gst": 12.826816306709402
+        }
+      },
+      {
+        "gross_mid_bps": -2.8941949128955944,
+        "spread_crossing_bps": 2.4489341570651915,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.238184708755166,
+        "true_net_bps": -12.581313778715952,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.16079095000003,
+          "stamp_duty": 16.176688794,
+          "sebi": 1.6171560216,
+          "nse": 29.593955195280003,
+          "brokerage": 40.0,
+          "gst": 12.818000019038399
+        }
+      },
+      {
+        "gross_mid_bps": -1.0018980401763813,
+        "spread_crossing_bps": 1.0761127098179764,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.239119479499145,
+        "true_net_bps": -9.317130229493502,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.210288475,
+          "stamp_duty": 16.173388629,
+          "sebi": 1.6170900084,
+          "nse": 29.592747153720005,
+          "brokerage": 40.0,
+          "gst": 12.817770689181602
+        }
+      },
+      {
+        "gross_mid_bps": 2.6720404368788815,
+        "spread_crossing_bps": 2.4493704004715204,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.238805979599756,
+        "true_net_bps": -7.0161359431923955,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.14279185000004,
+          "stamp_duty": 16.166968308,
+          "sebi": 1.6166339991,
+          "nse": 29.584402183530003,
+          "brokerage": 40.0,
+          "gst": 12.8161865128734
+        }
+      },
+      {
+        "gross_mid_bps": 3.1534857147110618,
+        "spread_crossing_bps": 2.151790252391236,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.238565480297704,
+        "true_net_bps": -6.236870017977878,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.27028547500004,
+          "stamp_duty": 16.170808500000003,
+          "sebi": 1.61708099595,
+          "nse": 29.592582225885003,
+          "brokerage": 40.0,
+          "gst": 12.8177393799303
+        }
+      },
+      {
+        "gross_mid_bps": -1.1504020840827194,
+        "spread_crossing_bps": 1.6699385091531187,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.238716950910284,
+        "true_net_bps": -10.059057544146121,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.15029147499996,
+          "stamp_duty": 16.172188569000003,
+          "sebi": 1.6169100114,
+          "nse": 29.58945320862,
+          "brokerage": 40.0,
+          "gst": 12.817145379603598
+        }
+      },
+      {
+        "gross_mid_bps": -0.5197109664587657,
+        "spread_crossing_bps": 3.118265798749893,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.238097671469387,
+        "true_net_bps": -10.876074436678046,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 403.95380129999995,
+          "stamp_duty": 16.165648242000007,
+          "sebi": 1.6161900147,
+          "nse": 29.57627726901,
+          "brokerage": 40.0,
+          "gst": 12.8146441110678
+        }
+      },
+      {
+        "gross_mid_bps": 11.864598748182981,
+        "spread_crossing_bps": 2.0238517426480254,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.245427425997687,
+        "true_net_bps": 2.5953195795372688,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.366280675,
+          "stamp_duty": 16.160367978000004,
+          "sebi": 1.61675096025,
+          "nse": 29.586542572575002,
+          "brokerage": 40.0,
+          "gst": 12.8165928359085
+        }
+      },
+      {
+        "gross_mid_bps": 7.982875803160847,
+        "spread_crossing_bps": 2.561946187991696,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.243265405412507,
+        "true_net_bps": -1.822335790243356,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.261285925,
+          "stamp_duty": 16.163308125000004,
+          "sebi": 1.6166879780999999,
+          "nse": 29.585389999230003,
+          "brokerage": 40.0,
+          "gst": 12.8163740359194
+        }
+      },
+      {
+        "gross_mid_bps": 5.902727505596996,
+        "spread_crossing_bps": 2.7100572824433855,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.242128072607453,
+        "true_net_bps": -4.049457849453843,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.240286975,
+          "stamp_duty": 16.166068263000003,
+          "sebi": 1.6167839870999998,
+          "nse": 29.587146963930003,
+          "brokerage": 40.0,
+          "gst": 12.8167075711854
+        }
+      },
+      {
+        "gross_mid_bps": -35.95264322277811,
+        "spread_crossing_bps": 4.70235395395793,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.237884163235588,
+        "true_net_bps": -47.89288133997162,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.978250075,
+          "stamp_duty": 16.266633291000005,
+          "sebi": 1.6232881647,
+          "nse": 29.706173414010003,
+          "brokerage": 40.0,
+          "gst": 12.8393030841678
+        }
+      },
+      {
+        "gross_mid_bps": -34.03312952957307,
+        "spread_crossing_bps": 3.481081801718254,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.23857237686919,
+        "true_net_bps": -44.75278370816051,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.96025097500006,
+          "stamp_duty": 16.260813000000002,
+          "sebi": 1.6229611519500002,
+          "nse": 29.700189080685007,
+          "brokerage": 40.0,
+          "gst": 12.8381670418743
+        }
+      },
+      {
+        "gross_mid_bps": 8.861939440963187,
+        "spread_crossing_bps": 1.98566277930331,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.232538463626388,
+        "true_net_bps": -0.35626180196651,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.8356072,
+          "stamp_duty": 16.303835151000005,
+          "sebi": 1.63086297195,
+          "nse": 29.844792386685004,
+          "brokerage": 40.0,
+          "gst": 12.865617964554302
+        }
+      },
+      {
+        "gross_mid_bps": 16.192293130129897,
+        "spread_crossing_bps": 3.4737155523210403,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.232370674979438,
+        "true_net_bps": 5.4862069028294185,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.996099175,
+          "stamp_duty": 16.300714995000003,
+          "sebi": 1.6310279480999998,
+          "nse": 29.847811450230004,
+          "brokerage": 40.0,
+          "gst": 12.866191091699399
+        }
+      },
+      {
+        "gross_mid_bps": 17.97956065895561,
+        "spread_crossing_bps": 3.0517454697203505,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2318269359196385,
+        "true_net_bps": 7.695988253315621,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.85210637500006,
+          "stamp_duty": 16.291354527000003,
+          "sebi": 1.6302719391,
+          "nse": 29.833976485530005,
+          "brokerage": 40.0,
+          "gst": 12.8635647164334
+        }
+      },
+      {
+        "gross_mid_bps": 15.347825847209176,
+        "spread_crossing_bps": 3.731267840699293,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.232195111028346,
+        "true_net_bps": 4.384362895481538,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.95110142499993,
+          "stamp_duty": 16.300714995000003,
+          "sebi": 1.6309379525999999,
+          "nse": 29.84616453258,
+          "brokerage": 40.0,
+          "gst": 12.865878447332399
+        }
+      },
+      {
+        "gross_mid_bps": 17.021714634446464,
+        "spread_crossing_bps": 2.095545862124379,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.232511815570684,
+        "true_net_bps": 7.693656956751402,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.95110142499993,
+          "stamp_duty": 16.295314725000004,
+          "sebi": 1.6306679390999999,
+          "nse": 29.84122328553,
+          "brokerage": 40.0,
+          "gst": 12.864940420433399
+        }
+      },
+      {
+        "gross_mid_bps": 30.641390891083013,
+        "spread_crossing_bps": 2.611691180391917,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.231835442549009,
+        "true_net_bps": 20.79786426814209,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.69311432500007,
+          "stamp_duty": 16.263633141000003,
+          "sebi": 1.6285678857,
+          "nse": 29.802792308310003,
+          "brokerage": 40.0,
+          "gst": 12.857644834921802
+        }
+      },
+      {
+        "gross_mid_bps": 33.82180927368523,
+        "spread_crossing_bps": 3.218497347956847,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.231940130576642,
+        "true_net_bps": 23.37137179515174,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7276126,
+          "stamp_duty": 16.260813000000002,
+          "sebi": 1.6284958752,
+          "nse": 29.801474516160006,
+          "brokerage": 40.0,
+          "gst": 12.8573946704448
+        }
+      },
+      {
+        "gross_mid_bps": 39.18849833205057,
+        "spread_crossing_bps": 3.071083632777439,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2313807158431125,
+        "true_net_bps": 28.88603398343002,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7456117000001,
+          "stamp_duty": 16.252532586000004,
+          "sebi": 1.6281178527000002,
+          "nse": 29.794556704410006,
+          "brokerage": 40.0,
+          "gst": 12.856081420279802
+        }
+      },
+      {
+        "gross_mid_bps": 61.69435191517184,
+        "spread_crossing_bps": 3.1251608538674787,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.23030170951388,
+        "true_net_bps": 51.338889351790485,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.894104275,
+          "stamp_duty": 16.22181105,
+          "sebi": 1.62687876105,
+          "nse": 29.771881327215002,
+          "brokerage": 40.0,
+          "gst": 12.851776815887698
+        }
+      },
+      {
+        "gross_mid_bps": -9.252408989195981,
+        "spread_crossing_bps": 3.0720179158646514,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.221824834787336,
+        "true_net_bps": -19.546251739847968,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.141891875,
+          "stamp_duty": 16.507665342000006,
+          "sebi": 1.64966705085,
+          "nse": 30.188907030555004,
+          "brokerage": 40.0,
+          "gst": 12.9309433346529
+        }
+      },
+      {
+        "gross_mid_bps": -2.5992911024271397,
+        "spread_crossing_bps": 2.5265836590010324,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.224998536286106,
+        "true_net_bps": -12.350873297714278,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.414878225,
+          "stamp_duty": 16.506705294000003,
+          "sebi": 1.6501650211499999,
+          "nse": 30.198019887045,
+          "brokerage": 40.0,
+          "gst": 12.9326732834751
+        }
+      },
+      {
+        "gross_mid_bps": 0.49088231550953393,
+        "spread_crossing_bps": 2.563496536552287,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.226452186434895,
+        "true_net_bps": -9.299066407477648,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.43137740000003,
+          "stamp_duty": 16.502325075,
+          "sebi": 1.64997900855,
+          "nse": 30.194615856465003,
+          "brokerage": 40.0,
+          "gst": 12.9320270757027
+        }
+      },
+      {
+        "gross_mid_bps": 17.644191241203863,
+        "spread_crossing_bps": 2.4010651998335786,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2366944264443855,
+        "true_net_bps": 8.0064316149259,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.005848675,
+          "stamp_duty": 16.496744796,
+          "sebi": 1.65084893715,
+          "nse": 30.210535549845005,
+          "brokerage": 40.0,
+          "gst": 12.9350492076591
+        }
+      },
+      {
+        "gross_mid_bps": 13.723163389365489,
+        "spread_crossing_bps": 2.7664732562112944,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.233799598700655,
+        "true_net_bps": 3.722890534453539,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.5168731250001,
+          "stamp_duty": 16.484264172000003,
+          "sebi": 1.6492469548500002,
+          "nse": 30.181219273755005,
+          "brokerage": 40.0,
+          "gst": 12.9294839211489
+        }
+      },
+      {
+        "gross_mid_bps": 23.80722522873645,
+        "spread_crossing_bps": 3.6976792053806937,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.24002507692342,
+        "true_net_bps": 12.869520946432335,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.63236735000004,
+          "stamp_duty": 16.473823650000003,
+          "sebi": 1.6489559172,
+          "nse": 30.175893284760004,
+          "brokerage": 40.0,
+          "gst": 12.928472856352801
+        }
+      },
+      {
+        "gross_mid_bps": 25.723050914151518,
+        "spread_crossing_bps": 1.4209617360514226,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2414338062398595,
+        "true_net_bps": 17.060655371860236,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.690864425,
+          "stamp_duty": 16.469263422000004,
+          "sebi": 1.64884489995,
+          "nse": 30.173861669085003,
+          "brokerage": 40.0,
+          "gst": 12.928087182426301
+        }
+      },
+      {
+        "gross_mid_bps": 15.083148357046952,
+        "spread_crossing_bps": 2.165132273207208,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2353122047994916,
+        "true_net_bps": 5.682703879040252,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.7853597,
+          "stamp_duty": 16.491764547000006,
+          "sebi": 1.6501589467500002,
+          "nse": 30.197908725525004,
+          "brokerage": 40.0,
+          "gst": 12.932652181009502
+        }
+      },
+      {
+        "gross_mid_bps": -7.67861886756695,
+        "spread_crossing_bps": 4.87646885428509,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.226608835185719,
+        "true_net_bps": -19.78169655703776,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.03689712500005,
+          "stamp_duty": 16.503825150000004,
+          "sebi": 1.64926505175,
+          "nse": 30.181550447025003,
+          "brokerage": 40.0,
+          "gst": 12.9295467897795
+        }
+      },
+      {
+        "gross_mid_bps": -9.186545076830443,
+        "spread_crossing_bps": 1.9464560855853266,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.227833633952579,
+        "true_net_bps": -18.360834796368348,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.2453867,
+          "stamp_duty": 16.509825450000005,
+          "sebi": 1.6499820458999999,
+          "nse": 30.19467143997,
+          "brokerage": 40.0,
+          "gst": 12.9320376274566
+        }
+      },
+      {
+        "gross_mid_bps": -17.398869073509957,
+        "spread_crossing_bps": 2.9119446148134265,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.227340039010155,
+        "true_net_bps": -27.538153727333537,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.9694005,
+          "stamp_duty": 16.513905654000002,
+          "sebi": 1.6496340836999999,
+          "nse": 30.18830373171,
+          "brokerage": 40.0,
+          "gst": 12.9308288067738
+        }
+      },
+      {
+        "gross_mid_bps": -17.635015241822003,
+        "spread_crossing_bps": 2.2021020064604477,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.227984498982658,
+        "true_net_bps": -27.065101747265107,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.02939749999996,
+          "stamp_duty": 16.515525735000004,
+          "sebi": 1.64983508175,
+          "nse": 30.191981996025,
+          "brokerage": 40.0,
+          "gst": 12.9315270739995
+        }
+      },
+      {
+        "gross_mid_bps": -0.5994855324163464,
+        "spread_crossing_bps": 3.324419770668742,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.226565920457824,
+        "true_net_bps": -11.150471223542912,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.798859025,
+          "stamp_duty": 16.520085963000003,
+          "sebi": 1.6516020162,
+          "nse": 30.224316896460003,
+          "brokerage": 40.0,
+          "gst": 12.937665404278802
+        }
+      },
+      {
+        "gross_mid_bps": 6.359889810366258,
+        "spread_crossing_bps": 1.417346872025009,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.230162997742061,
+        "true_net_bps": -2.2876200594008127,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.96685062499995,
+          "stamp_duty": 16.512165567000004,
+          "sebi": 1.6515419796000002,
+          "nse": 30.223218226680004,
+          "brokerage": 40.0,
+          "gst": 12.9374568371304
+        }
+      },
+      {
+        "gross_mid_bps": 6.323409698802715,
+        "spread_crossing_bps": 1.5990231422263692,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.230036477181298,
+        "true_net_bps": -2.5056499206049523,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.96685062499995,
+          "stamp_duty": 16.512525585000002,
+          "sebi": 1.6515599805,
+          "nse": 30.223547643150003,
+          "brokerage": 40.0,
+          "gst": 12.937519372256999
+        }
+      },
+      {
+        "gross_mid_bps": 4.86999122311204,
+        "spread_crossing_bps": 3.670665026375562,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2289925757622076,
+        "true_net_bps": -6.02966637902573,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.8573561,
+          "stamp_duty": 16.513965657000004,
+          "sebi": 1.65141299505,
+          "nse": 30.220857809415,
+          "brokerage": 40.0,
+          "gst": 12.9370087448037
+        }
+      },
+      {
+        "gross_mid_bps": 8.810988847286488,
+        "spread_crossing_bps": 1.0355182768970586,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.231380373318928,
+        "true_net_bps": 0.544090197070501,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.16784057500007,
+          "stamp_duty": 16.515525735000004,
+          "sebi": 1.6521119679,
+          "nse": 30.233649012570005,
+          "brokerage": 40.0,
+          "gst": 12.939436976484599
+        }
+      },
+      {
+        "gross_mid_bps": 10.066376304405898,
+        "spread_crossing_bps": 3.416026615936888,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2314120345146335,
+        "true_net_bps": -0.5810623460456235,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.08234485,
+          "stamp_duty": 16.513965657000004,
+          "sebi": 1.65186297255,
+          "nse": 30.229092397665006,
+          "brokerage": 40.0,
+          "gst": 12.938571966638701
+        }
+      },
+      {
+        "gross_mid_bps": 6.120084409948381,
+        "spread_crossing_bps": 3.1054434246332163,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2296421209205635,
+        "true_net_bps": -4.215001135605398,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.188839525,
+          "stamp_duty": 16.524226170000002,
+          "sebi": 1.65258898755,
+          "nse": 30.242378472165,
+          "brokerage": 40.0,
+          "gst": 12.9410941427487
+        }
+      },
+      {
+        "gross_mid_bps": 3.4506242905788875,
+        "spread_crossing_bps": 2.070374574347597,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2282036286787825,
+        "true_net_bps": -5.847953912447492,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.06134590000005,
+          "stamp_duty": 16.521826050000005,
+          "sebi": 1.6522139943,
+          "nse": 30.235516095690002,
+          "brokerage": 40.0,
+          "gst": 12.939791416198199
+        }
+      },
+      {
+        "gross_mid_bps": 5.248371461208625,
+        "spread_crossing_bps": 1.761564123658962,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2288506171110765,
+        "true_net_bps": -3.742043279561414,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.1333423,
+          "stamp_duty": 16.521226020000004,
+          "sebi": 1.6523279856,
+          "nse": 30.23760213648,
+          "brokerage": 40.0,
+          "gst": 12.9401874219744
+        }
+      },
+      {
+        "gross_mid_bps": 2.9969267878043744,
+        "spread_crossing_bps": 2.161419925749133,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2282185169441995,
+        "true_net_bps": -6.3927116548889575,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.01034845000004,
+          "stamp_duty": 16.520685993000004,
+          "sebi": 1.65205499655,
+          "nse": 30.232606436865005,
+          "brokerage": 40.0,
+          "gst": 12.939239058014701
+        }
+      },
+      {
+        "gross_mid_bps": -0.5983192667874625,
+        "spread_crossing_bps": 0.9246752304886354,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.225403329888177,
+        "true_net_bps": -8.748397827164275,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6073186,
+          "stamp_duty": 16.548467382000005,
+          "sebi": 1.6546380063000001,
+          "nse": 30.279875515290005,
+          "brokerage": 40.0,
+          "gst": 12.9482124338862
+        }
+      },
+      {
+        "gross_mid_bps": -1.2327952544626526,
+        "spread_crossing_bps": 0.9789844667800576,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.22463577839396,
+        "true_net_bps": -9.43641549963667,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.587819575,
+          "stamp_duty": 16.548827400000004,
+          "sebi": 1.65461700915,
+          "nse": 30.279491267445003,
+          "brokerage": 40.0,
+          "gst": 12.9481394897871
+        }
+      },
+      {
+        "gross_mid_bps": -4.838911371803661,
+        "spread_crossing_bps": 0.851793387546847,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2227386234333535,
+        "true_net_bps": -12.91344338278386,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.590819425,
+          "stamp_duty": 16.554707694,
+          "sebi": 1.65491702355,
+          "nse": 30.284981530965002,
+          "brokerage": 40.0,
+          "gst": 12.9491817398127
+        }
+      },
+      {
+        "gross_mid_bps": 0.34444563288285684,
+        "spread_crossing_bps": 0.7432774183253316,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.22559459731075,
+        "true_net_bps": -7.624426382753225,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.67931500000003,
+          "stamp_duty": 16.549487433,
+          "sebi": 1.65483300165,
+          "nse": 30.283443930195002,
+          "brokerage": 40.0,
+          "gst": 12.948889847732099
+        }
+      },
+      {
+        "gross_mid_bps": 3.482190951019786,
+        "spread_crossing_bps": 0.9068205601611965,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.227535089620555,
+        "true_net_bps": -4.652164698761966,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6373171,
+          "stamp_duty": 16.542887103,
+          "sebi": 1.6544189893499999,
+          "nse": 30.275867505105005,
+          "brokerage": 40.0,
+          "gst": 12.9474515690019
+        }
+      },
+      {
+        "gross_mid_bps": 4.823261903121076,
+        "spread_crossing_bps": 0.8340979230959077,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.227958186238702,
+        "true_net_bps": -3.2387942062135333,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.7693105,
+          "stamp_duty": 16.545827250000002,
+          "sebi": 1.6548299835,
+          "nse": 30.283388698050004,
+          "brokerage": 40.0,
+          "gst": 12.948879362679001
+        }
+      },
+      {
+        "gross_mid_bps": 5.658539770284521,
+        "spread_crossing_bps": 2.1400887592750015,
+        "slippage_bps": 1.0,
+        "statutory_exchange_broker_bps": 6.2285798650974895,
+        "true_net_bps": -3.71012885408797,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.71831304999995,
+          "stamp_duty": 16.544567187000006,
+          "sebi": 1.65466498545,
+          "nse": 30.280369233735,
+          "brokerage": 40.0,
+          "gst": 12.948306159453299
+        }
+      }
+    ]
+  },
+  "slip_1.0bps": {
+    "n_events": 52,
+    "mean_gross_mid_bps": 8.420972076581096,
+    "mean_spread_bps": 2.454867162518008,
+    "mean_slippage_bps": 2.0,
+    "mean_statutory_exchange_broker_bps": 6.231943643703474,
+    "mean_true_net_bps": -2.265838729640387,
+    "quoted_spread_coverage_pct": 100.0,
+    "per_trade_logs": [
+      {
+        "gross_mid_bps": 51.39750233625064,
+        "spread_crossing_bps": 3.9337650009424245,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.233397766318635,
+        "true_net_bps": 39.23033956898958,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 406.0078951500001,
+          "stamp_duty": 16.166456484,
+          "sebi": 1.6203386145,
+          "nse": 29.652196645350003,
+          "brokerage": 40.0,
+          "gst": 12.829056346773
+        }
+      },
+      {
+        "gross_mid_bps": 47.505455459246846,
+        "spread_crossing_bps": 3.307458781488108,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.233644044026636,
+        "true_net_bps": 35.964352633732105,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.79641630000003,
+          "stamp_duty": 16.163336172,
+          "sebi": 1.6197596412,
+          "nse": 29.641601433960002,
+          "brokerage": 40.0,
+          "gst": 12.827044993528801
+        }
+      },
+      {
+        "gross_mid_bps": 48.20795385044525,
+        "spread_crossing_bps": 2.1618745114976274,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.233903646904657,
+        "true_net_bps": 37.81217569204296,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.8174142000001,
+          "stamp_duty": 16.161175956,
+          "sebi": 1.6196936262000001,
+          "nse": 29.640393359460003,
+          "brokerage": 40.0,
+          "gst": 12.826815657418798
+        }
+      },
+      {
+        "gross_mid_bps": -2.8941949128955944,
+        "spread_crossing_bps": 2.4489341570651915,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.237944765599114,
+        "true_net_bps": -13.581073835559899,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.1405819,
+          "stamp_duty": 16.177497588,
+          "sebi": 1.6171560431999998,
+          "nse": 29.59395559056,
+          "brokerage": 40.0,
+          "gst": 12.8180000940768
+        }
+      },
+      {
+        "gross_mid_bps": -1.0018980401763813,
+        "spread_crossing_bps": 1.0761127098179764,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.238879485279251,
+        "true_net_bps": -10.316890235273608,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.19007695000005,
+          "stamp_duty": 16.174197258,
+          "sebi": 1.6170900167999998,
+          "nse": 29.59274730744,
+          "brokerage": 40.0,
+          "gst": 12.8177707183632
+        }
+      },
+      {
+        "gross_mid_bps": 2.6720404368788815,
+        "spread_crossing_bps": 2.4493704004715204,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.238565992483734,
+        "true_net_bps": -8.015895956076372,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.1225837,
+          "stamp_duty": 16.167776616,
+          "sebi": 1.6166339982,
+          "nse": 29.584402167060002,
+          "brokerage": 40.0,
+          "gst": 12.816186509746801
+        }
+      },
+      {
+        "gross_mid_bps": 3.1534857147110618,
+        "spread_crossing_bps": 2.151790252391236,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.238325492401714,
+        "true_net_bps": -7.236630030081888,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.25007095,
+          "stamp_duty": 16.171617,
+          "sebi": 1.6170809919,
+          "nse": 29.592582151770003,
+          "brokerage": 40.0,
+          "gst": 12.8177393658606
+        }
+      },
+      {
+        "gross_mid_bps": -1.1504020840827194,
+        "spread_crossing_bps": 1.6699385091531187,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.238476978317361,
+        "true_net_bps": -11.058817571553199,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.13008295000003,
+          "stamp_duty": 16.172997138000003,
+          "sebi": 1.6169100228,
+          "nse": 29.58945341724,
+          "brokerage": 40.0,
+          "gst": 12.8171454192072
+        }
+      },
+      {
+        "gross_mid_bps": -0.5197109664587657,
+        "spread_crossing_bps": 3.118265798749893,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.237857736715111,
+        "true_net_bps": -11.87583450192377,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 403.9336026,
+          "stamp_duty": 16.166456484,
+          "sebi": 1.6161900293999998,
+          "nse": 29.57627753802,
+          "brokerage": 40.0,
+          "gst": 12.814644162135602
+        }
+      },
+      {
+        "gross_mid_bps": 11.864598748182981,
+        "spread_crossing_bps": 2.0238517426480254,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.245187135351949,
+        "true_net_bps": 1.5955598701830072,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.34606134999996,
+          "stamp_duty": 16.161175956,
+          "sebi": 1.6167509205,
+          "nse": 29.586541845150002,
+          "brokerage": 40.0,
+          "gst": 12.816592697816997
+        }
+      },
+      {
+        "gross_mid_bps": 7.982875803160847,
+        "spread_crossing_bps": 2.561946187991696,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.243025220497535,
+        "true_net_bps": -2.822095605328384,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.24107185,
+          "stamp_duty": 16.164116250000003,
+          "sebi": 1.6166879561999998,
+          "nse": 29.58538959846,
+          "brokerage": 40.0,
+          "gst": 12.816373959838801
+        }
+      },
+      {
+        "gross_mid_bps": 5.902727505596996,
+        "spread_crossing_bps": 2.7100572824433855,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.241887941042406,
+        "true_net_bps": -5.049217717888796,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2200739500001,
+          "stamp_duty": 16.166876526,
+          "sebi": 1.6167839742,
+          "nse": 29.587146727860002,
+          "brokerage": 40.0,
+          "gst": 12.8167075263708
+        }
+      },
+      {
+        "gross_mid_bps": -35.95264322277811,
+        "spread_crossing_bps": 4.70235395395793,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.237644319942183,
+        "true_net_bps": -48.89264149667822,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.95800015,
+          "stamp_duty": 16.267446582,
+          "sebi": 1.6232883293999998,
+          "nse": 29.70617642802,
+          "brokerage": 40.0,
+          "gst": 12.839303656335598
+        }
+      },
+      {
+        "gross_mid_bps": -34.03312952957307,
+        "spread_crossing_bps": 3.481081801718254,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2383324962074544,
+        "true_net_bps": -45.752543827498776,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.94000195,
+          "stamp_duty": 16.261626,
+          "sebi": 1.6229613039,
+          "nse": 29.70019186137,
+          "brokerage": 40.0,
+          "gst": 12.838167569748599
+        }
+      },
+      {
+        "gross_mid_bps": 8.861939440963187,
+        "spread_crossing_bps": 1.98566277930331,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2322984890746085,
+        "true_net_bps": -1.3560218274147307,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.8152144,
+          "stamp_duty": 16.304650302,
+          "sebi": 1.6308629439,
+          "nse": 29.84479187337,
+          "brokerage": 40.0,
+          "gst": 12.865617867108599
+        }
+      },
+      {
+        "gross_mid_bps": 16.192293130129897,
+        "spread_crossing_bps": 3.4737155523210403,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.232130676009048,
+        "true_net_bps": 4.486446901799809,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.97569835,
+          "stamp_duty": 16.30152999,
+          "sebi": 1.6310278962,
+          "nse": 29.84781050046,
+          "brokerage": 40.0,
+          "gst": 12.866190911398798
+        }
+      },
+      {
+        "gross_mid_bps": 17.97956065895561,
+        "spread_crossing_bps": 3.0517454697203505,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.231586957380681,
+        "true_net_bps": 6.696228231854579,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.83171275,
+          "stamp_duty": 16.292169054000006,
+          "sebi": 1.6302718782,
+          "nse": 29.833975371060006,
+          "brokerage": 40.0,
+          "gst": 12.863564504866801
+        }
+      },
+      {
+        "gross_mid_bps": 15.347825847209176,
+        "spread_crossing_bps": 3.731267840699293,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.231955125445039,
+        "true_net_bps": 3.3846028810648443,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.93070285,
+          "stamp_duty": 16.30152999,
+          "sebi": 1.6309379051999997,
+          "nse": 29.84616366516,
+          "brokerage": 40.0,
+          "gst": 12.8658782826648
+        }
+      },
+      {
+        "gross_mid_bps": 17.021714634446464,
+        "spread_crossing_bps": 2.095545862124379,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.232271805265295,
+        "true_net_bps": 6.693896967056791,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.93070285,
+          "stamp_duty": 16.296129450000002,
+          "sebi": 1.6306678782000001,
+          "nse": 29.841222171060004,
+          "brokerage": 40.0,
+          "gst": 12.864940208866798
+        }
+      },
+      {
+        "gross_mid_bps": 30.641390891083013,
+        "spread_crossing_bps": 2.611691180391917,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.231595422770437,
+        "true_net_bps": 19.798104287920662,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.67272865000007,
+          "stamp_duty": 16.264446282,
+          "sebi": 1.6285677714,
+          "nse": 29.802790216620004,
+          "brokerage": 40.0,
+          "gst": 12.857644437843602
+        }
+      },
+      {
+        "gross_mid_bps": 33.82180927368523,
+        "spread_crossing_bps": 3.218497347956847,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.231700095140125,
+        "true_net_bps": 22.371611830588257,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7072252,
+          "stamp_duty": 16.261626,
+          "sebi": 1.6284957504,
+          "nse": 29.801472232320002,
+          "brokerage": 40.0,
+          "gst": 12.857394236889599
+        }
+      },
+      {
+        "gross_mid_bps": 39.18849833205057,
+        "spread_crossing_bps": 3.071083632777439,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2311406800860105,
+        "true_net_bps": 27.886274019187123,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7252234,
+          "stamp_duty": 16.253345172000003,
+          "sebi": 1.6281177054,
+          "nse": 29.79455400882,
+          "brokerage": 40.0,
+          "gst": 12.8560809085596
+        }
+      },
+      {
+        "gross_mid_bps": 61.69435191517184,
+        "spread_crossing_bps": 3.1251608538674787,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.230061622195082,
+        "true_net_bps": 50.339129439109286,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.87370855,
+          "stamp_duty": 16.222622100000002,
+          "sebi": 1.6268785220999997,
+          "nse": 29.77187695443,
+          "brokerage": 40.0,
+          "gst": 12.851775985775399
+        }
+      },
+      {
+        "gross_mid_bps": -9.252408989195981,
+        "spread_crossing_bps": 3.0720179158646514,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.221585112869281,
+        "true_net_bps": -20.546012017929915,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.12128375000003,
+          "stamp_duty": 16.508490684000005,
+          "sebi": 1.6496671017,
+          "nse": 30.188907961110004,
+          "brokerage": 40.0,
+          "gst": 12.9309435113058
+        }
+      },
+      {
+        "gross_mid_bps": -2.5992911024271397,
+        "spread_crossing_bps": 2.5265836590010324,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.224758650202553,
+        "true_net_bps": -13.350633411630724,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.39425645,
+          "stamp_duty": 16.507530588,
+          "sebi": 1.6501650422999998,
+          "nse": 30.19802027409,
+          "brokerage": 40.0,
+          "gst": 12.9326733569502
+        }
+      },
+      {
+        "gross_mid_bps": 0.49088231550953393,
+        "spread_crossing_bps": 2.563496536552287,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2262122318835385,
+        "true_net_bps": -10.298826452926292,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.4107548,
+          "stamp_duty": 16.503150150000003,
+          "sebi": 1.6499790171000002,
+          "nse": 30.194616012930005,
+          "brokerage": 40.0,
+          "gst": 12.932027105405401
+        }
+      },
+      {
+        "gross_mid_bps": 17.644191241203863,
+        "spread_crossing_bps": 2.4010651998335786,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.236453980860698,
+        "true_net_bps": 7.006672060509588,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.98519734999996,
+          "stamp_duty": 16.497569592,
+          "sebi": 1.6508488742999998,
+          "nse": 30.21053439969,
+          "brokerage": 40.0,
+          "gst": 12.935048989318199
+        }
+      },
+      {
+        "gross_mid_bps": 13.723163389365489,
+        "spread_crossing_bps": 2.7664732562112944,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.233559307065277,
+        "true_net_bps": 2.7231308260889167,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.49624624999996,
+          "stamp_duty": 16.485088344,
+          "sebi": 1.6492469097,
+          "nse": 30.181218447510002,
+          "brokerage": 40.0,
+          "gst": 12.9294837642978
+        }
+      },
+      {
+        "gross_mid_bps": 23.80722522873645,
+        "spread_crossing_bps": 3.6976792053806937,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.239784504509475,
+        "true_net_bps": 11.869761518846278,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.61173470000006,
+          "stamp_duty": 16.4746473,
+          "sebi": 1.6489558344,
+          "nse": 30.175891769520003,
+          "brokerage": 40.0,
+          "gst": 12.928472568705601
+        }
+      },
+      {
+        "gross_mid_bps": 25.723050914151518,
+        "spread_crossing_bps": 1.4209617360514226,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2411931605215845,
+        "true_net_bps": 16.060896017578514,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.67022884999994,
+          "stamp_duty": 16.470086844,
+          "sebi": 1.6488447998999998,
+          "nse": 30.17385983817,
+          "brokerage": 40.0,
+          "gst": 12.928086834852602
+        }
+      },
+      {
+        "gross_mid_bps": 15.083148357046952,
+        "spread_crossing_bps": 2.165132273207208,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2350718330794495,
+        "true_net_bps": 4.682944250760294,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.76471940000005,
+          "stamp_duty": 16.492589094000003,
+          "sebi": 1.6501588935,
+          "nse": 30.197907751050003,
+          "brokerage": 40.0,
+          "gst": 12.932651996019
+        }
+      },
+      {
+        "gross_mid_bps": -7.67861886756695,
+        "spread_crossing_bps": 4.87646885428509,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.226368935402667,
+        "true_net_bps": -20.781456657254708,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.01629425000004,
+          "stamp_duty": 16.504650299999998,
+          "sebi": 1.6492651034999999,
+          "nse": 30.18155139405,
+          "brokerage": 40.0,
+          "gst": 12.929546969559
+        }
+      },
+      {
+        "gross_mid_bps": -9.186545076830443,
+        "spread_crossing_bps": 1.9464560855853266,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.22759367042379,
+        "true_net_bps": -19.36059483283956,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.2247734,
+          "stamp_duty": 16.510650899999998,
+          "sebi": 1.6499820917999997,
+          "nse": 30.19467227994,
+          "brokerage": 40.0,
+          "gst": 12.9320377869132
+        }
+      },
+      {
+        "gross_mid_bps": -17.398869073509957,
+        "spread_crossing_bps": 2.9119446148134265,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2271001440365215,
+        "true_net_bps": -28.537913832359905,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.94880100000006,
+          "stamp_duty": 16.514731308,
+          "sebi": 1.6496341674,
+          "nse": 30.188305263420002,
+          "brokerage": 40.0,
+          "gst": 12.9308290975476
+        }
+      },
+      {
+        "gross_mid_bps": -17.635015241822003,
+        "spread_crossing_bps": 2.2021020064604477,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.227744574166843,
+        "true_net_bps": -28.064861822449295,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.008795,
+          "stamp_duty": 16.51635147,
+          "sebi": 1.6498351635,
+          "nse": 30.19198349205,
+          "brokerage": 40.0,
+          "gst": 12.931527357999
+        }
+      },
+      {
+        "gross_mid_bps": -0.5994855324163464,
+        "spread_crossing_bps": 3.324419770668742,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.226325948905395,
+        "true_net_bps": -12.150231251990483,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.77821804999996,
+          "stamp_duty": 16.520911926,
+          "sebi": 1.6516020323999998,
+          "nse": 30.22431719292,
+          "brokerage": 40.0,
+          "gst": 12.9376654605576
+        }
+      },
+      {
+        "gross_mid_bps": 6.359889810366258,
+        "spread_crossing_bps": 1.417346872025009,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.229922845000654,
+        "true_net_bps": -3.287379906659405,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.94620125000006,
+          "stamp_duty": 16.512991134000004,
+          "sebi": 1.6515419592000002,
+          "nse": 30.223217853360005,
+          "brokerage": 40.0,
+          "gst": 12.9374567662608
+        }
+      },
+      {
+        "gross_mid_bps": 6.323409698802715,
+        "spread_crossing_bps": 1.5990231422263692,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.229796330142727,
+        "true_net_bps": -3.505409773566381,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.94620125000006,
+          "stamp_duty": 16.51335117,
+          "sebi": 1.6515599609999998,
+          "nse": 30.223547286300004,
+          "brokerage": 40.0,
+          "gst": 12.937519304514002
+        }
+      },
+      {
+        "gross_mid_bps": 4.86999122311204,
+        "spread_crossing_bps": 3.670665026375562,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.22875248815408,
+        "true_net_bps": -7.029426291417602,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.8367122000001,
+          "stamp_duty": 16.514791314000004,
+          "sebi": 1.6514129901,
+          "nse": 30.220857718830004,
+          "brokerage": 40.0,
+          "gst": 12.9370087276074
+        }
+      },
+      {
+        "gross_mid_bps": 8.810988847286488,
+        "spread_crossing_bps": 1.0355182768970586,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.23114015220192,
+        "true_net_bps": -0.45566958181249095,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.14718115000005,
+          "stamp_duty": 16.51635147,
+          "sebi": 1.6521119357999998,
+          "nse": 30.233648425140004,
+          "brokerage": 40.0,
+          "gst": 12.939436864969199
+        }
+      },
+      {
+        "gross_mid_bps": 10.066376304405898,
+        "spread_crossing_bps": 3.416026615936888,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.231171820999084,
+        "true_net_bps": -1.5808221325300735,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.0616897,
+          "stamp_duty": 16.514791314000004,
+          "sebi": 1.6518629451,
+          "nse": 30.22909189533,
+          "brokerage": 40.0,
+          "gst": 12.9385718712774
+        }
+      },
+      {
+        "gross_mid_bps": 6.120084409948381,
+        "spread_crossing_bps": 3.1054434246332163,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.229401983717639,
+        "true_net_bps": -5.214760998402474,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.16817905,
+          "stamp_duty": 16.525052340000002,
+          "sebi": 1.6525889751,
+          "nse": 30.24237824433,
+          "brokerage": 40.0,
+          "gst": 12.9410940994974
+        }
+      },
+      {
+        "gross_mid_bps": 3.4506242905788875,
+        "spread_crossing_bps": 2.070374574347597,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.227963559910725,
+        "true_net_bps": -6.8477138436794345,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.0406918,
+          "stamp_duty": 16.522652100000002,
+          "sebi": 1.6522139885999998,
+          "nse": 30.235515991379998,
+          "brokerage": 40.0,
+          "gst": 12.939791396396402
+        }
+      },
+      {
+        "gross_mid_bps": 5.248371461208625,
+        "spread_crossing_bps": 1.761564123658962,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.228610511587385,
+        "true_net_bps": -4.741803174037722,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.11268459999997,
+          "stamp_duty": 16.522052040000002,
+          "sebi": 1.6523279712,
+          "nse": 30.23760187296,
+          "brokerage": 40.0,
+          "gst": 12.9401873719488
+        }
+      },
+      {
+        "gross_mid_bps": 2.9969267878043744,
+        "spread_crossing_bps": 2.161419925749133,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.227978452385306,
+        "true_net_bps": -7.392471590330064,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.98969690000007,
+          "stamp_duty": 16.521511986,
+          "sebi": 1.6520549931000001,
+          "nse": 30.232606373730004,
+          "brokerage": 40.0,
+          "gst": 12.9392390460294
+        }
+      },
+      {
+        "gross_mid_bps": -0.5983192667874625,
+        "spread_crossing_bps": 0.9246752304886354,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.225163350986198,
+        "true_net_bps": -9.748157848262295,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.5866372,
+          "stamp_duty": 16.549294764000003,
+          "sebi": 1.6546380126,
+          "nse": 30.27987563058,
+          "brokerage": 40.0,
+          "gst": 12.9482124557724
+        }
+      },
+      {
+        "gross_mid_bps": -1.2327952544626526,
+        "spread_crossing_bps": 0.9789844667800576,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.224395832726173,
+        "true_net_bps": -10.436175553968884,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.56713915000006,
+          "stamp_duty": 16.549654800000003,
+          "sebi": 1.6546170183000002,
+          "nse": 30.279491434890005,
+          "brokerage": 40.0,
+          "gst": 12.9481395215742
+        }
+      },
+      {
+        "gross_mid_bps": -4.838911371803661,
+        "spread_crossing_bps": 0.851793387546847,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.222498763916767,
+        "true_net_bps": -13.913203523267274,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.57013885,
+          "stamp_duty": 16.555535388000003,
+          "sebi": 1.6549170471,
+          "nse": 30.28498196193,
+          "brokerage": 40.0,
+          "gst": 12.9491818216254
+        }
+      },
+      {
+        "gross_mid_bps": 0.34444563288285684,
+        "spread_crossing_bps": 0.7432774183253316,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2253546029497135,
+        "true_net_bps": -8.624186388392188,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.65863,
+          "stamp_duty": 16.550314866,
+          "sebi": 1.6548330032999998,
+          "nse": 30.283443960390002,
+          "brokerage": 40.0,
+          "gst": 12.9488898534642
+        }
+      },
+      {
+        "gross_mid_bps": 3.482190951019786,
+        "spread_crossing_bps": 0.9068205601611965,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.227295011421874,
+        "true_net_bps": -5.6519246205632845,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.61663419999996,
+          "stamp_duty": 16.543714206,
+          "sebi": 1.6544189786999999,
+          "nse": 30.275867310210003,
+          "brokerage": 40.0,
+          "gst": 12.947451532003798
+        }
+      },
+      {
+        "gross_mid_bps": 4.823261903121076,
+        "spread_crossing_bps": 0.8340979230959077,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.227718079356053,
+        "true_net_bps": -4.238554099330884,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.748621,
+          "stamp_duty": 16.546654500000002,
+          "sebi": 1.654829967,
+          "nse": 30.2833883961,
+          "brokerage": 40.0,
+          "gst": 12.948879305358
+        }
+      },
+      {
+        "gross_mid_bps": 5.658539770284521,
+        "spread_crossing_bps": 2.1400887592750015,
+        "slippage_bps": 2.0,
+        "statutory_exchange_broker_bps": 6.2283397387432435,
+        "true_net_bps": -4.709888727733724,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6976261,
+          "stamp_duty": 16.545394374000004,
+          "sebi": 1.6546649709,
+          "nse": 30.280368967470004,
+          "brokerage": 40.0,
+          "gst": 12.9483061089066
+        }
+      }
+    ]
+  },
+  "slip_2.0bps": {
+    "n_events": 52,
+    "mean_gross_mid_bps": 8.420972076581096,
+    "mean_spread_bps": 2.454867162518008,
+    "mean_slippage_bps": 4.0,
+    "mean_statutory_exchange_broker_bps": 6.231463516300782,
+    "mean_true_net_bps": -4.265358602237695,
+    "quoted_spread_coverage_pct": 100.0,
+    "per_trade_logs": [
+      {
+        "gross_mid_bps": 51.39750233625064,
+        "spread_crossing_bps": 3.9337650009424245,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.232917623578039,
+        "true_net_bps": 37.23081971173018,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.9672903,
+          "stamp_duty": 16.168072968000004,
+          "sebi": 1.620338229,
+          "nse": 29.652189590700004,
+          "brokerage": 40.0,
+          "gst": 12.829055007546
+        }
+      },
+      {
+        "gross_mid_bps": 47.505455459246846,
+        "spread_crossing_bps": 3.307458781488108,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.23316393036201,
+        "true_net_bps": 33.96483274739673,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.75583259999996,
+          "stamp_duty": 16.164952344,
+          "sebi": 1.6197592823999998,
+          "nse": 29.64159486792,
+          "brokerage": 40.0,
+          "gst": 12.8270437470576
+        }
+      },
+      {
+        "gross_mid_bps": 48.20795385044525,
+        "spread_crossing_bps": 2.1618745114976274,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.233423496954067,
+        "true_net_bps": 35.81265584199355,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 405.7768284,
+          "stamp_duty": 16.162791912000003,
+          "sebi": 1.6196932523999998,
+          "nse": 29.640386518920003,
+          "brokerage": 40.0,
+          "gst": 12.826814358837598
+        }
+      },
+      {
+        "gross_mid_bps": -2.8941949128955944,
+        "spread_crossing_bps": 2.4489341570651915,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.237464879287008,
+        "true_net_bps": -15.580593949247792,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.10016379999996,
+          "stamp_duty": 16.179115176,
+          "sebi": 1.6171560863999999,
+          "nse": 29.59395638112,
+          "brokerage": 40.0,
+          "gst": 12.818000244153598
+        }
+      },
+      {
+        "gross_mid_bps": -1.0018980401763813,
+        "spread_crossing_bps": 1.0761127098179764,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.238399496839462,
+        "true_net_bps": -12.316410246833819,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.14965390000003,
+          "stamp_duty": 16.175814516000003,
+          "sebi": 1.6170900336,
+          "nse": 29.592747614880004,
+          "brokerage": 40.0,
+          "gst": 12.8177707767264
+        }
+      },
+      {
+        "gross_mid_bps": 2.6720404368788815,
+        "spread_crossing_bps": 2.4493704004715204,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.238086018251689,
+        "true_net_bps": -10.015415981844328,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.08216740000006,
+          "stamp_duty": 16.169393231999997,
+          "sebi": 1.6166339964,
+          "nse": 29.58440213412,
+          "brokerage": 40.0,
+          "gst": 12.8161865034936
+        }
+      },
+      {
+        "gross_mid_bps": 3.1534857147110618,
+        "spread_crossing_bps": 2.151790252391236,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.237845516609733,
+        "true_net_bps": -9.236150054289908,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.2096419,
+          "stamp_duty": 16.173234,
+          "sebi": 1.6170809837999998,
+          "nse": 29.592582003540002,
+          "brokerage": 40.0,
+          "gst": 12.817739337721202
+        }
+      },
+      {
+        "gross_mid_bps": -1.1504020840827194,
+        "spread_crossing_bps": 1.6699385091531187,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.237997033131512,
+        "true_net_bps": -13.05833762636735,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.08966590000006,
+          "stamp_duty": 16.174614276,
+          "sebi": 1.6169100455999998,
+          "nse": 29.58945383448,
+          "brokerage": 40.0,
+          "gst": 12.8171454984144
+        }
+      },
+      {
+        "gross_mid_bps": -0.5197109664587657,
+        "spread_crossing_bps": 3.118265798749893,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.237377867206561,
+        "true_net_bps": -13.87535463241522,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 403.8932052,
+          "stamp_duty": 16.168072968000004,
+          "sebi": 1.6161900588,
+          "nse": 29.576278076040005,
+          "brokerage": 40.0,
+          "gst": 12.8146442642712
+        }
+      },
+      {
+        "gross_mid_bps": 11.864598748182981,
+        "spread_crossing_bps": 2.0238517426480254,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.244706554060471,
+        "true_net_bps": -0.4039595485255152,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.30562269999996,
+          "stamp_duty": 16.162791912000003,
+          "sebi": 1.6167508409999998,
+          "nse": 29.5865403903,
+          "brokerage": 40.0,
+          "gst": 12.816592421633999
+        }
+      },
+      {
+        "gross_mid_bps": 7.982875803160847,
+        "spread_crossing_bps": 2.561946187991696,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.242544850667592,
+        "true_net_bps": -4.821615235498441,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.20064369999994,
+          "stamp_duty": 16.1657325,
+          "sebi": 1.6166879123999998,
+          "nse": 29.58538879692,
+          "brokerage": 40.0,
+          "gst": 12.816373807677602
+        }
+      },
+      {
+        "gross_mid_bps": 5.902727505596996,
+        "spread_crossing_bps": 2.7100572824433855,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.241407677912313,
+        "true_net_bps": -7.048737454758703,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.1796479,
+          "stamp_duty": 16.168493052,
+          "sebi": 1.6167839483999997,
+          "nse": 29.58714625572,
+          "brokerage": 40.0,
+          "gst": 12.816707436741599
+        }
+      },
+      {
+        "gross_mid_bps": -35.95264322277811,
+        "spread_crossing_bps": 4.70235395395793,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2371646333553805,
+        "true_net_bps": -50.89216181009142,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.9175003000001,
+          "stamp_duty": 16.269073164,
+          "sebi": 1.6232886588000002,
+          "nse": 29.706182456040004,
+          "brokerage": 40.0,
+          "gst": 12.8393048006712
+        }
+      },
+      {
+        "gross_mid_bps": -34.03312952957307,
+        "spread_crossing_bps": 3.481081801718254,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.237852734883986,
+        "true_net_bps": -47.75206406617531,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 404.8995039,
+          "stamp_duty": 16.263252,
+          "sebi": 1.6229616078,
+          "nse": 29.70019742274,
+          "brokerage": 40.0,
+          "gst": 12.838168625497199
+        }
+      },
+      {
+        "gross_mid_bps": 8.861939440963187,
+        "spread_crossing_bps": 1.98566277930331,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.23181853997105,
+        "true_net_bps": -3.355541878311172,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7744288,
+          "stamp_duty": 16.306280604,
+          "sebi": 1.6308628878,
+          "nse": 29.84479084674,
+          "brokerage": 40.0,
+          "gst": 12.8656176722172
+        }
+      },
+      {
+        "gross_mid_bps": 16.192293130129897,
+        "spread_crossing_bps": 3.4737155523210403,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.231650678068267,
+        "true_net_bps": 2.48692689974059,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.93489669999997,
+          "stamp_duty": 16.303159980000004,
+          "sebi": 1.6310277923999998,
+          "nse": 29.847808600920004,
+          "brokerage": 40.0,
+          "gst": 12.866190550797599
+        }
+      },
+      {
+        "gross_mid_bps": 17.97956065895561,
+        "spread_crossing_bps": 3.0517454697203505,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.231107000302766,
+        "true_net_bps": 4.696708188932493,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.7909255,
+          "stamp_duty": 16.293798108,
+          "sebi": 1.6302717564,
+          "nse": 29.83397314212,
+          "brokerage": 40.0,
+          "gst": 12.863564081733601
+        }
+      },
+      {
+        "gross_mid_bps": 15.347825847209176,
+        "spread_crossing_bps": 3.731267840699293,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.231475154278421,
+        "true_net_bps": 1.3850828522314629,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.88990569999993,
+          "stamp_duty": 16.303159980000004,
+          "sebi": 1.6309378103999999,
+          "nse": 29.84616193032,
+          "brokerage": 40.0,
+          "gst": 12.865877953329601
+        }
+      },
+      {
+        "gross_mid_bps": 17.021714634446464,
+        "spread_crossing_bps": 2.095545862124379,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.23179178465452,
+        "true_net_bps": 4.694376987667566,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.88990569999993,
+          "stamp_duty": 16.2977589,
+          "sebi": 1.6306677563999998,
+          "nse": 29.84121994212,
+          "brokerage": 40.0,
+          "gst": 12.864939785733599
+        }
+      },
+      {
+        "gross_mid_bps": 30.641390891083013,
+        "spread_crossing_bps": 2.611691180391917,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.23111538321329,
+        "true_net_bps": 17.79858432747781,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.6319573,
+          "stamp_duty": 16.266072564,
+          "sebi": 1.6285675428,
+          "nse": 29.802786033240004,
+          "brokerage": 40.0,
+          "gst": 12.8576436436872
+        }
+      },
+      {
+        "gross_mid_bps": 33.82180927368523,
+        "spread_crossing_bps": 3.218497347956847,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.231220024267093,
+        "true_net_bps": 20.372091901461292,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.66645040000003,
+          "stamp_duty": 16.263252,
+          "sebi": 1.6284955008,
+          "nse": 29.80146766464,
+          "brokerage": 40.0,
+          "gst": 12.8573933697792
+        }
+      },
+      {
+        "gross_mid_bps": 39.18849833205057,
+        "spread_crossing_bps": 3.071083632777439,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.230660608571808,
+        "true_net_bps": 25.886754090701324,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.68444680000005,
+          "stamp_duty": 16.254970344,
+          "sebi": 1.6281174107999998,
+          "nse": 29.794548617640004,
+          "brokerage": 40.0,
+          "gst": 12.8560798851192
+        }
+      },
+      {
+        "gross_mid_bps": 61.69435191517184,
+        "spread_crossing_bps": 3.1251608538674787,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.229581447557482,
+        "true_net_bps": 48.33960961374689,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 407.83291710000003,
+          "stamp_duty": 16.2242442,
+          "sebi": 1.6268780442,
+          "nse": 29.77186820886,
+          "brokerage": 40.0,
+          "gst": 12.8517743255508
+        }
+      },
+      {
+        "gross_mid_bps": -9.252408989195981,
+        "spread_crossing_bps": 3.0720179158646514,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.221105669033169,
+        "true_net_bps": -22.5455325740938,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.08006750000004,
+          "stamp_duty": 16.510141368000003,
+          "sebi": 1.6496672034,
+          "nse": 30.188909822220005,
+          "brokerage": 40.0,
+          "gst": 12.9309438646116
+        }
+      },
+      {
+        "gross_mid_bps": -2.5992911024271397,
+        "spread_crossing_bps": 2.5265836590010324,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.224278878035451,
+        "true_net_bps": -15.350153639463624,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.35301290000007,
+          "stamp_duty": 16.509181176,
+          "sebi": 1.6501650845999998,
+          "nse": 30.198021048180003,
+          "brokerage": 40.0,
+          "gst": 12.9326735039004
+        }
+      },
+      {
+        "gross_mid_bps": 0.49088231550953393,
+        "spread_crossing_bps": 2.563496536552287,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.225732322780829,
+        "true_net_bps": -12.298346543823582,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.3695096,
+          "stamp_duty": 16.5048003,
+          "sebi": 1.6499790341999998,
+          "nse": 30.19461632586,
+          "brokerage": 40.0,
+          "gst": 12.9320271648108
+        }
+      },
+      {
+        "gross_mid_bps": 17.644191241203863,
+        "spread_crossing_bps": 2.4010651998335786,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2359730896933225,
+        "true_net_bps": 5.007152951676963,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.94389469999993,
+          "stamp_duty": 16.499219184,
+          "sebi": 1.6508487485999996,
+          "nse": 30.210532099379996,
+          "brokerage": 40.0,
+          "gst": 12.935048552636399
+        }
+      },
+      {
+        "gross_mid_bps": 13.723163389365489,
+        "spread_crossing_bps": 2.7664732562112944,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.233078723794529,
+        "true_net_bps": 0.7236114093596644,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.45499250000006,
+          "stamp_duty": 16.486736688000004,
+          "sebi": 1.6492468194,
+          "nse": 30.181216795020006,
+          "brokerage": 40.0,
+          "gst": 12.929483450595601
+        }
+      },
+      {
+        "gross_mid_bps": 23.80722522873645,
+        "spread_crossing_bps": 3.6976792053806937,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.239303359681589,
+        "true_net_bps": 9.870242663674166,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.57046940000004,
+          "stamp_duty": 16.4762946,
+          "sebi": 1.6489556687999998,
+          "nse": 30.17588873904,
+          "brokerage": 40.0,
+          "gst": 12.9284719934112
+        }
+      },
+      {
+        "gross_mid_bps": 25.723050914151518,
+        "spread_crossing_bps": 1.4209617360514226,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.240711869085038,
+        "true_net_bps": 14.061377309015059,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.62895770000006,
+          "stamp_duty": 16.471733688,
+          "sebi": 1.6488445997999999,
+          "nse": 30.173856176340003,
+          "brokerage": 40.0,
+          "gst": 12.9280861397052
+        }
+      },
+      {
+        "gross_mid_bps": 15.083148357046952,
+        "spread_crossing_bps": 2.165132273207208,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2345910896393635,
+        "true_net_bps": 2.6834249942003803,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.72343880000005,
+          "stamp_duty": 16.494238188,
+          "sebi": 1.650158787,
+          "nse": 30.197905802100003,
+          "brokerage": 40.0,
+          "gst": 12.932651626038
+        }
+      },
+      {
+        "gross_mid_bps": -7.67861886756695,
+        "spread_crossing_bps": 4.87646885428509,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.225889135836563,
+        "true_net_bps": -22.780976857688604,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.9750885,
+          "stamp_duty": 16.506300600000003,
+          "sebi": 1.649265207,
+          "nse": 30.1815532881,
+          "brokerage": 40.0,
+          "gst": 12.929547329118
+        }
+      },
+      {
+        "gross_mid_bps": -9.186545076830443,
+        "spread_crossing_bps": 1.9464560855853266,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2271137433662105,
+        "true_net_bps": -21.36011490578198,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.18354680000004,
+          "stamp_duty": 16.5123018,
+          "sebi": 1.6499821835999997,
+          "nse": 30.19467395988,
+          "brokerage": 40.0,
+          "gst": 12.932038105826399
+        }
+      },
+      {
+        "gross_mid_bps": -17.398869073509957,
+        "spread_crossing_bps": 2.9119446148134265,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2266203540892535,
+        "true_net_bps": -30.537434042412634,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.907602,
+          "stamp_duty": 16.516382616,
+          "sebi": 1.6496343348,
+          "nse": 30.18830832684,
+          "brokerage": 40.0,
+          "gst": 12.930829679095199
+        }
+      },
+      {
+        "gross_mid_bps": -17.635015241822003,
+        "spread_crossing_bps": 2.2021020064604477,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.227264724535215,
+        "true_net_bps": -30.064381972817664,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 411.96759000000003,
+          "stamp_duty": 16.518002940000002,
+          "sebi": 1.649835327,
+          "nse": 30.191986484100003,
+          "brokerage": 40.0,
+          "gst": 12.931527925998001
+        }
+      },
+      {
+        "gross_mid_bps": -0.5994855324163464,
+        "spread_crossing_bps": 3.324419770668742,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.22584600580054,
+        "true_net_bps": -14.149751308885628,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.73693610000004,
+          "stamp_duty": 16.522563852,
+          "sebi": 1.6516020648,
+          "nse": 30.22431778584,
+          "brokerage": 40.0,
+          "gst": 12.9376655731152
+        }
+      },
+      {
+        "gross_mid_bps": 6.359889810366258,
+        "spread_crossing_bps": 1.417346872025009,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.229442539517832,
+        "true_net_bps": -5.286899601176583,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.90490250000005,
+          "stamp_duty": 16.514642268000003,
+          "sebi": 1.6515419184,
+          "nse": 30.223217106720003,
+          "brokerage": 40.0,
+          "gst": 12.9374566245216
+        }
+      },
+      {
+        "gross_mid_bps": 6.323409698802715,
+        "spread_crossing_bps": 1.5990231422263692,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.22931603606558,
+        "true_net_bps": -5.504929479489234,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.90490250000005,
+          "stamp_duty": 16.515002340000002,
+          "sebi": 1.651559922,
+          "nse": 30.2235465726,
+          "brokerage": 40.0,
+          "gst": 12.937519169028
+        }
+      },
+      {
+        "gross_mid_bps": 4.86999122311204,
+        "spread_crossing_bps": 3.670665026375562,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.22827231293782,
+        "true_net_bps": -9.028946116201343,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.7954244,
+          "stamp_duty": 16.516442628,
+          "sebi": 1.6514129802,
+          "nse": 30.220857537660002,
+          "brokerage": 40.0,
+          "gst": 12.9370086932148
+        }
+      },
+      {
+        "gross_mid_bps": 8.810988847286488,
+        "spread_crossing_bps": 1.0355182768970586,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.230659709967906,
+        "true_net_bps": -2.4551891395784766,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.10586230000007,
+          "stamp_duty": 16.518002940000002,
+          "sebi": 1.6521118715999998,
+          "nse": 30.23364725028,
+          "brokerage": 40.0,
+          "gst": 12.9394366419384
+        }
+      },
+      {
+        "gross_mid_bps": 10.066376304405898,
+        "spread_crossing_bps": 3.416026615936888,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2306913939679855,
+        "true_net_bps": -3.5803417054989755,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.02037939999997,
+          "stamp_duty": 16.516442628,
+          "sebi": 1.6518628901999999,
+          "nse": 30.229090890659997,
+          "brokerage": 40.0,
+          "gst": 12.9385716805548
+        }
+      },
+      {
+        "gross_mid_bps": 6.120084409948381,
+        "spread_crossing_bps": 3.1054434246332163,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.228921709311786,
+        "true_net_bps": -7.214280723996621,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.12685809999994,
+          "stamp_duty": 16.52670468,
+          "sebi": 1.6525889501999997,
+          "nse": 30.24237778866,
+          "brokerage": 40.0,
+          "gst": 12.941094012994801
+        }
+      },
+      {
+        "gross_mid_bps": 3.4506242905788875,
+        "spread_crossing_bps": 2.070374574347597,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.227483422374609,
+        "true_net_bps": -8.847233706143319,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9993836,
+          "stamp_duty": 16.5243042,
+          "sebi": 1.6522139772,
+          "nse": 30.23551578276,
+          "brokerage": 40.0,
+          "gst": 12.9397913567928
+        }
+      },
+      {
+        "gross_mid_bps": 5.248371461208625,
+        "spread_crossing_bps": 1.761564123658962,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.228130300540004,
+        "true_net_bps": -6.741322962990341,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.07136920000005,
+          "stamp_duty": 16.52370408,
+          "sebi": 1.6523279424,
+          "nse": 30.237601345920005,
+          "brokerage": 40.0,
+          "gst": 12.940187271897601
+        }
+      },
+      {
+        "gross_mid_bps": 2.9969267878043744,
+        "spread_crossing_bps": 2.161419925749133,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.227498323267522,
+        "true_net_bps": -9.39199146121228,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 412.9483938,
+          "stamp_duty": 16.523163972000003,
+          "sebi": 1.6520549862,
+          "nse": 30.232606247460005,
+          "brokerage": 40.0,
+          "gst": 12.939239022058802
+        }
+      },
+      {
+        "gross_mid_bps": -0.5983192667874625,
+        "spread_crossing_bps": 0.9246752304886354,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.22468339318224,
+        "true_net_bps": -11.747677890458338,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.54527440000004,
+          "stamp_duty": 16.550949528000004,
+          "sebi": 1.6546380252000001,
+          "nse": 30.279875861160004,
+          "brokerage": 40.0,
+          "gst": 12.948212499544802
+        }
+      },
+      {
+        "gross_mid_bps": -1.2327952544626526,
+        "spread_crossing_bps": 0.9789844667800576,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.223915941390599,
+        "true_net_bps": -12.435695662633309,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.52577830000007,
+          "stamp_duty": 16.5513096,
+          "sebi": 1.6546170366,
+          "nse": 30.27949176978,
+          "brokerage": 40.0,
+          "gst": 12.948139585148402
+        }
+      },
+      {
+        "gross_mid_bps": -4.838911371803661,
+        "spread_crossing_bps": 0.851793387546847,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.222019044883601,
+        "true_net_bps": -15.912723804234108,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.5287777,
+          "stamp_duty": 16.557190776000002,
+          "sebi": 1.6549170942,
+          "nse": 30.28498282386,
+          "brokerage": 40.0,
+          "gst": 12.949181985250801
+        }
+      },
+      {
+        "gross_mid_bps": 0.34444563288285684,
+        "spread_crossing_bps": 0.7432774183253316,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.224874614227639,
+        "true_net_bps": -10.623706399670114,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.61726000000004,
+          "stamp_duty": 16.551969732,
+          "sebi": 1.6548330065999999,
+          "nse": 30.283444020780003,
+          "brokerage": 40.0,
+          "gst": 12.948889864928399
+        }
+      },
+      {
+        "gross_mid_bps": 3.482190951019786,
+        "spread_crossing_bps": 0.9068205601611965,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.226814855024512,
+        "true_net_bps": -7.651444464165922,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.5752684,
+          "stamp_duty": 16.545368412000002,
+          "sebi": 1.6544189574,
+          "nse": 30.27586692042,
+          "brokerage": 40.0,
+          "gst": 12.947451458007599
+        }
+      },
+      {
+        "gross_mid_bps": 4.823261903121076,
+        "spread_crossing_bps": 0.8340979230959077,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.227237865590752,
+        "true_net_bps": -6.2380738855655835,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.707242,
+          "stamp_duty": 16.548309,
+          "sebi": 1.654829934,
+          "nse": 30.283387792200003,
+          "brokerage": 40.0,
+          "gst": 12.948879190716001
+        }
+      },
+      {
+        "gross_mid_bps": 5.658539770284521,
+        "spread_crossing_bps": 2.1400887592750015,
+        "slippage_bps": 4.0,
+        "statutory_exchange_broker_bps": 6.2278594860347525,
+        "true_net_bps": -6.709408475025233,
+        "spread_source": "quoted",
+        "cost_inr_breakdown": {
+          "stt": 413.6562522,
+          "stamp_duty": 16.547048748,
+          "sebi": 1.6546649418,
+          "nse": 30.28036843494,
+          "brokerage": 40.0,
+          "gst": 12.948306007813198
+        }
+      }
+    ]
+  }
+}

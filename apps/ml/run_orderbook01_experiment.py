@@ -6,15 +6,25 @@ predicts whether price will be REJECTED (bounce) or SWEPT (breakout) through the
 
 Strict non-leakage: Uses only the depth_frame received BEFORE or AT the contact_time.
 
+AUDIT FIX NOTE (2026-10-10, docs/2026-10-10-orderbook-liquidity-audit-fixes.md): earlier runs of this
+script (and any verdict quoted from them) came from defective code: DI was aligned with OPPOSITE signs
+for up/down levels (contradicting the frozen di_tilde = -DI convention used by run_orderbook01_oos.py
+and the live gate), the nearest-frame lookup accepted frames AFTER the contact (abs() gap), depth came
+from every provider_symbol, missing totals crashed/was zero, raw DI is a per-day constant, labels were
+the look-ahead v1-legacy ones, and the stored is_regression filter silently dropped whole sessions.
+Now: one population (symbol/timeframe/active/labeling_version), front-month futures depth only,
+recomputed sequence flags, causal within-day detrended DI, past-only matching, one event per level-day,
+and aligned_di = -DI_detrended for EVERY level (positive => predicts REJECTION).
+
 Data:
 - liquidity_contact_labels: 32,097 labeled contact events (Aug 21 - Sep 25, 2026)
 - depth_frames: 1,010,875 rows at 500ms resolution (same window)
 
 Method:
-- For each contact event, match closest depth_frame within ±5 seconds (past-only: receive_at <= contact_time + 1s)
-- Compute DI = (total_buy_qty - total_sell_qty) / (total_buy_qty + total_sell_qty)
-- For UP levels (PDH, SWING_HIGH, etc.): DI < 0 (sellers dominate) predicts REJECTION
-- For DOWN levels (PDL, SWING_LOW, etc.): DI > 0 (buyers dominate) predicts REJECTION
+- For each contact event, match the latest depth_frame received_at <= contact_time (at most 5s old; PAST-ONLY)
+- Compute DI = (total_buy_qty - total_sell_qty) / (total_buy_qty + total_sell_qty), then subtract the
+  trailing mean of the previous 30 complete minutes (causal; min 10) -- orderbook_di.causal_detrend_di
+- For ALL levels (up and down alike): di_tilde = -DI_detrended; di_tilde > 0 predicts REJECTION
 - Tests: Binomial test per pool_type, overall classification accuracy, logistic regression
 """
 
@@ -25,7 +35,7 @@ import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
 import zoneinfo
-from bisect import bisect_left
+from bisect import bisect_right
 
 import numpy as np
 from scipy import stats
@@ -36,6 +46,17 @@ if str(script_dir) not in sys.path:
 
 import psycopg
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
+from ai_quant_lab_ml.orderbook_di import (
+    DEFAULT_SYMBOL,
+    DEFAULT_TIMEFRAME,
+    LABELING_VERSION_CAUSAL,
+    TIER1_HORIZON_SECONDS,
+    causal_detrend_di,
+    collapse_to_level_days,
+    fetch_front_month_depth_rows,
+    latest_value_at_or_before,
+    raw_depth_imbalance,
+)
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
@@ -43,8 +64,17 @@ UP_LEVEL_TYPES = {"PDH", "SWING_HIGH", "SESSION_HIGH", "ITH"}
 DOWN_LEVEL_TYPES = {"PDL", "SWING_LOW", "SESSION_LOW", "ITL"}
 
 
-def fetch_contact_events(conn: psycopg.Connection, start: datetime, end: datetime) -> list[dict]:
-    """Fetch all contact events with candidate info in the window."""
+def fetch_contact_events(
+    conn: psycopg.Connection,
+    start: datetime,
+    end: datetime,
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    labeling_version: str = LABELING_VERSION_CAUSAL,
+    horizon_seconds: int = TIER1_HORIZON_SECONDS,
+) -> list[dict]:
+    """Contact events for ONE population (one symbol, one timeframe, one horizon, active candidates,
+    one labeling_version). Pooling horizons/timeframes/legacy labels repeats the same contact."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT
@@ -55,66 +85,70 @@ def fetch_contact_events(conn: psycopg.Connection, start: datetime, end: datetim
                 lpc.pool_type,
                 lpc.side,
                 lpc.price AS level_price,
-                lpc.timeframe
+                lpc.timeframe,
+                lpc.symbol
             FROM liquidity_contact_labels lcl
             JOIN liquidity_pool_candidates lpc ON lpc.id = lcl.candidate_id
             WHERE lcl.contact_time >= %s
               AND lcl.contact_time <= %s
               AND lcl.contacted = TRUE
+              AND lcl.is_active_candidate = TRUE
+              AND lcl.breached IS NOT NULL
+              AND lcl.labeling_version = %s
+              AND lcl.horizon_seconds = %s
+              AND lpc.symbol = %s
+              AND lpc.timeframe = %s
             ORDER BY lcl.contact_time ASC
-        """, (start, end))
+        """, (start, end, labeling_version, horizon_seconds, symbol, timeframe))
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def fetch_depth_frames_for_day(conn: psycopg.Connection, day: date) -> list[tuple[datetime, float, float]]:
-    """Fetch (received_at, total_buy_qty, total_sell_qty) for a single trading day."""
-    day_start = datetime.combine(day, datetime.min.time(), tzinfo=zoneinfo.ZoneInfo("UTC"))
+def fetch_depth_frames_for_day(
+    conn: psycopg.Connection, day: date
+) -> list[tuple[datetime, float | None, float | None]]:
+    """(received_at, total_buy_qty, total_sell_qty) for one IST trading day, FRONT-MONTH future only.
+
+    Missing totals stay None. Duplicates / sequence resets are dropped using flags recomputed from
+    sequence_no -- NOT the stored is_regression, which flags every frame after a reset."""
+    day_start = datetime.combine(day, datetime.min.time(), tzinfo=INDIA_TZ)
     day_end = day_start + timedelta(days=1)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT received_at, total_buy_qty, total_sell_qty
-            FROM depth_frames
-            WHERE received_at >= %s
-              AND received_at < %s
-              AND is_duplicate = FALSE
-              AND is_regression = FALSE
-            ORDER BY received_at ASC
-        """, (day_start, day_end))
-        rows = cur.fetchall()
-        return [(r[0], float(r[1]), float(r[2])) for r in rows]
+    rows = fetch_front_month_depth_rows(conn, day_start, day_end, day.isoformat())
+    return [(r["received_at"], r["total_buy_qty"], r["total_sell_qty"]) for r in rows]
 
 
 def find_nearest_depth_frame(
-    frames: list[tuple[datetime, float, float]],
+    frames: list[tuple[datetime, float | None, float | None]],
     contact_time: datetime,
     max_gap_seconds: float = 5.0,
 ) -> tuple[float, float] | None:
-    """Binary search for the closest depth frame to contact_time (past-only within max_gap_seconds)."""
+    """Latest depth frame with received_at <= contact_time, at most max_gap_seconds old (PAST-ONLY).
+
+    A frame AFTER contact_time is never returned even if it is nearer (the previous implementation
+    used abs(gap) and could read the book up to 5s into the future). Frames with a missing total are
+    skipped, not zero-filled. Returns (total_buy_qty, total_sell_qty) or None."""
     if not frames:
         return None
     times = [f[0] for f in frames]
-    pos = bisect_left(times, contact_time)
-
-    best = None
-    best_gap = float("inf")
-
-    # Check pos-1, pos (the frame at or just before contact_time)
-    for idx in [pos - 1, pos]:
-        if 0 <= idx < len(frames):
-            gap = abs((frames[idx][0] - contact_time).total_seconds())
-            if gap <= max_gap_seconds and gap < best_gap:
-                best_gap = gap
-                best = (frames[idx][1], frames[idx][2])
-    return best
+    idx = bisect_right(times, contact_time) - 1
+    while idx >= 0:
+        if (contact_time - times[idx]).total_seconds() > max_gap_seconds:
+            return None
+        buy, sell = frames[idx][1], frames[idx][2]
+        if buy is not None and sell is not None:
+            return buy, sell
+        idx -= 1
+    return None
 
 
-def compute_di(buy_qty: float, sell_qty: float) -> float | None:
-    """Compute normalized depth imbalance: (buy - sell) / (buy + sell)."""
-    total = buy_qty + sell_qty
-    if total <= 0:
-        return None
-    return (buy_qty - sell_qty) / total
+def compute_di(buy_qty: float | None, sell_qty: float | None) -> float | None:
+    """Normalized depth imbalance (buy - sell) / (buy + sell); None if missing / zero total."""
+    return raw_depth_imbalance(buy_qty, sell_qty)
+
+
+def aligned_di_for(detrended_di: float) -> float:
+    """di_tilde = -DI_detrended for EVERY level (ORDERBOOK-01 convention; positive predicts REJECTION)."""
+    return -detrended_di
 
 
 def main() -> None:
@@ -157,29 +191,28 @@ def main() -> None:
                 continue
 
             matched = 0
+            frame_times = [f[0] for f in frames]
+            frame_raw_dis = [compute_di(f[1], f[2]) for f in frames]
+            frame_detrended = causal_detrend_di(frame_times, frame_raw_dis)
+            matched_day_events = []
             for ev in day_events:
                 ct = ev["contact_time"]
                 if ct.tzinfo is None:
                     ct = ct.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
-                match = find_nearest_depth_frame(frames, ct)
-                if match is None:
-                    continue
-                buy_qty, sell_qty = match
-                di = compute_di(buy_qty, sell_qty)
-                if di is None:
-                    continue
+                hit = latest_value_at_or_before(frame_times, frame_detrended, ct, max_gap_seconds=5.0)
+                if hit is None:
+                    continue  # UNAVAILABLE (no past frame / insufficient history) -- never DI = 0
+                matched_day_events.append({**ev, "contact_time": ct, "level_price": float(ev["level_price"]), "_di": hit[0]})
 
+            # One event per level-day: repeat contacts of a level on one day are not independent.
+            for ev in collapse_to_level_days(matched_day_events):
+                di = ev["_di"]
                 pool_type = ev["pool_type"]
                 is_up_level = pool_type in UP_LEVEL_TYPES
                 is_down_level = pool_type in DOWN_LEVEL_TYPES
 
-                # Align DI sign: positive "aligned_di" means orderbook supports REJECTION
-                if is_up_level:
-                    aligned_di = -di  # negative DI (sellers dominate) -> rejection at resistance
-                elif is_down_level:
-                    aligned_di = di   # positive DI (buyers dominate) -> rejection at support
-                else:
-                    aligned_di = 0.0  # unknown level direction
+                # ORDERBOOK-01 convention, uniform across levels: positive aligned_di predicts REJECTION.
+                aligned_di = aligned_di_for(di)
 
                 results.append({
                     "pool_type": pool_type,
@@ -187,8 +220,7 @@ def main() -> None:
                     "breached": ev["breached"],
                     "di": di,
                     "aligned_di": aligned_di,
-                    "buy_qty": buy_qty,
-                    "sell_qty": sell_qty,
+                    "detrended_di": di,
                     "is_up_level": is_up_level,
                     "is_down_level": is_down_level,
                 })

@@ -5,6 +5,7 @@ import {
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS,
   MAXIMUM_EXECUTABLE_QUOTE_AGE_MS_SCALP_CADENCE,
   MAXIMUM_IDEA_PRICE_DRIFT_FRACTION,
+  resolveOptionEntryDeltaThresholds,
 } from "./prepare-option-entry.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 import type { OptionExpiryCalendar } from "../../market-data/domain/option-expiry-calendar.js";
@@ -361,14 +362,16 @@ describe("PrepareOptionEntry - the pre-trade gate", () => {
     expect(result.reasons?.join(" ")).toContain("Bid-Ask spread");
   });
 
-  it("refuses falling open interest on the intended strike", async () => {
+  it("does not refuse on day-over-day falling open interest (2026-10-10 amendment)", async () => {
+    // `openInterestChange` is the vendor's open_interest minus previous_open_interest -- change
+    // versus the PREVIOUS DAY'S CLOSE, not intraday flow -- and a decline is routine near expiry.
+    // Nothing in the repo shows it predicts worse entries, so it is informational, not a veto.
+    // The informational wording itself is asserted in options-entry-validator.test.ts.
     const falling = chain();
     falling.quotes[0] = { ...falling.quotes[0]!, openInterestChange: -50_000 };
     const result = await service({ snapshot: falling }).execute({ tradeIdeaId: "idea-1", now: NOW });
 
-    expect(result).toMatchObject({ approved: false, reason: "OPTIONS_ENTRY_REJECTED" });
-    if (result.approved) return;
-    expect(result.reasons?.join(" ")).toContain("Open interest is decreasing");
+    expect(result).toMatchObject({ approved: true });
   });
 
   it("refuses a low-confidence idea", async () => {
@@ -460,7 +463,7 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
     if (!result.approved) return;
     expect((result.entry.feeBreakdown as any).entryProvenance).toMatchObject({
       selectionMode: "O2_CHAIN_ENUMERATION",
-      targetDelta: 0.75,
+      targetDelta: 0.65,
       eligibleContractCount: 1,
       chainObservedAt: NOW.toISOString(),
       strike: 56000,
@@ -468,11 +471,11 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
     });
   });
 
-  it("refuses with NO_OPTION_ENTRY when no contracts satisfy abs(delta) >= 0.75", async () => {
+  it("refuses with NO_OPTION_ENTRY when no contracts satisfy abs(delta) >= 0.55", async () => {
     const otmChain = chain({
       quotes: [
         {
-          strikePrice: 57700, // ATM strike, delta ~0.52 (< 0.75)
+          strikePrice: 59500, // Deep OTM strike, delta ~0.15 (< 0.55)
           optionType: "CE" as const,
           expiryDate: MONTHLY,
           expiryKind: "MONTHLY" as const,
@@ -494,14 +497,30 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
     expect(result.approved).toBe(false);
     if (result.approved) return;
     expect(result.reason).toBe("NO_OPTION_ENTRY");
-    expect(result.explanation).toContain("abs(delta) >= 0.75");
+    expect(result.explanation).toContain("abs(delta) >= 0.55");
+    
+    // Provenance Test: No 0.55+ delta exists
+    expect(result.rejectionProvenance).toMatchObject({
+      reasonCode: "NO_OPTION_ENTRY",
+      underlyingSymbol: "BANKNIFTY",
+      underlyingValue: 57720,
+      targetDelta: 0.65,
+      minEntryDelta: 0.55,
+      candidateCount: 1,
+      deltaAvailableCount: 1,
+      minAvailableStrike: 59500,
+      maxAvailableStrike: 59500,
+      liquidityEligibleCount: 1,
+    });
+    expect(result.rejectionProvenance?.maxAbsDeltaAvailable).toBeLessThan(0.55);
+    expect(result.rejectionProvenance?.maxAbsDeltaLiquidityEligible).toBeLessThan(0.55);
   });
 
   it("refuses with NO_OPTION_ENTRY when all matching quotes have ask <= bid", async () => {
     const invalidQuoteChain = chain({
       quotes: [
         {
-          strikePrice: 56000,
+          strikePrice: 56000, // Delta > 0.55
           optionType: "CE" as const,
           expiryDate: MONTHLY,
           expiryKind: "MONTHLY" as const,
@@ -523,19 +542,27 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
     expect(result.approved).toBe(false);
     if (result.approved) return;
     expect(result.reason).toBe("NO_OPTION_ENTRY");
+    
+    // Provenance Test: Delta available but liquidity unavailable
+    expect(result.rejectionProvenance).toMatchObject({
+      liquidityEligibleCount: 0,
+      maxAbsDeltaLiquidityEligible: null,
+    });
+    expect(result.rejectionProvenance?.maxAbsDeltaAvailable).toBeNull();
   });
 
-  it("ranks eligible contracts by distance to target delta 0.75, spread, and strike ASC", async () => {
-    // 56000 CE has delta ~0.76 (diff 0.01)
-    // 55500 CE has delta ~0.82 (diff 0.07)
+  it("ranks eligible contracts by distance to target delta 0.65, spread, and strike ASC", async () => {
+    // 56000 CE has delta ~0.76 (diff 0.11)
+    // 56800 CE has delta ~0.64 (diff 0.01)
+    // 57300 CE has delta ~0.58 (diff 0.07)
     const multiStrikeChain = chain({
       quotes: [
         {
-          strikePrice: 55500,
+          strikePrice: 56800,
           optionType: "CE" as const,
           expiryDate: MONTHLY,
           expiryKind: "MONTHLY" as const,
-          providerSymbol: "NSE:BANKNIFTY26082555500CE",
+          providerSymbol: "NSE:BANKNIFTY26082556800CE",
           providerToken: null,
           lastPrice: 2550,
           bid: 2540,
@@ -560,6 +587,21 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
           previousOpenInterest: 800_000,
           openInterestChange: 100_000,
         },
+        {
+          strikePrice: 57300,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082557300CE",
+          providerToken: null,
+          lastPrice: 1550,
+          bid: 1540,
+          ask: 1560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
       ],
     });
 
@@ -567,8 +609,202 @@ describe("PrepareOptionEntry - O2 full option chain enumeration", () => {
 
     expect(result.approved).toBe(true);
     if (!result.approved) return;
+    expect(result.entry.optionContract.optionStrike).toBe(56800);
+    expect((result.entry.feeBreakdown as any).entryProvenance.eligibleContractCount).toBe(3);
+  });
+
+  it("selects next closest to 0.65 when closest fails liquidity", async () => {
+    // 56000 CE ~0.76 (diff 0.11) - liquid
+    // 56800 CE ~0.64 (diff 0.01) - illiquid
+    // 57300 CE ~0.58 (diff 0.07) - liquid
+    const multiStrikeChain = chain({
+      quotes: [
+        {
+          strikePrice: 56800,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082556800CE",
+          providerToken: null,
+          lastPrice: 2550,
+          bid: 2560, // illiquid (ask <= bid)
+          ask: 2550, 
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+        {
+          strikePrice: 56000,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082556000CE",
+          providerToken: null,
+          lastPrice: 2105,
+          bid: 2100,
+          ask: 2110,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+        {
+          strikePrice: 57300,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082557300CE",
+          providerToken: null,
+          lastPrice: 1550,
+          bid: 1540,
+          ask: 1560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ snapshot: multiStrikeChain }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionStrike).toBe(57300); // the next closest liquid contract
+  });
+
+  it("Provenance Test: Empty universe", async () => {
+    const emptyChain = chain({
+      quotes: [],
+    });
+
+    const result = await service({ snapshot: emptyChain, premiumTick: null }).execute({ tradeIdeaId: "idea-1", now: NOW });
+
+    expect(result.approved).toBe(false);
+    if (result.approved) return;
+    expect(result.reason).toBe("NO_OPTION_ENTRY");
+    
+    expect(result.rejectionProvenance).toMatchObject({
+      candidateCount: 0,
+      deltaAvailableCount: 0,
+      minAvailableStrike: null,
+      maxAvailableStrike: null,
+      maxAbsDeltaAvailable: null,
+      liquidityEligibleCount: 0,
+      maxAbsDeltaLiquidityEligible: null,
+    });
+  });
+
+  it("approves a contract with 0.65 delta even if 0.75 is unavailable (the treatment/control test)", async () => {
+    // 56800 CE has delta ~0.64, no higher delta exists in chain
+    const treatmentChain = chain({
+      quotes: [
+        {
+          strikePrice: 56800,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:BANKNIFTY26082556800CE",
+          providerToken: null,
+          lastPrice: 2550,
+          bid: 2540,
+          ask: 2560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ snapshot: treatmentChain }).execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    // Under the old 0.75 rule, this would be NO_OPTION_ENTRY. Under the new 0.55/0.65 rule, it is approved.
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
+    expect(result.entry.optionContract.optionStrike).toBe(56800);
+  });
+
+  it("holds NIFTY50 to 0.75, even on a contract BANKNIFTY's 0.55 floor would accept", async () => {
+    // 56800 CE ~0.64 and 57300 CE ~0.58 -- both clear BANKNIFTY's 0.55 floor but not NIFTY50's 0.75.
+    const shallowChain = chain({
+      underlyingSymbol: "NIFTY50",
+      quotes: [
+        {
+          strikePrice: 56800,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:NIFTY26082556800CE",
+          providerToken: null,
+          lastPrice: 2550,
+          bid: 2540,
+          ask: 2560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+        {
+          strikePrice: 57300,
+          optionType: "CE" as const,
+          expiryDate: MONTHLY,
+          expiryKind: "MONTHLY" as const,
+          providerSymbol: "NSE:NIFTY26082557300CE",
+          providerToken: null,
+          lastPrice: 1550,
+          bid: 1540,
+          ask: 1560,
+          volume: 120_000,
+          openInterest: 900_000,
+          previousOpenInterest: 800_000,
+          openInterestChange: 100_000,
+        },
+      ],
+    });
+
+    const result = await service({ idea: { ...IDEA, symbol: "NIFTY50" }, snapshot: shallowChain })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(false);
+    if (result.approved) return;
+    expect(result.reason).toBe("NO_OPTION_ENTRY");
+    expect(result.rejectionProvenance).toMatchObject({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("approves NIFTY50 once a 0.75+ delta contract is actually on offer", async () => {
+    // 56000 CE has delta ~0.76, clearing NIFTY50's 0.75 floor.
+    const deepChain = chain({ underlyingSymbol: "NIFTY50" });
+
+    const result = await service({ idea: { ...IDEA, symbol: "NIFTY50" }, snapshot: deepChain })
+      .execute({ tradeIdeaId: "idea-1", lots: 1, now: NOW });
+
+    expect(result.approved).toBe(true);
+    if (!result.approved) return;
     expect(result.entry.optionContract.optionStrike).toBe(56000);
-    expect((result.entry.feeBreakdown as any).entryProvenance.eligibleContractCount).toBe(2);
+    expect((result.entry.feeBreakdown as any).entryProvenance.targetDelta).toBe(0.75);
+  });
+});
+
+describe("resolveOptionEntryDeltaThresholds", () => {
+  it("holds NIFTY50 to 0.75/0.75 regardless of days to expiry", () => {
+    expect(resolveOptionEntryDeltaThresholds("NIFTY50", 25)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+    expect(resolveOptionEntryDeltaThresholds("NIFTY50", 2)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("gives BANKNIFTY the permissive 0.55/0.65 pair far from its own expiry", () => {
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 25)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 11)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
+  });
+
+  it("switches BANKNIFTY to NIFTY50's strict 0.75/0.75 once its own expiry is within 10 days", () => {
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 10)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+    expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 1)).toEqual({ minEntryDelta: 0.75, targetDelta: 0.75 });
+  });
+
+  it("falls back to the permissive pair for any other underlying", () => {
+    expect(resolveOptionEntryDeltaThresholds("XAU_USD", 25)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
   });
 });
 

@@ -22,11 +22,11 @@ import { SharedStreamPollerRegistry } from "../../application/shared-stream-poll
  * The resolver now owns every spelling in one place.
  *
  * GOLD is `XAU_USD` -- spot gold in USD, quoted through Twelve Data (`ProviderRoutedQuoteClient`
- * routes any symbol `twelvedata-symbol-resolver.ts` maps there). This started as `GC=F`
+ * routes any symbol `oanda-symbol-resolver.ts` maps there). This started as `GC=F`
  * (COMEX gold futures via Yahoo, reference-only, no candles) because Fyers has no live segment
  * for it (India-only, NSE/BSE) and OANDA -- tried next, a real broker -- does not accept
  * Indian-resident accounts. `XAU_USD` is now the real, backfilled, selectable instrument
- * (see `apps/api/src/infrastructure/market-data/twelvedata-historical-data-provider.ts`), so
+ * (see `apps/api/src/infrastructure/market-data/oanda-historical-data-provider.ts`), so
  * the tile points at it instead of the old placeholder.
  */
 const MARKET_WATCH_TILES: readonly MarketWatchTile[] = [

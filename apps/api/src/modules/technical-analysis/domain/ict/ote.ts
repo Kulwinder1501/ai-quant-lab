@@ -52,6 +52,56 @@ export interface OteFeature {
 const OTE_LOWER_RATIO = 0.21;
 const OTE_UPPER_RATIO = 0.38;
 
+/** Fibonacci retracement bounds of the OTE zone, measured from the leg's far end, and its "sweet spot". */
+export const OTE_RETRACE_NEAR = 0.62;
+export const OTE_RETRACE_FAR = 0.79;
+export const OTE_RETRACE_SWEET_SPOT = 0.705;
+
+export interface OteLegBand {
+  readonly bandLow: number;
+  readonly bandHigh: number;
+  /** The 70.5% retracement, where a resting limit is placed. */
+  readonly level: number;
+  /** Absolute leg length. */
+  readonly span: number;
+}
+
+/**
+ * OTE band measured on a specific displacement LEG -- the move that took the sweep extreme to the
+ * current far end -- rather than on `bias.ts`'s HH/HL dealing range.
+ *
+ * The dealing range is "last confirmed HH to last confirmed HL" and drifts: once price has pulled
+ * back past the HL it describes a range that no longer corresponds to any single impulse, so a
+ * "62-79% retracement" of it was a retracement of nothing in particular. The doctrine measures the
+ * retracement of the impulse that broke structure, which is exactly what `MssSnapshot` carries.
+ *
+ * `legStart` is where the leg began (the sweep extreme); `legEnd` is its current far end. For a
+ * bullish leg legEnd > legStart and the band sits BELOW legEnd; for a bearish leg it sits above.
+ * Null for a degenerate leg or one pointing the wrong way.
+ */
+export function computeOteBandForLeg(
+  legStart: number,
+  legEnd: number,
+  direction: "BULLISH" | "BEARISH"
+): OteLegBand | null {
+  const span = direction === "BULLISH" ? legEnd - legStart : legStart - legEnd;
+  if (!(span > 0)) return null;
+  if (direction === "BULLISH") {
+    return {
+      bandHigh: legEnd - OTE_RETRACE_NEAR * span,
+      bandLow: legEnd - OTE_RETRACE_FAR * span,
+      level: legEnd - OTE_RETRACE_SWEET_SPOT * span,
+      span,
+    };
+  }
+  return {
+    bandLow: legEnd + OTE_RETRACE_NEAR * span,
+    bandHigh: legEnd + OTE_RETRACE_FAR * span,
+    level: legEnd + OTE_RETRACE_SWEET_SPOT * span,
+    span,
+  };
+}
+
 /**
  * Computes the OTE feature for one instant, given the current dealing range and trend.
  *

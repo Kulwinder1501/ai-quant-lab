@@ -4,11 +4,12 @@ import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
 import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
-import { TwelveDataQuoteClient } from "../../infrastructure/market-data/twelvedata-quote-client.js";
+import { OandaQuoteClient } from "../../infrastructure/market-data/oanda-quote-client.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresDashboardQueryRepository } from "../../infrastructure/database/repositories/postgres-dashboard-query-repository.js";
 import { PostgresInstitutionalFlowRepository } from "../../infrastructure/database/repositories/postgres-institutional-flow-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
+import { PostgresJournalQueryRepository } from "../../infrastructure/database/repositories/postgres-journal-query-repository.js";
 import { PostgresMarketScannerQueryRepository } from "../../infrastructure/database/repositories/postgres-market-scanner-query-repository.js";
 import { PostgresMarketContextReader } from "../../infrastructure/database/repositories/postgres-market-context-reader.js";
 import { PostgresModelPerformanceQueryRepository } from "../../infrastructure/database/repositories/postgres-model-performance-query-repository.js";
@@ -40,6 +41,7 @@ import { ClosePaperTrade } from "../../modules/paper-trading/application/close-p
 import { CreatePaperAccount } from "../../modules/paper-trading/application/create-paper-account.js";
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { GetPaperAccountSummary } from "../../modules/paper-trading/application/get-paper-account-summary.js";
+import { ListJournalTrades } from "../../modules/paper-trading/application/list-journal.js";
 import { ListPaperTradeHistory } from "../../modules/paper-trading/application/list-paper-trade-history.js";
 import { OpenPaperTrade } from "../../modules/paper-trading/application/open-paper-trade.js";
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-trading/infrastructure/india-vix-implied-volatility-source.js";
@@ -53,6 +55,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const predictionRepository = new PostgresModelPredictionQueryRepository(pool);
   const marketScannerRepository = new PostgresMarketScannerQueryRepository(pool);
   const tradeHistoryRepository = new PostgresPaperTradeHistoryQueryRepository(pool);
+  const journalRepository = new PostgresJournalQueryRepository(pool);
   const paperTradeNotificationRepository = new PostgresPaperTradeNotificationRepository(pool);
   const modelPerformanceRepository = new PostgresModelPerformanceQueryRepository(pool);
   const dashboardRepository = new PostgresDashboardQueryRepository(pool);
@@ -75,16 +78,19 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       pin: process.env.FYERS_PIN ?? "",
     })
     : null;
-  const twelveDataApiKey = process.env.TWELVEDATA_API_KEY;
-  const twelveDataQuoteClient = twelveDataApiKey
-    ? new TwelveDataQuoteClient({ apiKey: twelveDataApiKey })
+  const oandaAccountId = process.env.OANDA_ACCOUNT_ID;
+  const oandaAccessToken = process.env.OANDA_ACCESS_TOKEN;
+  const oandaEnvironment = (process.env.OANDA_ENVIRONMENT ?? "practice") as "practice" | "trade";
+  
+  const oandaQuoteClient = oandaAccountId && oandaAccessToken
+    ? new OandaQuoteClient({ accountId: oandaAccountId, accessToken: oandaAccessToken, environment: oandaEnvironment })
     : null;
   const marketQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
       ? new FyersQuoteClient({ tokenService: fyersTokenService, appId })
       : null,
     undefined,
-    twelveDataQuoteClient,
+    oandaQuoteClient,
   );
 
   /**
@@ -103,7 +109,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
       ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0 })
       : null,
     undefined,
-    twelveDataQuoteClient,
+    oandaQuoteClient,
   );
 
   const evaluateOpenPaperTrades = new EvaluateOpenPaperTrades(
@@ -143,6 +149,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     listWatchlist: new ListWatchlist(marketScannerRepository),
     listMarketScanner: new ListMarketScanner(marketScannerRepository),
     listPaperTradeHistory: new ListPaperTradeHistory(tradeHistoryRepository),
+    listJournalTrades: new ListJournalTrades(journalRepository),
     listModelVersions: new ListModelVersions(modelPerformanceRepository),
     dashboardRepository,
     paperTradeRepository,
