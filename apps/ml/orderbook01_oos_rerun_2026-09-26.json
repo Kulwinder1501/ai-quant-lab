@@ -1,4 +1,5 @@
 {
+  "INVALID_RUN_NOTICE": "INVALID: eval_start (2026-09-26) is after eval_end (2026-09-24), so the evaluation window is empty. The zero-event INSUFFICIENT_DATA / INCONCLUSIVE content below reflects that empty window, NOT an out-of-sample test of ORDERBOOK-01. It is not evidence for or against the strategy. Annotated 2026-10-10; run_orderbook01_oos.py now refuses to write a result for an inverted window.",
   "pre_registration": "ORDERBOOK-01",
   "eval_mode": "oos",
   "eval_start": "2026-09-26",

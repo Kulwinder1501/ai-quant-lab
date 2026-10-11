@@ -1,5 +1,9 @@
 import type { QueryResultRow } from "pg";
 import type { DatabaseQueryable } from "../database.js";
+// The dashboard shows the CURRENT rule set only. `candlestick-v1` rows are a mixture of two rule
+// sets (see market-pattern.ts) and are superseded; until v2 re-detection has run the panel is empty,
+// which is the honest state rather than a display of mixed-rule evidence.
+import { candlestickAlgorithmVersion } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 
 export interface DashboardPaperAccountSummary {
   id: string;
@@ -103,6 +107,7 @@ export class PostgresDashboardQueryRepository {
     const result = await this.database.query<QueryResultRow>(`
       SELECT id, name, opening_balance, currency, is_active
       FROM paper_accounts
+      WHERE is_active = TRUE
       ORDER BY name ASC
     `);
     return result.rows.map((row) => ({
@@ -279,6 +284,10 @@ export class PostgresDashboardQueryRepository {
     
     const params: any[] = [limit];
     const conditions: string[] = [];
+    // No bot has ever owned this cell -- see DISABLED_SERIES in run-paper-trading-bot.ts, which
+    // stops generating these going forward. Filtered here too so the proposals grid also stops
+    // showing the ones already written before that took effect.
+    conditions.push(`NOT (i.symbol = 'NIFTY50' AND c.timeframe = '1m')`);
     if (!includeExpired) {
       // NULL expiry is treated as still live (agent/manual rows without a clock).
       conditions.push(`(ti.expires_at IS NULL OR ti.expires_at > CURRENT_TIMESTAMP)`);
@@ -507,8 +516,8 @@ export class PostgresDashboardQueryRepository {
         FROM pattern_detections pd
         JOIN pattern_definitions pdf ON pdf.id = pd.pattern_definition_id
         WHERE pd.candle_id = ANY($1::uuid[])
-          AND pdf.algorithm_version = 'candlestick-v1'
-      `, [candleIds]),
+          AND pdf.algorithm_version = $2
+      `, [candleIds, candlestickAlgorithmVersion]),
     ]);
 
     const indicatorsByCandle = new Map<string, Record<string, unknown>>();

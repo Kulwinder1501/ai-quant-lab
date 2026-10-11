@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { validateOptionsEntry } from "./options-entry-validator.js";
+import type { ConfluenceSignal } from "./strategy.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
 
 const EXPIRY = new Date("2026-08-25T10:00:00.000Z");
@@ -139,7 +140,11 @@ describe("validateOptionsEntry", () => {
     expect(result.reasons.join(" ")).toMatch(/Liquidity Alert/);
   });
 
-  it("refuses when open interest is falling on the intended strike", () => {
+  // Changed 2026-10: this used to REFUSE on `openInterestChange < 0`. That field is the vendor's
+  // open_interest - previous_open_interest (change vs the PREVIOUS DAY, not the last poll); its sign
+  // without the price direction says nothing about whether to buy, and it is negative on almost
+  // every contract near expiry. It is now informational only.
+  it("does not refuse on a day-over-day open-interest decline; it is informational", () => {
     const result = validateOptionsEntry({
       proposedIdea: IDEA,
       candleVolume: 12_000,
@@ -149,8 +154,100 @@ describe("validateOptionsEntry", () => {
       hasMacroEvent: false,
     });
 
-    expect(result.isValid).toBe(false);
-    expect(result.reasons.join(" ")).toMatch(/Open interest is decreasing/);
+    expect(result.isValid).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/down 1500 versus the previous day's close.*Informational only/);
+  });
+
+  describe("OI walls are compared with spot before being labelled", () => {
+    // Spot is 57_684.35 in `chain()`.
+    const putWall = (strikePrice: number) => quote({ optionType: "PE", strikePrice, openInterest: 90_000 });
+    const callWall = (strikePrice: number) => quote({ optionType: "CE", strikePrice, openInterest: 90_000 });
+
+    it("calls a put wall below spot support", () => {
+      const result = validateOptionsEntry({
+        proposedIdea: IDEA, candleVolume: 12_000, hasMacroEvent: false,
+        optionChain: chain({ quotes: [quote(), putWall(57_000)] }),
+      });
+
+      expect(result.reasons.join(" ")).toMatch(/Strong Put OI support at strike 57000/);
+    });
+
+    it("does not call a put wall ABOVE spot support", () => {
+      const result = validateOptionsEntry({
+        proposedIdea: IDEA, candleVolume: 12_000, hasMacroEvent: false,
+        optionChain: chain({ quotes: [quote(), putWall(58_500)] }),
+      });
+
+      expect(result.reasons.join(" ")).not.toMatch(/Strong Put OI support/);
+      expect(result.reasons.join(" ")).toMatch(/ABOVE spot.*not support/);
+    });
+
+    it("calls a call wall above spot resistance, but not one below spot", () => {
+      const short = { ...IDEA, side: "SHORT" as const };
+      const above = validateOptionsEntry({
+        proposedIdea: short, candleVolume: 12_000, hasMacroEvent: false,
+        optionChain: chain({ quotes: [callWall(58_500)] }),
+      });
+      const below = validateOptionsEntry({
+        proposedIdea: short, candleVolume: 12_000, hasMacroEvent: false,
+        optionChain: chain({ quotes: [callWall(57_000)] }),
+      });
+
+      expect(above.reasons.join(" ")).toMatch(/Strong Call OI resistance at strike 58500/);
+      expect(below.reasons.join(" ")).not.toMatch(/Strong Call OI resistance/);
+      expect(below.reasons.join(" ")).toMatch(/BELOW spot.*not resistance/);
+    });
+
+    it("reports the wall as unchecked when the chain carries no spot", () => {
+      const result = validateOptionsEntry({
+        proposedIdea: IDEA, candleVolume: 12_000, hasMacroEvent: false,
+        optionChain: chain({ underlyingValue: null, quotes: [putWall(57_000)] }),
+      });
+
+      expect(result.unchecked.join(" ")).toMatch(/Put OI wall at strike 57000.*no underlying value/);
+      expect(result.reasons.join(" ")).not.toMatch(/support/);
+    });
+  });
+
+  describe("the intended contract is matched on expiry as well as strike and side", () => {
+    const NEAR = new Date("2026-08-25T10:00:00.000Z");
+    const FAR = new Date("2026-09-29T10:00:00.000Z");
+    // Same strike and side on two expiries; only the far one has a wide spread.
+    const twoExpiries = chain({
+      quotes: [
+        quote({ expiryDate: NEAR, bid: 811.45, ask: 813.55 }),
+        quote({ expiryDate: FAR, bid: 790, ask: 830 }),
+      ],
+      listedExpiries: [
+        { expiryDate: NEAR, expiryKind: "MONTHLY" },
+        { expiryDate: FAR, expiryKind: "MONTHLY" },
+      ],
+    });
+    const base = {
+      proposedIdea: IDEA, candleVolume: 12_000, intendedStrike: 57_700,
+      intendedContractDelta: 0.51, hasMacroEvent: false, optionChain: twoExpiries,
+    };
+
+    it("evaluates the far-expiry contract when that expiry is intended", () => {
+      const result = validateOptionsEntry({ ...base, intendedExpiryDate: FAR });
+
+      expect(result.isValid).toBe(false);
+      expect(result.reasons.join(" ")).toMatch(/Liquidity Alert/);
+    });
+
+    it("evaluates the near-expiry contract when that expiry is intended", () => {
+      const result = validateOptionsEntry({ ...base, intendedExpiryDate: NEAR });
+
+      expect(result.reasons.join(" ")).not.toMatch(/Liquidity Alert/);
+      expect(result.unchecked.join(" ")).not.toMatch(/Intended expiry/);
+    });
+
+    it("assumes the nearest expiry, and says so, when none is supplied", () => {
+      const result = validateOptionsEntry(base);
+
+      expect(result.reasons.join(" ")).not.toMatch(/Liquidity Alert/);
+      expect(result.unchecked.join(" ")).toMatch(/Intended expiry: not supplied.*2026-08-25/);
+    });
   });
 
   it("refuses a 0-DTE contract unless confidence is high", () => {
@@ -285,7 +382,7 @@ describe("validateOptionsEntry", () => {
 
   describe("ORDERBOOK-01 directional gate kill switch", () => {
     // gate_action recommends SHORT; IDEA is LONG, so evaluateOrderbookDirectionalGate returns BLOCK.
-    const BLOCKING_SIGNAL = {
+    const BLOCKING_SIGNAL: ConfluenceSignal = {
       is_level_proximate: true,
       nearest_level_type: "SWING_HIGH",
       nearest_level_price: 57_750,

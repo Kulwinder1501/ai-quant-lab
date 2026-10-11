@@ -1,17 +1,25 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
-import { CandlestickPatternEngine } from "../domain/candlestick-pattern-engine.js";
+import { CandlestickPatternEngine, intradayTrendLookback } from "../domain/candlestick-pattern-engine.js";
 import { ChartPatternEngine } from "../domain/chart-pattern-engine.js";
 import {
+  candlestickAlgorithmVersion as currentCandlestickAlgorithmVersion,
   candlestickPatternDescriptions,
   candlestickPatternLayer,
+  priceActionAlgorithmVersion as currentPriceActionAlgorithmVersion,
   priceActionLayer,
   type CandleFeatureCoverageRepository,
+  type DetectedCandlestickPattern,
+  type DetectedPriceActionEvent,
   type PatternCandle,
   type PatternDefinitionRepository,
   type PatternDetectionRepository,
   type PriceActionEventRepository,
 } from "../domain/market-pattern.js";
-import { PriceActionEngine } from "../domain/price-action-engine.js";
+import { PriceActionEngine, priceActionConfigurationForTimeframe } from "../domain/price-action-engine.js";
+import { findSuppressedCandleIds, isIntradayTimeframe, splitIntoSessions } from "../domain/session-segmentation.js";
+
+/** NSE default tick (INR 0.05), used for the DOJI range floor when the caller supplies no tick size. */
+const defaultTickSize = 0.05;
 
 export interface DetectMarketPatternsInput {
   instrumentId: string;
@@ -19,6 +27,12 @@ export interface DetectMarketPatternsInput {
   candlestickAlgorithmVersion?: string;
   priceActionAlgorithmVersion?: string;
   since?: Date;
+  /**
+   * The instrument's tick size, for the DOJI minimum-range floor. Defaults to the NSE 0.05 tick:
+   * callers that do not know the instrument still get a floor, though not the right one for a
+   * non-NSE series, so pass it when it is known.
+   */
+  tickSize?: number;
 }
 
 export interface DetectMarketPatternsResult {
@@ -96,7 +110,12 @@ export class DetectMarketPatterns {
     private readonly patternDetectionRepository: PatternDetectionRepository,
     private readonly priceActionEventRepository: PriceActionEventRepository,
     private readonly candlestickEngine = new CandlestickPatternEngine(),
-    private readonly priceActionEngine = new PriceActionEngine(),
+    /**
+     * Null (the default) selects the `price-action-v3` engine for the timeframe: ATR units on
+     * intraday, percent on daily. An explicit engine is used as given, and the caller is then
+     * responsible for pairing it with the matching `priceActionAlgorithmVersion` label.
+     */
+    private readonly priceActionEngine: PriceActionEngine | null = null,
     private readonly chartPatternEngine = new ChartPatternEngine(),
     /**
      * Last, and optional, so the existing call sites that pass engines positionally keep compiling
@@ -114,12 +133,34 @@ export class DetectMarketPatterns {
     const candles = (await this.candleRepository.listCompleted(input.instrumentId, input.timeframe)).map(toPatternCandle);
     assertChronological(candles);
 
-    const candlestickAlgorithmVersion = input.candlestickAlgorithmVersion ?? "candlestick-v1";
-    const priceActionAlgorithmVersion = input.priceActionAlgorithmVersion ?? "price-action-v2";
-    const patterns = this.candlestickEngine.detect(candles);
-    const priceEvents = this.priceActionEngine.detect(candles);
-    const chartEvents = this.chartPatternEngine.detect(candles);
-    const events = [...priceEvents, ...chartEvents];
+    const candlestickAlgorithmVersion = input.candlestickAlgorithmVersion ?? currentCandlestickAlgorithmVersion;
+    const priceActionAlgorithmVersion = input.priceActionAlgorithmVersion ?? currentPriceActionAlgorithmVersion;
+    const priceActionEngine = this.priceActionEngine
+      ?? new PriceActionEngine(priceActionConfigurationForTimeframe(input.timeframe));
+    const intraday = isIntradayTimeframe(input.timeframe);
+    const candlestickOptions = {
+      tickSize: input.tickSize ?? defaultTickSize,
+      ...(intraday ? { trendLookback: intradayTrendLookback } : {}),
+    };
+
+    // Every engine runs once per session segment (one segment for the daily timeframe), so an
+    // intraday pattern can never use a bar from a previous session as one of its prior bars, and
+    // bars that are not real trades (flat zero-volume prints, or zero-volume bars in a series that
+    // reports volume) neither trigger nor take part in a pattern.
+    const patterns: DetectedCandlestickPattern[] = [];
+    const events: DetectedPriceActionEvent[] = [];
+    for (const segment of splitIntoSessions(candles, input.timeframe)) {
+      const suppressed = findSuppressedCandleIds(segment);
+      const usable = <T extends { candleId: string }>(detected: T, contextCandleIds: readonly string[] = []): boolean => (
+        !suppressed.has(detected.candleId) && !contextCandleIds.some((id) => suppressed.has(id))
+      );
+      for (const pattern of this.candlestickEngine.detect(segment, candlestickOptions)) {
+        if (usable(pattern, pattern.contextCandleIds)) patterns.push(pattern);
+      }
+      for (const event of [...priceActionEngine.detect(segment), ...this.chartPatternEngine.detect(segment)]) {
+        if (usable(event)) events.push(event);
+      }
+    }
     
     const openTimeByCandleId = new Map<string, number>();
     for (const c of candles) {

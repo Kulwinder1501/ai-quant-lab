@@ -10,19 +10,10 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
 import { ImportHistoricalMarketData } from "../../modules/market-data/application/import-historical-market-data.js";
 import type { HistoricalMarketDataProvider } from "../../modules/market-data/domain/historical-data-provider.js";
-import type { Instrument } from "../../modules/market-data/domain/instrument.js";
-import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
+import { getOption, parseDateOption, parseHistoricalTimeframe, parseInstrumentExchange, requireOption } from "./arguments.js";
 
 import { YahooHistoricalDataProvider } from "../../infrastructure/market-data/yahoo-historical-data-provider.js";
 import { OandaHistoricalDataProvider } from "../../infrastructure/market-data/oanda-historical-data-provider.js";
-
-function parseExchangeOption(value: string): Instrument["exchange"] {
-  const upper = value.toUpperCase();
-  if (upper === "NSE" || upper === "NFO" || upper === "BSE" || upper === "OANDA") {
-    return upper;
-  }
-  throw new Error(`Unsupported --exchange "${value}". Use NSE, NFO, BSE, or OANDA.`);
-}
 
 function providerFromArguments(
   argumentsList: string[],
@@ -168,7 +159,7 @@ async function main(): Promise<void> {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     // Defaults to NSE, unchanged for every existing call site -- only a non-Indian instrument
     // (e.g. `--exchange TWELVEDATA --instrument XAU_USD`) needs to pass this explicitly.
-    const exchange = parseExchangeOption(getOption(argumentsList, "exchange") ?? "NSE");
+    const exchange = parseInstrumentExchange(getOption(argumentsList, "exchange") ?? "NSE");
     const instrument = await instrumentRepository.findByExchangeAndSymbol(exchange, symbol);
     if (!instrument) {
       throw new Error(`${exchange} instrument "${symbol}" is not registered. Run data:seed:core-instruments or register it first.`);

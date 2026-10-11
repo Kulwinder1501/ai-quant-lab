@@ -13,6 +13,47 @@ import type {
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
+import type { OPTION_CHAIN_PCR_SCOPE, OptionChainPcrUnavailableReason } from "./option-chain-signal.js";
+
+/** The ORDERBOOK-01 gate's verdict on direction; `NO_ACTION` when depth is missing or di_tilde <= 0. */
+export type ConfluenceGateAction = "BUY_CALL_OR_LONG" | "BUY_PUT_OR_SHORT" | "NO_ACTION";
+export type ConfluenceDirectionalBias =
+  | "BULLISH_REJECTION"
+  | "BEARISH_REJECTION"
+  | "BEARISH_SWEEP"
+  | "BULLISH_SWEEP"
+  | "NONE";
+/** `NO_DEPTH`: no usable front-month futures depth frame at the decision time (raw_di / di_tilde are null). */
+export type ConfluenceDepthState = "NO_DEPTH";
+/** Why `di_tilde` is (or is not) available; see `causalStandardiseDi`. */
+export type ConfluenceDiStatus = "OK" | "UNAVAILABLE_DEPTH" | "UNAVAILABLE_HISTORY";
+
+/**
+ * Structural-level + order-book depth signal attached to a strategy context.
+ *
+ * `raw_di` / `di_tilde` are `null` (never 0) when unavailable. `di_tilde` is the causally
+ * standardised DI: `-(raw_di - trailing same-session mean of prior-minute DI)`.
+ */
+export interface ConfluenceSignal {
+  is_level_proximate?: boolean;
+  nearest_level_type?: string | null;
+  nearest_level_price?: number | null;
+  distance_bps?: number | null;
+  raw_di?: number | null;
+  decaying_di?: number | null;
+  di_tilde?: number | null;
+  di_z_score?: number | null;
+  di_status?: ConfluenceDiStatus;
+  /** Number of prior complete-minute DI samples behind `di_tilde` (0 when none were available). */
+  di_history_count?: number;
+  directional_bias?: ConfluenceDirectionalBias;
+  gate_action?: ConfluenceGateAction;
+  /** Present (as `NO_DEPTH`) only when no usable depth frame was found. */
+  depth_state?: ConfluenceDepthState;
+  /** Front-month futures ticker the depth lookup used; null when no contract could be resolved. */
+  depth_symbol?: string | null;
+  depth_max_age_ms?: number;
+}
 
 export type TradeSide = "LONG" | "SHORT";
 export type TradeIdeaStatus = "PROPOSED" | "ACCEPTED" | "EXPIRED" | "REJECTED";
@@ -90,16 +131,7 @@ export interface StrategyMarketContext {
   patternObservations?: readonly PatternObservationSummary[];
   patternObservationCoverage?: PatternObservationCoverageState;
   regime?: RegimeContext;
-  confluenceSignal?: {
-    is_level_proximate?: boolean;
-    nearest_level_type?: string | null;
-    nearest_level_price?: number | null;
-    distance_bps?: number | null;
-    raw_di?: number | null;
-    di_tilde?: number | null;
-    directional_bias?: string;
-    gate_action?: string;
-  } | null;
+  confluenceSignal?: ConfluenceSignal | null;
   /**
    * Whole-chain put/call ratio (put OI / call OI, nearest un-expired expiry) resolved as-of this
    * candle's close, for strategies that gate on an option-chain OI wall (e.g.
@@ -118,6 +150,16 @@ export interface StrategyMarketContext {
     putOpenInterest: number | null;
     observedAt: Date | null;
     ageMinutes: number | null;
+    /**
+     * Optional diagnostics carried by the resolved `OptionChainSignal` (see `option-chain-signal.ts`).
+     * Declared here so consumers read them without casting; a producer that only knows the five
+     * fields above simply omits them.
+     */
+    pcrWindowed?: number | null;
+    pcrScope?: typeof OPTION_CHAIN_PCR_SCOPE;
+    expiryDate?: string | null;
+    unavailableReason?: OptionChainPcrUnavailableReason | null;
+    unavailableMessage?: string | null;
   };
   /**
    * Trend and level context from slower timeframes, for confluence scoring.

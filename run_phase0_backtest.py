@@ -1,8 +1,11 @@
+import os
 import psycopg2
 import pandas as pd
 import numpy as np
 
-DATABASE_URL = "postgresql://ai_quant_lab:2a33c5b07e01286c245ebf92710f8997208e4ff0237126ff06f2a4fcde47e0c8@localhost:5433/ai_quant_lab"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set; refusing to fall back to a built-in credential.")
 
 def main():
     print("Connecting to DB...")

@@ -124,15 +124,29 @@ describe("putCallRatios", () => {
     expect(ratios.volumeRatio).toBeNull();
   });
 
-  it("treats a missing open interest as absent, contributing nothing", () => {
+  // A missing put OI used to be coerced to 0 -> PCR 0, which passes a SHORT gate (<= 0.8). Unknown
+  // is not zero: the ratio must be null so the gate sees "unavailable".
+  it("returns a null ratio when any contract is missing open interest, not a PCR of 0", () => {
     const ratios = putCallRatios([
       quote({ optionType: "CE", openInterest: 100, volume: null }),
       quote({ optionType: "PE", strikePrice: 24_050, openInterest: null, volume: null }),
     ]);
 
+    expect(ratios.openInterestRatio).toBeNull();
+    // The raw sums still report what was observed.
+    expect(ratios.callOpenInterest).toBe(100);
     expect(ratios.putOpenInterest).toBe(0);
-    expect(ratios.openInterestRatio).toBeCloseTo(0, 10);
     expect(ratios.volumeRatio).toBeNull();
+  });
+
+  it("returns a null ratio when the missing OI is on the call side too", () => {
+    const ratios = putCallRatios([
+      quote({ optionType: "CE", openInterest: null, volume: null }),
+      quote({ optionType: "CE", strikePrice: 24_050, openInterest: 100, volume: null }),
+      quote({ optionType: "PE", openInterest: 150, volume: null }),
+    ]);
+
+    expect(ratios.openInterestRatio).toBeNull();
   });
 });
 

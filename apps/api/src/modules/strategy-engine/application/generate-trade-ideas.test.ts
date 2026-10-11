@@ -36,7 +36,7 @@ function qualifyingContext(): StrategyMarketContext {
     ],
     patterns: [{
       code: "BULLISH_ENGULFING",
-      algorithmVersion: "candlestick-v1",
+      algorithmVersion: "candlestick-v2",
       direction: "BULLISH",
       confidence: 0.8,
       contextCandleIds: ["candle-0", "candle-1"],
@@ -222,7 +222,7 @@ describe("GenerateTradeIdeas", () => {
     expect(saved[0].reasoning).toContain("This is a close-time paper-trade proposal only; a later phase simulates an eligible next-candle fill.");
     expect(saved[0].evidenceItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "ATR:ta-v1" }),
-      expect.objectContaining({ sourceType: "PATTERN", sourceReference: "BULLISH_ENGULFING:candlestick-v1" }),
+      expect.objectContaining({ sourceType: "PATTERN", sourceReference: "BULLISH_ENGULFING:candlestick-v2" }),
       expect.objectContaining({ sourceType: "PRICE_ACTION", sourceReference: "BREAKOUT:price-action-v2" }),
       expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "SMC:smc-v2", contribution: 0.05 }),
     ]));

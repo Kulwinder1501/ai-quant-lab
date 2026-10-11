@@ -58,7 +58,7 @@ same minimum-extrinsic-value floor), deliberately skipping the put-call-parity
 forward correction `chain-greeks.ts` applies live -- appropriate for a cheap
 first-pass screen, not for a number a trade decision would read.
 
-Features (all as-of, `observed_at <= candle.close_time`, snapshot age <= 60min):
+Features (all as-of, `observed_at <= candle.close_time`, snapshot age <= 20min -- the shared `MAX_SNAPSHOT_AGE_MINUTES`; the code used 15 and this line said 60 until 2026-10-10, when both were aligned. Quotes wider than 5% of mid are also refused when solving ATM IV, and the output now carries a `sampleLimits` block stating the day count; the figures below were produced before both changes and are not re-run):
 
 - `iv.percentile` -- rank of the latest known IV against **calendar days strictly
   before** the candle's own day (one representative value per day, requiring

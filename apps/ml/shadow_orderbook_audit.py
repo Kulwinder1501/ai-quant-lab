@@ -7,8 +7,19 @@ evidence->'orderbookGate' shadow metadata.
 Metrics Computed:
 1. Shadow Gate Verdict Breakdown (ALLOWED vs BLOCKED vs NEUTRAL count).
 2. Per-Strategy Gating Distribution.
-3. Paper Trade Attribution (Win Rate, Total PnL, Drawdown of Gated vs Ungated).
-4. Net Protection PnL (Dollars/Points saved by blocking conflicting L2 setups).
+3. Paper Trade Attribution (trade count, win rate, average and total realized PnL per shadow verdict).
+4. Counterfactual "net protection" for BLOCKED verdicts: -sum(realized PnL of the BLOCKED paper trades
+   that actually executed). This is the PnL change IF those trades had been skipped.
+
+HONEST LIMITS -- read before quoting any number from this report:
+  - It is a counterfactual, not realised protection: ORDERBOOK-01 is shadow-only (the verdict is
+    recorded in `evidence.orderbookGate` but, with ORDERBOOK01_LIVE_GATE_ENABLED off, never blocks),
+    so BLOCKED trades DID execute and their PnL is observed. If the gate is ever switched on, BLOCKED
+    ideas stop becoming paper trades and their PnL becomes unobservable here.
+  - No drawdown, no ungated-vs-gated equity comparison and no significance test are computed.
+    (Earlier docstring text promised "Drawdown" and "Points saved"; neither was ever implemented.)
+  - ORDERBOOK-01 was falsified out of sample (docs/2026-10-05-orderbook01-bug-fixes-and-honest-verdict.md);
+    a positive counterfactual here is not evidence of an edge.
 """
 
 from __future__ import annotations
@@ -32,6 +43,23 @@ def log_output(msg: str):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(formatted + "\n")
+
+def format_net_protection_line(pt_rows) -> str:
+    """Counterfactual net protection from (verdict, trades, wins, avg_pnl, total_pnl) rows.
+
+    = -(total realized PnL of BLOCKED paper trades). Returns an explicit "not computable" message
+    when there are no executed BLOCKED trades or their PnL is missing -- never a fabricated 0.
+    """
+    blocked = [r for r in pt_rows if r[0] == "BLOCKED"]
+    if not blocked or blocked[0][1] == 0 or blocked[0][4] is None:
+        return "  * Net protection (counterfactual): not computable -- no executed BLOCKED paper trades with PnL."
+    total_blocked_pnl = float(blocked[0][4])
+    return (
+        f"  * Net protection (counterfactual, observed BLOCKED trades only): {-total_blocked_pnl:+.2f} "
+        f"(= minus the {total_blocked_pnl:+.2f} realized PnL of {blocked[0][1]} BLOCKED trades, had they been skipped; "
+        "shadow-only gate, not a realised saving, not evidence of an edge)"
+    )
+
 
 def run_shadow_audit():
     log_output("==========================================================================")
@@ -105,6 +133,7 @@ def run_shadow_audit():
                 for pt in pt_rows:
                     win_rate = (pt[2] / pt[1] * 100) if pt[1] > 0 else 0.0
                     log_output(f"  * Verdict: {pt[0]:12s} | Trades: {pt[1]:4d} | Win Rate: {win_rate:5.1f}% | Avg PnL: {pt[3]} | Total PnL: {pt[4]}")
+                log_output(format_net_protection_line(pt_rows))
         except Exception as e:
             log_output(f"Note: Paper trade join omitted ({e})")
 

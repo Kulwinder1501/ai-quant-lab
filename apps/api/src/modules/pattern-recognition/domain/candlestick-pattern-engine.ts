@@ -22,6 +22,31 @@ export interface CandlestickPatternConfiguration {
   marubozuMinBodyRatio: number;
   piercingMinPenetration: number;
   darkCloudMinPenetration: number;
+  /**
+   * A DOJI needs a real range: its range must exceed this many ticks. A body/range ratio is
+   * meaningless when the range is one or two price increments (23% of stored 1m DOJIs were on
+   * ranges of two ticks or less -- quantisation, not indecision). Only applied when the caller
+   * supplies the instrument tick size via `CandlestickDetectionOptions.tickSize`.
+   */
+  dojiMinRangeTicks: number;
+}
+
+/**
+ * Prior-trend lookback, in bars, used for every pattern that conditions on a prior trend when the
+ * series is intraday. The default `trendLookback` of 3 compares two closes three bars apart, which
+ * on 1m/5m is noise (a couple of ticks of drift decides "uptrend"); a textbook reversal pattern
+ * presumes a move worth reversing. 12 bars is an hour on 5m and twelve minutes on 1m -- a
+ * documented, deliberately round choice rather than a tuned one. The daily timeframe keeps 3.
+ * Because the intraday series is a single IST session, the first 13 bars of a session have no
+ * trend context and therefore emit none of the trend-qualified patterns.
+ */
+export const intradayTrendLookback = 12;
+
+export interface CandlestickDetectionOptions {
+  /** Overrides `configuration.trendLookback` (the application passes the intraday value). */
+  trendLookback?: number;
+  /** Instrument tick size, enabling the DOJI minimum-range floor. Omitted = no floor. */
+  tickSize?: number;
 }
 
 const defaultConfiguration: CandlestickPatternConfiguration = {
@@ -41,6 +66,7 @@ const defaultConfiguration: CandlestickPatternConfiguration = {
   marubozuMinBodyRatio: 0.9,
   piercingMinPenetration: 0.5,
   darkCloudMinPenetration: 0.5,
+  dojiMinRangeTicks: 2,
 };
 
 interface CandleShape {
@@ -119,22 +145,35 @@ function detection(
 export class CandlestickPatternEngine {
   constructor(private readonly configuration: CandlestickPatternConfiguration = defaultConfiguration) {}
 
-  detect(candles: readonly PatternCandle[]): DetectedCandlestickPattern[] {
+  /**
+   * `candles` must be one contiguous series -- for intraday timeframes a single session. Patterns
+   * look back at `candles[index - 1..2]` and the trend window without any gap check, so a caller
+   * that passes several sessions concatenated would build patterns across the overnight gap.
+   */
+  detect(candles: readonly PatternCandle[], options: CandlestickDetectionOptions = {}): DetectedCandlestickPattern[] {
     const results: DetectedCandlestickPattern[] = [];
+    const trendLookback = options.trendLookback ?? this.configuration.trendLookback;
+    const dojiMinRange = options.tickSize !== undefined && options.tickSize > 0
+      ? options.tickSize * this.configuration.dojiMinRangeTicks
+      : 0;
     for (let index = 0; index < candles.length; index += 1) {
       const current = candles[index];
       const currentShape = shape(current);
       if (currentShape.range <= 0) continue;
-      const downtrend = isDowntrend(candles, index, this.configuration.trendLookback);
-      const uptrend = isUptrend(candles, index, this.configuration.trendLookback);
+      const downtrend = isDowntrend(candles, index, trendLookback);
+      const uptrend = isUptrend(candles, index, trendLookback);
 
       // --- 1-CANDLE PATTERNS ---
 
-      // 1. DOJI
-      if (currentShape.bodyRatio <= this.configuration.dojiBodyRatio) {
+      // 1. DOJI (and the dragonfly / gravestone refinements, which are doji by construction).
+      // Needs a range wider than `dojiMinRangeTicks` ticks. `confidence` here is `1 - bodyRatio`,
+      // which is >= 0.9 for every doji by definition: a heuristic strength score that restates the
+      // threshold, not a probability, and the details say so.
+      if (currentShape.bodyRatio <= this.configuration.dojiBodyRatio && currentShape.range > dojiMinRange) {
         results.push(detection(current, "DOJI", "NEUTRAL", 1 - currentShape.bodyRatio, [current], {
           bodyRatio: currentShape.bodyRatio,
           range: currentShape.range,
+          confidenceKind: "HEURISTIC_STRENGTH",
         }));
 
         // 2. DRAGONFLY DOJI: long lower shadow, virtually no upper shadow
@@ -316,12 +355,14 @@ export class CandlestickPatternEngine {
           ), [previous, current], { previousHigh: previous.high, previousLow: previous.low }));
         }
 
-        // 10. PIERCING LINE: Prior bearish, current opens below prior low (or close) and closes above midpoint of prior body
+        // 10. PIERCING LINE: Prior bearish, current opens BELOW the prior low (textbook gap-down open)
+        // and closes above the midpoint of the prior body. v1 also accepted any open below the
+        // prior close, which is just a normal bar and made the pattern a plain bullish reversal.
         const priorMidpoint = (previous.open + previous.close) / 2;
         if (
           previousShape.bearish
           && currentShape.bullish
-          && (current.open <= previous.low || current.open < previous.close)
+          && current.open < previous.low
           && current.close > priorMidpoint
           && current.close < previous.open
         ) {
@@ -335,11 +376,12 @@ export class CandlestickPatternEngine {
           }
         }
 
-        // 11. DARK CLOUD COVER: Prior bullish, current opens above prior high (or close) and closes below midpoint of prior body
+        // 11. DARK CLOUD COVER: Prior bullish, current opens ABOVE the prior high (textbook gap-up
+        // open) and closes below the midpoint of the prior body.
         if (
           previousShape.bullish
           && currentShape.bearish
-          && (current.open >= previous.high || current.open > previous.close)
+          && current.open > previous.high
           && current.close < priorMidpoint
           && current.close > previous.open
         ) {

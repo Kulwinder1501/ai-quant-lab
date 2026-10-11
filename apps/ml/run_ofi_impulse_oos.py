@@ -15,7 +15,12 @@ script_dir = Path(r"c:\Users\Kulwinder Singh\Desktop\personal\AI Quant Lab\apps\
 sys.path.insert(0, str(script_dir))
 
 from ai_quant_lab_ml.structure_intelligence import get_db_connection_string
-from ai_quant_lab_ml.cks_ofi_touch import compute_windowed_ofi_series, DepthFrameRow
+from ai_quant_lab_ml.cks_ofi_touch import (
+    compute_windowed_ofi_series,
+    DepthFrameRow,
+    drop_reset_and_duplicate_rows,
+    recompute_sequence_flags_by_stream,
+)
 
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -43,10 +48,46 @@ class FrameRow:
         self.bid_price_0 = float(bp[0]) if bp else 0.0
         self.ask_price_0 = float(ap[0]) if ap else 0.0
 
+def _to_india(ts):
+    return ts.astimezone(INDIA_TZ) if ts.tzinfo else ts.replace(tzinfo=INDIA_TZ)
+
+
+def build_ofi_frames_and_quote_rows(r_list):
+    """Rows of ONE symbol (get_frames_basic layout, in received order) ->
+    (depth_frames, quote_rows).
+
+    2026-10-10 follow-up (code gaps): this script used to hard-code is_snapshot=False,
+    is_duplicate=False, gap_before=None, so every duplicate, gap and sequence reset silently flowed
+    into the OFI chain. The flags are now RECOMPUTED per capture session from sequence_no with
+    cks_ofi_touch.recompute_sequence_flags (the stored is_regression is wrong after a reset without a
+    snapshot, so it is never read). Duplicates / SEQUENCE_RESET frames break the OFI chain
+    (compute_windowed_ofi_series) and are dropped from `quote_rows`, the rows later used for decision
+    / horizon quotes. The first frame of each capture session is a chain baseline (is_snapshot).
+    """
+    flags = recompute_sequence_flags_by_stream(
+        [(r[10], None if r[11] is None else int(r[11]), bool(r[12])) for r in r_list]
+    )
+    dframes = []
+    for r, (gap_before, is_dup, is_reg, is_stream_start) in zip(r_list, flags):
+        dframes.append(DepthFrameRow(
+            received_at=_to_india(r[0]),
+            is_snapshot=bool(r[12]) or is_stream_start,
+            is_duplicate=is_dup,
+            gap_before=gap_before,
+            bid_price_0=float(r[5][0]) if r[5] else 0.0,
+            bid_qty_0=float(r[6][0]) if r[6] else 0.0,
+            ask_price_0=float(r[7][0]) if r[7] else 0.0,
+            ask_qty_0=float(r[8][0]) if r[8] else 0.0,
+            is_regression=is_reg,
+        ))
+    return dframes, drop_reset_and_duplicate_rows(r_list, flags)
+
+
 def get_frames_basic(conn, start_dt, end_dt, session_id=None):
     query = """
         SELECT received_at, total_buy_qty, total_sell_qty, exchange_feed_time, vendor_send_time, 
-               bid_price, bid_qty, ask_price, ask_qty, provider_symbol, capture_session_id
+               bid_price, bid_qty, ask_price, ask_qty, provider_symbol, capture_session_id,
+               sequence_no, is_snapshot
         FROM depth_frames
         WHERE received_at >= %s AND received_at < %s
     """
@@ -54,7 +95,7 @@ def get_frames_basic(conn, start_dt, end_dt, session_id=None):
     if session_id:
         query += " AND capture_session_id = %s"
         params.append(session_id)
-    query += " ORDER BY received_at ASC"
+    query += " ORDER BY received_at ASC, sequence_no ASC NULLS LAST"
     
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
@@ -123,18 +164,7 @@ def main():
             if not is_banknifty and not is_nifty:
                 continue
                 
-            dframes = []
-            for r in r_list:
-                dframes.append(DepthFrameRow(
-                    received_at=r[0].astimezone(INDIA_TZ) if r[0].tzinfo else r[0].replace(tzinfo=INDIA_TZ),
-                    is_snapshot=False,
-                    is_duplicate=False,
-                    gap_before=None,
-                    bid_price_0=float(r[5][0]) if r[5] else 0.0,
-                    bid_qty_0=float(r[6][0]) if r[6] else 0.0,
-                    ask_price_0=float(r[7][0]) if r[7] else 0.0,
-                    ask_qty_0=float(r[8][0]) if r[8] else 0.0
-                ))
+            dframes, _quote_rows = build_ofi_frames_and_quote_rows(r_list)
             
             ofi_obs = compute_windowed_ofi_series(dframes)
             if not ofi_obs:
@@ -187,21 +217,8 @@ def main():
                 q01 = frozen_q[f"{instrument}_Q01"]
                 q99 = frozen_q[f"{instrument}_Q99"]
                 
-                dframes = []
-                frows = []
-                for r in r_list:
-                    d_r = r[0].astimezone(INDIA_TZ) if r[0].tzinfo else r[0].replace(tzinfo=INDIA_TZ)
-                    dframes.append(DepthFrameRow(
-                        received_at=d_r,
-                        is_snapshot=False,
-                        is_duplicate=False,
-                        gap_before=None,
-                        bid_price_0=float(r[5][0]) if r[5] else 0.0,
-                        bid_qty_0=float(r[6][0]) if r[6] else 0.0,
-                        ask_price_0=float(r[7][0]) if r[7] else 0.0,
-                        ask_qty_0=float(r[8][0]) if r[8] else 0.0
-                    ))
-                    frows.append(FrameRow(r))
+                dframes, quote_rows = build_ofi_frames_and_quote_rows(r_list)
+                frows = [FrameRow(r) for r in quote_rows]
                     
                 ofi_obs = compute_windowed_ofi_series(dframes)
                 if len(ofi_obs) < 2:

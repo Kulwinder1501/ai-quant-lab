@@ -22,7 +22,13 @@ import {
 /** Same rate the option-buyer fill path uses, so premiums and IVs stay comparable. */
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 import type { IctStructureSnapshot } from "../../../technical-analysis/domain/ict/structure.js";
-import { summariseIvPercentile, type DailyImpliedVolatility } from "../../domain/iv-percentile.js";
+import { atmImpliedVolatility, calendarDaysToExpiry } from "../../domain/atm-implied-volatility.js";
+import {
+  buildTenorIvHistory,
+  ivPercentileForValidator,
+  summariseTenorMatchedIvPercentile,
+  type TenorImpliedVolatilityObservation,
+} from "../../domain/iv-percentile-by-tenor.js";
 
 export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
 
@@ -550,49 +556,42 @@ export function registerMarketDataRoutes(
         .map((leg) => (leg as { impliedVolatility: number | null } | null)?.impliedVolatility ?? null)
         .filter((iv): iv is number => iv !== null));
 
-      // One solve per stored day, from that day's last snapshot and its own spot, so a year of
-      // history costs a few hundred inversions rather than every strike of every observation.
-      const history: DailyImpliedVolatility[] = [];
+      /*
+       * IV percentile, tenor-matched and on one basis.
+       *
+       * Both the live reading and every historical day go through `atmImpliedVolatility`, which
+       * solves on the put-call-parity forward -- the old history solved on raw spot while the
+       * live reading used the forward, so the two sides were different quantities. The rank is
+       * taken only within the live expiry's days-to-expiry bucket (expiry-day excluded), because
+       * ATM IV is not tenor-flat and the stored history's nearest expiry rotates 1-8+ days out.
+       *
+       * The percentile expiry is the nearest expiry at least one calendar date away (or the
+       * requested `expiry`). One solve per stored day, from that day's last snapshot.
+       */
+      let history: TenorImpliedVolatilityObservation[] = [];
       try {
-        const dailyQuotes = await dependencies.optionChainRepository.dailyAtmQuotes({
+        history = buildTenorIvHistory(await dependencies.optionChainRepository.dailyAtmQuotes({
           underlyingSymbol, days: 400,
-        });
-        const byDate = new Map<string, typeof dailyQuotes>();
-        for (const quote of dailyQuotes) {
-          byDate.set(quote.date, [...(byDate.get(quote.date) ?? []), quote]);
-        }
-        for (const [date, quotes] of byDate) {
-          const daySpot = quotes.find((quote) => quote.underlyingValue !== null)?.underlyingValue ?? null;
-          if (daySpot === null) continue;
-          // That day's own ATM strike, not today's: spot moves, and ranking a fixed strike
-          // across months would measure moneyness drift rather than volatility.
-          const strikes = [...new Set(quotes.map((quote) => quote.strikePrice))];
-          const dayAtm = strikes.reduce<number | null>((closest, strike) => (
-            closest === null || Math.abs(strike - daySpot) < Math.abs(closest - daySpot)
-              ? strike
-              : closest
-          ), null);
-          if (dayAtm === null) continue;
-          const solved = quotes
-            .filter((quote) => quote.strikePrice === dayAtm)
-            .map((quote) => {
-              const mid = midPriceForIv(quote.bid, quote.ask);
-              const time = yearsToExpiry(quote.observedAt, quote.expiryDate);
-              if (mid === null || time <= 0) return null;
-              const result = impliedVolatilityFromPremium({
-                spot: daySpot, strike: quote.strikePrice, timeToExpiryYears: time,
-                riskFreeRate: RISK_FREE_RATE, optionType: quote.optionType, premium: mid,
-              });
-              return result.measurable ? result.impliedVolatility : null;
-            })
-            .filter((iv): iv is number => iv !== null);
-          const dayIv = meanIv(solved);
-          if (dayIv !== null) history.push({ date, impliedVolatility: dayIv });
-        }
+        }));
       } catch {
         // History is an enrichment. Losing it must not cost the caller the live chain.
       }
-      const ivPercentile = summariseIvPercentile({ history, currentImpliedVolatility: atmIv });
+      const percentileExpiry = expiriesOf(snapshot).find((entry) => expiryDate !== undefined
+        || calendarDaysToExpiry(snapshot.observedAt, entry.expiryDate) >= 1)
+        ?? expiriesOf(snapshot)[0];
+      const currentTenorIv = percentileExpiry === undefined
+        ? null
+        : atmImpliedVolatility({
+          observedAt: snapshot.observedAt,
+          expiryDate: percentileExpiry.expiryDate,
+          quotes: snapshot.quotes.filter((quote) => quote.expiryDate.getTime() === percentileExpiry.expiryDate.getTime()),
+        });
+      const ivPercentile = summariseTenorMatchedIvPercentile({
+        history,
+        current: currentTenorIv !== null && currentTenorIv.measurable
+          ? { impliedVolatility: currentTenorIv.impliedVolatility, daysToExpiry: currentTenorIv.daysToExpiry }
+          : null,
+      });
 
       response.status(200).json({
         data: {
@@ -629,6 +628,9 @@ export function registerMarketDataRoutes(
            * point; a percentile over three days is arithmetically fine and worthless.
            */
           atmImpliedVolatilityPercentile: ivPercentile,
+          // The 0-100 value `options-entry-validator`'s `ivPercentile` takes, or null when the
+          // tenor bucket is not measurable. Callers must pass this field (not the object above).
+          ivPercentileForValidator: ivPercentileForValidator(ivPercentile),
           strikes: [...byStrike.values()].sort(
             (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
           ),

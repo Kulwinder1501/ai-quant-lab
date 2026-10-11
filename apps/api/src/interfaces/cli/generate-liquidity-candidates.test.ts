@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateCandidates } from "./generate-liquidity-candidates.js";
+import { buildCandidateInsert, generateCandidates } from "./generate-liquidity-candidates.js";
 import type { PersistedCandle } from "../../modules/market-data/domain/candle.js";
 
 /**
@@ -137,5 +137,97 @@ describe("Phase 1 — known_at_time invariant", () => {
     for (const c of invalidated) {
       expect(c.invalidatedAtTime!.getTime()).toBeGreaterThanOrEqual(c.knownAtTime.getTime());
     }
+  });
+});
+
+/**
+ * Duplicate-candidate regression (audit: 5m BANKNIFTY PDL produced 104,749 rows for 191 level-days).
+ * After a PDH/PDL breach the old generator nulled its "active" copy and then re-registered the SAME
+ * level on the very next bar, repeatedly, so one level-day became up to ~1,700 rows -- each one
+ * selected because the registering bar's own low was already through the level.
+ */
+describe("Phase 1 — one candidate per level per session", () => {
+  /** Day 1 sets PDH 51000 / PDL 49900; every day-2 bar trades through BOTH levels. */
+  function buildBreachSeries(day2Bars: number): PersistedCandle[] {
+    const day1Open = new Date("2026-08-21T03:45:00Z");
+    const day2Open = new Date("2026-08-22T03:45:00Z");
+    const candles: PersistedCandle[] = [];
+    for (let i = 0; i < 12; i++) {
+      candles.push(makeCandle({
+        openTime: new Date(day1Open.getTime() + i * 5 * 60 * 1000),
+        high: "51000",
+        low: "49900",
+      }));
+    }
+    for (let i = 0; i < day2Bars; i++) {
+      candles.push(makeCandle({
+        openTime: new Date(day2Open.getTime() + i * 5 * 60 * 1000),
+        high: "51200", // above PDH on every bar
+        low: "49800", // below PDL on every bar
+      }));
+    }
+    return candles;
+  }
+
+  it("registers a breached PDL exactly once per session (no re-registration on later bars)", () => {
+    const candidates = generateCandidates(buildBreachSeries(60), INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const pdl = candidates.filter((c) => c.poolType === "PDL");
+    const pdh = candidates.filter((c) => c.poolType === "PDH");
+    expect(pdl).toHaveLength(1);
+    expect(pdh).toHaveLength(1);
+    expect(pdl[0]!.price).toBe(49900);
+    expect(pdl[0]!.sessionDate).toBe("2026-08-22");
+  });
+
+  it("does not scale with the number of post-breach bars", () => {
+    const short = generateCandidates(buildBreachSeries(10), INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const long = generateCandidates(buildBreachSeries(70), INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const count = (cs: typeof short, type: string) => cs.filter((c) => c.poolType === type).length;
+    expect(count(long, "PDL")).toBe(count(short, "PDL"));
+    expect(count(long, "PDH")).toBe(count(short, "PDH"));
+  });
+
+  it("marks a PDL that the registering bar itself breached as invalidated, not 'active'", () => {
+    const candidates = generateCandidates(buildBreachSeries(5), INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const pdl = candidates.find((c) => c.poolType === "PDL")!;
+    expect(pdl.invalidatedAtTime).not.toBeNull();
+    expect(pdl.invalidatedAtTime!.getTime()).toBeGreaterThanOrEqual(pdl.knownAtTime.getTime());
+  });
+
+  it("emits no two candidates with the same (pool_type, price, session_date) for any pool type", () => {
+    const candles = buildTwoSessionSeries();
+    const candidates = generateCandidates(candles, INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const keys = candidates.map((c) => `${c.poolType}|${c.price}|${c.sessionDate}`);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("still registers the same PDL price again in a LATER session (a new level-day)", () => {
+    const day3Open = new Date("2026-08-23T03:45:00Z");
+    const series = buildBreachSeries(12);
+    // Day 3: PDL is day 2's low (49800); keep trading through it.
+    for (let i = 0; i < 12; i++) {
+      series.push(makeCandle({
+        openTime: new Date(day3Open.getTime() + i * 5 * 60 * 1000),
+        high: "51200",
+        low: "49700",
+      }));
+    }
+    const candidates = generateCandidates(series, INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    expect(candidates.filter((c) => c.poolType === "PDL").map((c) => c.sessionDate)).toEqual([
+      "2026-08-22",
+      "2026-08-23",
+    ]);
+  });
+});
+
+describe("Phase 1 — idempotent persistence", () => {
+  it("writes candidate_version v2-dedup and conflicts on the partial unique key", () => {
+    const candidates = generateCandidates(buildTwoSessionSeries(), INSTRUMENT_ID, SYMBOL, TIMEFRAME, 5);
+    const { text, values } = buildCandidateInsert(candidates.slice(0, 3), "run-1");
+    expect(text).toContain("ON CONFLICT (instrument_id, timeframe, pool_type, price, session_date)");
+    expect(text).toContain("WHERE candidate_version = 'v2-dedup'");
+    expect(text).toContain("DO NOTHING");
+    expect(values).toHaveLength(3 * 13);
+    expect(values.filter((v) => v === "v2-dedup")).toHaveLength(3);
   });
 });

@@ -1,6 +1,5 @@
 import type { StrategyEvaluator } from "./strategy-registry.js";
 import type { EnsureStrategyVersionInput, ProposedTradeIdea, StrategyMarketContext } from "./strategy.js";
-
 export const hybridLiquidityConfluenceStrategyKey = "hybrid-liquidity-confluence-v1";
 // Bumped 1 -> 2: version 1's stored configuration ({"minDiDecay": 0.15, "minLongPcr": 1.2,
 // "maxShortPcr": 0.8, "minRawDiOfi": 0.05, "minIvPercentile": 15}, registered 2026-09-28) predates
@@ -14,7 +13,7 @@ export const hybridLiquidityConfluenceStrategyVersion = 2;
 export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: hybridLiquidityConfluenceStrategyKey,
   name: "Hybrid Liquidity Confluence Strategy",
-  description: "3-Pillar institutional engine combining L2 depth imbalance, Cont-Kukanov-Stoikov OFI, and Option Chain OI walls.",
+  description: "3-Pillar engine combining causally-standardised L2 depth imbalance, a static depth-imbalance confirmation (not CKS OFI), and Option Chain OI walls. Disabled (no executable sides).",
   version: hybridLiquidityConfluenceStrategyVersion,
   configuration: {},
 };
@@ -25,8 +24,15 @@ export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersio
  * 3-Pillar Institutional Trading Strategy:
  * 1. Pillar A: Structural Liquidity Level Sweep (PDH/PDL, Swing High/Low, Session High/Low)
  *              + Decaying L2 Depth Imbalance (DI_decay > 0.10).
- * 2. Pillar B: Cont-Kukanov-Stoikov Order Flow Imbalance (OFI) Aggressor Flow.
+ * 2. Pillar B: STATIC depth-imbalance confirmation (raw total-book DI agrees with the Pillar A direction).
+ *              This is NOT order-flow imbalance: it is a level (snapshot) measure of resting depth, not
+ *              the Cont-Kukanov-Stoikov flow of queue changes (see `cks_ofi_touch.py` for the real OFI).
  * 3. Pillar C: Option Chain Open Interest (OI) Put/Call Ratio Wall (PCR >= 1.2 for LONG, <= 0.8 for SHORT).
+ *
+ * NOTE (2026-10-10): `di_tilde` is now the causally standardised (trailing-mean-detrended) DI from
+ * `orderbook-directional-gate.ts`, so the 0.10 threshold below -- validated on the UN-standardised
+ * raw DI -- is an unvalidated carry-over on the new scale. This strategy is disabled
+ * (`executableSides: []`) and must not be enabled without re-validating it.
  *
  * Pillar A threshold fixed 2026-09-28: this code gated at 0.10 while the docstring (until this
  * revision) and `apps/ml/run_hybrid_confluence_backtest.py` both said 0.15 -- a real mismatch
@@ -65,10 +71,18 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
 
     if (!proposedSide) return [];
 
-    // Pillar B: Institutional Order Flow Imbalance (OFI Aggressor Flow)
-    // Check price action / indicator flow or raw_di confirmation
-    const rawDi = confluence?.raw_di ?? 0;
-    const isOfiAligned = proposedSide === "LONG" ? rawDi >= 0.05 : rawDi <= -0.05;
+    // Pillar B: STATIC depth-imbalance confirmation (not OFI -- a snapshot level, not queue flow).
+    //
+    // One sign convention for BOTH pillars and BOTH sides: the validated ORDERBOOK-01 convention
+    // `di_tilde = -DI`, where a positive value supports the direction `gate_action` already encodes
+    // (BUY_CALL_OR_LONG at a support, BUY_PUT_OR_SHORT at a resistance / PDL sweep). Pillar A reads it
+    // causally standardised (`di_tilde`); Pillar B reads the same signed quantity on the raw,
+    // un-standardised book (`-raw_di`). Before 2026-10-10 Pillar B demanded `raw_di >= +0.05` for LONG
+    // while Pillar A had already required `di_tilde = -raw_di > 0.10`, so LONG could never fire.
+    // A missing raw_di is unconfirmed (null), never a defaulted 0.
+    const rawDi = confluence?.raw_di ?? null;
+    const signedRawDi = rawDi === null ? null : -rawDi;
+    const isDepthImbalanceAligned = signedRawDi !== null && signedRawDi >= 0.05;
 
     // Pillar C: Option Chain Open Interest (OI) Put/Call Ratio Wall Check.
     //
@@ -78,8 +92,28 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
     // set, so it was always `true` -- Pillar C never rejected a single proposal. `pcr === null`
     // (no snapshot yet, or the nearest one older than `optionChainSignal.ageMinutes`'s ceiling)
     // is treated as unconfirmed, not as a pass.
-    const pcr = context.optionChainSignal?.pcr ?? null;
-    if (!isOfiAligned || pcr === null) {
+    //
+    // The PCR is a WINDOWED ratio (put OI / call OI over the collector's +/-strikecount strikes around
+    // spot, for the nearest un-settled expiry), not a whole-chain PCR; `pcrWindowed` is the honest
+    // name and `pcr` the same value kept for stored-JSON consumers. When Pillars A and B have both
+    // passed and only the PCR is missing, the reason ("PCR unavailable (stale)" etc.) is logged
+    // explicitly instead of the proposal vanishing silently.
+    const optionChainSignal = context.optionChainSignal;
+    const pcr = optionChainSignal?.pcr ?? null;
+    if (isDepthImbalanceAligned && pcr === null) {
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: optionChainSignal?.unavailableMessage ?? "PCR unavailable (no option-chain signal was resolved)",
+        strategyKey: this.strategyKey,
+        pillarC: "UNCONFIRMED",
+        proposedSide,
+        unavailableReason: optionChainSignal?.unavailableReason ?? "NO_SIGNAL",
+        ageMinutes: optionChainSignal?.ageMinutes ?? null,
+        expiryDate: optionChainSignal?.expiryDate ?? null,
+        candleCloseTime: candle.closeTime,
+      }));
+    }
+    if (!isDepthImbalanceAligned || pcr === null) {
       return [];
     }
     const oiWallConfirmed = proposedSide === "LONG" ? pcr >= 1.2 : pcr <= 0.8;
@@ -102,11 +136,15 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
       ? Number((entryPrice + rewardDistance).toFixed(2))
       : Number((entryPrice - rewardDistance).toFixed(2));
 
-    const confidence = Math.min(95, Math.round(85 + diTilde * 10));
+    // Confidence is on the repo-wide 0-1 scale (every other strategy clamps to [0, 1], and
+    // `applyOrderbookGateToProposal` / the options-entry validator both assume it). This used to be
+    // 85-95 on a 0-100 scale, which any downstream [0, 1] clamp would have flattened to 1.0.
+    // Unvalidated heuristic: 0.85 base + 0.10 per unit of di_tilde, capped at 0.95.
+    const confidence = Math.min(0.95, Math.round((0.85 + diTilde * 0.10) * 100) / 100);
 
     const reasoning = [
       `[Pillar A PASS] Structural sweep at ${nearestLevelType} with Decaying Depth Imbalance DI_tilde=${diTilde.toFixed(4)}.`,
-      `[Pillar B PASS] Order Flow Aggressor flow confirmed (raw_di=${rawDi.toFixed(4)}).`,
+      `[Pillar B PASS] Static depth imbalance (not OFI) agrees with ${proposedSide} (signed raw DI=${(signedRawDi ?? 0).toFixed(4)}).`,
       `[Pillar C PASS] Option Chain PCR wall confirmed for ${proposedSide} (pcr=${pcr.toFixed(4)}).`,
     ];
 
@@ -121,7 +159,9 @@ export class HybridLiquidityConfluenceStrategy implements StrategyEvaluator {
       evidence: {
         strategyKey: this.strategyKey,
         pillarA: { nearestLevelType, diTilde, bias },
-        pillarB: { rawDi, isOfiAligned },
+        pillarB: { kind: "STATIC_DEPTH_IMBALANCE", rawDi, signedRawDi, isDepthImbalanceAligned },
+        // `pcr` is the WINDOWED ratio (see Pillar C above). Shape unchanged for stored-JSON consumers;
+        // the windowed/expiry/scope detail lives on `context.optionChainSignal` in the captured context.
         pillarC: { pcr, oiWallConfirmed },
       },
       expiresAt: new Date(candle.closeTime.getTime() + 15 * 60 * 1000), // 15-minute expiration

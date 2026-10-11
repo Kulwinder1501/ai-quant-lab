@@ -1,3 +1,5 @@
+import { isFlatBar } from "../../../market-data/domain/flat-bar.js";
+
 /**
  * Incremental Wilder ATR, computed bar-by-bar like every other tracker in this module
  * (`IctStructureTracker`, `IctZoneLedger`, `IctSessionLevelTracker`, `CisdTracker`) rather than
@@ -22,8 +24,23 @@ export class IctAtrTracker {
     this.period = period;
   }
 
-  /** Returns the current ATR after folding in this candle, or null while still warming up. */
-  processCandle(candle: { readonly high: number; readonly low: number; readonly close: number }): number | null {
+  /**
+   * Returns the current ATR after folding in this candle, or null while still warming up.
+   *
+   * A frozen-feed bar (`high == low && volume == 0`, see `flat-bar.ts`) is not folded in: the
+   * average and the prior close stay as they were and the current ATR is returned unchanged.
+   * `volume` is optional; when a caller does not supply it the bar is never treated as flat.
+   *
+   * The first bar of a session uses the prior session's close, so its true range can exceed its
+   * own high-low range. That is the Wilder definition and is intentional.
+   */
+  processCandle(candle: {
+    readonly high: number;
+    readonly low: number;
+    readonly close: number;
+    readonly volume?: number;
+  }): number | null {
+    if (isFlatBar(candle)) return this.average;
     const trueRange =
       this.previousClose === null
         ? candle.high - candle.low

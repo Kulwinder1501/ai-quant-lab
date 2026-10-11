@@ -144,6 +144,19 @@ const SCAN_SYMBOLS = ["NIFTY50", "BANKNIFTY"] as const;
  * pre-registered backtest that was already ruled unreliable.
  */
 const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
+
+/**
+ * Series excluded from idea generation outright, even though both their symbol and timeframe are
+ * otherwise scanned.
+ *
+ * `NIFTY50 1m`: no bot has ever owned this cell (`momentum-scalp`, the only 1m-capable strategy, is
+ * scoped to `BANKNIFTY 1m`/`BANKNIFTY 5m`/`NIFTY50 5m` via `AutoBot-Scalp1m`'s `allowedSeries` --
+ * see bot-sandboxes.ts), so every idea this cell raised was pure noise on the Strategy & Ideas
+ * proposals grid: a signal nothing could ever act on, indistinguishable there from one a bot would
+ * take. Removed on request rather than left to accumulate the way `trend-breakout` and
+ * (pre-2026-09-03) `momentum-scalp` did.
+ */
+const DISABLED_SERIES = new Set(["NIFTY50:1m"]);
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;
@@ -340,6 +353,10 @@ async function main(): Promise<void> {
         if (!instrument) continue;
 
         for (const timeframe of SCAN_TIMEFRAMES) {
+          if (DISABLED_SERIES.has(`${symbol}:${timeframe}`)) {
+            continue;
+          }
+
           const latest = await database.query<{ close_time: Date }>(
             `SELECT close_time FROM candles
              WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE

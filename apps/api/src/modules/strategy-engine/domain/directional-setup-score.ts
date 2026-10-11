@@ -89,7 +89,11 @@ export interface DirectionalSetupInput {
   livePrice: number;
   bollingerUpper: number;
   bollingerLower: number;
-  /** The most recent pattern, or null. Ignored below the certainty floor. */
+  /**
+   * The one directional pattern chosen for this bar (see `selectDirectionalPattern`), or null.
+   * `confidence` is the engine's uncalibrated rule-strength score. Ignored below the certainty
+   * floor, and NEUTRAL patterns contribute nothing.
+   */
   pattern: { code: string; direction: string; confidence: number } | null;
   /**
    * The institutional-flow verdict **per thesis**.
@@ -246,11 +250,18 @@ function scoreThesis(
 
   // --- Pattern evidence -----------------------------------------------------------------
   // The one genuinely symmetric input: the pattern engine publishes a direction, and agreeing
-  // with it is not a new claim in either direction.
-  if (pattern && pattern.confidence >= PATTERN_CERTAINTY_FLOOR) {
-    const agrees = long ? pattern.direction !== "BEARISH" : pattern.direction === "BEARISH";
-    add(agrees ? 20 : -20, `Detected ${pattern.code} (${pattern.direction}) with `
-      + `${(pattern.confidence * 100).toFixed(0)}% algorithmic certainty.`);
+  // with it is not a new claim in either direction. A BULLISH pattern agrees with a long and
+  // conflicts with a short; a BEARISH pattern the reverse; both at the same +/-20. A NEUTRAL
+  // pattern (DOJI, INSIDE_BAR, SPINNING_TOP, ...) is indecision and says nothing about direction,
+  // so it contributes 0 and no reason line. It used to count as "agreeing" with every long
+  // (`direction !== "BEARISH"`) while never agreeing with a short, handing every long +20 on
+  // any doji -- whose heuristic score is always >= 0.9 -- and making the input asymmetric.
+  if (pattern && pattern.confidence >= PATTERN_CERTAINTY_FLOOR
+    && (pattern.direction === "BULLISH" || pattern.direction === "BEARISH")) {
+    const agrees = long ? pattern.direction === "BULLISH" : pattern.direction === "BEARISH";
+    add(agrees ? 20 : -20, `Detected ${pattern.code} (${pattern.direction}), heuristic strength `
+      + `${pattern.confidence.toFixed(2)} (an uncalibrated rule-fit score, not a probability), `
+      + `${agrees ? "agreeing with" : "conflicting with"} a ${side} thesis.`);
   }
 
   // --- Institutional flow ---------------------------------------------------------------

@@ -70,15 +70,16 @@ describe("PostgresDashboardQueryRepository.listTradeIdeas strategy filter", () =
     expect(params[1]).toEqual(["momentum-scalp", "momentum-scalp-index"]);
   });
 
-  it("omits the filter when the list parses to nothing", async () => {
+  it("omits the strategy predicate when the list parses to nothing", async () => {
     const { text, params } = await listWith(",, ,");
 
     // Matches how the route already treats `strategy=`, which `strategy || undefined` turns into no
     // filter at all. Binding an empty array instead would return zero rows for a caller that asked
     // for no particular strategy.
-    // `s.strategy_key` still appears in the SELECT list, so the assertion is that no predicate was
-    // built at all: with includeExpired and no date, an omitted strategy leaves zero conditions.
-    expect(text).not.toContain("WHERE");
+    // `s.strategy_key` still appears in the SELECT list, so the assertion is that no *strategy*
+    // predicate was built: with includeExpired and no date, an omitted strategy leaves only the
+    // permanent NIFTY50-1m exclusion (see listTradeIdeas), which binds no parameter of its own.
+    expect(text).toContain("WHERE NOT (i.symbol = 'NIFTY50' AND c.timeframe = '1m')");
     expect(text).not.toContain("ANY(");
     expect(params).toEqual([100]);
   });

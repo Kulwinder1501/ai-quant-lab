@@ -46,6 +46,9 @@ services:
       # Twelve Data: the market-data vendor behind XAU_USD, since Fyers/Kite are India-only
       # brokers with no segment for it and OANDA does not accept Indian-resident accounts.
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
+      OANDA_ACCESS_TOKEN: ${OANDA_ACCESS_TOKEN:-}
+      OANDA_ENVIRONMENT: ${OANDA_ENVIRONMENT:-practice}
       NSE_HOLIDAYS: ${NSE_HOLIDAYS:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       API_MUTATION_RATE_LIMIT: ${API_MUTATION_RATE_LIMIT:-120}
@@ -90,6 +93,9 @@ services:
       # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
       # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
+      OANDA_ACCESS_TOKEN: ${OANDA_ACCESS_TOKEN:-}
+      OANDA_ENVIRONMENT: ${OANDA_ENVIRONMENT:-practice}
       # Kill switch for the gold bot's live entries, same shape as ORDERBOOK01_LIVE_GATE_ENABLED
       # above: `ict-structure-v1` has zero validation on XAU_USD (its only evidence is
       # TERMINAL_UNOWNED sign-instability on NIFTY50/BANKNIFTY). Default false: PAPER_TRADING_BOT_GOLD

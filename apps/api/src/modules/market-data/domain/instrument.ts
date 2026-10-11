@@ -2,9 +2,13 @@ export const instrumentTypes = ["INDEX", "EQUITY", "ETF", "OPTION", "FUTURE"] as
 export type InstrumentType = (typeof instrumentTypes)[number];
 export type OptionType = "CE" | "PE";
 
+/** Single source of truth for the venues an instrument can be stored under (CLIs validate against it). */
+export const instrumentExchanges = ["NSE", "NFO", "BSE", "TWELVEDATA", "OANDA"] as const;
+export type InstrumentExchange = (typeof instrumentExchanges)[number];
+
 export interface Instrument {
   id: string;
-  exchange: "NSE" | "NFO" | "BSE" | "TWELVEDATA" | "OANDA";
+  exchange: InstrumentExchange;
   symbol: string;
   displayName: string;
   instrumentType: InstrumentType;

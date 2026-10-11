@@ -93,9 +93,20 @@ export class DepthFrameBuffer {
       isSnapshot: frame.isSnapshot,
     });
 
-    // A regression must not move the marker backwards: a late-arriving stale frame would otherwise
-    // make every subsequent frame look like a huge forward gap.
-    if (frame.sequenceNo !== null && !classification.isRegression) {
+    // The marker ALWAYS follows the last stored usable sequence number, INCLUDING after a
+    // regression (a sequence reset). Until 2026-10-10 a regression was not allowed to move the
+    // marker backwards, to stop a late stale frame from making every later frame look like a huge
+    // forward gap. The cost was far worse: after a feed restart that resets the sequence WITHOUT a
+    // snapshot, the marker stayed at the old high-water mark, so EVERY later frame of the session was
+    // classed as a regression (29,954 frames on 2026-09-11) and research that drops
+    // `is_regression` lost the whole session.
+    //
+    // Re-basing flags only the reset frame itself as the break; the frames after it chain normally.
+    // Trade-off, stated plainly: a single genuinely stale out-of-order frame now also re-bases, so
+    // the next in-order frame is reported with a (conservative) forward gap of however far the
+    // stale frame lagged -- a visible, chain-breaking false gap rather than a silent whole-session
+    // false regression. The two cases cannot be told apart at arrival time.
+    if (frame.sequenceNo !== null && Number.isFinite(frame.sequenceNo) && frame.sequenceNo >= 0) {
       this.lastStoredSequence.set(frame.providerSymbol, frame.sequenceNo);
     }
 

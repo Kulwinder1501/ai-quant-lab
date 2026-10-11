@@ -379,3 +379,159 @@ def test_qualified_zone_staleness_forces_rearm():
     candles.append(make_bar(20, timestamps[19], 117, 119, 108, 109, timestamps[19]))  # latest, close 109 < resistance 110 (no MSS cascade yet)
     engine.process_new_candle(candles, resistance, None, atr, timestamps[19])
     assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+
+# ---------------------------------------------------------------------------------------------
+# 2026-10-10 realignment regression tests: anchor extension, pre-POI invalidation, both
+# qualification floors, fractal width. Each of these failed (or was unreachable) before.
+# ---------------------------------------------------------------------------------------------
+
+def _bullish_engine_at_mss(sample_artifact, pivot_width: int = 1):
+    """Canonical scenario: pivot low 100 (bar 8), MSS bar 11 closing 195 > 110 with high 200."""
+    engine = StatefulPITFibEngine(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=pivot_width)
+    timestamps = [100000 + i * 1000 for i in range(20)]
+    candles = [
+        make_bar(1, timestamps[0], 100, 101, 99, 100, timestamps[0]),
+        make_bar(2, timestamps[1], 100, 101, 99, 100, timestamps[1]),
+        make_bar(3, timestamps[2], 100, 101, 99, 100, timestamps[2]),
+        make_bar(4, timestamps[3], 100, 101, 99, 100, timestamps[3]),
+        make_bar(5, timestamps[4], 100, 101, 99, 100, timestamps[4]),
+        make_bar(6, timestamps[5], 100, 101, 99, 100, timestamps[5]),
+        make_bar(7, timestamps[6], 102, 103, 102, 102, timestamps[6]),
+        make_bar(8, timestamps[7], 99, 100, 100, 100, timestamps[7]),   # pivot low 100
+        make_bar(9, timestamps[8], 101, 105, 102, 104, timestamps[8]),
+        make_bar(10, timestamps[9], 104, 110, 103, 108, timestamps[9]),
+    ]
+    resistance = StructuralLevel(levelPrice=110.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[9])
+    assert engine.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+    candles.append(make_bar(11, timestamps[10], 115, 200, 114, 195, timestamps[10]))
+    engine.process_new_candle(candles, resistance, None, atr, timestamps[10])
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.anchor_high == 200
+    return engine, candles, resistance, atr, timestamps
+
+
+def _process(engine, candles, resistance, atr, ts, seq, o, h, l, c, retr_low=None):
+    candles.append(make_bar(seq, ts, o, h, l, c, ts))
+    retr = RetracementObservation(low=retr_low, sequenceNumber=seq, observedAt=ts, availableAt=ts) if retr_low is not None else None
+    return engine.process_new_candle(candles[-20:], resistance, retr, atr, ts)
+
+
+def test_new_high_after_qualification_reanchors_and_supersedes_the_stale_poi(sample_artifact):
+    """
+    The original engine froze the anchor on the first pause and then measured zones against that
+    frozen leg for up to maxQualifiedLifetimeBars bars even after price ran far past it (real
+    NIFTY50 5m: >5 ATR past the anchor in 38% of qualified POIs). A new high must re-anchor.
+    """
+    engine, candles, res, atr, ts = _bullish_engine_at_mss(sample_artifact)
+    _process(engine, candles, res, atr, ts[11], 12, 195, 196, 135, 136, retr_low=135.0)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.active_poi.anchorHigh == 200
+    stale_gp_price = 138.0  # r = 0.62 against the original 100-200 leg
+    assert engine.evaluate_location(stale_gp_price, ts[11] + 5000)[1] == "GOLDEN_POCKET"
+
+    # Price makes a new high of 210: the leg extended.
+    _process(engine, candles, res, atr, ts[12], 13, 136, 210, 136, 205)
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.active_poi is None
+    assert engine.poi_qualified_seq is None
+    assert engine.anchor_high == 210
+    assert engine.event_history[-1]["eventType"] == "ANCHOR_EXTENDED"
+    assert engine.evaluate_location(stale_gp_price, ts[12] + 5000) == (False, "NONE")
+
+    # The next pullback qualifies a NEW poi measured from 210.
+    _process(engine, candles, res, atr, ts[13], 14, 205, 206, 150, 151, retr_low=150.0)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+    assert engine.active_poi.anchorHigh == 210
+    assert engine.poi_qualified_seq == 14
+    # r = (210 - 141.8) / 110 = 0.62
+    assert engine.evaluate_location(141.8, ts[13] + 5000)[1] == "GOLDEN_POCKET"
+    # The old zone price is now outside every zone: r = (210 - 138) / 110 = 0.6545
+    assert engine.evaluate_location(stale_gp_price, ts[13] + 5000) == (False, "NONE")
+
+
+def test_break_of_pivot_low_before_any_poi_invalidates(sample_artifact):
+    """With re-anchoring a leg can live many bars, so the pivot-low stop must apply before a POI exists."""
+    engine, candles, res, atr, ts = _bullish_engine_at_mss(sample_artifact)
+    assert engine.active_poi is None
+    # Pivot low is 100: stop = 100 - 2 ticks = 99.90. A low of 99.85 breaks it.
+    _, status = _process(engine, candles, res, atr, ts[11], 12, 150, 151, 99.85, 100)
+    assert status == "INVALIDATED"
+    assert engine.state == FibLifecycleState.IDLE
+
+
+def test_qualification_needs_both_the_tick_floor_and_the_atr_floor(sample_artifact):
+    """
+    `or` let the 10-tick floor (0.5 index points) qualify any one-bar pause: median MSS-to-
+    qualification was 2 bars. A 0.6-point pullback is 12 ticks but only 0.3 ATR (ATR 2.0).
+    """
+    engine, candles, res, atr, ts = _bullish_engine_at_mss(sample_artifact)
+    _process(engine, candles, res, atr, ts[11], 12, 195, 199.9, 199.4, 199.6, retr_low=199.4)
+    assert engine.state == FibLifecycleState.ANCHOR_HIGH_FORMED
+    assert engine.active_poi is None
+    # A real pullback (2.0 points = 40 ticks = 1.0 ATR) does qualify.
+    _process(engine, candles, res, atr, ts[12], 13, 199, 199.5, 198.0, 198.5, retr_low=198.0)
+    assert engine.state == FibLifecycleState.RETRACEMENT_QUALIFIED
+
+
+def test_extension_while_waiting_for_a_qualifying_pullback_keeps_tracking_the_leg(sample_artifact):
+    engine, candles, res, atr, ts = _bullish_engine_at_mss(sample_artifact)
+    _process(engine, candles, res, atr, ts[11], 12, 195, 199.9, 199.4, 199.6, retr_low=199.4)
+    assert engine.state == FibLifecycleState.ANCHOR_HIGH_FORMED
+    _process(engine, candles, res, atr, ts[12], 13, 199.6, 205, 199.5, 204)
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.anchor_high == 205
+
+
+def test_a_leg_that_keeps_extending_does_not_time_out(sample_artifact):
+    """The 20-bar post-MSS window is measured from the latest extension, not frozen at the MSS bar."""
+    engine, candles, res, atr, ts = _bullish_engine_at_mss(sample_artifact)
+    price = 200.0
+    for seq in range(12, 32):  # 20 consecutive higher highs, beyond maxWindowBars=20 from the MSS
+        price += 2.0
+        t = 100000 + (seq - 1) * 1000
+        _, status = _process(engine, candles, res, atr, t, seq, price - 1, price, price - 1.5, price - 0.5)
+        assert status == "UPDATED"
+    assert engine.state == FibLifecycleState.IMPULSE_TRACKING
+    assert engine.anchor_high == price
+
+
+def test_fractal_width_two_ignores_a_one_bar_wiggle_and_finds_a_real_five_bar_pivot(sample_artifact):
+    base = [
+        make_bar(i + 1, 100000 + i * 1000, 100, 101, 99, 100, 100000 + i * 1000) for i in range(6)
+    ]
+    resistance = StructuralLevel(levelPrice=110.0, sequenceNumber=1, sourceTimestamp=100000, availableAt=100000)
+    atr = ATRObservation(atr14=2.0, sourceTimestamp=100000, availableAt=100000)
+
+    # 3-bar fractal at bar 8 (low 95) but bar 7 (low 98) is NOT below its two neighbours' wings.
+    wiggle = base + [
+        make_bar(7, 106000, 100, 101, 98, 100, 106000),
+        make_bar(8, 107000, 99, 100, 95, 96, 107000),
+        make_bar(9, 108000, 96, 98, 97, 97, 108000),
+        make_bar(10, 109000, 97, 99, 98, 98, 109000),
+    ]
+    narrow = StatefulPITFibEngine(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=1)
+    narrow.process_new_candle(wiggle, resistance, None, atr, 109000)
+    assert narrow.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+    wide = StatefulPITFibEngine(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=2)
+    wide.process_new_candle(wiggle, resistance, None, atr, 109000)
+    assert wide.state == FibLifecycleState.IDLE  # candles[-4] (low 98) is not below the two bars to its right
+
+    # Lows 99, 98, [95], 96, 97, then the decision bar: a genuine 5-bar fractal at index 6 (bar 7).
+    real = base[:4] + [
+        make_bar(5, 104000, 100, 101, 99, 100, 104000),
+        make_bar(6, 105000, 100, 101, 98, 100, 105000),
+        make_bar(7, 106000, 99, 100, 95, 96, 106000),    # pivot, width 2
+        make_bar(8, 107000, 96, 98, 96, 97, 107000),
+        make_bar(9, 108000, 97, 99, 97, 98, 108000),
+        make_bar(10, 109000, 98, 100, 98, 99, 109000),   # decision bar
+    ]
+    wide2 = StatefulPITFibEngine(fib_artifact=sample_artifact, tick_size=0.05, pivot_width=2)
+    wide2.process_new_candle(real, resistance, None, atr, 109000)
+    assert wide2.state == FibLifecycleState.PIVOT_CANDIDATE_DETECTED
+    assert wide2.pending_pivot_low == 95
+    assert wide2.pending_pivot_seq == 7
+    # formedAt (the pivot bar) precedes candidateAt (the last bar of its right wing).
+    assert wide2.pivot_formed_time == 106000
+    assert wide2.pending_pivot_time == 108000
