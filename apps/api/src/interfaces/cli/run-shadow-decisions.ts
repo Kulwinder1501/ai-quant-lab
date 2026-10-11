@@ -10,6 +10,7 @@ import { PostgresInstitutionalFlowRepository } from "../../infrastructure/databa
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { PostgresDecisionPipelineLedger } from "../../infrastructure/database/repositories/postgres-decision-pipeline-ledger.js";
 import { runDecisionPipeline } from "../../modules/autonomous-v2/domain/decision-pipeline.js";
+import { resolveDecisionAttempt } from "../../modules/autonomous-v2/domain/decision-identity.js";
 import { buildDecisionPipelineInput } from "../../modules/autonomous-v2/application/decision-pipeline-input.js";
 import { canonicalDecisionPipelineOutcome } from "../../modules/autonomous-v2/application/decision-pipeline-comparison.js";
 import {
@@ -256,6 +257,16 @@ async function main(): Promise<void> {
     const session = new NseMarketSession();
     const records: Record<string, unknown>[] = [];
 
+    // Where a decision id stands in the ledger, so a repeated run on a bar that already settled is
+    // skipped instead of decided again. See decision-identity.ts.
+    const lastStateOf = async (decisionId: string): Promise<string | null> => {
+      const result = await database.query<{ state_to: string }>(
+        "SELECT state_to FROM decision_ledger WHERE aggregate_id = $1 ORDER BY aggregate_version DESC LIMIT 1",
+        [decisionId],
+      );
+      return result.rows[0]?.state_to ?? null;
+    };
+
     for (const symbol of [...new Set(symbols)]) {
       const instrument = await instrumentRepository.findByExchangeAndSymbol("NSE", symbol);
       if (!instrument) {
@@ -431,69 +442,85 @@ async function main(): Promise<void> {
          * already works.
          */
         try {
-          const institutionalFlow = await institutionalFlowRepository.findLatest({ withinDays: 7 });
-          const volatilityReading = await contextRepository.findRawVolatilityReading({
-            instrumentId: instrument.id,
-            timeframe: latest.candle.timeframe,
-            closeTime: latest.candle.closeTime,
-          });
-          const pipelineOptionChain = await optionChainRepository.latestSnapshot({
-            underlyingSymbol: symbol,
-            asOf: latest.candle.closeTime,
-          });
-          const pipelineExecutionChain = await optionChainRepository.latestSnapshot({ underlyingSymbol: symbol });
-
-          const pipelineInput = buildDecisionPipelineInput({
-            decisionId: randomUUID(),
-            instrumentSymbol: symbol,
-            instrumentTickSize: instrument.tickSize,
-            instrumentLotSize: instrument.lotSize,
-            latestClose: latest.candle.close,
-            latestCloseTime: latest.candle.closeTime,
-            evaluationAt: knownAt,
-            snapshotInstants: snapshot.instants,
-            observedIn: snapshot.ref,
-            indicators: latest.indicators,
-            legacyPatterns: latest.patterns,
-            patternsComputed: coverage.patternsComputed,
-            volatilityReading,
-            institutionalFlow,
-            optionChain: pipelineOptionChain,
-            executionChain: pipelineExecutionChain,
-          });
-
-          const pipelineRun = runDecisionPipeline(pipelineInput);
-          await decisionPipelineLedger.append(pipelineRun);
-
-          const pipelineV2 = comparableAction(canonicalDecisionPipelineOutcome(pipelineRun));
-          const pipelineRecorded = await observations.record({
-            observation: {
-              comparisonKey: `${symbol}@${latest.candle.timeframe}@${latest.candle.closeTime.toISOString()}`,
-              legacySnapshotRef: sealed.snapshotId,
-              v2SnapshotRef: sealed.snapshotId,
-              legacyOutcome: legacy.action,
-              v2Outcome: pipelineV2.action,
-            },
-            comparisonVersion: thesisComparisonVersion,
-            producerId: "native-pipeline",
-            legacyDetail: legacy.detail,
-            v2Detail: pipelineV2.detail,
-          });
-
-          records.push({
+          const pipelineIdentity = await resolveDecisionAttempt({
+            path: "native-pipeline",
             symbol,
-            timeframe,
-            producer: "native-pipeline",
-            decisionId: pipelineRun.decisionId,
-            legacyAction: legacy.action,
-            legacyReason: legacy.detail || null,
-            agreed: legacy.action === pipelineV2.action,
-            observationRecorded: pipelineRecorded,
-            barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
-            outcome: pipelineRun.outcome.kind,
-            contextSnapshotId: sealed.snapshotId.slice(0, 12),
-            tapeLiveness: tape.liveness,
-          });
+            timeframe: latest.candle.timeframe,
+            barCloseTime: latest.candle.closeTime,
+          }, lastStateOf);
+          if (pipelineIdentity.kind !== "DECIDE") {
+            records.push({
+              symbol,
+              timeframe,
+              producer: "native-pipeline",
+              skipped: pipelineIdentity.kind,
+              barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+            });
+          } else {
+            const institutionalFlow = await institutionalFlowRepository.findLatest({ withinDays: 7 });
+            const volatilityReading = await contextRepository.findRawVolatilityReading({
+              instrumentId: instrument.id,
+              timeframe: latest.candle.timeframe,
+              closeTime: latest.candle.closeTime,
+            });
+            const pipelineOptionChain = await optionChainRepository.latestSnapshot({
+              underlyingSymbol: symbol,
+              asOf: latest.candle.closeTime,
+            });
+            const pipelineExecutionChain = await optionChainRepository.latestSnapshot({ underlyingSymbol: symbol });
+
+            const pipelineInput = buildDecisionPipelineInput({
+              decisionId: pipelineIdentity.decisionId,
+              instrumentSymbol: symbol,
+              instrumentTickSize: instrument.tickSize,
+              instrumentLotSize: instrument.lotSize,
+              latestClose: latest.candle.close,
+              latestCloseTime: latest.candle.closeTime,
+              evaluationAt: knownAt,
+              snapshotInstants: snapshot.instants,
+              observedIn: snapshot.ref,
+              indicators: latest.indicators,
+              legacyPatterns: latest.patterns,
+              patternsComputed: coverage.patternsComputed,
+              volatilityReading,
+              institutionalFlow,
+              optionChain: pipelineOptionChain,
+              executionChain: pipelineExecutionChain,
+            });
+
+            const pipelineRun = runDecisionPipeline(pipelineInput);
+            await decisionPipelineLedger.append(pipelineRun);
+
+            const pipelineV2 = comparableAction(canonicalDecisionPipelineOutcome(pipelineRun));
+            const pipelineRecorded = await observations.record({
+              observation: {
+                comparisonKey: `${symbol}@${latest.candle.timeframe}@${latest.candle.closeTime.toISOString()}`,
+                legacySnapshotRef: sealed.snapshotId,
+                v2SnapshotRef: sealed.snapshotId,
+                legacyOutcome: legacy.action,
+                v2Outcome: pipelineV2.action,
+              },
+              comparisonVersion: thesisComparisonVersion,
+              producerId: "native-pipeline",
+              legacyDetail: legacy.detail,
+              v2Detail: pipelineV2.detail,
+            });
+
+            records.push({
+              symbol,
+              timeframe,
+              producer: "native-pipeline",
+              decisionId: pipelineRun.decisionId,
+              legacyAction: legacy.action,
+              legacyReason: legacy.detail || null,
+              agreed: legacy.action === pipelineV2.action,
+              observationRecorded: pipelineRecorded,
+              barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+              outcome: pipelineRun.outcome.kind,
+              contextSnapshotId: sealed.snapshotId.slice(0, 12),
+              tapeLiveness: tape.liveness,
+            });
+          }
         } catch (error) {
           records.push({
             symbol,
@@ -505,8 +532,25 @@ async function main(): Promise<void> {
         }
 
         for (const producer of selected) {
+          const shadowIdentity = await resolveDecisionAttempt({
+            path: producer.producerId,
+            symbol,
+            timeframe: latest.candle.timeframe,
+            barCloseTime: latest.candle.closeTime,
+          }, lastStateOf);
+          if (shadowIdentity.kind !== "DECIDE") {
+            records.push({
+              symbol,
+              timeframe,
+              producer: producer.producerId,
+              skipped: shadowIdentity.kind,
+              barCloseAt: latest.candle.closeTime.toLocaleTimeString("en-GB", { timeZone: IST }),
+            });
+            continue;
+          }
+
           const record = await runShadowDecision({
-            decisionId: randomUUID(),
+            decisionId: shadowIdentity.decisionId,
             gate: {
               snapshot,
               tapeLiveness: tape.liveness,

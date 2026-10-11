@@ -529,11 +529,54 @@ async function main(): Promise<void> {
    *
    * Cost measured before adding them, because this helper rescans the full completed series on
    * every invocation and that is what once let a per-minute job reach 330 concurrent runs: 5m is
-   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. Four passes at a
-   * fifteen-minute cadence is well inside the 20-minute abandoned-claim horizon for this job.
+   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. That cost was measured
+   * for a fifteen-minute cadence; 1m and 5m now run every five minutes -- see the next block.
    */
-  cronSchedule("*/15 9-15 * * 1-5", () => {
-    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
+  /*
+   * Pattern detection for the 1m and 5m series runs every five minutes, immediately ahead of the
+   * shadow decision pass in the same tick; 15m stays on the quarter hour.
+   *
+   * It used to run every fifteen minutes for all three timeframes while `SHADOW_DECISION` decided a
+   * fresh 1m and 5m bar every five. A bar closing off the quarter hour had no pattern coverage yet,
+   * so V2.2's opportunity resolver deferred it (`PATTERN_LAYER_NOT_COMPUTED`) and nothing ever
+   * retried it. Measured 2026-10-11 over the ledger since Oct 1: every decision at :04, :05, :09,
+   * :10 and :14 deferred (about 69% of resolved candidates), and even at the :00 mark 106 of 302
+   * deferred because detection and the shadow pass started together.
+   *
+   * Detection is deterministic for a closed bar -- every engine reads indices at or before the bar --
+   * so running it sooner changes when the layer becomes available, never what it contains.
+   *
+   * Sequenced with `await`, not fired as independent `void schedule(...)` calls: that is the
+   * read-before-write race this closes, the same one the XAU block's own comment describes. The
+   * shadow pass runs whether or not detection succeeded, because a deferral recorded honestly is
+   * better than a missing decision, and `schedule()` already contains a failed run.
+   *
+   * Cost: 1m + 5m for both indices measured about 25s on average (77s worst) per run, well inside
+   * the five-minute cadence and the 3-minute (1m) / 7-minute (5m) bar-age ceilings the shadow pass
+   * enforces.
+   *
+   * Side effect to know about: the same pattern tables feed the pattern-gated live bots, so their 1m
+   * and 5m patterns are now at most one tick old instead of up to fifteen minutes old.
+   */
+  cronSchedule("*/5 9-15 * * 1-5", () => {
+    void (async () => {
+      const onQuarterHour = new Date().getMinutes() % 15 === 0;
+      await schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(
+        onQuarterHour ? ["1m", "5m", "15m"] : ["1m", "5m"],
+      ));
+      /*
+       * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
+       *
+       * Same five-minute cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the
+       * same decision points, and a shadow run on a different rhythm would produce records V1 has no
+       * counterpart for -- unpairable rows that look like coverage.
+       *
+       * Not gated on `fyersTokenService`, unlike the bot. It reads stored contexts and places no
+       * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
+       * differential record on exactly the days the token lapses, which are the days worth comparing.
+       */
+      await schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
+    })();
   });
 
   /**
@@ -652,18 +695,6 @@ async function main(): Promise<void> {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
-    /*
-     * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
-     *
-     * On the same cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the same
-     * decision points, and a shadow run on a different rhythm would produce records V1 has no
-     * counterpart for -- unpairable rows that look like coverage.
-     *
-     * Not gated on `fyersTokenService`, unlike the bot above. It reads stored contexts and places no
-     * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
-     * differential record on exactly the days the token lapses, which are the days worth comparing.
-     */
-    void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
   });
 
   /**
