@@ -249,6 +249,10 @@ async function main(): Promise<void> {
     // generation, and 4 minutes clears well inside a 15-minute tick with margin to spare.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
+    // Hourly XAU_USD backfill of holes the 45-minute collection window cannot reach; most runs only
+    // scan, and a real heal derives and recomputes indicators over the healed window, so it gets
+    // far more room than a collection tick.
+    XAU_GAP_HEAL: 20 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
     // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
     // stalled claimant just means the next day's run picks up everything since the last success.
@@ -805,6 +809,26 @@ async function main(): Promise<void> {
       });
       await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
     })();
+  });
+
+  /**
+   * Hourly backfill of XAU_USD 1m holes.
+   *
+   * `XAU_CANDLE_COLLECTION` above only ever fetches the last 45 minutes, so any outage longer than
+   * that (the host sleeping overnight, a scheduler restart) leaves the missed bars missing
+   * permanently, and the 5m/15m series and indicators the gold strategies read inherit the hole.
+   * `data:heal-gold-gaps` finds missing minutes that fall inside gold's real session (the weekend
+   * close and the daily New York break are not gaps), fetches them append-only, and only then
+   * derives higher timeframes and recomputes indicators over the healed window. A run with
+   * nothing to heal is a single query.
+   *
+   * Offset to :07 so it never lands inside the :00/:15/:30/:45 collection ticks it complements.
+   */
+  cronSchedule("7 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
+    void schedule("XAU_GAP_HEAL", () => runCommand("npm", [
+      "run", "data:heal-gold-gaps", "--", "--apply", "--lookback-days", "7",
+    ]));
   });
 
   /**
@@ -1401,7 +1425,7 @@ async function main(): Promise<void> {
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
       ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
-        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD"]
+        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL"]
         : []),
     ],
     timezone: IST,
