@@ -61,6 +61,12 @@ interface Account {
   name: string;
 }
 
+const INSTRUMENT_OPTIONS = [
+  { value: "ALL", label: "All instruments" },
+  { value: "NIFTY50", label: "Nifty 50" },
+  { value: "BANKNIFTY", label: "Bank Nifty" },
+] as const;
+
 const TAG_LABELS: Record<string, { label: string; tone: "amber" | "rose" | "slate"; explain: string }> = {
   GAVE_BACK_FAVOURABLE_MOVE: {
     label: "Gave back an open profit",
@@ -135,6 +141,7 @@ function outcomeBadge(trade: JournalTrade) {
 export default function JournalPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState<string>("ALL");
+  const [instrument, setInstrument] = useState<string>("ALL");
   const [openedFrom, setOpenedFrom] = useState<string>("");
   const [openedTo, setOpenedTo] = useState<string>("");
   const [trades, setTrades] = useState<JournalTrade[]>([]);
@@ -151,6 +158,7 @@ export default function JournalPage() {
       try {
         const params = new URLSearchParams();
         if (accountId !== "ALL") params.set("accountId", accountId);
+        if (instrument !== "ALL") params.set("instrument", instrument);
         if (openedFrom) params.set("openedFrom", new Date(`${openedFrom}T00:00:00+05:30`).toISOString());
         if (openedTo) params.set("openedTo", new Date(`${openedTo}T23:59:59+05:30`).toISOString());
         params.set("limit", "200");
@@ -172,7 +180,7 @@ export default function JournalPage() {
     }
     void fetchData();
     return () => controller.abort();
-  }, [accountId, openedFrom, openedTo]);
+  }, [accountId, instrument, openedFrom, openedTo]);
 
   // Across exactly the trades currently in view, not all-time -- the mentor reading should match
   // whatever bot/date window is on screen, not blend it with everything else ever traded.
@@ -219,6 +227,16 @@ export default function JournalPage() {
               <option key={account.id} value={account.id}>{account.name}</option>
             ))}
           </select>
+          <select
+            value={instrument}
+            onChange={(e) => setInstrument(e.target.value)}
+            className="bg-slate-800 text-white border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
+            aria-label="Instrument"
+          >
+            {INSTRUMENT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
           <input
             type="date"
             value={openedFrom}
@@ -234,10 +252,10 @@ export default function JournalPage() {
             className="bg-slate-800 text-white border border-slate-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-400/50"
             aria-label="To date"
           />
-          {(openedFrom || openedTo || accountId !== "ALL") && (
+          {(openedFrom || openedTo || accountId !== "ALL" || instrument !== "ALL") && (
             <button
               type="button"
-              onClick={() => { setOpenedFrom(""); setOpenedTo(""); setAccountId("ALL"); }}
+              onClick={() => { setOpenedFrom(""); setOpenedTo(""); setAccountId("ALL"); setInstrument("ALL"); }}
               className="text-xs text-slate-400 hover:text-slate-200 underline underline-offset-2"
             >
               Clear
@@ -316,7 +334,14 @@ export default function JournalPage() {
             No trades match these filters.
           </GlassPanel>
         ) : (
-          <div className="flex flex-col gap-2">
+          <GlassPanel className="overflow-hidden">
+            <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+              <h2 className="text-sm font-semibold text-white tracking-wide">TRADES</h2>
+              <span className="text-xs text-slate-400">
+                {trades.length} shown{summary && summary.tradeCount > trades.length ? " of " + summary.tradeCount : ""}
+              </span>
+            </div>
+            <div className="max-h-[60vh] space-y-2 overflow-y-auto p-3 custom-scrollbar">
             {trades.map((trade) => {
               const isExpanded = expanded.has(trade.id);
               return (
@@ -434,7 +459,8 @@ export default function JournalPage() {
                 </GlassPanel>
               );
             })}
-          </div>
+            </div>
+          </GlassPanel>
         )}
       </div>
     </div>
