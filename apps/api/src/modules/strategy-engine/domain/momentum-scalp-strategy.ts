@@ -102,7 +102,18 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * improvement it shows on a negative-expectancy book means "traded less" until the survivors beat
  * the blocked on win rate. That test has not passed, and this gate does not claim it.
  */
-export const momentumScalpStrategyVersion = 6;
+/**
+ * Bumped 2026-10-10: candlestickAlgorithmVersion moved from v1 to v2. v2 fixes four confirmed
+ * defects in v1 -- a real lookahead bug (detections computed on a still-open bar, later silently
+ * rewritten), a scoring bug (NEUTRAL patterns awarded +20 toward long theses), nondeterministic-vs-
+ * priority pattern selection (picked patterns[0] from an alphabetical list instead of the highest-
+ * confidence candidate), and flat/holiday bars poisoning detection. This is live on AutoBot-Scalp1m
+ * today, so this version bump takes effect immediately: the frozen research cohorts that spread this
+ * file's default (momentum-v9/v10/v11-research in research-strategies.ts) were given their own
+ * explicit `candlestickAlgorithmVersion: "candlestick-v1"` pin in the same change, so they keep
+ * measuring exactly what they always have and are unaffected by this.
+ */
+export const momentumScalpStrategyVersion = 7;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
@@ -116,7 +127,7 @@ export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyCon
     VWAP: { reset: "NSE_SESSION" },
     ATR: { period: 14, smoothing: "WILDER" },
   },
-  candlestickAlgorithmVersion: "candlestick-v1",
+  candlestickAlgorithmVersion: "candlestick-v2",
   priceActionAlgorithmVersion: "price-action-v2",
   rsiLongMin: 55,
   rsiLongMax: 75,

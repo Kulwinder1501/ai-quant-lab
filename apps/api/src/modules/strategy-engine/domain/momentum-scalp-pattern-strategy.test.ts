@@ -86,7 +86,7 @@ describe("MomentumScalpPatternStrategy", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -127,7 +127,7 @@ describe("MomentumScalpPatternStrategy", () => {
       patterns: [
         {
           code: "SHOOTING_STAR",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BEARISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -197,7 +197,7 @@ describe("MomentumScalpPatternStrategy", () => {
         // Alphabetically first, but last (weakest) in BULLISH_PATTERNS -- must NOT win.
         {
           code: "DRAGONFLY_DOJI",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.55,
           contextCandleIds: ["candle-1"],
@@ -206,7 +206,7 @@ describe("MomentumScalpPatternStrategy", () => {
         // First (strongest) in BULLISH_PATTERNS -- must win despite sorting after DRAGONFLY_DOJI.
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.9,
           contextCandleIds: ["candle-1"],
@@ -235,7 +235,7 @@ describe("MomentumScalpPatternStrategy", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -255,7 +255,7 @@ describe("MomentumScalpPatternStrategy", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -278,7 +278,7 @@ describe("MomentumScalpPatternStrategy", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -325,7 +325,7 @@ describe("MomentumScalpPatternStrategy", () => {
         vwap: 23_990,
         atr: 20,
         patterns: [{
-          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          code: "HAMMER", algorithmVersion: "candlestick-v2", direction: "BULLISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -361,7 +361,7 @@ describe("MomentumScalpPatternStrategy", () => {
         vwap: 23_990,
         atr: 20,
         patterns: [{
-          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          code: "HAMMER", algorithmVersion: "candlestick-v2", direction: "BULLISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -383,7 +383,7 @@ describe("MomentumScalpPatternStrategy", () => {
         vwap: 23_910,
         atr: 20,
         patterns: [{
-          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v2", direction: "BEARISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -409,7 +409,7 @@ describe("MomentumScalpPatternStrategy", () => {
           details: {},
         }],
         patterns: [{
-          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          code: "HAMMER", algorithmVersion: "candlestick-v2", direction: "BULLISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -446,7 +446,7 @@ describe("MomentumScalpPatternStrategy", () => {
           details: {},
         }],
         patterns: [{
-          code: "HAMMER", algorithmVersion: "candlestick-v1", direction: "BULLISH",
+          code: "HAMMER", algorithmVersion: "candlestick-v2", direction: "BULLISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -472,7 +472,7 @@ describe("MomentumScalpPatternStrategy", () => {
           details: {},
         }],
         patterns: [{
-          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v1", direction: "BEARISH",
+          code: "SHOOTING_STAR", algorithmVersion: "candlestick-v2", direction: "BEARISH",
           confidence: 0.85, contextCandleIds: ["candle-1"], details: {},
         }],
       });
@@ -494,13 +494,13 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       volumeSurgeRatio: 1.1,
       expiryCandles: 3,
       indicatorAlgorithmVersion: "ta-v1",
-      candlestickAlgorithmVersion: "candlestick-v1",
+      candlestickAlgorithmVersion: "candlestick-v2",
       priceActionAlgorithmVersion: "price-action-v2",
     };
 
     const configB = {
       priceActionAlgorithmVersion: "price-action-v2",
-      candlestickAlgorithmVersion: "candlestick-v1",
+      candlestickAlgorithmVersion: "candlestick-v2",
       indicatorAlgorithmVersion: "ta-v1",
       expiryCandles: 3,
       volumeSurgeRatio: 1.1,
@@ -539,7 +539,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -553,7 +553,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
     const idea = ideas[0];
     expect(idea.evidence).toMatchObject({
       strategyVersion: "momentum-scalp-pattern-v2",
-      candlestickEngineVersion: "candlestick-v1",
+      candlestickEngineVersion: "candlestick-v2",
       chartPatternEngineVersion: "price-action-v2",
       featureSchemaVersion: null,
     });
@@ -583,7 +583,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       patterns: [
         {
           code: "INVERTED_HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -616,7 +616,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       patterns: [
         {
           code: "INVERTED_HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
@@ -659,7 +659,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
         // Alphabetically first, but ranked BELOW TWEEZER_TOP in BEARISH_PATTERNS -- must NOT win.
         {
           code: "BEARISH_HARAMI",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BEARISH",
           confidence: 0.5,
           contextCandleIds: ["candle-1"],
@@ -668,7 +668,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
         // Ranked ABOVE BEARISH_HARAMI in BEARISH_PATTERNS -- must win despite sorting later.
         {
           code: "TWEEZER_TOP",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BEARISH",
           confidence: 0.88,
           contextCandleIds: ["candle-1"],
@@ -703,7 +703,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       patterns: [
         {
           code: "HAMMER",
-          algorithmVersion: "candlestick-v1",
+          algorithmVersion: "candlestick-v2",
           direction: "BULLISH",
           confidence: 0.85,
           contextCandleIds: ["candle-1"],
