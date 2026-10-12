@@ -249,10 +249,10 @@ async function main(): Promise<void> {
     // generation, and 4 minutes clears well inside a 15-minute tick with margin to spare.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
-    // Hourly XAU_USD backfill of holes the 45-minute collection window cannot reach; most runs only
-    // scan, and a real heal derives and recomputes indicators over the healed window, so it gets
-    // far more room than a collection tick.
-    XAU_GAP_HEAL: 20 * 60 * 1000,
+    // Hourly backfill of OANDA holes the 45-minute collection window cannot reach (XAU_USD, the six
+    // FX legs of DXY, and DXY itself); most runs only scan, but a real heal fetches up to seven series,
+    // rebuilds DXY and recomputes indicators, so it gets far more room than a collection tick.
+    XAU_GAP_HEAL: 30 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
     // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
     // stalled claimant just means the next day's run picks up everything since the last success.
@@ -843,15 +843,16 @@ async function main(): Promise<void> {
   });
 
   /**
-   * Hourly backfill of XAU_USD 1m holes.
+   * Hourly backfill of OANDA 1m holes: XAU_USD, the six FX pairs DXY is rebuilt from, and DXY.
    *
    * `XAU_CANDLE_COLLECTION` above only ever fetches the last 45 minutes, so any outage longer than
    * that (the host sleeping overnight, a scheduler restart) leaves the missed bars missing
-   * permanently, and the 5m/15m series and indicators the gold strategies read inherit the hole.
-   * `data:heal-gold-gaps` finds missing minutes that fall inside gold's real session (the weekend
-   * close and the daily New York break are not gaps), fetches them append-only, and only then
-   * derives higher timeframes and recomputes indicators over the healed window. A run with
-   * nothing to heal is a single query.
+   * permanently, and the 5m/15m series and indicators the gold strategies read inherit the hole --
+   * including their DXY intermarket filter, which cannot be rebuilt for a day unless all six FX legs
+   * exist for it. `data:heal-gold-gaps` finds missing minutes inside each series' own session (gold
+   * has a daily New York break, FX does not; the weekend close is never a gap), fetches them
+   * append-only, derives and recomputes indicators for gold, and rebuilds DXY from the healed legs.
+   * A run with nothing to heal is a handful of queries.
    *
    * Offset to :07 so it never lands inside the :00/:15/:30/:45 collection ticks it complements.
    */
