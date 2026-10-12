@@ -10,7 +10,7 @@ import type { SettleableOpeningGapPrediction } from "../../../modules/market-dat
 interface PredictionRow extends QueryResultRow {
   id: string;
   instrument_symbol: string;
-  session_date: Date;
+  session_date: string;
   predicted_at: Date;
   driver_symbol: string;
   driver_change_pct: string;
@@ -19,15 +19,14 @@ interface PredictionRow extends QueryResultRow {
   supplementary_cues: Record<string, number | null>;
 }
 
-function toSessionDateKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
+// `session_date` is selected as `::text` everywhere below. node-pg returns a DATE as a Date at
+// *local* midnight, so `toISOString()` on an IST host reads the session back as the previous day --
+// which is how two rows were graded against the wrong open on 2026-10-10.
 function toPrediction(row: PredictionRow): OpeningGapPrediction {
   return {
     id: row.id,
     instrumentSymbol: row.instrument_symbol as OpeningGapClassifierInstrument,
-    sessionDate: toSessionDateKey(row.session_date),
+    sessionDate: row.session_date,
     predictedAt: row.predicted_at,
     driverSymbol: row.driver_symbol,
     driverChangePct: Number.parseFloat(row.driver_change_pct),
@@ -68,7 +67,7 @@ export class PostgresOpeningGapPredictionRepository {
         predicted_at = NOW(),
         updated_at = NOW()
       WHERE opening_gap_predictions.settled_at IS NULL
-      RETURNING id, instrument_symbol, session_date, predicted_at, driver_symbol,
+      RETURNING id, instrument_symbol, session_date::text AS session_date, predicted_at, driver_symbol,
         driver_change_pct, threshold_pct, expectation, supplementary_cues
       `,
       [
@@ -91,7 +90,7 @@ export class PostgresOpeningGapPredictionRepository {
     // settlement has already happened should be a no-op, not a failure.
     const existing = await this.database.query<PredictionRow>(
       `
-      SELECT id, instrument_symbol, session_date, predicted_at, driver_symbol,
+      SELECT id, instrument_symbol, session_date::text AS session_date, predicted_at, driver_symbol,
         driver_change_pct, threshold_pct, expectation, supplementary_cues
       FROM opening_gap_predictions
       WHERE instrument_symbol = $1 AND session_date = $2::date
@@ -108,11 +107,11 @@ export class PostgresOpeningGapPredictionRepository {
     const result = await this.database.query<{
       id: string;
       instrument_symbol: string;
-      session_date: Date;
+      session_date: string;
       expectation: string;
     }>(
       `
-      SELECT id, instrument_symbol, session_date, expectation
+      SELECT id, instrument_symbol, session_date::text AS session_date, expectation
       FROM opening_gap_predictions
       WHERE settled_at IS NULL AND unsettleable_reason IS NULL
       ORDER BY session_date ASC
@@ -123,7 +122,7 @@ export class PostgresOpeningGapPredictionRepository {
     return result.rows.map((row) => ({
       id: row.id,
       instrumentSymbol: row.instrument_symbol as OpeningGapClassifierInstrument,
-      sessionDate: toSessionDateKey(row.session_date),
+      sessionDate: row.session_date,
       expectation: row.expectation as GapExpectation,
     }));
   }

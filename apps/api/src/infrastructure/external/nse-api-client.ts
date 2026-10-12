@@ -257,6 +257,50 @@ export class NseApiClient {
   }
 
   /**
+   * NIFTY 50 / NIFTY BANK `indicativeClose` and `previousClose` from `allIndices`, plus the
+   * payload's own timestamp.
+   *
+   * `indicativeClose` is 0 whenever NSE is not publishing a pre-open auction result (verified
+   * 2026-10-12 after the close), so callers must not read a number here as "indicative" without
+   * also checking `timestamp` -- see `evaluatePreOpenGate`. The raw timestamp is returned
+   * unparsed for exactly that reason.
+   */
+  async getIndexIndicatives(): Promise<{
+    timestamp: string | null;
+    rows: Record<"NIFTY50" | "BANKNIFTY", { indicativeClose: number | null; previousClose: number | null; last: number | null }>;
+  }> {
+    await this.ensureSession();
+
+    let response;
+    try {
+      response = await axios.get(`${this.baseUrl}/api/allIndices`, {
+        headers: { ...XHR_HEADERS, Referer: `${this.baseUrl}/`, Cookie: this.sessionCookies.join("; ") },
+        timeout: 10_000,
+      });
+    } catch (error) {
+      this.sessionCookies = [];
+      throw new NseApiError("allIndices request to NSE failed.", error);
+    }
+
+    const body = response.data as { data?: unknown; timestamp?: unknown };
+    if (!Array.isArray(body.data)) throw new NseApiError("NSE allIndices payload had no data array.");
+    const find = (name: string): Record<string, unknown> | undefined =>
+      (body.data as Array<Record<string, unknown>>).find((row) => row.index === name);
+    const read = (name: string) => {
+      const row = find(name);
+      return {
+        indicativeClose: row ? parseNseNumber(row.indicativeClose) : null,
+        previousClose: row ? parseNseNumber(row.previousClose) : null,
+        last: row ? parseNseNumber(row.last) : null,
+      };
+    };
+    return {
+      timestamp: typeof body.timestamp === "string" ? body.timestamp : null,
+      rows: { NIFTY50: read("NIFTY 50"), BANKNIFTY: read("NIFTY BANK") },
+    };
+  }
+
+  /**
    * Fetch the offshore (GIFT Nifty) close for a session, if a provider is configured.
    *
    * GIFT Nifty trades on NSE IX, which publishes no free machine-readable feed,

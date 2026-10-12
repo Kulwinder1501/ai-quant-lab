@@ -42,6 +42,13 @@ export interface SettleOpeningGapPredictionsResult {
   settled: number;
   notYetMatured: number;
   unsettleable: number;
+  /**
+   * Which input a not-yet-matured row was missing. A row can count in both. Added after a 16:20 run
+   * reported "notYetMatured: 2" for a session whose 09:15 bar and previous close were both stored,
+   * with nothing in the output to say which lookup came back empty.
+   */
+  missingPreviousClose: number;
+  missingSessionOpen: number;
 }
 
 const DEFAULT_LIMIT = 500;
@@ -64,6 +71,8 @@ export class SettleOpeningGapPredictions {
       settled: 0,
       notYetMatured: 0,
       unsettleable: 0,
+      missingPreviousClose: 0,
+      missingSessionOpen: 0,
     };
 
     for (const prediction of pending) {
@@ -74,6 +83,8 @@ export class SettleOpeningGapPredictions {
       ]);
 
       if (previousClose === null || actualOpen === null) {
+        if (previousClose === null) result.missingPreviousClose += 1;
+        if (actualOpen === null) result.missingSessionOpen += 1;
         const ageDays = Math.floor(
           (this.now().getTime() - Date.parse(`${prediction.sessionDate}T00:00:00.000Z`)) / 86_400_000,
         );

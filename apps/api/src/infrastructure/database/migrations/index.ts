@@ -131,6 +131,7 @@ import { openingGapPredictionsMigration } from "./130-opening-gap-predictions.js
 import { repairMislabelledMonthlyExpiryRowsMigration } from "./131-repair-mislabelled-monthly-expiry-rows.js";
 import { contactLabelVersioningMigration } from "./132-contact-label-versioning.js";
 import { candlestickV2PatternDefinitionsMigration } from "./133-candlestick-v2-pattern-definitions.js";
+import { premarketIntelligenceMigration } from "./134-premarket-intelligence.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -266,4 +267,5 @@ export const migrations = [
   repairMislabelledMonthlyExpiryRowsMigration,
   contactLabelVersioningMigration,
   candlestickV2PatternDefinitionsMigration,
+  premarketIntelligenceMigration,
 ];

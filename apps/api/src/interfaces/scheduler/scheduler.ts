@@ -204,6 +204,11 @@ async function main(): Promise<void> {
     OPENING_GAP_PREDICTION: 5 * 60 * 1000,
     // Reads stored candles only, same patience as AUXILIARY_PREDICTION_SETTLEMENT.
     OPENING_GAP_SETTLEMENT: 10 * 60 * 1000,
+    // Includes up to two Gemini round trips (45s timeout each) plus the quote fetches.
+    PREMARKET_BIAS: 6 * 60 * 1000,
+    PREMARKET_PREOPEN_UPDATE: 4 * 60 * 1000,
+    // Reads stored 1m bars for two instruments; same patience as the other settlement sweeps.
+    SESSION_OUTCOME_SETTLEMENT: 10 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -386,11 +391,10 @@ async function main(): Promise<void> {
   });
 
   /**
-   * Predicts NIFTY50/BANKNIFTY's opening gap from the S&P 500's own overnight change, 25
-   * minutes before the 09:15 IST open -- see `opening-gap-classifier.ts` for why the driver
-   * is the S&P 500 and not GIFT Nifty (no free GIFT Nifty feed exists anywhere this codebase
-   * can reach). Reads a live Yahoo quote and writes one row per instrument; ungated, like
-   * `INSTITUTIONAL_FLOWS`, since it depends on neither the Fyers token nor the option chain.
+   * Predicts NIFTY50/BANKNIFTY's opening gap from GIFT Nifty's overnight change, 25 minutes
+   * before the 09:15 IST open -- see `opening-gap-classifier.ts` and `nse-ix-client.ts` for where
+   * that quote comes from. Writes one row per instrument; ungated, like `INSTITUTIONAL_FLOWS`,
+   * since it depends on neither the Fyers token nor the option chain.
    */
   cronSchedule("50 8 * * 1-5", () => {
     void schedule("OPENING_GAP_PREDICTION", () => runCommand("npm", ["run", "data:predict:opening-gap"]));
@@ -408,6 +412,44 @@ async function main(): Promise<void> {
   });
   cronSchedule("20 16 * * 1-5", () => {
     void schedule("OPENING_GAP_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:opening-gap"]));
+  });
+
+  /**
+   * The Asia-to-India pre-market engine: a deterministic snapshot (GIFT Nifty, Asian and global
+   * cues, candidate levels), the benchmark baselines, and -- when GEMINI_API_KEY and GEMINI_MODEL
+   * are set -- a strictly validated model interpretation of that snapshot. Without the key it still
+   * stores snapshot and baselines, so the benchmark population accrues from day one.
+   *
+   * Two tries, five minutes apart and both before the 09:08 pre-open, so a transient outage can
+   * recover; only the second (`--final`) may record a no-data day as terminal. The second is a
+   * no-op once the first has recorded.
+   */
+  cronSchedule("52 8 * * 1-5", () => {
+    void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850"]));
+  });
+  cronSchedule("57 8 * * 1-5", () => {
+    void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]));
+  });
+
+  /**
+   * The conditional 09:10 update. It records a probe of NSE's allIndices `indicativeClose` every
+   * day, and writes a second snapshot only when that feed carries a time-stamped pre-open print
+   * inside the pre-open window -- see `evaluatePreOpenGate`.
+   */
+  cronSchedule("10 9 * * 1-5", () => {
+    void schedule("PREMARKET_PREOPEN_UPDATE", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0910"]));
+  });
+
+  /**
+   * Measures the gap / first-hour / full-session outcomes the snapshots are scored against. After
+   * the close with margin (the closing-window bars land late), plus a morning catch-up for a day
+   * the evening run missed.
+   */
+  cronSchedule("40 16 * * 1-5", () => {
+    void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
+  });
+  cronSchedule("30 8 * * 1-5", () => {
+    void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
   });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
@@ -1440,6 +1482,9 @@ async function main(): Promise<void> {
       "INSTITUTIONAL_FLOWS_RETRY",
       "OPENING_GAP_PREDICTION",
       "OPENING_GAP_SETTLEMENT",
+      "PREMARKET_BIAS",
+      "PREMARKET_PREOPEN_UPDATE",
+      "SESSION_OUTCOME_SETTLEMENT",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",

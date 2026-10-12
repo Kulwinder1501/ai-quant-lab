@@ -38,7 +38,7 @@ describe("SettleOpeningGapPredictions", () => {
 
     const result = await new SettleOpeningGapPredictions(repo, () => NOW).execute();
 
-    expect(result).toEqual({ examined: 1, settled: 1, notYetMatured: 0, unsettleable: 0 });
+    expect(result).toEqual({ examined: 1, settled: 1, notYetMatured: 0, unsettleable: 0, missingPreviousClose: 0, missingSessionOpen: 0 });
     expect(repo.recordSettlement).toHaveBeenCalledWith(
       "pred-1",
       expect.objectContaining({ previousClose: 25000, actualOpen: 25075, actualExpectation: "GAP_UP", wasCorrect: true }),
@@ -67,7 +67,7 @@ describe("SettleOpeningGapPredictions", () => {
 
     const result = await new SettleOpeningGapPredictions(repo, () => NOW).execute();
 
-    expect(result).toEqual({ examined: 1, settled: 0, notYetMatured: 1, unsettleable: 0 });
+    expect(result).toEqual({ examined: 1, settled: 0, notYetMatured: 1, unsettleable: 0, missingPreviousClose: 0, missingSessionOpen: 1 });
     expect(repo.recordUnsettleable).not.toHaveBeenCalled();
   });
 
@@ -80,7 +80,7 @@ describe("SettleOpeningGapPredictions", () => {
 
     const result = await new SettleOpeningGapPredictions(repo, () => NOW).execute();
 
-    expect(result).toEqual({ examined: 1, settled: 0, notYetMatured: 0, unsettleable: 1 });
+    expect(result).toEqual({ examined: 1, settled: 0, notYetMatured: 0, unsettleable: 1, missingPreviousClose: 0, missingSessionOpen: 1 });
     expect(repo.recordUnsettleable).toHaveBeenCalledWith("pred-1", "NO_SESSION_OPEN_CANDLE");
   });
 

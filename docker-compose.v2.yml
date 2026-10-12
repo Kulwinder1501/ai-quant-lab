@@ -93,6 +93,11 @@ services:
       # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
       # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
       TWELVEDATA_API_KEY: ${TWELVEDATA_API_KEY:-}
+      # Pre-market engine (PREMARKET_BIAS). Both must be set for the model arm to run; without
+      # them the job still stores the snapshot and deterministic baselines. No default model on
+      # purpose -- see gemini-client.ts.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
       OANDA_ACCOUNT_ID: ${OANDA_ACCOUNT_ID:-}
       OANDA_ACCESS_TOKEN: ${OANDA_ACCESS_TOKEN:-}
       OANDA_ENVIRONMENT: ${OANDA_ENVIRONMENT:-practice}
