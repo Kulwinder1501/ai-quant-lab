@@ -2,7 +2,7 @@ import { nearestStrike } from "@ai-quant-lab/pricing";
 import type { OptionChainSnapshot } from "./option-chain.js";
 import { selectNearestListedExpiry, type OptionExpiryCalendar } from "./option-expiry-calendar.js";
 import { solveContractGreeksFromChain } from "./chain-greeks.js";
-import { resolveOptionEntryDeltaThresholds } from "./option-entry-delta-thresholds.js";
+import { isTwoSidedQuote, resolveOptionEntryDeltaThresholds } from "./option-entry-delta-thresholds.js";
 
 /**
  * Which expiries the dense premium feed must cover, as `YYYY-MM-DD` keys.
@@ -237,6 +237,10 @@ export function selectDeltaTargetPremiumContracts(
   for (const optionType of ["CE", "PE"] as const) {
     const withDelta: Array<{ strike: number; absDelta: number }> = [];
     for (const strike of strikes) {
+      // The gate only ever fills a two-sided quote, so a strike without one is not a candidate here
+      // either: ranking it would aim the quote budget at a contract the gate steps over.
+      const listed = expiryQuotes.find((q) => q.strikePrice === strike && q.optionType === optionType);
+      if (!listed || !isTwoSidedQuote(listed)) continue;
       const greeks = solveContractGreeksFromChain({ snapshot, strikePrice: strike, optionType });
       if (greeks !== null && Number.isFinite(greeks.delta)) {
         withDelta.push({ strike, absDelta: Math.abs(greeks.delta) });

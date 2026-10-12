@@ -15,7 +15,7 @@ import {
   type TenorImpliedVolatilityObservation,
 } from "../../market-data/domain/iv-percentile-by-tenor.js";
 import type { OptionChainSnapshot } from "../../market-data/domain/option-chain.js";
-import { resolveOptionEntryDeltaThresholds } from "../../market-data/domain/option-entry-delta-thresholds.js";
+import { isTwoSidedQuote, resolveOptionEntryDeltaThresholds } from "../../market-data/domain/option-entry-delta-thresholds.js";
 import {
   resolveListedExpiry,
   selectNearestListedExpiry,
@@ -472,13 +472,7 @@ export class PrepareOptionEntry {
         }
       }
 
-      const passesLiquidity = (
-        q.bid !== null
-        && q.ask !== null
-        && Number.isFinite(q.bid)
-        && Number.isFinite(q.ask)
-        && (q.ask > q.bid)
-      );
+      const passesLiquidity = isTwoSidedQuote(q);
 
       if (passesLiquidity) {
         liquidityEligibleCount++;
