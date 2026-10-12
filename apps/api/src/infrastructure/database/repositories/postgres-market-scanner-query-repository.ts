@@ -421,6 +421,7 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
         i.lot_size AS instrument_lot_size
       FROM instruments i
       WHERE i.is_active = TRUE
+        AND i.exchange IN (${scannerExchanges.map((exchange) => `'${exchange}'`).join(", ")})
         AND ($1::text IS NULL OR i.exchange = $1)
         AND ($2::text IS NULL OR i.instrument_type = $2)
         AND (
