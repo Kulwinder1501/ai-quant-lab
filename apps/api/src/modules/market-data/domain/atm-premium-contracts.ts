@@ -2,6 +2,7 @@ import { nearestStrike } from "@ai-quant-lab/pricing";
 import type { OptionChainSnapshot } from "./option-chain.js";
 import { selectNearestListedExpiry, type OptionExpiryCalendar } from "./option-expiry-calendar.js";
 import { solveContractGreeksFromChain } from "./chain-greeks.js";
+import { resolveOptionEntryDeltaThresholds } from "./option-entry-delta-thresholds.js";
 
 /**
  * Which expiries the dense premium feed must cover, as `YYYY-MM-DD` keys.
@@ -134,13 +135,11 @@ export function selectAtmPremiumContracts(
 }
 
 /**
- * Mirrors `MIN_ENTRY_DELTA` / `TARGET_DELTA` in `prepare-option-entry.ts` (both 0.75 today).
+ * The delta the selector aims for ONLY when a caller pins one explicitly without a floor of its own.
  *
- * Restated rather than imported: `modules/market-data` must not depend on `modules/paper-trading`
- * (the dependency points the other way everywhere else in this codebase -- see
- * `collect-option-premium-ticks.ts`'s own comment on `collectorRegime` for the same rule applied
- * to a different constant). If that gate's target ever moves, this must move with it; nothing
- * enforces that automatically, which is why both call sites below also accept an override.
+ * No longer the default. The default is `resolveOptionEntryDeltaThresholds` -- the very function the
+ * entry gate calls -- so the two cannot drift: a fixed 0.75 here while the gate moved BANKNIFTY to
+ * 0.55/0.65 (2026-10-10) left every BANKNIFTY idea refusing NO_FRESH_EXECUTABLE_QUOTE on 2026-10-12.
  */
 export const DEFAULT_DELTA_TARGET = 0.75;
 
@@ -186,7 +185,10 @@ export const DEFAULT_DELTA_TARGET = 0.75;
 export function selectDeltaTargetPremiumContracts(
   snapshot: OptionChainSnapshot,
   options: {
+    /** Pins the target delta. Omit to follow the entry gate (per underlying and days to expiry). */
     targetDelta?: number;
+    /** The eligibility floor. Omit to follow the gate -- or, when `targetDelta` is pinned, to equal it. */
+    minEntryDelta?: number;
     /**
      * Strike-steps of margin kept on each side of the computed target, to absorb drift between
      * this snapshot (up to `maxAgeMs` old) and whatever chain `PrepareOptionEntry` reads for the
@@ -199,7 +201,6 @@ export function selectDeltaTargetPremiumContracts(
     now?: Date;
   } = {},
 ): AtmPremiumContract[] {
-  const targetDelta = options.targetDelta ?? DEFAULT_DELTA_TARGET;
   const strikeMargin = options.strikeMargin ?? 2;
   const maxAgeMs = options.maxAgeMs ?? 40 * 60 * 1000;
   const now = options.now ?? new Date();
@@ -225,6 +226,13 @@ export function selectDeltaTargetPremiumContracts(
   const step = inferStrikeStep(strikes);
   if (step === null) return [];
 
+  // The same thresholds the entry gate resolves, from the same two inputs: the underlying, and days
+  // from now to the expiry's settlement instant (`chain.expiryDate`, as the gate's own `daysToExpiry`).
+  const daysToExpiry = (expiryQuotes[0]!.expiryDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
+  const resolved = resolveOptionEntryDeltaThresholds(snapshot.underlyingSymbol, daysToExpiry);
+  const targetDelta = options.targetDelta ?? resolved.targetDelta;
+  const minEntryDelta = options.minEntryDelta ?? (options.targetDelta !== undefined ? options.targetDelta : resolved.minEntryDelta);
+
   const selected: AtmPremiumContract[] = [];
   for (const optionType of ["CE", "PE"] as const) {
     const withDelta: Array<{ strike: number; absDelta: number }> = [];
@@ -235,9 +243,10 @@ export function selectDeltaTargetPremiumContracts(
       }
     }
 
-    // Mirror `PrepareOptionEntry`'s own eligibility floor: only a strike that already clears the
-    // target delta is one it could ever pick. Nothing below the floor is a candidate.
-    const eligible = withDelta.filter((d) => d.absDelta >= targetDelta);
+    // Mirror `PrepareOptionEntry`'s own eligibility floor: only a strike that already clears
+    // `minEntryDelta` is one it could ever pick, and among those it takes the one closest to the
+    // target. The floor and the target differ for far-dated BANKNIFTY (0.55 / 0.65).
+    const eligible = withDelta.filter((d) => d.absDelta >= minEntryDelta);
     if (eligible.length === 0) continue;
 
     eligible.sort((a, b) => Math.abs(a.absDelta - targetDelta) - Math.abs(b.absDelta - targetDelta));
