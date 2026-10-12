@@ -66,6 +66,22 @@ describe("PrepareDirectEntry", () => {
     if (!result.approved) expect(result.reason).toBe("NO_FRESH_QUOTE");
   });
 
+  it("regression 2026-10-12: a quote stamped after the decision time is fresh, not refused", async () => {
+    // The bot's decision time is captured at process start; the quote is fetched ~40 s later.
+    const later = freshQuote({ regularMarketTime: new Date(NOW.getTime() + 40_000) });
+    const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(later));
+    const result = await prepare.execute({ tradeIdeaId: "idea-1", now: NOW });
+    expect(result.approved).toBe(true);
+  });
+
+  it("still refuses a quote stamped implausibly far in the future", async () => {
+    const far = freshQuote({ regularMarketTime: new Date(NOW.getTime() + 10 * 60_000) });
+    const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(far));
+    const result = await prepare.execute({ tradeIdeaId: "idea-1", now: NOW });
+    expect(result.approved).toBe(false);
+    if (!result.approved) expect(result.reason).toBe("NO_FRESH_QUOTE");
+  });
+
   it("refuses a stale quote outside the freshness window", async () => {
     const stale = freshQuote({ regularMarketTime: new Date("2026-09-22T09:00:00.000Z") });
     const prepare = new PrepareDirectEntry(fakeDatabase(ideaRow()), fakeQuoteReader(stale));
