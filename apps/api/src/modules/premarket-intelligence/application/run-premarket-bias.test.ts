@@ -105,7 +105,7 @@ describe("RunPremarketBias", () => {
   it("records FAILED, not a repaired answer, when the model never produces a valid one", async () => {
     const { store, terminals, attempts } = fakeStore();
     const client = llm(["not json at all"]);
-    const result = await run(source([gift]), store, client).execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    const result = await run(source([gift]), store, client).execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
 
     expect(client.calls).toBe(2);
     expect(result).toMatchObject({ outcome: "RECORDED", llmStatus: "FAILED", modelAttempts: 2 });
@@ -115,9 +115,57 @@ describe("RunPremarketBias", () => {
 
   it("treats a request error as a failed attempt and still stores the baseline", async () => {
     const { store, terminals } = fakeStore();
-    const result = await run(source([gift]), store, llm([new Error("boom")])).execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    const result = await run(source([gift]), store, llm([new Error("boom")])).execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
     expect(result.llmStatus).toBe("FAILED");
     expect(terminals[0]!.deterministicBaselines).toBeDefined();
+  });
+
+  it("does not make a model failure terminal on a non-final try, so the next try can recover it", async () => {
+    const { store, terminals } = fakeStore();
+    const first = await run(source([gift]), store, llm([new Error("503")])).execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    expect(first).toMatchObject({ outcome: "MODEL_RETRY_PENDING", llmStatus: "FAILED" });
+    expect(terminals).toHaveLength(0);
+
+    // The :57 try: Gemini is back, and the day's model result is recorded instead of lost.
+    const second = await run(source([gift]), store, llm([validResponse])).execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
+    expect(second).toMatchObject({ outcome: "RECORDED", llmStatus: "VALIDATED" });
+    expect(terminals).toHaveLength(1);
+  });
+
+  it("records FAILED on the final try when the model is still down", async () => {
+    const { store, terminals } = fakeStore();
+    await run(source([gift]), store, llm([new Error("503")])).execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    await run(source([gift]), store, llm([new Error("503")])).execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ status: "VALID", llmStatus: "FAILED" });
+  });
+
+  it("stores a not-configured day on the first try -- there is nothing to retry", async () => {
+    const { store, terminals } = fakeStore();
+    const result = await run(source([gift]), store, null).execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    expect(result.outcome).toBe("RECORDED");
+    expect(terminals[0]!.llmStatus).toBe("NOT_CONFIGURED");
+  });
+
+  it("skips an NSE holiday: no capture, no model call, no terminal row, one visible attempt", async () => {
+    const { store, terminals, attempts } = fakeStore();
+    const capture = vi.fn(async (): Promise<CaptureResult> => ({ snapshot: snapshot([gift]), diagnostics: {} }));
+    const client = llm([validResponse]);
+    const result = await new RunPremarketBias({ capture }, store, client, () => NOW, async () => "Test Holiday")
+      .execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
+
+    expect(result.outcome).toBe("HOLIDAY_SKIPPED");
+    expect(capture).not.toHaveBeenCalled();
+    expect(client.calls).toBe(0);
+    expect(terminals).toHaveLength(0);
+    expect(attempts).toEqual([{ status: "INSUFFICIENT_DATA", errorDetails: { reason: "NSE_HOLIDAY", holiday: "Test Holiday" } }]);
+  });
+
+  it("runs normally on a trading day when a holiday lookup is wired", async () => {
+    const { store } = fakeStore();
+    const result = await new RunPremarketBias(source([gift]), store, null, () => NOW, async () => null)
+      .execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+    expect(result.outcome).toBe("RECORDED");
   });
 
   it("accepts a response wrapped in a markdown fence", async () => {
