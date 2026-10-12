@@ -37,6 +37,34 @@ describe("CapturePremarketSnapshot", () => {
     expect(snapshot.evidence.some((e) => e.category === "NSE_PREOPEN")).toBe(false);
   });
 
+  describe("GIFT Nifty quote freshness", () => {
+    const capture = (quoteTime: Date | null | undefined) => new CapturePremarketSnapshot(deps({
+      giftNiftyQuote: async () => ({ lastPrice: 22575.5, changePercent: 0.24, expiryDate: "27-Oct-2026", quoteTime }),
+    })).capture({ sessionDate: "2026-10-12", runSlot: "k", now: NOW, slot: "0850" });
+
+    it("stamps the evidence with the exchange's own last-update time and says so in the label", async () => {
+      const { snapshot } = await capture(new Date("2026-10-12T03:39:40.000Z")); // 09:09:40 IST
+      const [change, price] = snapshot.evidence.filter((e) => e.category === "GIFT_NIFTY");
+      expect(change!.observedAt).toBe("2026-10-12T03:39:40.000Z");
+      expect(price!.observedAt).toBe("2026-10-12T03:39:40.000Z");
+      expect(change!.label).toContain("last update 09:09 IST");
+    });
+
+    it("refuses a stale quote as the driver and reports how old it was", async () => {
+      const { snapshot, diagnostics } = await capture(new Date("2026-10-12T02:00:00.000Z")); // 07:30 IST, 100.5 min before capture
+      expect(snapshot.evidence.some((e) => e.category === "GIFT_NIFTY")).toBe(false);
+      expect(String(diagnostics.giftNifty)).toMatch(/^STALE_QUOTE: last updated 2026-10-12T02:00:00.000Z, 101 min/);
+    });
+
+    it("keeps a quote with no exchange time, but leaves its time unknown instead of using the fetch time", async () => {
+      const { snapshot, diagnostics } = await capture(null);
+      const change = snapshot.evidence.find((e) => e.category === "GIFT_NIFTY" && e.unit === "PERCENT_CHANGE")!;
+      expect(change.observedAt).toBeNull();
+      expect(change.label).toContain("quote time not provided");
+      expect(diagnostics.giftNiftyQuoteTime).toBe("NOT_PROVIDED_OR_UNUSABLE");
+    });
+  });
+
   it("builds candidate levels for both instruments", async () => {
     const { snapshot } = await new CapturePremarketSnapshot(deps()).capture({ sessionDate: "2026-10-12", runSlot: "k", now: NOW, slot: "0850" });
     expect(new Set(snapshot.candidateLevels.map((l) => l.instrument))).toEqual(new Set(["NIFTY50", "BANKNIFTY"]));

@@ -1,5 +1,6 @@
 import axios from "axios";
 import { parseNseNumber } from "./nse-api-client.js";
+import { parseNseIndexTimestamp } from "../../modules/premarket-intelligence/domain/preopen-gate.js";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -15,7 +16,13 @@ export interface GiftNiftyFuturesQuote {
   lastPrice: number;
   changePercent: number;
   expiryDate: string;
+  /** When this process fetched the quote. NOT when the exchange last traded -- see `quoteTime`. */
   observedAt: Date;
+  /**
+   * The exchange's own last-update time for the contract (the row's `TIMESTMP`, IST), or null when the
+   * payload omits it or it does not parse. A quote is only as fresh as this, whatever the fetch time says.
+   */
+  quoteTime: Date | null;
 }
 
 export interface DerivativesRow {
@@ -24,6 +31,41 @@ export interface DerivativesRow {
   EXPIRYDATE?: unknown;
   LASTPRICE?: unknown;
   PERCHANGE?: unknown;
+  /** "12-Oct-2026 17:31:33", IST: the exchange's last update of this contract. */
+  TIMESTMP?: unknown;
+}
+
+/**
+ * The oldest last-update a GIFT Nifty quote may carry and still be used as the opening-gap driver.
+ * GIFT Nifty trades continuously through the pre-market, so a print older than this is last night's or a
+ * dead feed's, and reading it as this morning's move would feed a stale number into every baseline.
+ */
+export const MAX_GIFT_QUOTE_AGE_MS = 30 * 60 * 1000;
+/** A quote stamped this far ahead of the clock is a clock or timezone problem, not a fresh quote. */
+const MAX_GIFT_QUOTE_FUTURE_SKEW_MS = 2 * 60 * 1000;
+
+export type GiftQuoteFreshness =
+  | { status: "FRESH"; ageMs: number }
+  | { status: "STALE"; ageMs: number }
+  /** No usable exchange time. Not proof of staleness, so the quote is kept but flagged unverified. */
+  | { status: "UNKNOWN" };
+
+/** How old the exchange's own last update is at `now`. Pure. */
+export function assessGiftQuoteFreshness(quoteTime: Date | null, now: Date): GiftQuoteFreshness {
+  if (quoteTime === null) return { status: "UNKNOWN" };
+  const ageMs = now.getTime() - quoteTime.getTime();
+  if (ageMs < -MAX_GIFT_QUOTE_FUTURE_SKEW_MS) return { status: "UNKNOWN" };
+  return ageMs > MAX_GIFT_QUOTE_AGE_MS ? { status: "STALE", ageMs } : { status: "FRESH", ageMs };
+}
+
+/** Builds the quote from a selected derivatives row, or null when the price fields are unusable. Pure. */
+export function giftQuoteFromRow(row: DerivativesRow, fetchedAt: Date): GiftNiftyFuturesQuote | null {
+  const changePercent = parseNseNumber(row.PERCHANGE);
+  const lastPrice = parseNseNumber(row.LASTPRICE);
+  if (changePercent === null || lastPrice === null || lastPrice <= 0 || typeof row.EXPIRYDATE !== "string") {
+    return null;
+  }
+  return { lastPrice, changePercent, expiryDate: row.EXPIRYDATE, observedAt: fetchedAt, quoteTime: parseNseIndexTimestamp(row.TIMESTMP) };
 }
 
 const MONTH_ABBREVIATIONS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -94,12 +136,6 @@ export class NseIxClient {
     const row = selectGiftNiftyFuturesRow(rows as DerivativesRow[]);
     if (!row) return null;
 
-    const changePercent = parseNseNumber(row.PERCHANGE);
-    const lastPrice = parseNseNumber(row.LASTPRICE);
-    if (changePercent === null || lastPrice === null || lastPrice <= 0 || typeof row.EXPIRYDATE !== "string") {
-      return null;
-    }
-
-    return { lastPrice, changePercent, expiryDate: row.EXPIRYDATE, observedAt: new Date() };
+    return giftQuoteFromRow(row, new Date());
   }
 }
