@@ -142,7 +142,9 @@ from ai_quant_lab_ml.fibonacci_pit_engine import (
     RetracementObservation,
     StructuralLevel,
 )
+from ai_quant_lab_ml.gex_resolver import resolve_options_context
 from ai_quant_lab_ml.master_scanner import Master5LayerScanner
+from ai_quant_lab_ml.option_chain_pcr import OptionChainBooks, load_option_chain_books
 
 INSTRUMENTS = ["NIFTY50", "BANKNIFTY"]
 TIMEFRAME = "5m"  # single, fixed granularity -- never mix timeframes in one engine stream
@@ -188,6 +190,16 @@ def get_database_url() -> str:
     if not url:
         raise RuntimeError("DATABASE_URL is not set; refusing to fall back to a built-in credential.")
     return url
+
+
+def fetch_lot_size(connection: psycopg.Connection, symbol: str) -> Optional[int]:
+    """The instruments table's lot_size has drifted before (BANKNIFTY 15->30->15-bug->30) and an
+    ON CONFLICT upsert once silently reset it -- read it live rather than hardcoding a value here
+    that could go stale the same way. None (not a fabricated default) when the symbol has no row."""
+    with connection.cursor() as cur:
+        cur.execute("SELECT lot_size FROM instruments WHERE symbol = %s", (symbol,))
+        row = cur.fetchone()
+    return int(row[0]) if row else None
 
 
 def compute_atr_wilder_series(highs: List[float], lows: List[float], closes: List[float]) -> List[Optional[float]]:
@@ -456,7 +468,12 @@ def compute_net_return_bps(opens: List[float], closes: List[float], idx: int, ho
 
 def _scan_direction(rows, instrument: str, direction: str, timeframe_minutes: int,
                     atr_series: List[Optional[float]], swing_series, vol_ratio_series: List[float],
-                    ofi_joined: list, breadth_contexts: Optional[List[BreadthContext]]
+                    ofi_joined: list, breadth_contexts: Optional[List[BreadthContext]],
+                    connection: Optional[psycopg.Connection] = None,
+                    options_underlying_symbol: Optional[str] = None,
+                    options_books: Optional[OptionChainBooks] = None,
+                    options_contract_multiplier: Optional[int] = None,
+                    options_gex_cache: Optional[dict] = None,
                     ) -> Tuple[List[dict], dict]:
     """
     Drives ONE direction's Master5LayerScanner over the instrument's bars and returns one raw
@@ -583,11 +600,37 @@ def _scan_direction(rows, instrument: str, direction: str, timeframe_minutes: in
         atr_obs = ATRObservation(atr14=atr_val, sourceTimestamp=t_ms, availableAt=t_ms)
         bars_evaluated += 1
 
+        # Real windowed PCR + real dealer gamma exposure, both describing the SAME resolved
+        # option-chain snapshot (see gex_resolver.py). UNAVAILABLE (not a fabricated reading)
+        # whenever this instrument/direction has no options_books wired in (e.g. BANKNIFTY_FUT's
+        # own futures OHLC series has no option_chain_snapshots rows under its own label -- it is
+        # wired to BANKNIFTY's real chain by the caller instead) or the resolver itself refuses
+        # (stale, no unsettled expiry listed, incomplete OI).
+        if options_books is not None and connection is not None and options_underlying_symbol is not None:
+            options_resolution = resolve_options_context(
+                connection, options_books, options_underlying_symbol, spot=bar.close,
+                contract_multiplier=options_contract_multiplier or 1, as_of=dt,
+                gex_cache=options_gex_cache,
+            )
+            resolved_ms = (
+                int(options_resolution.observed_at.timestamp() * 1000)
+                if options_resolution.observed_at else None
+            )
+            gex_ctx = GEXContext(
+                state=options_resolution.state,
+                pcrRatio=options_resolution.pcr_windowed,
+                snapshotTimestamp=resolved_ms,
+                availableAt=resolved_ms,
+                netDealerGammaExposure=options_resolution.net_dealer_gamma_exposure,
+            )
+        else:
+            gex_ctx = GEXContext("UNAVAILABLE", None, None, None)
+
         sig = scanner.process_market_state(
             bar=bar,
             current_candles=candle_buffer[-20:],
             current_l2=None,
-            gex_context=GEXContext("UNAVAILABLE", None, None, None),  # no options data in this feed
+            gex_context=gex_ctx,
             magnitude=magnitude,
             normalized_ofi=normalized_ofi,
             l2_depth_liq=l2_depth,
@@ -740,7 +783,9 @@ def build_episodes_from_records(records: List[dict], opens: List[float], closes:
 
 def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
                               ofi_observations: Optional[List[OfiWindowObservation]] = None,
-                              breadth_contexts: Optional[List[BreadthContext]] = None
+                              breadth_contexts: Optional[List[BreadthContext]] = None,
+                              connection: Optional[psycopg.Connection] = None,
+                              options_underlying_symbol: Optional[str] = None,
                               ) -> Tuple[List[ObservationEpisode], List[ObservationEpisode], dict]:
     """
     Builds ObservationEpisodes for ONE instrument's own chronologically-ordered, single-timeframe
@@ -772,6 +817,16 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
     ofi_available_count = sum(1 for v in ofi_joined if v is not None)
     horizon_bars = max(1, round(HORIZON_MINUTES / timeframe_minutes))
 
+    # Loaded ONCE per instrument and shared by both directions: option_chain_snapshots and
+    # instruments.lot_size don't change per direction, and the gex_cache memoizes GEX by resolved
+    # snapshot so repeat candles between polls never re-solve the same chain's IV twice.
+    options_books: Optional[OptionChainBooks] = None
+    options_contract_multiplier: Optional[int] = None
+    options_gex_cache: dict = {}
+    if connection is not None and options_underlying_symbol is not None:
+        options_books = load_option_chain_books(connection, options_underlying_symbol)
+        options_contract_multiplier = fetch_lot_size(connection, options_underlying_symbol)
+
     episodes_by_direction: Dict[str, List[ObservationEpisode]] = {}
     diagnostics: dict = {}
     for direction, key, swing_series in (
@@ -781,6 +836,9 @@ def build_instrument_episodes(rows, instrument: str, timeframe_minutes: int,
         records, diag = _scan_direction(
             rows, instrument, direction, timeframe_minutes, atr_series, swing_series,
             vol_ratio_series, ofi_joined, breadth_contexts,
+            connection=connection, options_underlying_symbol=options_underlying_symbol,
+            options_books=options_books, options_contract_multiplier=options_contract_multiplier,
+            options_gex_cache=options_gex_cache,
         )
         episodes, n_treat, n_ctrl, with_ofi = build_episodes_from_records(
             records, opens, closes, horizon_bars, instrument, direction
@@ -863,6 +921,7 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
             instrument_bull_episodes, instrument_bear_episodes, diag = build_instrument_episodes(
                 rows, instrument, TIMEFRAME_MINUTES[TIMEFRAME],
                 ofi_observations=ofi_observations, breadth_contexts=breadth_contexts,
+                connection=connection, options_underlying_symbol=instrument,
             )
             bull_episodes.extend(instrument_bull_episodes)
             bear_episodes.extend(instrument_bear_episodes)
@@ -879,6 +938,11 @@ def load_historical_episodes_from_db(connection: Optional[psycopg.Connection]
             instrument_fut_bull_episodes, instrument_fut_bear_episodes, fut_diag = build_instrument_episodes(
                 fut_rows, BANKNIFTY_FUT_INSTRUMENT_LABEL, TIMEFRAME_MINUTES[TIMEFRAME],
                 ofi_observations=ofi_observations, breadth_contexts=breadth_contexts,
+                # BANKNIFTY_FUT_INSTRUMENT_LABEL has no row of its own in option_chain_snapshots or
+                # instruments -- it's a futures-mid-price proxy series, not a distinct listed
+                # underlying. Its dealer gamma exposure is BANKNIFTY's real options chain (the
+                # futures and the index share one options market), so wire that chain in by name.
+                connection=connection, options_underlying_symbol="BANKNIFTY",
             )
             fut_bull_episodes.extend(instrument_fut_bull_episodes)
             fut_bear_episodes.extend(instrument_fut_bear_episodes)

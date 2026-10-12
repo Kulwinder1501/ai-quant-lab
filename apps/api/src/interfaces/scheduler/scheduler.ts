@@ -249,6 +249,10 @@ async function main(): Promise<void> {
     // generation, and 4 minutes clears well inside a 15-minute tick with margin to spare.
     XAU_CANDLE_COLLECTION: 4 * 60 * 1000,
     PAPER_TRADING_BOT_GOLD: 4 * 60 * 1000,
+    // Hourly backfill of OANDA holes the 45-minute collection window cannot reach (XAU_USD, the six
+    // FX legs of DXY, and DXY itself); most runs only scan, but a real heal fetches up to seven series,
+    // rebuilds DXY and recomputes indicators, so it gets far more room than a collection tick.
+    XAU_GAP_HEAL: 30 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
     // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
     // stalled claimant just means the next day's run picks up everything since the last success.
@@ -525,11 +529,54 @@ async function main(): Promise<void> {
    *
    * Cost measured before adding them, because this helper rescans the full completed series on
    * every invocation and that is what once let a per-minute job reach 330 concurrent runs: 5m is
-   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. Four passes at a
-   * fifteen-minute cadence is well inside the 20-minute abandoned-claim horizon for this job.
+   * 5-6s per instrument over ~12k bars, 1m is 14s per instrument over ~56k. That cost was measured
+   * for a fifteen-minute cadence; 1m and 5m now run every five minutes -- see the next block.
    */
-  cronSchedule("*/15 9-15 * * 1-5", () => {
-    void schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(["1m", "5m", "15m"]));
+  /*
+   * Pattern detection for the 1m and 5m series runs every five minutes, immediately ahead of the
+   * shadow decision pass in the same tick; 15m stays on the quarter hour.
+   *
+   * It used to run every fifteen minutes for all three timeframes while `SHADOW_DECISION` decided a
+   * fresh 1m and 5m bar every five. A bar closing off the quarter hour had no pattern coverage yet,
+   * so V2.2's opportunity resolver deferred it (`PATTERN_LAYER_NOT_COMPUTED`) and nothing ever
+   * retried it. Measured 2026-10-11 over the ledger since Oct 1: every decision at :04, :05, :09,
+   * :10 and :14 deferred (about 69% of resolved candidates), and even at the :00 mark 106 of 302
+   * deferred because detection and the shadow pass started together.
+   *
+   * Detection is deterministic for a closed bar -- every engine reads indices at or before the bar --
+   * so running it sooner changes when the layer becomes available, never what it contains.
+   *
+   * Sequenced with `await`, not fired as independent `void schedule(...)` calls: that is the
+   * read-before-write race this closes, the same one the XAU block's own comment describes. The
+   * shadow pass runs whether or not detection succeeded, because a deferral recorded honestly is
+   * better than a missing decision, and `schedule()` already contains a failed run.
+   *
+   * Cost: 1m + 5m for both indices measured about 25s on average (77s worst) per run, well inside
+   * the five-minute cadence and the 3-minute (1m) / 7-minute (5m) bar-age ceilings the shadow pass
+   * enforces.
+   *
+   * Side effect to know about: the same pattern tables feed the pattern-gated live bots, so their 1m
+   * and 5m patterns are now at most one tick old instead of up to fifteen minutes old.
+   */
+  cronSchedule("*/5 9-15 * * 1-5", () => {
+    void (async () => {
+      const onQuarterHour = new Date().getMinutes() % 15 === 0;
+      await schedule("PATTERN_DETECTION_INTRADAY", () => detectPatternsIntraday(
+        onQuarterHour ? ["1m", "5m", "15m"] : ["1m", "5m"],
+      ));
+      /*
+       * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
+       *
+       * Same five-minute cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the
+       * same decision points, and a shadow run on a different rhythm would produce records V1 has no
+       * counterpart for -- unpairable rows that look like coverage.
+       *
+       * Not gated on `fyersTokenService`, unlike the bot. It reads stored contexts and places no
+       * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
+       * differential record on exactly the days the token lapses, which are the days worth comparing.
+       */
+      await schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
+    })();
   });
 
   /**
@@ -648,18 +695,6 @@ async function main(): Promise<void> {
     if (fyersTokenService) {
       void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
     }
-    /*
-     * V2.2's shadow decision pass (Brain step 2 of retiring V1). Records decisions; executes nothing.
-     *
-     * On the same cadence as PAPER_TRADING_BOT deliberately: P13 compares the two systems at the same
-     * decision points, and a shadow run on a different rhythm would produce records V1 has no
-     * counterpart for -- unpairable rows that look like coverage.
-     *
-     * Not gated on `fyersTokenService`, unlike the bot above. It reads stored contexts and places no
-     * orders, so a broker token is irrelevant to it -- and gating it there would silently stop the
-     * differential record on exactly the days the token lapses, which are the days worth comparing.
-     */
-    void schedule("SHADOW_DECISION", () => runCommand("npm", ["run", "shadow:decisions"]));
   });
 
   /**
@@ -805,6 +840,27 @@ async function main(): Promise<void> {
       });
       await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
     })();
+  });
+
+  /**
+   * Hourly backfill of OANDA 1m holes: XAU_USD, the six FX pairs DXY is rebuilt from, and DXY.
+   *
+   * `XAU_CANDLE_COLLECTION` above only ever fetches the last 45 minutes, so any outage longer than
+   * that (the host sleeping overnight, a scheduler restart) leaves the missed bars missing
+   * permanently, and the 5m/15m series and indicators the gold strategies read inherit the hole --
+   * including their DXY intermarket filter, which cannot be rebuilt for a day unless all six FX legs
+   * exist for it. `data:heal-gold-gaps` finds missing minutes inside each series' own session (gold
+   * has a daily New York break, FX does not; the weekend close is never a gap), fetches them
+   * append-only, derives and recomputes indicators for gold, and rebuilds DXY from the healed legs.
+   * A run with nothing to heal is a handful of queries.
+   *
+   * Offset to :07 so it never lands inside the :00/:15/:30/:45 collection ticks it complements.
+   */
+  cronSchedule("7 * * * *", () => {
+    if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
+    void schedule("XAU_GAP_HEAL", () => runCommand("npm", [
+      "run", "data:heal-gold-gaps", "--", "--apply", "--lookback-days", "7",
+    ]));
   });
 
   /**
@@ -1401,7 +1457,7 @@ async function main(): Promise<void> {
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
       ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
-        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD"]
+        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL"]
         : []),
     ],
     timezone: IST,

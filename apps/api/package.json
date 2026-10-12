@@ -42,6 +42,7 @@
     "research:experiment-a": "tsx src/interfaces/cli/run-experiment-a.ts",
     "data:detect-gaps": "tsx src/interfaces/cli/detect-candle-gaps.ts",
     "data:heal-gaps": "tsx src/interfaces/cli/heal-candle-gaps.ts",
+    "data:heal-gold-gaps": "tsx src/interfaces/cli/heal-gold-gaps.ts",
     "research:stop-sweep": "tsx src/interfaces/cli/run-stop-multiple-sweep.ts",
     "research:horizon-sweep": "tsx src/interfaces/cli/run-horizon-sweep.ts",
     "agent:tick": "tsx src/interfaces/cli/run-agent-tick.ts",

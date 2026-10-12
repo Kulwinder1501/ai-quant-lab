@@ -64,8 +64,15 @@ export interface BaseEvaluator {
  * it is stable; changing it costs the capture history.
  */
 export const frozenSourceContentDigests = Object.freeze({
-  "momentum-scalp-strategy.ts": "4dda2a773aa45a9db5d09a671db4f9a6fcf24d53dfca32869e0959b5654df0e9",
-  "momentum-scalp-index-strategy.ts": "ecf9fe47c96ddce944c269757a292c5fc647e3d03364d3adab2339024a1f0396",
+  // Re-pinned 2026-10-10: candlestickAlgorithmVersion moved from v1 to v2 (momentumScalpStrategyVersion
+  // bumped 6->7 in the same change). The three research definitions below that spread this file's
+  // default (momentum-v9/v10/v11-research) were given their own explicit
+  // candlestickAlgorithmVersion: "candlestick-v1" override first, so their registered behaviour and
+  // researchStrategySourceChecksums entry are both unchanged -- only this drift-detector pin moves.
+  "momentum-scalp-strategy.ts": "310547388eede3ac6db661f90581df82d839d0de69ad2f552bb2d34282dad50f",
+  // Re-pinned 2026-10-10, same reason and same shape as above (momentumScalpIndexStrategyVersion
+  // bumped 1->2). index-v3-research was given its own explicit candlestick-v1 override first.
+  "momentum-scalp-index-strategy.ts": "08379a18e493d57e664adb24095bb410af686972420ea89dc903e466f7145e86",
   // Bumped 2026-09-22 when selectPriorityPattern replaced the alphabetical-arrival trigger pick.
   // See the note on patternDefinition below for why that forced pattern-v5-research rather than a repin.
   //
@@ -77,7 +84,11 @@ export const frozenSourceContentDigests = Object.freeze({
   // `config.requireStrictTrendAlignment` reads `undefined` there -- falsy, same branch the old
   // unconditional OR always took. pattern-v5-research's registered behaviour is unchanged; only the
   // drift detector's pin was stale.
-  "momentum-scalp-pattern-strategy.ts": "ea75ecaefb5effd0f71abc4ae37572f98412c1e4a9834744f4480baf20b6867c",
+  //
+  // Re-pinned again 2026-10-10, same reason and same shape as momentum-scalp-strategy.ts above
+  // (momentumScalpPatternStrategyVersion bumped 1->2, momentumScalpPatternStrategyV2Version 2->3).
+  // pattern-v5-research was given its own explicit candlestick-v1 override first.
+  "momentum-scalp-pattern-strategy.ts": "a401768d96fa8689a35a1acf900df4a7369b6787369cab2155d61cb4c685fa15",
 });
 
 export const researchStrategySourceChecksums = Object.freeze({
@@ -369,7 +380,15 @@ const momentumDefinition = buildStrategyDefinition({
   researchVersion: 9,
   featureSchemaVersion: "scalp-raw-context-v2",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
-  configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
+  // Pinned explicitly 2026-10-10, ahead of momentum-scalp-strategy.ts's default moving to
+  // candlestick-v2: this spread the shared default and so would otherwise have silently started
+  // reading v2 patterns too, changing what an already-capturing frozen research version measures
+  // without a new checksum or version number to mark it. V9 keeps measuring v1, as it always has.
+  configuration: {
+    ...defaultMomentumScalpStrategyConfiguration,
+    candlestickAlgorithmVersion: "candlestick-v1",
+    minimumConfidence: 0,
+  } as Record<string, unknown>,
 });
 
 /**
@@ -386,7 +405,12 @@ const momentumHtfDefinition = buildStrategyDefinition({
   researchVersion: 10,
   featureSchemaVersion: "scalp-raw-context-v3",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
-  configuration: { ...defaultMomentumScalpStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
+  // Pinned explicitly 2026-10-10 -- see momentumDefinition's note above; same reasoning, same date.
+  configuration: {
+    ...defaultMomentumScalpStrategyConfiguration,
+    candlestickAlgorithmVersion: "candlestick-v1",
+    minimumConfidence: 0,
+  } as Record<string, unknown>,
 });
 
 const momentumFreshSetupDefinition = buildStrategyDefinition({
@@ -403,8 +427,10 @@ const momentumFreshSetupDefinition = buildStrategyDefinition({
    * artifact as V9 and V10, so it pins the same content hash they do.
    */
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-strategy.ts"],
+  // Pinned explicitly 2026-10-10 -- see momentumDefinition's note above; same reasoning, same date.
   configuration: {
     ...defaultMomentumScalpStrategyConfiguration,
+    candlestickAlgorithmVersion: "candlestick-v1",
     minimumConfidence: 0,
     freshSetupPolicy: "NEW_OR_DIRECTION_CHANGE",
   } as Record<string, unknown>,
@@ -415,7 +441,13 @@ const indexDefinition = buildStrategyDefinition({
   researchVersion: 3,
   featureSchemaVersion: "scalp-raw-context-v2",
   implementationArtifactChecksum: researchStrategySourceChecksums["momentum-scalp-index-strategy.ts"],
-  configuration: { ...defaultMomentumScalpIndexStrategyConfiguration, minimumConfidence: 0 } as Record<string, unknown>,
+  // Pinned explicitly 2026-10-10 -- see momentumDefinition's note above; same reasoning, same date,
+  // now for momentum-scalp-index-strategy.ts's default moving to candlestick-v2.
+  configuration: {
+    ...defaultMomentumScalpIndexStrategyConfiguration,
+    candlestickAlgorithmVersion: "candlestick-v1",
+    minimumConfidence: 0,
+  } as Record<string, unknown>,
 });
 
 /**
@@ -445,7 +477,14 @@ const patternDefinition = buildStrategyDefinition({
   // The pattern strategy gates on the raw confluence score, not on `minimumConfidence` — which it does
   // not even define. Setting the wrong key here would have added a dead parameter and left the 5-of-9
   // confluence gate fully active, quietly defeating the ungating.
-  configuration: { ...defaultMomentumScalpPatternStrategyConfiguration, scoreThreshold: 0 } as Record<string, unknown>,
+  //
+  // candlestickAlgorithmVersion pinned explicitly 2026-10-10 -- see momentumDefinition's note above;
+  // same reasoning, same date, now for momentum-scalp-pattern-strategy.ts's default moving to v2.
+  configuration: {
+    ...defaultMomentumScalpPatternStrategyConfiguration,
+    candlestickAlgorithmVersion: "candlestick-v1",
+    scoreThreshold: 0,
+  } as Record<string, unknown>,
 });
 
 /**

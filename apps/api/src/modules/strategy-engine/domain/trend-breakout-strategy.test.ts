@@ -35,7 +35,7 @@ function qualifyingLongContext(): StrategyMarketContext {
     ],
     patterns: [{
       code: "BULLISH_ENGULFING",
-      algorithmVersion: "candlestick-v1",
+      algorithmVersion: "candlestick-v2",
       direction: "BULLISH",
       confidence: 0.9,
       contextCandleIds: ["previous-candle", "candle-long"],
@@ -77,7 +77,7 @@ function qualifyingShortContext(): StrategyMarketContext {
     ],
     patterns: [{
       code: "BEARISH_ENGULFING",
-      algorithmVersion: "candlestick-v1",
+      algorithmVersion: "candlestick-v2",
       direction: "BEARISH",
       confidence: 0.91,
       contextCandleIds: ["previous-candle", "candle-short"],
@@ -108,7 +108,7 @@ describe("TrendBreakoutStrategy", () => {
       riskReward: 2,
       evidence: {
         strategy: "trend-breakout",
-        strategyVersion: 2,
+        strategyVersion: 3,
         sourceCandleId: "candle-long",
         trigger: "BREAKOUT",
         pattern: "BULLISH_ENGULFING",
@@ -121,7 +121,7 @@ describe("TrendBreakoutStrategy", () => {
       "PATTERN", "PRICE_ACTION", "STRATEGY",
     ]);
     expect(proposal.evidenceItems.at(-1)).toMatchObject({
-      sourceReference: "trend-breakout:v2",
+      sourceReference: "trend-breakout:v3",
       details: { sourceCandleId: "candle-long", timeframe: "1d" },
     });
     expect(proposal.reasoning.at(-1)).toBe(

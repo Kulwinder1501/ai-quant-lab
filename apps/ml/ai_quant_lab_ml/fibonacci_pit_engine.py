@@ -133,6 +133,13 @@ class OptionsContext:
     * ``pcrRatio`` -- a put/call OI ratio, carried but NEVER read by the scanner. If a producer ever
       fills it, it is a windowed PCR (the collector's +/-strikecount strikes around spot for the
       nearest un-settled expiry), not a whole-chain PCR and not a gamma measure.
+    * ``netDealerGammaExposure`` -- a real aggregate (gamma x open interest x lot size x spot^2,
+      summed across the nearest-unsettled expiry's strikes; see ai_quant_lab_ml/gex_aggregator.py),
+      populated by run_phase_c_pipeline.py from captured option_chain_snapshots. This IS the thing
+      the class docstring above says doesn't exist -- it's new (2026-10-10) and, like pcrRatio,
+      is NOT read by the scanner's Layer 3 gate (freshness-only). It requires a dealer-positioning
+      sign assumption (calls add, puts subtract) that nothing in this codebase validates; it is
+      carried through to FeatureVector for future F1-F4 conditioning, not for gating.
 
     Historical name: ``GEXContext`` (kept as an alias below). The old name overstated what the data
     is; tests that construct ``GEXContext("FRESH", 1.0, t, t)`` fabricate the ratio and prove only
@@ -143,6 +150,7 @@ class OptionsContext:
     pcrRatio: Optional[float]
     snapshotTimestamp: Optional[int]
     availableAt: Optional[int]
+    netDealerGammaExposure: Optional[float] = None
 
 
 # Backward-compatible alias (same class object): `GEXContext(...)`, isinstance checks and imports
@@ -197,6 +205,9 @@ class FeatureVector:
     # Options-context FRESHNESS state (not gamma exposure). The field name is kept for stored-JSON
     # compatibility; see `OptionsContext`.
     gexState: OptionsContextState
+    # Passed through from OptionsContext.netDealerGammaExposure, unconditionally and ungated --
+    # see that field's docstring for the sign-convention assumption it carries.
+    netDealerGammaExposure: Optional[float] = None
 
 
 @dataclass

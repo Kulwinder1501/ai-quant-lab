@@ -9,6 +9,7 @@ import { registerModelPerformanceRoutes } from "../../modules/model-performance/
 import { registerModelPredictionRoutes } from "../../modules/model-predictions/interfaces/http/model-prediction.routes.js";
 import { registerNewsRoutes } from "../../modules/news-sentiment/interfaces/http/news.routes.js";
 import { registerPaperTradingRoutes } from "../../modules/paper-trading/interfaces/http/paper-trading.routes.js";
+import { registerJournalRoutes } from "../../modules/paper-trading/interfaces/http/journal.routes.js";
 import { registerPricingRoutes } from "../../modules/pricing/interfaces/http/pricing.routes.js";
 import { registerStrategyRoutes } from "../../modules/strategy-engine/interfaces/http/strategy.routes.js";
 import {
@@ -66,6 +67,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   registerMarketScannerRoutes(app, dependencies);
   registerModelPredictionRoutes(app, dependencies);
   registerPaperTradingRoutes(app, dependencies);
+  registerJournalRoutes(app, dependencies);
   registerModelPerformanceRoutes(app, dependencies);
   registerPricingRoutes(app, dependencies);
   registerStrategyRoutes(app, dependencies);

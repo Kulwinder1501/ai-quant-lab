@@ -236,7 +236,8 @@ class Master5LayerScanner:
             impulseVelocity=None, normalizedOfi30s=normalized_ofi.ofi30s, depthNormFactor=normalized_ofi.depthNormFactor,
             l2DepthLiquidity=l2_depth_liq.meanTop5Depth, lambdaProxy=None, pocDisplacementZ=bar.pocDisplacementZ,
             tailVolumeRatio=bar.tailVolumeRatio, footprintShape="UNKNOWN", breadthAd=breadth_ad,
-            yzVolRatio=yz_vol, todSin=tod_sin, todCos=tod_cos, gexState="UNAVAILABLE"
+            yzVolRatio=yz_vol, todSin=tod_sin, todCos=tod_cos, gexState="UNAVAILABLE",
+            netDealerGammaExposure=gex_context.netDealerGammaExposure
         )
 
         # Immediate Candle Depth Safeguard — Evaluated BEFORE accessing current_candles[-1]!
@@ -363,7 +364,8 @@ class Master5LayerScanner:
             impulseVelocity=None, normalizedOfi30s=normalized_ofi.ofi30s, depthNormFactor=normalized_ofi.depthNormFactor,
             l2DepthLiquidity=l2_depth_liq.meanTop5Depth, lambdaProxy=None, pocDisplacementZ=bar.pocDisplacementZ,
             tailVolumeRatio=bar.tailVolumeRatio, footprintShape="UNKNOWN", breadthAd=breadth_ad,
-            yzVolRatio=yz_vol, todSin=tod_sin, todCos=tod_cos, gexState=gex_state_eval
+            yzVolRatio=yz_vol, todSin=tod_sin, todCos=tod_cos, gexState=gex_state_eval,
+            netDealerGammaExposure=gex_context.netDealerGammaExposure
         )
 
         # EARLY PIT ABORT — ZERO STATE ENGINE MUTATION OCCURS
@@ -464,7 +466,8 @@ class Master5LayerScanner:
             yzVolRatio=yz_vol,
             todSin=tod_sin,
             todCos=tod_cos,
-            gexState=gex_state_eval
+            gexState=gex_state_eval,
+            netDealerGammaExposure=gex_context.netDealerGammaExposure
         )
 
         if poi and anchor_range_price:
