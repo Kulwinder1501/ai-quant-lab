@@ -132,6 +132,44 @@ export class PostgresCandidateLedgerRepository {
   }
 
   /**
+   * Records a follow-through verdict (TARGET or STOP reached after the idea's own horizon), upgrading an
+   * UNRESOLVED or UNSETTLEABLE row, or inserting when there is none.
+   *
+   * Unlike `recordSettlement`, which is first-writer-wins and leaves an UNRESOLVED row alone, an UNRESOLVED
+   * row here only means "no hit inside ten minutes", which is exactly what this supersedes. A row that is
+   * already TARGET or STOP is never overwritten: a settled verdict is not re-litigated.
+   */
+  async recordFollowThrough(tradeIdeaId: string, settlement: CandidateSettlement): Promise<boolean> {
+    if (settlement.outcome !== "TARGET" && settlement.outcome !== "STOP") {
+      throw new Error("A follow-through verdict must be TARGET or STOP.");
+    }
+    const result = await this.database.query<{ id: string }>(`
+      INSERT INTO candidate_settlements (
+        trade_idea_id, outcome, r_multiple, bars_to_resolution, mae_r, mfe_r,
+        horizon_end, resolved_timeframe, bars_available, resolver_version
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (trade_idea_id) DO UPDATE SET
+        outcome = EXCLUDED.outcome,
+        r_multiple = EXCLUDED.r_multiple,
+        bars_to_resolution = EXCLUDED.bars_to_resolution,
+        mae_r = EXCLUDED.mae_r,
+        mfe_r = EXCLUDED.mfe_r,
+        horizon_end = EXCLUDED.horizon_end,
+        resolved_timeframe = EXCLUDED.resolved_timeframe,
+        bars_available = EXCLUDED.bars_available,
+        resolver_version = EXCLUDED.resolver_version,
+        settled_at = NOW()
+      WHERE candidate_settlements.outcome IN ('UNRESOLVED', 'UNSETTLEABLE')
+      RETURNING id
+    `, [
+      tradeIdeaId, settlement.outcome, settlement.rMultiple, settlement.barsToResolution,
+      settlement.maeR, settlement.mfeR, settlement.horizonEnd, settlement.resolvedTimeframe,
+      settlement.barsAvailable, settlement.resolverVersion,
+    ]);
+    return result.rows.length > 0;
+  }
+
+  /**
    * Candidates that carry no settlement yet (or carry an UNSETTLEABLE initial status), regardless of
    * whether their horizon has fully elapsed.
    *

@@ -61,6 +61,7 @@
     "research:evaluate-ofi": "npm run research:evaluate-ofi --workspace @ai-quant-lab/api --",
     "data:collect:depth-frames": "npm run data:collect:depth-frames --workspace @ai-quant-lab/api --",
     "research:settle-candidates": "npm run research:settle-candidates --workspace @ai-quant-lab/api --",
+    "research:gold:resolve-shadow": "npm run research:gold:resolve-shadow --workspace @ai-quant-lab/api --",
     "research:scalp:capture": "npm run research:scalp:capture --workspace @ai-quant-lab/api --",
     "research:scalp:match-controls": "npm run research:scalp:match-controls --workspace @ai-quant-lab/api --",
     "research:scalp:settle": "npm run research:scalp:settle --workspace @ai-quant-lab/api --",
