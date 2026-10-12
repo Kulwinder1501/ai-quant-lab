@@ -160,6 +160,81 @@ export function buildTenorIvHistory(quotes: readonly DailyChainQuote[]): TenorIm
 }
 
 /**
+ * How much calendar history the chain-derived percentile must stand on before the entry gate may act on it.
+ *
+ * The tenor-matched percentile only demands `MINIMUM_BUCKET_OBSERVATIONS` distinct days *in the bucket*, and chain
+ * history cannot be backfilled (it begins 2026-08-04). On 2026-10-12 that let a two-month window call
+ * ordinary volatility "the 100th percentile" -- India VIX closed at 15.35, between its 400-day median
+ * (12.3) and 85th percentile (18.2) -- and the 85% ceiling then refused every NIFTY50 and BANKNIFTY entry.
+ * A percentile is only as meaningful as the range it ranks against, so under this span the gate reads the
+ * longer baseline we do have: India VIX's daily closes.
+ */
+export const MINIMUM_BASELINE_SPAN_DAYS = 120;
+
+/** Calendar days from the oldest history date to `asOf`. */
+export function baselineSpanDays(history: readonly TenorImpliedVolatilityObservation[], asOf: Date): number {
+  if (history.length === 0) return 0;
+  const oldest = history.reduce((min, entry) => (entry.date < min ? entry.date : min), history[0]!.date);
+  return Math.floor((asOf.getTime() - new Date(`${oldest}T00:00:00Z`).getTime()) / 86_400_000);
+}
+
+export interface IndiaVixBaseline {
+  /** The latest India VIX reading at or before the decision, or null when none is fresh. */
+  current: number | null;
+  /** One daily close per session, `YYYY-MM-DD`. */
+  dailyCloses: readonly { date: string; close: number }[];
+}
+
+export type ValidatorIvPercentileSource = "TENOR_MATCHED_CHAIN" | "INDIA_VIX_FALLBACK" | "UNAVAILABLE";
+
+export interface ValidatorIvPercentile {
+  /** 0-100, or null when no baseline can be trusted (the validator then records it as unchecked). */
+  percentile: number | null;
+  source: ValidatorIvPercentileSource;
+  baselineSpanDays: number;
+  /** Why the chain percentile was not used, when it was not. */
+  note: string | null;
+}
+
+/**
+ * The percentile the entry gate's IV ceiling reads.
+ *
+ * The tenor-matched chain percentile when it is measurable AND stands on at least
+ * `MINIMUM_BASELINE_SPAN_DAYS` of history; otherwise India VIX ranked against its own daily closes
+ * (same one-value-per-day, strictly-below ranking, same distinct-day floor). If neither is usable it is
+ * null -- "unchecked", which is what an unmeasurable percentile already meant, never "passed".
+ */
+export function resolveValidatorIvPercentile(input: {
+  tenor: TenorIvPercentileResult;
+  history: readonly TenorImpliedVolatilityObservation[];
+  asOf: Date;
+  vix: IndiaVixBaseline | null;
+  minimumSpanDays?: number;
+}): ValidatorIvPercentile {
+  const minimumSpan = input.minimumSpanDays ?? MINIMUM_BASELINE_SPAN_DAYS;
+  const span = baselineSpanDays(input.history, input.asOf);
+
+  if (input.tenor.measurable && span >= minimumSpan) {
+    return { percentile: input.tenor.percentile, source: "TENOR_MATCHED_CHAIN", baselineSpanDays: span, note: null };
+  }
+
+  const note = input.tenor.measurable
+    ? `Chain history spans ${span} day(s); ${minimumSpan} are required before its percentile is trusted.`
+    : input.tenor.explanation;
+  if (input.vix !== null) {
+    const ranked = summariseIvPercentile({
+      history: input.vix.dailyCloses.map((entry) => ({ date: entry.date, impliedVolatility: entry.close })),
+      currentImpliedVolatility: input.vix.current,
+      minimumDays: minimumSpan,
+    });
+    if (ranked.measurable) {
+      return { percentile: ranked.percentile, source: "INDIA_VIX_FALLBACK", baselineSpanDays: span, note };
+    }
+  }
+  return { percentile: null, source: "UNAVAILABLE", baselineSpanDays: span, note };
+}
+
+/**
  * The value `options-entry-validator`'s `ivPercentile` field takes: the 0-100 percentile, or null
  * when it is not measurable (the validator then records "IV percentile unavailable" as unchecked
  * rather than passing or failing the trade).

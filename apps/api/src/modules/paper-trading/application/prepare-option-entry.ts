@@ -9,7 +9,8 @@ import { atmImpliedVolatility, calendarDaysToExpiry } from "../../market-data/do
 import { solveContractGreeksFromChain } from "../../market-data/domain/chain-greeks.js";
 import {
   buildTenorIvHistory,
-  ivPercentileForValidator,
+  resolveValidatorIvPercentile,
+  type IndiaVixBaseline,
   summariseTenorMatchedIvPercentile,
   type DailyChainQuote,
   type TenorImpliedVolatilityObservation,
@@ -277,10 +278,59 @@ export class PrepareOptionEntry {
         await this.optionChainRepository.dailyAtmQuotes({ underlyingSymbol, days: 400 }),
       );
       if (calendarDaysToExpiry(chain.observedAt, expiryDate) < 1) return null;
-      return ivPercentileForValidator(summariseTenorMatchedIvPercentile({
+      const tenor = summariseTenorMatchedIvPercentile({
         history,
         current: { impliedVolatility: current.impliedVolatility, daysToExpiry: current.daysToExpiry },
-      }));
+      });
+      const resolved = resolveValidatorIvPercentile({
+        tenor,
+        history,
+        asOf: chain.observedAt,
+        vix: await this.readIndiaVixBaseline(chain.observedAt),
+      });
+      if (resolved.source !== "TENOR_MATCHED_CHAIN") {
+        // Recorded because the percentile that gates the entry came from somewhere other than the chain.
+        console.info(JSON.stringify({
+          level: "info",
+          message: "IV percentile baseline fallback",
+          underlyingSymbol,
+          source: resolved.source,
+          percentile: resolved.percentile,
+          baselineSpanDays: resolved.baselineSpanDays,
+          note: resolved.note,
+        }));
+      }
+      return resolved.percentile;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * India VIX, for ranking volatility against a baseline longer than the option-chain history. The
+   * current reading is the latest 1m/5m bar closed within 30 minutes of the decision; the history is its
+   * completed daily closes over the last 400 days. Null (never a guess) when either read fails.
+   */
+  private async readIndiaVixBaseline(asOf: Date): Promise<IndiaVixBaseline | null> {
+    try {
+      const current = await this.database.query<{ close: string }>(`
+        SELECT c.close
+          FROM candles c JOIN instruments i ON i.id = c.instrument_id
+         WHERE i.exchange = 'NSE' AND i.symbol = 'INDIAVIX' AND c.timeframe IN ('1m', '5m')
+           AND c.is_complete = TRUE AND c.close_time <= $1 AND c.close_time >= $1::timestamptz - INTERVAL '30 minutes'
+         ORDER BY c.close_time DESC LIMIT 1
+      `, [asOf]);
+      const daily = await this.database.query<{ date: string; close: string }>(`
+        SELECT to_char(c.open_time AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD') AS date, c.close
+          FROM candles c JOIN instruments i ON i.id = c.instrument_id
+         WHERE i.exchange = 'NSE' AND i.symbol = 'INDIAVIX' AND c.timeframe = '1d' AND c.is_complete = TRUE
+           AND c.open_time >= $1::timestamptz - INTERVAL '400 days' AND c.open_time < $1
+         ORDER BY c.open_time ASC
+      `, [asOf]);
+      return {
+        current: current.rows[0] === undefined ? null : Number(current.rows[0].close),
+        dailyCloses: daily.rows.map((row) => ({ date: row.date, close: Number(row.close) })),
+      };
     } catch {
       return null;
     }
