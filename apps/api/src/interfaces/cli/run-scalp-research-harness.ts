@@ -20,6 +20,10 @@ import {
 import { DEFERRAL_FAMILIES, type DeferralFamily } from "../../modules/platform/observability/decision-audit-record.js";
 import { evaluateThreshold, OBS_POLICY_V1 } from "../../modules/platform/observability/observability-policy.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
+import {
+  candlestickAlgorithmVersion,
+  priceActionAlgorithmVersion,
+} from "../../modules/pattern-recognition/domain/market-pattern.js";
 import { getOption } from "./arguments.js";
 import { requireIsolatedResearchDatabaseUrl } from "./scalp-research-database.js";
 
@@ -112,6 +116,13 @@ async function main(): Promise<void> {
           -- Both layers are matched at exact algorithm versions. An ANY test would pass on either
           -- layer alone, and ignoring the version would let the ATR price-action variant open the
           -- gate for strategies that consume the percent-mode events.
+          --
+          -- The versions are the detector's CURRENT ones ($4, $5), not literals. They were
+          -- 'candlestick-v1' / 'price-action-v2' until 2026-10-12; the detector moved to v2 / v3 on
+          -- 2026-10-10, so from then on this check could never pass: every minute waited out
+          -- featureWaitMs and was then captured with featureCoverage INCOMPLETE. The gate answers
+          -- "did the detection pass run for this bar", which only the version the detector writes can
+          -- say -- a strategy pinned to an older version simply finds no rows of it, whatever this reads.
           (
             SELECT bool_and(
               sibling.id IS NOT NULL
@@ -119,8 +130,8 @@ async function main(): Promise<void> {
                 SELECT count(*) FROM candle_feature_coverage coverage
                 WHERE coverage.candle_id = sibling.id
                   AND (coverage.feature_layer, coverage.algorithm_version) IN (
-                    ('CANDLESTICK_PATTERN', 'candlestick-v1'),
-                    ('PRICE_ACTION', 'price-action-v2')
+                    ('CANDLESTICK_PATTERN', $4),
+                    ('PRICE_ACTION', $5)
                   )
               ) = 2
             )
@@ -148,7 +159,7 @@ async function main(): Promise<void> {
                WHERE control.source_candle_id = candle.id) < 2
         ORDER BY candle.close_time ASC
         LIMIT $3
-      `, [instrument.id, latest.candle.closeTime, catchUpLimit]);
+      `, [instrument.id, latest.candle.closeTime, catchUpLimit, candlestickAlgorithmVersion, priceActionAlgorithmVersion]);
       const totals = { strategyDefinitions: 0, controls: 0, proposals: 0, opportunities: 0, riskSubjects: 0, riskDecisions: 0 };
       const capturedDecisionTimes: Date[] = [];
       let deferredForFeatures = 0;
