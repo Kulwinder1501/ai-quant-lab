@@ -49,3 +49,17 @@ export function resolveOptionEntryDeltaThresholds(
   }
   return { minEntryDelta: 0.55, targetDelta: 0.65 };
 }
+
+/**
+ * Whether a chain quote can be entered at all: a bid and an ask that are both numbers, with the ask
+ * above the bid. The entry gate's liquidity screen, shared so the dense premium collector ranks the
+ * same strikes the gate does -- an illiquid strike the gate skips must not be the one the collector
+ * quotes in its place.
+ */
+export function isTwoSidedQuote(quote: { bid: number | null; ask: number | null }): boolean {
+  return quote.bid !== null
+    && quote.ask !== null
+    && Number.isFinite(quote.bid)
+    && Number.isFinite(quote.ask)
+    && quote.ask > quote.bid;
+}
