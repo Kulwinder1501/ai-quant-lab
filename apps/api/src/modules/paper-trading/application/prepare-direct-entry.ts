@@ -4,6 +4,18 @@ import type { MarketQuoteReader } from "../../market-data/domain/market-quote.js
 /** The freshest a quote may be to fill against it. Matches the option path's own bound in spirit. */
 export const MAXIMUM_EXECUTABLE_QUOTE_AGE_MS = 5 * 60 * 1000;
 
+/**
+ * How far AFTER the decision time a quote may be stamped and still count as fresh.
+ *
+ * The gold bot captures its decision time when the process starts and fetches the quote tens of seconds
+ * later, after idea generation (a run takes ~40 s). A live quote is therefore stamped *after* that
+ * decision time, its "age" is negative, and the old check (`age >= 0`) refused every gold idea as
+ * NO_FRESH_QUOTE -- 11 of 11 on 2026-10-12, with a perfectly fresh OANDA quote available (age 0 s when
+ * probed). A quote newer than the decision is fresher, not staler. Bounded so a quote stamped implausibly
+ * far ahead (a broken clock, a replayed feed) is still refused.
+ */
+export const MAXIMUM_QUOTE_FUTURE_SKEW_MS = 2 * 60 * 1000;
+
 export interface PreparedDirectEntry {
   tradeIdeaId: string;
   side: TradeSide;
@@ -111,7 +123,7 @@ export class PrepareDirectEntry {
     const observedAsk = quote?.ask ?? observedPrice;
 
     const fresh = observedPrice !== null && observedPrice > 0
-      && quoteAgeMs !== null && quoteAgeMs >= 0 && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
+      && quoteAgeMs !== null && quoteAgeMs >= -MAXIMUM_QUOTE_FUTURE_SKEW_MS && quoteAgeMs <= MAXIMUM_EXECUTABLE_QUOTE_AGE_MS
       && observedBid !== undefined && observedBid !== null 
       && observedAsk !== undefined && observedAsk !== null 
       && observedAsk >= observedBid;
