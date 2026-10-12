@@ -162,7 +162,7 @@ export default function GoldShadowLedgerPage() {
                     <td className="px-4 py-3">
                       {t.outcome === "TARGET" && <span className="inline-flex items-center gap-1 text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded text-xs"><CheckCircle2 className="size-3" /> TARGET</span>}
                       {t.outcome === "STOP" && <span className="inline-flex items-center gap-1 text-rose-400 bg-rose-400/10 px-2 py-0.5 rounded text-xs"><XCircle className="size-3" /> STOP</span>}
-                      {t.outcome === "UNRESOLVED" && <span className="inline-flex items-center gap-1 text-slate-400 bg-slate-400/10 px-2 py-0.5 rounded text-xs"><Clock className="size-3" /> EXPIRED</span>}
+                      {t.outcome === "UNRESOLVED" && <span className="inline-flex items-center gap-1 text-slate-400 bg-slate-400/10 px-2 py-0.5 rounded text-xs"><Clock className="size-3" /> OPEN</span>}
                     </td>
                     <td className={`px-4 py-3 text-right font-bold ${parseFloat(t.r_multiple || "0") > 0 ? "text-emerald-400" : parseFloat(t.r_multiple || "0") < 0 ? "text-rose-400" : "text-slate-500"}`}>
                       {t.r_multiple ? `${parseFloat(t.r_multiple).toFixed(2)}R` : "-"}

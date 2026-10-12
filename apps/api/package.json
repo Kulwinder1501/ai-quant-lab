@@ -34,6 +34,7 @@
     "trading:paper:bot": "tsx src/interfaces/cli/run-paper-trading-bot.ts",
     "trading:paper:bot:gold": "tsx src/interfaces/cli/run-gold-paper-trading-bot.ts",
     "research:settle-candidates": "tsx src/interfaces/cli/settle-candidates.ts",
+    "research:gold:resolve-shadow": "tsx src/interfaces/cli/resolve-gold-shadow.ts",
     "research:scalp:capture": "tsx src/interfaces/cli/run-scalp-research-harness.ts",
     "research:scalp:match-controls": "tsx src/interfaces/cli/match-scalp-research-controls.ts",
     "research:scalp:settle": "tsx src/interfaces/cli/settle-scalp-research.ts",

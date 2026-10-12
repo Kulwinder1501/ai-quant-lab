@@ -253,6 +253,8 @@ async function main(): Promise<void> {
     // FX legs of DXY, and DXY itself); most runs only scan, but a real heal fetches up to seven series,
     // rebuilds DXY and recomputes indicators, so it gets far more room than a collection tick.
     XAU_GAP_HEAL: 30 * 60 * 1000,
+    // Follows gold shadow brackets to a target or stop on 1m bars; reads one series and writes a handful of rows.
+    GOLD_SHADOW_RESOLVE: 10 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
     // full idempotent re-walk (INSERT ... ON CONFLICT DO NOTHING), not an incremental one, so a
     // stalled claimant just means the next day's run picks up everything since the last success.
@@ -864,6 +866,22 @@ async function main(): Promise<void> {
   });
 
   /**
+   * Gold shadow follow-through. The regular candidate sweep gives a gold scalp about ten minutes to hit a level
+   * and records the rest as UNRESOLVED; a live position would still be open, so this follows each bracket to its
+   * target or stop for as long as that takes (`research:gold:resolve-shadow`). Ideas that were running when the
+   * machine slept are DEFERRED until `XAU_GAP_HEAL` fills the missing bars, then resolve on a later run.
+   *
+   * Minute 17 in IST is :47 past the UTC hour -- ten minutes after XAU_GAP_HEAL's :37 -- so a hole it just healed
+   * is already filled when this reads the series. Idempotent and cheap when there is nothing to resolve.
+   */
+  cronSchedule("17 * * * *", () => {
+    if (!XAU_BOT_ENABLED) return;
+    void schedule("GOLD_SHADOW_RESOLVE", () => runCommand("npm", [
+      "run", "research:gold:resolve-shadow", "--", "--apply",
+    ]));
+  });
+
+  /**
    * Liquidity Intelligence Engine v1 -- daily candidate + contact-label recompute for BANKNIFTY.
    *
    * `generate-liquidity-candidates.ts`/`generate-contact-labels.ts` were built and run once by
@@ -1457,7 +1475,7 @@ async function main(): Promise<void> {
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
       ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
-        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL"]
+        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL", "GOLD_SHADOW_RESOLVE"]
         : []),
     ],
     timezone: IST,
