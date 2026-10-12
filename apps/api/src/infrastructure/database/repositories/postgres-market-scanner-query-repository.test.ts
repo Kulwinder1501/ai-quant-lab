@@ -113,6 +113,9 @@ describe("PostgresMarketScannerQueryRepository", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("FROM instruments i");
     expect(calls[0]?.text).toContain("WHERE i.is_active = TRUE");
+    // The watchlist's contract is NSE/NFO/BSE in INR. Active OANDA instruments (gold, forex, USD) must
+    // not reach the INR-only mapper, which throws on them and turns the whole endpoint into a 500.
+    expect(calls[0]?.text).toContain("i.exchange IN ('NSE', 'NFO', 'BSE')");
     expect(calls[0]?.text).toContain("ORDER BY i.exchange ASC, i.symbol ASC, i.id ASC");
     expect(calls[0]?.text).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
     expect(calls[0]?.text).not.toMatch(/metadata|source_metadata|provider/i);
