@@ -3,7 +3,7 @@ import { XAUUSD_OANDA_PROFILE } from "../../platform/calendar/instrument-profile
 
 const MINUTE_MS = 60_000;
 
-export interface MissingXauRange {
+export interface MissingRange {
   /** First missing 1m bar's open time. */
   from: Date;
   /** Last missing 1m bar's open time (inclusive). */
@@ -12,7 +12,7 @@ export interface MissingXauRange {
   minutes: number;
 }
 
-export interface FindMissingXauRangesInput {
+export interface FindMissingRangesInput {
   /** Sorted ascending 1m bar open times already stored. */
   openTimes: Date[];
   /** Last minute (exclusive) the scan is allowed to call missing; anything newer is the live collector's job. */
@@ -22,16 +22,16 @@ export interface FindMissingXauRangesInput {
 }
 
 /**
- * Finds runs of missing 1m bars that fall inside gold's trading session.
+ * Finds runs of missing 1m bars that fall inside a market's trading session.
  *
- * A stored-bar gap is only a real hole where the market was actually open: the weekend close
- * and OANDA's daily 17:00-18:00 New York break show up as gaps in the data too, and fetching
- * them would only ever return nothing. Walking the missing minutes and keeping the ones
- * `isSessionActive` accepts is what separates "the machine was asleep" from "the market was shut".
+ * A stored-bar gap is only a real hole where the market was actually open: the weekend close and any
+ * daily break show up as gaps in the data too, and fetching them would only ever return nothing.
+ * Walking the missing minutes and keeping the ones `isSessionActive` accepts is what separates "the
+ * machine was asleep" from "the market was shut".
  */
-export function findMissingXauRanges(input: FindMissingXauRangesInput): MissingXauRange[] {
+export function findMissingSessionRanges(input: FindMissingRangesInput): MissingRange[] {
   const { openTimes, scanTo, isSessionActive, minMissingMinutes } = input;
-  const ranges: MissingXauRange[] = [];
+  const ranges: MissingRange[] = [];
   if (openTimes.length === 0) return ranges;
 
   let runStart: number | null = null;
@@ -65,8 +65,8 @@ export function findMissingXauRanges(input: FindMissingXauRangesInput): MissingX
 }
 
 /** Splits a range into chunks of at most `maxMinutes` so each stays under the provider's per-request bar cap. */
-export function chunkMissingRange(range: MissingXauRange, maxMinutes: number): MissingXauRange[] {
-  const chunks: MissingXauRange[] = [];
+export function chunkMissingRange(range: MissingRange, maxMinutes: number): MissingRange[] {
+  const chunks: MissingRange[] = [];
   let cursor = range.from.getTime();
   const end = range.to.getTime();
   while (cursor <= end) {
@@ -81,7 +81,23 @@ export function chunkMissingRange(range: MissingXauRange, maxMinutes: number): M
   return chunks;
 }
 
-export interface ScanXauGapsOptions {
+/**
+ * The session every series here is healed against: gold's -- Sunday 18:00 to Friday 17:00 New York, with a
+ * daily 17:00-18:00 break Monday to Thursday.
+ *
+ * Deliberately gold's for the six FX pairs and DXY as well, not their own (FX in fact trades through that
+ * break hour, with thin and gappy data: measured 2026-10-12, 5-15 minute holes around 21:10-21:40 UTC
+ * every day, which OANDA never fills). These series exist for the gold strategies and the NSE-hours
+ * intermarket filter, and neither reads a bar from an hour gold is shut, so healing them there would only
+ * re-fetch the same unfillable holes every hour and leave DXY permanently "still missing".
+ */
+export function isHealSessionActive(minute: Date): boolean {
+  return XAUUSD_OANDA_PROFILE.isSessionActive(minute);
+}
+
+export interface ScanOandaGapsOptions {
+  /** The OANDA instrument whose stored 1m series is scanned, e.g. `XAU_USD`, `EUR_USD`, `DXY`. */
+  symbol: string;
   lookbackDays: number;
   minMissingMinutes: number;
   /** Anything newer than `now - tailGraceMinutes` is left to the regular 15-minute collection tick. */
@@ -89,10 +105,10 @@ export interface ScanXauGapsOptions {
   now?: Date;
 }
 
-export async function scanXauGaps(
+export async function scanOandaGaps(
   database: Pick<DatabasePool, "query">,
-  options: ScanXauGapsOptions,
-): Promise<MissingXauRange[]> {
+  options: ScanOandaGapsOptions,
+): Promise<MissingRange[]> {
   const now = options.now ?? new Date();
   const scanFrom = new Date(now.getTime() - options.lookbackDays * 24 * 60 * MINUTE_MS);
   const scanTo = new Date(now.getTime() - options.tailGraceMinutes * MINUTE_MS);
@@ -101,17 +117,17 @@ export async function scanXauGaps(
     `SELECT c.open_time
        FROM candles c
        JOIN instruments i ON i.id = c.instrument_id
-      WHERE i.exchange = 'OANDA' AND i.symbol = 'XAU_USD'
+      WHERE i.exchange = 'OANDA' AND i.symbol = $2
         AND c.timeframe = '1m'
         AND c.open_time >= $1
       ORDER BY c.open_time ASC`,
-    [scanFrom],
+    [scanFrom, options.symbol],
   );
 
-  return findMissingXauRanges({
+  return findMissingSessionRanges({
     openTimes: result.rows.map((row) => new Date(row.open_time)),
     scanTo,
-    isSessionActive: (minute) => XAUUSD_OANDA_PROFILE.isSessionActive(minute),
+    isSessionActive: isHealSessionActive,
     minMissingMinutes: options.minMissingMinutes,
   });
 }
