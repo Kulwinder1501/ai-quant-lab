@@ -50,6 +50,10 @@ import {
   legacyThesisComparison,
   thesisComparisonVersion,
 } from "../../modules/autonomous-v2/application/thesis-adapter.js";
+import {
+  candlestickAlgorithmVersion,
+  priceActionAlgorithmVersion,
+} from "../../modules/pattern-recognition/domain/market-pattern.js";
 import { getOption } from "./arguments.js";
 import {
   barAgeCeilingFor,
@@ -207,6 +211,13 @@ function executableSidesFor(timeframe: string): readonly ThesisSide[] {
  *
  * Matched at exact algorithm versions for the reason the scalp harness's gate is: ignoring the
  * version would let a different variant of a layer open the gate for consumers of this one.
+ *
+ * The versions are the detector's CURRENT ones, imported rather than written as literals. They were
+ * literals ('candlestick-v1' / 'price-action-v2'); the detector moved to v2 / v3 on 2026-10-10, after
+ * which every bar read as "pattern layer not computed" while the context loader (which reads every
+ * version stored for the candle) still supplied the v2 rows. The adapter's contradiction check then
+ * refused the snapshot, and SHADOW_DECISION failed on every tick that carried a detection
+ * (2026-10-12 from 04:00 UTC).
  */
 async function featureCoverageFor(
   database: ReturnType<typeof createDatabasePool>,
@@ -216,10 +227,10 @@ async function featureCoverageFor(
     SELECT feature_layer FROM candle_feature_coverage
     WHERE candle_id = $1
       AND (feature_layer, algorithm_version) IN (
-        ('CANDLESTICK_PATTERN', 'candlestick-v1'),
-        ('PRICE_ACTION', 'price-action-v2')
+        ('CANDLESTICK_PATTERN', $2),
+        ('PRICE_ACTION', $3)
       )
-  `, [candleId]);
+  `, [candleId, candlestickAlgorithmVersion, priceActionAlgorithmVersion]);
   const layers = new Set(result.rows.map((row) => row.feature_layer));
   return {
     patternsComputed: layers.has("CANDLESTICK_PATTERN"),
