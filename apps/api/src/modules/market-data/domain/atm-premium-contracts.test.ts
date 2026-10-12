@@ -7,6 +7,8 @@ import {
 import type { OptionExpiryCalendar } from "./option-expiry-calendar.js";
 import type { OptionChainQuote, OptionChainSnapshot } from "./option-chain.js";
 import { priceEuropeanOption, RISK_FREE_RATE, yearsToExpiry } from "@ai-quant-lab/pricing";
+import { solveContractGreeksFromChain } from "./chain-greeks.js";
+import { resolveOptionEntryDeltaThresholds } from "./option-entry-delta-thresholds.js";
 
 function snapshot(overrides: Partial<OptionChainSnapshot> = {}): OptionChainSnapshot {
   const expiry = new Date("2026-08-18T10:00:00.000Z");
@@ -191,7 +193,7 @@ describe("selectDeltaTargetPremiumContracts", () => {
     // to clear the 0.75 floor is 53,300 (the live incident's own mixed-IV book put it a step away
     // at 53,400 -- both sit 12-13 strikes below ATM, which is the point: either way, strikeBand
     // 1-3 (the CLI's enforced ceiling) cannot reach it, and this does.
-    const deltaTargeted = selectDeltaTargetPremiumContracts(snap, { now });
+    const deltaTargeted = selectDeltaTargetPremiumContracts(snap, { now, targetDelta: 0.75 });
     const ceStrikes = deltaTargeted.filter((c) => c.optionType === "CE").map((c) => c.strikePrice);
     expect(ceStrikes.length).toBeGreaterThan(0);
     expect(ceStrikes).toContain(53_300);
@@ -202,6 +204,7 @@ describe("selectDeltaTargetPremiumContracts", () => {
     const snap = bankniftyLikeSnapshot();
     const contracts = selectDeltaTargetPremiumContracts(snap, {
       now: new Date("2026-10-05T07:25:00.000Z"),
+      targetDelta: 0.75,
       strikeMargin: 0,
     });
     const ceStrikes = contracts.filter((c) => c.optionType === "CE").map((c) => c.strikePrice);
@@ -231,6 +234,7 @@ describe("selectDeltaTargetPremiumContracts", () => {
     };
     const contracts = selectDeltaTargetPremiumContracts(narrow, {
       now: new Date("2026-10-05T07:25:00.000Z"),
+      targetDelta: 0.75,
     });
     expect(contracts.filter((c) => c.optionType === "PE")).toHaveLength(0);
   });
@@ -247,6 +251,55 @@ describe("selectDeltaTargetPremiumContracts", () => {
     // 53,400 the 0.75 target needs.
     expect(ceStrikes.length).toBeGreaterThan(0);
     expect(Math.min(...ceStrikes)).toBeGreaterThan(54_000);
+  });
+
+  describe("follows the entry gate's own thresholds by default", () => {
+    const now = new Date("2026-10-05T07:25:00.000Z");
+    const gateChoice = (snap: OptionChainSnapshot, optionType: "CE" | "PE", minDelta: number, targetDelta: number): number => {
+      const candidates = snap.quotes
+        .filter((q) => q.optionType === optionType)
+        .map((q) => ({ strike: q.strikePrice, d: Math.abs(solveContractGreeksFromChain({ snapshot: snap, strikePrice: q.strikePrice, optionType })?.delta ?? NaN) }))
+        .filter((c) => Number.isFinite(c.d) && c.d >= minDelta)
+        .sort((a, b) => Math.abs(a.d - targetDelta) - Math.abs(b.d - targetDelta));
+      return candidates[0]!.strike;
+    };
+
+    it("regression 2026-10-12: far-dated BANKNIFTY quotes the 0.65-delta strike the gate picks, not the 0.75 one", () => {
+      // 22 DTE: the gate resolves 0.55 floor / 0.65 target. The collector used to chase 0.75 and quoted
+      // strikes ~300-400 points deeper than the one the gate then asked for, so every idea refused
+      // NO_FRESH_EXECUTABLE_QUOTE.
+      const snap = bankniftyLikeSnapshot();
+      expect(resolveOptionEntryDeltaThresholds("BANKNIFTY", 22)).toEqual({ minEntryDelta: 0.55, targetDelta: 0.65 });
+      const contracts = selectDeltaTargetPremiumContracts(snap, { now, strikeMargin: 0 });
+      for (const optionType of ["CE", "PE"] as const) {
+        const strikes = contracts.filter((c) => c.optionType === optionType).map((c) => c.strikePrice);
+        expect(strikes).toEqual([gateChoice(snap, optionType, 0.55, 0.65)]);
+      }
+      const deep = selectDeltaTargetPremiumContracts(snap, { now, strikeMargin: 0, targetDelta: 0.75 });
+      const ce = (list: typeof deep) => list.find((c) => c.optionType === "CE")!.strikePrice;
+      expect(ce(contracts)).toBeGreaterThan(ce(deep)); // the call side is shallower, i.e. nearer spot
+    });
+
+    it("keeps NIFTY50 on 0.75/0.75 whatever the days to expiry", () => {
+      const snap = bankniftyLikeSnapshot({ underlyingSymbol: "NIFTY50" });
+      expect(selectDeltaTargetPremiumContracts(snap, { now })).toEqual(
+        selectDeltaTargetPremiumContracts(snap, { now, targetDelta: 0.75 }),
+      );
+    });
+
+    it("switches BANKNIFTY to 0.75/0.75 once its own expiry is within 10 days", () => {
+      const nearNow = new Date("2026-10-20T07:25:00.000Z"); // 7.1 days to 2026-10-27 10:00Z
+      const snap = bankniftyLikeSnapshot({ observedAt: new Date("2026-10-20T07:23:00.000Z") });
+      expect(selectDeltaTargetPremiumContracts(snap, { now: nearNow })).toEqual(
+        selectDeltaTargetPremiumContracts(snap, { now: nearNow, targetDelta: 0.75 }),
+      );
+    });
+
+    it("lets an explicit target override both the target and the floor", () => {
+      const snap = bankniftyLikeSnapshot();
+      const pinned = selectDeltaTargetPremiumContracts(snap, { now, strikeMargin: 0, targetDelta: 0.65 });
+      expect(pinned.find((c) => c.optionType === "CE")!.strikePrice).toBe(gateChoice(snap, "CE", 0.65, 0.65));
+    });
   });
 
   it("refuses a stale chain rather than inventing a target strike", () => {
