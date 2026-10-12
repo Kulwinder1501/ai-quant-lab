@@ -280,6 +280,26 @@ describe("selectDeltaTargetPremiumContracts", () => {
       expect(ce(contracts)).toBeGreaterThan(ce(deep)); // the call side is shallower, i.e. nearer spot
     });
 
+    it("skips a strike the gate would skip for want of a two-sided quote, as the gate does", () => {
+      const snap = bankniftyLikeSnapshot();
+      const first = selectDeltaTargetPremiumContracts(snap, { now, strikeMargin: 0 });
+      const ceFirst = first.find((c) => c.optionType === "CE")!.strikePrice;
+      // Make the gate's favourite call strike illiquid (no ask above its bid).
+      const thin: OptionChainSnapshot = {
+        ...snap,
+        quotes: snap.quotes.map((q) => (q.optionType === "CE" && q.strikePrice === ceFirst ? { ...q, bid: 50, ask: 50 } : q)),
+      };
+      const second = selectDeltaTargetPremiumContracts(thin, { now, strikeMargin: 0 });
+      const ceSecond = second.find((c) => c.optionType === "CE")!.strikePrice;
+      expect(ceSecond).not.toBe(ceFirst);
+      const liquid = thin.quotes.filter((q) => q.optionType === "CE" && q.ask! > q.bid!);
+      const expected = liquid
+        .map((q) => ({ strike: q.strikePrice, d: Math.abs(solveContractGreeksFromChain({ snapshot: thin, strikePrice: q.strikePrice, optionType: "CE" })?.delta ?? NaN) }))
+        .filter((c) => Number.isFinite(c.d) && c.d >= 0.55)
+        .sort((a, b) => Math.abs(a.d - 0.65) - Math.abs(b.d - 0.65))[0]!.strike;
+      expect(ceSecond).toBe(expected);
+    });
+
     it("keeps NIFTY50 on 0.75/0.75 whatever the days to expiry", () => {
       const snap = bankniftyLikeSnapshot({ underlyingSymbol: "NIFTY50" });
       expect(selectDeltaTargetPremiumContracts(snap, { now })).toEqual(
