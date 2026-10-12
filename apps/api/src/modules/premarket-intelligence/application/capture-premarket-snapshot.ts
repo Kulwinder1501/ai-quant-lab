@@ -1,4 +1,5 @@
 import { istSessionDate } from "../../platform/calendar/trading-session.js";
+import { assessGiftQuoteFreshness } from "../../../infrastructure/external/nse-ix-client.js";
 import { computeCandidateLevels, RANGE_LOOKBACK_SESSIONS, type DailyBar } from "../domain/levels.js";
 import { evaluatePreOpenGate, type IndexIndicativeRow } from "../domain/preopen-gate.js";
 import { evidenceId, type CandidateLevel, type EvidenceItem, type MarketSnapshot } from "../domain/snapshot.js";
@@ -12,7 +13,7 @@ export interface CueQuote {
 }
 
 export interface SnapshotSourceDependencies {
-  giftNiftyQuote(): Promise<{ lastPrice: number; changePercent: number; expiryDate: string } | null>;
+  giftNiftyQuote(): Promise<{ lastPrice: number; changePercent: number; expiryDate: string; quoteTime?: Date | null } | null>;
   /** Keyed by the symbol as passed in; a missing key means no usable quote. */
   cueQuotes(symbols: readonly string[]): Promise<Map<string, CueQuote>>;
   indexIndicatives(): Promise<{ timestamp: string | null; rows: Record<PremarketInstrument, IndexIndicativeRow & { last: number | null }> }>;
@@ -60,10 +61,20 @@ export class CapturePremarketSnapshot implements SnapshotSource {
 
     try {
       const gift = await this.deps.giftNiftyQuote();
-      if (gift) {
-        const observedAt = input.now.toISOString();
-        push({ category: "GIFT_NIFTY", label: `GIFT Nifty futures (${gift.expiryDate}) change vs previous settlement`, value: gift.changePercent, unit: "PERCENT_CHANGE", observedAt, source: "NSE_IX" });
-        push({ category: "GIFT_NIFTY", label: `GIFT Nifty futures (${gift.expiryDate}) last price`, value: gift.lastPrice, unit: "PRICE", observedAt, source: "NSE_IX" });
+      const freshness = gift ? assessGiftQuoteFreshness(gift.quoteTime ?? null, input.now) : null;
+      if (gift && freshness?.status === "STALE") {
+        // Last night's print or a dead feed. Using it would put a stale number under every baseline, so it is
+        // treated as no quote: a non-final try retries, and the final try records the day as having no driver.
+        diagnostics.giftNifty = `STALE_QUOTE: last updated ${gift.quoteTime?.toISOString()}, ${Math.round(freshness.ageMs / 60_000)} min before capture`;
+      } else if (gift) {
+        // The exchange's own update time when it gave one; otherwise null -- unknown, never the fetch time,
+        // which would make a stale quote look fresh.
+        const quoteTime = freshness?.status === "FRESH" ? gift.quoteTime ?? null : null;
+        const observedAt = quoteTime === null ? null : quoteTime.toISOString();
+        const stamp = quoteTime === null ? "quote time not provided" : `last update ${quoteTime.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" })} IST`;
+        if (quoteTime === null) diagnostics.giftNiftyQuoteTime = "NOT_PROVIDED_OR_UNUSABLE";
+        push({ category: "GIFT_NIFTY", label: `GIFT Nifty futures (${gift.expiryDate}) change vs previous settlement (${stamp})`, value: gift.changePercent, unit: "PERCENT_CHANGE", observedAt, source: "NSE_IX" });
+        push({ category: "GIFT_NIFTY", label: `GIFT Nifty futures (${gift.expiryDate}) last price (${stamp})`, value: gift.lastPrice, unit: "PRICE", observedAt, source: "NSE_IX" });
       } else {
         diagnostics.giftNifty = "NO_QUOTE";
       }

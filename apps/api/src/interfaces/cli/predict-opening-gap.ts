@@ -2,7 +2,7 @@ import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { quoteLabSymbols } from "../../infrastructure/market-data/yahoo-quote-client.js";
-import { NseIxClient } from "../../infrastructure/external/nse-ix-client.js";
+import { NseIxClient, assessGiftQuoteFreshness } from "../../infrastructure/external/nse-ix-client.js";
 import { PostgresOpeningGapPredictionRepository } from "../../infrastructure/database/repositories/postgres-opening-gap-prediction-repository.js";
 import {
   PredictOpeningGap,
@@ -33,7 +33,12 @@ const liveCueSource: GlobalCueSource = {
       let changePercent: number | null = null;
       try {
         const quote = await nseIx.getGiftNiftyFuturesQuote();
-        changePercent = quote?.changePercent ?? null;
+        const freshness = quote === null ? null : assessGiftQuoteFreshness(quote.quoteTime, new Date());
+        if (quote !== null && freshness?.status === "STALE") {
+          console.error(JSON.stringify({ level: "warn", message: "GIFT Nifty quote is stale; treated as no quote", quoteTime: quote.quoteTime?.toISOString(), ageMinutes: Math.round(freshness.ageMs / 60_000) }));
+        } else {
+          changePercent = quote?.changePercent ?? null;
+        }
       } catch (error) {
         console.error(JSON.stringify({ level: "warn", message: "GIFT Nifty fetch failed", error: String(error) }));
       }
