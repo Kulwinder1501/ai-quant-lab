@@ -47,16 +47,21 @@ export interface PremarketBiasStore {
 export interface RunPremarketBiasOptions {
   slot: RunSlot;
   /**
-   * Whether a snapshot with no usable primary driver may become the slot's terminal row. False on
-   * a non-final try so a transient outage can still be retried; the final try sets it, so a day
-   * with genuinely no data is recorded as such instead of leaving the slot silently empty.
+   * Whether a run that could not produce its result may become the slot's terminal row. False on a
+   * non-final try so a transient outage can still be retried; the final try sets it, so a day is recorded
+   * as it was instead of leaving the slot silently empty. Covers both a snapshot with no usable primary
+   * driver and a model call that failed validation or the request: the terminal row is immutable, so
+   * writing "model FAILED" at the first try would make the second try a no-op and cost the day.
    */
   finalAttempt: boolean;
   /** The 09:10 update exists only if a true indicative pre-open print is present. */
   requirePreOpen: boolean;
 }
 
-export type RunOutcome = "RECORDED" | "ALREADY_RECORDED" | "NO_DATA" | "NOT_APPLICABLE";
+export type RunOutcome = "RECORDED" | "ALREADY_RECORDED" | "NO_DATA" | "NOT_APPLICABLE" | "MODEL_RETRY_PENDING" | "HOLIDAY_SKIPPED";
+
+/** The NSE holiday name for a session date, or null on a trading day. Injected so the run stays testable. */
+export type HolidayLookup = (sessionDate: string) => Promise<string | null>;
 
 export interface RunPremarketBiasResult {
   logicalRunKey: string;
@@ -93,6 +98,8 @@ export class RunPremarketBias {
     private readonly store: PremarketBiasStore,
     private readonly llm: LlmClient | null,
     private readonly now: () => Date = () => new Date(),
+    /** When given, an NSE holiday is skipped: the Indian market is shut, so there is nothing to score. */
+    private readonly holidayLookup: HolidayLookup | null = null,
   ) {}
 
   async execute(options: RunPremarketBiasOptions): Promise<RunPremarketBiasResult> {
@@ -102,6 +109,15 @@ export class RunPremarketBias {
     const base = { logicalRunKey: key, llmStatus: null, modelAttempts: 0 } as const;
 
     if (await this.store.hasTerminal(key)) return { ...base, outcome: "ALREADY_RECORDED" };
+
+    // The cron runs Monday to Friday, which includes NSE holidays. GIFT Nifty and the Asian cues still
+    // quote, so without this a holiday would spend a model call and store a snapshot whose outcomes can
+    // never be measured. Recorded as an attempt so the skip is visible, not silent.
+    const holiday = this.holidayLookup === null ? null : await this.holidayLookup(sessionDate);
+    if (holiday !== null) {
+      await this.store.recordAttempt({ runSlot: key, status: "INSUFFICIENT_DATA", errorDetails: { reason: "NSE_HOLIDAY", holiday } });
+      return { ...base, outcome: "HOLIDAY_SKIPPED" };
+    }
 
     let captured: CaptureResult;
     try {
@@ -137,6 +153,12 @@ export class RunPremarketBias {
 
     const baselines = buildDeterministicBaselines(giftChangeFrom(snapshot));
     const model = await this.assess(key, snapshot, sessionDate);
+
+    // A model that failed on a non-final try is left for the next try; the final try records whatever
+    // happens. A model that is simply not configured is not a failure and is stored straight away.
+    if (model.llmStatus === "FAILED" && !options.finalAttempt) {
+      return { logicalRunKey: key, outcome: "MODEL_RETRY_PENDING", llmStatus: "FAILED", modelAttempts: model.attempts };
+    }
 
     const inserted = await this.store.insertTerminal({
       logicalRunKey: key,

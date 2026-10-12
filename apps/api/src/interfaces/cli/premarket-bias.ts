@@ -8,6 +8,7 @@ import { NseIxClient } from "../../infrastructure/external/nse-ix-client.js";
 import { quoteLabSymbols } from "../../infrastructure/market-data/yahoo-quote-client.js";
 import { CapturePremarketSnapshot, type CueQuote } from "../../modules/premarket-intelligence/application/capture-premarket-snapshot.js";
 import { RunPremarketBias, type RunSlot } from "../../modules/premarket-intelligence/application/run-premarket-bias.js";
+import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
 
 function readSlot(argv: readonly string[]): RunSlot {
   const index = argv.indexOf("--slot");
@@ -20,8 +21,8 @@ function readSlot(argv: readonly string[]): RunSlot {
  * One pre-market run. `--slot 0850` is the primary snapshot; `--slot 0910` is the conditional
  * update and writes nothing unless NSE is publishing a true indicative pre-open print (it still
  * records a probe attempt, so the feed's real behaviour is visible in the attempts table).
- * `--final` lets a no-data run become the slot's terminal row; the early try omits it so a
- * transient outage can still be retried.
+ * `--final` lets a no-data run, or a failed model call, become the slot's terminal row; the early try
+ * omits it so a transient outage can still be retried. NSE holidays are skipped.
  */
 async function main(): Promise<void> {
   const slot = readSlot(process.argv);
@@ -53,7 +54,13 @@ async function main(): Promise<void> {
       dailyBars: (instrument, beforeDate, count) => repository.dailyBars(instrument, beforeDate, count),
     });
 
-    const result = await new RunPremarketBias(source, repository, geminiClientFromEnvironment()).execute({
+    const result = await new RunPremarketBias(
+      source,
+      repository,
+      geminiClientFromEnvironment(),
+      () => new Date(),
+      async () => (await isNseHoliday(database, new Date())).name,
+    ).execute({
       slot,
       finalAttempt: finalAttempt || slot === "0910",
       requirePreOpen: slot === "0910",

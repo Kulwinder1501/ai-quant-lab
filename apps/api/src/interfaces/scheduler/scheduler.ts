@@ -421,8 +421,8 @@ async function main(): Promise<void> {
    * stores snapshot and baselines, so the benchmark population accrues from day one.
    *
    * Two tries, five minutes apart and both before the 09:08 pre-open, so a transient outage can
-   * recover; only the second (`--final`) may record a no-data day as terminal. The second is a
-   * no-op once the first has recorded.
+   * recover; only the second (`--final`) may record a no-data day, or a failed model call, as
+   * terminal. The second is a no-op once the first has recorded. NSE holidays are skipped.
    */
   cronSchedule("52 8 * * 1-5", () => {
     void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850"]));
