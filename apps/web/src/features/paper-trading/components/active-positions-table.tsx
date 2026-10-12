@@ -37,7 +37,7 @@ export function ActivePositionsTable({ openTrades, pendingTrades, loading, onClo
       ) : activeTrades.length === 0 ? (
         <div className="py-10 text-center rounded-xl border border-dashed border-white/10 bg-white/5">
           <p className="text-sm font-semibold text-slate-300">No active simulated trades</p>
-          <p className="text-xs text-slate-500 mt-1">Click &quot;Simulate Trade&quot; above to open a position from an AI strategy proposal.</p>
+          <p className="text-xs text-slate-500 mt-1">Click &quot;Manual Trade&quot; above to buy a contract from the live chain, or &quot;From AI Proposal&quot; to open one from a strategy idea.</p>
         </div>
       ) : (
         <div className="overflow-x-auto">

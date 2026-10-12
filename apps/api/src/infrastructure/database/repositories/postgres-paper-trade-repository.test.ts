@@ -46,10 +46,14 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
   // raw 23514 on every call; the assertions below fail on each of those three mistakes.
   it("writes literals that satisfy the trade_ideas reasoning/evidence/risk_reward CHECK constraints", async () => {
     const statements: string[] = [];
+    let ideaParams: unknown[] = [];
     const client = {
-      query: vi.fn(async (text: string) => {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
         statements.push(text.replace(/\s+/g, " ").trim());
-        if (text.includes("INSERT INTO trade_ideas")) return { rows: [{ id: "idea-1" }] };
+        if (text.includes("INSERT INTO trade_ideas")) {
+          ideaParams = params ?? [];
+          return { rows: [{ id: "idea-1" }] };
+        }
         // Nothing back for the account lookup, so the open aborts right after the synthetic idea is
         // inserted -- the INSERT statement under test has already been captured by then.
         if (text.includes("FROM paper_accounts")) return { rows: [] };
@@ -87,10 +91,37 @@ describe("PostgresPaperTradeRepository manual option transaction", () => {
     // evidence JSONB NOT NULL CHECK (jsonb_typeof(evidence) = 'object')
     expect(evidence !== null && typeof evidence === "object" && !Array.isArray(evidence)).toBe(true);
 
-    // risk_reward NUMERIC NOT NULL CHECK (risk_reward > 0) -- the value between the $4 stop param and confidence.
-    const riskReward = insert!.match(/\$4,\s*([0-9.]+)\s*,/);
-    expect(riskReward).not.toBeNull();
-    expect(Number(riskReward![1])).toBeGreaterThan(0);
+    // risk_reward NUMERIC NOT NULL CHECK (risk_reward > 0) -- the bound parameter between the $4 target and
+    // confidence, computed from the caller's own premium exits: (200 - 100) / (100 - 50).
+    expect(insert).toMatch(/\$4,\s*\$5\s*,/);
+    expect(ideaParams).toEqual(["instrument-1", 100, 50, 200, 2]);
+  });
+
+  it("keeps the idea row's stop, target and risk/reward consistent when the caller gives no exits", async () => {
+    let ideaParams: unknown[] = [];
+    const client = {
+      query: vi.fn(async (text: string, params?: unknown[]) => {
+        if (text.includes("INSERT INTO trade_ideas")) {
+          ideaParams = params ?? [];
+          return { rows: [{ id: "idea-1" }] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const database = { connect: vi.fn(async () => client) } as unknown as DatabasePool;
+    await expect(new PostgresPaperTradeRepository(database).openManualOption({
+      accountId: "account-1",
+      instrumentId: "instrument-1",
+      quantity: 75,
+      fillPrice: 100,
+      openedAt: new Date("2026-08-09T10:00:00.000Z"),
+      entryFees: 20,
+      entrySlippage: 0,
+      notes: "test",
+    })).rejects.toThrow();
+    // The old fixed -50% / +100% bracket: reward twice the risk.
+    expect(ideaParams).toEqual(["instrument-1", 100, 50, 200, 2]);
   });
 
   it("rolls back the first structure leg when the second leg cannot open", async () => {

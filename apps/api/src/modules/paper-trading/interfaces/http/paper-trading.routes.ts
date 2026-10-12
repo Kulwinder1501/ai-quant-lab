@@ -14,6 +14,7 @@ import type { TradeOutcomeFilter } from "../../domain/paper-trade-history.js";
 import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-trading.js";
 import { lotsToQuantity, validateQuantity } from "../../domain/lot-size-validator.js";
 import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
+import { checkManualOptionGeometry, parseManualOptionBarriers } from "../../domain/manual-option-barriers.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
@@ -528,6 +529,8 @@ export function registerPaperTradingRoutes(
         quantity,
         lots,
         impliedVolatility,
+        stopLoss,
+        targetPrice,
         notes,
       } = request.body || {};
 
@@ -543,6 +546,14 @@ export function registerPaperTradingRoutes(
         || !Number.isFinite(numericStrike) || numericStrike <= 0
         || !Number.isFinite(requestedFill) || requestedFill <= 0) {
         response.status(400).json({ error: "optionType must be CE/PE and strike/fillPrice must be positive numbers." });
+        return;
+      }
+
+      // Both exits are the buyer's to set: the position would otherwise have none, since a manual entry has no
+      // candle timeframe for the 15:15 square-off to act on.
+      const barriers = parseManualOptionBarriers(stopLoss, targetPrice);
+      if (!barriers.ok) {
+        response.status(400).json({ error: barriers.error });
         return;
       }
 
@@ -601,6 +612,11 @@ export function registerPaperTradingRoutes(
       // A buyer pays the observed ask. The request value is display context only and
       // cannot override the server-side book used to book P&L.
       const serverFillPrice = observedQuote.ask;
+      const geometryError = checkManualOptionGeometry(barriers, serverFillPrice);
+      if (geometryError !== null) {
+        response.status(422).json({ error: geometryError });
+        return;
+      }
 
       /*
        * Where the underlying actually was when this contract was bought.
@@ -687,6 +703,8 @@ export function registerPaperTradingRoutes(
         entrySlippage: 0,
         notes: notes || "Manual option trade from chain",
         sideOverride: "LONG", // Buying options is always LONG
+        stopLossOverride: barriers.stopLoss,
+        targetPriceOverride: barriers.targetPrice,
         // There is no antecedent trade idea on this path to read a thesis side from, so the
         // direction is derived from the contract itself: buying a CE is a bullish call, buying
         // a PE is a bearish one. Hardcoding this to "LONG" (the same value as sideOverride

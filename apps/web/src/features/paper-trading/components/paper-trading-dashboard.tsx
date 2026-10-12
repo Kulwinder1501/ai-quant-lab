@@ -2,19 +2,24 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
+import { ModalPortal } from "../../../components/ui/modal-portal";
 import { Reveal } from "../../../components/ui/reveal";
 import { getResearchJson, postResearchJson } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
-import type { PaperAccountSummary, PaperAccountFullSummary, PaperTradeRow } from "../domain";
+import { summariseOpenTradeMarks, type PaperAccountMetrics, type PaperAccountSummary, type PaperAccountFullSummary, type PaperTradeRow } from "../domain";
 import { EquityMetrics } from "./equity-metrics";
 import { ActivePositionsTable } from "./active-positions-table";
 import { TradeHistoryTable } from "./trade-history-table";
 import { CreateAccountModal } from "./create-account-modal";
 import { OpenTradeModal } from "./open-trade-modal";
+import { ManualTradePicker } from "./manual-trade-picker";
 import { CloseTradeModal } from "./close-trade-modal";
 import { useAppStore } from "../../../stores/app-store";
+/** Open positions are re-marked this often while the tab is visible, so the live marks do not go stale. */
+const SUMMARY_REFRESH_MS = 15_000;
+
 export interface TradeIdeaOption {
   id: string;
   instrumentSymbol: string;
@@ -46,6 +51,8 @@ export function PaperTradingDashboard() {
   const [newAccountBalance, setNewAccountBalance] = useState<number>(1000000);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  const [showManualPicker, setShowManualPicker] = useState<boolean>(false);
+
   const [showOpenModal, setShowOpenModal] = useState<boolean>(false);
   const [tradeIdeas, setTradeIdeas] = useState<TradeIdeaOption[]>([]);
   const [selectedIdeaId, setSelectedIdeaId] = useState<string>("");
@@ -75,7 +82,10 @@ export function PaperTradingDashboard() {
         return activeAccountId;
       }
       if (current && list.some((account) => account.id === current)) return current;
-      return list[0]?.id ?? "";
+      // A hand-made portfolio before a bot's: this page is where manual trades are taken, and the bot
+      // accounts are managed by their schedulers.
+      const manual = list.find((account) => !account.name.toLowerCase().startsWith("autobot"));
+      return (manual ?? list[0])?.id ?? "";
     });
   }, [activeAccountId]);
 
@@ -128,6 +138,25 @@ export function PaperTradingDashboard() {
     const controller = new AbortController();
     void loadSummary(selectedAccountId, controller.signal).then(applySummary, applySummaryError);
     return () => controller.abort();
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
+
+  // Keeps the marks live. Skipped while the tab is hidden, and a refresh is not started while the previous
+  // one is still running: marking an option reads the live book, which can be slow when the feed is degraded.
+  useEffect(() => {
+    if (!selectedAccountId) return;
+    const controller = new AbortController();
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      void loadSummary(selectedAccountId, controller.signal)
+        .then(applySummary, applySummaryError)
+        .finally(() => { inFlight = false; });
+    }, SUMMARY_REFRESH_MS);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
   }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   useEffect(() => {
@@ -263,15 +292,23 @@ export function PaperTradingDashboard() {
     }
   };
 
-  const metrics = summary?.metrics || {
-    totalTrades: 0,
-    winningTrades: 0,
-    losingTrades: 0,
+  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  const emptyBalance = selectedAccount?.openingBalance || 0;
+  const metrics: PaperAccountMetrics = summary?.metrics ?? {
+    openingBalance: emptyBalance,
+    closedTradeCount: 0,
+    openTradeCount: 0,
+    winningTradeCount: 0,
     winRatePercent: 0,
     realizedPnl: 0,
-    unrealizedPnl: 0,
-    equity: accounts.find((a) => a.id === selectedAccountId)?.openingBalance || 0,
+    totalFees: 0,
+    totalSlippage: 0,
+    averageReward: null,
+    maximumDrawdownPercent: 0,
+    currentEquity: emptyBalance,
+    availableCapital: emptyBalance,
   };
+  const { unrealizedPnl, unmarkedCount } = summariseOpenTradeMarks(summary?.openTrades ?? []);
 
   return (
     <>
@@ -337,11 +374,20 @@ export function PaperTradingDashboard() {
 
               <button
                 type="button"
+                onClick={() => setShowManualPicker(true)}
+                disabled={!selectedAccountId}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 transition shadow-md shadow-emerald-500/20 disabled:opacity-50 flex items-center gap-1.5"
+              >
+                <span>+ Manual Trade</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={openTradeModalWithIdeas}
                 disabled={!selectedAccountId}
                 className="px-4 py-2 rounded-xl text-xs font-bold text-static-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition shadow-md shadow-cyan-500/20 disabled:opacity-50 flex items-center gap-1.5"
               >
-                <span>🚀 Simulate Trade</span>
+                <span>From AI Proposal</span>
               </button>
             </div>
           </GlassPanel>
@@ -362,10 +408,11 @@ export function PaperTradingDashboard() {
 
         {/* Metrics Summary Grid */}
         <Reveal delayMs={100}>
-          <EquityMetrics 
-            metrics={metrics} 
-            openingBalance={summary?.account.openingBalance || 0} 
-            openTradesCount={summary?.openTrades.length || 0} 
+          <EquityMetrics
+            metrics={metrics}
+            unrealizedPnl={unrealizedPnl}
+            unmarkedCount={unmarkedCount}
+            openTradesCount={summary?.openTrades.length || 0}
           />
         </Reveal>
 
@@ -385,6 +432,17 @@ export function PaperTradingDashboard() {
             closedTrades={summary?.closedTrades || []} 
           />
         </Reveal>
+
+        {/* Modals are mounted on the body: inside the page they open against Reveal's transformed wrapper. */}
+        <ModalPortal>
+        {/* Modal: Manual option entry from the live chain */}
+        <ManualTradePicker
+          show={showManualPicker}
+          onClose={() => setShowManualPicker(false)}
+          accountId={selectedAccountId}
+          accountName={selectedAccount?.name ?? ""}
+          onOpened={() => { void refreshSummary(selectedAccountId); }}
+        />
 
         {/* Modal: Create Portfolio Account */}
         <CreateAccountModal 
@@ -431,6 +489,7 @@ export function PaperTradingDashboard() {
           setCloseNotes={setCloseNotes}
           closeError={closeError}
         />
+        </ModalPortal>
       </div>
     </div>
     </>

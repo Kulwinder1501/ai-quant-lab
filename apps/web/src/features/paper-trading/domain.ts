@@ -105,18 +105,47 @@ export function paperTradeContractLabel(trade: PaperTradeRow): string {
   return `${trade.underlyingSymbol} ${trade.optionStrike} ${trade.optionType}`;
 }
 
+/**
+ * The account metrics the API returns (`calculatePaperAccountMetrics`).
+ *
+ * This page used to type them as `totalTrades / unrealizedPnl / equity`, names the API never sent, so
+ * Total Equity and Unrealized P&L rendered `NaN`. `currentEquity` is the opening balance plus REALISED
+ * P&L only; open positions are marked per trade (`liveValuation`), so a live equity adds them on top.
+ */
+export interface PaperAccountMetrics {
+  openingBalance: number;
+  closedTradeCount: number;
+  openTradeCount: number;
+  winningTradeCount: number;
+  winRatePercent: number;
+  realizedPnl: number;
+  totalFees: number;
+  totalSlippage: number;
+  averageReward: number | null;
+  maximumDrawdownPercent: number;
+  currentEquity: number;
+  availableCapital: number;
+}
+
 export interface PaperAccountFullSummary {
   account: PaperAccountSummary;
   openTrades: PaperTradeRow[];
   pendingTrades: PaperTradeRow[];
   closedTrades: PaperTradeRow[];
-  metrics: {
-    totalTrades: number;
-    winningTrades: number;
-    losingTrades: number;
-    winRatePercent: number;
-    realizedPnl: number;
-    unrealizedPnl: number;
-    equity: number;
-  };
+  metrics: PaperAccountMetrics;
+}
+
+/** Unrealised P&L across the open trades that have a live mark, and how many do not. */
+export function summariseOpenTradeMarks(openTrades: PaperTradeRow[]): { unrealizedPnl: number; unmarkedCount: number } {
+  let unrealizedPnl = 0;
+  let unmarkedCount = 0;
+  for (const trade of openTrades) {
+    const pnl = trade.liveValuation?.status === "AVAILABLE" ? trade.liveValuation.unrealizedPnl : null;
+    if (pnl === null || pnl === undefined || !Number.isFinite(pnl)) {
+      unmarkedCount += 1;
+    } else {
+      unrealizedPnl += pnl;
+    }
+  }
+  return { unrealizedPnl, unmarkedCount };
 }

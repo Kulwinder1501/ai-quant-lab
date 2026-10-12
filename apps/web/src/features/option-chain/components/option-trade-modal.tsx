@@ -35,6 +35,22 @@ interface PaperAccountsResponse {
   data?: PaperAccountSummary[];
 }
 
+/** Option premiums trade in 5-paise ticks. */
+const PREMIUM_TICK = 0.05;
+
+function roundToTick(value: number): number {
+  return Math.round(value / PREMIUM_TICK) * PREMIUM_TICK;
+}
+
+/** A premium input as the text a field holds: two decimals, no float noise. */
+function premiumText(value: number): string {
+  return roundToTick(value).toFixed(2);
+}
+
+/** Quick picks, as a fraction of the entry premium. The default is the middle of each row. */
+const STOP_PRESETS = [0.2, 0.3, 0.5] as const;
+const TARGET_PRESETS = [0.3, 0.6, 1.0] as const;
+
 export interface OptionTradeModalProps {
   show: boolean;
   onClose: () => void;
@@ -44,6 +60,10 @@ export interface OptionTradeModalProps {
   expiryDate: string;
   premium: number;
   impliedVolatility: number | null;
+  /** The account to preselect, so a ticket opened from a page that already has one does not default to the first. */
+  defaultAccountId?: string;
+  /** Called once the trade is booked, before `onClose`, so the caller can refresh what it shows. */
+  onOpened?: () => void;
   greeks: {
     delta: number | null;
     gamma: number | null;
@@ -61,11 +81,16 @@ export function OptionTradeModal({
   expiryDate,
   premium,
   impliedVolatility,
+  defaultAccountId,
+  onOpened,
   greeks,
 }: OptionTradeModalProps) {
   const [accounts, setAccounts] = useState<PaperAccountSummary[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [selectedAccountId, setSelectedAccountId] = useState<string>(defaultAccountId ?? "");
   const [lots, setLots] = useState(1);
+  // Premium levels, held as text so a half-typed number is not rewritten under the cursor.
+  const [stopText, setStopText] = useState(() => premiumText(premium * (1 - STOP_PRESETS[1])));
+  const [targetText, setTargetText] = useState(() => premiumText(premium * (1 + TARGET_PRESETS[1])));
   const [notes, setNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,6 +144,20 @@ export function OptionTradeModal({
   const notional = useMemo(() => premium * quantity, [premium, quantity]);
   const totalCost = useMemo(() => notional + (feeTotal ?? 0), [notional, feeTotal]);
   
+  const stopLoss = Number(stopText);
+  const targetPrice = Number(targetText);
+  const levelsError = useMemo(() => {
+    if (!Number.isFinite(stopLoss) || stopLoss <= 0) return "Enter a stop loss premium above zero.";
+    if (!Number.isFinite(targetPrice) || targetPrice <= 0) return "Enter a target premium above zero.";
+    if (stopLoss >= premium) return "The stop loss must be below the entry premium.";
+    if (targetPrice <= premium) return "The target must be above the entry premium.";
+    return null;
+  }, [stopLoss, targetPrice, premium]);
+  const entryFees = feeTotal ?? 0;
+  const lossAtStop = levelsError === null ? (premium - stopLoss) * quantity + entryFees : null;
+  const gainAtTarget = levelsError === null ? (targetPrice - premium) * quantity - entryFees : null;
+  const rewardToRisk = lossAtStop !== null && gainAtTarget !== null && lossAtStop > 0 ? gainAtTarget / lossAtStop : null;
+
   const breakeven = useMemo(() => {
     return optionType === "CE" ? strike + premium : strike - premium;
   }, [strike, premium, optionType]);
@@ -131,6 +170,10 @@ export function OptionTradeModal({
     }
     if (impliedVolatility === null) {
       setError("This contract has no measured implied volatility and cannot be opened safely.");
+      return;
+    }
+    if (levelsError !== null) {
+      setError(levelsError);
       return;
     }
     setIsSubmitting(true);
@@ -146,9 +189,12 @@ export function OptionTradeModal({
         fillPrice: premium,
         lots,
         impliedVolatility,
+        stopLoss,
+        targetPrice,
         notes: notes || `Manual ${optionType} buy at ${strike}`,
       });
       setIsSubmitting(false);
+      onOpened?.();
       onClose();
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to open trade."));
@@ -180,7 +226,7 @@ export function OptionTradeModal({
               <option value="" disabled>Select an account...</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} (Available: ₹{formatNumber(acc.openingBalance, 2)})
+                  {acc.name} (Fund: ₹{formatNumber(acc.openingBalance, 2)})
                 </option>
               ))}
             </select>
@@ -226,14 +272,75 @@ export function OptionTradeModal({
             </div>
           </div>
 
+          <div className="rounded-xl border border-white/10 bg-slate-900/80 p-3 space-y-3">
+            <p className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Exit levels (option premium)</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-rose-300 uppercase">Stop Loss (₹)</label>
+                <input
+                  type="number"
+                  required
+                  step={PREMIUM_TICK}
+                  min={PREMIUM_TICK}
+                  value={stopText}
+                  onChange={(e) => setStopText(e.target.value)}
+                  className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white font-mono focus:outline-none focus:ring-2 focus:ring-rose-400"
+                />
+                <div className="mt-1.5 flex gap-1">
+                  {STOP_PRESETS.map((fraction) => (
+                    <button
+                      key={fraction}
+                      type="button"
+                      onClick={() => setStopText(premiumText(premium * (1 - fraction)))}
+                      className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-bold text-rose-200 hover:bg-rose-500/30"
+                    >
+                      −{Math.round(fraction * 100)}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-emerald-300 uppercase">Target (₹)</label>
+                <input
+                  type="number"
+                  required
+                  step={PREMIUM_TICK}
+                  min={PREMIUM_TICK}
+                  value={targetText}
+                  onChange={(e) => setTargetText(e.target.value)}
+                  className="mt-1 w-full rounded-xl bg-slate-900 border border-white/10 px-3.5 py-2 text-sm text-white font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                />
+                <div className="mt-1.5 flex gap-1">
+                  {TARGET_PRESETS.map((fraction) => (
+                    <button
+                      key={fraction}
+                      type="button"
+                      onClick={() => setTargetText(premiumText(premium * (1 + fraction)))}
+                      className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-200 hover:bg-emerald-500/30"
+                    >
+                      +{Math.round(fraction * 100)}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {levelsError && <p className="text-[11px] text-rose-300">{levelsError}</p>}
+            <p className="text-[10px] text-slate-500">
+              Checked against the contract&apos;s live premium every minute while the market is open. A manual position is not
+              squared off at 15:15: if neither level is hit it stays open until you close it.
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl border border-white/10 bg-slate-900/80 p-3 space-y-1.5">
               <p className="text-[10px] uppercase font-semibold tracking-wider text-slate-500">Risk Profile</p>
               <ul className="text-xs text-slate-300 space-y-1">
-                <li className="flex justify-between"><span>Max Risk</span><span className="text-rose-300">₹{formatNumber(notional, 2)}</span></li>
-                <li className="flex justify-between"><span>Max Reward</span><span className="text-emerald-300">Infinite</span></li>
+                <li className="flex justify-between"><span>Loss at stop</span><span className="text-rose-300">{lossAtStop === null ? "—" : `₹${formatNumber(lossAtStop, 2)}`}</span></li>
+                <li className="flex justify-between"><span>Gain at target</span><span className="text-emerald-300">{gainAtTarget === null ? "—" : `₹${formatNumber(gainAtTarget, 2)}`}</span></li>
+                <li className="flex justify-between"><span>Reward : Risk</span><span className="font-bold text-white">{rewardToRisk === null ? "—" : rewardToRisk.toFixed(2)}</span></li>
                 <li className="flex justify-between border-t border-white/10 pt-1"><span>Breakeven</span><span className="font-bold text-white">₹{formatNumber(breakeven, 2)}</span></li>
               </ul>
+              <p className="text-[10px] text-slate-500">Before exit fees. Entry fees are included.</p>
             </div>
             
             <div className="rounded-xl border border-white/10 bg-slate-900/80 p-3 space-y-1.5">
@@ -280,7 +387,7 @@ export function OptionTradeModal({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || !selectedAccountId}
+              disabled={isSubmitting || !selectedAccountId || levelsError !== null}
               className="px-5 py-2 rounded-xl text-sm font-semibold text-static-white bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50"
             >
               {isSubmitting ? "Executing..." : "Execute Trade"}

@@ -119,6 +119,7 @@ async function main(): Promise<void> {
           if (!proposal.expiresAt) continue;
 
           const forward = contexts.slice(i + 1).map((ctx) => ({
+            id: ctx.candle.id,
             openTime: ctx.candle.openTime,
             closeTime: ctx.candle.closeTime,
             open: ctx.candle.open,

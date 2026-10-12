@@ -356,16 +356,21 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     try {
       await client.query("BEGIN");
       transactionStarted = true;
+      // The caller's own premium exits when given (the HTTP route always gives them); the old fixed -50% / +100%
+      // only for a caller that does not, so the idea row and the position it backs agree on the levels.
+      const manualStop = input.stopLossOverride ?? input.fillPrice * 0.5;
+      const manualTarget = input.targetPriceOverride ?? input.fillPrice * 2;
+      const manualRiskReward = (manualTarget - input.fillPrice) / (input.fillPrice - manualStop);
       const ideaResult = await client.query<{ id: string }>(`
         INSERT INTO trade_ideas (
           instrument_id, strategy_version_id, source_candle_id, side, status,
           entry_price, stop_loss, target_price, risk_reward, confidence,
           reasoning, evidence, expires_at
         ) VALUES (
-          $1, NULL, NULL, 'LONG', 'PROPOSED', $2, $3, $4, 2.0, 1.0,
+          $1, NULL, NULL, 'LONG', 'PROPOSED', $2, $3, $4, $5, 1.0,
           '["Manual options chain trade"]'::jsonb, '{}'::jsonb, NOW() + INTERVAL '1 day'
         ) RETURNING id
-      `, [input.instrumentId, input.fillPrice, input.fillPrice * 0.5, input.fillPrice * 2]);
+      `, [input.instrumentId, input.fillPrice, manualStop, manualTarget, manualRiskReward]);
       const tradeIdeaId = ideaResult.rows[0]?.id;
       if (!tradeIdeaId) {
         throw new Error("Manual trade idea creation returned no id.");
