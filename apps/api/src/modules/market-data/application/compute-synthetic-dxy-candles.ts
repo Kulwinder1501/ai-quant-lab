@@ -135,7 +135,10 @@ export async function computeSyntheticDxyCandles(
         close: bar.close.toFixed(6),
         volume: "0",
         isComplete: true,
-        source: "oanda",
+        // Not "oanda": these bars are reconstructed, and candle_series_provenance declares DXY's intraday
+        // series as "synthetic" (as do its ~2.8M stored bars). candles.(instrument_id, timeframe, source)
+        // is a foreign key into it, so any other value is refused and fails the whole collection job.
+        source: "synthetic",
         sourceMetadata: { synthetic: true, formula: "ICE_DXY_V1", components: COMPONENT_SYMBOLS },
       });
     }
