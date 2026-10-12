@@ -75,9 +75,20 @@ export class PostgresStrategyVersionRepository implements StrategyVersionReposit
       throw new Error(`Unable to resolve strategy ${input.strategyKey}.`);
     }
 
+    /*
+     * Inserted INACTIVE, and activated below once its predecessor has been deactivated.
+     *
+     * `is_active` defaults to TRUE, and migration 098's partial unique index allows one active row per
+     * strategy, so a plain insert of a NEW version while the previous one is still active is refused
+     * outright -- before the cutover below ever runs. That is what happened on 2026-10-12: six version
+     * bumps went out together and the first bot pass to touch each one failed with
+     * "strategy_versions_one_active_per_strategy" (STRATEGY_FAILED), so the gold bot recorded no decisions
+     * and the live pattern and ICT bots were about to fail the same way at the open. The cutover logic
+     * itself was sound; it was simply unreachable for any version that did not already exist.
+     */
     await this.database.query(`
-      INSERT INTO strategy_versions (strategy_id, version, configuration)
-      VALUES ($1, $2, $3::jsonb)
+      INSERT INTO strategy_versions (strategy_id, version, configuration, is_active)
+      VALUES ($1, $2, $3::jsonb, FALSE)
       ON CONFLICT (strategy_id, version) DO NOTHING
     `, [strategyId, input.version, configuration]);
 
@@ -102,10 +113,10 @@ export class PostgresStrategyVersionRepository implements StrategyVersionReposit
     /*
      * Exactly one active version per strategy, and it is the one the code declares.
      *
-     * `is_active` defaults to TRUE and this method never set it, so every version bump left its
-     * predecessor active -- momentum-scalp reached 2 and 3, trend-breakout 1 and 2. The generator
-     * was unaffected because it resolves by `(strategy_id, version)`, but the callers that ask the
-     * database to nominate "the" active version were choosing arbitrarily between them.
+     * Before the unique index existed, `is_active` defaulted to TRUE and this method never set it, so
+     * every version bump left its predecessor active -- momentum-scalp reached 2 and 3, trend-breakout
+     * 1 and 2. The generator was unaffected because it resolves by `(strategy_id, version)`, but the
+     * callers that ask the database to nominate "the" active version were choosing arbitrarily.
      *
      * Gated on actual drift rather than run unconditionally: this is called for every strategy on
      * every generation pass, and the two-step update below passes briefly through zero active rows.
