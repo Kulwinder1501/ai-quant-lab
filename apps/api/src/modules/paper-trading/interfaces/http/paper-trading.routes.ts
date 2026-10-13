@@ -15,6 +15,7 @@ import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-
 import { lotsToQuantity, validateQuantity } from "../../domain/lot-size-validator.js";
 import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
 import { checkManualOptionGeometry, parseManualOptionBarriers } from "../../domain/manual-option-barriers.js";
+import { chooseManualOptionFill } from "../../domain/manual-option-fill.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
@@ -594,24 +595,31 @@ export function registerPaperTradingRoutes(
       }
       validateQuantity(resolvedQuantity, lotSize);
 
-      const observedQuote = await dependencies.optionChainRepository.latestContractQuote({
+      // The price a buyer pays is the ask the market is showing *now*: the live premium tick for this exact
+      // contract, or a chain quote only if it is just as fresh. This used to read the latest stored chain snapshot
+      // and accept one up to 40 minutes old, which filled buys at prices from before the last big move. The value
+      // the client sent is display context only and cannot override the server-side book.
+      const contractKey = {
         underlyingSymbol: normalizedSymbol,
         expiryDate: expiry,
         strikePrice: numericStrike,
         optionType: normalizedOptionType as "CE" | "PE",
+      };
+      const quoteNow = new Date();
+      const [liveTick, chainQuote] = await Promise.all([
+        dependencies.optionPremiumTickRepository.latestForContract(contractKey, undefined, quoteNow).catch(() => null),
+        dependencies.optionChainRepository.latestContractQuote(contractKey),
+      ]);
+      const chosenFill = chooseManualOptionFill({
+        tick: liveTick,
+        chainQuote: chainQuote === null ? null : { bid: chainQuote.bid, ask: chainQuote.ask, observedAt: chainQuote.observedAt },
+        now: quoteNow,
       });
-      const quoteAgeMinutes = observedQuote === null
-        ? Number.POSITIVE_INFINITY
-        : (Date.now() - observedQuote.observedAt.getTime()) / 60_000;
-      if (observedQuote?.ask == null || observedQuote.ask <= 0 || quoteAgeMinutes < 0 || quoteAgeMinutes > 40) {
-        response.status(422).json({
-          error: "A fresh two-sided quote for the exact contract is required before a manual option can be opened.",
-        });
+      if (!chosenFill.ok) {
+        response.status(422).json({ error: chosenFill.error });
         return;
       }
-      // A buyer pays the observed ask. The request value is display context only and
-      // cannot override the server-side book used to book P&L.
-      const serverFillPrice = observedQuote.ask;
+      const serverFillPrice = chosenFill.fillPrice;
       const geometryError = checkManualOptionGeometry(barriers, serverFillPrice);
       if (geometryError !== null) {
         response.status(422).json({ error: geometryError });
@@ -630,23 +638,29 @@ export function registerPaperTradingRoutes(
        *
        * Resolved server-side rather than taken from the request: the client already displays
        * a spot, but an entry anchor that decides exits should not be caller-supplied. The
-       * stored chain snapshot is preferred because it is the same observation the strike was
-       * chosen from; a live quote is the fallback.
+       * fill's own tick carries the spot it was observed with, which is preferred; a chain
+       * snapshot (only ever accepted when fresh) and then a live quote are the fallbacks.
        */
-      let underlyingEntryPrice: number | null = null;
+      let underlyingEntryPrice: number | null = chosenFill.underlyingValue;
       // A manual open has no antecedent idea, so there is no separate signal-time level to
       // record: the chain snapshot/live quote resolved here *is* the fill-moment observation,
       // taken server-side in the same request that books the fill. Carried onto both
       // underlyingEntryPrice (for consumers that read the "signal-time" column) and
       // underlyingFillPrice (migration 120) -- for this path the two happen to be the same
       // real observation, not two different numbers.
-      let underlyingFillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null = null;
+      let underlyingFillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null =
+        chosenFill.underlyingValue === null ? null : "OPTION_PREMIUM_TICK_ASK";
       try {
-        const snapshot = await dependencies.optionChainRepository.latestSnapshot({
-          underlyingSymbol: String(underlyingSymbol).toUpperCase(),
-        });
-        underlyingEntryPrice = snapshot?.underlyingValue ?? null;
-        if (underlyingEntryPrice !== null) underlyingFillSource = "OPTION_CHAIN_QUOTE";
+        // Only when the fill did not bring its own spot: a stored snapshot's spot is as old as the snapshot.
+        const snapshot = underlyingEntryPrice !== null
+          ? null
+          : await dependencies.optionChainRepository.latestSnapshot({
+            underlyingSymbol: String(underlyingSymbol).toUpperCase(),
+          });
+        if (snapshot) {
+          underlyingEntryPrice = snapshot.underlyingValue ?? null;
+          if (underlyingEntryPrice !== null) underlyingFillSource = "OPTION_CHAIN_QUOTE";
+        }
       } catch {
         underlyingEntryPrice = null;
       }
@@ -687,9 +701,9 @@ export function registerPaperTradingRoutes(
           // The observed spot when available; the strike only as a last resort, and this
           // field is display metadata rather than an input to any exit decision.
           underlyingEntry: underlyingEntryPrice,
-          quoteObservedAt: observedQuote.observedAt.toISOString(),
+          quoteObservedAt: chosenFill.observedAt.toISOString(),
           requestedFill,
-          fillSource: "OBSERVED_ASK",
+          fillSource: chosenFill.source,
         },
       };
 
