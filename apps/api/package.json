@@ -15,6 +15,7 @@
     "data:derive:higher-timeframes": "tsx src/interfaces/cli/derive-higher-timeframe-candles.ts",
     "data:collect:live": "tsx src/interfaces/cli/collect-live-market-data.ts",
     "data:collect:institutional": "tsx src/interfaces/cli/collect-institutional-data.ts",
+    "data:collect:index-futures": "tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts",
     "data:predict:opening-gap": "tsx src/interfaces/cli/predict-opening-gap.ts",
     "data:settle:opening-gap": "tsx src/interfaces/cli/settle-opening-gap-predictions.ts",
     "data:premarket-bias": "tsx src/interfaces/cli/premarket-bias.ts",

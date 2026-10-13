@@ -18,6 +18,7 @@
     "data:derive:higher-timeframes": "npm run data:derive:higher-timeframes --workspace @ai-quant-lab/api --",
     "data:collect:live": "npm run data:collect:live --workspace @ai-quant-lab/api --",
     "data:collect:institutional": "npm run data:collect:institutional --workspace @ai-quant-lab/api --",
+    "data:collect:index-futures": "npm run data:collect:index-futures --workspace @ai-quant-lab/api --",
     "data:predict:opening-gap": "npm run data:predict:opening-gap --workspace @ai-quant-lab/api --",
     "data:settle:opening-gap": "npm run data:settle:opening-gap --workspace @ai-quant-lab/api --",
     "data:premarket-bias": "npm run data:premarket-bias --workspace @ai-quant-lab/api --",

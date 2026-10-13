@@ -247,6 +247,9 @@ async function main(): Promise<void> {
     CANDLE_GAP_CHECK: 30 * 60 * 1000,
     // Once-a-day append-only backfill of confirmed gaps; same patience as the check it precedes.
     CANDLE_GAP_HEAL: 30 * 60 * 1000,
+    // Four Fyers history requests (two contracts per index) over five days of 1m bars.
+    INDEX_FUTURES_EOD: 15 * 60 * 1000,
+    INDEX_FUTURES_EOD_RETRY: 15 * 60 * 1000,
     // XAU_CANDLE_COLLECTION moved to a 15-minute cron 2026-10-07 (see that job's own docstring --
     // Twelve Data's daily free-tier credit cap, not this timeout); PAPER_TRADING_BOT_GOLD still
     // fires inside the same tick. Same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
@@ -1075,6 +1078,26 @@ async function main(): Promise<void> {
   const GAP_SCANNED_TIMEFRAMES = ["1m", "5m"] as const;
 
   /**
+   * Index-futures 1m bars, which the volume-profile observation reads as the *prior* session's profile.
+   *
+   * Runs at 16:08 IST, after the futures session (it runs to 15:40) and before the 16:38 token expiry,
+   * and again at 09:12 the next morning as a repair for a night that failed: the first entries of the
+   * day are stamped from yesterday's bars. `--auto` derives the live contracts from the date, so the
+   * month roll needs no deploy. Only stored bars are written and existing ones are skipped, so a re-run
+   * is harmless. Needs the Fyers credential, so it is gated like the other collecting jobs. It feeds a
+   * log-only research stamp and nothing else: if it fails, entries are stamped NO_PRIOR_SESSION_FUTURES
+   * and still open normally.
+   */
+  cronSchedule("8 16 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("INDEX_FUTURES_EOD", () => runCommand("npm", ["run", "data:collect:index-futures", "--", "--auto"]));
+  });
+  cronSchedule("12 9 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("INDEX_FUTURES_EOD_RETRY", () => runCommand("npm", ["run", "data:collect:index-futures", "--", "--auto"]));
+  });
+
+  /**
    * End-of-day append-only backfill of any confirmed collection gap.
    *
    * Runs at 16:18 IST, a hair before the detector below, so a recoverable gap is repaired before it
@@ -1508,7 +1531,7 @@ async function main(): Promise<void> {
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
            // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
-           "CANDLE_GAP_HEAL"]
+           "CANDLE_GAP_HEAL", "INDEX_FUTURES_EOD", "INDEX_FUTURES_EOD_RETRY"]
         : []),
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",

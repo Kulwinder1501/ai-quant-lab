@@ -8,6 +8,7 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
 import { ImportHistoricalMarketData } from "../../modules/market-data/application/import-historical-market-data.js";
 import { getOption, parseDateOption } from "./arguments.js";
+import { upcomingIndexFutures } from "../../modules/market-data/domain/index-futures-contracts.js";
 
 /**
  * Phase 0 FRVP data prerequisite: register historically eligible NIFTY/BANKNIFTY monthly
@@ -17,6 +18,13 @@ import { getOption, parseDateOption } from "./arguments.js";
  * Usage:
  *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts
  *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts --from 2026-07-15 --to 2026-10-12
+ *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts --auto
+ *
+ * `--auto` is what the scheduler runs (INDEX_FUTURES_EOD): the next two monthly contracts per index
+ * that are live today, derived from the date, over the last few days. The fixed list below stops at
+ * October 2026, so without it nothing would fetch futures bars after 2026-10-12 and the volume-profile
+ * observation (volume-profile-observation.ts) would have no prior session to read. Re-running is safe:
+ * bars that already exist are skipped, so the window also repairs a day that was missed.
  */
 
 interface FuturesContractSpec {
@@ -101,8 +109,19 @@ const CONTRACTS: readonly FuturesContractSpec[] = [
   },
 ];
 
+/** Days of history re-requested by `--auto`; wide enough to repair a missed night or a weekend. */
+const AUTO_LOOKBACK_DAYS = 5;
+
+function autoContracts(): FuturesContractSpec[] {
+  const todayIst = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+  const from = new Date(Date.parse(`${todayIst}T00:00:00Z`) - AUTO_LOOKBACK_DAYS * 86_400_000).toISOString().slice(0, 10);
+  return upcomingIndexFutures(todayIst, 2).map((contract) => ({ ...contract, collectFrom: from, collectTo: todayIst }));
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  const auto = args.includes("--auto");
+  const contracts: readonly FuturesContractSpec[] = auto ? autoContracts() : CONTRACTS;
   const environment = loadEnvironment();
   const appId = process.env.FYERS_APP_ID;
   const appSecret = process.env.FYERS_APP_SECRET;
@@ -132,7 +151,7 @@ async function main(): Promise<void> {
 
   const results: unknown[] = [];
   try {
-    for (const contract of CONTRACTS) {
+    for (const contract of contracts) {
       if (only && contract.symbol !== only) continue;
 
       const instrument = await instruments.upsert({
@@ -149,7 +168,7 @@ async function main(): Promise<void> {
           fyersSymbol: contract.providerInstrumentId,
           expiryKind: "MONTHLY",
           role: "index-future",
-          phase0ExperimentId: "FRVP-MSP-P0-2026-10-12",
+          ...(auto ? { collectedBy: "INDEX_FUTURES_EOD" } : { phase0ExperimentId: "FRVP-MSP-P0-2026-10-12" }),
         },
       });
 
