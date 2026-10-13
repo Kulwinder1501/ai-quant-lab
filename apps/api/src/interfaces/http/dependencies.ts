@@ -2,6 +2,7 @@ import type { DatabasePool, DatabaseQueryable } from "../../infrastructure/datab
 import { PostgresAiJournalRepository } from "../../infrastructure/database/repositories/postgres-ai-journal-repository.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
+import { LiveQuoteCache } from "../../infrastructure/market-data/live-quote-cache.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
 import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
 import { OandaQuoteClient } from "../../infrastructure/market-data/oanda-quote-client.js";
@@ -142,6 +143,11 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     });
   }
 
+  // Remembers the latest bid and ask the live socket has shown for each symbol, so a manual buy can be filled at
+  // the price the option-chain stream is showing -- for any strike, not only the ones the collector subscribes.
+  const liveQuoteCache = new LiveQuoteCache();
+  if (fyersLiveStreamer) liveQuoteCache.attach(fyersLiveStreamer);
+
   return {
     database,
     listModelPredictions: new ListModelPredictions(predictionRepository),
@@ -180,6 +186,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     ),
     optionChainRepository: new PostgresOptionChainRepository(pool),
     fyersLiveStreamer,
+    liveQuoteCache,
     aiAutonomousAgent,
   };
 }

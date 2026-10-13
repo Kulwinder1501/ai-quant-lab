@@ -15,7 +15,10 @@ import type { PaperTradeExitReason, PaperTradeStatus } from "../../domain/paper-
 import { lotsToQuantity, validateQuantity } from "../../domain/lot-size-validator.js";
 import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
 import { checkManualOptionGeometry, parseManualOptionBarriers } from "../../domain/manual-option-barriers.js";
-import { chooseManualOptionFill } from "../../domain/manual-option-fill.js";
+import {
+  MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS,
+  chooseManualOptionFill,
+} from "../../domain/manual-option-fill.js";
 import {
   checkLimitAgainstAsk,
   parseOrderValidity,
@@ -144,6 +147,7 @@ export function registerPaperTradingRoutes(
   app: Express,
   dependencies: Pick<HttpDependencies,
     | "database"
+    | "liveQuoteCache"
     | "listPaperTradeHistory"
     | "dashboardRepository"
     | "paperTradeRepository"
@@ -637,7 +641,30 @@ export function registerPaperTradingRoutes(
         dependencies.optionPremiumTickRepository.latestForContract(contractKey, undefined, quoteNow).catch(() => null),
         dependencies.optionChainRepository.latestContractQuote(contractKey),
       ]);
+      // The live stream's book for this exact contract: what the ticket is showing. The contract's Fyers symbol and
+      // the index's come from the chain snapshot, not the request, so a caller cannot pair one contract with
+      // another's price.
+      const chainSnapshot = await dependencies.optionChainRepository.latestSnapshot({
+        underlyingSymbol: normalizedSymbol,
+        expiryDate: expiry.toISOString().slice(0, 10),
+      }).catch(() => null);
+      const providerSymbol = chainSnapshot?.quotes.find(
+        (quote) => quote.strikePrice === numericStrike && quote.optionType === normalizedOptionType,
+      )?.providerSymbol ?? null;
+      const liveBook = providerSymbol === null
+        ? null
+        : dependencies.liveQuoteCache?.quote(providerSymbol, MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS, quoteNow.getTime()) ?? null;
+      const liveSpot = providerSymbol === null
+        ? null
+        : dependencies.liveQuoteCache?.lastPrice(
+          `${providerSymbol.split(":")[0]}:${normalizedSymbol}-INDEX`,
+          MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS,
+          quoteNow.getTime(),
+        ) ?? null;
       const chosenFill = chooseManualOptionFill({
+        stream: liveBook === null
+          ? null
+          : { bid: liveBook.bid, ask: liveBook.ask, observedAt: liveBook.observedAt, underlyingValue: liveSpot?.price ?? null },
         tick: liveTick,
         chainQuote: chainQuote === null ? null : { bid: chainQuote.bid, ask: chainQuote.ask, observedAt: chainQuote.observedAt },
         now: quoteNow,

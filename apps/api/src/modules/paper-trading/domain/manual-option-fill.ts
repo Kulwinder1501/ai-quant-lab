@@ -12,6 +12,13 @@
  */
 export const MAXIMUM_MANUAL_QUOTE_AGE_MS = 2 * 60 * 1000;
 
+/**
+ * How old the live-stream quote may be. Much tighter than the stored-tick limit, because the stream is what the
+ * screen is showing: if it has gone quiet for more than a few seconds there is no live price to honour, and the
+ * buy falls back to the stored series (which is allowed to be older) or is refused.
+ */
+export const MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS = 10 * 1000;
+
 /** A quote stamped slightly ahead of this process's clock is clock skew; further ahead is not trusted. */
 const MAXIMUM_QUOTE_FUTURE_SKEW_MS = 5 * 1000;
 
@@ -28,7 +35,7 @@ export type ManualOptionFill =
     ok: true;
     fillPrice: number;
     observedAt: Date;
-    source: "OPTION_PREMIUM_TICK_ASK" | "OPTION_CHAIN_QUOTE";
+    source: "LIVE_STREAM_ASK" | "OPTION_PREMIUM_TICK_ASK" | "OPTION_CHAIN_QUOTE";
     /** The underlying at the fill instant, only when the winning quote carried it. */
     underlyingValue: number | null;
   }
@@ -44,12 +51,25 @@ function usableQuote(quote: ManualFillQuote | null | undefined, now: Date, maxAg
 }
 
 export function chooseManualOptionFill(input: {
+  /** The live socket's latest book for the exact contract, when this process is streaming it. Preferred. */
+  stream?: ManualFillQuote | null;
   tick: ManualFillQuote | null;
   chainQuote: ManualFillQuote | null;
   now: Date;
   maxAgeMs?: number;
+  streamMaxAgeMs?: number;
 }): ManualOptionFill {
   const maxAgeMs = input.maxAgeMs ?? MAXIMUM_MANUAL_QUOTE_AGE_MS;
+  if (usableQuote(input.stream, input.now, input.streamMaxAgeMs ?? MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS)) {
+    const underlying = input.stream.underlyingValue;
+    return {
+      ok: true,
+      fillPrice: input.stream.ask,
+      observedAt: input.stream.observedAt,
+      source: "LIVE_STREAM_ASK",
+      underlyingValue: underlying !== undefined && underlying !== null && Number.isFinite(underlying) && underlying > 0 ? underlying : null,
+    };
+  }
   if (usableQuote(input.tick, input.now, maxAgeMs)) {
     const underlying = input.tick.underlyingValue;
     return {
@@ -71,8 +91,8 @@ export function chooseManualOptionFill(input: {
   }
   return {
     ok: false,
-    error: `No live two-sided quote for this exact contract in the last ${maxAgeMs / 1000} seconds, so it was not bought `
-      + "(a stored or modelled premium is not an executable price). The live feed covers the strikes around the money: "
-      + "pick a nearer strike, or try again in a moment. Outside market hours there is no live quote at all.",
+    error: "No fresh two-sided quote for this exact contract, so it was not bought (a stored or modelled premium is not an "
+      + "executable price). Keep the option chain or this picker open so the live stream is running, then try again in a "
+      + "moment. Outside market hours there is no live quote at all.",
   };
 }

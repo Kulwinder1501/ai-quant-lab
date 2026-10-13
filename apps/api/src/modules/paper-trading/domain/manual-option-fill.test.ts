@@ -4,6 +4,34 @@ import { chooseManualOptionFill, MAXIMUM_MANUAL_QUOTE_AGE_MS } from "./manual-op
 const now = new Date("2026-10-13T06:40:59.000Z");
 const secondsAgo = (s: number) => new Date(now.getTime() - s * 1000);
 
+describe("chooseManualOptionFill: the live stream", () => {
+  it("fills at the live stream's ask, which is what the ticket shows, ahead of a stored tick", () => {
+    const result = chooseManualOptionFill({
+      stream: { bid: 644.5, ask: 646, observedAt: secondsAgo(1), underlyingValue: 55125.4 },
+      tick: { bid: 636, ask: 637.1, observedAt: secondsAgo(30) },
+      chainQuote: null,
+      now,
+    });
+    expect(result).toEqual({ ok: true, fillPrice: 646, observedAt: secondsAgo(1), source: "LIVE_STREAM_ASK", underlyingValue: 55125.4 });
+  });
+
+  it("serves a contract that has no stored ticks at all -- an out-of-the-money strike the collector does not subscribe", () => {
+    const result = chooseManualOptionFill({ stream: { bid: 644.5, ask: 646, observedAt: secondsAgo(2) }, tick: null, chainQuote: null, now });
+    expect(result).toMatchObject({ ok: true, fillPrice: 646, source: "LIVE_STREAM_ASK" });
+  });
+
+  it("holds the stream to 10 seconds, then falls back to a stored tick that is still fresh", () => {
+    const stale = { bid: 644.5, ask: 646, observedAt: secondsAgo(11) };
+    const tick = { bid: 640, ask: 641, observedAt: secondsAgo(40) };
+    expect(chooseManualOptionFill({ stream: stale, tick, chainQuote: null, now })).toMatchObject({ fillPrice: 641, source: "OPTION_PREMIUM_TICK_ASK" });
+    expect(chooseManualOptionFill({ stream: stale, tick: null, chainQuote: null, now }).ok).toBe(false);
+  });
+
+  it("refuses a one-sided stream book rather than trusting it", () => {
+    expect(chooseManualOptionFill({ stream: { bid: null, ask: 646, observedAt: secondsAgo(1) }, tick: null, chainQuote: null, now }).ok).toBe(false);
+  });
+});
+
 describe("chooseManualOptionFill", () => {
   it("fills at the live tick's ask and carries its underlying", () => {
     const result = chooseManualOptionFill({
