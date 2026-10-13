@@ -690,10 +690,10 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
   });
 
   it("digests attached slower bars into higherTimeframes for confluence scorers", async () => {
-    let seen: StrategyMarketContext | null = null;
+    const captured: { context: StrategyMarketContext | null } = { context: null };
     class CaptureStrategy {
       evaluate(context: StrategyMarketContext): ProposedTradeIdea[] {
-        seen = context;
+        captured.context = context;
         return [];
       }
     }
@@ -738,7 +738,7 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
         strategyKey: "capture-htf",
         name: "Capture",
         description: "test",
-        version: "1",
+        version: 1,
         configuration: {},
       },
       StrategyClass: CaptureStrategy as never,
@@ -747,8 +747,8 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
 
     await generator.execute({ instrumentId: "instrument-1", timeframe: "1m" });
 
-    expect(seen?.higherTimeframeContexts?.["5m"]).toBeDefined();
-    expect(seen?.higherTimeframes?.length).toBeGreaterThan(0);
-    expect(seen?.higherTimeframes?.some((h) => h.htfTimeframe === "5m")).toBe(true);
+    expect(captured.context?.higherTimeframeContexts?.["5m"]).toBeDefined();
+    expect(captured.context?.higherTimeframes?.length).toBeGreaterThan(0);
+    expect(captured.context?.higherTimeframes?.some((h) => h.htfTimeframe === "5m")).toBe(true);
   });
 });
