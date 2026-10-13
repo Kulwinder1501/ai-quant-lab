@@ -43,6 +43,7 @@ import { PostgresOptionPremiumTickRepository } from "../../infrastructure/databa
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domain/session-close.js";
 import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-trade-cap.js";
+import { observeOppositeSignal } from "../../modules/paper-trading/application/opposite-signal-observation.js";
 
 /**
  * Refuses to start on a timeframe nothing can trade.
@@ -557,6 +558,14 @@ async function main(): Promise<void> {
             }
 
             const riskNote = ` Risk checks: ${riskDecision.reasonCodes.join(", ")}.`;
+            // Log-only: stamps the notes and nothing else; see opposite-signal-observation.ts.
+            const oppositeSignalNote = await observeOppositeSignal({
+              database,
+              accountId: account.id,
+              underlyingSymbol: entry.optionContract.underlyingSymbol,
+              optionType: entry.optionContract.optionType,
+              now,
+            });
 
             let trade;
             try {
@@ -568,7 +577,7 @@ async function main(): Promise<void> {
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}`,
+                notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}${oppositeSignalNote ?? ""}`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,
