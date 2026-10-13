@@ -1,11 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { getApiV1Url } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "../../option-chain/components/option-trade-modal";
+import {
+  applyChainTick,
+  subscribeToChainTicks,
+  type ChainResponse,
+  type Leg,
+  type StrikeRow,
+} from "../../option-chain/live-chain";
 
 /** Underlyings the option chain is collected for. Same list the Option Chain page offers. */
 const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
@@ -13,38 +20,18 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
 /** Strikes shown either side of the at-the-money strike, unless the whole ladder is asked for. */
 const STRIKES_EACH_SIDE = 8;
 
-/** The chain is re-read this often while the picker is open, so the ask a ticket opens with is current. */
+/**
+ * The stored snapshot is re-read this often, but only while the live stream has been silent. While ticks
+ * arrive they are the source of truth, and a snapshot is older than the ticks already merged into the chain.
+ */
 const CHAIN_REFRESH_MS = 15_000;
+const STREAM_SILENCE_MS = 30_000;
+
+/** A tick this recent means the chain on screen is live. */
+const LIVE_TICK_WINDOW_MS = 15_000;
 
 /** The server refuses a contract quote older than 40 minutes; this warns well before that. */
 const STALE_CHAIN_MINUTES = 10;
-
-interface Leg {
-  bid: number | null;
-  ask: number | null;
-  impliedVolatility: number | null;
-  delta: number | null;
-  gamma: number | null;
-  theta: number | null;
-  vega: number | null;
-}
-
-interface StrikeRow {
-  strikePrice: number;
-  isAtm: boolean;
-  call: Leg | null;
-  put: Leg | null;
-}
-
-interface ChainResponse {
-  underlyingSymbol: string;
-  available: boolean;
-  reason?: string;
-  observedAt?: string;
-  underlyingValue?: number | null;
-  expiries?: Array<{ expiryDate: string; expiryKind: string }>;
-  strikes?: StrikeRow[];
-}
 
 type LoadResult =
   | { status: "loaded"; chain: ChainResponse }
@@ -83,6 +70,9 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
   const [showAll, setShowAll] = useState(false);
   const [pick, setPick] = useState<Pick | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  // Read from timers and event handlers only, never while rendering.
+  const lastTickRef = useRef(0);
 
   const fetchChain = useCallback(async (signal: AbortSignal): Promise<LoadResult> => {
     try {
@@ -98,6 +88,8 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
     }
   }, [underlying, expiry]);
 
+  // The stored snapshot: read when the picker opens or the selection changes, and again only while no tick has
+  // arrived for a while, so a dead feed does not leave the screen frozen on old prices.
   useEffect(() => {
     if (!show) return;
     let controller = new AbortController();
@@ -113,20 +105,44 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
           setError(result.message);
         }
         setLoading(false);
-        setNow(Date.now());
       });
     };
     load();
-    const timer = window.setInterval(load, CHAIN_REFRESH_MS);
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastTickRef.current > STREAM_SILENCE_MS) load();
+    }, CHAIN_REFRESH_MS);
     return () => {
       window.clearInterval(timer);
       controller.abort();
     };
   }, [show, fetchChain]);
 
+  // The live tick stream, merged into the chain exactly as the Option Chain page does it.
+  const chainAvailable = chain?.available === true;
+  useEffect(() => {
+    if (!show || !chainAvailable) return;
+    return subscribeToChainTicks(underlying, (tick) => {
+      setChain((prev) => applyChainTick(prev, tick));
+      const at = Date.now();
+      if (at - lastTickRef.current >= 1000) {
+        lastTickRef.current = at;
+        setLastTickAt(at);
+      }
+    });
+  }, [show, chainAvailable, underlying]);
+
+  // Drives the "how old" and "is it live" labels between ticks.
+  useEffect(() => {
+    if (!show) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [show]);
+
   const changeUnderlying = (value: string) => {
     setUnderlying(value);
     setExpiry("");
+    lastTickRef.current = 0;
+    setLastTickAt(null);
     setChain(null);
     setLoading(true);
     setError(null);
@@ -164,6 +180,7 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
   const observedAtMs = chain?.observedAt ? Date.parse(chain.observedAt) : Number.NaN;
   const ageMinutes = Number.isFinite(observedAtMs) ? Math.max(0, (now - observedAtMs) / 60_000) : null;
   const stale = ageMinutes !== null && ageMinutes > STALE_CHAIN_MINUTES;
+  const live = lastTickAt !== null && now - lastTickAt < LIVE_TICK_WINDOW_MS;
   const botAccount = accountName.toLowerCase().startsWith("autobot");
 
   const buyButton = (row: StrikeRow, optionType: "CE" | "PE") => {
@@ -235,10 +252,12 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
               {chain?.underlyingValue != null && (
                 <p>Spot <span className="font-bold text-white">{formatNumber(chain.underlyingValue, 2)}</span></p>
               )}
-              {ageMinutes !== null && (
+              {live ? (
+                <p className="font-semibold text-emerald-300">● Live — prices streaming</p>
+              ) : ageMinutes !== null && (
                 <p className={stale ? "text-amber-300" : undefined}>
-                  Chain {ageMinutes < 1 ? "just now" : `${Math.round(ageMinutes)} min old`}
-                  {stale && " — market closed or feed delayed"}
+                  Snapshot {ageMinutes < 1 ? "just now" : `${Math.round(ageMinutes)} min old`}
+                  {stale && " — no live ticks (market closed or feed delayed)"}
                 </p>
               )}
             </div>

@@ -8,12 +8,12 @@ import { getApiV1Url } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
 import {
-  RISK_FREE_RATE,
-  effectiveSpotForForward,
-  impliedVolatilityFromPremium,
-  midPriceForIv,
-  priceEuropeanOption,
-} from "@ai-quant-lab/pricing";
+  DEFAULT_COST_BUDGET_PERCENT,
+  applyChainTick,
+  subscribeToChainTicks,
+  type ChainResponse,
+  type Leg,
+} from "../live-chain";
 
 /**
  * This page reads the API base URL from the same store as every other feature.
@@ -25,9 +25,6 @@ import {
  * somewhere nothing was listening.
  */
 
-/** The cost budget the measured volatility edge can afford: it dies near 1.09% per leg. */
-const DEFAULT_COST_BUDGET_PERCENT = 1.0;
-
 const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
 
 /**
@@ -37,69 +34,6 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * twenty-two columns, which is unreadable at any width.
  */
 type ChainView = "quotes" | "greeks";
-
-interface Leg {
-  lastPrice: number | null;
-  bid: number | null;
-  ask: number | null;
-  volume: number | null;
-  openInterest: number | null;
-  openInterestChange: number | null;
-  spreadAbsolute: number | null;
-  spreadPercentOfMid: number | null;
-  withinCostBudget: boolean | null;
-  moneyness: "ITM" | "ATM" | "OTM" | null;
-  providerSymbol: string;
-  /** Solved from the mid, not published by the exchange. Null carries a reason. */
-  impliedVolatility: number | null;
-  impliedVolatilityRefusal: string | null;
-  /** Computed at the solved IV, so null together with it - never at a house volatility. */
-  delta: number | null;
-  gamma: number | null;
-  /** Currency per calendar day. Negative for a long option: the buyer pays theta. */
-  theta: number | null;
-  /** Per one absolute percentage point of IV. Positive for calls and puts alike. */
-  vega: number | null;
-  daysToExpiry: number | null;
-}
-
-interface StrikeRow {
-  strikePrice: number;
-  isAtm: boolean;
-  call: Leg | null;
-  put: Leg | null;
-}
-
-interface ChainResponse {
-  underlyingSymbol: string;
-  available: boolean;
-  reason?: string;
-  provider?: string;
-  observedAt?: string;
-  underlyingValue?: number | null;
-  atmStrike?: number | null;
-  atmImpliedVolatility?: number | null;
-  impliedForwardByExpiry?: Record<string, number>;
-  expiries?: Array<{ expiryDate: string; expiryKind: string }>;
-  putCall?: {
-    openInterestRatio: number | null;
-    volumeRatio: number | null;
-    callOpenInterest: number;
-    putOpenInterest: number;
-  };
-  liquidity?: {
-    contracts: number;
-    quotedBothSides: number;
-    medianSpreadPercent: number | null;
-    withinCostBudget: number;
-    costBudgetPercent: number;
-  };
-  largestOpenInterest?: {
-    call: { strikePrice: number; openInterest: number } | null;
-    put: { strikePrice: number; openInterest: number } | null;
-  };
-  strikes?: StrikeRow[];
-}
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -203,183 +137,7 @@ export function OptionChainDashboard() {
   // Live streaming via SSE
   useEffect(() => {
     if (!chain?.available) return;
-
-    let eventSource: EventSource | null = null;
-    const url = `${getApiV1Url()}/option-chain/stream?underlying=${underlying}`;
-    
-    try {
-      eventSource = new EventSource(url);
-      
-      eventSource.onmessage = (event) => {
-        try {
-          const tick = JSON.parse(event.data);
-          
-          setChain((prevChain) => {
-            if (!prevChain || !prevChain.strikes) return prevChain;
-
-            const newStrikes = [...prevChain.strikes];
-            let changed = false;
-            let currentSpot = prevChain.underlyingValue ?? 0;
-            
-            // If the tick is for the underlying index
-            const isIndex = tick.symbol.endsWith("-INDEX");
-            if (isIndex && tick.ltp) {
-              currentSpot = tick.ltp;
-              changed = true;
-            }
-
-            // The forward the option market prices, as the server uses. Re-solving against
-            // raw spot is what made a live BANKNIFTY delta read 0.61 where the server said
-            // 0.53, and it showed up as the number jumping the instant a tick arrived.
-            const forwardByExpiry = prevChain.impliedForwardByExpiry ?? {};
-
-            const recalculateLeg = (leg: Leg, strikePrice: number, optionType: "CE" | "PE", isLegTick: boolean): Leg => {
-              const newLastPrice = isLegTick ? (tick.ltp ?? leg.lastPrice) : leg.lastPrice;
-              const newBid = isLegTick ? (tick.bid ?? leg.bid) : leg.bid;
-              const newAsk = isLegTick ? (tick.ask ?? leg.ask) : leg.ask;
-              const newVolume = isLegTick ? (tick.volume ?? leg.volume) : leg.volume;
-
-              let spreadAbs: number | null = null;
-              let midPrice: number | null = null;
-              let spreadPct: number | null = null;
-              let withinBudget: boolean | null = leg.withinCostBudget;
-
-              if (newBid !== null && newAsk !== null && newBid > 0 && newAsk > 0 && newAsk >= newBid) {
-                spreadAbs = newAsk - newBid;
-                midPrice = (newAsk + newBid) / 2;
-                spreadPct = (spreadAbs / midPrice) * 100;
-                withinBudget = spreadPct <= DEFAULT_COST_BUDGET_PERCENT;
-              } else {
-                midPrice = midPriceForIv(newBid, newAsk);
-              }
-
-              const premium = midPrice ?? newLastPrice;
-              let iv: number | null = null;
-              let ivRefusal: string | null = "NO_PREMIUM";
-              let newDelta = leg.delta;
-              let newGamma = leg.gamma;
-              let newTheta = leg.theta;
-              let newVega = leg.vega;
-
-              const timeToExpiryYears = leg.daysToExpiry === null
-                ? null
-                : Math.max(0, leg.daysToExpiry / 365);
-              // Only the expiry's own forward may price it; spot is the fallback, and then
-              // the bias is the known one rather than a silent one.
-              const legForward = Object.values(forwardByExpiry)[0];
-              const pricingSpot = legForward !== undefined && timeToExpiryYears !== null && timeToExpiryYears > 0
-                ? effectiveSpotForForward(legForward, RISK_FREE_RATE, timeToExpiryYears)
-                : currentSpot;
-
-              if (premium !== null && timeToExpiryYears !== null && pricingSpot > 0) {
-                const ivResult = impliedVolatilityFromPremium({
-                  spot: pricingSpot,
-                  strike: strikePrice,
-                  timeToExpiryYears,
-                  riskFreeRate: RISK_FREE_RATE,
-                  optionType,
-                  premium,
-                });
-
-                if (ivResult.measurable) {
-                  iv = ivResult.impliedVolatility;
-                  ivRefusal = null;
-                  const greeks = priceEuropeanOption({
-                    spot: pricingSpot,
-                    strike: strikePrice,
-                    timeToExpiryYears,
-                    riskFreeRate: RISK_FREE_RATE,
-                    volatility: iv,
-                    optionType,
-                  });
-                  newDelta = greeks.delta;
-                  newGamma = greeks.gamma;
-                  newTheta = greeks.theta;
-                  newVega = greeks.vega;
-                } else {
-                  ivRefusal = ivResult.reason;
-                  newDelta = null;
-                  newGamma = null;
-                  newTheta = null;
-                  newVega = null;
-                }
-              }
-
-              return {
-                ...leg,
-                lastPrice: newLastPrice,
-                bid: newBid,
-                ask: newAsk,
-                volume: newVolume,
-                spreadAbsolute: spreadAbs,
-                spreadPercentOfMid: spreadPct,
-                withinCostBudget: withinBudget,
-                impliedVolatility: iv,
-                impliedVolatilityRefusal: ivRefusal,
-                delta: newDelta,
-                gamma: newGamma,
-                theta: newTheta,
-                vega: newVega,
-              };
-            };
-
-            for (let i = 0; i < newStrikes.length; i++) {
-              const row = newStrikes[i];
-              const call = row.call;
-              const put = row.put;
-
-              const isCallTick = call?.providerSymbol === tick.symbol;
-              const isPutTick = put?.providerSymbol === tick.symbol;
-
-              // Recalculate if this specific leg ticked, OR if the index ticked (affecting all legs)
-              if (isCallTick || isIndex) {
-                if (call) {
-                  newStrikes[i] = {
-                    ...newStrikes[i],
-                    call: recalculateLeg(call, row.strikePrice, "CE", isCallTick)
-                  };
-                  changed = true;
-                }
-              }
-              
-              if (isPutTick || isIndex) {
-                if (put) {
-                  newStrikes[i] = {
-                    ...newStrikes[i],
-                    put: recalculateLeg(put, row.strikePrice, "PE", isPutTick)
-                  };
-                  changed = true;
-                }
-              }
-            }
-
-            if (changed) {
-              return { 
-                ...prevChain, 
-                underlyingValue: currentSpot,
-                strikes: newStrikes 
-              };
-            }
-            return prevChain;
-          });
-        } catch (err) {
-          console.error("Failed to parse tick:", err);
-        }
-      };
-
-      eventSource.onerror = (err) => {
-        console.error("SSE Error:", err);
-        eventSource?.close();
-      };
-    } catch (err) {
-      console.error("Failed to setup SSE:", err);
-    }
-
-    return () => {
-      if (eventSource) {
-        eventSource.close();
-      }
-    };
+    return subscribeToChainTicks(underlying, (tick) => setChain((prev) => applyChainTick(prev, tick)));
   }, [chain?.available, underlying]);
 
   const spreadTone = useCallback((leg: Leg | null) => {
