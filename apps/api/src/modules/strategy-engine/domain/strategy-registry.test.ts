@@ -118,15 +118,14 @@ describe("strategy registry", () => {
     expect(indexScalp.terminalResearchAcknowledgement?.disposition).toMatch(/^DISABLED/);
   });
 
-  it("restricts exactly the three strategies gated off, and no others", () => {
+  it("restricts exactly the strategies still gated off, and no others", () => {
     /*
      * Pinned as an exact set rather than a per-strategy check. The restriction is per strategy on
      * purpose -- a global side filter would silence that side everywhere -- so the risk worth
      * guarding is a restriction spreading to a strategy whose evidence never justified one.
      *
-     * `hybrid-liquidity-confluence-v1` joined this set 2026-09-28, the same day it shipped -- not
-     * for a measured losing side like the other two, but gated pending the random-subsample
-     * validation recorded in docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md.
+     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` left this set 2026-10-13 when
+     * both were enabled for live paper observation on operator request.
      */
     const restricted = registeredStrategies
       .filter((strategy) => strategy.executableSides !== undefined)
@@ -134,8 +133,7 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "event-reversal-v1", "hybrid-liquidity-confluence-v1", "momentum-scalp-index",
-      "momentum-scalp-pattern-v2", "trend-continuation-v1",
+      "event-reversal-v1", "momentum-scalp-index", "momentum-scalp-pattern-v2",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
@@ -144,30 +142,22 @@ describe("strategy registry", () => {
     }
   });
 
-  it("gates hybrid-liquidity-confluence-v1 off pending validation, not on a measured verdict", () => {
+  it("allows hybrid-liquidity-confluence-v1 both sides for live paper observation", () => {
     const hybrid = requireRegisteredStrategy("hybrid-liquidity-confluence-v1");
 
-    expect(strategyExecutableSides(hybrid)).toEqual([]);
-    // Deliberately no terminalResearchAcknowledgement: it has no research twin and no TERMINAL
-    // verdict, so attaching one would misrepresent the record (see the registry comment).
+    expect(strategyExecutableSides(hybrid)).toEqual(["LONG", "SHORT"]);
+    expect(hybrid.executableSides).toBeUndefined();
+    // Still no terminalResearchAcknowledgement: enabling paper observation is not a TERMINAL clearance.
     expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
   });
 
-  it("gates trend-continuation-v1 and event-reversal-v1 off pending validation, not on a measured verdict", () => {
-    /*
-     * Both shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation. The
-     * same-day follow-up fix (commit cherry-picked as part of this gate) corrected 8 typecheck
-     * errors in both files, but that only makes the code compile and run -- it is not evidence the
-     * logic has edge. Same pattern as `hybrid-liquidity-confluence-v1`: gated pending validation,
-     * not on a measured losing verdict.
-     */
+  it("allows trend-continuation-v1 both sides; keeps event-reversal-v1 gated", () => {
     const trendContinuation = requireRegisteredStrategy("trend-continuation-v1");
     const eventReversal = requireRegisteredStrategy("event-reversal-v1");
 
-    expect(strategyExecutableSides(trendContinuation)).toEqual([]);
+    expect(strategyExecutableSides(trendContinuation)).toEqual(["LONG", "SHORT"]);
+    expect(trendContinuation.executableSides).toBeUndefined();
     expect(strategyExecutableSides(eventReversal)).toEqual([]);
-    // Deliberately no terminalResearchAcknowledgement for either: neither has a research twin or a
-    // TERMINAL verdict, so attaching one would misrepresent the record (see the registry comment).
     expect(trendContinuation.terminalResearchAcknowledgement).toBeUndefined();
     expect(eventReversal.terminalResearchAcknowledgement).toBeUndefined();
   });

@@ -395,34 +395,21 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     StrategyClass: HybridLiquidityConfluenceStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
     /*
-     * Disabled entirely 2026-09-28 -- both sides, not a side restriction. Same pattern as
-     * `momentum-scalp-pattern-v2` above: registered so idea generation, lineage and this
-     * reasoning survive, but nothing may act on it yet.
+     * Enabled live 2026-10-13 on explicit operator request (AutoBot-HybridConfluence) so a paper
+     * record can accumulate. Prior state: both sides disabled 2026-09-28 pending validation.
      *
-     * This strategy shipped 2026-09-28 with two real defects, both fixed the same day:
-     * Pillar A's threshold disagreed with its own docstring and backtest script (code gated at
-     * 0.10, docs said 0.15 -- a sensitivity sweep at 0.10/0.125/0.15 settled which value ships,
-     * see docs/2026-09-28-hybrid-liquidity-confluence-v1-validation.md), and Pillar C was a stub
-     * that read a `priceActionEvents[].details.oiSupport/oiResistance` flag nothing ever set, so
-     * it defaulted to a silent pass on every proposal. Pillar C is now a real as-of PCR join
-     * against `option_chain_snapshots`.
+     * History (kept so the enable is not read as a research clearance):
+     * This strategy shipped 2026-09-28 with two real defects, both fixed the same day (Pillar A
+     * threshold mismatch settled at 0.10; Pillar C stub replaced with a real as-of PCR join). An
+     * in-sample random-subsample comparison looked strong, then a 2026-10-10 amendment ruled the
+     * "29 SD" figure out as evidence (wrong null, no costs, clustered PCR). Enabling here is an
+     * operator override to gather live paper fills -- not OOS / walk-forward clearance. Re-gate
+     * both sides if the live record fails, the same way other unvalidated strategies were gated.
      *
-     * Fixing those defects is not the same as validating the strategy. The one test built to
-     * distinguish "this confluence logic adds something" from "this is equivalent to randomly
-     * dropping most of the population" is the random-subsample null comparison recorded in the
-     * doc above -- read it before enabling either side. A single backtest run, in-sample-adjacent
-     * to the data these defects were found in, is not grounds to go live per this project's own
-     * discipline (train -> shadow -> settle -> compete, OOS validation, walk-forward), regardless
-     * of which way that comparison came out.
+     * No `executableSides` restriction: both LONG and SHORT may propose. No
+     * `terminalResearchAcknowledgement` / `operationalDisposition` -- there is still no TERMINAL
+     * research twin for this strategy.
      */
-    executableSides: [],
-    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
-    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
-    // here (see `terminal-verdict-propagation.test.ts`). This strategy has no research twin and no
-    // TERMINAL verdict -- inventing one to attach a disposition here would misrepresent the record
-    // the same way `trend-breakout`'s comment warns against. `operationalDisposition` does not fit
-    // either: its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this
-    // is not. The plain comment above is the honest record for a "pending validation" disable.
   },
   {
     registration: trendContinuationStrategyRegistration,
@@ -430,24 +417,13 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     supportedTimeframes: ["1m", "5m", "15m"],
     readsIctContext: true,
     /*
-     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
-     * `hybrid-liquidity-confluence-v1` above: registered so idea generation, lineage and this
-     * reasoning survive, but nothing may act on it yet.
-     *
-     * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
-     * follow-up fix corrected 8 typecheck errors caused by both new strategies being written against
-     * an imagined snapshot shape (see that commit message for the field-level detail). Fixing those
-     * defects only makes the code compile and run; it says nothing about whether the logic has edge.
-     * No research twin, no CPCV/walk-forward result, no live record exists for this strategy. Per
-     * this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
-     * going live), a strategy with no measurement at all does not get to trade.
+     * Enabled live 2026-10-13 on explicit operator request (AutoBot-Nifty5mTrendCont) so a paper
+     * record can accumulate. Prior state: both sides disabled 2026-09-29 -- shipped with zero
+     * backtest or research validation (compile fixes only). Enabling here is an operator override
+     * to gather live paper fills -- not a measured clearance. No `executableSides` restriction:
+     * both LONG and SHORT may propose. No `terminalResearchAcknowledgement` /
+     * `operationalDisposition` -- there is still no research twin or TERMINAL verdict.
      */
-    executableSides: [],
-    // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against
-    // `researchStrategyRegistry` and must name an entry that exists, is TERMINAL, and points back
-    // here. This strategy has no research twin and no TERMINAL verdict -- there is nothing to
-    // acknowledge yet, only an absence of validation. `operationalDisposition` does not fit either:
-    // its `status` is only ever `"TERMINAL_UNOWNED"`, a measured-and-abandoned verdict this is not.
   },
   {
     registration: eventReversalStrategyRegistration,
@@ -455,8 +431,7 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     supportedTimeframes: ["5m", "15m", "60m", "1d"],
     readsIctContext: true,
     /*
-     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Same pattern as
-     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` above: registered so idea
+     * Disabled entirely 2026-09-29 -- both sides, not a side restriction. Registered so idea
      * generation, lineage and this reasoning survive, but nothing may act on it yet.
      *
      * Shipped 2026-09-29 (commit 5d8c4d7) with zero backtest or research validation -- the same-day
@@ -467,6 +442,9 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * edge. No research twin, no CPCV/walk-forward result, no live record exists for this strategy.
      * Per this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
      * going live), a strategy with no measurement at all does not get to trade.
+     *
+     * Note: `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` were enabled for live paper
+     * observation on 2026-10-13; this entry remains gated until an explicit enable.
      */
     executableSides: [],
     // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against

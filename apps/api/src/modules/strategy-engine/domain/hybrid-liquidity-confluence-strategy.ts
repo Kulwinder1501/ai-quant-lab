@@ -13,7 +13,7 @@ export const hybridLiquidityConfluenceStrategyVersion = 2;
 export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersionInput = {
   strategyKey: hybridLiquidityConfluenceStrategyKey,
   name: "Hybrid Liquidity Confluence Strategy",
-  description: "3-Pillar engine combining causally-standardised L2 depth imbalance, a static depth-imbalance confirmation (not CKS OFI), and Option Chain OI walls. Disabled (no executable sides).",
+  description: "3-Pillar engine combining causally-standardised L2 depth imbalance, a static depth-imbalance confirmation (not CKS OFI), and Option Chain OI walls. Live paper observation enabled 2026-10-13.",
   version: hybridLiquidityConfluenceStrategyVersion,
   configuration: {},
 };
@@ -31,8 +31,8 @@ export const hybridLiquidityConfluenceStrategyRegistration: EnsureStrategyVersio
  *
  * NOTE (2026-10-10): `di_tilde` is now the causally standardised (trailing-mean-detrended) DI from
  * `orderbook-directional-gate.ts`, so the 0.10 threshold below -- validated on the UN-standardised
- * raw DI -- is an unvalidated carry-over on the new scale. This strategy is disabled
- * (`executableSides: []`) and must not be enabled without re-validating it.
+ * raw DI -- is an unvalidated carry-over on the new scale. Enabled for live paper observation
+ * 2026-10-13 on operator request; the threshold scale is still an unvalidated carry-over.
  *
  * Pillar A threshold fixed 2026-09-28: this code gated at 0.10 while the docstring (until this
  * revision) and `apps/ml/run_hybrid_confluence_backtest.py` both said 0.15 -- a real mismatch
