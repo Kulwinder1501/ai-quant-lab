@@ -28,7 +28,7 @@
  * The full definition is frozen in `docs/2026-10-13-frvp-rows-observation-protocol.md`.
  */
 
-export const VOLUME_PROFILE_ALGORITHM_VERSION = "frvp-rows48-v1";
+export const VOLUME_PROFILE_ALGORITHM_VERSION = "frvp-rows48-v2";
 export const VOLUME_PROFILE_ROWS = 48;
 export const VALUE_AREA_FRACTION = 0.7;
 /** A node is a local high only if it carries at least this share of the POC row's volume. */
@@ -59,6 +59,8 @@ export interface VolumeProfile {
   hvns: number[];
   lvns: number[];
   vwap: number;
+  /** The volume-weighted mean of the row centres: where the bulk of the volume sits in the range. */
+  volumeCentroid: number;
 }
 
 export type ProfilePosition = "INSIDE_VALUE" | "ABOVE_VAH" | "BELOW_VAL";
@@ -135,6 +137,8 @@ export function buildFixedRowVolumeProfile(
   if (totalVolume <= 0) return null;
 
   const vwap = notional / totalVolume;
+  let centroidNotional = 0;
+  for (let row = 0; row < rowCount; row += 1) centroidNotional += rowVolumes[row]! * rowCentre(low, rowWidth, row);
   const pocRow = pointOfControlRow(rowVolumes, low, rowWidth, vwap);
   const { valRow, vahRow } = valueAreaRows(rowVolumes, pocRow, totalVolume);
   const { hvnRows, lvnRows } = findNodes(rowVolumes, pocRow);
@@ -153,6 +157,7 @@ export function buildFixedRowVolumeProfile(
     hvns: hvnRows.map((row) => rowCentre(low, rowWidth, row)),
     lvns: lvnRows.map((row) => rowCentre(low, rowWidth, row)),
     vwap,
+    volumeCentroid: centroidNotional / totalVolume,
   };
 }
 
@@ -268,4 +273,96 @@ export function describeEntryAgainstProfile(
     hvnAhead,
     lvnBeforeHvn: lvnAhead === null ? null : hvnAhead === null ? true : lvnAhead.distance < hvnAhead.distance,
   };
+}
+
+/**
+ * The shape a trader reads off a profile. The sources agree on what the shapes mean and give no
+ * numbers for any of them, so the numbers below are this lab's own and are frozen in
+ * `docs/2026-10-13-frvp-rows-observation-protocol.md` (Amendment 1):
+ *
+ * - `P`: the POC is in the upper third of the range. A fast move up, then acceptance high; a thin tail
+ *   below.
+ * - `b`: the POC is in the lower third. A fast move down, then acceptance low; a thin tail above.
+ * - `D`: the POC is in the middle third. Balance.
+ *
+ * Every description consulted says the larger *concentration* sits high or low in the range, and none
+ * gives a number. The POC is the proxy used, because it is what a trader reads off the chart. A first
+ * version used the volume-weighted centre of the profile instead and was dropped: drawn against the 14
+ * real sessions it called almost every day D, including days that are plainly top- or bottom-heavy to
+ * the eye (BANKNIFTY 2026-10-05, 2026-10-12). The centre's position is still recorded
+ * (`centroidPosition`) so the two can be compared later.
+ * - `B`: double distribution -- two comparable humps with a thin neck between them: a second peak a
+ *   quarter of the range or more from the POC holding at least 60% of its volume, and a dip between
+ *   them under 40% of that second peak, in the middle band of the range. Checked first, because it is
+ *   the more specific shape. A first version called any dip with a node on each side a B and labelled
+ *   6 of 14 sessions that way, including clear P and b days; a double distribution is rare and obvious.
+ *
+ * Where the POC sits is the whole of P, b and D. That is blunt on purpose: it is the rule that can be
+ * stated before looking at an outcome, and it matches how the shapes are described.
+ */
+export type ProfileShape = "P" | "b" | "D" | "B";
+
+/** The POC's position within the range: 0 at the bottom, 1 at the top. */
+export const SHAPE_THIRD = 1 / 3;
+/** The dip between two humps only makes a double distribution inside this band of the range. */
+export const DOUBLE_DISTRIBUTION_BAND: readonly [number, number] = [0.25, 0.75];
+/** The second hump must lie at least this share of the rows away from the POC. */
+export const DOUBLE_DISTRIBUTION_MIN_SEPARATION = 0.25;
+/** The second hump must hold at least this share of the POC row's volume. */
+export const DOUBLE_DISTRIBUTION_MIN_SECOND_PEAK = 0.6;
+/** The neck must hold less than this share of the second hump's volume. */
+export const DOUBLE_DISTRIBUTION_MAX_NECK = 0.4;
+
+/** Row counts a shape is re-read at; if it changes with any of them it is not a stable reading. */
+export const SHAPE_STABILITY_ROWS: readonly number[] = [24, 32, 64];
+
+export interface ProfileShapeReading {
+  shape: ProfileShape;
+  /** POC position within the range, 0-1. */
+  pocPosition: number;
+  /** Position of the volume-weighted centre within the range, 0-1; recorded, not used to classify. */
+  centroidPosition: number;
+}
+
+function hasDoubleDistribution(profile: VolumeProfile): boolean {
+  const rows = profile.rowVolumes;
+  const pocRow = Math.min(rows.length - 1, Math.max(0, Math.floor((profile.poc - profile.low) / profile.rowWidth)));
+  const minimumGap = Math.ceil(DOUBLE_DISTRIBUTION_MIN_SEPARATION * rows.length);
+
+  let secondRow = -1;
+  for (let row = 0; row < rows.length; row += 1) {
+    if (Math.abs(row - pocRow) < minimumGap) continue;
+    if (secondRow < 0 || rows[row]! > rows[secondRow]!) secondRow = row;
+  }
+  if (secondRow < 0) return false;
+  const secondPeak = rows[secondRow]!;
+  if (secondPeak < DOUBLE_DISTRIBUTION_MIN_SECOND_PEAK * rows[pocRow]!) return false;
+
+  const from = Math.min(pocRow, secondRow) + 1;
+  const to = Math.max(pocRow, secondRow) - 1;
+  if (to < from) return false;
+  let neckRow = from;
+  for (let row = from; row <= to; row += 1) if (rows[row]! < rows[neckRow]!) neckRow = row;
+  if (rows[neckRow]! >= DOUBLE_DISTRIBUTION_MAX_NECK * secondPeak) return false;
+
+  // The neck is the middle of the thin stretch, not its first row: a long flat gap between two humps is
+  // centred between them, however close its first row sits to one of them.
+  let neckLeft = neckRow;
+  let neckRight = neckRow;
+  while (neckLeft > from && sameVolume(rows[neckLeft - 1]!, rows[neckRow]!)) neckLeft -= 1;
+  while (neckRight < to && sameVolume(rows[neckRight + 1]!, rows[neckRow]!)) neckRight += 1;
+  const neckPosition = (Math.floor((neckLeft + neckRight) / 2) + 0.5) / rows.length;
+  return neckPosition >= DOUBLE_DISTRIBUTION_BAND[0] && neckPosition <= DOUBLE_DISTRIBUTION_BAND[1];
+}
+
+export function classifyProfileShape(profile: VolumeProfile): ProfileShapeReading {
+  const range = profile.high - profile.low;
+  const pocPosition = (profile.poc - profile.low) / range;
+  const centroidPosition = (profile.volumeCentroid - profile.low) / range;
+
+  if (hasDoubleDistribution(profile)) return { shape: "B", pocPosition, centroidPosition };
+
+  if (pocPosition >= 1 - SHAPE_THIRD) return { shape: "P", pocPosition, centroidPosition };
+  if (pocPosition <= SHAPE_THIRD) return { shape: "b", pocPosition, centroidPosition };
+  return { shape: "D", pocPosition, centroidPosition };
 }

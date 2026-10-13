@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   VOLUME_PROFILE_ROWS,
   buildFixedRowVolumeProfile,
+  classifyProfileShape,
   describeEntryAgainstProfile,
   type ProfileBar,
 } from "./fixed-row-volume-profile.js";
@@ -131,5 +132,59 @@ describe("describeEntryAgainstProfile", () => {
   it("signs the distance from the POC", () => {
     expect(describeEntryAgainstProfile(profile, profile.poc + 7, "LONG").fromPoc).toBeCloseTo(7, 9);
     expect(describeEntryAgainstProfile(profile, profile.poc - 7, "SHORT").fromPoc).toBeCloseTo(-7, 9);
+  });
+});
+
+/** A thin bar over the whole 100-140 range, so the profile spans it, plus heavy bars where asked. */
+function profileWithHeavyZone(low: number, high: number, repeats = 10): ReturnType<typeof buildFixedRowVolumeProfile> {
+  const bars: ProfileBar[] = [bar(100, 140, 40)];
+  for (let i = 0; i < repeats; i += 1) bars.push(bar(low, high, 1000));
+  return buildFixedRowVolumeProfile(bars);
+}
+
+describe("classifyProfileShape", () => {
+  it("calls a profile with its volume at the top a P", () => {
+    const reading = classifyProfileShape(profileWithHeavyZone(130, 138)!);
+    expect(reading.shape).toBe("P");
+    expect(reading.pocPosition).toBeGreaterThan(0.67);
+  });
+
+  it("calls a profile with its volume at the bottom a b", () => {
+    const reading = classifyProfileShape(profileWithHeavyZone(102, 110)!);
+    expect(reading.shape).toBe("b");
+    expect(reading.pocPosition).toBeLessThan(0.33);
+  });
+
+  it("calls a profile with its volume in the middle a D", () => {
+    const reading = classifyProfileShape(profileWithHeavyZone(116, 124)!);
+    expect(reading.shape).toBe("D");
+    expect(reading.pocPosition).toBeGreaterThan(0.33);
+    expect(reading.pocPosition).toBeLessThan(0.67);
+  });
+
+  it("calls two busy zones with a dip between them in the middle band a B", () => {
+    expect(classifyProfileShape(buildFixedRowVolumeProfile(twoZoneBars())!).shape).toBe("B");
+  });
+
+  it("does not call two humps closer than a quarter of the range a double distribution", () => {
+    // Humps at 100-103 and 108-111 on a 100-140 range: only about ten rows apart, so one distribution.
+    const bars: ProfileBar[] = [bar(100, 140, 40)];
+    for (let i = 0; i < 10; i += 1) bars.push(bar(100, 103, 1000), bar(108, 111, 1000));
+    expect(classifyProfileShape(buildFixedRowVolumeProfile(bars)!).shape).not.toBe("B");
+  });
+
+  it("does not call a second hump that is much smaller than the POC a double distribution", () => {
+    const bars: ProfileBar[] = [bar(100, 140, 40)];
+    for (let i = 0; i < 10; i += 1) bars.push(bar(100, 108, 1000));
+    for (let i = 0; i < 2; i += 1) bars.push(bar(132, 140, 1000));
+    expect(classifyProfileShape(buildFixedRowVolumeProfile(bars)!).shape).toBe("b");
+  });
+
+  it("does not call a dip near the edge of the range a double distribution", () => {
+    // A heavy zone at 100-104 and another at 105-140's top, with the only dip hugging the bottom.
+    const bars: ProfileBar[] = [bar(100, 140, 40), bar(100, 102, 1000), bar(104, 106, 900)];
+    for (let i = 0; i < 10; i += 1) bars.push(bar(130, 138, 1000));
+    const reading = classifyProfileShape(buildFixedRowVolumeProfile(bars)!);
+    expect(reading.shape).not.toBe("B");
   });
 });

@@ -1,7 +1,7 @@
 # FRVP rows observation protocol (`frvp-rows48-v1`)
 
 **Date frozen:** 2026-10-13
-**Status:** FROZEN. Observation only; nothing here changes whether or how a trade is taken.
+**Status:** FROZEN. Observation only; nothing here changes whether or how a trade is taken. **Amended 2026-10-13 (Amendment 1, at the end), before any trade was stamped.**
 **Relation to the first study:** `FRVP-MSP-P0-2026-10-12` stays closed as INCONCLUSIVE and is not reopened. This is a separate protocol with its own sample. The 2026-10-12 locked-test day is not used.
 **Code:** `fixed-row-volume-profile.ts`, `volume-profile-observation.ts`, `index-futures-contracts.ts`, `ingest-index-futures-ohlcv.ts --auto`.
 
@@ -98,3 +98,86 @@ SELECT t.id, a.name, t.opened_at, t.realized_pnl,
   FROM paper_trades t JOIN paper_accounts a ON a.id = t.account_id
  WHERE t.notes LIKE '%FRVP_OBS%' AND t.status = 'CLOSED';
 ```
+
+---
+
+## Amendment 1 (2026-10-13, before any stamped trade): shapes, today's developing profile, and the shape hypothesis
+
+**Why.** The trader this is for draws a fixed-range profile from a day's high to its low, reads its *shape* (P, b, D), and does the same on the current day from the open to now, on 5-minute charts. Section 2 measured only yesterday's levels. No trade has been stamped yet (the stamp has only existed since the evening of 2026-10-13, after the session), so this amendment cannot have been shaped by an outcome.
+
+**Supersedes:** the stamp format in section 3 (now `frvp-rows48-v2`; v1 never stamped a trade) and where H1 reads its fields. Sections 2, 4 (H1's test), 5, 6 and 7 stand unless restated here.
+
+### A1.1 Two profiles per entry
+
+| Block | Range | Built from | Role |
+|---|---|---|---|
+| `d1` | the prior completed session, day high to day low | all of that session's paired minutes | the levels the market arrives at |
+| `d0` | today, open to the last minute that had closed | paired minutes of today so far, rebuilt at each entry | what is forming now |
+
+Drawing a profile bottom-to-top or top-to-bottom gives the same profile; direction matters only for what is read from it. Each block has its own `st`, level read-out and shape. Decisions are at 5-minute bar closes, as the strategies already are; the profile is built from 1-minute volume, the finest the data allows, so a 5-minute bar is never smeared over its range.
+
+`d0` is not read before 30 paired minutes exist (`TOO_EARLY`): a shape on a few bars is noise. Its `asof` is the open time of the last minute actually used, which can trail the clock by a minute or two.
+
+### A1.2 Shapes: what the sources say, and the numbers this lab uses
+
+**What was read.** NinjaTrader's guide to the four common shapes; LuxAlgo's profile shape taxonomy; MarketCalls' market-profile day types (an Indian-market source); Traders Second Brain's profile guide; and a TradingView open-source shape detector, read in full. NexusFi's shape page refused the fetch, so only its search-result summary was used. Sources: [NinjaTrader](https://ninjatrader.com/futures/blogs/trade-futures-understanding-the-4-common-volume-profile-shapes/), [LuxAlgo](https://www.luxalgo.com/library/concept/profile-shape-taxonomy.md), [MarketCalls](https://www.marketcalls.in/market-profile/market-profile-different-types-of-profile-days.html), [Traders Second Brain](https://traderssecondbrain.com/guides/volume-profile-analysis), [TradingView detector](https://in.tradingview.com/script/NNkzKfmR-Simple-VP-Shape-Detector/), [NexusFi](https://nexusfi.com/a/concepts/profile-shapes).
+
+**What they agree on (paraphrased).**
+
+- **P:** the larger concentration of volume sits in the upper part of the range with a thin tail below. A fast move up, then acceptance higher. Usually read as bullish; also seen at the end of a downtrend as a short-covering rally, which several sources warn is often temporary. MarketCalls adds that a P at the top can raise the chance of a reversal.
+- **b:** the mirror: concentration low, thin tail above. Long liquidation; usually read as bearish.
+- **D:** one symmetric concentration in the middle with tapering tails. Balance.
+- **Double distribution:** two separated concentrations with a thin neck between them (MarketCalls: single prints; Traders Second Brain: "multi-distribution"). NinjaTrader calls it **B** and describes it as two D profiles in one period, usually trend continuation. The TradingView detector uses "B" for something different (seller-dominant), so a letter alone is not a definition.
+- **Caveats the sources themselves give:** shapes are practitioner shorthand, not forecasts; they are clean only in hindsight and change as the day builds; a P or b can sit inside a bigger trend or reverse; and shape alone does not say whether buyers or sellers were the aggressors.
+
+**What none of them give: a number.** Not for "upper", "thin", "fat", or how deep a neck must be. Traders Second Brain says what to do about that: fix the rule before the session, freeze the completed profile, and treat a shape that changes when the row count changes as not stable enough to test. This amendment does the first two and records the third.
+
+**Rules used here (the lab's, written before any outcome):**
+
+- **B (double distribution), tested first:** a second hump at least a quarter of the range (12 of 48 rows) from the POC, holding at least 60% of the POC row's volume, with a neck between them under 40% of that second hump, the neck centred in the middle band (25-75%) of the range.
+- **P:** POC in the upper third of the range. **b:** POC in the lower third. **D:** POC in the middle third.
+- **Stability (`stb`):** true when the same shape results at 24, 32, 48 and 64 rows.
+
+**Rejected on the way, and why.** (1) Calling any dip with a node on each side a B labelled 6 of 14 sessions B, including clear P and b days. (2) Reading P, b and D from the volume-weighted centre rather than the POC row called nearly every day D, including days that are plainly top- or bottom-heavy when drawn. Both were judged by drawing the 14 development sessions (2026-10-01 to 10-12), not by any trade outcome. The volume centre is still recorded (`cp`).
+
+**Provisional.** The trader is the authority on what the shapes look like. The 14 profiles were drawn and sent for labelling. If their calls differ from these rules, the numbers are recalibrated to their labels by a dated amendment, which is allowed any time before an outcome is examined and never after. `pp` and `cp` are stamped, and the rest can be rebuilt from stored candles, so no stamped trade is lost to a recalibration.
+
+"Where liquidity left" is read as the low-volume nodes, the existing `lvnA` and `lvnB`. A thin or trend profile ("I") is not classified; add it by amendment if it is used.
+
+### A1.3 Volume source, and why index volume is not used
+
+Futures volume only. Index volume was tested as a stand-in for the developing profile and rejected: over 16 session-profiles (NIFTY and BANKNIFTY, 2026-10-01 to 10-13) the minute-by-minute correlation with futures volume was 0.38 and the two classified the same shape in 7 of 16, about what chance would give. `d0` therefore needs today's futures bars in the database during the session, which `INDEX_FUTURES_INTRADAY` (every five minutes, :04) tries to supply from the history endpoint. It is not known whether that endpoint publishes same-day 1-minute futures bars mid-session (the existing code says the index series needed the live collector for that reason). If it does not, `d0` is `NO_TODAY_FUTURES`, which is itself the answer.
+
+**Pre-registered fallback.** If fewer than half of stamped entries have `d0.st = OK` by 2026-10-31, H2 is tested on `d1` instead, and a live futures feed for `d0` becomes a separate piece of work with its own amendment.
+
+### A1.4 Stamp v2
+
+```
+FRVP_OBS {"v":"frvp-rows48-v2","e":<entry>,"fut":"<contract>","d1":{...},"d0":{...}}
+```
+
+Each block: `st` (`OK`, `THIN_SESSION`, `PROFILE_NOT_BUILT`, `NO_PRIOR_SESSION_FUTURES`, `NO_TODAY_FUTURES`, `TOO_EARLY`); `sess`, `n`, `cov` (d1) or `n`, `asof` (d0); `sh` shape; `stb` shape stable across 24/32/48/64 rows; `pp` POC position in the range; `cp` volume-centre position; `pos` against the value area; `poc`, `vah`, `val`; `hi`, `lo` (the range); `rw`; `lvnA`, `lvnB`, `hvnA` as `[level, distance]`; `open`. A top-level `st` appears only for `NO_ENTRY_PRICE`.
+
+### A1.5 Hypotheses (family of two, Holm-corrected)
+
+**H1 (restated).** Unchanged, read from `d1`: Sniper entries with `d1.open = true` and `d1.lvnA` distance of at most 1R-in-index-points do better than other Sniper entries with `d1.st = OK`.
+
+**H2 (the trader's method).** On `d0`, entries whose direction agrees with the shape's lean -- LONG when `d0.sh = P`, SHORT when `d0.sh = b` -- have a different mean result per trade than entries that go against it (LONG on b, SHORT on P). `D` and `B` entries are excluded from H2 and reported separately.
+
+- **Two-sided,** because the lore is contested. Several sources read P as bullish (a fast move up, then acceptance); others read the same shape as a short-covering rally that is temporary and can be faded. A one-sided test would bake one reading in. The sign of the difference is the finding.
+- **Outcome, test, clustering:** exactly as H1 (section 4): result per trade divided by planned risk, permutation of the label within each session day, day-clustered bootstrap interval.
+- **Sample rule:** judge once, when at least 150 closed Sniper trades with `d0.st = OK` and a P or b shape exist, with at least 30 in each of agree and against. Interim counts only until then.
+- **Replication:** the same test on AutoBot-Scalp1m, reported alongside, not pooled.
+- **Correction:** H1 and H2 are judged together with Holm at family alpha 0.05. Neither is judged before its own sample rule is met.
+
+**Secondary (descriptive only):** result by shape and direction for `d0` and `d1`; `d1` shape agreeing with `d0` shape; result by `pos`; distance from the POC.
+
+### A1.6 Decisions
+
+Section 5 applies to each hypothesis separately. A PASS on H2 authorises a separately dated protocol for a *shadow* filter on the shape, not a live one. A result on `d1` is never used to rescue a failed `d0` read.
+
+### A1.7 Known limits added
+
+- `d0` is built from a poll, so it can miss the last minute or two; the stamp says which minute it used.
+- A shape on a developing profile changes as the day builds, and the sources themselves say it is only clean in hindsight. Recording the shape *at the moment of entry* is what makes H2 honest about this.
+- The 5-minute chart the trader reads is not the resolution of the profile (1-minute volume); the decision times are 5-minute closes.

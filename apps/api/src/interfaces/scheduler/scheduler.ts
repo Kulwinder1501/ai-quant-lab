@@ -255,6 +255,8 @@ async function main(): Promise<void> {
     // Four Fyers history requests (two contracts per index) over five days of 1m bars.
     INDEX_FUTURES_EOD: 15 * 60 * 1000,
     INDEX_FUTURES_EOD_RETRY: 15 * 60 * 1000,
+    // Every five minutes in-session; a run that outlives its slot is superseded by the next.
+    INDEX_FUTURES_INTRADAY: 4 * 60 * 1000,
     // XAU_CANDLE_COLLECTION moved to a 15-minute cron 2026-10-07 (see that job's own docstring --
     // Twelve Data's daily free-tier credit cap, not this timeout); PAPER_TRADING_BOT_GOLD still
     // fires inside the same tick. Same reasoning as PAPER_TRADING_BOT's 10-minute allowance scaled
@@ -1122,6 +1124,20 @@ async function main(): Promise<void> {
   });
 
   /**
+   * Today's futures minutes, in-session, for the *developing* volume profile (d0 in the FRVP_OBS stamp).
+   *
+   * At :04, :09, :14 ... so it finishes before the bot's :00/:05 run reads it; the minute still forming
+   * is dropped by the provider, so the stamp lags the clock by a minute or two, and says which minute it
+   * used. Fyers' history endpoint is not known to publish same-day bars mid-session (the index series
+   * need the live collector for that reason), so this may deliver nothing: then entries are stamped
+   * NO_TODAY_FUTURES and nothing else changes. Log-only research input; never on a path that trades.
+   */
+  cronSchedule("4-59/5 9-15 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("INDEX_FUTURES_INTRADAY", () => runCommand("npm", ["run", "data:collect:index-futures", "--", "--auto", "--intraday"]));
+  });
+
+  /**
    * End-of-day append-only backfill of any confirmed collection gap.
    *
    * Runs at 16:18 IST, a hair before the detector below, so a recoverable gap is repaired before it
@@ -1557,7 +1573,7 @@ async function main(): Promise<void> {
       ...(fyersTokenService
         ? ["FYERS_AUTH_HEALTH_CHECK", "PAPER_TRADING_BOT", "PAPER_TRADE_EXIT_SWEEP", "OPTION_PREMIUM_TICKS",
            // Collects to backfill gaps, so it is gated on the Fyers token like the other collectors.
-           "CANDLE_GAP_HEAL", "INDEX_FUTURES_EOD", "INDEX_FUTURES_EOD_RETRY"]
+           "CANDLE_GAP_HEAL", "INDEX_FUTURES_EOD", "INDEX_FUTURES_EOD_RETRY", "INDEX_FUTURES_INTRADAY"]
         : []),
       "OPTION_CHAIN",
       "VOLATILITY_STRADDLE",

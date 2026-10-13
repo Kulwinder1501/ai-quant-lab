@@ -19,12 +19,19 @@ import { upcomingIndexFutures } from "../../modules/market-data/domain/index-fut
  *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts
  *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts --from 2026-07-15 --to 2026-10-12
  *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts --auto
+ *   npx tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts --auto --intraday
  *
  * `--auto` is what the scheduler runs (INDEX_FUTURES_EOD): the next two monthly contracts per index
  * that are live today, derived from the date, over the last few days. The fixed list below stops at
  * October 2026, so without it nothing would fetch futures bars after 2026-10-12 and the volume-profile
  * observation (volume-profile-observation.ts) would have no prior session to read. Re-running is safe:
  * bars that already exist are skipped, so the window also repairs a day that was missed.
+ *
+ * `--intraday` narrows the window to today and is what INDEX_FUTURES_INTRADAY runs every five minutes
+ * in-session, so the developing profile has today's futures volume to read. The provider returns only
+ * minutes that have closed, so no forming bar is stored. Whether the history endpoint publishes
+ * same-day 1m futures bars mid-session is not assumed: a day it does not shows up as
+ * NO_TODAY_FUTURES in the stamp.
  */
 
 interface FuturesContractSpec {
@@ -112,16 +119,18 @@ const CONTRACTS: readonly FuturesContractSpec[] = [
 /** Days of history re-requested by `--auto`; wide enough to repair a missed night or a weekend. */
 const AUTO_LOOKBACK_DAYS = 5;
 
-function autoContracts(): FuturesContractSpec[] {
+function autoContracts(intraday: boolean): FuturesContractSpec[] {
   const todayIst = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
-  const from = new Date(Date.parse(`${todayIst}T00:00:00Z`) - AUTO_LOOKBACK_DAYS * 86_400_000).toISOString().slice(0, 10);
+  const from = intraday
+    ? todayIst
+    : new Date(Date.parse(`${todayIst}T00:00:00Z`) - AUTO_LOOKBACK_DAYS * 86_400_000).toISOString().slice(0, 10);
   return upcomingIndexFutures(todayIst, 2).map((contract) => ({ ...contract, collectFrom: from, collectTo: todayIst }));
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const auto = args.includes("--auto");
-  const contracts: readonly FuturesContractSpec[] = auto ? autoContracts() : CONTRACTS;
+  const contracts: readonly FuturesContractSpec[] = auto ? autoContracts(args.includes("--intraday")) : CONTRACTS;
   const environment = loadEnvironment();
   const appId = process.env.FYERS_APP_ID;
   const appSecret = process.env.FYERS_APP_SECRET;
