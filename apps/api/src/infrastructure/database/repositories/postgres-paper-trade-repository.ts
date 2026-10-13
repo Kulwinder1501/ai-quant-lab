@@ -1,6 +1,8 @@
 import type { QueryResultRow } from "pg";
+import { INSUFFICIENT_CAPITAL_MESSAGE } from "../../../modules/paper-trading/domain/paper-trading.js";
 import type {
   ClosePaperTradeInput,
+  FillPendingTradeInput,
   OpenPaperTradeInput,
   PaperAccount,
   PaperAccountPerformanceData,
@@ -682,7 +684,7 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
     return result.rows.map(toPaperTrade);
   }
 
-  async fillPendingTrade(input: { paperTradeId: string; fillPrice: number; filledAt: Date }): Promise<PaperTrade> {
+  async fillPendingTrade(input: FillPendingTradeInput): Promise<PaperTrade> {
     const client = await this.database.connect();
     let transactionStarted = false;
     try {
@@ -692,20 +694,92 @@ export class PostgresPaperTradeRepository implements PaperTradeRepository {
       const tradeResult = await client.query(`
         SELECT id FROM paper_trades WHERE id = $1 AND status = 'PENDING' FOR UPDATE
       `, [input.paperTradeId]);
-      if (!tradeResult.rows[0]) {
+      const pending = tradeResult.rows[0];
+      if (!pending) {
         throw new Error("Trade is not pending or does not exist.");
       }
 
-      await client.query(`
-        UPDATE paper_trades
-        SET status = 'OPEN', entry_price = $2, opened_at = $3, stop_loss_effective_at = $3
-        WHERE id = $1
-      `, [input.paperTradeId, input.fillPrice, input.filledAt]);
+      const optionFill = input.optionFill;
+      if (optionFill === undefined) {
+        await client.query(`
+          UPDATE paper_trades
+          SET status = 'OPEN', entry_price = $2, opened_at = $3, stop_loss_effective_at = $3
+          WHERE id = $1
+        `, [input.paperTradeId, input.fillPrice, input.filledAt]);
 
-      await client.query(`
-        INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
-        VALUES ($1, 'OPENED', $2, NULL, $3::jsonb, $4)
-      `, [input.paperTradeId, input.fillPrice, JSON.stringify({ fillPolicy: "LIMIT_STOP_TRIGGERED" }), input.filledAt]);
+        await client.query(`
+          INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+          VALUES ($1, 'OPENED', $2, NULL, $3::jsonb, $4)
+        `, [input.paperTradeId, input.fillPrice, JSON.stringify({ fillPolicy: "LIMIT_STOP_TRIGGERED" }), input.filledAt]);
+      } else {
+        /*
+         * An option limit order. Nothing was reserved when it was placed, so the account is locked and its
+         * capital re-checked here, at the price actually paid: several working orders, or a bot's entry in the
+         * meantime, may have used it up. The same arithmetic as opening a position, minus this trade, which is
+         * still PENDING and so is not in the open-position sum.
+         */
+        const lockedTrade = await client.query<{ account_id: string; quantity: string | number }>(
+          `SELECT account_id, quantity FROM paper_trades WHERE id = $1`,
+          [input.paperTradeId],
+        );
+        const accountId = lockedTrade.rows[0]!.account_id;
+        await client.query(`SELECT id FROM paper_accounts WHERE id = $1 FOR UPDATE`, [accountId]);
+        const capital = await client.query<CapitalRow>(`
+          SELECT
+            paper_accounts.opening_balance
+            + COALESCE(SUM(paper_trades.realized_pnl) FILTER (WHERE paper_trades.status = 'CLOSED' AND paper_trades.excluded_from_evidence = false), 0)
+            - COALESCE(SUM(paper_trades.quantity * paper_trades.entry_price) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+            - COALESCE(SUM(paper_trades.fees + paper_trades.slippage) FILTER (WHERE paper_trades.status = 'OPEN' AND paper_trades.excluded_from_evidence = false), 0)
+            AS available_capital
+          FROM paper_accounts
+          LEFT JOIN paper_trades ON paper_trades.account_id = paper_accounts.id
+          WHERE paper_accounts.id = $1
+          GROUP BY paper_accounts.id, paper_accounts.opening_balance
+        `, [accountId]);
+        const available = capital.rows[0] ? toNumber(capital.rows[0].available_capital, "available capital") : null;
+        if (available === null) throw new Error("Unable to calculate available paper-account capital.");
+        const required = Number(lockedTrade.rows[0]!.quantity) * input.fillPrice + optionFill.entryFees;
+        if (required > available + 1e-9) {
+          throw new Error(INSUFFICIENT_CAPITAL_MESSAGE);
+        }
+
+        await client.query(`
+          UPDATE paper_trades
+          SET status = 'OPEN',
+              entry_price = $2,
+              opened_at = $3,
+              stop_loss_effective_at = $3,
+              fees = $4,
+              underlying_entry_price = COALESCE($5, underlying_entry_price),
+              underlying_fill_price = $5,
+              underlying_fill_price_source = CASE WHEN $5::numeric IS NULL THEN NULL ELSE 'OPTION_PREMIUM_TICK_ASK' END,
+              entry_underlying = COALESCE($5, entry_underlying),
+              fee_breakdown = jsonb_set(
+                jsonb_set(COALESCE(fee_breakdown, '{}'::jsonb), '{entry}', $6::jsonb),
+                '{option}',
+                COALESCE(fee_breakdown->'option', '{}'::jsonb) || $7::jsonb
+              )
+          WHERE id = $1
+        `, [
+          input.paperTradeId, input.fillPrice, input.filledAt, optionFill.entryFees,
+          optionFill.underlyingValue, JSON.stringify(optionFill.entryFeeBreakdown),
+          JSON.stringify({
+            fillSource: "OPTION_PREMIUM_TICK_ASK",
+            quoteObservedAt: optionFill.quoteObservedAt.toISOString(),
+            underlyingEntry: optionFill.underlyingValue,
+          }),
+        ]);
+
+        await client.query(`
+          INSERT INTO paper_trade_events (paper_trade_id, event_type, price, quantity, details, occurred_at)
+          VALUES ($1, 'OPENED', $2, NULL, $3::jsonb, $4)
+        `, [input.paperTradeId, input.fillPrice, JSON.stringify({
+          fillPolicy: "LIMIT_ORDER_TRIGGERED",
+          limitPrice: optionFill.limitPrice,
+          quoteObservedAt: optionFill.quoteObservedAt.toISOString(),
+          entryFees: optionFill.entryFees,
+        }), input.filledAt]);
+      }
 
       await client.query("COMMIT");
       transactionStarted = false;

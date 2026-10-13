@@ -1124,7 +1124,7 @@ async function main(): Promise<void> {
         `SELECT DISTINCT account.name
            FROM paper_trades trade
            JOIN paper_accounts account ON account.id = trade.account_id
-          WHERE trade.status = 'OPEN'`,
+          WHERE trade.status IN ('OPEN', 'PENDING')`,
       );
       for (const account of accounts.rows) {
         await runCommand("npm", ["run", "paper:trades:evaluate", "--", "--account", account.name]);

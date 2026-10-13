@@ -26,6 +26,12 @@ describe("checkManualOptionGeometry", () => {
     expect(checkManualOptionGeometry(barriers, 100)).toMatch(/stop loss/);
   });
 
+  it("names the limit, not the ask, when the price being checked is a limit order", () => {
+    expect(checkManualOptionGeometry(barriers, 100, "your limit price")).toMatch(/your limit price/);
+    expect(checkManualOptionGeometry(barriers, 100, "your limit price")).not.toMatch(/current ask/);
+    expect(checkManualOptionGeometry({ stopLoss: 120, targetPrice: 260 }, 300, "your limit price")).toMatch(/your limit price/);
+  });
+
   it("refuses a target at or below the fill, which would book a win at once", () => {
     expect(checkManualOptionGeometry(barriers, 260)).toMatch(/target/);
     expect(checkManualOptionGeometry(barriers, 300)).toMatch(/target/);

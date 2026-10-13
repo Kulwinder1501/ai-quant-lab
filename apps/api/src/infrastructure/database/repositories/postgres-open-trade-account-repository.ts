@@ -14,7 +14,7 @@ export class PostgresOpenTradeAccountRepository implements OpenTradeAccountReade
 
   async listAccountIdsWithOpenTrades(): Promise<string[]> {
     const result = await this.database.query<{ account_id: string }>(
-      `SELECT DISTINCT account_id FROM paper_trades WHERE status = 'OPEN'`,
+      `SELECT DISTINCT account_id FROM paper_trades WHERE status IN ('OPEN', 'PENDING')`,
     );
     return result.rows.map((row) => String(row.account_id));
   }

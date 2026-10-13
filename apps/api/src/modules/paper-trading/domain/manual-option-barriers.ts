@@ -30,12 +30,18 @@ export function parseManualOptionBarriers(stopLoss: unknown, targetPrice: unknow
  * below the fill and the target above it. Checked against the server's observed ask, not the price the
  * screen showed, because the ask can move between the click and the booking.
  */
-export function checkManualOptionGeometry(barriers: { stopLoss: number; targetPrice: number }, fillPrice: number): string | null {
+export function checkManualOptionGeometry(
+  barriers: { stopLoss: number; targetPrice: number },
+  fillPrice: number,
+  /** What `fillPrice` is, for the message: the current ask for a market buy, the limit for a limit order. */
+  priceLabel = "the current ask",
+): string | null {
+  const hint = priceLabel === "the current ask" ? " The ask may have moved since the ticket opened." : "";
   if (barriers.stopLoss >= fillPrice) {
-    return `The stop loss (${barriers.stopLoss}) must be below the fill price (${fillPrice}, the current ask). The ask may have moved since the ticket opened.`;
+    return `The stop loss (${barriers.stopLoss}) must be below the fill price (${fillPrice}, ${priceLabel}).${hint}`;
   }
   if (barriers.targetPrice <= fillPrice) {
-    return `The target (${barriers.targetPrice}) must be above the fill price (${fillPrice}, the current ask). The ask may have moved since the ticket opened.`;
+    return `The target (${barriers.targetPrice}) must be above the fill price (${fillPrice}, ${priceLabel}).${hint}`;
   }
   return null;
 }

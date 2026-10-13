@@ -271,10 +271,25 @@ export interface ExecuteExitSliceInput {
   feeBreakdown?: Record<string, unknown>;
 }
 
+/** The message of the refusal when a fill would take the account past its available capital. */
+export const INSUFFICIENT_CAPITAL_MESSAGE = "Insufficient available capital for this simulated fill.";
+
 export interface FillPendingTradeInput {
   paperTradeId: string;
   fillPrice: number;
   filledAt: Date;
+  /**
+   * Set only when an option limit order fills. It carries what the fill itself measured -- the fees at the price
+   * actually paid, and the underlying and quote the ask came from -- and turns on the capital check, since a
+   * pending order reserves nothing until it fills. Absent for the older fill paths, which behave as before.
+   */
+  optionFill?: {
+    entryFees: number;
+    entryFeeBreakdown: Record<string, unknown>;
+    underlyingValue: number | null;
+    quoteObservedAt: Date;
+    limitPrice: number;
+  };
 }
 
 export interface PaperTradeRepository {

@@ -47,13 +47,15 @@ describe("PostgresOpenPositionContractRepository", () => {
     ]);
   });
 
-  it("asks only for open option positions on the requested underlying", async () => {
+  // PENDING as well as OPEN: a working limit order has to keep its contract quoted, or the feed drifts off it and the
+  // order can never see the ask come down to its limit.
+  it("asks only for open or working option positions on the requested underlying", async () => {
     const { query, repository } = repositoryReturning([]);
 
     await repository.listForUnderlying("NIFTY50");
 
     const [text, values] = query.mock.calls[0] ?? [];
-    expect(text).toContain("trade.status = 'OPEN'");
+    expect(text).toContain("trade.status IN ('OPEN', 'PENDING')");
     expect(text).toContain("trade.option_type IS NOT NULL");
     expect(values).toEqual(["NIFTY50"]);
   });

@@ -1,8 +1,11 @@
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import { advanceProtectiveStop, momentumScalp1mStopPolicy, type ProtectiveStopPolicy } from "../domain/protective-stop.js";
 import { decidePaperTradeExit, type CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
-import type { PaperTrade, PaperTradeRepository, PaperTradeExitReason } from "../domain/paper-trading.js";
+import { INSUFFICIENT_CAPITAL_MESSAGE, type PaperTrade, type PaperTradeRepository, type PaperTradeExitReason } from "../domain/paper-trading.js";
+import { decidePendingOrder, readPendingOrderMeta, type PendingOrderMeta } from "../domain/manual-option-order.js";
+import { MAXIMUM_MANUAL_QUOTE_AGE_MS } from "../domain/manual-option-fill.js";
 import {
+  calculateEntryFees,
   calculateExitFees,
   calculateExercisedExpiryFees,
 } from "../domain/brokerage-calculator.js";
@@ -207,6 +210,76 @@ export class EvaluateOpenPaperTrades {
     private readonly momentumScalpStopPolicy: ProtectiveStopPolicy = momentumScalp1mStopPolicy,
   ) {}
 
+  /**
+   * One working option limit order: fills it, lapses it, or leaves it waiting.
+   *
+   * The ask comes from the live premium tick for the exact contract (nothing older than two minutes counts),
+   * and a fill is booked at that ask, with the fees for the price actually paid. An order that would take the
+   * account past its capital when it fills is cancelled with that reason rather than left to retry forever.
+   */
+  private async processPendingOptionOrder(
+    trade: PaperTrade,
+    order: PendingOrderMeta,
+    asOf: Date,
+  ): Promise<"FILLED" | "CANCELLED" | "WAITING"> {
+    const contract = {
+      underlyingSymbol: trade.underlyingSymbol!,
+      expiryDate: trade.optionExpiry!,
+      strikePrice: trade.optionStrike!,
+      optionType: trade.optionType as "CE" | "PE",
+    };
+    const quote = await this.densePremiums?.latestForContract(contract, MAXIMUM_MANUAL_QUOTE_AGE_MS, asOf)
+      .catch(() => null) ?? null;
+    const validUntil = new Date(order.validUntil);
+    const decision = decidePendingOrder({
+      limitPrice: order.limitPrice,
+      validUntil: Number.isNaN(validUntil.getTime()) ? null : validUntil,
+      quote,
+      now: asOf,
+    });
+
+    const cancel = async (reason: string, extra: Record<string, unknown> = {}) => {
+      await this.paperTradeRepository.close({
+        paperTradeId: trade.id,
+        exitPrice: trade.entryPrice,
+        exitReason: "CANCELLED",
+        closedAt: asOf,
+        exitFees: 0,
+        exitSlippage: 0,
+        details: { reason, limitPrice: order.limitPrice, validUntil: order.validUntil, ...extra },
+      });
+    };
+
+    if (decision.action === "EXPIRE") {
+      await cancel(decision.reason);
+      return "CANCELLED";
+    }
+    if (decision.action === "WAIT") return "WAITING";
+
+    const fees = calculateEntryFees(decision.fillPrice, trade.quantity);
+    try {
+      await this.paperTradeRepository.fillPendingTrade({
+        paperTradeId: trade.id,
+        fillPrice: decision.fillPrice,
+        filledAt: asOf,
+        optionFill: {
+          entryFees: fees.total,
+          entryFeeBreakdown: { ...fees },
+          underlyingValue: decision.underlyingValue,
+          quoteObservedAt: decision.observedAt,
+          limitPrice: order.limitPrice,
+        },
+      });
+      return "FILLED";
+    } catch (error) {
+      if (error instanceof Error && error.message === INSUFFICIENT_CAPITAL_MESSAGE) {
+        await cancel("INSUFFICIENT_CAPITAL", { attemptedFillPrice: decision.fillPrice });
+        return "CANCELLED";
+      }
+      throw error;
+    }
+  }
+
   async execute(input: EvaluateOpenPaperTradesInput): Promise<EvaluateOpenPaperTradesResult> {
     const asOf = input.asOf ?? new Date();
     if (Number.isNaN(asOf.getTime())) {
@@ -241,6 +314,27 @@ export class EvaluateOpenPaperTrades {
           details: { reason: "END_OF_DAY_EXPIRATION" },
         });
         cancelledTradeIds.push(trade.id);
+        continue;
+      }
+
+      // An option order is priced in premium, and the checks below compare the *underlying's* level against the
+      // entry. Letting an option fall through to them would read an index level of ~55,000 as having "reached"
+      // a premium limit of ~540 and fill it instantly, so an option never reaches them: a stored limit order is
+      // handled on its own terms, and anything else option-shaped is left pending for the end-of-day rule above.
+      if (isOptionBuyerTrade(trade)) {
+        const order = readPendingOrderMeta(trade.feeBreakdown);
+        if (order === null) continue;
+        try {
+          const outcome = await this.processPendingOptionOrder(trade, order, asOf);
+          if (outcome === "FILLED") filledTradeIds.push(trade.id);
+          else if (outcome === "CANCELLED") cancelledTradeIds.push(trade.id);
+        } catch (error) {
+          // Collected, not thrown: one order that cannot be processed must not stop the account's stops.
+          evaluationFailures.push({
+            tradeId: trade.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         continue;
       }
 

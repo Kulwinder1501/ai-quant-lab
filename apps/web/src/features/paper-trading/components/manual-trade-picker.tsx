@@ -177,6 +177,11 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
 
   if (!show) return null;
 
+  // The contract the ticket is open on, read from the live chain so its price keeps moving while the ticket is open.
+  const liveLeg = pick === null
+    ? null
+    : (chain?.strikes?.find((row) => row.strikePrice === pick.strike)?.[pick.optionType === "CE" ? "call" : "put"] ?? null);
+
   const observedAtMs = chain?.observedAt ? Date.parse(chain.observedAt) : Number.NaN;
   const ageMinutes = Number.isFinite(observedAtMs) ? Math.max(0, (now - observedAtMs) / 60_000) : null;
   const stale = ageMinutes !== null && ageMinutes > STALE_CHAIN_MINUTES;
@@ -323,8 +328,8 @@ export function ManualTradePicker({ show, onClose, accountId, accountName, onOpe
           optionType={pick.optionType}
           expiryDate={resolvedExpiry}
           premium={pick.leg.ask!}
-          impliedVolatility={pick.leg.impliedVolatility}
-          greeks={{ delta: pick.leg.delta, gamma: pick.leg.gamma, theta: pick.leg.theta, vega: pick.leg.vega }}
+          impliedVolatility={liveLeg?.impliedVolatility ?? pick.leg.impliedVolatility}
+          livePremium={liveLeg ? { bid: liveLeg.bid, ask: liveLeg.ask } : null}
         />
       )}
     </>

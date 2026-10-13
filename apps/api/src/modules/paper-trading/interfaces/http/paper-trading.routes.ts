@@ -16,6 +16,12 @@ import { lotsToQuantity, validateQuantity } from "../../domain/lot-size-validato
 import { resolveOptionExpiryInstant } from "../../domain/option-buyer-fill.js";
 import { checkManualOptionGeometry, parseManualOptionBarriers } from "../../domain/manual-option-barriers.js";
 import { chooseManualOptionFill } from "../../domain/manual-option-fill.js";
+import {
+  checkLimitAgainstAsk,
+  parseOrderValidity,
+  resolveOrderValidUntil,
+  type PendingOrderMeta,
+} from "../../domain/manual-option-order.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
@@ -532,6 +538,9 @@ export function registerPaperTradingRoutes(
         impliedVolatility,
         stopLoss,
         targetPrice,
+        orderType,
+        limitPrice,
+        validForMinutes,
         notes,
       } = request.body || {};
 
@@ -555,6 +564,24 @@ export function registerPaperTradingRoutes(
       const barriers = parseManualOptionBarriers(stopLoss, targetPrice);
       if (!barriers.ok) {
         response.status(400).json({ error: barriers.error });
+        return;
+      }
+
+      // MARKET buys now at the live ask. LIMIT waits, below the market, and fills only when the ask comes down to it.
+      const normalizedOrderType = String(orderType ?? "MARKET").toUpperCase();
+      if (normalizedOrderType !== "MARKET" && normalizedOrderType !== "LIMIT") {
+        response.status(400).json({ error: "orderType must be MARKET or LIMIT." });
+        return;
+      }
+      const isLimitOrder = normalizedOrderType === "LIMIT";
+      const validity = parseOrderValidity(validForMinutes);
+      if (!validity.ok) {
+        response.status(400).json({ error: validity.error });
+        return;
+      }
+      const requestedLimit = Number(limitPrice);
+      if (isLimitOrder && (!Number.isFinite(requestedLimit) || requestedLimit <= 0)) {
+        response.status(400).json({ error: "A LIMIT order needs a limitPrice above zero." });
         return;
       }
 
@@ -620,9 +647,30 @@ export function registerPaperTradingRoutes(
         return;
       }
       const serverFillPrice = chosenFill.fillPrice;
-      const geometryError = checkManualOptionGeometry(barriers, serverFillPrice);
+      // A market buy is booked at the live ask. A limit order is booked at its own limit and waits, so its
+      // stop and target are measured from the limit -- the price it will fill at or better -- not today's ask.
+      const bookingPrice = isLimitOrder ? requestedLimit : serverFillPrice;
+      const limitError = isLimitOrder ? checkLimitAgainstAsk(requestedLimit, serverFillPrice) : null;
+      if (limitError !== null) {
+        response.status(422).json({ error: limitError });
+        return;
+      }
+      const geometryError = checkManualOptionGeometry(barriers, bookingPrice, isLimitOrder ? "your limit price" : "the current ask");
       if (geometryError !== null) {
         response.status(422).json({ error: geometryError });
+        return;
+      }
+      const orderMeta: PendingOrderMeta | null = isLimitOrder
+        ? {
+          type: "LIMIT",
+          limitPrice: requestedLimit,
+          placedAt: quoteNow.toISOString(),
+          placedAsk: serverFillPrice,
+          validUntil: resolveOrderValidUntil(quoteNow, validity.minutes).toISOString(),
+        }
+        : null;
+      if (orderMeta !== null && Date.parse(orderMeta.validUntil) - quoteNow.getTime() < 60_000) {
+        response.status(422).json({ error: "The market closes in under a minute, so a limit order placed now would lapse straight away." });
         return;
       }
 
@@ -692,7 +740,7 @@ export function registerPaperTradingRoutes(
       };
 
       const feeMeta = {
-        entry: calculateEntryFees(serverFillPrice, resolvedQuantity),
+        entry: calculateEntryFees(bookingPrice, resolvedQuantity),
         option: {
           optionType: normalizedOptionType,
           strike: numericStrike,
@@ -703,19 +751,21 @@ export function registerPaperTradingRoutes(
           underlyingEntry: underlyingEntryPrice,
           quoteObservedAt: chosenFill.observedAt.toISOString(),
           requestedFill,
-          fillSource: chosenFill.source,
+          fillSource: isLimitOrder ? "PENDING_LIMIT_ORDER" : chosenFill.source,
         },
+        ...(orderMeta === null ? {} : { order: orderMeta }),
       };
 
       const trade = await dependencies.paperTradeRepository.openManualOption({
         accountId,
         instrumentId: instrument.id,
-        fillPrice: serverFillPrice,
+        fillPrice: bookingPrice,
         quantity: resolvedQuantity,
         openedAt: new Date(),
+        status: isLimitOrder ? "PENDING" : "OPEN",
         entryFees: feeMeta.entry.total,
         entrySlippage: 0,
-        notes: notes || "Manual option trade from chain",
+        notes: notes || (isLimitOrder ? `Manual limit order at ${requestedLimit}` : "Manual option trade from chain"),
         sideOverride: "LONG", // Buying options is always LONG
         stopLossOverride: barriers.stopLoss,
         targetPriceOverride: barriers.targetPrice,
@@ -732,6 +782,40 @@ export function registerPaperTradingRoutes(
       response.status(201).json({ data: trade });
     } catch (error) {
       respondToRouteError(error, response, next, 400, "Failed to open manual paper trade");
+    }
+  });
+
+  /**
+   * Cancels a working order that has not filled. An open position is closed, not cancelled, so this refuses one.
+   */
+  app.post("/api/v1/paper-trades/cancel-pending", async (request, response, next) => {
+    try {
+      const { paperTradeId } = request.body || {};
+      if (!paperTradeId || typeof paperTradeId !== "string") {
+        response.status(400).json({ error: "paperTradeId is required." });
+        return;
+      }
+      const pending = await dependencies.database.query(
+        `SELECT entry_price FROM paper_trades WHERE id = $1 AND status = 'PENDING'`,
+        [paperTradeId],
+      );
+      const row = pending.rows[0] as { entry_price: string | number } | undefined;
+      if (!row) {
+        response.status(404).json({ error: `Pending order ${paperTradeId} was not found. It may already have filled or lapsed.` });
+        return;
+      }
+      const trade = await dependencies.paperTradeRepository.close({
+        paperTradeId,
+        exitPrice: Number(row.entry_price),
+        exitReason: "CANCELLED",
+        closedAt: new Date(),
+        exitFees: 0,
+        exitSlippage: 0,
+        details: { reason: "CANCELLED_BY_USER" },
+      });
+      response.status(200).json({ data: trade });
+    } catch (error) {
+      respondToRouteError(error, response, next, 400, "Failed to cancel the pending order");
     }
   });
 

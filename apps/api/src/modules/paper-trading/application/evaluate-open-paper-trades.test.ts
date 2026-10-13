@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CandleRepository, PersistedCandle } from "../../market-data/domain/candle.js";
 import { EvaluateOpenPaperTrades } from "./evaluate-open-paper-trades.js";
-import type { ClosePaperTradeInput, PaperTrade, PaperTradeRepository } from "../domain/paper-trading.js";
+import { INSUFFICIENT_CAPITAL_MESSAGE, type ClosePaperTradeInput, type FillPendingTradeInput, type PaperTrade, type PaperTradeRepository } from "../domain/paper-trading.js";
 import { FixedImpliedVolatilitySource } from "../infrastructure/india-vix-implied-volatility-source.js";
 import { priceOptionMark, priceOptionMarksAtOhlc } from "../domain/option-mark-to-market.js";
 import type { CompletedPriceCandle } from "../domain/paper-trade-exit-policy.js";
@@ -1371,5 +1371,104 @@ describe("EvaluateOpenPaperTrades", () => {
       expect(result.tradesClosed).toBe(0);
       expect(closings).toHaveLength(0);
     });
+  });
+});
+
+describe("EvaluateOpenPaperTrades: working option limit orders", () => {
+  const placedAt = "2026-10-13T06:40:59.000Z";
+  const asOf = new Date("2026-10-13T06:50:00.000Z");
+  const limit = 540;
+
+  function limitOrder(overrides: Partial<PaperTrade> = {}): PaperTrade {
+    return optionBuyerTrade({
+      id: "order-1",
+      status: "PENDING",
+      instrumentSymbol: "BANKNIFTY",
+      underlyingSymbol: "BANKNIFTY",
+      optionStrike: 55400,
+      optionExpiry: new Date("2026-10-27T10:00:00.000Z"),
+      quantity: 30,
+      remainingQuantity: 30,
+      entryPrice: limit,
+      stopLoss: 400,
+      targetPrice: 800,
+      openedAt: new Date(placedAt),
+      feeBreakdown: { order: { type: "LIMIT", limitPrice: limit, placedAt, placedAsk: 561.8, validUntil: "2026-10-13T10:00:00.000Z" } },
+      ...overrides,
+    });
+  }
+
+  function harness(trade: PaperTrade, fillError?: Error) {
+    const fills: FillPendingTradeInput[] = [];
+    const closings: ClosePaperTradeInput[] = [];
+    const repo: PaperTradeRepository = {
+      ...stubRepoMany([], closings),
+      listOpenByAccount: async () => [],
+      listPendingByAccount: async () => [trade],
+      fillPendingTrade: async (input) => {
+        if (fillError) throw fillError;
+        fills.push(input);
+        return { ...trade, status: "OPEN", entryPrice: input.fillPrice };
+      },
+    };
+    const candleRepository: CandleRepository = {
+      upsert: async () => { throw new Error("not used"); },
+      findByKey: async () => null,
+      listIncomplete: async () => [],
+      listCompleted: async () => [],
+    };
+    const run = (latest: DenseSample | null, at = asOf) =>
+      new EvaluateOpenPaperTrades(repo, candleRepository, new FixedImpliedVolatilitySource(0.12), denseReader(latest))
+        .execute({ accountId: "account-1", asOf: at, livePrices: { BANKNIFTY: 55060 }, exitFees: 0 });
+    return { fills, closings, run };
+  }
+
+  it("waits while the ask is still above the limit", async () => {
+    const { fills, closings, run } = harness(limitOrder());
+    const result = await run(sample("2026-10-13T06:49:55.000Z", 560, 55060));
+    expect(result).toMatchObject({ pendingTradesFilled: 0, pendingTradesCancelled: 0 });
+    expect(fills).toHaveLength(0);
+    expect(closings).toHaveLength(0);
+  });
+
+  it("fills at the live ask once it has come down to the limit, with the fees for that price", async () => {
+    const { fills, run } = harness(limitOrder());
+    // bid 538 -> ask 539.5, at or under the 540 limit.
+    const result = await run(sample("2026-10-13T06:49:55.000Z", 538, 55012.5));
+    expect(result.pendingTradesFilled).toBe(1);
+    expect(fills[0]).toMatchObject({ paperTradeId: "order-1", fillPrice: 539.5 });
+    expect(fills[0]!.optionFill).toMatchObject({ limitPrice: limit, underlyingValue: 55012.5 });
+    expect(fills[0]!.optionFill!.entryFees).toBeGreaterThan(0);
+  });
+
+  it("never fills on a stale quote, even one below the limit", async () => {
+    const { fills, run } = harness(limitOrder());
+    await run(sample("2026-10-13T06:30:00.000Z", 500, 55000));
+    expect(fills).toHaveLength(0);
+  });
+
+  it("cancels an order that has passed its valid-until time", async () => {
+    const { fills, closings, run } = harness(limitOrder());
+    const late = new Date("2026-10-13T10:01:00.000Z");
+    const result = await run(sample("2026-10-13T10:00:55.000Z", 500, 55000), late);
+    expect(result.pendingTradesCancelled).toBe(1);
+    expect(fills).toHaveLength(0);
+    expect(closings[0]).toMatchObject({ paperTradeId: "order-1", exitReason: "CANCELLED", details: expect.objectContaining({ reason: "ORDER_EXPIRED" }) });
+  });
+
+  it("cancels, rather than retrying for ever, an order the account can no longer afford", async () => {
+    const { closings, run } = harness(limitOrder(), new Error(INSUFFICIENT_CAPITAL_MESSAGE));
+    const result = await run(sample("2026-10-13T06:49:55.000Z", 538, 55012.5));
+    expect(result.pendingTradesCancelled).toBe(1);
+    expect(closings[0]).toMatchObject({ exitReason: "CANCELLED", details: expect.objectContaining({ reason: "INSUFFICIENT_CAPITAL" }) });
+  });
+
+  it("does not fill an option order because the INDEX level is above its premium limit", async () => {
+    // The pre-existing pending check compared the underlying (~55,060) with the entry (a premium of 540), which
+    // reads as already reached. An option order must never reach that comparison.
+    const { fills, run } = harness(limitOrder({ feeBreakdown: {} }));
+    const result = await run(null);
+    expect(fills).toHaveLength(0);
+    expect(result.pendingTradesFilled).toBe(0);
   });
 });

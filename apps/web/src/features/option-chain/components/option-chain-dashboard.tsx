@@ -511,7 +511,11 @@ export function OptionChainDashboard() {
         </>
       )}
 
-      {tradeModalConfig && (
+      {tradeModalConfig && (() => {
+        // Read from the live chain, so the ticket's price keeps moving while it is open.
+        const liveLeg = chain?.strikes?.find((row) => row.strikePrice === tradeModalConfig.strike)
+          ?.[tradeModalConfig.optionType === "CE" ? "call" : "put"] ?? null;
+        return (
         <OptionTradeModal
           show={true}
           onClose={() => setTradeModalConfig(null)}
@@ -520,15 +524,11 @@ export function OptionChainDashboard() {
           optionType={tradeModalConfig.optionType}
           expiryDate={expiry || chain!.expiries![0].expiryDate}
           premium={tradeModalConfig.leg.ask!}
-          impliedVolatility={tradeModalConfig.leg.impliedVolatility}
-          greeks={{
-            delta: tradeModalConfig.leg.delta,
-            gamma: tradeModalConfig.leg.gamma,
-            theta: tradeModalConfig.leg.theta,
-            vega: tradeModalConfig.leg.vega,
-          }}
+          impliedVolatility={liveLeg?.impliedVolatility ?? tradeModalConfig.leg.impliedVolatility}
+          livePremium={liveLeg ? { bid: liveLeg.bid, ask: liveLeg.ask } : null}
         />
-      )}
+        );
+      })()}
     </div>
   );
 }

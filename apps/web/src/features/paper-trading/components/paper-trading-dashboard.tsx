@@ -12,6 +12,7 @@ import { summariseOpenTradeMarks, type PaperAccountMetrics, type PaperAccountSum
 import type { LiveQuote, LiveQuoteMap } from "../../positions/components/active-positions-table";
 import { EquityMetrics } from "./equity-metrics";
 import { ActivePositionsTable } from "./active-positions-table";
+import { PendingOrdersTable } from "./pending-orders-table";
 import { TradeHistoryTable } from "./trade-history-table";
 import { CreateAccountModal } from "./create-account-modal";
 import { OpenTradeModal } from "./open-trade-modal";
@@ -65,6 +66,7 @@ export function PaperTradingDashboard() {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const [showManualPicker, setShowManualPicker] = useState<boolean>(false);
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
 
   const [showOpenModal, setShowOpenModal] = useState<boolean>(false);
   const [tradeIdeas, setTradeIdeas] = useState<TradeIdeaOption[]>([]);
@@ -416,6 +418,18 @@ export function PaperTradingDashboard() {
     }
   };
 
+  const handleCancelOrder = async (order: PaperTradeRow) => {
+    setCancellingOrderId(order.id);
+    try {
+      await postResearchJson("/paper-trades/cancel-pending", { paperTradeId: order.id });
+      await refreshSummary(selectedAccountId);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to cancel the order."));
+    } finally {
+      setCancellingOrderId(null);
+    }
+  };
+
   const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
   const emptyBalance = selectedAccount?.openingBalance || 0;
   const metrics: PaperAccountMetrics = summary?.metrics ?? {
@@ -540,11 +554,18 @@ export function PaperTradingDashboard() {
           />
         </Reveal>
 
+        {/* Limit orders still waiting for their price. They are not positions, so they are listed apart. */}
+        <PendingOrdersTable
+          orders={summary?.pendingTrades || []}
+          cancellingId={cancellingOrderId}
+          onCancel={(order) => { void handleCancelOrder(order); }}
+        />
+
         {/* Open Positions Table — live monitoring aligned with Portfolio Positions */}
         <Reveal delayMs={200}>
           <ActivePositionsTable
             openTrades={summary?.openTrades || []}
-            pendingTrades={summary?.pendingTrades || []}
+            pendingTrades={[]}
             loading={loading && !summary}
             liveQuotes={liveQuotes}
             isStreaming={isStreaming}

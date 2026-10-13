@@ -149,3 +149,23 @@ export function summariseOpenTradeMarks(openTrades: PaperTradeRow[]): { unrealiz
   }
   return { unrealizedPnl, unmarkedCount };
 }
+
+/** A limit order's own terms, kept on the trade by the API (`fee_breakdown.order`). Null for any other trade. */
+export interface LimitOrderInfo {
+  limitPrice: number;
+  /** The ask when the order was placed. Zero when the order predates the field. */
+  placedAsk: number;
+  validUntil: string;
+}
+
+export function limitOrderInfo(trade: PaperTradeRow): LimitOrderInfo | null {
+  const order = trade.feeBreakdown?.order;
+  if (!order || typeof order !== "object") return null;
+  const meta = order as Record<string, unknown>;
+  if (meta.type !== "LIMIT" || typeof meta.limitPrice !== "number" || typeof meta.validUntil !== "string") return null;
+  return {
+    limitPrice: meta.limitPrice,
+    placedAsk: typeof meta.placedAsk === "number" ? meta.placedAsk : 0,
+    validUntil: meta.validUntil,
+  };
+}

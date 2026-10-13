@@ -56,7 +56,7 @@ export class PostgresOpenPositionContractRepository {
             ORDER BY snapshot.observed_at DESC
             LIMIT 1
          ) contract ON TRUE
-        WHERE trade.status = 'OPEN'
+        WHERE trade.status IN ('OPEN', 'PENDING')
           AND trade.option_type IS NOT NULL
           AND trade.option_strike IS NOT NULL
           AND trade.option_expiry IS NOT NULL
