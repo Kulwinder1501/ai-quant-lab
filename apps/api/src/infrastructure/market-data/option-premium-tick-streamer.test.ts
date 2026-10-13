@@ -274,3 +274,88 @@ describe("OptionPremiumTickStreamer tick handler", () => {
     error.mockRestore();
   });
 });
+
+describe("OptionPremiumTickStreamer: contracts an open position needs", () => {
+  function setup() {
+    const state = { spot: 57_300, observedAt: OBSERVED_AT };
+    const socket = liveStreamer();
+    const required: Array<{ underlyingSymbol: string; expiryDate: string; strikePrice: number; optionType: "CE" | "PE"; providerSymbol: string }> = [];
+    const insertTicks = vi.fn(async (rows: unknown[]) => ({ inserted: rows.length, skipped: 0 }));
+    const streamer = new OptionPremiumTickStreamer({
+      underlyingSymbols: ["BANKNIFTY"],
+      streamer: socket as unknown as FyersLiveStreamer,
+      chainRepository: movableChain(state),
+      tickRepository: { insertTicks } as unknown as PostgresOptionPremiumTickRepository,
+      requiredContracts: { listForUnderlying: async () => [...required] },
+      now: () => OBSERVED_AT,
+    });
+    const subscribed = (): string[] => socket.subscribe.mock.calls.flatMap((call) => call[0] as string[]);
+    return { streamer, socket, required, insertTicks, subscribed };
+  }
+  // A strike far outside the band the chain refresh would pick.
+  const deepOtm = { underlyingSymbol: "BANKNIFTY", expiryDate: "2026-08-25", strikePrice: 57_600, optionType: "CE" as const, providerSymbol: "SYM-OTM-57600CE" };
+
+  it("puts a contract opened after the last full refresh on the socket straight away", async () => {
+    const { streamer, required, subscribed, socket } = setup();
+    await streamer.refreshSubscriptions();
+    socket.subscribe.mockClear();
+
+    required.push(deepOtm); // the user has just bought it
+    await streamer.refreshRequiredSubscriptions();
+
+    expect(subscribed()).toEqual(["SYM-OTM-57600CE"]);
+  });
+
+  it("subscribes it once, not on every pass", async () => {
+    const { streamer, required, subscribed, socket } = setup();
+    await streamer.refreshSubscriptions();
+    socket.subscribe.mockClear();
+    required.push(deepOtm);
+
+    await streamer.refreshRequiredSubscriptions();
+    await streamer.refreshRequiredSubscriptions();
+    await streamer.refreshRequiredSubscriptions();
+
+    expect(subscribed()).toEqual(["SYM-OTM-57600CE"]);
+  });
+
+  it("never unsubscribes anything: the band belongs to the full refresh", async () => {
+    const { streamer, required, socket } = setup();
+    await streamer.refreshSubscriptions();
+    required.push(deepOtm);
+    await streamer.refreshRequiredSubscriptions();
+    required.length = 0; // the position closed
+
+    await streamer.refreshRequiredSubscriptions();
+
+    expect(socket.unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it("persists the quotes it receives for that contract", async () => {
+    const { streamer, required, socket, insertTicks } = setup();
+    // start() is what registers the tick listener, as in the retention tests above.
+    await streamer.start();
+    required.push(deepOtm);
+    await streamer.refreshRequiredSubscriptions();
+
+    socket.emitTick({ symbol: "SYM-OTM-57600CE", ltp: 580, bid: 579, ask: 581, volume: 10 } as Tick);
+    await streamer.flush();
+
+    const written = insertTicks.mock.calls.flat().flat() as Array<{ providerSymbol: string }>;
+    expect(written.map((row) => row.providerSymbol)).toContain("SYM-OTM-57600CE");
+    await streamer.stop();
+  });
+
+  it("does nothing, and does not fail, when no required-contract reader is configured", async () => {
+    const socket = liveStreamer();
+    const streamer = new OptionPremiumTickStreamer({
+      underlyingSymbols: ["BANKNIFTY"],
+      streamer: socket as unknown as FyersLiveStreamer,
+      chainRepository: chainRepository(),
+      tickRepository: { insertTicks: vi.fn() } as unknown as PostgresOptionPremiumTickRepository,
+      now: () => OBSERVED_AT,
+    });
+    await expect(streamer.refreshRequiredSubscriptions()).resolves.toBeUndefined();
+    expect(socket.subscribe).not.toHaveBeenCalled();
+  });
+});

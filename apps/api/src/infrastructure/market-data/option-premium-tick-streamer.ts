@@ -34,6 +34,15 @@ export interface OptionPremiumTickStreamerOptions {
   flushIntervalMs?: number;
   /** How often the ATM band is recomputed from the newest chain snapshot. */
   resubscribeIntervalMs?: number;
+  /**
+   * How often the contracts an open position or working order needs are picked up between full refreshes.
+   *
+   * Without this a contract opened just after a refresh was not subscribed on the socket until the next one,
+   * up to five minutes later. Until then it was covered only by the once-a-minute HTTP poller, so a brand-new
+   * position's P&L moved once a minute and its stop was checked at the same rate -- while the chain screen,
+   * which streams every strike, moved every second.
+   */
+  requiredRefreshIntervalMs?: number;
   /** A quote older than this is dropped rather than written. */
   maximumTickAgeMs?: number;
   /**
@@ -86,6 +95,9 @@ const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
 // The chain job runs every 15 minutes, so recomputing faster than that mostly re-reads the same
 // snapshot. Five minutes still moves the band within one chain interval when spot runs.
 const DEFAULT_RESUBSCRIBE_INTERVAL_MS = 5 * 60_000;
+// One small query per underlying. Short enough that a position the user has just opened is on the socket
+// before they have looked at its P&L, long enough not to matter to the database.
+const DEFAULT_REQUIRED_REFRESH_INTERVAL_MS = 5_000;
 // Three flushes. Long enough that one dropped message is not a gap, short enough that a dead
 // socket stops writing well inside the five-minute bot cycle that reads this series.
 const DEFAULT_MAXIMUM_TICK_AGE_MS = 15_000;
@@ -151,6 +163,8 @@ export class OptionPremiumTickStreamer {
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
   private resubscribeTimer: NodeJS.Timeout | null = null;
+  private requiredTimer: NodeJS.Timeout | null = null;
+  private refreshingRequired = false;
   private readonly onTick = (tick: Tick): void => this.record(tick);
 
   constructor(private readonly options: OptionPremiumTickStreamerOptions) {}
@@ -195,14 +209,32 @@ export class OptionPremiumTickStreamer {
         }));
       });
     }, this.options.resubscribeIntervalMs ?? DEFAULT_RESUBSCRIBE_INTERVAL_MS);
+    if (this.options.requiredContracts) {
+      this.requiredTimer = setInterval(() => {
+        // Skipped, not queued, while the previous pass is still reading.
+        if (this.refreshingRequired) return;
+        this.refreshingRequired = true;
+        void this.refreshRequiredSubscriptions()
+          .catch((error: unknown) => {
+            console.error(JSON.stringify({
+              level: "error",
+              message: "Refreshing the subscriptions open positions need failed; the existing set stays in place.",
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          })
+          .finally(() => { this.refreshingRequired = false; });
+      }, this.options.requiredRefreshIntervalMs ?? DEFAULT_REQUIRED_REFRESH_INTERVAL_MS);
+    }
   }
 
   async stop(): Promise<void> {
     this.options.streamer.off("tick", this.onTick);
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.resubscribeTimer) clearInterval(this.resubscribeTimer);
+    if (this.requiredTimer) clearInterval(this.requiredTimer);
     this.flushTimer = null;
     this.resubscribeTimer = null;
+    this.requiredTimer = null;
     // One last write so quotes already in hand are not discarded on shutdown.
     await this.flush();
   }
@@ -229,6 +261,33 @@ export class OptionPremiumTickStreamer {
         ? null
         : new Date(tick.lastTradeTimeSeconds * 1000),
     });
+  }
+
+  /**
+   * Subscribes any contract an open position or working order needs that is not on the socket yet.
+   *
+   * Only ever adds. The full refresh owns the band and the unsubscribing; this just makes sure a contract the
+   * user has opened a trade on is streaming within seconds, not at the next five-minute boundary. The part after
+   * the read is synchronous, so it cannot interleave with the tail of a full refresh.
+   */
+  async refreshRequiredSubscriptions(): Promise<void> {
+    if (!this.options.requiredContracts) return;
+    const required: AtmPremiumContract[] = [];
+    for (const symbol of this.options.underlyingSymbols) {
+      required.push(...await this.options.requiredContracts.listForUnderlying(symbol));
+    }
+    const nowMs = this.now().getTime();
+    for (const contract of required) {
+      this.recentlyWanted.set(contract.providerSymbol.toUpperCase(), { contract, lastWantedAtMs: nowMs });
+    }
+    // Kept in `contracts` as well as subscribed: ticks are persisted only for a contract on that list.
+    this.contracts = [...this.recentlyWanted.values()].map((entry) => entry.contract);
+    const fresh = [...new Set(required.map((contract) => contract.providerSymbol))]
+      .filter((symbol) => !this.subscribed.has(symbol));
+    if (fresh.length > 0) {
+      this.options.streamer.subscribe(fresh);
+      for (const symbol of fresh) this.subscribed.add(symbol);
+    }
   }
 
   /** Recompute the wanted contract set and move the socket's subscriptions to match. */

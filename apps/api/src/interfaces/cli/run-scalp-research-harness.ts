@@ -6,7 +6,9 @@ import { PostgresPatternObservationReader } from "../../infrastructure/database/
 import { PostgresResearchRiskSnapshotProvider } from "../../infrastructure/database/repositories/postgres-research-risk-snapshot-provider.js";
 import { PostgresScalpResearchRepository } from "../../infrastructure/database/repositories/postgres-scalp-research-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
-import { CaptureScalpResearchDecision } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
+import { CaptureScalpResearchDecision, hasCanonicalAtr } from "../../modules/research/scalp-harness/application/capture-research-decision.js";
+import { decideBarReadiness } from "../../modules/research/scalp-harness/domain/pending-bar-readiness.js";
+import { canonicalAtrAlgorithmVersion, canonicalAtrParameters } from "../../modules/research/scalp-harness/domain/policies.js";
 import { resolveTapeLiveness } from "../../modules/research/scalp-harness/application/resolve-tape-liveness.js";
 import {
   frozenTapeThresholdFor,
@@ -84,7 +86,7 @@ async function main(): Promise<void> {
         reports.push({ symbol: instrument.symbol, skipped: "NO_COMPLETED_1M_REFERENCE" });
         continue;
       }
-      const pending = await database.query<{ close_time: Date; features_covered: boolean }>(`
+      const pending = await database.query<{ close_time: Date; features_covered: boolean; atr_computed: boolean }>(`
         SELECT
           candle.close_time,
           -- Every timeframe this minute will be read at must be covered, not just the 1m
@@ -146,7 +148,22 @@ async function main(): Promise<void> {
              AND sibling.is_complete = TRUE
             WHERE wanted.timeframe = '1m'
                OR EXTRACT(MINUTE FROM candle.close_time AT TIME ZONE 'Asia/Kolkata')::int % 5 = 0
-          ) AS features_covered
+          ) AS features_covered,
+          -- Whether the canonical ATR(14) exists for this bar. Every proposal's geometry is built from it, and the
+          -- capture step throws without it, so a bar that lacks it must wait or be recorded without proposals (see
+          -- pending-bar-readiness.ts) rather than reach that throw. Matched at the same version and parameters the
+          -- capture step reads ($6, $7).
+          EXISTS (
+            SELECT 1
+            FROM indicator_snapshots atr_snapshot
+            JOIN indicator_definitions atr_definition ON atr_definition.id = atr_snapshot.indicator_definition_id
+            WHERE atr_snapshot.candle_id = candle.id
+              AND atr_definition.indicator_code = 'ATR'
+              AND atr_definition.algorithm_version = $6
+              AND atr_definition.parameters @> $7::jsonb
+              AND jsonb_typeof(atr_snapshot.values->'value') = 'number'
+              AND (atr_snapshot.values->>'value')::numeric > 0
+          ) AS atr_computed
         FROM candles candle
         WHERE candle.instrument_id = $1 AND candle.timeframe = '1m' AND candle.is_complete = TRUE
           AND candle.close_time <= $2
@@ -159,7 +176,10 @@ async function main(): Promise<void> {
                WHERE control.source_candle_id = candle.id) < 2
         ORDER BY candle.close_time ASC
         LIMIT $3
-      `, [instrument.id, latest.candle.closeTime, catchUpLimit, candlestickAlgorithmVersion, priceActionAlgorithmVersion]);
+      `, [
+        instrument.id, latest.candle.closeTime, catchUpLimit, candlestickAlgorithmVersion, priceActionAlgorithmVersion,
+        canonicalAtrAlgorithmVersion, JSON.stringify(canonicalAtrParameters),
+      ]);
       const totals = { strategyDefinitions: 0, controls: 0, proposals: 0, opportunities: 0, riskSubjects: 0, riskDecisions: 0 };
       const capturedDecisionTimes: Date[] = [];
       let deferredForFeatures = 0;
@@ -179,18 +199,29 @@ async function main(): Promise<void> {
         const featuresCovered = row.features_covered === true;
         const ageMs = Date.now() - row.close_time.getTime();
         // Deferring is the normal path and costs nothing: the minute stays pending and is captured
-        // on a later tick, by which point the detection pass has run and the context is whole.
-        if (!featuresCovered && ageMs < featureWaitMs) {
+        // on a later tick, by which point the detection pass has run and the context is whole. That
+        // covers the ATR as well as the pattern layers: a bar that lacked its ATR used to pass this
+        // gate, produce a proposal, and make the capture step throw -- and since the oldest pending
+        // bar is picked up first on every run, that one bar then stopped all capture, for every
+        // instrument, until the end of the session.
+        if (decideBarReadiness({
+          featuresCovered, atrComputed: row.atr_computed === true, ageMs, waitMs: featureWaitMs,
+        }) === "DEFER") {
           deferredForFeatures += 1;
           continue;
         }
-        if (!featuresCovered) capturedWithoutFeatures += 1;
         const reference = row.close_time.getTime() === latest.candle.closeTime.getTime()
           ? latest
           : await contextRepository.findCompletedAt({
               instrumentId: instrument.id, timeframe: "1m", closeTime: row.close_time,
             });
         if (!reference) throw new Error(`Completed 1m context disappeared at ${row.close_time.toISOString()}.`);
+
+        // Judged on the loaded context itself, which is what the capture step reads. Past the wait window a bar
+        // that is still missing a layer is captured as a control point with no proposals (INCOMPLETE): the grid
+        // point is kept, nothing is minted from a layer that was not there, and the run carries on.
+        const captureComplete = featuresCovered && hasCanonicalAtr(reference);
+        if (!captureComplete) capturedWithoutFeatures += 1;
 
         /*
          * Attach Pattern Intelligence observations, for `pattern-v4-research-v2`.
@@ -301,7 +332,7 @@ async function main(): Promise<void> {
           tickSize: Number(instrument.tickSize),
           lotSize: instrument.lotSize,
           accountSnapshots,
-          featureCoverage: featuresCovered ? "COMPLETE" : "INCOMPLETE",
+          featureCoverage: captureComplete ? "COMPLETE" : "INCOMPLETE",
           tapeLiveness: tape.liveness,
         });
         if (tape.liveness === "FROZEN") frozenTapeDecisions += 1;

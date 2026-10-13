@@ -56,7 +56,7 @@ export interface CaptureResearchDecisionResult {
   readonly deferralFamily: DeferralFamily | null;
 }
 
-function canonicalAtr(context: StrategyMarketContext): number {
+function canonicalAtrValue(context: StrategyMarketContext): number | null {
   const snapshot = context.indicators.find((item) => (
     item.code === "ATR"
     && item.algorithmVersion === canonicalAtrAlgorithmVersion
@@ -64,7 +64,22 @@ function canonicalAtr(context: StrategyMarketContext): number {
     && item.parameters.smoothing === canonicalAtrParameters.smoothing
   ));
   const value = snapshot?.values.value;
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * Whether the context carries the canonical ATR(14) that every proposal's geometry is built from.
+ *
+ * The runner asks this before capturing, so a bar without it is deferred or recorded without proposals rather
+ * than reaching `canonicalAtr` below, which throws.
+ */
+export function hasCanonicalAtr(context: StrategyMarketContext): boolean {
+  return canonicalAtrValue(context) !== null;
+}
+
+function canonicalAtr(context: StrategyMarketContext): number {
+  const value = canonicalAtrValue(context);
+  if (value === null) {
     throw new Error("CANONICAL_GEOMETRY_V1 requires completed ta-v1 Wilder ATR(14)." );
   }
   return value;
