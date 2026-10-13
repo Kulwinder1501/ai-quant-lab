@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { ModalPortal } from "../../../components/ui/modal-portal";
 import { Reveal } from "../../../components/ui/reveal";
-import { getResearchJson, postResearchJson } from "../../research/api";
+import { getApiV1Url, getResearchJson, postResearchJson } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { errorMessage, isAbortError } from "../../../lib/errors";
 import { PageHeader } from "../../../components/layout/page-header";
 import { summariseOpenTradeMarks, type PaperAccountMetrics, type PaperAccountSummary, type PaperAccountFullSummary, type PaperTradeRow } from "../domain";
+import type { LiveQuote, LiveQuoteMap } from "../../positions/components/active-positions-table";
 import { EquityMetrics } from "./equity-metrics";
 import { ActivePositionsTable } from "./active-positions-table";
 import { TradeHistoryTable } from "./trade-history-table";
@@ -17,8 +18,18 @@ import { OpenTradeModal } from "./open-trade-modal";
 import { ManualTradePicker } from "./manual-trade-picker";
 import { CloseTradeModal } from "./close-trade-modal";
 import { useAppStore } from "../../../stores/app-store";
-/** Open positions are re-marked this often while the tab is visible, so the live marks do not go stale. */
-const SUMMARY_REFRESH_MS = 15_000;
+
+/** Same cadence as Portfolio Positions so paper marks stay monitorable live. */
+const SUMMARY_REFRESH_MS = 3_000;
+const QUOTE_REFRESH_MS = 2_000;
+
+interface LivePriceResponse {
+  data?: {
+    livePrice: number;
+    change: number;
+    changePercent: number;
+  };
+}
 
 export interface TradeIdeaOption {
   id: string;
@@ -40,6 +51,8 @@ export function PaperTradingDashboard() {
   const [summary, setSummary] = useState<PaperAccountFullSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [liveQuotes, setLiveQuotes] = useState<LiveQuoteMap>({});
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
   // Actions state
   const [evaluating, setEvaluating] = useState<boolean>(false);
@@ -99,7 +112,12 @@ export function PaperTradingDashboard() {
     return res.data;
   }, []);
 
-  const applySummary = useCallback((data: PaperAccountFullSummary) => {
+  const applySummary = useCallback((data?: PaperAccountFullSummary) => {
+    if (!data) {
+      setError("The paper-trading summary came back empty; the list below may be out of date.");
+      setLoading(false);
+      return;
+    }
     setSummary(data);
     setError(null);
     setLoading(false);
@@ -111,12 +129,28 @@ export function PaperTradingDashboard() {
     setLoading(false);
   }, []);
 
-  const refreshSummary = useCallback((accId: string) => {
-    if (!accId) return Promise.resolve();
+  /**
+   * Sequence number of the newest summary request, so a slow response cannot overwrite a newer one
+   * (same race guard as Portfolio Positions).
+   */
+  const summaryRequestRef = useRef(0);
+
+  const refreshSummary = useCallback((accId?: string) => {
+    const id = accId ?? selectedAccountId;
+    if (!id) return Promise.resolve();
+    const requestId = ++summaryRequestRef.current;
     setLoading(true);
-    setError(null);
-    return loadSummary(accId).then(applySummary, applySummaryError);
-  }, [loadSummary, applySummary, applySummaryError]);
+    return loadSummary(id).then(
+      (data) => {
+        if (requestId !== summaryRequestRef.current) return;
+        applySummary(data);
+      },
+      (err: unknown) => {
+        if (requestId !== summaryRequestRef.current) return;
+        applySummaryError(err);
+      },
+    );
+  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
   // The summary effect may not raise `loading` itself, so account switches have to
   // raise it from the event handler that triggers them.
@@ -126,6 +160,49 @@ export function PaperTradingDashboard() {
     setLoading(true);
     setError(null);
   }, [setActiveAccountId]);
+
+  const loadLiveQuotes = useCallback(async () => {
+    const [niftyRes, bankRes] = (await Promise.all([
+      getResearchJson("/live-price?symbol=NIFTY50"),
+      getResearchJson("/live-price?symbol=BANKNIFTY"),
+    ])) as [LivePriceResponse, LivePriceResponse];
+    const newQuotes: Record<string, LiveQuote> = {};
+    if (niftyRes?.data) {
+      newQuotes.NIFTY50 = {
+        livePrice: niftyRes.data.livePrice,
+        change: niftyRes.data.change,
+        changePercent: niftyRes.data.changePercent,
+      };
+    }
+    if (bankRes?.data) {
+      newQuotes.BANKNIFTY = {
+        livePrice: bankRes.data.livePrice,
+        change: bankRes.data.change,
+        changePercent: bankRes.data.changePercent,
+      };
+    }
+    return newQuotes;
+  }, []);
+
+  const applyLiveQuotes = useCallback((newQuotes: Record<string, LiveQuote>) => {
+    setLiveQuotes((prev) => {
+      const updateWithDir = (sym: string, newQ?: LiveQuote) => {
+        if (!newQ) return prev[sym];
+        const oldPrice = prev[sym]?.livePrice || newQ.livePrice;
+        let direction: "UP" | "DOWN" | "NONE" = prev[sym]?.direction || "NONE";
+        if (newQ.livePrice > oldPrice) direction = "UP";
+        else if (newQ.livePrice < oldPrice) direction = "DOWN";
+        return { ...newQ, direction };
+      };
+      return {
+        ...prev,
+        NIFTY50: updateWithDir("NIFTY50", newQuotes.NIFTY50),
+        BANKNIFTY: updateWithDir("BANKNIFTY", newQuotes.BANKNIFTY),
+      };
+    });
+  }, []);
+
+  const ignoreLiveQuotesError = useCallback(() => undefined, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -140,31 +217,80 @@ export function PaperTradingDashboard() {
     return () => controller.abort();
   }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
 
-  // Keeps the marks live. Skipped while the tab is hidden, and a refresh is not started while the previous
-  // one is still running: marking an option reads the live book, which can be slow when the feed is degraded.
+  // SSE underlying ticks — same feed Portfolio Positions uses for live monitoring.
+  useEffect(() => {
+    const symbols = ["NIFTY50", "BANKNIFTY"];
+    const sources = symbols.map((sym) => {
+      const streamUrl = `${getApiV1Url()}/stream/live-agent?symbol=${sym}&timeframe=1d`;
+      const es = new EventSource(streamUrl);
+      es.onopen = () => setIsStreaming(true);
+      es.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (parsed?.symbol && parsed?.livePrice) {
+            setLiveQuotes((prev) => {
+              const oldPrice = prev[parsed.symbol]?.livePrice || parsed.livePrice;
+              const newPrice = parsed.livePrice;
+              let direction: "UP" | "DOWN" | "NONE" = prev[parsed.symbol]?.direction || "NONE";
+              if (newPrice > oldPrice) direction = "UP";
+              else if (newPrice < oldPrice) direction = "DOWN";
+              return {
+                ...prev,
+                [parsed.symbol]: {
+                  livePrice: newPrice,
+                  change: parsed.change || 0,
+                  changePercent: parsed.changePercent || 0,
+                  direction,
+                },
+              };
+            });
+          }
+        } catch {
+          // Ignore stream parse errors
+        }
+      };
+      return es;
+    });
+    return () => {
+      sources.forEach((es) => es.close());
+      setIsStreaming(false);
+    };
+  }, []);
+
+  // Quote fallback (2s) + summary re-mark (3s) + visibility refresh — mirrored from Positions.
   useEffect(() => {
     if (!selectedAccountId) return;
-    const controller = new AbortController();
-    let inFlight = false;
-    const timer = window.setInterval(() => {
-      if (inFlight || document.visibilityState !== "visible") return;
-      inFlight = true;
-      void loadSummary(selectedAccountId, controller.signal)
-        .then(applySummary, applySummaryError)
-        .finally(() => { inFlight = false; });
+    void loadLiveQuotes().then(applyLiveQuotes, ignoreLiveQuotesError);
+    const quoteTimer = window.setInterval(() => {
+      void loadLiveQuotes().then(applyLiveQuotes, ignoreLiveQuotesError);
+    }, QUOTE_REFRESH_MS);
+    const summaryTimer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void refreshSummary(selectedAccountId);
     }, SUMMARY_REFRESH_MS);
-    return () => {
-      window.clearInterval(timer);
-      controller.abort();
+    const refreshOnVisible = () => {
+      if (document.visibilityState === "visible") void refreshSummary(selectedAccountId);
     };
-  }, [selectedAccountId, loadSummary, applySummary, applySummaryError]);
+    document.addEventListener("visibilitychange", refreshOnVisible);
+    return () => {
+      window.clearInterval(quoteTimer);
+      window.clearInterval(summaryTimer);
+      document.removeEventListener("visibilitychange", refreshOnVisible);
+    };
+  }, [
+    selectedAccountId,
+    loadLiveQuotes,
+    applyLiveQuotes,
+    ignoreLiveQuotesError,
+    refreshSummary,
+  ]);
 
   useEffect(() => {
     const refreshOpenedAccount = (event: Event) => {
       const notification = (event as CustomEvent<{ accountId?: string }>).detail;
       void loadAccounts().then(applyAccounts, applyAccountsError);
       if (notification?.accountId === selectedAccountId) {
-        void loadSummary(selectedAccountId).then(applySummary, applySummaryError);
+        void refreshSummary(selectedAccountId);
       }
     };
     window.addEventListener("automated-paper-trade-opened", refreshOpenedAccount);
@@ -174,9 +300,7 @@ export function PaperTradingDashboard() {
     loadAccounts,
     applyAccounts,
     applyAccountsError,
-    loadSummary,
-    applySummary,
-    applySummaryError,
+    refreshSummary,
   ]);
 
   const handleCreateAccount = async (e: React.FormEvent) => {
@@ -315,7 +439,7 @@ export function PaperTradingDashboard() {
       <PageHeader eyebrow="Quantitative Sandbox"
       title="Simulated Portfolio & Execution"
       description="Test quantitative strategies with real-time simulated order execution, automated exit rules, and zero financial risk."
-      connectionLabel="Sandbox Ready" />
+      connectionLabel={isStreaming ? "Live SSE Ticking" : "Sandbox Ready"} />
       <div className="mt-10">
       <div className="space-y-6">
         {/* Control Bar */}
@@ -323,7 +447,7 @@ export function PaperTradingDashboard() {
           <GlassPanel className="p-4 border-cyan-500/20 bg-gradient-to-r from-slate-950 via-slate-900 to-cyan-950/30 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 bg-slate-950/80 rounded-xl px-3 py-1.5 border border-white/10">
-                <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className={`h-2 w-2 rounded-full animate-pulse ${isStreaming ? "bg-emerald-400" : "bg-cyan-400"}`} />
                 <label htmlFor="acc-select" className="text-xs font-semibold text-slate-400">
                   Active Fund:
                 </label>
@@ -416,13 +540,16 @@ export function PaperTradingDashboard() {
           />
         </Reveal>
 
-        {/* Open Positions Table */}
+        {/* Open Positions Table — live monitoring aligned with Portfolio Positions */}
         <Reveal delayMs={200}>
-          <ActivePositionsTable 
-            openTrades={summary?.openTrades || []} 
+          <ActivePositionsTable
+            openTrades={summary?.openTrades || []}
             pendingTrades={summary?.pendingTrades || []}
-            loading={loading && !summary} 
-            onCloseTrade={openCloseTradeModal} 
+            loading={loading && !summary}
+            liveQuotes={liveQuotes}
+            isStreaming={isStreaming}
+            onCloseTrade={openCloseTradeModal}
+            onRefresh={() => { void refreshSummary(selectedAccountId); }}
           />
         </Reveal>
 
