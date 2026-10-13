@@ -40,8 +40,24 @@ export interface OandaHistoricalDataProviderOptions {
   baseUrl?: string;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
+  /** Retries for a 429 or a dropped connection. */
   maxRetries?: number;
+  /** Retries for the statuses in `TRANSIENT_STATUSES`. */
+  maxTransientRetries?: number;
 }
+
+/**
+ * Statuses OANDA returns for a request that is worth repeating, besides a 429.
+ *
+ * A 401 is in here although it normally means bad credentials. The practice endpoint refuses a valid token now and
+ * then: over four days about 4% of the scheduled gold candle runs got a 401, while 120 consecutive requests with the
+ * same token from the same container all succeeded, and each failed run was followed by a successful one. A token
+ * that really is revoked still fails: every attempt gets the 401 and the error is thrown after the last retry.
+ * 502/503/504 are the gateway errors OANDA's edge returns when its backend hiccups.
+ */
+const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([401, 502, 503, 504]);
+const DEFAULT_MAX_TRANSIENT_RETRIES = 2;
+const REFUSAL_BODY_LIMIT = 300;
 
 const oandaInterval: Record<HistoricalTimeframe, string> = {
   "1m": "M1",
@@ -65,6 +81,22 @@ const timeframeDurationMs: Record<HistoricalTimeframe, number> = {
   "1d": 24 * 60 * 60_000,
 };
 
+/**
+ * What OANDA said when it refused a request: its request id, and the start of the body.
+ *
+ * Read from a clone so the response the caller holds is still unread. The token is never in either place, but the
+ * body is cut short anyway: an error page is not worth a log line of its own.
+ */
+async function describeRefusal(response: Response): Promise<{ requestId: string | null; body: string }> {
+  let body = "";
+  try {
+    body = (await response.clone().text()).replace(/\s+/g, " ").trim().slice(0, REFUSAL_BODY_LIMIT);
+  } catch {
+    // An unreadable body is not worth failing the request over.
+  }
+  return { requestId: response.headers.get("x-request-id"), body };
+}
+
 export class OandaHistoricalDataProvider implements HistoricalMarketDataProvider {
   readonly id = OANDA_PROVIDER_ID;
   private readonly accessToken: string;
@@ -73,6 +105,7 @@ export class OandaHistoricalDataProvider implements HistoricalMarketDataProvider
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly maxRetries: number;
+  private readonly maxTransientRetries: number;
 
   constructor(options: OandaHistoricalDataProviderOptions) {
     if (!options.accessToken) throw new Error("OandaHistoricalDataProvider requires an accessToken.");
@@ -90,6 +123,7 @@ export class OandaHistoricalDataProvider implements HistoricalMarketDataProvider
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRetries = options.maxRetries ?? 3;
+    this.maxTransientRetries = options.maxTransientRetries ?? DEFAULT_MAX_TRANSIENT_RETRIES;
   }
 
   async fetchCandles(request: HistoricalMarketDataRequest): Promise<HistoricalMarketCandle[]> {
@@ -128,7 +162,13 @@ export class OandaHistoricalDataProvider implements HistoricalMarketDataProvider
         if (response.status === 404 || response.status === 400) {
            break; // Bad symbol or range
         }
-        throw new Error(`OANDA candles failed: ${response.status} ${response.statusText}`);
+        // The prefix is what operators and job-history queries match on; what OANDA said follows it.
+        const refusal = await describeRefusal(response);
+        throw new Error(
+          `OANDA candles failed: ${response.status} ${response.statusText}`
+          + (refusal.requestId ? ` (request id ${refusal.requestId})` : "")
+          + (refusal.body ? `: ${refusal.body}` : ""),
+        );
       }
 
       const payload = (await response.json()) as OandaCandlesResponse;
@@ -181,26 +221,57 @@ export class OandaHistoricalDataProvider implements HistoricalMarketDataProvider
   }
 
   private async fetchWithRetry(url: URL): Promise<Response> {
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    // Counted separately: a rate limit, a refused request and a dropped connection are different failures with
+    // different budgets, and sharing one counter would let a burst of one use up the retries meant for another.
+    let rateLimitRetries = 0;
+    let transientRetries = 0;
+    let networkRetries = 0;
+    for (;;) {
+      let response: Response;
       try {
-        const response = await this.fetch(url, {
+        response = await this.fetch(url, {
           method: "GET",
           headers: {
             "Authorization": `Bearer ${this.accessToken}`,
             "Accept-Datetime-Format": "RFC3339",
           },
         });
-        
-        if (response.status === 429 && attempt < this.maxRetries) {
-          await this.sleep(1000 * Math.pow(2, attempt)); // Exp backoff
+      } catch (err) {
+        if (networkRetries >= this.maxRetries) throw err;
+        await this.sleep(1000 * Math.pow(2, networkRetries));
+        networkRetries += 1;
+        continue;
+      }
+
+      if (response.status === 429 && rateLimitRetries < this.maxRetries) {
+        await this.sleep(1000 * Math.pow(2, rateLimitRetries)); // Exp backoff
+        rateLimitRetries += 1;
+        continue;
+      }
+
+      if (!response.ok && TRANSIENT_STATUSES.has(response.status)) {
+        const willRetry = transientRetries < this.maxTransientRetries;
+        // Logged whether or not it is retried: until now the body and request id were thrown away, so a refusal
+        // could never be explained after the fact.
+        const refusal = await describeRefusal(response);
+        console.warn(JSON.stringify({
+          level: "warn",
+          message: willRetry ? "OANDA refused a request; retrying" : "OANDA refused a request; giving up",
+          source: "OandaHistoricalDataProvider",
+          path: url.pathname,
+          status: response.status,
+          requestId: refusal.requestId,
+          body: refusal.body,
+          attempt: transientRetries + 1,
+          maxAttempts: this.maxTransientRetries + 1,
+        }));
+        if (willRetry) {
+          await this.sleep(1000 * Math.pow(2, transientRetries));
+          transientRetries += 1;
           continue;
         }
-        return response;
-      } catch (err) {
-        if (attempt === this.maxRetries) throw err;
-        await this.sleep(1000 * Math.pow(2, attempt));
       }
+      return response;
     }
-    throw new Error("OANDA fetch retries exhausted");
   }
 }
