@@ -209,6 +209,11 @@ async function main(): Promise<void> {
     PREMARKET_PREOPEN_UPDATE: 4 * 60 * 1000,
     // Reads stored 1m bars for two instruments; same patience as the other settlement sweeps.
     SESSION_OUTCOME_SETTLEMENT: 10 * 60 * 1000,
+    // Loads one bar's ICT state for four series on a five-minute cron; a run that outlives the next
+    // tick has been superseded by it.
+    ICT_SHADOW_CAPTURE: 4 * 60 * 1000,
+    // Reads stored 1m bars only.
+    ICT_SHADOW_RESOLVE: 10 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -453,6 +458,25 @@ async function main(): Promise<void> {
   });
   cronSchedule("30 8 * * 1-5", () => {
     void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
+  });
+
+  /**
+   * Shadow variants of the live ICT strategy: records what each would have proposed on every closed
+   * 5m and 15m bar of NIFTY50 and BANKNIFTY, then follows each bracket to a target, a stop or the
+   * 15:15 square-off. It creates no idea and opens no position -- see `ict-shadow-variant.ts`.
+   *
+   * Two minutes past the five-minute boundaries, so a bar that has just closed has been collected;
+   * repeating a bar is a no-op. Resolution runs after the square-off with margin, plus a morning
+   * catch-up for a session whose last bars arrived late.
+   */
+  cronSchedule("2-59/5 9-15 * * 1-5", () => {
+    void schedule("ICT_SHADOW_CAPTURE", () => runCommand("npm", ["run", "research:ict-shadow:capture"]));
+  });
+  cronSchedule("45 15 * * 1-5", () => {
+    void schedule("ICT_SHADOW_RESOLVE", () => runCommand("npm", ["run", "research:ict-shadow:resolve"]));
+  });
+  cronSchedule("35 8 * * 1-5", () => {
+    void schedule("ICT_SHADOW_RESOLVE", () => runCommand("npm", ["run", "research:ict-shadow:resolve"]));
   });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
@@ -1508,6 +1532,8 @@ async function main(): Promise<void> {
       "PREMARKET_BIAS",
       "PREMARKET_PREOPEN_UPDATE",
       "SESSION_OUTCOME_SETTLEMENT",
+      "ICT_SHADOW_CAPTURE",
+      "ICT_SHADOW_RESOLVE",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",

@@ -132,6 +132,7 @@ import { repairMislabelledMonthlyExpiryRowsMigration } from "./131-repair-mislab
 import { contactLabelVersioningMigration } from "./132-contact-label-versioning.js";
 import { candlestickV2PatternDefinitionsMigration } from "./133-candlestick-v2-pattern-definitions.js";
 import { premarketIntelligenceMigration } from "./134-premarket-intelligence.js";
+import { ictShadowSignalsMigration } from "./135-ict-shadow-signals.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -268,4 +269,5 @@ export const migrations = [
   contactLabelVersioningMigration,
   candlestickV2PatternDefinitionsMigration,
   premarketIntelligenceMigration,
+  ictShadowSignalsMigration,
 ];
