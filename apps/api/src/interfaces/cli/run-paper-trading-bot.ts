@@ -45,6 +45,7 @@ import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domai
 import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-trade-cap.js";
 import { observeOppositeSignal } from "../../modules/paper-trading/application/opposite-signal-observation.js";
 import { observeVolumeProfile } from "../../modules/paper-trading/application/volume-profile-observation.js";
+import { observeMarketContext } from "../../modules/paper-trading/application/market-context-observation.js";
 
 /**
  * Refuses to start on a timeframe nothing can trade.
@@ -567,6 +568,17 @@ async function main(): Promise<void> {
               optionType: entry.optionContract.optionType,
               now,
             });
+            // Log-only Market Context Map (trend + day extremes + S/R + shadow veto). Sniper only;
+            // must never affect entry. Placed before FRVP so FRVP_OBS stays last for its regex.
+            const marketContextNote = botSpec.name === "AutoBot-Sniper"
+              ? await observeMarketContext({
+                database,
+                underlyingSymbol: entry.optionContract.underlyingSymbol,
+                tradeIdeaId,
+                direction: entry.underlyingDirection,
+                now,
+              })
+              : null;
             // Log-only as well: where this entry sits against the prior session's volume profile. Last in
             // the notes so the stamp parses to the end of the line; see volume-profile-observation.ts.
             const volumeProfileNote = await observeVolumeProfile({
@@ -587,7 +599,7 @@ async function main(): Promise<void> {
                 openedAt: now,
                 entryFees: entry.entryFees,
                 entrySlippage: 0,
-                notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}${oppositeSignalNote ?? ""}${volumeProfileNote ?? ""}`,
+                notes: `Opened by ${botSpec.name} from a ${timeframe} ${symbol} signal.${riskNote}${oppositeSignalNote ?? ""}${marketContextNote ?? ""}${volumeProfileNote ?? ""}`,
                 orderType: "MARKET",
                 stopLossOverride: entry.stopLossOverride,
                 targetPriceOverride: entry.targetPriceOverride,

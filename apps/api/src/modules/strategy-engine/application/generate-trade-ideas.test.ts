@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type {
+  ProposedTradeIdea,
   SaveTradeIdeaProposalInput,
   StrategyMarketContext,
   StrategyMarketContextRepository,
@@ -686,5 +687,68 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
     // Absence of the optional method is a legitimate state, not an error: every existing stub and
     // caller keeps working and simply gets no higher-timeframe context.
     await expect(generator.execute({ instrumentId: "instrument-1", timeframe: "1m" })).resolves.toBeDefined();
+  });
+
+  it("digests attached slower bars into higherTimeframes for confluence scorers", async () => {
+    let seen: StrategyMarketContext | null = null;
+    class CaptureStrategy {
+      evaluate(context: StrategyMarketContext): ProposedTradeIdea[] {
+        seen = context;
+        return [];
+      }
+    }
+    const versions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: "sv-capture",
+        strategyId: "s-capture",
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async () => {
+        throw new Error("should not save");
+      },
+      findActiveDuplicate: async () => null,
+    };
+    const contexts = {
+      findLatestCompleted: async () => contextAt("1m", new Date("2026-07-25T03:45:00Z"), 110),
+      listCompletedContexts: async () => [],
+      findCompletedBefore: async (input: { timeframe: string }) => {
+        const htf = contextAt(input.timeframe, new Date("2026-07-25T03:40:00Z"), 109);
+        return {
+          ...htf,
+          indicators: [{
+            code: "EMA" as const,
+            algorithmVersion: "ta-v1",
+            parameters: { period: 20 },
+            values: { value: 108 },
+          }],
+        };
+      },
+    } as StrategyMarketContextRepository;
+
+    const generator = new GenerateTradeIdeas(versions, contexts, ideas, [{
+      registration: {
+        strategyKey: "capture-htf",
+        name: "Capture",
+        description: "test",
+        version: "1",
+        configuration: {},
+      },
+      StrategyClass: CaptureStrategy as never,
+      supportedTimeframes: ["1m", "3m", "5m", "15m"],
+    }]);
+
+    await generator.execute({ instrumentId: "instrument-1", timeframe: "1m" });
+
+    expect(seen?.higherTimeframeContexts?.["5m"]).toBeDefined();
+    expect(seen?.higherTimeframes?.length).toBeGreaterThan(0);
+    expect(seen?.higherTimeframes?.some((h) => h.htfTimeframe === "5m")).toBe(true);
   });
 });

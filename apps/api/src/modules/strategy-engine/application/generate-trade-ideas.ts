@@ -18,6 +18,7 @@ import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
 import { applyOrderbookGateToProposal } from "../domain/orderbook-directional-gate.js";
 import { ICT_STRUCTURE_STRATEGY_KEY } from "../../technical-analysis/domain/ict/config.js";
 import { computeIctShadowDiagnostics, type IctShadowDiagnostics } from "../domain/ict-shadow-diagnostics.js";
+import { digestHigherTimeframeContexts } from "../domain/digest-higher-timeframes.js";
 
 export interface GenerateTradeIdeasInput {
   instrumentId: string;
@@ -149,7 +150,15 @@ export class GenerateTradeIdeas {
       }
       attached[timeframe] = htf;
     }
-    return Object.keys(attached).length > 0 ? { ...context, higherTimeframeContexts: attached } : context;
+    if (Object.keys(attached).length === 0) return context;
+    // Digested `higherTimeframes` is what Sniper / confluence scorers read. Without it, HTF terms
+    // stayed at 0 even though full slower bars were already attached above.
+    const higherTimeframes = digestHigherTimeframeContexts(attached);
+    return {
+      ...context,
+      higherTimeframeContexts: attached,
+      higherTimeframes: higherTimeframes.length > 0 ? higherTimeframes : undefined,
+    };
   }
 
   async execute(input: GenerateTradeIdeasInput): Promise<GenerateTradeIdeasResult[]> {
