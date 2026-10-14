@@ -218,18 +218,33 @@ describe("contact label SQL (mirrors the reference rules)", () => {
   });
 
   it("only counts bars that close inside the horizon and stamps contact_time at the bar close", () => {
-    expect(sql).toContain("c.open_time + INTERVAL '60 seconds' <= pc.observable_at + 300 * INTERVAL '1 second'");
+    // 'open_time + bar <= end', written 'open_time <= end - bar' so the index gets an upper bound.
+    expect(sql).toContain("c.open_time <= pc.observable_at + 300 * INTERVAL '1 second' - INTERVAL '60 seconds'");
+    expect(sql).not.toMatch(/c\.open_time \+ INTERVAL '60 seconds' <=/);
     expect(sql).toContain("min(c.open_time + INTERVAL '60 seconds') FILTER");
   });
 
   it("measures price_at_known from bars that have closed by observable_at", () => {
-    expect(sql).toContain("c.open_time + INTERVAL '60 seconds' <= lpc.known_at_time + tf.seconds * INTERVAL '1 second'");
+    expect(sql).toContain("c.open_time <= lpc.known_at_time + tf.seconds * INTERVAL '1 second' - INTERVAL '60 seconds'");
   });
 
   it("filters candidates to the current candidate version by default and supports 'all'", () => {
     expect(sql).toContain("lpc.candidate_version = 'v2-dedup'");
     const all = buildLabelQuery({ epsilonBps: 10, deltaBps: 5, horizonSeconds: 300, timeframeFilter: null, candidateVersion: "all" });
     expect(all).not.toContain("lpc.candidate_version =");
+  });
+
+  it("scores every candidate by default, and leaves out already-labelled ones only when asked", () => {
+    expect(sql).not.toContain("liquidity_contact_labels");
+    const skipping = buildLabelQuery({ epsilonBps: 10, deltaBps: 5, horizonSeconds: 300, timeframeFilter: null, skipLabelled: true });
+    expect(skipping).toContain("NOT EXISTS");
+    expect(skipping).toContain("done.horizon_seconds = 300");
+    expect(skipping).toContain("done.labeling_version = 'v2-causal'");
+  });
+
+  it("the insert skips already-labelled candidates, which its ON CONFLICT would discard anyway", () => {
+    const insert = buildInsertQuery({ epsilonBps: 10, deltaBps: 5, horizonSeconds: 900, timeframeFilter: null, runId: "run-x" });
+    expect(insert).toContain("done.horizon_seconds = 900");
   });
 
   it("rejects a malformed timeframe filter instead of interpolating it", () => {

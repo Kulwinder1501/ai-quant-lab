@@ -304,6 +304,15 @@ export interface LabelQueryOptions {
   timeframeFilter: string | null;
   candidateVersion?: CandidateVersionFilter;
   limit?: number;
+  /**
+   * Leave out candidates that already carry a label for this horizon at the current labeling version.
+   *
+   * The insert is `ON CONFLICT DO NOTHING` on exactly that key, so scoring an already-labelled
+   * candidate can never change a row -- it only costs the scan. Without this every run re-scored the
+   * whole candidate table per horizon to insert the day's few new rows. Used by the insert only; the
+   * dry-run preview still samples from every candidate.
+   */
+  skipLabelled?: boolean;
 }
 
 function timeframeSecondsSqlCase(column: string): string {
@@ -359,7 +368,11 @@ export function buildLabelQuery(opts: LabelQueryOptions): string {
         FROM candles c
         WHERE c.instrument_id = lpc.instrument_id
           AND c.timeframe = '1m'
-          AND c.open_time + ${barInterval} <= lpc.known_at_time + tf.seconds * INTERVAL '1 second'
+          -- Same condition as 'open_time + bar <= observable_at', with the arithmetic moved off the
+          -- column so the (instrument, timeframe, open_time) index can seek to it. Written the other
+          -- way the planner walked the index backwards from the newest bar, discarding every bar after
+          -- the candidate: ~73k rows for the oldest candidate, one per candidate per horizon.
+          AND c.open_time <= lpc.known_at_time + tf.seconds * INTERVAL '1 second' - ${barInterval}
           AND c.is_complete = true
         ORDER BY c.open_time DESC
         LIMIT 1
@@ -369,6 +382,12 @@ export function buildLabelQuery(opts: LabelQueryOptions): string {
     WHERE tf.seconds IS NOT NULL
       AND (${timeframeFilter ? `lpc.timeframe = '${timeframeFilter}'` : "TRUE"})
       AND (${candidateVersion === "all" ? "TRUE" : `lpc.candidate_version = '${candidateVersion}'`})
+      AND (${opts.skipLabelled ? `NOT EXISTS (
+        SELECT 1 FROM liquidity_contact_labels done
+        WHERE done.candidate_id = lpc.id
+          AND done.horizon_seconds = ${horizonSeconds}
+          AND done.labeling_version = '${LABELING_VERSION_CURRENT}'
+      )` : "TRUE"})
   ),
   labelled AS (
     SELECT
@@ -446,7 +465,10 @@ export function buildLabelQuery(opts: LabelQueryOptions): string {
         -- Strictly AFTER the confirming bar: the window opens at its close ...
         AND c.open_time >= pc.observable_at
         -- ... and only bars that CLOSE inside the horizon count (a 1m bar cannot resolve < 60s).
-        AND c.open_time + ${barInterval} <= pc.observable_at + ${horizonSeconds} * INTERVAL '1 second'
+        -- (Written as 'open_time <= end - bar', not 'open_time + bar <= end': identical, but this form
+        -- gives the index an upper bound. The other had none, so every candidate scanned to the end
+        -- of the series and discarded everything after its own window.)
+        AND c.open_time <= pc.observable_at + ${horizonSeconds} * INTERVAL '1 second' - ${barInterval}
     ) fwd ON true
     WHERE pc.price_at_known IS NOT NULL
   )
@@ -468,7 +490,7 @@ export function buildLabelQuery(opts: LabelQueryOptions): string {
 export function buildInsertQuery(
   opts: LabelQueryOptions & { runId: string }
 ): string {
-  const selectSql = buildLabelQuery(opts);
+  const selectSql = buildLabelQuery({ ...opts, skipLabelled: true });
   return `
   INSERT INTO liquidity_contact_labels
     (candidate_id, horizon_seconds, price_at_known, distance_bps,
