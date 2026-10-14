@@ -31,6 +31,8 @@ export interface MarkQuoteCandidate {
   underlyingValue?: number | null;
 }
 
+type TwoSided = MarkQuoteCandidate & { bid: number; ask: number };
+
 function usable(quote: MarkQuoteCandidate | null | undefined, now: Date, maxAgeMs: number): quote is MarkQuoteCandidate & { bid: number; ask: number } {
   if (!quote) return false;
   const { bid, ask } = quote;
@@ -75,10 +77,15 @@ export function chooseMarkQuote(input: {
   }
 
   // Nothing is fresh: hand over the newest recorded two-sided quote, for the valuation to judge against the index.
-  let newest: (MarkQuoteCandidate & { bid: number; ask: number }) | null = null;
+  // A snapshot taken after the close shows a book nobody is trading (641.6 / 653.0 on a contract that closed at
+  // 652.35 / 654.20), so a newer quote whose spread is more than twice an older one's loses to it.
+  const spreadOf = (quote: { bid: number; ask: number }) => (quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2);
+  let best: TwoSided | null = null;
   for (const quote of [input.tick, input.chain]) {
     if (!usable(quote, input.now, anchoredMaxAgeMs)) continue;
-    if (newest === null || quote.observedAt.getTime() > newest.observedAt.getTime()) newest = quote;
+    if (best === null) { best = quote; continue; }
+    const [newer, older]: [TwoSided, TwoSided] = quote.observedAt.getTime() > best.observedAt.getTime() ? [quote, best] : [best, quote];
+    best = spreadOf(newer) > 2 * spreadOf(older) ? older : newer;
   }
-  return newest === null ? null : toObserved(newest);
+  return best === null ? null : toObserved(best);
 }

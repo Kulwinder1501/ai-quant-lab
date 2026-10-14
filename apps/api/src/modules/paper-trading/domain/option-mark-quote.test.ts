@@ -27,10 +27,21 @@ describe("chooseMarkQuote", () => {
 
     const old = chooseMarkQuote({
       tick: { bid: 650, ask: 652, observedAt: ago(30 * 60_000) },
-      chain: { bid: 640, ask: 654, observedAt: ago(20 * 60_000) },
+      chain: { bid: 646, ask: 648, observedAt: ago(20 * 60_000) },
       now,
     });
     expect(old!.mid).toBe(647);
+  });
+
+  // The reported close: last tick 652.35 / 654.20 at 15:30:04, then a 15:53 snapshot of 641.6 / 653.0 -- a book
+  // nobody was trading. The newer snapshot marked the position Rs 360 lower than where it last traded.
+  it("does not let a newer, much wider post-close snapshot replace the last tight quote", () => {
+    const quote = chooseMarkQuote({
+      tick: { bid: 652.35, ask: 654.2, observedAt: ago(45 * 60_000), underlyingValue: 55_316 },
+      chain: { bid: 641.6, ask: 653, observedAt: ago(22 * 60_000), underlyingValue: 55_316 },
+      now,
+    });
+    expect(quote!.mid).toBeCloseTo(653.275, 6);
   });
 
   it("gives up on a quote older than the anchoring window", () => {
