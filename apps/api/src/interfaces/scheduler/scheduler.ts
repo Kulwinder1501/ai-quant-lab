@@ -214,6 +214,8 @@ async function main(): Promise<void> {
     ICT_SHADOW_CAPTURE: 4 * 60 * 1000,
     // Reads stored 1m bars only.
     ICT_SHADOW_RESOLVE: 10 * 60 * 1000,
+    // Three small reads of one day's snapshots, ideas and trades.
+    ICT_GATE_REPORT: 5 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -479,6 +481,15 @@ async function main(): Promise<void> {
   });
   cronSchedule("35 8 * * 1-5", () => {
     void schedule("ICT_SHADOW_RESOLVE", () => runCommand("npm", ["run", "research:ict-shadow:resolve"]));
+  });
+
+  /**
+   * One log line per ICT bot after the close: which pillar blocked how many bars, the higher-timeframe bias and the
+   * ideas and trades that resulted. Read-only. A quiet day for `ict-structure-v1` is normal (about 5-6 signals a
+   * month), so the line is what tells waiting from broken. Run at 15:50, after the last 15m bar's state is stored.
+   */
+  cronSchedule("50 15 * * 1-5", () => {
+    void schedule("ICT_GATE_REPORT", () => runCommand("npm", ["run", "research:ict-gates:report"]));
   });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
@@ -1550,6 +1561,7 @@ async function main(): Promise<void> {
       "SESSION_OUTCOME_SETTLEMENT",
       "ICT_SHADOW_CAPTURE",
       "ICT_SHADOW_RESOLVE",
+      "ICT_GATE_REPORT",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
