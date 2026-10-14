@@ -19,6 +19,12 @@ export const MAXIMUM_MARK_STREAM_AGE_MS = 10 * 1000;
 /** How far back the newest recorded quote is still worth handing to the valuation: past a night and a morning. */
 export const MAXIMUM_ANCHORED_QUOTE_AGE_MS = 20 * 60 * 60 * 1000;
 
+/**
+ * An old quote whose spread is wider than this share of its price is not a market anyone is dealing in (the exchange's
+ * closing book was 641.6 / 653.0 on a contract that last traded at 653.0), so its mid is not a price.
+ */
+const WIDE_BOOK_SPREAD = 0.01;
+
 /** A quote stamped slightly ahead of this process's clock is skew; further ahead is not trusted. */
 const MAXIMUM_QUOTE_FUTURE_SKEW_MS = 5 * 1000;
 
@@ -29,6 +35,8 @@ export interface MarkQuoteCandidate {
   impliedForward?: number | null;
   /** The index level in the same observation, when the source carries one. */
   underlyingValue?: number | null;
+  /** The last traded price in the same observation, when the source carries one. */
+  lastPrice?: number | null;
 }
 
 type TwoSided = MarkQuoteCandidate & { bid: number; ask: number };
@@ -42,10 +50,10 @@ function usable(quote: MarkQuoteCandidate | null | undefined, now: Date, maxAgeM
   return ageMs >= -MAXIMUM_QUOTE_FUTURE_SKEW_MS && ageMs <= maxAgeMs;
 }
 
-function toObserved(quote: MarkQuoteCandidate & { bid: number; ask: number }): ObservedOptionQuote {
+function toObserved(quote: MarkQuoteCandidate & { bid: number; ask: number }, markAt: number | null = null): ObservedOptionQuote {
   const underlying = quote.underlyingValue;
   return {
-    mid: (quote.bid + quote.ask) / 2,
+    mid: markAt ?? (quote.bid + quote.ask) / 2,
     bid: quote.bid,
     ask: quote.ask,
     observedAt: quote.observedAt,
@@ -87,5 +95,9 @@ export function chooseMarkQuote(input: {
     const [newer, older]: [TwoSided, TwoSided] = quote.observedAt.getTime() > best.observedAt.getTime() ? [quote, best] : [best, quote];
     best = spreadOf(newer) > 2 * spreadOf(older) ? older : newer;
   }
-  return best === null ? null : toObserved(best);
+  if (best === null) return null;
+  // A wide old book is marked at the last trade, if that trade sits inside it -- the usual rule for an illiquid book.
+  const last = best.lastPrice;
+  const tradedInsideBook = typeof last === "number" && Number.isFinite(last) && last >= best.bid && last <= best.ask;
+  return toObserved(best, spreadOf(best) > WIDE_BOOK_SPREAD && tradedInsideBook ? last : null);
 }

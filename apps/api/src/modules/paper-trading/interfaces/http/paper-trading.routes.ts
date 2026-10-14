@@ -147,13 +147,14 @@ async function observedChainQuoteFor(
     // bid from a stale snapshot is not a price the position can be sold at.
     return chooseMarkQuote({
       stream: stream === null ? null : { bid: stream.bid, ask: stream.ask, observedAt: stream.observedAt },
-      tick: tick === null ? null : { bid: tick.bid, ask: tick.ask, observedAt: tick.observedAt, underlyingValue: tick.underlyingValue },
+      tick: tick === null ? null : { bid: tick.bid, ask: tick.ask, observedAt: tick.observedAt, underlyingValue: tick.underlyingValue, lastPrice: tick.lastPrice },
       chain: chain === null ? null : {
         bid: chain.bid,
         ask: chain.ask,
         observedAt: chain.observedAt,
         impliedForward: chain.impliedForward,
         underlyingValue: chain.underlyingValue,
+        lastPrice: chain.lastPrice,
       },
       now,
     });

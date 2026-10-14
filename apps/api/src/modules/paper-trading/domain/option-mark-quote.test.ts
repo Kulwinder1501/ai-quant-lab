@@ -44,6 +44,31 @@ describe("chooseMarkQuote", () => {
     expect(quote!.mid).toBeCloseTo(653.275, 6);
   });
 
+  // The exchange's closing book was 641.6 / 653.0 and the last trade 653.0: the mid (647.3) is not a price.
+  describe("an old quote with a wide book", () => {
+    const wide = { bid: 641.6, ask: 653, observedAt: ago(90 * 60_000), underlyingValue: 55_316 };
+
+    it("is marked at the last trade when that trade sits inside the book", () => {
+      expect(chooseMarkQuote({ tick: { ...wide, lastPrice: 653 }, now })!.mid).toBe(653);
+      expect(chooseMarkQuote({ tick: { ...wide, lastPrice: 648.5 }, now })!.mid).toBe(648.5);
+    });
+
+    it("keeps the mid when there is no last trade, or it lies outside the book", () => {
+      expect(chooseMarkQuote({ tick: wide, now })!.mid).toBeCloseTo(647.3, 6);
+      expect(chooseMarkQuote({ tick: { ...wide, lastPrice: 670 }, now })!.mid).toBeCloseTo(647.3, 6);
+    });
+
+    it("leaves a tight old book at its mid, whatever the last trade was", () => {
+      const tight = { bid: 652.35, ask: 654.2, observedAt: ago(90 * 60_000), lastPrice: 651.05 };
+      expect(chooseMarkQuote({ tick: tight, now })!.mid).toBeCloseTo(653.275, 6);
+    });
+
+    it("never overrides a fresh quote's mid", () => {
+      const live = { bid: 641.6, ask: 653, observedAt: ago(30_000), lastPrice: 653 };
+      expect(chooseMarkQuote({ tick: live, now })!.mid).toBeCloseTo(647.3, 6);
+    });
+  });
+
   it("gives up on a quote older than the anchoring window", () => {
     expect(chooseMarkQuote({
       tick: { bid: 650, ask: 652, observedAt: ago(21 * 60 * 60 * 1000), underlyingValue: 55_316 },
