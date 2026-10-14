@@ -24,6 +24,36 @@ export class PostgresPremarketBiasRepository implements PremarketBiasStore {
     return result.rows.length > 0;
   }
 
+  /**
+   * What the database holds about the 08:50 run for one session date: its stored result, its attempts, and the
+   * scheduler's own claim rows. Read by the morning run check, which decides from this whether the run happened.
+   */
+  async loadRunEvidence(sessionDate: string): Promise<{
+    terminal: { status: string; llmStatus: string } | null;
+    attemptStatuses: string[];
+    jobRunStatuses: string[];
+  }> {
+    const slotPattern = `ASIA_INDIA_PREMARKET_${sessionDate}_0850_%`;
+    const terminal = await this.database.query(
+      "SELECT status, llm_status FROM daily_market_bias WHERE assessment_date = $1::date AND run_slot LIKE $2 ORDER BY generated_at DESC LIMIT 1",
+      [sessionDate, slotPattern],
+    );
+    const attempts = await this.database.query(
+      "SELECT status FROM daily_market_bias_attempts WHERE run_slot LIKE $1 ORDER BY attempted_at",
+      [`ASIA_INDIA_PREMARKET_${sessionDate}_%`],
+    );
+    const jobs = await this.database.query(
+      "SELECT status FROM scheduled_job_runs WHERE job_type = 'PREMARKET_BIAS' AND (scheduled_for AT TIME ZONE 'Asia/Kolkata')::date = $1::date ORDER BY scheduled_for",
+      [sessionDate],
+    );
+    const row = terminal.rows[0];
+    return {
+      terminal: row === undefined ? null : { status: String(row.status), llmStatus: String(row.llm_status) },
+      attemptStatuses: attempts.rows.map((r) => String(r.status)),
+      jobRunStatuses: jobs.rows.map((r) => String(r.status)),
+    };
+  }
+
   async recordAttempt(input: { runSlot: string; status: AttemptStatus; errorDetails: Record<string, unknown> }): Promise<void> {
     await this.database.query(
       "INSERT INTO daily_market_bias_attempts (run_slot, status, error_details) VALUES ($1, $2, $3::jsonb)",

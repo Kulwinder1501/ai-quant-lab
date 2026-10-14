@@ -37,6 +37,9 @@ import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-au
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
 import { createSchedulerLogSink } from "./scheduler-log-sink.js";
+import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
+import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
+import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
 
 /** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
@@ -216,6 +219,8 @@ async function main(): Promise<void> {
     ICT_SHADOW_RESOLVE: 10 * 60 * 1000,
     // Three small reads of one day's snapshots, ideas and trades.
     ICT_GATE_REPORT: 5 * 60 * 1000,
+    // Three indexed reads and a comparison; nothing is fetched or computed.
+    PREMARKET_RUN_CHECK: 2 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -436,10 +441,13 @@ async function main(): Promise<void> {
    * recover; only the second (`--final`) may record a no-data day, or a failed model call, as
    * terminal. The second is a no-op once the first has recorded. NSE holidays are skipped.
    */
-  cronSchedule("52 8 * * 1-5", () => {
+  // Named because the run check reads these timers' last fire times; one literal each, so they cannot drift apart.
+  const PREMARKET_FIRST_SLOT_CRON = "52 8 * * 1-5";
+  const PREMARKET_FINAL_SLOT_CRON = "57 8 * * 1-5";
+  cronSchedule(PREMARKET_FIRST_SLOT_CRON, () => {
     void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850"]));
   });
-  cronSchedule("57 8 * * 1-5", () => {
+  cronSchedule(PREMARKET_FINAL_SLOT_CRON, () => {
     void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]));
   });
 
@@ -1562,6 +1570,7 @@ async function main(): Promise<void> {
       "ICT_SHADOW_CAPTURE",
       "ICT_SHADOW_RESOLVE",
       "ICT_GATE_REPORT",
+      "PREMARKET_RUN_CHECK",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
@@ -1696,6 +1705,46 @@ async function main(): Promise<void> {
     });
     clearInterval(cronWatchdog);
     void shutdown("CRON_STALL", CRON_STALL_EXIT_CODE);
+  }, 60_000);
+
+  /**
+   * The pre-market run check. Once each trading morning, after the 08:57 slot has had time to finish, it decides from
+   * the database and this process's own timers whether the pre-market run happened and, if not, why -- see
+   * `assessPremarketRun`. On 2026-10-14 the run left no trace at all and the container's logs were gone before anyone
+   * looked.
+   *
+   * A plain interval deciding on wall-clock time, not a cron, for the reason the watchdog above is one: a cron in the
+   * hour window is exactly what stops firing after a host suspend, and a check that dies of the thing it checks for
+   * reports nothing. A miss is thrown, so the job row is FAILED with the diagnosis in `error_details`, which outlives
+   * the logs. A scheduler that starts after 09:05 checks once on start-up and finds the earlier process's rows.
+   */
+  const PREMARKET_CHECK_FROM_IST_MINUTE = 9 * 60 + 5;
+  const PREMARKET_CHECK_UNTIL_IST_MINUTE = 15 * 60 + 30;
+  let premarketCheckedDate: string | null = null;
+  setInterval(() => {
+    const now = new Date();
+    const ist = new Date(now.getTime() + 5.5 * 60 * 60_000);
+    const sessionDate = ist.toISOString().slice(0, 10);
+    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    const weekday = ist.getUTCDay();
+    if (weekday === 0 || weekday === 6 || premarketCheckedDate === sessionDate) return;
+    if (minute < PREMARKET_CHECK_FROM_IST_MINUTE || minute > PREMARKET_CHECK_UNTIL_IST_MINUTE) return;
+    premarketCheckedDate = sessionDate;
+    void schedule("PREMARKET_RUN_CHECK", async () => {
+      const stored = await new PostgresPremarketBiasRepository(database).loadRunEvidence(sessionDate);
+      const verdict = assessPremarketRun({
+        sessionDate,
+        holiday: (await isNseHoliday(database, now)).name,
+        ...stored,
+        firstSlotTimerFiredAt: cronLastFiredAt.get(PREMARKET_FIRST_SLOT_CRON) ?? null,
+        finalSlotTimerFiredAt: cronLastFiredAt.get(PREMARKET_FINAL_SLOT_CRON) ?? null,
+        processStartedAt,
+        firstSlotDueAt: new Date(`${sessionDate}T08:52:00+05:30`),
+        finalSlotDueAt: new Date(`${sessionDate}T08:57:00+05:30`),
+      });
+      log("Pre-market run check", { sessionDate, outcome: verdict.outcome, detail: verdict.detail });
+      if (verdict.outcome === "MISSED" || verdict.outcome === "RAN_NO_RESULT") throw new Error(verdict.detail);
+    });
   }, 60_000);
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
