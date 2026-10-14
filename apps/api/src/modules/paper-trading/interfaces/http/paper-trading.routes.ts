@@ -27,6 +27,7 @@ import {
 } from "../../domain/manual-option-order.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
+import { MAXIMUM_MARK_STREAM_AGE_MS, chooseMarkQuote } from "../../domain/option-mark-quote.js";
 import {
   hasAnyOptionContractField,
   valuePaperTrade,
@@ -107,7 +108,9 @@ async function loadLivePrices(
 async function observedChainQuoteFor(
   optionChainRepository: HttpDependencies["optionChainRepository"],
   premiumTickRepository: HttpDependencies["optionPremiumTickRepository"],
+  liveQuoteCache: HttpDependencies["liveQuoteCache"],
   trade: { underlyingSymbol?: string | null; optionExpiry?: Date | null; optionStrike?: number | null; optionType?: string | null },
+  now: Date = new Date(),
 ): Promise<Awaited<ReturnType<HttpDependencies["optionChainRepository"]["latestContractQuote"]>>> {
   if (
     !trade.underlyingSymbol || !(trade.optionExpiry instanceof Date)
@@ -117,26 +120,29 @@ async function observedChainQuoteFor(
     return null;
   }
   try {
-    const dense = await premiumTickRepository.latestForContract({
+    const contract = {
       underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
       expiryDate: trade.optionExpiry,
       strikePrice: trade.optionStrike,
-      optionType: trade.optionType,
-    });
-    if (dense?.bid != null && dense.ask != null && dense.bid > 0 && dense.ask >= dense.bid) {
-      return {
-        mid: (dense.bid + dense.ask) / 2,
-        bid: dense.bid,
-        ask: dense.ask,
-        observedAt: dense.observedAt,
-        impliedForward: null,
-      };
-    }
-    return await optionChainRepository.latestContractQuote({
-      underlyingSymbol: trade.underlyingSymbol.toUpperCase(),
-      expiryDate: trade.optionExpiry,
-      strikePrice: trade.optionStrike,
-      optionType: trade.optionType,
+      optionType: trade.optionType as "CE" | "PE",
+    };
+    const providerSymbol = liveQuoteCache === undefined
+      ? null
+      : await optionChainRepository.providerSymbolFor(contract).catch(() => null);
+    const stream = providerSymbol === null || liveQuoteCache === undefined
+      ? null
+      : liveQuoteCache.quote(providerSymbol, MAXIMUM_MARK_STREAM_AGE_MS, now.getTime());
+    const [tick, chain] = await Promise.all([
+      premiumTickRepository.latestForContract(contract, undefined, now).catch(() => null),
+      optionChainRepository.latestContractQuote(contract).catch(() => null),
+    ]);
+    // Freshness is decided here, not left to the valuation: the close route also sells at this quote's bid, and a
+    // bid from a stale snapshot is not a price the position can be sold at.
+    return chooseMarkQuote({
+      stream: stream === null ? null : { bid: stream.bid, ask: stream.ask, observedAt: stream.observedAt },
+      tick: tick === null ? null : { bid: tick.bid, ask: tick.ask, observedAt: tick.observedAt },
+      chain: chain === null ? null : { bid: chain.bid, ask: chain.ask, observedAt: chain.observedAt, impliedForward: chain.impliedForward },
+      now,
     });
   } catch {
     return null;
@@ -364,7 +370,9 @@ export function registerPaperTradingRoutes(
         const observedQuote = await observedChainQuoteFor(
           dependencies.optionChainRepository,
           dependencies.optionPremiumTickRepository,
+          dependencies.liveQuoteCache,
           trade,
+          asOf,
         );
         return [
           trade.id,
@@ -916,7 +924,9 @@ export function registerPaperTradingRoutes(
         const observedQuote = await observedChainQuoteFor(
           dependencies.optionChainRepository,
           dependencies.optionPremiumTickRepository,
+          dependencies.liveQuoteCache,
           openTrade,
+          closedAt,
         );
         const valuation = valuePaperTrade({
           trade: openTrade,
@@ -933,7 +943,8 @@ export function registerPaperTradingRoutes(
         }
         // Closing a long option means selling it. A fresh observed bid is executable; the mid is
         // a valuation mark only. Fall back to the server model/chain mid when no bid exists.
-        appliedExitPrice = observedQuote?.bid != null && observedQuote.bid > 0
+        // Only a bid the valuation itself used: if it fell back to the model, the quote was not fresh enough to sell at.
+        appliedExitPrice = valuation.source === "OPTION_CHAIN_MID" && observedQuote?.bid != null && observedQuote.bid > 0
           ? observedQuote.bid
           : valuation.markPrice;
         exitPriceSource = "SERVER_OPTION_MARK";

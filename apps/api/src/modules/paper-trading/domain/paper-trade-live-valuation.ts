@@ -90,14 +90,16 @@ export interface ValuePaperTradeInput {
   currentVolatility?: number | null;
   observedQuote?: ObservedOptionQuote | null;
   /**
-   * How old an observed quote may be and still be a mark. Defaults to 40 minutes:
-   * the collector runs every 15, so this tolerates a missed cycle without letting a
-   * stale book price a live position.
+   * How old an observed quote may be and still be a mark. Defaults to 2 minutes, the age a buy's fill quote
+   * is held to. It was 40 minutes, which marked a call bought at the live ask of Rs 575 at the mid of a snapshot
+   * taken before the buy (Rs 556.63) and opened it Rs 551 under water.
    */
   maxQuoteAgeMs?: number;
 }
 
-const DEFAULT_MAX_QUOTE_AGE_MS = 40 * 60 * 1000;
+const DEFAULT_MAX_QUOTE_AGE_MS = 2 * 60 * 1000;
+/** A quote older than the position itself cannot be its mark; this much slack covers clock skew between sources. */
+const QUOTE_BEFORE_OPEN_SLACK_MS = 10 * 1000;
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 function validPositive(value: number | null | undefined): value is number {
@@ -190,7 +192,10 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
       ? null
       : asOf.getTime() - observed.observedAt.getTime();
     const maxAge = input.maxQuoteAgeMs ?? DEFAULT_MAX_QUOTE_AGE_MS;
-    if (observed !== null && validPositive(observed.mid) && quoteAgeMs !== null
+    const predatesPosition = observed !== null
+      && trade.openedAt instanceof Date
+      && observed.observedAt.getTime() < trade.openedAt.getTime() - QUOTE_BEFORE_OPEN_SLACK_MS;
+    if (observed !== null && !predatesPosition && validPositive(observed.mid) && quoteAgeMs !== null
       && quoteAgeMs >= 0 && quoteAgeMs <= maxAge) {
       const timeToExpiry = yearsToExpiry(asOf, trade.optionExpiry as Date);
       // The forward the option market itself prices, when the snapshot could supply

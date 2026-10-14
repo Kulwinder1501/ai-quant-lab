@@ -172,6 +172,27 @@ export class PostgresOptionChainRepository {
     return { ...target, observedAt, impliedForward };
   }
 
+  /**
+   * The provider symbol of one exact contract, from its latest stored snapshot. The live stream is keyed by it, so
+   * this is what lets a far-from-the-money position (which has no stored tick series) be marked from the live book.
+   */
+  async providerSymbolFor(input: {
+    underlyingSymbol: string;
+    expiryDate: Date;
+    strikePrice: number;
+    optionType: "CE" | "PE";
+  }): Promise<string | null> {
+    const result = await this.pool.query(`
+      SELECT provider_symbol
+      FROM option_chain_snapshots
+      WHERE underlying_symbol = $1 AND expiry_date = $2::date AND strike_price = $3 AND option_type = $4
+      ORDER BY observed_at DESC
+      LIMIT 1
+    `, [input.underlyingSymbol, input.expiryDate.toISOString().slice(0, 10), input.strikePrice, input.optionType]);
+    const symbol = result.rows[0]?.provider_symbol;
+    return typeof symbol === "string" && symbol.length > 0 ? symbol : null;
+  }
+
   /** Persists one observation of which contracts an underlying lists. */
   async saveExpiryCalendar(calendar: OptionExpiryCalendar): Promise<{ inserted: number }> {
     let inserted = 0;

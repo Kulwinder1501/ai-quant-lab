@@ -128,6 +128,7 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
     entryPrice: 500,
     quantity: 15,
     entryIv: 0.12,
+    openedAt: new Date(asOf.getTime() - 60 * 60 * 1000),
   });
   const prices = { BANKNIFTY: 57_907 };
 
@@ -143,7 +144,7 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
         mid: 888.5,
         bid: 886,
         ask: 891,
-        observedAt: new Date(asOf.getTime() - 5 * 60 * 1000),
+        observedAt: new Date(asOf.getTime() - 90 * 1000),
         impliedForward: 57_714,
       },
     });
@@ -219,6 +220,40 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
     expect(result.source).toBe("OPTION_MODEL");
   });
 
+  // The reported defect: a call bought at the live ask of 575 at 12:02:42 was marked at 556.63, the mid of the
+  // 11:53 snapshot -- older than the position -- and opened Rs 551 under water.
+  it("does not mark a position from a quote older than the position itself", () => {
+    const result = valuePaperTrade({
+      trade: { ...optionTrade(), openedAt: new Date(asOf.getTime() - 30 * 1000) },
+      livePrices: prices,
+      asOf,
+      currentVolatility: 0.12,
+      observedQuote: {
+        mid: 556.63, bid: 556.05, ask: 557.2,
+        observedAt: new Date(asOf.getTime() - 90 * 1000),
+        impliedForward: 57_714,
+      },
+    });
+
+    expect(result.source).toBe("OPTION_MODEL");
+  });
+
+  it("does not mark from a nine-minute-old snapshot, which the 40-minute limit used to accept", () => {
+    const result = valuePaperTrade({
+      trade: optionTrade(),
+      livePrices: prices,
+      asOf,
+      currentVolatility: 0.12,
+      observedQuote: {
+        mid: 556.63, bid: 556.05, ask: 557.2,
+        observedAt: new Date(asOf.getTime() - 9 * 60 * 1000),
+        impliedForward: 57_714,
+      },
+    });
+
+    expect(result.source).toBe("OPTION_MODEL");
+  });
+
   it("falls back to the model when no quote is supplied", () => {
     const result = valuePaperTrade({
       trade: optionTrade(),
@@ -260,6 +295,7 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
       underlyingSymbol: "BANKNIFTY",
       entryPrice: 500,
       quantity: 15,
+      openedAt: new Date(asOf.getTime() - 60 * 60 * 1000),
     });
 
     const result = valuePaperTrade({
