@@ -1,7 +1,10 @@
 # Phase 27 — Scalping NIFTY option premiums
 
-**Written 2026-08-07. Not started.** Every figure below was measured against the live book or
-the stored series on that date, and the measurement command is given so it can be re-run
+**Written 2026-08-07.**  
+**Status (2026-10-14):** Step 1 (dense ATM premiums) is effectively in place via `option_premium_ticks`; chain snapshots remain ~15m. Step 2 is preregistered — see [2026-10-14-phase27-step2-premium-measurement-preregistration.md](2026-10-14-phase27-step2-premium-measurement-preregistration.md). Step 3 not authorized. `tradingExecutionAuthorized: false`.
+
+Every figure in the original body below was measured against the live book or
+the stored series on 2026-08-07, and the measurement command is given so it can be re-run
 rather than trusted.
 
 The goal: let the paper-trading bot scalp NIFTY option premiums on a 1-minute signal.
