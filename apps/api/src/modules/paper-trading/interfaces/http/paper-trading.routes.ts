@@ -27,9 +27,14 @@ import {
 } from "../../domain/manual-option-order.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
-import { MAXIMUM_MARK_STREAM_AGE_MS, chooseMarkQuote } from "../../domain/option-mark-quote.js";
+import {
+  MAXIMUM_ANCHORED_QUOTE_AGE_MS,
+  MAXIMUM_MARK_STREAM_AGE_MS,
+  chooseMarkQuote,
+} from "../../domain/option-mark-quote.js";
 import {
   hasAnyOptionContractField,
+  type ObservedOptionQuote,
   valuePaperTrade,
 } from "../../domain/paper-trade-live-valuation.js";
 import { PostgresIndiaVixImpliedVolatilitySource } from "../../infrastructure/india-vix-implied-volatility-source.js";
@@ -111,7 +116,7 @@ async function observedChainQuoteFor(
   liveQuoteCache: HttpDependencies["liveQuoteCache"],
   trade: { underlyingSymbol?: string | null; optionExpiry?: Date | null; optionStrike?: number | null; optionType?: string | null },
   now: Date = new Date(),
-): Promise<Awaited<ReturnType<HttpDependencies["optionChainRepository"]["latestContractQuote"]>>> {
+): Promise<ObservedOptionQuote | null> {
   if (
     !trade.underlyingSymbol || !(trade.optionExpiry instanceof Date)
     || typeof trade.optionStrike !== "number"
@@ -133,15 +138,23 @@ async function observedChainQuoteFor(
       ? null
       : liveQuoteCache.quote(providerSymbol, MAXIMUM_MARK_STREAM_AGE_MS, now.getTime());
     const [tick, chain] = await Promise.all([
-      premiumTickRepository.latestForContract(contract, undefined, now).catch(() => null),
+      // Read back past the freshness limit: the chooser still prefers a fresh quote, and the newest old one is what
+      // the valuation anchors to the index after the close.
+      premiumTickRepository.latestForContract(contract, MAXIMUM_ANCHORED_QUOTE_AGE_MS, now).catch(() => null),
       optionChainRepository.latestContractQuote(contract).catch(() => null),
     ]);
     // Freshness is decided here, not left to the valuation: the close route also sells at this quote's bid, and a
     // bid from a stale snapshot is not a price the position can be sold at.
     return chooseMarkQuote({
       stream: stream === null ? null : { bid: stream.bid, ask: stream.ask, observedAt: stream.observedAt },
-      tick: tick === null ? null : { bid: tick.bid, ask: tick.ask, observedAt: tick.observedAt },
-      chain: chain === null ? null : { bid: chain.bid, ask: chain.ask, observedAt: chain.observedAt, impliedForward: chain.impliedForward },
+      tick: tick === null ? null : { bid: tick.bid, ask: tick.ask, observedAt: tick.observedAt, underlyingValue: tick.underlyingValue },
+      chain: chain === null ? null : {
+        bid: chain.bid,
+        ask: chain.ask,
+        observedAt: chain.observedAt,
+        impliedForward: chain.impliedForward,
+        underlyingValue: chain.underlyingValue,
+      },
       now,
     });
   } catch {

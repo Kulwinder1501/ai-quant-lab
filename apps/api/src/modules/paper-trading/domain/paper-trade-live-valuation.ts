@@ -81,6 +81,11 @@ export interface ObservedOptionQuote {
    * straight in the delta.
    */
   impliedForward: number | null;
+  /**
+   * The index level in the same observation. Lets an old quote keep standing as the mark while the index has not
+   * moved (after the close, say), and lets the model be calibrated to the volatility this quote implied.
+   */
+  underlyingValue?: number | null;
 }
 
 export interface ValuePaperTradeInput {
@@ -107,6 +112,14 @@ const QUOTE_BEFORE_OPEN_SLACK_MS = 10 * 1000;
  * fault is minutes, not seconds.
  */
 const QUOTE_AFTER_AS_OF_SLACK_MS = 5 * 1000;
+/**
+ * A quote past the freshness limit still stands as the mark while the index sits where it did when the quote was
+ * taken: nothing that moves the premium has happened. 0.5 basis points is ~3 BANKNIFTY points, worth well under a
+ * premium point. After the close the index is frozen at exactly the last quote's level, so the last price holds.
+ */
+const SPOT_ANCHOR_TOLERANCE = 0.00005;
+/** Past this a quote is yesterday's, however still the index looks. */
+const MAX_ANCHORED_QUOTE_AGE_MS = 20 * 60 * 60 * 1000;
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 function validPositive(value: number | null | undefined): value is number {
@@ -159,6 +172,34 @@ function unavailable(
   };
 }
 
+/**
+ * The volatility the contract's own last quote implied, solved at that quote's index level and instant.
+ *
+ * When the index has moved since a quote was taken, the quote is no longer the mark -- but it is still the best
+ * evidence of how the market prices this strike, which India VIX is not: it put a BANKNIFTY 55400 CE at Rs 609
+ * when the market had it at Rs 653 (14.1% against ~15.5% implied), Rs 2,600 of phantom loss on 60 units.
+ */
+function volatilityFromLastQuote(
+  trade: PaperTrade,
+  observed: ObservedOptionQuote | null,
+  asOf: Date,
+): number | null {
+  if (observed === null || !validPositive(observed.mid) || !validPositive(observed.underlyingValue)) return null;
+  const ageMs = asOf.getTime() - observed.observedAt.getTime();
+  if (ageMs > MAX_ANCHORED_QUOTE_AGE_MS || ageMs < -QUOTE_AFTER_AS_OF_SLACK_MS) return null;
+  const timeToExpiry = yearsToExpiry(observed.observedAt, trade.optionExpiry as Date);
+  if (!(timeToExpiry > 0)) return null;
+  const solved = impliedVolatilityFromPremium({
+    spot: observed.underlyingValue,
+    strike: trade.optionStrike as number,
+    timeToExpiryYears: timeToExpiry,
+    riskFreeRate: RISK_FREE_RATE,
+    optionType: trade.optionType as "CE" | "PE",
+    premium: observed.mid,
+  });
+  return solved.measurable ? solved.impliedVolatility : null;
+}
+
 function pnlForMark(trade: PaperTrade, markPrice: number): { pnl: number; returnPercent: number } {
   const priceMove = trade.side === "LONG"
     ? markPrice - trade.entryPrice
@@ -202,8 +243,13 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
     const predatesPosition = observed !== null
       && trade.openedAt instanceof Date
       && observed.observedAt.getTime() < trade.openedAt.getTime() - QUOTE_BEFORE_OPEN_SLACK_MS;
-    if (observed !== null && !predatesPosition && validPositive(observed.mid) && quoteAgeMs !== null
-      && quoteAgeMs >= -QUOTE_AFTER_AS_OF_SLACK_MS && quoteAgeMs <= maxAge) {
+    const withinFreshness = quoteAgeMs !== null
+      && quoteAgeMs >= -QUOTE_AFTER_AS_OF_SLACK_MS && quoteAgeMs <= maxAge;
+    const anchoredToSpot = observed !== null && quoteAgeMs !== null
+      && quoteAgeMs > maxAge && quoteAgeMs <= MAX_ANCHORED_QUOTE_AGE_MS
+      && validPositive(observed.underlyingValue)
+      && Math.abs(spot - observed.underlyingValue) / observed.underlyingValue <= SPOT_ANCHOR_TOLERANCE;
+    if (observed !== null && !predatesPosition && validPositive(observed.mid) && (withinFreshness || anchoredToSpot)) {
       const timeToExpiry = yearsToExpiry(asOf, trade.optionExpiry as Date);
       // The forward the option market itself prices, when the snapshot could supply
       // it; spot only as a last resort, and the bias is then the known one.
@@ -250,15 +296,20 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
         daysToExpiry: timeToExpiry > 0 ? timeToExpiry * 365 : 0,
         // Only populated when the greeks are missing, so the row can say why the mark
         // is trustworthy while the greeks are absent.
-        reason: solved.measurable ? null : solved.explanation,
+        reason: solved.measurable
+          ? (anchoredToSpot
+            ? `Last quote ${observed.observedAt.toISOString()}; the index is unchanged since, so it still stands.`
+            : null)
+          : solved.explanation,
       };
     }
 
+    const calibratedVolatility = volatilityFromLastQuote(trade, observed, asOf);
     const currentVolatility = validPositive(input.currentVolatility)
       ? input.currentVolatility
       : null;
     const entryVolatility = validPositive(trade.entryIv) ? trade.entryIv : null;
-    const volatility = currentVolatility ?? entryVolatility;
+    const volatility = calibratedVolatility ?? currentVolatility ?? entryVolatility;
     if (volatility === null) {
       return unavailable(asOf, "Neither a current India VIX value nor entry IV is available.", spot);
     }
@@ -275,7 +326,9 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
         returnPercent: result.returnPercent,
         asOf: asOf.toISOString(),
         volatility,
-        volatilitySource: currentVolatility === null ? "ENTRY_IV" : "INDIA_VIX",
+        volatilitySource: calibratedVolatility !== null
+          ? "CHAIN_IMPLIED"
+          : currentVolatility === null ? "ENTRY_IV" : "INDIA_VIX",
         // Straight from the mark, so the greeks and the P&L above describe one model
         // evaluation rather than two.
         greeks: {

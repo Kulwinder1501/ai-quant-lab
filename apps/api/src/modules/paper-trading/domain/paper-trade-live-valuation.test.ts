@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PaperTrade } from "./paper-trading.js";
 import { valuePaperTrade } from "./paper-trade-live-valuation.js";
+import { RISK_FREE_RATE, priceEuropeanOption, yearsToExpiry } from "@ai-quant-lab/pricing";
 
 function trade(overrides: Partial<PaperTrade> = {}): PaperTrade {
   return {
@@ -252,6 +253,90 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
     });
 
     expect(result.source).toBe("OPTION_MODEL");
+  });
+
+  // After the close nothing is quoted, but the index is frozen at the last quote's level, so that quote is still the
+  // price. The model at India VIX put a BANKNIFTY 55400 CE at 609 when its last quote was 653.
+  describe("an old quote and the index", () => {
+    const heldSinceYesterday = () => ({ ...optionTrade(), openedAt: new Date(asOf.getTime() - 19 * 60 * 60 * 1000) });
+    const quotedAt = new Date(asOf.getTime() - 17 * 60 * 60 * 1000);
+    const quotedIndex = 57_907;
+    const quotedIv = 0.155;
+    const quotedMid = priceEuropeanOption({
+      spot: quotedIndex,
+      strike: 57_300,
+      timeToExpiryYears: yearsToExpiry(quotedAt, new Date("2026-08-25T10:00:00.000Z")),
+      riskFreeRate: RISK_FREE_RATE,
+      volatility: quotedIv,
+      optionType: "CE",
+    }).premium;
+    const lastQuote = {
+      mid: quotedMid, bid: quotedMid - 1, ask: quotedMid + 1,
+      observedAt: quotedAt, impliedForward: null, underlyingValue: quotedIndex,
+    };
+
+    it("keeps the last quote as the mark while the index has not moved since", () => {
+      const result = valuePaperTrade({
+        trade: heldSinceYesterday(),
+        livePrices: { BANKNIFTY: quotedIndex },
+        asOf,
+        currentVolatility: 0.1412,
+        observedQuote: lastQuote,
+      });
+
+      expect(result.source).toBe("OPTION_CHAIN_MID");
+      expect(result.markPrice).toBeCloseTo(quotedMid, 6);
+      expect(result.reason).toContain("index is unchanged");
+    });
+
+    it("does not keep it once the index has moved, and prices the model at the volatility the quote implied", () => {
+      const moved = quotedIndex * 1.005;
+      const result = valuePaperTrade({
+        trade: heldSinceYesterday(),
+        livePrices: { BANKNIFTY: moved },
+        asOf,
+        currentVolatility: 0.1412,
+        observedQuote: lastQuote,
+      });
+
+      expect(result.source).toBe("OPTION_MODEL");
+      expect(result.volatilitySource).toBe("CHAIN_IMPLIED");
+      expect(result.volatility).toBeCloseTo(quotedIv, 3);
+      const expected = priceEuropeanOption({
+        spot: moved,
+        strike: 57_300,
+        timeToExpiryYears: yearsToExpiry(asOf, new Date("2026-08-25T10:00:00.000Z")),
+        riskFreeRate: RISK_FREE_RATE,
+        volatility: quotedIv,
+        optionType: "CE",
+      }).premium;
+      expect(result.markPrice!).toBeCloseTo(expected, 0);
+    });
+
+    it("falls back to India VIX only when there is no usable last quote", () => {
+      const result = valuePaperTrade({
+        trade: heldSinceYesterday(),
+        livePrices: { BANKNIFTY: quotedIndex * 1.005 },
+        asOf,
+        currentVolatility: 0.1412,
+        observedQuote: { ...lastQuote, underlyingValue: null },
+      });
+
+      expect(result.source).toBe("OPTION_MODEL");
+      expect(result.volatilitySource).toBe("INDIA_VIX");
+    });
+
+    it("never anchors a quote from before the position was opened", () => {
+      const result = valuePaperTrade({
+        trade: { ...optionTrade(), openedAt: new Date(asOf.getTime() - 60 * 1000) },
+        livePrices: { BANKNIFTY: quotedIndex },
+        asOf,
+        currentVolatility: 0.1412,
+        observedQuote: lastQuote,
+      });
+
+      expect(result.source).toBe("OPTION_MODEL");
+    });
   });
 
   it("falls back to the model when no quote is supplied", () => {

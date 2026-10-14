@@ -6,12 +6,38 @@ const ago = (ms: number) => new Date(now.getTime() - ms);
 
 describe("chooseMarkQuote", () => {
   // The reported case: bought at the live ask of 575 at 12:02:42 IST, marked at the 11:53 snapshot's mid (556.63).
-  it("refuses a nine-minute-old chain snapshot, so a fresh buy does not open under water", () => {
+  // The chooser hands the old quote over with the index level it was taken at; the valuation decides whether the
+  // index is still there (see paper-trade-live-valuation.test.ts) -- it is not a fresh quote.
+  it("hands over a nine-minute-old chain snapshot with its index level, for the valuation to judge", () => {
     const quote = chooseMarkQuote({
-      chain: { bid: 556.05, ask: 557.2, observedAt: ago(9 * 60 * 1000), impliedForward: 55_500 },
+      chain: { bid: 556.05, ask: 557.2, observedAt: ago(9 * 60 * 1000), impliedForward: 55_500, underlyingValue: 55_426.45 },
       now,
     });
-    expect(quote).toBeNull();
+    expect(quote!.observedAt).toEqual(ago(9 * 60 * 1000));
+    expect(quote!.underlyingValue).toBe(55_426.45);
+  });
+
+  it("prefers a fresh quote over a newer-looking old one, and the newest old one when none is fresh", () => {
+    const fresh = chooseMarkQuote({
+      tick: { bid: 560, ask: 562, observedAt: ago(60_000) },
+      chain: { bid: 540, ask: 542, observedAt: ago(10 * 60_000) },
+      now,
+    });
+    expect(fresh!.mid).toBe(561);
+
+    const old = chooseMarkQuote({
+      tick: { bid: 650, ask: 652, observedAt: ago(30 * 60_000) },
+      chain: { bid: 640, ask: 654, observedAt: ago(20 * 60_000) },
+      now,
+    });
+    expect(old!.mid).toBe(647);
+  });
+
+  it("gives up on a quote older than the anchoring window", () => {
+    expect(chooseMarkQuote({
+      tick: { bid: 650, ask: 652, observedAt: ago(21 * 60 * 60 * 1000), underlyingValue: 55_316 },
+      now,
+    })).toBeNull();
   });
 
   it("uses the live stream book when it is fresh, and takes its mid", () => {

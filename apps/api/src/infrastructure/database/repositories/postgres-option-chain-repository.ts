@@ -116,6 +116,8 @@ export class PostgresOptionChainRepository {
     ask: number | null;
     observedAt: Date;
     impliedForward: number | null;
+    /** The index level in the snapshot this quote came from. */
+    underlyingValue: number | null;
   } | null> {
     const expiryKey = input.expiryDate.toISOString().slice(0, 10);
     const latest = await this.pool.query(`
@@ -127,7 +129,7 @@ export class PostgresOptionChainRepository {
     if (!observedAt) return null;
 
     const rows = await this.pool.query(`
-      SELECT strike_price, option_type, bid, ask
+      SELECT strike_price, option_type, bid, ask, underlying_value
       FROM option_chain_snapshots
       WHERE underlying_symbol = $1 AND expiry_date = $2::date AND observed_at = $3
     `, [input.underlyingSymbol, expiryKey, observedAt]);
@@ -142,7 +144,7 @@ export class PostgresOptionChainRepository {
       return (b + a) / 2;
     };
 
-    let target: { mid: number; bid: number | null; ask: number | null } | null = null;
+    let target: { mid: number; bid: number | null; ask: number | null; underlyingValue: number | null } | null = null;
     const pairs = new Map<number, { callMid?: number; putMid?: number }>();
     for (const row of rows.rows) {
       const strike = Number(row.strike_price);
@@ -155,7 +157,7 @@ export class PostgresOptionChainRepository {
         pairs.set(strike, slot);
       }
       if (strike === input.strikePrice && optionType === input.optionType && mid !== null) {
-        target = { mid, bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask) };
+        target = { mid, bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask), underlyingValue: toNumberOrNull(row.underlying_value) };
       }
     }
     if (target === null) return null;
