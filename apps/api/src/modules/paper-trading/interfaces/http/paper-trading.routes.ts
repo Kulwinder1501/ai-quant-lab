@@ -372,11 +372,12 @@ export function registerPaperTradingRoutes(
           dependencies.optionPremiumTickRepository,
           dependencies.liveQuoteCache,
           trade,
-          asOf,
         );
+        // Priced at the instant after the quote was read, not at the request's start: the live stream ticks
+        // several times a second, and a quote newer than the valuation instant used to be refused as "future".
         return [
           trade.id,
-          valuePaperTrade({ trade, livePrices, asOf, currentVolatility, observedQuote }),
+          valuePaperTrade({ trade, livePrices, asOf: new Date(), currentVolatility, observedQuote }),
         ] as const;
       })));
       fullSummary.openTrades = fullSummary.openTrades.map((trade) => ({
@@ -926,12 +927,11 @@ export function registerPaperTradingRoutes(
           dependencies.optionPremiumTickRepository,
           dependencies.liveQuoteCache,
           openTrade,
-          closedAt,
         );
         const valuation = valuePaperTrade({
           trade: openTrade,
           livePrices,
-          asOf: closedAt,
+          asOf: new Date(),
           currentVolatility,
           observedQuote,
         });

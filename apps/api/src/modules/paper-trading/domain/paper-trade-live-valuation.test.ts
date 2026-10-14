@@ -266,7 +266,26 @@ describe("valuePaperTrade with an observed option-chain quote", () => {
     expect(result.source).toBe("OPTION_MODEL");
   });
 
-  // A quote timestamped after the valuation instant is a clock or data fault, and using
+  // The live stream ticks several times a second, so a quote can land a moment after the request started. That
+  // is a live quote, not a fault; refusing it flipped the mark between the market and the model.
+  it("keeps the observed mark for a quote stamped a couple of seconds after the valuation instant", () => {
+    const result = valuePaperTrade({
+      trade: optionTrade(),
+      livePrices: prices,
+      asOf,
+      currentVolatility: 0.12,
+      observedQuote: {
+        mid: 888.5, bid: 886, ask: 891,
+        observedAt: new Date(asOf.getTime() + 2 * 1000),
+        impliedForward: 57_714,
+      },
+    });
+
+    expect(result.source).toBe("OPTION_CHAIN_MID");
+    expect(result.markPrice).toBeCloseTo(888.5, 6);
+  });
+
+  // A quote timestamped well after the valuation instant is a clock or data fault, and using
   // it would mark a position from the future.
   it("refuses a quote from the future", () => {
     const result = valuePaperTrade({

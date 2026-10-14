@@ -100,6 +100,13 @@ export interface ValuePaperTradeInput {
 const DEFAULT_MAX_QUOTE_AGE_MS = 2 * 60 * 1000;
 /** A quote older than the position itself cannot be its mark; this much slack covers clock skew between sources. */
 const QUOTE_BEFORE_OPEN_SLACK_MS = 10 * 1000;
+/**
+ * A quote may be stamped a little after the valuation instant: the live stream ticks several times a second, so one
+ * can land between a request starting and its mark being priced. That is the market moving, not a quote from the
+ * future, and rejecting it sent the mark to the model (631 vs 574 on a 55400 CE, Rs 3,400 of P&L). A real clock
+ * fault is minutes, not seconds.
+ */
+const QUOTE_AFTER_AS_OF_SLACK_MS = 5 * 1000;
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 function validPositive(value: number | null | undefined): value is number {
@@ -196,7 +203,7 @@ export function valuePaperTrade(input: ValuePaperTradeInput): PaperTradeLiveValu
       && trade.openedAt instanceof Date
       && observed.observedAt.getTime() < trade.openedAt.getTime() - QUOTE_BEFORE_OPEN_SLACK_MS;
     if (observed !== null && !predatesPosition && validPositive(observed.mid) && quoteAgeMs !== null
-      && quoteAgeMs >= 0 && quoteAgeMs <= maxAge) {
+      && quoteAgeMs >= -QUOTE_AFTER_AS_OF_SLACK_MS && quoteAgeMs <= maxAge) {
       const timeToExpiry = yearsToExpiry(asOf, trade.optionExpiry as Date);
       // The forward the option market itself prices, when the snapshot could supply
       // it; spot only as a last resort, and the bias is then the known one.
