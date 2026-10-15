@@ -17,6 +17,7 @@ import {
 import { PostgresBacktestRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-repository.js";
 import { PostgresStrategyMarketContextRepository } from "../../infrastructure/database/repositories/postgres-strategy-market-context-repository.js";
 import { decorateContextsWithIct } from "../../modules/technical-analysis/domain/ict/replay-builder.js";
+import { HTF_BIAS_RULES, type HtfBiasRule } from "../../modules/technical-analysis/domain/ict/htf-bias-variants.js";
 import {
   ICT_STRUCTURE_STRATEGY_KEY,
   defaultIctEngineConfig,
@@ -163,12 +164,28 @@ class HigherTimeframeDecoratedMarketData implements BacktestMarketDataRepository
 class IctDecoratedMarketData implements BacktestMarketDataRepository {
   constructor(
     private readonly inner: BacktestMarketDataRepository,
-    private readonly config: IctEngineConfig
+    private readonly config: IctEngineConfig,
+    private readonly htfBiasRule: HtfBiasRule = "OWN_STRUCTURE",
   ) {}
 
   async listContexts(input: Parameters<BacktestMarketDataRepository["listContexts"]>[0]) {
-    return decorateContextsWithIct(await this.inner.listContexts(input), { config: this.config });
+    return decorateContextsWithIct(await this.inner.listContexts(input), { config: this.config, htfBiasRule: this.htfBiasRule });
   }
+}
+
+/**
+ * `--ict-htf-bias-rule own-structure|internal-choch|zone-tap-choch`: the research arms of
+ * docs/2026-10-15-ict-htf-bias-variants-protocol.md. Omitted is `own-structure`, what ships, so every earlier
+ * invocation is unchanged. Only the daily bias series differs between arms.
+ */
+function parseHtfBiasRule(argumentsList: string[]): HtfBiasRule {
+  const raw = getOption(argumentsList, "ict-htf-bias-rule")?.trim().toLowerCase().replaceAll("-", "_");
+  if (raw === undefined || raw === "") return "OWN_STRUCTURE";
+  const rule = raw.toUpperCase() as HtfBiasRule;
+  if (!HTF_BIAS_RULES.includes(rule)) {
+    throw new Error(`--ict-htf-bias-rule must be one of own-structure, internal-choch, zone-tap-choch; received "${raw}".`);
+  }
+  return rule;
 }
 
 /**
@@ -473,7 +490,7 @@ async function main(): Promise<void> {
     // in the replay builder. Incumbent strategies never see this decoration.
     const selectedStrategy = requireRegisteredStrategy(getOption(argumentsList, "strategy")?.trim() || "trend-breakout");
     if (selectedStrategy.readsIctContext === true) {
-      marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList));
+      marketData = new IctDecoratedMarketData(marketData, parseIctEngineConfig(argumentsList), parseHtfBiasRule(argumentsList));
     }
 
     const strategyEvaluator = new StrategyClass();

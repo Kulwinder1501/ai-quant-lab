@@ -4,6 +4,7 @@ import type { CausalCandle } from "./causal-pivot.js";
 import { IctCompositeEngine } from "./composite-engine.js";
 import { defaultIctEngineConfig, type IctEngineConfig, type IctStateCompositeSnapshot } from "./config.js";
 import type { IctBiasDirection } from "./bias.js";
+import { applyHtfBiasRule, type HtfBiasRule } from "./htf-bias-variants.js";
 
 /**
  * Replay-side ICT snapshot builder.
@@ -24,6 +25,11 @@ import type { IctBiasDirection } from "./bias.js";
 
 export interface DecorateIctOptions {
   readonly config?: IctEngineConfig;
+  /**
+   * Research only: which daily-bias rule to use. Omitted is `OWN_STRUCTURE`, what ships, and is byte-identical to
+   * the behaviour before this option existed. See `htf-bias-variants.ts`.
+   */
+  readonly htfBiasRule?: HtfBiasRule;
   /*
    * There is no bucket-size knob any more, deliberately.
    *
@@ -163,6 +169,7 @@ export interface HtfBucketBias {
 export function computeHtfBucketBiases(
   candles: readonly HtfSourceCandle[],
   config: IctEngineConfig = defaultIctEngineConfig,
+  rule: HtfBiasRule = "OWN_STRUCTURE",
 ): HtfBucketBias[] {
   const buckets = aggregateSessionHtfBucketsFromCandles(candles);
   /*
@@ -172,10 +179,9 @@ export function computeHtfBucketBiases(
    */
   const htfEngine = new IctCompositeEngine({ ...config, biasSource: "OWN_STRUCTURE" });
   const htfCandles = buckets.map((b) => b.candle);
-  return buckets.map((bucket, i) => {
-    const snap = htfEngine.processCandle(htfCandles, i);
-    return { closeTime: bucket.closeTime, bias: snap.bias.bias };
-  });
+  const snapshots = buckets.map((_, i) => htfEngine.processCandle(htfCandles, i));
+  const biases = applyHtfBiasRule(rule, htfCandles, snapshots);
+  return buckets.map((bucket, i) => ({ closeTime: bucket.closeTime, bias: biases[i]! }));
 }
 
 /**
@@ -218,15 +224,17 @@ export function mapBarsToHtfBias(
 export function deriveHtfBiasSeriesFromCandles(
   candles: readonly HtfSourceCandle[],
   config: IctEngineConfig = defaultIctEngineConfig,
+  rule: HtfBiasRule = "OWN_STRUCTURE",
 ): (IctBiasDirection | undefined)[] {
-  return mapBarsToHtfBias(candles, computeHtfBucketBiases(candles, config));
+  return mapBarsToHtfBias(candles, computeHtfBucketBiases(candles, config, rule));
 }
 
 export function deriveHtfBiasSeries(
   contexts: readonly StrategyMarketContext[],
   config: IctEngineConfig = defaultIctEngineConfig,
+  rule: HtfBiasRule = "OWN_STRUCTURE",
 ): (IctBiasDirection | undefined)[] {
-  return deriveHtfBiasSeriesFromCandles(contexts.map((c) => c.candle), config);
+  return deriveHtfBiasSeriesFromCandles(contexts.map((c) => c.candle), config, rule);
 }
 
 /**
@@ -245,7 +253,7 @@ export function computeIctSnapshotsForContexts(
    * bucket, so every bar gets `undefined`, `coverage.htf` is NOT_COVERED and the four-pillar gate
    * fails closed -- which is the honest outcome for a window too short to carry a daily bias.
    */
-  const htfBiasSeries = deriveHtfBiasSeries(contexts, config);
+  const htfBiasSeries = deriveHtfBiasSeries(contexts, config, options.htfBiasRule ?? "OWN_STRUCTURE");
 
   const engine = new IctCompositeEngine(config);
   const causalCandles = contexts.map(contextToCausalCandle);
