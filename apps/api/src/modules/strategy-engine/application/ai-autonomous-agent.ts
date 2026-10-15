@@ -18,6 +18,17 @@ import { PrepareOptionEntry } from "../../paper-trading/application/prepare-opti
 import { PostgresOptionChainRepository } from "../../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { PostgresRiskStateRepository } from "../../../infrastructure/database/repositories/postgres-risk-state-repository.js";
 import { buildTradeReview } from "../../paper-trading/domain/trade-review.js";
+import {
+  assessImmediateAdverseExcursion,
+  calculatePlannedRiskRupees,
+  calculateRealizedR,
+  selectPrimaryObservedEvent,
+  AEDLS_TAXONOMY_VERSION,
+  AEDLS_REVIEWER_VERSION,
+  type EventTargetAssessment,
+  type ObservedEventEvidence,
+  type TerminalTradeOutcome,
+} from "../domain/aedls-forensic-review.js";
 import { INSTITUTIONAL_FLOW_STALENESS_DAYS } from "../../market-data/domain/institutional-flow-summary.js";
 import { loadIndexDriverTape } from "../../market-data/application/load-index-driver-tape.js";
 import { driverTapeBias as scoreDriverTapeBias, type DriverTapeMetrics } from "../../market-data/domain/driver-tape.js";
@@ -1302,13 +1313,16 @@ export class AiAutonomousAgent {
         option_expiry: Date | null;
         option_type: "CE" | "PE" | null;
         underlying_symbol: string | null;
+        trade_idea_id: string | null;
+        setup_family: string | null;
       }>(`
         SELECT paper_trades.id, paper_trades.instrument_id, paper_trades.side, paper_trades.quantity,
                paper_trades.realized_pnl, paper_trades.exit_reason, paper_trades.entry_price,
                paper_trades.exit_price, paper_trades.stop_loss, paper_trades.target_price,
                paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe,
                paper_trades.option_strike, paper_trades.option_expiry, paper_trades.option_type,
-               paper_trades.underlying_symbol
+               paper_trades.underlying_symbol, paper_trades.trade_idea_id,
+               trade_ideas.strategy_name AS setup_family
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
@@ -1373,27 +1387,117 @@ export class AiAutonomousAgent {
         ? `RESEARCH TAGS (aggregate before acting; these change nothing on their own): ${review.proposedResearchTags.join(", ")}.`
         : "No research tag triggered: geometry and outcome were unremarkable.";
 
-      const reflection: AiReflectionLog = {
-        id: `ref-${row.id}`,
-        timestamp: new Date(row.closed_at).toISOString(),
-        tradeId: row.id,
-        symbol,
+      // Map exitReason to TerminalTradeOutcome
+      let terminalOutcome: TerminalTradeOutcome = "OTHER";
+      const exitReasonLower = (row.exit_reason ?? "").toLowerCase();
+      if (exitReasonLower.includes("stop")) {
+        terminalOutcome = "STOP_LOSS";
+      } else if (exitReasonLower.includes("target")) {
+        terminalOutcome = "TARGET";
+      } else if (exitReasonLower.includes("time") || exitReasonLower.includes("session")) {
+        terminalOutcome = "TIMEOUT";
+      } else if (exitReasonLower.includes("manual")) {
+        terminalOutcome = "MANUAL_EXIT";
+      }
+
+      // Compute normalized planned risk & realized R
+      let plannedRiskRupees: number | null = null;
+      let realizedNetR: number | null = null;
+      try {
+        plannedRiskRupees = calculatePlannedRiskRupees({
+          entryPrice: Number(row.entry_price),
+          stopLoss: Number(row.stop_loss),
+          quantityUnits: Number(row.quantity),
+          contractMultiplier: 1,
+        });
+        realizedNetR = calculateRealizedR(pnl, plannedRiskRupees);
+      } catch {
+        // Fall back gracefully if geometry is unmeasurable
+      }
+
+      // Compute 3-bar excursion & supervised target assessments
+      const candleExtremes = holdingPeriod.candles.map((c) => ({
+        openTime: c.openTime,
+        high: c.high,
+        low: c.low,
+        close: c.high,
+      }));
+
+      const adverseAssessment = assessImmediateAdverseExcursion({
         side: row.side,
-        pnl,
-        outcome,
-        analysis,
-        improvementRule,
-      };
+        entryFillPrice: Number(row.entry_price),
+        riskPerUnit: review.riskPerUnit,
+        postEntry1mCandles: candleExtremes,
+        entryTime: new Date(row.opened_at),
+      });
+
+      const targetAssessments: EventTargetAssessment[] = [adverseAssessment];
+      const observedEvents: ObservedEventEvidence[] = [];
+      if (adverseAssessment.label === "POSITIVE") {
+        observedEvents.push({
+          event: "IMMEDIATE_ADVERSE_EXCURSION",
+          evidenceStatus: adverseAssessment.evidenceStatus,
+          eventWindowStart: adverseAssessment.windowStart,
+          eventWindowEnd: adverseAssessment.windowEnd,
+          evidenceReferences: adverseAssessment.evidenceReferences,
+        });
+      }
+
+      const primaryObservedEvent = selectPrimaryObservedEvent(observedEvents);
+      const excursionValidity = holdingPeriod.candles.length >= 3 ? "COMPLETE" : "INSUFFICIENT_DATA";
+      const outcomeValidity = "VALID_RECONCILED";
 
       // Any earlier entry for this trade is removed first: historical reflections were
       // keyed by `ref-<timestamp>-<random>`, so a re-review could not overwrite them
       // and superseded text would linger on the dashboard alongside the new entry.
-      //
-      // Saved without an embedding. The reflection text is real and worth keeping;
-      // a vector for it is not available until a real embedding model exists, and
-      // a fabricated one is worse than none.
       await this.aiJournalRepo.deleteByTradeId(row.id);
-      await this.aiJournalRepo.saveReflection(reflection);
+      await this.aiJournalRepo.saveForensicReview({
+        id: `ref-${row.id}`,
+        tradeId: row.id,
+        candidateId: row.trade_idea_id ?? null,
+        symbol,
+        side: row.side,
+        setupFamily: row.setup_family ?? null,
+        regimeClass: null,
+        pnl,
+        outcome,
+        analysis,
+        improvementRule,
+        structuralContext: {
+          exitReason: row.exit_reason,
+          observedTimeframe: holdingPeriod.timeframe,
+          timeframe: row.timeframe,
+        },
+        targetAssessments,
+        observedEvents,
+        primaryObservedEvent,
+        terminalOutcome,
+        outcomeValidity,
+        excursionValidity,
+        plannedRiskRupees,
+        realizedGrossRupees: pnl,
+        realizedNetRupees: pnl,
+        realizedGrossR: realizedNetR,
+        realizedNetR,
+        mae3BarsR: holdingPeriod.candles.length >= 3 ? (review.maximumAdverseExcursionR ?? null) : null,
+        mfe3BarsR: holdingPeriod.candles.length >= 3 ? (review.maximumFavourableExcursionR ?? null) : null,
+        maxAdverseExcursionR: review.maximumAdverseExcursionR ?? null,
+        maxFavourableExcursionR: review.maximumFavourableExcursionR ?? null,
+        underlyingExcursionPoints: null,
+        causalHypothesis: null,
+        attributionStatus: "UNKNOWN",
+        tradeClosedAt: new Date(row.closed_at).toISOString(),
+        evidenceAvailableAt: new Date(row.closed_at).toISOString(),
+        reviewAvailableAt: new Date().toISOString(),
+        embeddingAvailableAt: null,
+        reviewEmbeddingTemplateVersion: null,
+        embeddingModelId: null,
+        embeddingModelRevision: null,
+        embeddingConfigHash: null,
+        embeddingDim: 384,
+        taxonomyVersion: AEDLS_TAXONOMY_VERSION,
+        reviewerVersion: AEDLS_REVIEWER_VERSION,
+      });
 
       this.recordThought({
         id: this.thoughtId(symbol, "learn"),

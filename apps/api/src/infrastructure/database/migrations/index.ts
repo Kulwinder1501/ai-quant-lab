@@ -133,6 +133,7 @@ import { contactLabelVersioningMigration } from "./132-contact-label-versioning.
 import { candlestickV2PatternDefinitionsMigration } from "./133-candlestick-v2-pattern-definitions.js";
 import { premarketIntelligenceMigration } from "./134-premarket-intelligence.js";
 import { ictShadowSignalsMigration } from "./135-ict-shadow-signals.js";
+import { aedlsForensicSchemaMigration } from "./136-aedls-forensic-schema.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -270,4 +271,5 @@ export const migrations = [
   candlestickV2PatternDefinitionsMigration,
   premarketIntelligenceMigration,
   ictShadowSignalsMigration,
+  aedlsForensicSchemaMigration,
 ];
