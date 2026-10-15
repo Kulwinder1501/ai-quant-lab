@@ -40,7 +40,7 @@ On NIFTY50 15m both variants beat control on net P&L (A by 717 points, B by 1,50
 
 - **The control loses on every cell over all available history**: profit factor 0.24 to 0.59, net negative on all four, before any fees. The strategy's earlier 20-month NIFTY50 15m result (+18,342, PF 2.46) was a window effect, as the registry note already warned; over 3.8 years the same cell is -6,714.
 - **A faster daily bias mostly changes which trades are taken, not whether they win.** On NIFTY 15m it trades slightly less and loses slightly less; on BANKNIFTY it adds trades that lose.
-- **The zone condition (B) helped a little more than none (A)** on NIFTY 15m and NIFTY 5m and about the same on BANKNIFTY. Nothing here is significant at these trade counts.
+- **The zone condition (B) lost less than A on all four cells**, but it beat the control only on the two NIFTY cells (15m and 5m) and lost more than the control on both BANKNIFTY cells. Nothing here is significant at these trade counts.
 
 ## Limits
 
