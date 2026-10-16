@@ -29,6 +29,7 @@ import {
   summariseTenorMatchedIvPercentile,
   type TenorImpliedVolatilityObservation,
 } from "../../domain/iv-percentile-by-tenor.js";
+import { resolveFyersSymbol } from "../../domain/fyers-symbol-resolver.js";
 
 export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
 
@@ -666,11 +667,14 @@ export function registerMarketDataRoutes(
         }
       }
       
-      // Underlying is usually available via Fyers symbol like NSE:NIFTY50-INDEX
-      const fyersUnderlyingSymbol = snapshot.provider === "fyers-api-v3" && snapshot.quotes[0]?.providerSymbol 
-          ? snapshot.quotes[0].providerSymbol.split(":")[0] + ":" + underlyingSymbol + "-INDEX"
-          : null;
-      if (fyersUnderlyingSymbol) symbolsToSubscribe.add(fyersUnderlyingSymbol);
+      // Underlying is mapped to its provider symbol (e.g. NSE:NIFTY50-INDEX, NSE:NIFTYBANK-INDEX, NSE:SBIN-EQ)
+      if (snapshot.provider === "fyers-api-v3") {
+        try {
+          symbolsToSubscribe.add(resolveFyersSymbol(underlyingSymbol));
+        } catch {
+          // If symbol cannot be resolved, continue with option legs
+        }
+      }
 
       const symbolsArray = Array.from(symbolsToSubscribe);
 

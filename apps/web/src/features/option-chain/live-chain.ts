@@ -101,8 +101,8 @@ export function applyChainTick(prevChain: ChainResponse | null, tick: ChainTick)
   let changed = false;
   let currentSpot = prevChain.underlyingValue ?? 0;
 
-  // If the tick is for the underlying index
-  const isIndex = tick.symbol.endsWith("-INDEX");
+  // If the tick is for the underlying index or equity
+  const isIndex = tick.symbol.endsWith("-INDEX") || tick.symbol.endsWith("-EQ");
   if (isIndex && tick.ltp) {
     currentSpot = tick.ltp;
     changed = true;

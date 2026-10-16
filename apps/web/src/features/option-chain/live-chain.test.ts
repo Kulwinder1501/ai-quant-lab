@@ -61,6 +61,18 @@ describe("applyChainTick", () => {
     expect(after.strikes![0]!.call!.ask).toBe(101);
   });
 
+  it("moves the spot on a Bank Nifty index tick", () => {
+    const before = chain();
+    const after = applyChainTick(before, { symbol: "NSE:NIFTYBANK-INDEX", ltp: 55700 })!;
+    expect(after.underlyingValue).toBe(55700);
+  });
+
+  it("moves the spot on an equity underlying tick", () => {
+    const before = chain();
+    const after = applyChainTick(before, { symbol: "NSE:SBIN-EQ", ltp: 820 })!;
+    expect(after.underlyingValue).toBe(820);
+  });
+
   it("keeps the previous quote for a field the tick does not carry", () => {
     const after = applyChainTick(chain(), { symbol: "NSE:NIFTY26OCT22350CE", ask: 130 })!;
     const ticked = after.strikes![1]!.call!;
