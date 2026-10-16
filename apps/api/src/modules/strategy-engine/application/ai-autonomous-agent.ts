@@ -1450,14 +1450,16 @@ export class AiAutonomousAgent {
       // Any earlier entry for this trade is removed first: historical reflections were
       // keyed by `ref-<timestamp>-<random>`, so a re-review could not overwrite them
       // and superseded text would linger on the dashboard alongside the new entry.
+      const effectiveTradeSide = isOption && row.option_type === "PE" ? "SHORT" : "LONG";
       await this.aiJournalRepo.deleteByTradeId(row.id);
       await this.aiJournalRepo.saveForensicReview({
         id: `ref-${row.id}`,
         tradeId: row.id,
         candidateId: row.trade_idea_id ?? null,
         symbol,
-        side: row.side,
+        side: effectiveTradeSide,
         setupFamily: row.setup_family ?? null,
+
         regimeClass: null,
         pnl,
         outcome,

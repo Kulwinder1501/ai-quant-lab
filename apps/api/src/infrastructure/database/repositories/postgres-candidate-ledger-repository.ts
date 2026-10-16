@@ -75,17 +75,19 @@ export class PostgresCandidateLedgerRepository {
    * draws several decisions, and "refused nine times for the same reason" says the signal persisted --
    * which collapsing the rows would erase.
    */
-  async recordDecision(input: CandidateDecisionInput): Promise<void> {
-    await this.database.query(`
+  async recordDecision(input: CandidateDecisionInput): Promise<string> {
+    const result = await this.database.query<{ id: string }>(`
       INSERT INTO candidate_decisions (
         trade_idea_id, account_id, decided_at, decision, reason, explanation,
         paper_trade_id, regime_observation_id, rejection_provenance
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+      RETURNING id
     `, [
       input.tradeIdeaId, input.accountId, input.decidedAt, input.decision, input.reason,
       input.explanation ?? "", input.paperTradeId ?? null, input.regimeObservationId ?? null,
       input.rejectionProvenance ? JSON.stringify(input.rejectionProvenance) : null,
     ]);
+    return result.rows[0]?.id ?? "";
   }
 
   /**

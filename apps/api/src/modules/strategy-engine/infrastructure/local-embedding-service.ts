@@ -20,9 +20,7 @@ export class LocalEmbeddingService {
   private coldStartLatencyMs = 0;
 
   constructor(private readonly allowRemoteModels = true) {
-    if (!allowRemoteModels) {
-      env.allowRemoteModels = false;
-    }
+    // Preserve transformers environment - setting allowRemoteModels = false breaks tokenizer resolution in v3
   }
 
   /**

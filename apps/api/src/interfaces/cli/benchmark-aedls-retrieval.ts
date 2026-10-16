@@ -49,14 +49,20 @@ export async function runAedlsBenchmark() {
       "SELECT COUNT(*) AS count FROM ai_journal_reflections WHERE id LIKE 'bench-ref-%' AND embedding IS NOT NULL",
     );
     const existingCount = parseInt(existingBenchmarkRows.rows[0].count, 10);
-    console.log(`Existing benchmark rows in ai_journal_reflections: ${existingCount}`);
+    const cellCounts = await pool.query<{ count: string }>(
+      `SELECT COUNT(DISTINCT (instrument_symbol, trade_side)) AS count
+       FROM ai_journal_reflections WHERE id LIKE 'bench-ref-%' AND embedding IS NOT NULL`,
+    );
+    const existingCells = parseInt(cellCounts.rows[0].count, 10);
+    console.log(`Existing benchmark rows in ai_journal_reflections: ${existingCount} across ${existingCells} cells`);
 
-    if (existingCount < 1000) {
-      console.log("Seeding 1,000 embedded forensic records for realistic corpus benchmarking...");
+    if (existingCount < 1000 || existingCells < 4) {
+      console.log("Seeding 1,000 embedded forensic records balanced across 4 stratification cells...");
       const instruments = ["NIFTY50", "BANKNIFTY"];
       const sides = ["LONG", "SHORT"] as const;
       const setups = ["MOMENTUM_SCALP", "ORB_BREAKOUT", "MEAN_REVERSION"];
       const regimes = ["TRENDING_UP", "TRENDING_DOWN", "RANGEBOUND", "HIGH_VOLATILITY"];
+
 
       // Seed semantic phrases to generate real embeddings
       const basePhrases = [
@@ -87,7 +93,7 @@ export async function runAedlsBenchmark() {
           const id = `bench-ref-${String(i).padStart(4, "0")}`;
           const tradeId = `bench-trade-${String(i).padStart(4, "0")}`;
           const instrument = instruments[i % instruments.length];
-          const side = sides[i % sides.length];
+          const side = sides[Math.floor(i / 2) % sides.length];
           const setup = setups[i % setups.length];
           const regime = regimes[i % regimes.length];
 

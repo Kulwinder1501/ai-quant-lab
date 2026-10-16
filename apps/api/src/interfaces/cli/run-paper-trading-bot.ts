@@ -46,6 +46,8 @@ import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-tr
 import { observeOppositeSignal } from "../../modules/paper-trading/application/opposite-signal-observation.js";
 import { observeVolumeProfile } from "../../modules/paper-trading/application/volume-profile-observation.js";
 import { observeMarketContext } from "../../modules/paper-trading/application/market-context-observation.js";
+import { AedlsShadowConsumerService } from "../../modules/strategy-engine/application/aedls-shadow-consumer-service.js";
+
 
 /**
  * Refuses to start on a timeframe nothing can trade.
@@ -312,6 +314,8 @@ async function main(): Promise<void> {
     const riskRepository = new PostgresRiskStateRepository(database);
     const regimeRepository = new PostgresRegimeObservationRepository(database);
     const ledger = new PostgresCandidateLedgerRepository(database);
+    const aedlsShadowConsumer = new AedlsShadowConsumerService(database);
+
 
     /*
      * Excludes momentum-scalp-gold. Its own registration carries no instrument restriction (see its
@@ -702,8 +706,16 @@ async function main(): Promise<void> {
       let decisionsRecorded = 0;
       for (const decision of decisionsToRecord) {
         try {
-          await ledger.recordDecision(decision);
+          const decisionId = await ledger.recordDecision(decision);
           decisionsRecorded += 1;
+
+          if (decisionId) {
+            void aedlsShadowConsumer.processCandidateDecision({
+              candidateDecisionId: decisionId,
+              tradeIdeaId: decision.tradeIdeaId,
+              decidedAt: decision.decidedAt,
+            });
+          }
         } catch (error) {
           console.error(JSON.stringify({
             level: "error",
