@@ -7,6 +7,7 @@ import {
   type FyersRateLimitGate,
   type FyersRateLimitKind,
 } from "../../modules/market-data/domain/fyers-rate-limit.js";
+import { recordFyersRequest } from "../../modules/market-data/domain/fyers-request-counter.js";
 import { FYERS_PROVIDER_ID } from "./fyers-token-service.js";
 
 type FetchFunction = typeof fetch;
@@ -156,6 +157,7 @@ export class FyersQuoteClient implements MarketQuoteReader {
 
       for (let attempt = 0; ; attempt += 1) {
         try {
+          recordFyersRequest("quotes:api");
           response = await this.fetch(endpoint, {
             headers: { Authorization: `${this.options.appId}:${accessToken}` },
             signal: AbortSignal.timeout(this.requestTimeoutMs),

@@ -4,6 +4,8 @@ import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { LiveQuoteCache } from "../../infrastructure/market-data/live-quote-cache.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
+import { StreamFirstQuoteReader } from "../../infrastructure/market-data/stream-first-quote-reader.js";
+import type { MarketQuoteReader } from "../../modules/market-data/domain/market-quote.js";
 import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
 import { OandaQuoteClient } from "../../infrastructure/market-data/oanda-quote-client.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
@@ -86,12 +88,31 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const oandaQuoteClient = oandaAccountId && oandaAccessToken
     ? new OandaQuoteClient({ accountId: oandaAccountId, accessToken: oandaAccessToken, environment: oandaEnvironment })
     : null;
+  let fyersLiveStreamer: FyersLiveStreamer | null = null;
+  if (appId && fyersTokenService) {
+    fyersLiveStreamer = new FyersLiveStreamer({
+      tokenService: fyersTokenService,
+      appId,
+    });
+  }
+
+  // Remembers the latest bid and ask the live socket has shown for each symbol, so a manual buy can be filled at
+  // the price the option-chain stream is showing -- for any strike, not only the ones the collector subscribes.
+  const liveQuoteCache = new LiveQuoteCache();
+  if (fyersLiveStreamer) liveQuoteCache.attach(fyersLiveStreamer);
+
+  // Spot prices come from the live socket's ticks when they are fresh, and Fyers REST only refreshes the base they are
+  // laid over (previous close, open, volume). The market-watch and live-agent streams asked REST for the same few
+  // symbols every 2.5 seconds per open tab; see stream-first-quote-reader.ts.
+  const streamFirst = (inner: MarketQuoteReader): MarketQuoteReader =>
+    new StreamFirstQuoteReader({ inner, ticks: liveQuoteCache, subscriber: fyersLiveStreamer });
+
   // Identical quote requests within this window share one Fyers call. The UI's live-price, market-watch and live-agent
   // polls asked for the same few symbols about 860 times in two hours on 2026-10-16.
   const QUOTE_CACHE_TTL_MS = 2_000;
   const marketQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
-      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, cacheTtlMs: QUOTE_CACHE_TTL_MS })
+      ? streamFirst(new FyersQuoteClient({ tokenService: fyersTokenService, appId, cacheTtlMs: QUOTE_CACHE_TTL_MS }))
       : null,
     undefined,
     oandaQuoteClient,
@@ -110,7 +131,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
    */
   const streamingQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
-      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0, cacheTtlMs: QUOTE_CACHE_TTL_MS })
+      ? streamFirst(new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0, cacheTtlMs: QUOTE_CACHE_TTL_MS }))
       : null,
     undefined,
     oandaQuoteClient,
@@ -138,18 +159,6 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
     { marketQuotes: marketQuoteClient },
   );
 
-  let fyersLiveStreamer: FyersLiveStreamer | null = null;
-  if (appId && fyersTokenService) {
-    fyersLiveStreamer = new FyersLiveStreamer({
-      tokenService: fyersTokenService,
-      appId,
-    });
-  }
-
-  // Remembers the latest bid and ask the live socket has shown for each symbol, so a manual buy can be filled at
-  // the price the option-chain stream is showing -- for any strike, not only the ones the collector subscribes.
-  const liveQuoteCache = new LiveQuoteCache();
-  if (fyersLiveStreamer) liveQuoteCache.attach(fyersLiveStreamer);
 
   return {
     database,

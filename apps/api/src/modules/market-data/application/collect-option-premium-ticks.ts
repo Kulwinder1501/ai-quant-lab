@@ -1,4 +1,5 @@
 import type { PostgresOptionChainRepository } from "../../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { recordFyersRequest } from "../domain/fyers-request-counter.js";
 import type { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-token-service.js";
 import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
@@ -223,6 +224,7 @@ export class CollectOptionPremiumTicks {
     const endpoint = new URL("/data/quotes", baseUrl);
     endpoint.searchParams.set("symbols", [...new Set(providerSymbols)].join(","));
 
+    recordFyersRequest("quotes:premium");
     const response = await fetchFn(endpoint, {
       headers: { Authorization: `${this.options.appId}:${accessToken}` },
     });

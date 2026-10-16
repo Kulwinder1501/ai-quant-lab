@@ -20,6 +20,7 @@ interface FyersQuotePayload {
   d?: FyersQuoteData[];
 }
 
+import { recordFyersRequest } from "../../modules/market-data/domain/fyers-request-counter.js";
 import {
   FyersRateLimitedError,
   classifyFyersRateLimit,
@@ -123,6 +124,7 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
 
     for (let attempt = 0; ; attempt += 1) {
       try {
+        recordFyersRequest("quotes:collector");
         response = await this.fetch(endpoint, {
           headers: {
             Authorization: `${this.options.appId}:${accessToken}`,

@@ -1,4 +1,5 @@
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
+import { recordFyersRequest } from "../../modules/market-data/domain/fyers-request-counter.js";
 import type {
   ExpiryKind,
   OptionChainQuote,
@@ -93,6 +94,7 @@ export class FyersOptionChainClient {
     // one. Naming the expiry is the only way to reach any other listed contract's book.
     if (input.expiryToken) endpoint.searchParams.set("timestamp", input.expiryToken);
 
+    recordFyersRequest("optionchain");
     const response = await this.fetch(endpoint, {
       headers: { Authorization: `${this.options.appId}:${accessToken}` },
     });

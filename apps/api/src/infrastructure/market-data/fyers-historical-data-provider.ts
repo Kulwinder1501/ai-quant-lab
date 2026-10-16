@@ -1,3 +1,4 @@
+import { recordFyersRequest } from "../../modules/market-data/domain/fyers-request-counter.js";
 import type {
   HistoricalMarketCandle,
   HistoricalMarketDataProvider,
@@ -202,6 +203,7 @@ export class FyersHistoricalDataProvider implements HistoricalMarketDataProvider
     let payload: FyersHistoryResponse | undefined;
     for (let attempt = 0; ; attempt += 1) {
       try {
+        recordFyersRequest("history");
         response = await this.fetch(endpoint, {
           headers: { Authorization: `${this.options.appId}:${accessToken}` },
         });
