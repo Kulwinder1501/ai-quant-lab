@@ -9,7 +9,8 @@ import { PostgresInstrumentRepository } from "../../infrastructure/database/repo
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
 import { CollectLiveMarketData, type LiveMarketSubscription } from "../../modules/market-data/application/collect-live-market-data.js";
 import type { Instrument } from "../../modules/market-data/domain/instrument.js";
-import type { LiveMarketDataProvider } from "../../modules/market-data/domain/live-market-data-provider.js";
+import type { LiveMarketDataProvider, LiveMarketQuote } from "../../modules/market-data/domain/live-market-data-provider.js";
+import { isFyersRateLimitedError } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { isNseHoliday, istDateKey } from "../../modules/market-data/domain/nse-session-calendar.js";
@@ -177,13 +178,45 @@ async function main(): Promise<void> {
           lastLoggedHolidayDate = todayKey;
         }
       } else {
+        /*
+         * One quote fetch per poll, shared by every timeframe, and a pause instead of a crash when Fyers refuses.
+         *
+         * On 2026-10-16 the 5,000-a-day quota ran out; the collector died on the 429 and was restarted 86 times
+         * (110 for the scalp one), each restart asking again, while every poll had been fetching the same symbols
+         * once per timeframe. A rate limit now logs and waits out its cooldown, still sealing bars that are due;
+         * any other error behaves as before.
+         */
+        let quotes: LiveMarketQuote[] | undefined;
+        let pauseMs = 0;
+        if (session.isOpen(new Date())) {
+          try {
+            quotes = await provider.fetchQuotes(subscriptions.map((subscription) => subscription.providerInstrumentId));
+          } catch (error) {
+            if (!isFyersRateLimitedError(error)) throw error;
+            quotes = [];
+            pauseMs = Math.max(0, error.retryAtMs - Date.now());
+            console.warn(JSON.stringify({
+              level: "warn",
+              message: "Fyers rate limit; live collection paused",
+              kind: error.kind,
+              retryInSeconds: Math.ceil(pauseMs / 1_000),
+            }));
+          }
+        }
         for (const timeframe of timeframes) {
-          const result = await collector.execute({ subscriptions, timeframe, ingestionId, now: new Date() });
+          const result = await collector.execute({
+            subscriptions,
+            timeframe,
+            ingestionId,
+            now: new Date(),
+            ...(quotes === undefined ? {} : { quotes }),
+          });
           finalizedCount += result.candlesFinalized;
           // Logged per timeframe: "the poll ran" and "this timeframe sealed a bar" are different
           // facts, and a single merged line hides which aggregator is falling behind.
           console.info(JSON.stringify({ level: "info", message: "Live poll complete", timeframe, ...result }));
         }
+        if (pauseMs > 0) await delay(pauseMs);
       }
       if (getOption(argumentsList, "once") === "true" || argumentsList.includes("--once") || stopping) {
         break;

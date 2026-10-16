@@ -212,6 +212,40 @@ describe("CollectLiveMarketData", () => {
     expect(values.some((candle) => candle.timeframe === "5m" && !candle.isComplete)).toBe(true);
   });
 
+  // The CLI fetches once per poll and hands the same quotes to every timeframe: five fetches per 30-second poll in the
+  // main collector (two per 15 seconds in the scalp one) became one, which matters when the quota is 5,000 a day.
+  it("builds every timeframe from quotes it is handed, without fetching again", async () => {
+    let fetches = 0;
+    const provider: LiveMarketDataProvider = {
+      id: "test-live",
+      fetchQuotes: async () => { fetches += 1; return []; },
+    };
+    const candles = candleRepository();
+    const collector = new CollectLiveMarketData(provider, candles.repository, new NseMarketSession(), new Date("2026-07-24T03:45:00Z"));
+    const shared: LiveMarketQuote = {
+      providerInstrumentId: "NSE:RELIANCE",
+      lastPrice: "100",
+      cumulativeVolume: "1000",
+      observedAt: new Date("2026-07-24T03:45:10Z"),
+      exchangeTimestamp: null,
+    };
+
+    for (const timeframe of ["1m", "5m"] as const) {
+      await collector.execute({
+        subscriptions: [{ instrument, providerInstrumentId: "NSE:RELIANCE" }],
+        timeframe,
+        ingestionId: "live-ingestion",
+        now: new Date("2026-07-24T03:45:15Z"),
+        quotes: [shared],
+      });
+    }
+
+    expect(fetches).toBe(0);
+    const values = [...candles.saved.values()];
+    expect(values.some((candle) => candle.timeframe === "1m")).toBe(true);
+    expect(values.some((candle) => candle.timeframe === "5m")).toBe(true);
+  });
+
   it("leaves an earlier run's unfinished bar incomplete rather than sealing a guess", async () => {
     // Sealing it would make a partial permanent, and `skipExisting` skips only completed
     // candles -- so left incomplete, the historical fetch corrects it.

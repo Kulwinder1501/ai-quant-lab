@@ -16,6 +16,11 @@ export interface CollectLiveMarketDataInput {
   timeframe: HistoricalTimeframe;
   ingestionId: string;
   now?: Date;
+  /**
+   * Quotes fetched once for this poll and shared by every timeframe. Without them each timeframe fetched the same
+   * symbols again: five calls per 30-second poll in the main collector, two per 15 seconds in the scalp one.
+   */
+  quotes?: LiveMarketQuote[];
 }
 
 export interface CollectLiveMarketDataResult {
@@ -116,7 +121,8 @@ export class CollectLiveMarketData {
     }
 
     const quoteByProviderId = new Map<string, LiveMarketQuote>();
-    const quotes = await this.provider.fetchQuotes(input.subscriptions.map((subscription) => subscription.providerInstrumentId));
+    const quotes = input.quotes
+      ?? await this.provider.fetchQuotes(input.subscriptions.map((subscription) => subscription.providerInstrumentId));
     for (const quote of quotes) {
       quoteByProviderId.set(quote.providerInstrumentId, quote);
     }

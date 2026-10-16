@@ -86,9 +86,12 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   const oandaQuoteClient = oandaAccountId && oandaAccessToken
     ? new OandaQuoteClient({ accountId: oandaAccountId, accessToken: oandaAccessToken, environment: oandaEnvironment })
     : null;
+  // Identical quote requests within this window share one Fyers call. The UI's live-price, market-watch and live-agent
+  // polls asked for the same few symbols about 860 times in two hours on 2026-10-16.
+  const QUOTE_CACHE_TTL_MS = 2_000;
   const marketQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
-      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId })
+      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, cacheTtlMs: QUOTE_CACHE_TTL_MS })
       : null,
     undefined,
     oandaQuoteClient,
@@ -107,7 +110,7 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
    */
   const streamingQuoteClient = new ProviderRoutedQuoteClient(
     fyersTokenService && appId
-      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0 })
+      ? new FyersQuoteClient({ tokenService: fyersTokenService, appId, maxRetries: 0, cacheTtlMs: QUOTE_CACHE_TTL_MS })
       : null,
     undefined,
     oandaQuoteClient,

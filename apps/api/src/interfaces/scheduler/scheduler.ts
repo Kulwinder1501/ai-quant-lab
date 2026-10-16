@@ -37,6 +37,11 @@ import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-au
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
 import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/scheduled-job.js";
 import { createSchedulerLogSink } from "./scheduler-log-sink.js";
+import {
+  FYERS_REST_JOB_TYPES,
+  classifyFyersRateLimitFromText,
+  fyersRateLimitGate,
+} from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
@@ -294,9 +299,33 @@ async function main(): Promise<void> {
    */
   const inFlightRuns = new Map<string, { jobType: string; scheduledFor: Date }>();
 
+  /** When each gated job last logged a skip, so a cooldown does not write a line per job per minute. */
+  const gateSkipLoggedAt = new Map<string, number>();
+
   async function schedule(jobType: string, task: () => Promise<void>): Promise<void> {
     const scheduledFor = toDueMinute(new Date());
     const runKey = `${jobType}@${scheduledFor.toISOString()}`;
+    /*
+     * While Fyers is refusing -- the 5,000-a-day quota ran out at 11:04 IST on 2026-10-16 -- a polling job cannot
+     * succeed, and starting it only spends a request and an npm process to be told so. The cooldown is set when one
+     * of them fails with the provider's own rate-limit text (below); the exit sweep is not gated, it reads stored ticks.
+     */
+    if (FYERS_REST_JOB_TYPES.has(jobType)) {
+      const gate = fyersRateLimitGate.state();
+      if (gate.blocked) {
+        const last = gateSkipLoggedAt.get(jobType) ?? 0;
+        if (Date.now() - last > 5 * 60_000) {
+          gateSkipLoggedAt.set(jobType, Date.now());
+          log("Scheduled job skipped", {
+            jobType,
+            scheduledFor: scheduledFor.toISOString(),
+            skippedReason: `FYERS_RATE_LIMIT_${gate.kind}`,
+            retryAt: new Date(gate.retryAtMs).toISOString(),
+          });
+        }
+        return;
+      }
+    }
     try {
       // Every job here skips rather than overlaps itself. None of them is faster for
       // running twice at once, and INDICES_INTRADAY -- a `*/1` cron over a job that takes
@@ -328,6 +357,10 @@ async function main(): Promise<void> {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (FYERS_REST_JOB_TYPES.has(jobType)) {
+        const limit = classifyFyersRateLimitFromText(message);
+        if (limit !== null && limit !== "UNKNOWN") fyersRateLimitGate.open(limit);
+      }
       logError("Scheduled job failed", {
         jobType,
         scheduledFor: scheduledFor.toISOString(),

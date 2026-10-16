@@ -1,5 +1,12 @@
 import type { MarketQuote, MarketQuoteReader } from "../../modules/market-data/domain/market-quote.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
+import {
+  FyersRateLimitedError,
+  classifyFyersRateLimit,
+  fyersRateLimitGate,
+  type FyersRateLimitGate,
+  type FyersRateLimitKind,
+} from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { FYERS_PROVIDER_ID } from "./fyers-token-service.js";
 
 type FetchFunction = typeof fetch;
@@ -67,6 +74,14 @@ export interface FyersQuoteClientOptions {
   sleep?: (ms: number) => Promise<void>;
   maxRetryDelayMs?: number;
   requestTimeoutMs?: number;
+  /** Shared cooldown after a rate limit. Defaults to the process-wide gate; tests inject their own. */
+  rateLimitGate?: FyersRateLimitGate;
+  /**
+   * How long an identical request's result is reused, and how long concurrent identical requests share one call.
+   * Off by default so a client behaves as it always did; the API turns it on. On 2026-10-16 the UI's live-price,
+   * market-watch and live-agent polls made about 860 calls in two hours for the same handful of symbols.
+   */
+  cacheTtlMs?: number;
 }
 
 /** Canonical-symbol quote reader backed only by the Fyers Quotes API with retry on 429 rate limits. */
@@ -77,6 +92,9 @@ export class FyersQuoteClient implements MarketQuoteReader {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly maxRetryDelayMs: number;
   private readonly requestTimeoutMs: number;
+  private readonly gate: FyersRateLimitGate;
+  private readonly cacheTtlMs: number;
+  private readonly cache = new Map<string, { at: number; promise: Promise<Map<string, MarketQuote>> }>();
 
   constructor(private readonly options: FyersQuoteClientOptions) {
     if (!options.appId.trim()) throw new Error("Fyers quotes require an app ID.");
@@ -86,6 +104,8 @@ export class FyersQuoteClient implements MarketQuoteReader {
     this.sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRetryDelayMs = options.maxRetryDelayMs ?? MAX_RETRY_DELAY_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.gate = options.rateLimitGate ?? fyersRateLimitGate;
+    this.cacheTtlMs = options.cacheTtlMs ?? 0;
   }
 
   async quoteSymbol(symbol: string): Promise<MarketQuote | null> {
@@ -94,8 +114,29 @@ export class FyersQuoteClient implements MarketQuoteReader {
 
   async quoteSymbols(symbols: readonly string[]): Promise<Map<string, MarketQuote>> {
     const canonical = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
+    if (canonical.length === 0) return new Map();
+    if (this.cacheTtlMs <= 0) {
+      this.gate.assertOpen();
+      return this.requestQuotes(canonical);
+    }
+
+    const key = [...canonical].sort().join("|");
+    const cached = this.cache.get(key);
+    // A fresh result, or a call still in flight, answers an identical request without another round trip.
+    if (cached && Date.now() - cached.at < this.cacheTtlMs) return new Map(await cached.promise);
+
+    this.gate.assertOpen();
+    const entry = { at: Date.now(), promise: this.requestQuotes(canonical) };
+    this.cache.set(key, entry);
+    // A failure is never cached: the next caller asks again (and the gate decides whether that sends anything).
+    entry.promise.catch(() => {
+      if (this.cache.get(key) === entry) this.cache.delete(key);
+    });
+    return new Map(await entry.promise);
+  }
+
+  private async requestQuotes(canonical: string[]): Promise<Map<string, MarketQuote>> {
     const result = new Map<string, MarketQuote>();
-    if (canonical.length === 0) return result;
 
     const providerToCanonical = new Map(
       canonical.map((symbol) => [resolveFyersSymbol(symbol).toUpperCase(), symbol]),
@@ -111,6 +152,7 @@ export class FyersQuoteClient implements MarketQuoteReader {
       let response: Response | undefined;
       let payload: FyersQuotePayload | undefined;
       let retryAfterSeconds: number | null = null;
+      let limitKind: FyersRateLimitKind | null = null;
 
       for (let attempt = 0; ; attempt += 1) {
         try {
@@ -143,7 +185,13 @@ export class FyersQuoteClient implements MarketQuoteReader {
           retryAfterSeconds = retryAfter;
         }
 
-        if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries) break;
+        limitKind = rateLimited
+          ? classifyFyersRateLimit({ status: response.status, code: payload?.code, message: payload?.message })
+          : null;
+        // The daily cap and the per-minute limit do not clear in half a second: a retry only spends another request.
+        const hopeless = limitKind === "DAILY" || limitKind === "PER_MINUTE";
+
+        if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries || hopeless) break;
 
         // Capped deliberately: see MAX_RETRY_DELAY_MS. A multi-minute `retry-after` is a signal to
         // give up on this call, not an instruction to sleep through it holding a request open.
@@ -160,10 +208,14 @@ export class FyersQuoteClient implements MarketQuoteReader {
         const rateLimitDetail = retryAfterSeconds === null
           ? ""
           : ` Provider asked for a ${retryAfterSeconds}s cooldown (not waited out; capped at ${this.maxRetryDelayMs}ms per attempt).`;
-        throw new Error(
-          `Fyers quote request failed with HTTP ${response?.status ?? "none"}, code ${payload?.code ?? "none"}. `
-          + `${payload?.message ?? "No quote rows returned."}${rateLimitDetail}`,
-        );
+        const failure = `Fyers quote request failed with HTTP ${response?.status ?? "none"}, code ${payload?.code ?? "none"}. `
+          + `${payload?.message ?? "No quote rows returned."}${rateLimitDetail}`;
+        if (limitKind !== null) {
+          // Everyone sharing the gate now fails fast instead of each spending a request to learn the same thing.
+          if (limitKind !== "UNKNOWN") this.gate.open(limitKind);
+          throw new FyersRateLimitedError(failure, limitKind, Date.now() + Math.max(this.gate.remainingMs(), 1_000));
+        }
+        throw new Error(failure);
       }
 
       const observedAt = (this.options.now ?? (() => new Date()))();

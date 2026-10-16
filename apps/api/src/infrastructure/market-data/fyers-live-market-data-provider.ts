@@ -20,7 +20,17 @@ interface FyersQuotePayload {
   d?: FyersQuoteData[];
 }
 
+import {
+  FyersRateLimitedError,
+  classifyFyersRateLimit,
+  fyersRateLimitGate,
+  type FyersRateLimitGate,
+  type FyersRateLimitKind,
+} from "../../modules/market-data/domain/fyers-rate-limit.js";
+
 export interface FyersLiveMarketDataProviderOptions {
+  /** Shared cooldown after a rate limit. Defaults to the process-wide gate; tests inject their own. */
+  rateLimitGate?: FyersRateLimitGate;
   tokenService: FyersTokenService;
   appId: string;
   fetch?: FetchFunction;
@@ -76,6 +86,7 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
   private readonly baseUrl: string;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly gate: FyersRateLimitGate;
 
   constructor(private readonly options: FyersLiveMarketDataProviderOptions) {
     if (!options.appId.trim()) {
@@ -85,6 +96,7 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
     this.baseUrl = options.baseUrl ?? "https://api-t1.fyers.in";
     this.maxRetries = options.maxRetries ?? 3;
     this.sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.gate = options.rateLimitGate ?? fyersRateLimitGate;
   }
 
   async fetchQuotes(providerInstrumentIds: string[]): Promise<LiveMarketQuote[]> {
@@ -101,11 +113,13 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
   }
 
   private async fetchBatch(providerInstrumentIds: string[], accessToken: string): Promise<LiveMarketQuote[]> {
+    this.gate.assertOpen();
     const endpoint = new URL("/data/quotes", this.baseUrl);
     endpoint.searchParams.set("symbols", providerInstrumentIds.join(","));
 
     let response: Response | undefined;
     let payload: FyersQuotePayload | undefined;
+    let limitKind: FyersRateLimitKind | null = null;
 
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -126,7 +140,12 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
       payload = await response.json().catch(() => undefined) as FyersQuotePayload | undefined;
       const rateLimited = response.status === 429 || payload?.code === 429;
       const retryableServerFailure = response.status === 408 || response.status >= 500;
-      if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries) break;
+      limitKind = rateLimited
+        ? classifyFyersRateLimit({ status: response.status, code: payload?.code, message: payload?.message })
+        : null;
+      // The daily cap and the per-minute limit do not clear in half a second: a retry only spends another request.
+      const hopeless = limitKind === "DAILY" || limitKind === "PER_MINUTE";
+      if ((!rateLimited && !retryableServerFailure) || attempt >= this.maxRetries || hopeless) break;
 
       const retryAfter = Number(response.headers.get("retry-after"));
       const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
@@ -137,7 +156,12 @@ export class FyersLiveMarketDataProvider implements LiveMarketDataProvider {
     
     if (!response || !response.ok || payload?.s !== "ok" || !Array.isArray(payload.d)) {
       const detail = payload?.message ? ` ${payload.message}` : "";
-      throw new Error(`Fyers quote request failed with HTTP ${response?.status ?? "none"}.${detail}`);
+      const failure = `Fyers quote request failed with HTTP ${response?.status ?? "none"}.${detail}`;
+      if (limitKind !== null) {
+        if (limitKind !== "UNKNOWN") this.gate.open(limitKind);
+        throw new FyersRateLimitedError(failure, limitKind, Date.now() + Math.max(this.gate.remainingMs(), 1_000));
+      }
+      throw new Error(failure);
     }
 
     const observedAt = new Date();
