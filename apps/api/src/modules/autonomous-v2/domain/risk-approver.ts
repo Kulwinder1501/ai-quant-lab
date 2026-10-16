@@ -51,14 +51,25 @@ const maxDrawdownFraction = 0.1;
 const riskFractionPerTrade = 0.005;
 const marginFraction = 0.2;
 
+export const EXCESSIVE_OPTION_FRICTION_REASON = "EXCESSIVE_OPTION_FRICTION";
+
 export interface ShadowOptionFrictionTelemetry {
   readonly estimatedFrictionPoints: number;
   readonly expectedPremiumMovePoints: number;
   readonly frictionToRewardRatio: number;
   readonly wouldVeto: boolean;
-  readonly vetoReason?: string;
+  readonly vetoReason?: typeof EXCESSIVE_OPTION_FRICTION_REASON;
 }
 
+/**
+ * Log-only evaluation of option friction against trade geometry.
+ *
+ * Measured values derived from 3.3 million ticks in option_premium_ticks and
+ * the Zerodha/NSE fee schedule in docs/2026-09-29-brain-v22-cost-model.md:
+ * - BANKNIFTY: 3.334 pts measured bid/ask spread + 4.35 pts statutory round-trip fees = 7.68 pts.
+ * - NIFTY50: 0.463 pts measured bid/ask spread + 2.49 pts statutory round-trip fees = 2.95 pts.
+ * - Delta: ATM option benchmark delta ~0.50.
+ */
 export function computeShadowOptionFriction(input: {
   readonly instrumentSymbol: string;
   readonly entryReference: number;
@@ -68,20 +79,14 @@ export function computeShadowOptionFriction(input: {
   const targetPoints = Math.abs(input.targetPrice - input.entryReference);
   // Assumes ATM option with delta ~0.50
   const expectedPremiumMovePoints = targetPoints * 0.50;
-  // Estimated per-contract round-trip friction in premium points:
-  // - BANKNIFTY: 3.5 pts spread + ~3.5 pts fees = ~7.0 pts
-  // - NIFTY50: 1.0 pt spread + ~2.0 pts fees = ~3.0 pts
-  const estimatedFrictionPoints = isBankNifty ? 7.0 : 3.0;
+  // Empirically measured round-trip friction in premium points:
+  const estimatedFrictionPoints = isBankNifty ? 7.68 : 2.95;
   const frictionToRewardRatio = expectedPremiumMovePoints > 0
     ? Number((estimatedFrictionPoints / expectedPremiumMovePoints).toFixed(4))
     : 1.0;
 
   const wouldVeto = frictionToRewardRatio > 0.35 || expectedPremiumMovePoints <= estimatedFrictionPoints;
-  const vetoReason = wouldVeto
-    ? (expectedPremiumMovePoints <= estimatedFrictionPoints
-        ? "EXPECTED_MOVE_CANNOT_COVER_OPTION_FRICTION"
-        : "ESTIMATED_OPTION_FRICTION_EXCEEDS_35_PERCENT")
-    : undefined;
+  const vetoReason = wouldVeto ? EXCESSIVE_OPTION_FRICTION_REASON : undefined;
 
   return Object.freeze({
     estimatedFrictionPoints,

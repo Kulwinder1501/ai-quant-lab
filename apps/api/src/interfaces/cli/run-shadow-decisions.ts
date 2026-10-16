@@ -245,6 +245,7 @@ async function main(): Promise<void> {
   if (symbols.length === 0) throw new Error("--instruments must contain at least one NSE symbol.");
   const barAgeOverrideMs = maxBarAgeMs(args);
   const chosenProducer = producerChoice(args);
+  const enableEmpiricalLiquidityRule = args.includes("--enable-empirical-liquidity-rule");
   const timeframes = (getOption(args, "timeframes") ?? SHADOW_TIMEFRAMES.join(","))
     .split(",").map((value) => value.trim()).filter(Boolean);
   if (timeframes.length === 0) throw new Error("--timeframes must contain at least one timeframe.");
@@ -497,12 +498,35 @@ async function main(): Promise<void> {
               institutionalFlow,
               optionChain: pipelineOptionChain,
               executionChain: pipelineExecutionChain,
+              enableEmpiricalLiquidityRule,
             });
 
             const pipelineRun = runDecisionPipeline(pipelineInput);
             await decisionPipelineLedger.append(pipelineRun);
 
+            const riskStage = pipelineRun.stages.risk;
+            const longFriction = riskStage?.long.outcome === "APPROVED" ? riskStage.long.value.positionSize.shadowOptionFriction : undefined;
+            const shortFriction = riskStage?.short.outcome === "APPROVED" ? riskStage.short.value.positionSize.shadowOptionFriction : undefined;
+            const wouldVeto = (longFriction?.wouldVeto ?? false) || (shortFriction?.wouldVeto ?? false);
+
+            if (longFriction || shortFriction) {
+              console.log(JSON.stringify({
+                source: "P8_SHADOW_OPTION_FRICTION",
+                decisionId: pipelineRun.decisionId,
+                symbol,
+                timeframe,
+                barCloseTime: latest.candle.closeTime.toISOString(),
+                longFriction: longFriction ?? null,
+                shortFriction: shortFriction ?? null,
+                wouldVeto,
+                vetoReason: wouldVeto ? "EXCESSIVE_OPTION_FRICTION" : null,
+              }));
+            }
+
             const pipelineV2 = comparableAction(canonicalDecisionPipelineOutcome(pipelineRun));
+            const shadowVetoTag = wouldVeto ? "[SHADOW_VETO: EXCESSIVE_OPTION_FRICTION]" : "";
+            const v2DetailToRecord = [pipelineV2.detail, shadowVetoTag].filter(Boolean).join(" ");
+
             const pipelineRecorded = await observations.record({
               observation: {
                 comparisonKey: `${symbol}@${latest.candle.timeframe}@${latest.candle.closeTime.toISOString()}`,
@@ -514,7 +538,7 @@ async function main(): Promise<void> {
               comparisonVersion: thesisComparisonVersion,
               producerId: "native-pipeline",
               legacyDetail: legacy.detail,
-              v2Detail: pipelineV2.detail,
+              v2Detail: v2DetailToRecord,
             });
 
             records.push({
@@ -530,6 +554,7 @@ async function main(): Promise<void> {
               outcome: pipelineRun.outcome.kind,
               contextSnapshotId: sealed.snapshotId.slice(0, 12),
               tapeLiveness: tape.liveness,
+              ...(wouldVeto ? { shadowVeto: "EXCESSIVE_OPTION_FRICTION" } : {}),
             });
           }
         } catch (error) {

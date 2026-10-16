@@ -132,6 +132,7 @@ export interface DecisionPipelineInputFacts {
   readonly institutionalFlow: { readonly fiiCashNetCr: number | null; readonly diiCashNetCr: number | null } | null;
   readonly optionChain: OptionChainSnapshot | null;
   readonly executionChain: OptionChainSnapshot | null;
+  readonly enableEmpiricalLiquidityRule?: boolean;
 }
 
 /** The canonical ATR definition every live consumer keys on (`ai-autonomous-agent.ts`'s `PRODUCTION_INDICATOR_VERSION`, etc.). */
@@ -204,5 +205,6 @@ export function buildDecisionPipelineInput(facts: DecisionPipelineInputFacts): D
     lotSize: facts.instrumentLotSize,
     optionChain: facts.optionChain,
     executionChain: facts.executionChain,
+    enableEmpiricalLiquidityRule: facts.enableEmpiricalLiquidityRule,
   };
 }

@@ -86,6 +86,7 @@ export interface DecisionPipelineInput {
   readonly tickSize: number;
   readonly entryReference: number;
   readonly atrValue: number | null;
+  readonly enableEmpiricalLiquidityRule?: boolean;
 
   // P7 siblings
   readonly costBps: number;
@@ -249,6 +250,7 @@ export function runDecisionPipeline(input: DecisionPipelineInput): DecisionPipel
     tickSize: input.tickSize,
     entryReference: input.entryReference,
     atrValue: input.atrValue,
+    enableEmpiricalLiquidityRule: input.enableEmpiricalLiquidityRule,
   });
   if (thesisResult.outcome === "DEFERRED") {
     return {
