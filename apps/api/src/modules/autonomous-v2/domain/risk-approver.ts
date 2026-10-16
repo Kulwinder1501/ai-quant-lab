@@ -51,6 +51,47 @@ const maxDrawdownFraction = 0.1;
 const riskFractionPerTrade = 0.005;
 const marginFraction = 0.2;
 
+export interface ShadowOptionFrictionTelemetry {
+  readonly estimatedFrictionPoints: number;
+  readonly expectedPremiumMovePoints: number;
+  readonly frictionToRewardRatio: number;
+  readonly wouldVeto: boolean;
+  readonly vetoReason?: string;
+}
+
+export function computeShadowOptionFriction(input: {
+  readonly instrumentSymbol: string;
+  readonly entryReference: number;
+  readonly targetPrice: number;
+}): ShadowOptionFrictionTelemetry {
+  const isBankNifty = input.instrumentSymbol.toUpperCase().includes("BANKNIFTY");
+  const targetPoints = Math.abs(input.targetPrice - input.entryReference);
+  // Assumes ATM option with delta ~0.50
+  const expectedPremiumMovePoints = targetPoints * 0.50;
+  // Estimated per-contract round-trip friction in premium points:
+  // - BANKNIFTY: 3.5 pts spread + ~3.5 pts fees = ~7.0 pts
+  // - NIFTY50: 1.0 pt spread + ~2.0 pts fees = ~3.0 pts
+  const estimatedFrictionPoints = isBankNifty ? 7.0 : 3.0;
+  const frictionToRewardRatio = expectedPremiumMovePoints > 0
+    ? Number((estimatedFrictionPoints / expectedPremiumMovePoints).toFixed(4))
+    : 1.0;
+
+  const wouldVeto = frictionToRewardRatio > 0.35 || expectedPremiumMovePoints <= estimatedFrictionPoints;
+  const vetoReason = wouldVeto
+    ? (expectedPremiumMovePoints <= estimatedFrictionPoints
+        ? "EXPECTED_MOVE_CANNOT_COVER_OPTION_FRICTION"
+        : "ESTIMATED_OPTION_FRICTION_EXCEEDS_35_PERCENT")
+    : undefined;
+
+  return Object.freeze({
+    estimatedFrictionPoints,
+    expectedPremiumMovePoints,
+    frictionToRewardRatio,
+    wouldVeto,
+    ...(vetoReason ? { vetoReason } : {}),
+  });
+}
+
 export interface PositionSize {
   readonly quantity: number;
   readonly lotSize: number;
@@ -58,6 +99,7 @@ export interface PositionSize {
   readonly estimatedRiskAmount: number;
   readonly notional: number;
   readonly capitalRequired: number;
+  readonly shadowOptionFriction?: ShadowOptionFrictionTelemetry;
 }
 
 export interface SideRiskApproval {
@@ -160,6 +202,12 @@ function assessSide(
     return rejected(["INSUFFICIENT_CAPITAL"]);
   }
 
+  const shadowOptionFriction = computeShadowOptionFriction({
+    instrumentSymbol: input.thesis.instrumentSymbol,
+    entryReference: geometry.entryReference,
+    targetPrice: geometry.targetPrice,
+  });
+
   return approved(Object.freeze({
     side,
     positionSize: Object.freeze({
@@ -169,6 +217,7 @@ function assessSide(
       estimatedRiskAmount: quantity * riskPerUnit,
       notional,
       capitalRequired,
+      shadowOptionFriction,
     }),
   }));
 }

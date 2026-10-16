@@ -77,9 +77,9 @@ function rejectedEdgeSide(): SideEdgeResult {
   return { outcome: "REJECTED", reasons: ["NO_APPROVED_THESIS_FOR_SIDE"] };
 }
 
-function edge(overrides: { long?: SideEdgeResult; short?: SideEdgeResult } = {}): DualSidedEdgeAssessment {
+function edge(overrides: { long?: SideEdgeResult; short?: SideEdgeResult; instrumentSymbol?: string } = {}): DualSidedEdgeAssessment {
   return Object.freeze({
-    instrumentSymbol: "NIFTY50",
+    instrumentSymbol: overrides.instrumentSymbol ?? "NIFTY50",
     decisionAt,
     observedIn,
     long: overrides.long ?? approvedEdgeSide(),
@@ -296,6 +296,7 @@ describe("structural no-composite-score proof", () => {
       "notional",
       "quantity",
       "riskPerUnit",
+      "shadowOptionFriction",
     ]);
   });
 
@@ -350,5 +351,55 @@ describe("freezing and determinism", () => {
   it("produces an identical approval for the same input twice", () => {
     const sameInput = input();
     expect(approvedRiskApproval(sameInput)).toEqual(approvedRiskApproval(sameInput));
+  });
+});
+
+describe("shadow option friction gate (log-only mode)", () => {
+  it("evaluates healthy NIFTY50 geometry without vetoing", () => {
+    // 75 index points target -> 37.5 premium points vs 3.0 friction -> ratio 0.08 (< 0.35)
+    const approval = approvedRiskApproval({
+      thesis: thesis({
+        long: approvedThesisSide({ entryReference: 24000, targetPrice: 24075 }),
+      }),
+    });
+    const long = expectApprovedSide(approval.long);
+    expect(long.positionSize.shadowOptionFriction).toBeDefined();
+    expect(long.positionSize.shadowOptionFriction?.wouldVeto).toBe(false);
+    expect(long.positionSize.shadowOptionFriction?.estimatedFrictionPoints).toBe(3.0);
+    expect(long.positionSize.shadowOptionFriction?.expectedPremiumMovePoints).toBe(37.5);
+    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.08);
+  });
+  it("identifies unviable BANKNIFTY geometry in shadow mode while preserving approval", () => {
+    // 20 index points target -> 10 premium points vs 7.0 friction -> ratio 0.70 (> 0.35)
+    const approval = approvedRiskApproval({
+      thesis: Object.freeze({
+        ...thesis({
+          long: approvedThesisSide({ entryReference: 51000, stopLoss: 50850, targetPrice: 51020 }),
+        }),
+        instrumentSymbol: "BANKNIFTY",
+      }),
+      edge: edge({
+        instrumentSymbol: "BANKNIFTY",
+        long: approvedEdgeSide(),
+      }),
+    });
+    // Strict invariant: outcome must remain APPROVED (log-only mode, zero execution gating)
+    expect(approval.long.outcome).toBe("APPROVED");
+    const long = expectApprovedSide(approval.long);
+    expect(long.positionSize.shadowOptionFriction?.wouldVeto).toBe(true);
+    expect(long.positionSize.shadowOptionFriction?.vetoReason).toBe("ESTIMATED_OPTION_FRICTION_EXCEEDS_35_PERCENT");
+    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.7);
+  });
+
+  it("flags geometry where target premium move cannot cover friction", () => {
+    // 10 index points target on NIFTY -> 5 premium points vs 3 friction -> ratio 0.6 (> 0.35)
+    const approval = approvedRiskApproval({
+      thesis: thesis({
+        long: approvedThesisSide({ entryReference: 24000, targetPrice: 24010 }),
+      }),
+    });
+    const long = expectApprovedSide(approval.long);
+    expect(long.positionSize.shadowOptionFriction?.wouldVeto).toBe(true);
+    expect(long.positionSize.shadowOptionFriction?.vetoReason).toBe("ESTIMATED_OPTION_FRICTION_EXCEEDS_35_PERCENT");
   });
 });
