@@ -134,10 +134,21 @@ export function OptionChainDashboard() {
     return () => controller.abort();
   }, [fetchChain]);
 
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 2000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   // Live streaming via SSE
   useEffect(() => {
     if (!chain?.available) return;
-    return subscribeToChainTicks(underlying, (tick) => setChain((prev) => applyChainTick(prev, tick)));
+    return subscribeToChainTicks(underlying, (tick) => {
+      setLastTickAt(Date.now());
+      setChain((prev) => applyChainTick(prev, tick));
+    });
   }, [chain?.available, underlying]);
 
   const spreadTone = useCallback((leg: Leg | null) => {
@@ -306,9 +317,22 @@ export function OptionChainDashboard() {
                   {chain.expiries?.map((entry) => `${entry.expiryDate} ${entry.expiryKind}`).join(" · ")}
                 </span>
               </p>
-              <p className="text-xs text-slate-500">
-                observed {chain.observedAt?.slice(0, 19).replace("T", " ")} UTC · {chain.provider}
-              </p>
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                {lastTickAt && now - lastTickAt < 10000 ? (
+                  <span className="flex items-center gap-1.5 font-semibold text-emerald-400">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                    Live ticks streaming
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-slate-400">
+                    <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
+                    Connecting live feed…
+                  </span>
+                )}
+                <span className="text-slate-500">
+                  (Snapshot: {chain.observedAt?.slice(0, 19).replace("T", " ")} UTC · {chain.provider})
+                </span>
+              </div>
             </div>
 
             <div className="overflow-x-auto">

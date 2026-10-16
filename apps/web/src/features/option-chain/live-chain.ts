@@ -260,8 +260,7 @@ export function subscribeToChainTicks(underlying: string, onTick: (tick: ChainTi
       }
     };
     eventSource.onerror = (err) => {
-      console.error("SSE Error:", err);
-      eventSource?.close();
+      console.warn("Option chain SSE connection interrupted, auto-reconnecting:", err);
     };
   } catch (err) {
     console.error("Failed to setup SSE:", err);
