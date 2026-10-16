@@ -39,8 +39,8 @@ import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/sch
 import { createSchedulerLogSink } from "./scheduler-log-sink.js";
 import {
   FYERS_REST_JOB_TYPES,
+  FyersRateLimitGate,
   classifyFyersRateLimitFromText,
-  fyersRateLimitGate,
 } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
@@ -299,6 +299,21 @@ async function main(): Promise<void> {
    */
   const inFlightRuns = new Map<string, { jobType: string; scheduledFor: Date }>();
 
+  /**
+   * One cooldown per job, not one for all of them: Fyers' limits are per endpoint. On 2026-10-16 the quote endpoint
+   * was out of requests while the history endpoint, which INDICES_INTRADAY, INDIA_VIX_INTRADAY and
+   * INDEX_FUTURES_INTRADAY use, kept answering -- so a shared gate would have paused jobs that still worked. Each job
+   * learns for itself, costing a failed run per cooldown for the jobs that really are refused.
+   */
+  const fyersJobGates = new Map<string, FyersRateLimitGate>();
+  const fyersGateFor = (jobType: string): FyersRateLimitGate => {
+    let gate = fyersJobGates.get(jobType);
+    if (gate === undefined) {
+      gate = new FyersRateLimitGate();
+      fyersJobGates.set(jobType, gate);
+    }
+    return gate;
+  };
   /** When each gated job last logged a skip, so a cooldown does not write a line per job per minute. */
   const gateSkipLoggedAt = new Map<string, number>();
 
@@ -311,7 +326,7 @@ async function main(): Promise<void> {
      * of them fails with the provider's own rate-limit text (below); the exit sweep is not gated, it reads stored ticks.
      */
     if (FYERS_REST_JOB_TYPES.has(jobType)) {
-      const gate = fyersRateLimitGate.state();
+      const gate = fyersGateFor(jobType).state();
       if (gate.blocked) {
         const last = gateSkipLoggedAt.get(jobType) ?? 0;
         if (Date.now() - last > 5 * 60_000) {
@@ -359,7 +374,7 @@ async function main(): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       if (FYERS_REST_JOB_TYPES.has(jobType)) {
         const limit = classifyFyersRateLimitFromText(message);
-        if (limit !== null && limit !== "UNKNOWN") fyersRateLimitGate.open(limit);
+        if (limit !== null && limit !== "UNKNOWN") fyersGateFor(jobType).open(limit);
       }
       logError("Scheduled job failed", {
         jobType,
