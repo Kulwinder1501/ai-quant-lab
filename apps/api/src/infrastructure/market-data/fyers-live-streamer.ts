@@ -56,6 +56,20 @@ const RECONNECT_BASE_MS = 5_000;
 const RECONNECT_MAX_MS = 5 * 60_000;
 
 /**
+ * Fyers WebSocket caps symbols per subscribe packet at 25. Large batches (e.g. 60+ option chain
+ * strikes) must be sent in chunks of 20 or fewer to avoid silent drops by the vendor socket.
+ */
+export const MAX_SOCKET_SUBSCRIBE_CHUNK = 20;
+
+export function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
  * Backoff for reconnection, doubling to a five-minute ceiling.
  *
  * A fixed 5s retry was worse than it looks: Fyers auth lapses every 15 days with no
@@ -161,7 +175,10 @@ export class FyersLiveStreamer extends EventEmitter {
           resubscribing: this.currentSubscriptions.size,
         });
         if (this.currentSubscriptions.size > 0) {
-          socket.subscribe([...this.currentSubscriptions]);
+          const subs = [...this.currentSubscriptions];
+          for (const batch of chunkArray(subs, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
+            socket.subscribe(batch);
+          }
         }
       });
 
@@ -226,14 +243,23 @@ export class FyersLiveStreamer extends EventEmitter {
       }
     }
 
-    if (this.isSocketConnected()) this.socket!.subscribe(symbols);
-    else if (isNew) void this.connect();
+    if (this.isSocketConnected()) {
+      for (const batch of chunkArray(symbols, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
+        this.socket!.subscribe(batch);
+      }
+    } else if (isNew) {
+      void this.connect();
+    }
   }
 
   unsubscribe(symbols: string[]): void {
     if (!symbols || symbols.length === 0) return;
     for (const symbol of symbols) this.currentSubscriptions.delete(symbol);
-    if (this.isSocketConnected()) this.socket!.unsubscribe(symbols);
+    if (this.isSocketConnected()) {
+      for (const batch of chunkArray(symbols, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
+        this.socket!.unsubscribe(batch);
+      }
+    }
   }
 
   /** Shuts the socket for good. A closed streamer stays closed; `connect()` becomes a no-op. */

@@ -264,4 +264,21 @@ describe("FyersLiveStreamer", () => {
 
     expect(socket.subscribed).toEqual([]);
   });
+
+  it("chunks large subscription batches into sizes under Fyers frame limits", async () => {
+    const socket = fakeSocket();
+    const streamer = build(socket, scheduler());
+
+    await streamer.connect();
+    socket.fire("connect");
+
+    const manySymbols = Array.from({ length: 45 }, (_, i) => `NSE:BANKNIFTY26OCT${50000 + i * 100}CE`);
+    streamer.subscribe(manySymbols);
+
+    // 45 symbols chunked into 20, 20, 5
+    expect(socket.subscribed).toHaveLength(3);
+    expect(socket.subscribed[0]).toHaveLength(20);
+    expect(socket.subscribed[1]).toHaveLength(20);
+    expect(socket.subscribed[2]).toHaveLength(5);
+  });
 });
