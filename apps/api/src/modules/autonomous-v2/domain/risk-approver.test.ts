@@ -365,13 +365,13 @@ describe("shadow option friction gate (log-only mode)", () => {
     const long = expectApprovedSide(approval.long);
     expect(long.positionSize.shadowOptionFriction).toBeDefined();
     expect(long.positionSize.shadowOptionFriction?.wouldVeto).toBe(false);
-    expect(long.positionSize.shadowOptionFriction?.estimatedFrictionPoints).toBe(2.95);
+    expect(long.positionSize.shadowOptionFriction?.estimatedFrictionPoints).toBe(1.08);
     expect(long.positionSize.shadowOptionFriction?.expectedPremiumMovePoints).toBe(37.5);
-    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.0787);
+    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.0288);
   });
 
   it("identifies unviable BANKNIFTY geometry in shadow mode while preserving approval", () => {
-    // 20 index points target -> 10 premium points vs 7.68 friction -> ratio 0.768 (> 0.35)
+    // 20 index points target -> 10 premium points vs 4.35 friction -> ratio 0.435 (> 0.35)
     const approval = approvedRiskApproval({
       thesis: Object.freeze({
         ...thesis({
@@ -389,15 +389,15 @@ describe("shadow option friction gate (log-only mode)", () => {
     const long = expectApprovedSide(approval.long);
     expect(long.positionSize.shadowOptionFriction?.wouldVeto).toBe(true);
     expect(long.positionSize.shadowOptionFriction?.vetoReason).toBe("EXCESSIVE_OPTION_FRICTION");
-    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.768);
-    expect(long.positionSize.shadowOptionFriction?.estimatedFrictionPoints).toBe(7.68);
+    expect(long.positionSize.shadowOptionFriction?.frictionToRewardRatio).toBe(0.435);
+    expect(long.positionSize.shadowOptionFriction?.estimatedFrictionPoints).toBe(4.35);
   });
 
   it("flags geometry where target premium move cannot cover friction", () => {
-    // 5 index points target on NIFTY -> 2.5 premium points vs 2.95 friction
+    // 2 index points target on NIFTY -> 1.0 premium points vs 1.08 friction
     const approval = approvedRiskApproval({
       thesis: thesis({
-        long: approvedThesisSide({ entryReference: 24000, targetPrice: 24005 }),
+        long: approvedThesisSide({ entryReference: 24000, targetPrice: 24002 }),
       }),
     });
     const long = expectApprovedSide(approval.long);

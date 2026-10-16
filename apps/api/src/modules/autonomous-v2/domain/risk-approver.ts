@@ -64,10 +64,10 @@ export interface ShadowOptionFrictionTelemetry {
 /**
  * Log-only evaluation of option friction against trade geometry.
  *
- * Measured values derived from 3.3 million ticks in option_premium_ticks and
- * the Zerodha/NSE fee schedule in docs/2026-09-29-brain-v22-cost-model.md:
- * - BANKNIFTY: 3.334 pts measured bid/ask spread + 4.35 pts statutory round-trip fees = 7.68 pts.
- * - NIFTY50: 0.463 pts measured bid/ask spread + 2.49 pts statutory round-trip fees = 2.95 pts.
+ * Measured values derived from 1.41 million ATM ticks in option_premium_ticks and
+ * the Zerodha/NSE fee schedule in brokerage-calculator.ts using registered lot sizes:
+ * - BANKNIFTY (lot 30 @ ~580 premium): 1.70 pts ATM mean spread + 2.65 pts statutory fees = 4.35 pts.
+ * - NIFTY50 (lot 75 @ ~108 premium): 0.25 pts ATM mean spread + 0.83 pts statutory fees = 1.08 pts.
  * - Delta: ATM option benchmark delta ~0.50.
  */
 export function computeShadowOptionFriction(input: {
@@ -79,8 +79,8 @@ export function computeShadowOptionFriction(input: {
   const targetPoints = Math.abs(input.targetPrice - input.entryReference);
   // Assumes ATM option with delta ~0.50
   const expectedPremiumMovePoints = targetPoints * 0.50;
-  // Empirically measured round-trip friction in premium points:
-  const estimatedFrictionPoints = isBankNifty ? 7.68 : 2.95;
+  // Empirically measured ATM round-trip friction in premium points:
+  const estimatedFrictionPoints = isBankNifty ? 4.35 : 1.08;
   const frictionToRewardRatio = expectedPremiumMovePoints > 0
     ? Number((estimatedFrictionPoints / expectedPremiumMovePoints).toFixed(4))
     : 1.0;
