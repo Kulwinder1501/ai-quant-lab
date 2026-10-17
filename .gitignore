@@ -35,3 +35,7 @@ video_info.json
 
 # Python virtualenv -- accidentally committed in full once (32d2001); never again.
 venv/
+
+# Equity Watch R0 raw research data cache (downloaded external series)
+apps/ml/research_data/
+

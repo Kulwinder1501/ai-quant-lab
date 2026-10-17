@@ -225,3 +225,11 @@ The owner chose to start with Slice 0 (collector, watchlist page, sidebar entry)
 ## 13. Slice 1 chosen (2026-10-17)
 
 The owner asked for a buy/sell/neutral suggestion. The planner recommended against any rating (no tested edge, see the Gate 7 memory) and wrote the descriptive trend panel instead: `2026-10-17-equity-trend-panel-slice1-plan.md`.
+
+## 14. Signal research (2026-10-17)
+
+The owner stated the goal as levels plus a buy/sell/neutral stance. Research and a proposed design (levels, rule-based stance, scoreboard, research-first order) are in `2026-10-17-equity-signal-research.md`; the study scripts are in `research/equity-signal-study/`.
+
+## 15. R0 and Levels engine plan (2026-10-17)
+
+Work plan for the developer, with reviewer gates: `2026-10-17-equity-levels-and-r0-plan.md` (R0 research study and the Levels engine; rules file in its appendix A).
