@@ -289,6 +289,8 @@ async function main(): Promise<void> {
     ICT_SHADOW_RESOLVE: 10 * 60 * 1000,
     // Three small reads of one day's snapshots, ideas and trades.
     ICT_GATE_REPORT: 5 * 60 * 1000,
+    // Equity research EOD collector (Slice 0): 50 stocks at 1 req/s takes ~2.5 mins; 15 min horizon.
+    EQUITY_EOD_COLLECT: 15 * 60 * 1000,
     // Three indexed reads and a comparison; nothing is fetched or computed.
     PREMARKET_RUN_CHECK: 2 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
@@ -643,6 +645,15 @@ async function main(): Promise<void> {
    */
   cronSchedule("50 15 * * 1-5", () => {
     void schedule("ICT_GATE_REPORT", () => runCommand("npm", ["run", "research:ict-gates:report"]));
+  });
+
+  /**
+   * End-of-day equity data collection (Slice 0):
+   * Daily price bars, dividends, splits, and Yahoo secondary fundamentals for active watchlist stocks.
+   * Runs weekdays at 17:00 IST after the market closes and Yahoo daily bars are finalized.
+   */
+  cronSchedule("0 17 * * 1-5", () => {
+    void schedule("EQUITY_EOD_COLLECT", () => runCommand("npm", ["run", "equity:collect:eod"]));
   });
 
   const collectIndiaVix = async (timeframes: readonly string[], lookbackDays: number): Promise<void> => {
@@ -1753,6 +1764,7 @@ async function main(): Promise<void> {
       "ICT_SHADOW_CAPTURE",
       "ICT_SHADOW_RESOLVE",
       "ICT_GATE_REPORT",
+      "EQUITY_EOD_COLLECT",
       "PREMARKET_RUN_CHECK",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",

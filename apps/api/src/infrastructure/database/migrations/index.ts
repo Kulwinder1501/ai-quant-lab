@@ -135,6 +135,8 @@ import { premarketIntelligenceMigration } from "./134-premarket-intelligence.js"
 import { ictShadowSignalsMigration } from "./135-ict-shadow-signals.js";
 import { aedlsForensicSchemaMigration } from "./136-aedls-forensic-schema.js";
 import { fyersDailyRequestLedgerMigration } from "./137-fyers-daily-request-ledger.js";
+import { equityResearchSchemaMigration } from "./138-equity-research-schema.js";
+import { equitySeriesVersioningMigration } from "./139-equity-series-versioning.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -274,4 +276,6 @@ export const migrations = [
   ictShadowSignalsMigration,
   aedlsForensicSchemaMigration,
   fyersDailyRequestLedgerMigration,
+  equityResearchSchemaMigration,
+  equitySeriesVersioningMigration,
 ];

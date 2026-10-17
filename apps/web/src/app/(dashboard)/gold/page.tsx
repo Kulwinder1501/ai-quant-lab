@@ -42,8 +42,8 @@ export default function GoldShadowLedgerPage() {
         const data = await res.json();
         setSummary(data.summary);
         setTrades(data.trades);
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
       } finally {
         setLoading(false);
       }

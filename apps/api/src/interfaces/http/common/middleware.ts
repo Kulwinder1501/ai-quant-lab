@@ -94,6 +94,17 @@ export function errorHandler(
   response: Response,
   _next: NextFunction,
 ): void {
+  // Catch malformed JSON payloads from express.json()
+  if (
+    error instanceof SyntaxError &&
+    "status" in error &&
+    error.status === 400 &&
+    "body" in error
+  ) {
+    response.status(400).json({ error: "Malformed JSON payload in request body" });
+    return;
+  }
+
   console.error(JSON.stringify({
     level: "error",
     method: request.method,

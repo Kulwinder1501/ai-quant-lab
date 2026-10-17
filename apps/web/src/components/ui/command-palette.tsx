@@ -72,6 +72,12 @@ export function CommandPalette() {
               <Activity className="h-4 w-4" /> Market Data
             </Command.Item>
             <Command.Item 
+              onSelect={() => { router.push('/equity'); close(); }}
+              className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
+            >
+              <Activity className="h-4 w-4" /> Equity Watch
+            </Command.Item>
+            <Command.Item 
               onSelect={() => { router.push('/strategy'); close(); }}
               className="flex items-center cursor-pointer gap-2 rounded-md px-2 py-2.5 text-sm aria-selected:bg-cyan-500/20 aria-selected:text-cyan-300"
             >

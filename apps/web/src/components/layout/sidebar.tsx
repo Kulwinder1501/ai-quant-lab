@@ -16,6 +16,7 @@ import {
   Target,
   BookOpen,
   Wallet,
+  LineChart,
 } from "lucide-react";
 import { classNames } from "../ui/class-names";
 import { type ReactNode } from "react";
@@ -47,6 +48,12 @@ export function Sidebar({ collapsed, onToggleCollapse }: SidebarProps) {
         { name: "Market News", href: "/news", icon: <Newspaper className="size-5" /> },
         { name: "Scanner & Backtesting", href: "/", icon: <ScanSearch className="size-5" /> },
         { name: "Option Chain", href: "/option-chain", icon: <Layers className="size-5" /> },
+      ],
+    },
+    {
+      title: "EQUITY",
+      items: [
+        { name: "Equity Watch", href: "/equity", icon: <LineChart className="size-5" /> },
       ],
     },
     {

@@ -8,6 +8,7 @@ import { registerMarketScannerRoutes } from "../../modules/market-scanner/interf
 import { registerModelPerformanceRoutes } from "../../modules/model-performance/interfaces/http/model-performance.routes.js";
 import { registerModelPredictionRoutes } from "../../modules/model-predictions/interfaces/http/model-prediction.routes.js";
 import { registerNewsRoutes } from "../../modules/news-sentiment/interfaces/http/news.routes.js";
+import { registerEquityRoutes } from "../../modules/equity-research/interfaces/http/equity.routes.js";
 import { registerPaperTradingRoutes } from "../../modules/paper-trading/interfaces/http/paper-trading.routes.js";
 import { registerJournalRoutes } from "../../modules/paper-trading/interfaces/http/journal.routes.js";
 import { registerPricingRoutes } from "../../modules/pricing/interfaces/http/pricing.routes.js";
@@ -74,6 +75,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   registerBacktestingRoutes(app, dependencies);
   registerMarketDataRoutes(app, dependencies);
   registerNewsRoutes(app, dependencies);
+  registerEquityRoutes(app, database);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
