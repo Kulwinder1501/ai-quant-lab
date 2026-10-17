@@ -1,9 +1,10 @@
 # Equity Watch: R0 Research Study Pre-Registration Specification
 
-**Status:** LOCKED / PRE-REGISTERED (Day 0)  
+**Status:** LOCKED / PRE-REGISTERED (Day 0, with Amendment 1 applied before any data fetched)  
 **Date:** 2026-10-17  
 **Author:** AI Quant Lab  
 **Plan Reference:** `docs/2026-10-17-equity-levels-and-r0-plan.md`  
+**Initial Anchor Commit:** `b1859530`  
 **Rules Configuration File:** `apps/api/src/modules/equity-research/domain/equity-rules-v1.json`  
 **Rules SHA-256:** `bdb3ff38b56e9f4e9885ecc8e545ee4b6ad116f6b893581fd5bebb231bf625bf`  
 
@@ -37,11 +38,11 @@ All thresholds and constants are bound strictly to `equity-rules-v1.json` (`sha2
   - Close sits within $1.5 \times \text{ATR14}$ above a valid support level (`maxAtrAboveSupport = 1.5`).
   - Support has at least 2 touches (`minStrengthTouches = 2`).
   - Close is not more than $10\%$ below the 200-day simple moving average (`maxBelowSma200Pct = 0.10`).
-  - Meets the liquidity gate: 60-bar median traded value $\ge ₹20,000,000$ (`minMedianTradedValueInr = 20000000`).
+  - Meets the point-in-time liquidity gate: 60-bar median traded value $\ge ₹20,000,000$ (`minMedianTradedValueInr = 20000000`).
 - **SELL (Technical Component / Avoided Loss):**
   - Close sits within $1.0 \times \text{ATR14}$ below a valid resistance level (`maxAtrBelowResistance = 1.0`) with $\ge 2$ touches, AND price is stretched $>25\%$ above the 200-day SMA (`stretchAboveSma200Pct = 0.25`), OR
   - Close breaks $>1.0 \times \text{ATR14}$ below a valid support level (`breakBelowSupportAtr = 1.0`).
-  - Meets the liquidity gate.
+  - Meets the point-in-time liquidity gate.
 
 ---
 
@@ -49,14 +50,14 @@ All thresholds and constants are bound strictly to `equity-rules-v1.json` (`sha2
 
 The multiplicity correction (Holm step-down procedure at $\alpha = 0.05$) will be applied across exactly these 6 pre-registered variants at the primary horizon:
 
-| Variant ID | Name | Trigger Definition |
-| :--- | :--- | :--- |
-| **V1** | **BUY Full Technical** | Support touch ($\le 1.5$ ATR), $\ge 2$ touches, close $\ge -10\%$ from 200 SMA, liquidity gate. |
-| **V2** | **SELL Full Technical** | Resistance touch with stretch ($>25\%$ above 200 SMA) OR support breakdown ($>1.0$ ATR), liquidity gate. |
-| **V3** | **Support Touch Alone** | Price within $1.5$ ATR above valid support level, liquidity gate (no SMA trend filter). |
-| **V4** | **Resistance Touch + Stretch** | Price within $1.0$ ATR below resistance AND $>25\%$ above 200 SMA, liquidity gate. |
-| **V5** | **Trend Context Alone** | Close $> 200$-day SMA, liquidity gate (no level constraint). |
-| **V6** | **52-Week High Proximity** | Close in top decile of 52-week price range within each calendar month, liquidity gate. |
+| Variant ID | Name | Trigger Definition | Sampling Rule |
+| :--- | :--- | :--- | :--- |
+| **V1** | **BUY Full Technical** | Support touch ($\le 1.5$ ATR), $\ge 2$ touches, close $\ge -10\%$ from 200 SMA, liquidity gate. | Event-driven on bar $T$, subject to 10-bar cooldown. |
+| **V2** | **SELL Full Technical** | Resistance touch with stretch ($>25\%$ above 200 SMA) OR support breakdown ($>1.0$ ATR), liquidity gate. | Event-driven on bar $T$, subject to 10-bar cooldown. |
+| **V3** | **Support Touch Alone** | Price within $1.5$ ATR above valid support level, liquidity gate (no SMA trend filter). | Event-driven on bar $T$, subject to 10-bar cooldown. |
+| **V4** | **Resistance Touch + Stretch** | Price within $1.0$ ATR below resistance AND $>25\%$ above 200 SMA, liquidity gate. | Event-driven on bar $T$, subject to 10-bar cooldown. |
+| **V5** | **Trend Context Alone** | Close $> 200$-day SMA, liquidity gate (no level constraint). | Evaluated on the **last trading bar of each month** where the condition holds. |
+| **V6** | **52-Week High Proximity** | Proximity to 52-week high, liquidity gate. | Evaluated on the **last trading bar of each month**: rank qualifying stocks by $\text{close} / \text{high}_{52\text{W}}$, select the **top 10% (top decile)**. |
 
 ---
 
@@ -66,23 +67,37 @@ The multiplicity correction (Holm step-down procedure at $\alpha = 0.05$) will b
 - **Primary Horizon:** $H = 63$ trading bars (approx. 3 calendar months). Pass/fail criteria are strictly evaluated at this horizon.
 - **Secondary Horizons:** $H = 21$ trading bars (1 month) and $H = 126$ trading bars (6 months). Reported descriptively for horizon sensitivity; not used for pass/fail.
 
-### 4.2 Independence & Cooldown
+### 4.2 Trade Execution Timing (Zero Look-Ahead)
+- Signals are generated after the market close of bar $T$.
+- **Entry:** Executed at the **Open of bar $T+1$** ($\text{open}_{T+1}$).
+- **Exit:** Executed at the **Close of bar $T+H$** ($\text{close}_{T+H}$).
+- **Variant Net Return (BUY):**
+  $$R_{\text{net}} = \frac{\text{close}_{T+H}}{\text{open}_{T+1}} - 1 - \text{cost}$$
+- **Variant Gross Return:**
+  $$R_{\text{gross}} = \frac{\text{close}_{T+H}}{\text{open}_{T+1}} - 1$$
+
+### 4.3 Point-in-Time Friction & Cost Model
+- **Point-in-Time Cost Tier:** At signal date $T$, rank all stocks that have active trading data on $T$ by their 60-bar median traded value ($\text{close} \times \text{volume}$). The top 100 stocks receive the large-cap cost tier; all other constituents receive the other tier.
+  - Large-Cap Tier: $0.30\%$ round-trip friction (`roundTripLargeCapPct = 0.003`).
+  - Other Constituents Tier: $1.00\%$ round-trip friction (`roundTripOtherPct = 0.010`).
+- **Point-in-Time Liquidity Gate:** 60-bar median traded value up to $T$ must be $\ge ₹20,000,000$.
+
+### 4.4 Independence & Cooldown
 - **Cooldown:** At least 10 trading bars between events for the same stock on the same side (`cooldownBars = 10`).
 - **Monthly Cap for Independence:** At most 1 event per stock per calendar month counted toward independent event sample size.
 
-### 4.3 Friction & Cost Model
-- **Large-Cap Tier:** $0.30\%$ round-trip friction (`roundTripLargeCapPct = 0.003`) for stocks ranked in the top 100 by 60-bar median traded value.
-- **Other Constituents Tier:** $1.00\%$ round-trip friction (`roundTripOtherPct = 0.010`).
-- **Net Forward Return (BUY variants):**
-  $$R_{\text{net}} = \frac{\text{close}_{T+H}}{\text{close}_T} - 1 - \text{cost}$$
-- **Avoided Loss (SELL variants):**
-  $$\text{AvoidedLoss}_{\text{net}} = \text{Baseline} - \left(\frac{\text{close}_{T+H}}{\text{close}_T} - 1\right) - \text{cost}$$
+### 4.5 Baselines & Net Excess Formulas
+All baselines are computed **gross (zero transaction costs)**; the variant carries the full transaction cost (conservative protocol).
+1. **Stock-Year Benchmark ($B_{\text{stock-year}}$):** The same stock's average gross $H$-bar forward return (measured open-to-close) across all trading days in the same calendar year.
+2. **Market Benchmark ($B_{\text{nifty50}}$):** Gross return of NIFTY 50 (`^NSEI`) over the exact execution window $[\text{open}_{T+1}, \text{close}_{T+H}]$.
+3. **Random Placebo ($B_{\text{placebo}}$):** Empirical distribution from 1,000 random-date draws matched to the exact number of events per stock-year.
 
-### 4.4 Baselines (All Three Must Be Exceeded)
-To claim an edge, the net return of each variant must exceed all three baselines:
-1. **Stock-Year Benchmark:** The same stock's average $H$-bar forward return across the same calendar year.
-2. **Market Benchmark:** NIFTY 50 (`^NSEI`) buy-and-hold forward return over the exact same date window $[T, T+H]$.
-3. **Random Placebo:** Empirical distribution from 1,000 random-date draws matched to the exact number of events per stock-year.
+**Net Excess Formulas:**
+- **For BUY Variants (V1, V3, V5, V6):**
+  $$\text{Net Excess} = R_{\text{net}} - B_{\text{gross}}$$
+- **For SELL Variants (V2, V4 / Avoided Loss):**
+  $$\text{Net Excess}_{\text{avoided}} = B_{\text{gross}} - R_{\text{gross}} - \text{cost}$$
+  *(A positive excess indicates the sell stance successfully avoided losses exceeding the benchmark net of costs).*
 
 ---
 
@@ -93,11 +108,14 @@ To claim an edge, the net return of each variant must exceed all three baselines
 - **Draws:** 5,000 replications (`bootstrapDraws = 5000`).
 - **Confidence Interval:** $95\%$ one-sided lower confidence bound (`ciLevel = 0.95`).
 - **Multiplicity Correction:** Holm step-down method at family-wise error rate $\alpha = 0.05$ across the 6 pre-registered variants.
+- **Variant p-value:** The variant's empirical $p$-value is defined conservatively as the **largest one-sided bootstrap $p$-value across the three baselines**:
+  $$p = \max(p_{\text{stock-year}}, p_{\text{nifty50}}, p_{\text{placebo}})$$
 - **Random Seed:** Fixed to `20261017` for byte-identical reproducibility.
 
-### 5.2 Out-of-Sample & Stability Partitions
-- **Chronological Halves:** The sample is split chronologically into Half 1 and Half 2.
-- **Holdout Partition:** The most recent 24 calendar months (`holdoutMonths = 24`) are held out entirely and evaluated only once at the conclusion of research, without modification.
+### 5.2 Out-of-Sample, Stability & Holdout Partitions
+- **Holdout Partition:** The most recent 24 calendar months (`holdoutMonths = 24`, 2024-10-18 to 2026-10-17) are sealed and evaluated only once at the end of the study.
+- **Holdout Boundary Constraint:** Any non-holdout event whose forward evaluation window reaches into the holdout ($T+H \ge \text{holdout\_start}$) is excluded from non-holdout metrics to ensure zero leakage.
+- **Chronological Halves:** Non-holdout data is split at the calendar midpoint between the earliest available date in the dataset and the holdout start date.
 
 ### 5.3 Frozen Pass / Fail Criteria
 At the primary horizon ($H = 63$ bars), a variant is classified as:
@@ -119,20 +137,33 @@ At the primary horizon ($H = 63$ bars), a variant is classified as:
 
 ---
 
-## 6. Data Integrity & Survivorship Bias
+## 6. Data Integrity & Prior Exposure Disclosure
 
 1. **Constituent Universe:** Nifty 500 constituents downloaded manually from NSE index archives into `apps/ml/data/equity_universe_nifty500.csv` with download URL and date in the header.
-2. **Quality Rules:**
+2. **Benchmark Data:** NIFTY 50 (`^NSEI`) fetched with the exact same daily granularity assertion (`meta.dataGranularity == "1d"`).
+3. **Quality Rules:**
    - Drop series with fewer than 756 daily trading bars.
    - Any bar with a 1-day absolute move $> 40\%$ is flagged as a suspected corporate action/demerger artifact (`artifactMovePct = 0.40`). Every event whose lookback or forward window touches such a bar is excluded in the primary count (results reported with and without exclusion).
    - Drop non-positive or non-finite closes.
-3. **Survivorship Bias Acknowledgment:** Free daily historical data from Yahoo Finance reflects survivor constituents. The final report will document the direction and likely magnitude of this bias for each variant rather than relegating it to a footnote.
+4. **Survivorship Bias Acknowledgment:** Free daily historical data from Yahoo Finance reflects survivor constituents. The final report will document the direction and likely magnitude of this bias for each variant.
+5. **Prior Exposure Disclosure (Exploratory 50 Stocks):**
+   - The preliminary exploratory study in `docs/2026-10-17-equity-signal-research.md` inspected 50 large-cap stocks through 2026-10-16. Therefore, the 24-month holdout is not strictly pristine for these 50 names:
+     `RELIANCE`, `TCS`, `HDFCBANK`, `INFY`, `ICICIBANK`, `HINDUNILVR`, `ITC`, `SBIN`, `BHARTIARTL`, `KOTAKBANK`, `LT`, `AXISBANK`, `ASIANPAINT`, `MARUTI`, `SUNPHARMA`, `TITAN`, `ULTRACEMCO`, `NESTLEIND`, `WIPRO`, `HCLTECH`, `M&M`, `BAJFINANCE`, `POWERGRID`, `NTPC`, `ONGC`, `TATASTEEL`, `JSWSTEEL`, `ADANIPORTS`, `COALINDIA`, `TECHM`, `GRASIM`, `HINDALCO`, `DRREDDY`, `CIPLA`, `EICHERMOT`, `BPCL`, `HEROMOTOCO`, `DIVISLAB`, `BRITANNIA`, `INDUSINDBK`, `APOLLOHOSP`, `TATACONSUM`, `BAJAJ-AUTO`, `SUZLON`, `TATAMOTORS`, `PIDILITIND`, `DABUR`, `GAIL`, `IOC`, `SIEMENS`.
+   - **Remedy:** The R0 evaluation will report holdout performance **overall (all stocks)** AND **separately for the ~450 stocks outside this 50-stock list**, ensuring a clean out-of-sample check.
 
 ---
 
-## 7. Pre-Registration Verification Hashes
+## 7. Pre-Registration Verification & Amendment Log
 
-- `apps/api/src/modules/equity-research/domain/equity-rules-v1.json`:  
-  `SHA-256: bdb3ff38b56e9f4e9885ecc8e545ee4b6ad116f6b893581fd5bebb231bf625bf`
-- This specification file (`docs/2026-10-17-equity-stance-r0-spec.md`):  
-  `SHA-256: 9186de80b4c1c9b08dec2ece3209cd218f58eb5366e8e29622c39fb235e88efb` (initial freeze)
+- **Initial Freeze Commit:** `b1859530`
+- **Rules Configuration File:** `apps/api/src/modules/equity-research/domain/equity-rules-v1.json` (`sha256: bdb3ff38b56e9f4e9885ecc8e545ee4b6ad116f6b893581fd5bebb231bf625bf`)
+- **Amendment 1 (Day 0 Review, before any data fetched):**
+  - Removed self-referential hash in favor of commit anchor + rules file hash.
+  - Defined V5 (month-end close $> 200$ SMA) and V6 (month-end top decile close / 52W high).
+  - Explicitly defined net excess formulas (gross baselines, variant carries costs; avoided loss for sell variants).
+  - Fixed trade execution: entry at next bar Open ($\text{open}_{T+1}$), exit at bar $T+H$ Close ($\text{close}_{T+H}$).
+  - Set variant $p$-value to $\max(p_{\text{stock-year}}, p_{\text{nifty50}}, p_{\text{placebo}})$.
+  - Point-in-time cost tier ranking and liquidity gating.
+  - Enforced holdout forward window boundary constraint ($T+H \ge \text{holdout\_start}$ excluded from non-holdout).
+  - Added prior exposure disclosure for 50 exploratory names with separate ~450 unexposed stock holdout reporting.
+  - Specified `^NSEI` daily granularity check.

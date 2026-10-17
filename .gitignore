@@ -6,7 +6,9 @@ coverage/
 .venv/
 __pycache__/
 *.py[cod]
-data/
+/data/
+!apps/ml/data/
+!apps/ml/data/**
 models/
 postgres-data/
 .claude/settings.local.json
