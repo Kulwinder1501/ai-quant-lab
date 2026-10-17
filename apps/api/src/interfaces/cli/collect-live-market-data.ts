@@ -13,6 +13,8 @@ import type { Instrument } from "../../modules/market-data/domain/instrument.js"
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../../modules/market-data/domain/live-market-data-provider.js";
 import { isFyersRateLimitedError } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { fyersRequestCounter, flushFyersRequestCounts } from "../../modules/market-data/domain/fyers-request-counter.js";
+import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
+import { StreamFirstLiveMarketDataProvider } from "../../infrastructure/market-data/stream-first-live-provider.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { isNseHoliday, istDateKey } from "../../modules/market-data/domain/nse-session-calendar.js";
@@ -22,6 +24,15 @@ function parsePositiveSeconds(value: string | undefined): number {
   const seconds = Number(value ?? "30");
   if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3_600) {
     throw new Error("--poll-seconds must be an integer between 1 and 3600.");
+  }
+  return seconds;
+}
+
+/** How long a REST quote anchors the stream-fed ones. Default one minute: the REST cost is one call per anchor. */
+function parseAnchorSeconds(value: string | undefined): number {
+  const seconds = Number(value ?? "60");
+  if (!Number.isInteger(seconds) || seconds < 5 || seconds > 600) {
+    throw new Error("--rest-anchor-seconds must be an integer between 5 and 600.");
   }
   return seconds;
 }
@@ -69,6 +80,8 @@ async function main(): Promise<void> {
   fyersLedger.attachToGlobalCounter();
   const ingestionRepository = new PostgresMarketDataIngestionRepository(database);
   let ingestionId: string | undefined;
+  let streamer: FyersLiveStreamer | null = null;
+  let streamFirstProvider: StreamFirstLiveMarketDataProvider | null = null;
   try {
     /*
      * `--timeframe` accepts a comma-separated list.
@@ -131,10 +144,25 @@ async function main(): Promise<void> {
       if (!appId || !appSecret || !pin) {
         throw new Error("Live Fyers collection requires FYERS_APP_ID, FYERS_APP_SECRET and FYERS_PIN in .env.");
       }
-      provider = new FyersLiveMarketDataProvider({
-        appId,
-        tokenService: new FyersTokenService({ pool: database, appId, appSecret, pin }),
-      });
+      const tokenService = new FyersTokenService({ pool: database, appId, appSecret, pin });
+      provider = new FyersLiveMarketDataProvider({ appId, tokenService });
+      /*
+       * Opt-in. Off, this process polls REST exactly as before. On, the socket supplies prices and volume between
+       * REST anchors taken every --rest-anchor-seconds, and each anchor logs how far the stream had drifted from
+       * it ("Stream-first parity"), so the switch can be judged from the logs. See stream-first-live-provider.ts.
+       */
+      if (argumentsList.includes("--stream-first")) {
+        const anchorSeconds = parseAnchorSeconds(getOption(argumentsList, "rest-anchor-seconds"));
+        streamer = new FyersLiveStreamer({ appId, tokenService });
+        streamFirstProvider = new StreamFirstLiveMarketDataProvider({
+          rest: provider,
+          ticks: streamer,
+          anchorMs: anchorSeconds * 1_000,
+          onParity: (parity) => console.info(JSON.stringify({ level: "info", message: "Stream-first parity", ...parity })),
+        });
+        provider = streamFirstProvider;
+        console.info(JSON.stringify({ level: "info", message: "Live collection is stream-first", restAnchorSeconds: anchorSeconds }));
+      }
     }
     const pollingSeconds = parsePositiveSeconds(getOption(argumentsList, "poll-seconds"));
     const session = new NseMarketSession(readHolidays(getOption(argumentsList, "holidays") ?? process.env.NSE_HOLIDAYS));
@@ -240,6 +268,8 @@ async function main(): Promise<void> {
     }
     throw error;
   } finally {
+    streamFirstProvider?.dispose();
+    streamer?.close();
     await flushFyersRequestCounts(fyersRequestCounter, (line) => console.info(line), "collect-live-market-data");
     await database.end();
   }

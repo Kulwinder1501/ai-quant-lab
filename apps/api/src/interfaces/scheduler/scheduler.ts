@@ -45,6 +45,7 @@ import {
   FyersRateLimitGate,
   classifyFyersRateLimitFromText,
 } from "../../modules/market-data/domain/fyers-rate-limit.js";
+import { istMinuteOfHour, shouldFetchIndexHistory } from "../../modules/market-data/domain/index-history-cadence.js";
 import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
 import { setFyersRequestPersister, fyersRequestCounter } from "../../modules/market-data/domain/fyers-request-counter.js";
 import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
@@ -691,23 +692,35 @@ async function main(): Promise<void> {
    */
   const INDICATOR_WRITE_LOOKBACK_DAYS = 5;
 
+  /*
+   * The first pass after the scheduler starts fetches every timeframe, so a restart mid-bar does not wait for the
+   * next boundary; every pass after that fetches only what `shouldFetchIndexHistory` says can have changed.
+   * See index-history-cadence.ts for the measurement behind it.
+   */
+  let indicesHistoryCaughtUp = false;
+
   const collectIndicesIntraday = async (timeframes: readonly string[]): Promise<void> => {
     const now = new Date();
+    const istMinute = istMinuteOfHour(now);
+    const fetchEverything = !indicesHistoryCaughtUp;
+    indicesHistoryCaughtUp = true;
     const todayIst = istDateKey(now);
     const indicatorsFrom = istDateKey(
       new Date(now.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
     );
     for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
       for (const timeframe of timeframes) {
-        await runCommand("npm", [
-          "run", "data:collect:historical", "--",
-          "--provider", "fyers",
-          "--instrument", instrument,
-          "--timeframe", timeframe,
-          "--from", todayIst,
-          "--to", todayIst,
-          "--skip-existing",
-        ]);
+        if (fetchEverything || shouldFetchIndexHistory(timeframe, istMinute)) {
+          await runCommand("npm", [
+            "run", "data:collect:historical", "--",
+            "--provider", "fyers",
+            "--instrument", instrument,
+            "--timeframe", timeframe,
+            "--from", todayIst,
+            "--to", todayIst,
+            "--skip-existing",
+          ]);
+        }
         await runCommand("npm", [
           "run", "analysis:calculate-indicators", "--",
           "--instrument", instrument,

@@ -238,6 +238,11 @@ services:
       - "--timeframe=1m,5m"
       - "--instruments=NIFTYBEES,BANKBEES"
       - "--poll-seconds=15"
+      # Prices and volume come from the websocket between REST anchors taken every 60 seconds, which takes this
+      # poller from about 1,500 quote requests a day to about 375. Each anchor logs "Stream-first parity" so the
+      # stream can be checked against REST. Remove this flag to go back to polling REST every poll.
+      - "--stream-first"
+      - "--rest-anchor-seconds=60"
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
