@@ -245,13 +245,13 @@ export class OptionPremiumTickStreamer {
   }
 
   private record(tick: Tick): void {
-    this.lastTickReceivedAt = this.now();
     const key = tick.symbol.toUpperCase();
     const underlying = this.underlyingByProviderSymbol.get(key);
     if (underlying !== undefined) {
       this.underlyingValues.set(underlying, tick.ltp);
       return;
     }
+    this.lastTickReceivedAt = this.now();
     this.buffered.set(key, {
       bid: tick.bid,
       ask: tick.ask,

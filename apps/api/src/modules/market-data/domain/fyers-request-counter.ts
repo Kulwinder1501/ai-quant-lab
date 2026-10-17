@@ -94,6 +94,25 @@ export function reportFyersRequestCounts(
   }
 }
 
+/** Drains and asynchronously flushes counts to the logger and active persister. */
+export async function flushFyersRequestCounts(
+  counter: FyersRequestCounter,
+  write: (line: string) => void,
+  script: string,
+): Promise<void> {
+  const dayKey = counter.getCurrentDayKey();
+  const window = counter.drain();
+  if (window.total === 0) return;
+  write(JSON.stringify({ level: "info", message: "Fyers REST request counts", script, ...window }));
+  if (activePersister) {
+    try {
+      await activePersister(window.counts, dayKey);
+    } catch {
+      // Ignored: logging/metrics persistence must not throw
+    }
+  }
+}
+
 export const fyersRequestCounter = new FyersRequestCounter();
 
 let reporting = false;
@@ -106,7 +125,8 @@ export function recordFyersRequest(endpoint: string): void {
   const script = (process.argv[1] ?? "unknown").split(/[\\/]/).pop() ?? "unknown";
   const report = () => reportFyersRequestCounts(fyersRequestCounter, (line) => console.info(line), script);
   // Unreffed: the counter must not keep a finished CLI job alive.
-  setInterval(report, 5 * 60_000).unref();
+  // 60-second window ensures cluster-wide ledger stays fresh and prevents late triggering of budget guards.
+  setInterval(report, 60_000).unref();
   process.on("exit", report);
 }
 

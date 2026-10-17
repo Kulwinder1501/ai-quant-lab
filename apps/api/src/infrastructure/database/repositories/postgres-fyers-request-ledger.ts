@@ -1,4 +1,5 @@
 import type { DatabasePool } from "../database.js";
+import { setFyersRequestPersister } from "../../../modules/market-data/domain/fyers-request-counter.js";
 
 export class PostgresFyersRequestLedger {
   constructor(private readonly pool: DatabasePool) {}
@@ -32,4 +33,22 @@ export class PostgresFyersRequestLedger {
     );
     return Number(result.rows[0]?.total ?? 0);
   }
+
+  /**
+   * Connects this ledger instance to the process's global fyersRequestCounter.
+   * Any Fyers REST request executed by this process will be recorded to this database ledger
+   * on periodic flush or shutdown.
+   */
+  attachToGlobalCounter(): void {
+    setFyersRequestPersister((counts, dateKey) => {
+      void this.recordBatch(dateKey, counts).catch((error) => {
+        console.error(JSON.stringify({
+          level: "error",
+          message: "Failed to persist Fyers request counts to ledger",
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      });
+    });
+  }
 }
+

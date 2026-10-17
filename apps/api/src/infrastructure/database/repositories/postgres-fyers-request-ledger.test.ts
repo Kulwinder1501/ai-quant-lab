@@ -75,4 +75,24 @@ describe("PostgresFyersRequestLedger", () => {
     const total = await ledger.getDailyTotal("2026-10-17");
     expect(total).toBe(0);
   });
+
+  it("attaches to global counter and persists batched counts", async () => {
+    const { fyersRequestCounter, reportFyersRequestCounts } = await import(
+      "../../../modules/market-data/domain/fyers-request-counter.js"
+    );
+    const query = vi.fn(async () => ({ rows: [] }));
+    const pool = { query } as unknown as DatabasePool;
+    const ledger = new PostgresFyersRequestLedger(pool);
+
+    ledger.attachToGlobalCounter();
+    fyersRequestCounter.record("quotes:collector", 12);
+    reportFyersRequestCounts(fyersRequestCounter, vi.fn(), "test-script");
+
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain("INSERT INTO fyers_daily_request_ledger");
+    expect(params[1]).toBe("quotes:collector");
+    expect(params[2]).toBe(12);
+  });
 });
+

@@ -167,3 +167,39 @@ describe("runCommand", () => {
     )).rejects.toThrow(/exited with code 3/);
   });
 });
+
+describe("createStdoutLineBuffer", () => {
+  it("buffers chunks split across line boundaries", async () => {
+    const { createStdoutLineBuffer } = await import("./scheduler.js");
+    const lines: string[] = [];
+    const buffer = createStdoutLineBuffer((line) => lines.push(line), () => undefined);
+
+    buffer.onChunk('{"level":"info",');
+    expect(lines).toEqual([]);
+
+    buffer.onChunk('"message":"Fyers REST request counts"}\n');
+    expect(lines).toEqual(['{"level":"info","message":"Fyers REST request counts"}']);
+  });
+
+  it("handles multiple lines in a single chunk", async () => {
+    const { createStdoutLineBuffer } = await import("./scheduler.js");
+    const lines: string[] = [];
+    const buffer = createStdoutLineBuffer((line) => lines.push(line), () => undefined);
+
+    buffer.onChunk("line 1\nline 2\nline 3\n");
+    expect(lines).toEqual(["line 1", "line 2", "line 3"]);
+  });
+
+  it("flushes un-terminated final line on process completion", async () => {
+    const { createStdoutLineBuffer } = await import("./scheduler.js");
+    const lines: string[] = [];
+    const buffer = createStdoutLineBuffer((line) => lines.push(line), () => undefined);
+
+    buffer.onChunk("final line without newline");
+    expect(lines).toEqual([]);
+
+    buffer.flush();
+    expect(lines).toEqual(["final line without newline"]);
+  });
+});
+

@@ -7,10 +7,12 @@ import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
 import { PostgresInstrumentRepository } from "../../infrastructure/database/repositories/postgres-instrument-repository.js";
 import { PostgresMarketDataIngestionRepository } from "../../infrastructure/database/repositories/postgres-market-data-ingestion-repository.js";
+import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
 import { CollectLiveMarketData, type LiveMarketSubscription } from "../../modules/market-data/application/collect-live-market-data.js";
 import type { Instrument } from "../../modules/market-data/domain/instrument.js";
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../../modules/market-data/domain/live-market-data-provider.js";
 import { isFyersRateLimitedError } from "../../modules/market-data/domain/fyers-rate-limit.js";
+import { fyersRequestCounter, flushFyersRequestCounts } from "../../modules/market-data/domain/fyers-request-counter.js";
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import { isNseHoliday, istDateKey } from "../../modules/market-data/domain/nse-session-calendar.js";
@@ -63,6 +65,8 @@ async function main(): Promise<void> {
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
+  const fyersLedger = new PostgresFyersRequestLedger(database);
+  fyersLedger.attachToGlobalCounter();
   const ingestionRepository = new PostgresMarketDataIngestionRepository(database);
   let ingestionId: string | undefined;
   try {
@@ -236,6 +240,7 @@ async function main(): Promise<void> {
     }
     throw error;
   } finally {
+    await flushFyersRequestCounts(fyersRequestCounter, (line) => console.info(line), "collect-live-market-data");
     await database.end();
   }
 }

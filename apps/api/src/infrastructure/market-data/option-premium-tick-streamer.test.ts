@@ -359,13 +359,17 @@ describe("OptionPremiumTickStreamer: contracts an open position needs", () => {
     expect(socket.subscribe).not.toHaveBeenCalled();
   });
 
-  it("tracks the timestamp of the most recently received tick", async () => {
+  it("tracks the timestamp of the most recently received option tick, ignoring underlying ticks", async () => {
     const { streamer, socket } = build({});
     expect(streamer.getLastTickReceivedAt()).toBeNull();
 
     await streamer.start();
-    socket.emitTick({ symbol: "SYM-57300CE", ltp: 250, bid: 249, ask: 251, volume: 10 } as Tick);
+    // Underlying index ticks (e.g., BANKNIFTY spot) must not set the option-tick timestamp
+    socket.emitTick({ symbol: "NSE:NIFTYBANK-INDEX", ltp: 57320, bid: 57319, ask: 57321, volume: 0 } as Tick);
+    expect(streamer.getLastTickReceivedAt()).toBeNull();
 
+    // Option contract ticks must update the timestamp
+    socket.emitTick({ symbol: "SYM-57300CE", ltp: 250, bid: 249, ask: 251, volume: 10 } as Tick);
     expect(streamer.getLastTickReceivedAt()).toEqual(OBSERVED_AT);
     await streamer.stop();
   });

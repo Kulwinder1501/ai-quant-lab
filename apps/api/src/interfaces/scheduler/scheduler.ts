@@ -83,26 +83,64 @@ const REPO_ROOT = fileURLToPath(new URL("../../../../..", import.meta.url));
 let fyersLedgerInstance: PostgresFyersRequestLedger | null = null;
 
 /**
+ * Buffers arbitrary stdout chunks into whole lines before passing them to the callback,
+ * handling chunk splits, multi-line chunks, and trailing un-terminated lines on flush.
+ */
+export function createStdoutLineBuffer(
+  onLine: (line: string) => void,
+  write: (chunk: string) => void = (chunk) => process.stdout.write(chunk),
+): {
+  onChunk: (chunk: string) => void;
+  flush: () => void;
+} {
+  let remainder = "";
+  return {
+    onChunk: (chunk: string) => {
+      write(chunk);
+      const combined = remainder + chunk;
+      const lines = combined.split("\n");
+      remainder = lines.pop() ?? "";
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (line.length > 0) {
+          onLine(line);
+        }
+      }
+    },
+    flush: () => {
+      const line = remainder.trim();
+      remainder = "";
+      if (line.length > 0) {
+        onLine(line);
+      }
+    },
+  };
+}
+
+/**
  * Child output is captured as well as forwarded, so a FAILED row in `scheduled_job_runs`
  * carries the reason rather than only an exit code. See `run-command.ts`.
  */
 function runCommand(command: string, args: string[]): Promise<void> {
+  const lineBuffer = createStdoutLineBuffer((line) => {
+    if (line.includes("Fyers REST request counts")) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed && typeof parsed === "object" && parsed.counts && fyersLedgerInstance) {
+          const todayKey = istDateKey(new Date());
+          void fyersLedgerInstance.recordBatch(todayKey, parsed.counts);
+        }
+      } catch {
+        // Non-JSON or malformed log line, safe to ignore
+      }
+    }
+  });
+
   return runChildCommand(command, args, {
     cwd: REPO_ROOT,
-    onStdout: (chunk) => {
-      process.stdout.write(chunk);
-      if (chunk.includes("Fyers REST request counts")) {
-        try {
-          const parsed = JSON.parse(chunk.trim());
-          if (parsed && typeof parsed === "object" && parsed.counts && fyersLedgerInstance) {
-            const todayKey = istDateKey(new Date());
-            void fyersLedgerInstance.recordBatch(todayKey, parsed.counts);
-          }
-        } catch {
-          // Non-JSON or fragmented log line, safe to ignore
-        }
-      }
-    },
+    onStdout: lineBuffer.onChunk,
+  }).finally(() => {
+    lineBuffer.flush();
   });
 }
 
@@ -203,16 +241,7 @@ async function main(): Promise<void> {
   const ingestNews = new IngestRssNewsService(new PostgresNewsRepository(database));
   const fyersLedger = new PostgresFyersRequestLedger(database);
   fyersLedgerInstance = fyersLedger;
-
-  setFyersRequestPersister((counts, dateKey) => {
-    void fyersLedger.recordBatch(dateKey, counts).catch((error) => {
-      console.error(JSON.stringify({
-        level: "error",
-        message: "Failed to persist Fyers request counts to ledger",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    });
-  });
+  fyersLedger.attachToGlobalCounter();
 
   const fyersAppId = process.env.FYERS_APP_ID;
   const fyersAppSecret = process.env.FYERS_APP_SECRET;
@@ -1519,6 +1548,7 @@ async function main(): Promise<void> {
   //
   // We now run this HTTP job ONLY when the socket stream is offline or quiet (>75s since last tick),
   // preserving 100% data continuity without exhausting the quota.
+  let lastPremiumPollState: "active" | "fallback" | null = null;
   const schedulePremiumTicks = () => {
     if (fyersTokenService) {
       void schedule("OPTION_PREMIUM_TICKS", async () => {
@@ -1527,15 +1557,21 @@ async function main(): Promise<void> {
           && (Date.now() - lastTickAt.getTime()) <= 75_000;
 
         if (socketActive) {
-          log("OPTION_PREMIUM_TICKS skipped: WebSocket stream healthy and active", {
-            lastTickAgeSeconds: Math.round((Date.now() - lastTickAt.getTime()) / 1000),
-          });
+          if (lastPremiumPollState !== "active") {
+            lastPremiumPollState = "active";
+            log("OPTION_PREMIUM_TICKS stream healthy: suppressing HTTP poll while socket is active", {
+              lastTickAgeSeconds: Math.round((Date.now() - lastTickAt.getTime()) / 1000),
+            });
+          }
           return;
         }
 
-        log("OPTION_PREMIUM_TICKS fallback to HTTP: WebSocket quiet or offline", {
-          lastTickAgeSeconds: lastTickAt ? Math.round((Date.now() - lastTickAt.getTime()) / 1000) : null,
-        });
+        if (lastPremiumPollState !== "fallback") {
+          lastPremiumPollState = "fallback";
+          log("OPTION_PREMIUM_TICKS fallback to HTTP: WebSocket quiet or offline", {
+            lastTickAgeSeconds: lastTickAt ? Math.round((Date.now() - lastTickAt.getTime()) / 1000) : null,
+          });
+        }
 
         const args = [
           "run", "data:collect:option-premium-ticks", "--",
