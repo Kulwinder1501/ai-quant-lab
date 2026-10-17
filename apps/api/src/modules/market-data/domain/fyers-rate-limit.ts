@@ -132,3 +132,24 @@ export const FYERS_REST_JOB_TYPES: ReadonlySet<string> = new Set([
   "INDEX_FUTURES_INTRADAY",
   "AI_AGENT_TICK",
 ]);
+
+/** Standard plan daily quota cap. */
+export const FYERS_DAILY_REQUEST_CAP = 5_000;
+
+/**
+ * 70% budget threshold. When daily usage exceeds this, low-priority polling jobs are paused to
+ * protect trading bot execution and exit sweeps until the next session.
+ */
+export const FYERS_DAILY_BUDGET_WARNING_THRESHOLD = 3_500;
+
+/**
+ * Low-value/non-critical jobs that should pause when daily usage passes the 70% threshold (3,500).
+ * High-value execution (PAPER_TRADING_BOT, PAPER_TRADE_EXIT_SWEEP, INDICES_INTRADAY) stays active.
+ */
+export const LOW_PRIORITY_FYERS_JOBS: ReadonlySet<string> = new Set([
+  "AI_AGENT_TICK",
+  "OPTION_CHAIN",
+  "INDIA_VIX_INTRADAY",
+  "INDEX_FUTURES_INTRADAY",
+]);
+

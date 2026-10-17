@@ -358,4 +358,15 @@ describe("OptionPremiumTickStreamer: contracts an open position needs", () => {
     await expect(streamer.refreshRequiredSubscriptions()).resolves.toBeUndefined();
     expect(socket.subscribe).not.toHaveBeenCalled();
   });
+
+  it("tracks the timestamp of the most recently received tick", async () => {
+    const { streamer, socket } = build({});
+    expect(streamer.getLastTickReceivedAt()).toBeNull();
+
+    await streamer.start();
+    socket.emitTick({ symbol: "SYM-57300CE", ltp: 250, bid: 249, ask: 251, volume: 10 } as Tick);
+
+    expect(streamer.getLastTickReceivedAt()).toEqual(OBSERVED_AT);
+    await streamer.stop();
+  });
 });

@@ -134,6 +134,7 @@ import { candlestickV2PatternDefinitionsMigration } from "./133-candlestick-v2-p
 import { premarketIntelligenceMigration } from "./134-premarket-intelligence.js";
 import { ictShadowSignalsMigration } from "./135-ict-shadow-signals.js";
 import { aedlsForensicSchemaMigration } from "./136-aedls-forensic-schema.js";
+import { fyersDailyRequestLedgerMigration } from "./137-fyers-daily-request-ledger.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -272,4 +273,5 @@ export const migrations = [
   premarketIntelligenceMigration,
   ictShadowSignalsMigration,
   aedlsForensicSchemaMigration,
+  fyersDailyRequestLedgerMigration,
 ];

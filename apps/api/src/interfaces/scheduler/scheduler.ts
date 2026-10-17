@@ -39,9 +39,14 @@ import { runExclusively, toDueMinute } from "../../modules/scheduling/domain/sch
 import { createSchedulerLogSink } from "./scheduler-log-sink.js";
 import {
   FYERS_REST_JOB_TYPES,
+  FYERS_DAILY_REQUEST_CAP,
+  FYERS_DAILY_BUDGET_WARNING_THRESHOLD,
+  LOW_PRIORITY_FYERS_JOBS,
   FyersRateLimitGate,
   classifyFyersRateLimitFromText,
 } from "../../modules/market-data/domain/fyers-rate-limit.js";
+import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
+import { setFyersRequestPersister, fyersRequestCounter } from "../../modules/market-data/domain/fyers-request-counter.js";
 import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
@@ -75,12 +80,30 @@ function istDateKey(instant: Date): string {
 // container (/app) — relying on it silently broke every ML job in Docker.
 const REPO_ROOT = fileURLToPath(new URL("../../../../..", import.meta.url));
 
+let fyersLedgerInstance: PostgresFyersRequestLedger | null = null;
+
 /**
  * Child output is captured as well as forwarded, so a FAILED row in `scheduled_job_runs`
  * carries the reason rather than only an exit code. See `run-command.ts`.
  */
 function runCommand(command: string, args: string[]): Promise<void> {
-  return runChildCommand(command, args, { cwd: REPO_ROOT });
+  return runChildCommand(command, args, {
+    cwd: REPO_ROOT,
+    onStdout: (chunk) => {
+      process.stdout.write(chunk);
+      if (chunk.includes("Fyers REST request counts")) {
+        try {
+          const parsed = JSON.parse(chunk.trim());
+          if (parsed && typeof parsed === "object" && parsed.counts && fyersLedgerInstance) {
+            const todayKey = istDateKey(new Date());
+            void fyersLedgerInstance.recordBatch(todayKey, parsed.counts);
+          }
+        } catch {
+          // Non-JSON or fragmented log line, safe to ignore
+        }
+      }
+    },
+  });
 }
 
 /**
@@ -178,6 +201,18 @@ async function main(): Promise<void> {
   const database = createDatabasePool(environment.DATABASE_URL);
   const claims = new PostgresScheduledJobClaimRepository(database);
   const ingestNews = new IngestRssNewsService(new PostgresNewsRepository(database));
+  const fyersLedger = new PostgresFyersRequestLedger(database);
+  fyersLedgerInstance = fyersLedger;
+
+  setFyersRequestPersister((counts, dateKey) => {
+    void fyersLedger.recordBatch(dateKey, counts).catch((error) => {
+      console.error(JSON.stringify({
+        level: "error",
+        message: "Failed to persist Fyers request counts to ledger",
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+  });
 
   const fyersAppId = process.env.FYERS_APP_ID;
   const fyersAppSecret = process.env.FYERS_APP_SECRET;
@@ -339,6 +374,38 @@ async function main(): Promise<void> {
           });
         }
         return;
+      }
+
+      /*
+       * Daily budget guard: once cumulative requests across the system cross 70% of quota (3,500),
+       * low-priority polling jobs (AI_AGENT_TICK, OPTION_CHAIN, etc.) pause to preserve remaining calls
+       * for the trading bot and exit sweeps.
+       */
+      if (LOW_PRIORITY_FYERS_JOBS.has(jobType)) {
+        const todayKey = istDateKey(new Date());
+        let dailyCount = fyersRequestCounter.getDailyTotal();
+        try {
+          const dbTotal = await fyersLedger.getDailyTotal(todayKey);
+          dailyCount = Math.max(dailyCount, dbTotal);
+        } catch {
+          // DB error fallback to in-memory count
+        }
+
+        if (dailyCount >= FYERS_DAILY_BUDGET_WARNING_THRESHOLD) {
+          const last = gateSkipLoggedAt.get(jobType) ?? 0;
+          if (Date.now() - last > 5 * 60_000) {
+            gateSkipLoggedAt.set(jobType, Date.now());
+            log("Scheduled job skipped: daily Fyers request budget threshold reached", {
+              jobType,
+              scheduledFor: scheduledFor.toISOString(),
+              dailyRequests: dailyCount,
+              threshold: FYERS_DAILY_BUDGET_WARNING_THRESHOLD,
+              cap: FYERS_DAILY_REQUEST_CAP,
+              skippedReason: "FYERS_DAILY_BUDGET_THRESHOLD_REACHED",
+            });
+          }
+          return;
+        }
       }
     }
     try {
@@ -1444,13 +1511,32 @@ async function main(): Promise<void> {
   // 2026-08-16 failed on `HTTP 429 request limit reached`, and on 2026-08-12 those failures also
   // drove 16 of 24 auth health checks to declare a valid credential unusable.
   //
-  // With the socket writing the same table continuously, this drops to a single run and becomes
-  // the floor under it rather than the source. That matters because a socket fails by going
-  // quiet: if it drops, this still deposits a quote on every cron tick, so the series degrades
-  // to its old resolution instead of stopping. Forward-only like OPTION_CHAIN.
+  // Dense ATM premium ticks over HTTP: now a pure fallback.
+  //
+  // OptionPremiumTickStreamer continuously persists incoming quotes over the live websocket.
+  // Running an unconditional REST poll every minute spent ~750 requests a day on redundant quotes,
+  // burning 15% of the 5,000-request quota.
+  //
+  // We now run this HTTP job ONLY when the socket stream is offline or quiet (>75s since last tick),
+  // preserving 100% data continuity without exhausting the quota.
   const schedulePremiumTicks = () => {
     if (fyersTokenService) {
       void schedule("OPTION_PREMIUM_TICKS", async () => {
+        const lastTickAt = premiumTickStreamer?.getLastTickReceivedAt();
+        const socketActive = lastTickAt !== null && lastTickAt !== undefined
+          && (Date.now() - lastTickAt.getTime()) <= 75_000;
+
+        if (socketActive) {
+          log("OPTION_PREMIUM_TICKS skipped: WebSocket stream healthy and active", {
+            lastTickAgeSeconds: Math.round((Date.now() - lastTickAt.getTime()) / 1000),
+          });
+          return;
+        }
+
+        log("OPTION_PREMIUM_TICKS fallback to HTTP: WebSocket quiet or offline", {
+          lastTickAgeSeconds: lastTickAt ? Math.round((Date.now() - lastTickAt.getTime()) / 1000) : null,
+        });
+
         const args = [
           "run", "data:collect:option-premium-ticks", "--",
           "--underlyings", "NIFTY50,BANKNIFTY",

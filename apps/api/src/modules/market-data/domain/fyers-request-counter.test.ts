@@ -21,6 +21,29 @@ describe("FyersRequestCounter", () => {
     expect(next.total).toBe(0);
     expect(next.windowSeconds).toBe(60);
   });
+
+  it("maintains cumulative daily total across drain cycles and resets on day rollover", () => {
+    // 2026-10-17 10:00:00 IST -> UTC is 04:30:00
+    let now = new Date("2026-10-17T04:30:00.000Z").getTime();
+    const counter = new FyersRequestCounter(() => now, now);
+
+    counter.record("quotes:api", 5);
+    counter.record("history", 10);
+    expect(counter.getDailyTotal()).toBe(15);
+
+    // Drain resets window but preserves daily total
+    counter.drain();
+    expect(counter.getDailyTotal()).toBe(15);
+
+    counter.record("quotes:api", 5);
+    expect(counter.getDailyTotal()).toBe(20);
+
+    // Rollover to next day: 2026-10-18 04:30:00 UTC (10:00 IST)
+    now = new Date("2026-10-18T04:30:00.000Z").getTime();
+    expect(counter.getDailyTotal()).toBe(0);
+    counter.record("quotes:api", 3);
+    expect(counter.getDailyTotal()).toBe(3);
+  });
 });
 
 describe("reportFyersRequestCounts", () => {

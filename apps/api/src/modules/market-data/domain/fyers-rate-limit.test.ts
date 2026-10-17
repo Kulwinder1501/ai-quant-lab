@@ -95,3 +95,17 @@ describe("FYERS_REST_JOB_TYPES", () => {
     expect(FYERS_REST_JOB_TYPES.has("PAPER_TRADE_EXIT_SWEEP")).toBe(false);
   });
 });
+
+describe("Daily Budget Guard Constants", () => {
+  it("defines standard cap at 5,000 and warning at 70% (3,500)", async () => {
+    const { FYERS_DAILY_REQUEST_CAP, FYERS_DAILY_BUDGET_WARNING_THRESHOLD, LOW_PRIORITY_FYERS_JOBS } = await import("./fyers-rate-limit.js");
+    expect(FYERS_DAILY_REQUEST_CAP).toBe(5_000);
+    expect(FYERS_DAILY_BUDGET_WARNING_THRESHOLD).toBe(3_500);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("AI_AGENT_TICK")).toBe(true);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("OPTION_CHAIN")).toBe(true);
+    // Crucial: high-value trading bot and exit sweep must NOT be in low priority
+    expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADING_BOT")).toBe(false);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADE_EXIT_SWEEP")).toBe(false);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("INDICES_INTRADAY")).toBe(false);
+  });
+});

@@ -166,8 +166,13 @@ export class OptionPremiumTickStreamer {
   private requiredTimer: NodeJS.Timeout | null = null;
   private refreshingRequired = false;
   private readonly onTick = (tick: Tick): void => this.record(tick);
+  private lastTickReceivedAt: Date | null = null;
 
   constructor(private readonly options: OptionPremiumTickStreamerOptions) {}
+
+  getLastTickReceivedAt(): Date | null {
+    return this.lastTickReceivedAt;
+  }
 
   private now(): Date {
     return this.options.now?.() ?? new Date();
@@ -240,6 +245,7 @@ export class OptionPremiumTickStreamer {
   }
 
   private record(tick: Tick): void {
+    this.lastTickReceivedAt = this.now();
     const key = tick.symbol.toUpperCase();
     const underlying = this.underlyingByProviderSymbol.get(key);
     if (underlying !== undefined) {
