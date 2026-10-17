@@ -212,6 +212,11 @@ services:
       - "--timeframe=1m,5m,15m,30m,60m"
       - "--instruments=NIFTY50,BANKNIFTY"
       - "--poll-seconds=30"
+      # Prices and volume come from the websocket between REST anchors taken every 60 seconds (about 750 quote
+      # requests a day down to about 375). See live-collector-scalp-v2 and stream-first-live-provider.ts. Remove this
+      # flag to go back to polling REST every poll.
+      - "--stream-first"
+      - "--rest-anchor-seconds=60"
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
