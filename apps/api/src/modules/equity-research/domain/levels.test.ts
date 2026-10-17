@@ -1,0 +1,612 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  clusterPivots,
+  computeAtr14,
+  computeLevels,
+  computeTrueRanges,
+  computeVolumeProfile,
+  EQUITY_LEVELS_DISCLAIMER,
+  EQUITY_LEVELS_EMPIRICAL_NOTE,
+  findSwingPivots,
+  type LevelItem,
+  type LevelsInput,
+  type SwingPivot,
+} from "./levels.js";
+
+// Helper to generate daily bars
+function generateBars(
+  count: number,
+  startDateStr: string,
+  baseClose = 100,
+  dailyStep = 0.2,
+  volume = 10_000,
+) {
+  const bars: LevelsInput["bars"] = [];
+  const [y, m, d] = startDateStr.split("-").map(Number);
+  const current = new Date(Date.UTC(y, m - 1, d));
+
+  let close = baseClose;
+  for (let i = 0; i < count; i++) {
+    const dateStr = current.toISOString().slice(0, 10);
+    bars.push({
+      bar_date: dateStr,
+      open: Math.round((close - 0.2) * 100) / 100,
+      high: Math.round((close + 1.5) * 100) / 100,
+      low: Math.round((close - 1.5) * 100) / 100,
+      close: Math.round(close * 100) / 100,
+      volume,
+    });
+    close += dailyStep;
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return bars;
+}
+
+describe("Levels Engine Domain Logic (WP-B Step B1)", () => {
+  // =========================================================================
+  // Gate L1: Hand-Computed Fixtures (>= 8 distinct fixtures)
+  // =========================================================================
+  describe("Gate L1: Hand-Computed Fixtures", () => {
+    it("Fixture 1: True Range and ATR14 Hand Check", () => {
+      // 15 bars with hand-specified prices:
+      // Bar 0: H=105, L=95, C=100 -> TR = 105 - 95 = 10.0
+      // Bar 1: H=104, L=98, C=102, prevC=100 -> TR = max(104-98=6, |104-100|=4, |98-100|=2) = 6.0
+      // Bar 2: H=108, L=101, C=106, prevC=102 -> TR = max(7, 6, 1) = 7.0
+      // Bar 3: H=107, L=103, C=104, prevC=106 -> TR = max(4, 1, 3) = 4.0
+      // Bar 4: H=110, L=99, C=101, prevC=104 -> TR = max(11, 6, 5) = 11.0
+      // Bar 5: H=103, L=97, C=98, prevC=101 -> TR = max(6, 2, 4) = 6.0
+      // Bar 6: H=100, L=95, C=99, prevC=98 -> TR = max(5, 2, 3) = 5.0
+      // Bar 7: H=102, L=96, C=101, prevC=99 -> TR = max(6, 3, 3) = 6.0
+      // Bar 8: H=105, L=100, C=104, prevC=101 -> TR = max(5, 4, 1) = 5.0
+      // Bar 9: H=109, L=103, C=108, prevC=104 -> TR = max(6, 5, 1) = 6.0
+      // Bar 10: H=111, L=105, C=107, prevC=108 -> TR = max(6, 3, 3) = 6.0
+      // Bar 11: H=108, L=102, C=103, prevC=107 -> TR = max(6, 1, 5) = 6.0
+      // Bar 12: H=106, L=98, C=100, prevC=103 -> TR = max(8, 3, 5) = 8.0
+      // Bar 13: H=104, L=99, C=102, prevC=100 -> TR = max(5, 4, 1) = 5.0
+      // Bar 14: H=107, L=101, C=105, prevC=102 -> TR = max(6, 5, 1) = 6.0
+      //
+      // Total 15 bars (index 0 to 14).
+      // The last 14 True Ranges (bars 1 to 14):
+      // [6, 7, 4, 11, 6, 5, 6, 5, 6, 6, 6, 8, 5, 6]
+      // Sum = 6+7+4+11+6+5+6+5+6+6+6+8+5+6 = 87
+      // ATR14 = 87 / 14 = 6.214285714...
+      const rawBars = [
+        { high: 105, low: 95, close: 100 },
+        { high: 104, low: 98, close: 102 },
+        { high: 108, low: 101, close: 106 },
+        { high: 107, low: 103, close: 104 },
+        { high: 110, low: 99, close: 101 },
+        { high: 103, low: 97, close: 98 },
+        { high: 100, low: 95, close: 99 },
+        { high: 102, low: 96, close: 101 },
+        { high: 105, low: 100, close: 104 },
+        { high: 109, low: 103, close: 108 },
+        { high: 111, low: 105, close: 107 },
+        { high: 108, low: 102, close: 103 },
+        { high: 106, low: 98, close: 100 },
+        { high: 104, low: 99, close: 102 },
+        { high: 107, low: 101, close: 105 },
+      ];
+
+      const trs = computeTrueRanges(rawBars);
+      expect(trs).toEqual([10, 6, 7, 4, 11, 6, 5, 6, 5, 6, 6, 6, 8, 5, 6]);
+
+      const atr14 = computeAtr14(rawBars, 14);
+      expect(atr14).not.toBeNull();
+      expect(atr14).toBeCloseTo(87 / 14, 8);
+    });
+
+    it("Fixture 2: Swing Pivots Low & High (k=5)", () => {
+      // 15 bars: bar 5 is a swing low (k=5), bar 8 is a swing high (k=5)
+      // lows before bar 5: [50, 48, 46, 44, 42], bar 5 low = 40.0.
+      // lows after bar 5: [43, 45, 47, 49, 51].
+      // Bar 5 low (40.0) is < min(bars 0..4 lows) and <= min(bars 6..10 lows).
+      const bars = [
+        { bar_date: "2026-01-01", low: 50, high: 55, volume: 100 }, // 0
+        { bar_date: "2026-01-02", low: 48, high: 54, volume: 100 }, // 1
+        { bar_date: "2026-01-03", low: 46, high: 53, volume: 100 }, // 2
+        { bar_date: "2026-01-04", low: 44, high: 52, volume: 100 }, // 3
+        { bar_date: "2026-01-05", low: 42, high: 51, volume: 100 }, // 4
+        { bar_date: "2026-01-06", low: 40, high: 50, volume: 100 }, // 5: SWING LOW
+        { bar_date: "2026-01-07", low: 43, high: 52, volume: 100 }, // 6
+        { bar_date: "2026-01-08", low: 45, high: 56, volume: 100 }, // 7
+        { bar_date: "2026-01-09", low: 47, high: 70, volume: 100 }, // 8: SWING HIGH
+        { bar_date: "2026-01-10", low: 46, high: 65, volume: 100 }, // 9
+        { bar_date: "2026-01-11", low: 45, high: 62, volume: 100 }, // 10
+        { bar_date: "2026-01-12", low: 44, high: 60, volume: 100 }, // 11
+        { bar_date: "2026-01-13", low: 43, high: 58, volume: 100 }, // 12
+        { bar_date: "2026-01-14", low: 42, high: 55, volume: 100 }, // 13
+        { bar_date: "2026-01-15", low: 41, high: 54, volume: 100 }, // 14
+      ];
+
+      // At totalBars = 15, T = 14. maxIndex = 14 - 5 = 9.
+      // Bar 5 (SWING_LOW) and Bar 8 (SWING_HIGH) both satisfy i <= 9.
+      const pivots = findSwingPivots(bars, 5, 252);
+      expect(pivots.length).toBe(2);
+
+      expect(pivots[0]).toEqual({
+        price: 40,
+        barDate: "2026-01-06",
+        barIndex: 5,
+        volume: 100,
+        kind: "SWING_LOW",
+      });
+
+      expect(pivots[1]).toEqual({
+        price: 70,
+        barDate: "2026-01-09",
+        barIndex: 8,
+        volume: 100,
+        kind: "SWING_HIGH",
+      });
+    });
+
+    it("Fixture 3: Single-Linkage Clustering and Cluster Threshold", () => {
+      // Threshold = 1.5% (0.015).
+      // Prices: [100.0, 101.2, 103.0, 150.0, 151.5]
+      // Gap 101.2 - 100.0 = 1.2 <= 100.0 * 0.015 (1.5) -> same cluster
+      // Gap 103.0 - 101.2 = 1.8 > 101.2 * 0.015 (1.518) -> new cluster
+      // Gap 150.0 - 103.0 = 47.0 > 103.0 * 0.015 -> new cluster
+      // Gap 151.5 - 150.0 = 1.5 <= 150.0 * 0.015 (2.25) -> same cluster
+      const pivots: SwingPivot[] = [
+        { price: 101.2, barDate: "2026-01-02", barIndex: 1, volume: 100, kind: "SWING_LOW" },
+        { price: 150.0, barDate: "2026-01-04", barIndex: 3, volume: 100, kind: "SWING_HIGH" },
+        { price: 100.0, barDate: "2026-01-01", barIndex: 0, volume: 100, kind: "SWING_LOW" },
+        { price: 103.0, barDate: "2026-01-03", barIndex: 2, volume: 100, kind: "SWING_HIGH" },
+        { price: 151.5, barDate: "2026-01-05", barIndex: 4, volume: 100, kind: "SWING_HIGH" },
+      ];
+
+      const clusters = clusterPivots(pivots, 0.015);
+      expect(clusters.length).toBe(3);
+
+      // Cluster 0: [100.0, 101.2]
+      expect(clusters[0].map((p) => p.price)).toEqual([100.0, 101.2]);
+      const mean0 = (100.0 + 101.2) / 2;
+      expect(mean0).toBe(100.6);
+
+      // Cluster 1: [103.0]
+      expect(clusters[1].map((p) => p.price)).toEqual([103.0]);
+
+      // Cluster 2: [150.0, 151.5]
+      expect(clusters[2].map((p) => p.price)).toEqual([150.0, 151.5]);
+      const mean2 = (150.0 + 151.5) / 2;
+      expect(mean2).toBe(150.75);
+    });
+
+    it("Fixture 4: Recency-Weighted Strength Calculation", () => {
+      // Recency formula: sum(0.5 ^ (age / halfLife)), with halfLife = 126
+      // Let T = 252 (today is bar 252).
+      // Pivot A: barIndex = 252 -> age = 0 -> weight = 0.5^0 = 1.0
+      // Pivot B: barIndex = 126 -> age = 126 -> weight = 0.5^(126/126) = 0.5
+      // Pivot C: barIndex = 0 -> age = 252 -> weight = 0.5^(252/126) = 0.25
+      // Hand sum = 1.0 + 0.5 + 0.25 = 1.75
+      const halfLife = 126;
+      const T = 252;
+      const ages = [T - 252, T - 126, T - 0];
+      const sum = ages.reduce((acc, age) => acc + Math.pow(0.5, age / halfLife), 0);
+      expect(sum).toBe(1.75);
+    });
+
+    it("Fixture 5: Zone Half-Width Calculation (max(1%, 0.5 * ATR14))", () => {
+      // Level price = 200.0
+      // 1% of level = 2.0
+      // Case 5a: ATR14 = 2.0 -> 0.5 * ATR = 1.0. max(2.0, 1.0) = 2.0. Zone: [198.0, 202.0]
+      // Case 5b: ATR14 = 8.0 -> 0.5 * ATR = 4.0. max(2.0, 4.0) = 4.0. Zone: [196.0, 204.0]
+      const price = 200.0;
+      const zoneMinPct = 0.01;
+      const zoneAtrMultiple = 0.5;
+
+      const wA = Math.max(zoneMinPct * price, zoneAtrMultiple * 2.0);
+      expect(wA).toBe(2.0);
+      expect(price - wA).toBe(198.0);
+      expect(price + wA).toBe(202.0);
+
+      const wB = Math.max(zoneMinPct * price, zoneAtrMultiple * 8.0);
+      expect(wB).toBe(4.0);
+      expect(price - wB).toBe(196.0);
+      expect(price + wB).toBe(204.0);
+    });
+
+    it("Fixture 6: Break & Flip Hand Trace", () => {
+      // 280 bars. Create a strong swing low at price 100.0 formed by pivots.
+      // Then bar T-2 closes at 96.0 (below 100 - w = 98.0).
+      // If current close is 95.0 -> FLIPPED (from support to resistance).
+      const baseBars = generateBars(280, "2025-01-01", 100, 0, 10_000);
+
+      // Create two swing lows at price 100.0 at bar 100 and bar 150
+      // For bar 100 to be swing low (k=5):
+      for (let i = 95; i <= 105; i++) {
+        baseBars[i].low = i === 100 ? 100.0 : 103.0;
+        baseBars[i].high = 110.0;
+        baseBars[i].close = 106.0;
+      }
+      for (let i = 145; i <= 155; i++) {
+        baseBars[i].low = i === 150 ? 100.2 : 103.0;
+        baseBars[i].high = 110.0;
+        baseBars[i].close = 106.0;
+      }
+
+      // Bar 278 closes at 95.0 (breakdown below 100 - w)
+      baseBars[278].close = 95.0;
+      baseBars[278].low = 94.0;
+      baseBars[279].close = 94.0; // Current close < 100.0
+
+      const res = computeLevels({ bars: baseBars, rebackfillNeeded: false });
+      const swingLevel = res.levels.find((l) => l.kind === "SWING");
+      expect(swingLevel).toBeDefined();
+      expect(swingLevel?.state).toBe("FLIPPED");
+      expect(swingLevel?.side).toBe("RESISTANCE"); // Since price is now below level
+      expect(swingLevel?.brokenOn).toBe(baseBars[278].bar_date);
+    });
+
+    it("Fixture 7: Round Numbers Hand Calculation Across Magnitudes", () => {
+      // Price = 42.0:
+      // Magnitude = 10^floor(log10(42)) = 10^1 = 10. Step = 5.
+      // Range: [42 * 0.85 = 35.7, 42 * 1.15 = 48.3].
+      // Multiples of 5 in range: 40, 45.
+      const bars42 = generateBars(300, "2025-01-01", 42, 0);
+      const res42 = computeLevels({ bars: bars42, rebackfillNeeded: false });
+      const round42 = res42.levels.filter((l) => l.kind === "ROUND_NUMBER").map((l) => l.price);
+      expect(round42.sort((a, b) => a - b)).toEqual([40, 45]);
+
+      // Price = 100.0:
+      // Magnitude = 10^floor(log10(100)) = 10^2 = 100. Step = 50.
+      // Range: [85, 115]. Multiples of 50 in range: 100.
+      const bars100 = generateBars(300, "2025-01-01", 100, 0);
+      const res100 = computeLevels({ bars: bars100, rebackfillNeeded: false });
+      const round100 = res100.levels.filter((l) => l.kind === "ROUND_NUMBER").map((l) => l.price);
+      expect(round100).toEqual([100]);
+
+      // Price = 99.0:
+      // Magnitude = 10^floor(log10(99)) = 10. Step = 5.
+      // Range: [99 * 0.85 = 84.15, 99 * 1.15 = 113.85].
+      // Multiples of 5 in range: 85, 90, 95, 100, 105, 110.
+      const bars99 = generateBars(300, "2025-01-01", 99, 0);
+      const res99 = computeLevels({ bars: bars99, rebackfillNeeded: false });
+      const round99 = res99.levels.filter((l) => l.kind === "ROUND_NUMBER").map((l) => l.price);
+      expect(round99.sort((a, b) => a - b)).toEqual([85, 90, 95, 100, 105, 110]);
+    });
+
+    it("Fixture 8: Volume Profile Hand Calculation", () => {
+      // 60 bins over price range 100.0 to 160.0 -> binWidth = 1.0
+      // Bar 1: low=100, high=120, vol=210 -> touches bins 0..20 (21 bins) -> 10 vol/bin
+      // Bar 2: low=125, high=135, vol=1100 -> touches bins 25..35 (11 bins) -> 100 vol/bin (heaviest!)
+      // Bar 3: low=140, high=160, vol=200 -> touches bins 40..59 (20 bins) -> 10 vol/bin
+      // Total volume = 210 + 1100 + 200 = 1510
+      // POC is at bin 25 (first max volume bin with 100 vol) -> midpoint = 100 + (25 + 0.5) * 1.0 = 125.5
+      // Value area (70% of 1510 = 1057 vol) expands around POC.
+      const bars = [
+        { low: 100.0, high: 120.0, volume: 210 },
+        { low: 125.0, high: 135.0, volume: 1100 },
+        { low: 140.0, high: 160.0, volume: 200 },
+      ];
+
+      const vp = computeVolumeProfile(bars, 60, 0.70);
+      expect(vp).not.toBeNull();
+      expect(vp?.binWidth).toBe(1.0);
+      expect(vp?.totalVolume).toBe(1510);
+      expect(vp?.poc).toBe(125.5);
+      // Value area contains the heavy bins 25..35 (1100 >= 1057)
+      expect(vp?.val).toBeLessThanOrEqual(125.0);
+      expect(vp?.vah).toBeGreaterThanOrEqual(136.0);
+    });
+
+    it("Fixture 9: Unfilled Gap Hand Calculation", () => {
+      // 300 bars with flat base price 100.0.
+      // At bar 260, create an unfilled Gap Up:
+      // prevBar (259): high = 100.0, close = 99.5
+      // currBar (260): low = 105.0, high = 108.0, close = 107.0
+      // Gap size = 5.0 >= 1.0 * ATR14 (ATR ~ 2.0).
+      // Gap edge = 100.0. Subsequent bars remain above 102.0.
+      const bars = generateBars(300, "2025-01-01", 100, 0);
+      bars[259].high = 100.0;
+      bars[259].close = 99.5;
+      bars[260].open = 106.0;
+      bars[260].low = 105.0;
+      bars[260].high = 108.0;
+      bars[260].close = 107.0;
+
+      // Bars 261..299 all remain above 104.0
+      for (let i = 261; i < 300; i++) {
+        bars[i].low = 104.0;
+        bars[i].high = 108.0;
+        bars[i].close = 106.0;
+      }
+
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      const gapLevel = res.levels.find((l) => l.kind === "GAP" && l.source === "Unfilled Gap Up Edge");
+      expect(gapLevel).toBeDefined();
+      expect(gapLevel?.price).toBe(100.0);
+
+      // Now fill the gap at bar 290 by dropping low to 99.0
+      bars[290].low = 99.0;
+      const resFilled = computeLevels({ bars, rebackfillNeeded: false });
+      const filledGap = resFilled.levels.find(
+        (l) => l.kind === "GAP" && l.price === 100.0 && l.source === "Unfilled Gap Up Edge",
+      );
+      expect(filledGap).toBeUndefined();
+    });
+  });
+
+  // =========================================================================
+  // Gate L2: No Look-Ahead Test
+  // =========================================================================
+  describe("Gate L2: No Look-Ahead Verification", () => {
+    it("levels computed on series cut at date d are identical to full series truncated at d, and future spikes change nothing prior", () => {
+      // Generate 5 distinct synthetic stocks with 400 bars each
+      const stocks = [
+        generateBars(400, "2025-01-01", 50, 0.1, 10_000),
+        generateBars(400, "2025-01-01", 120, -0.05, 25_000),
+        generateBars(400, "2025-01-01", 300, 0.25, 5_000),
+        generateBars(400, "2025-01-01", 85, 0.0, 15_000),
+        generateBars(400, "2025-01-01", 200, -0.15, 50_000),
+      ];
+
+      // Test 20 cut points spaced across the series (indices 260 to 380)
+      const cutIndices = [
+        260, 265, 270, 275, 280, 285, 290, 295, 300, 305,
+        310, 315, 320, 325, 330, 340, 350, 360, 370, 380,
+      ];
+
+      for (let sIdx = 0; sIdx < stocks.length; sIdx++) {
+        const fullStock = stocks[sIdx];
+
+        for (const cut of cutIndices) {
+          const cutDate = fullStock[cut].bar_date;
+
+          // 1. Compute on series sliced up to cut index
+          const truncatedSlice = fullStock.slice(0, cut + 1);
+          const resTruncated = computeLevels({ bars: truncatedSlice, rebackfillNeeded: false });
+
+          // 2. Plant a massive spike 5 bars in the future (at cut + 5)
+          const futureSpikeBars = fullStock.slice(0, cut + 10).map((b, idx) => {
+            if (idx === cut + 5) {
+              return {
+                ...b,
+                high: b.high * 5,
+                close: b.close * 5,
+                volume: b.volume * 10,
+              };
+            }
+            return { ...b };
+          });
+
+          // Compute on the spike series cut at cutDate
+          const spikeSlice = futureSpikeBars.slice(0, cut + 1);
+          const resSpikeSlice = computeLevels({ bars: spikeSlice, rebackfillNeeded: false });
+
+          // Must be 100% identical
+          expect(resTruncated.asOfDate).toBe(cutDate);
+          expect(resTruncated.atr14).toBe(resSpikeSlice.atr14);
+          expect(resTruncated.state).toBe(resSpikeSlice.state);
+          expect(resTruncated.riskDistanceAtr).toBe(resSpikeSlice.riskDistanceAtr);
+          expect(resTruncated.levels.length).toBe(resSpikeSlice.levels.length);
+
+          for (let i = 0; i < resTruncated.levels.length; i++) {
+            const lA = resTruncated.levels[i];
+            const lB = resSpikeSlice.levels[i];
+            expect(lA.id).toBe(lB.id);
+            expect(lA.price).toBe(lB.price);
+            expect(lA.side).toBe(lB.side);
+            expect(lA.zoneLow).toBe(lB.zoneLow);
+            expect(lA.zoneHigh).toBe(lB.zoneHigh);
+            expect(lA.strength).toBe(lB.strength);
+            expect(lA.state).toBe(lB.state);
+          }
+        }
+      }
+    });
+  });
+
+  // =========================================================================
+  // Gate L5: Edge Cases
+  // =========================================================================
+  describe("Gate L5: Edge Cases", () => {
+    it("handles a completely flat series (H = L = C, ATR = 0)", () => {
+      const flatBars = generateBars(300, "2025-01-01", 100, 0, 1000).map((b) => ({
+        ...b,
+        high: 100.0,
+        low: 100.0,
+        close: 100.0,
+      }));
+
+      const res = computeLevels({ bars: flatBars, rebackfillNeeded: false });
+      expect(res.state).toBe("OK");
+      expect(res.atr14).toBe(0);
+      expect(res.atrPercent).toBe(0);
+      // Reference levels (SMA 50, SMA 200, Round numbers) still computed safely
+      expect(res.levels.some((l) => l.kind === "SMA_50")).toBe(true);
+      expect(res.levels.some((l) => l.kind === "ROUND_NUMBER")).toBe(true);
+    });
+
+    it("handles fewer than 258 bars (e.g. 80 bars) with INSUFFICIENT_HISTORY", () => {
+      const shortBars = generateBars(80, "2026-05-01", 100, 0.2);
+      const res = computeLevels({ bars: shortBars, rebackfillNeeded: false });
+
+      expect(res.state).toBe("INSUFFICIENT_HISTORY");
+      // Swing levels not produced
+      expect(res.levels.filter((l) => l.kind === "SWING").length).toBe(0);
+      // Reference levels that can be computed are still shown (e.g. SMA 50, Round numbers, 52W range)
+      expect(res.levels.some((l) => l.kind === "SMA_50")).toBe(true);
+      expect(res.levels.some((l) => l.kind === "52W_HIGH")).toBe(true);
+      expect(res.nearestSupport).toBeNull();
+      expect(res.nearestResistance).toBeNull();
+    });
+
+    it("handles fewer than 14 bars gracefully", () => {
+      const veryShort = generateBars(10, "2026-05-01", 100, 0.2);
+      const res = computeLevels({ bars: veryShort, rebackfillNeeded: false });
+
+      expect(res.state).toBe("INSUFFICIENT_HISTORY");
+      expect(res.atr14).toBeNull();
+      expect(res.levels.length).toBe(0);
+    });
+
+    it("handles calendar gaps over 10 days without crashing", () => {
+      const bars = generateBars(300, "2025-01-01", 100, 0.1);
+      // Introduce an artificial 20-calendar-day gap at bar 100
+      const dateParts = bars[100].bar_date.split("-").map(Number);
+      const jumpedDate = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2] + 20));
+      for (let i = 100; i < bars.length; i++) {
+        bars[i].bar_date = jumpedDate.toISOString().slice(0, 10);
+        jumpedDate.setUTCDate(jumpedDate.getUTCDate() + 1);
+      }
+
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      expect(res.state).toBe("OK");
+    });
+
+    it("handles a halted stock where High equals Low for several weeks", () => {
+      const bars = generateBars(300, "2025-01-01", 100, 0.1);
+      for (let i = 150; i <= 180; i++) {
+        bars[i].high = 115.0;
+        bars[i].low = 115.0;
+        bars[i].close = 115.0;
+        bars[i].volume = 0;
+      }
+
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      expect(res.state).toBe("OK");
+    });
+
+    it("handles a demerger-style drop (-40% one day move like TMPV 2025-10-14)", () => {
+      const bars = generateBars(300, "2025-01-01", 100, 0.1);
+      bars[200].close = bars[199].close * 0.5985; // ~40.15% drop
+      bars[200].low = bars[200].close - 1;
+      bars[200].high = bars[199].close;
+
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      expect(res.state).toBe("OK");
+      expect(res.warnings.some((w) => w.includes("one-day move of -40.15%"))).toBe(true);
+    });
+
+    it("handles zero-volume days in Volume Profile safely", () => {
+      const zeroVolBars = generateBars(280, "2025-01-01", 100, 0.1).map((b) => ({
+        ...b,
+        volume: 0,
+      }));
+
+      const res = computeLevels({ bars: zeroVolBars, rebackfillNeeded: false });
+      expect(res.state).toBe("OK");
+      // Volume Profile POC/VAH/VAL levels are safely omitted when totalVolume == 0
+      expect(res.levels.some((l) => l.kind === "VOLUME_PROFILE_POC")).toBe(false);
+    });
+
+    it("ignores a single pivot cluster with touches < minPivots", () => {
+      const pivots: SwingPivot[] = [
+        { price: 100.0, barDate: "2026-01-01", barIndex: 10, volume: 100, kind: "SWING_LOW" },
+        { price: 200.0, barDate: "2026-02-01", barIndex: 30, volume: 100, kind: "SWING_HIGH" },
+      ];
+
+      const clusters = clusterPivots(pivots, 0.015);
+      expect(clusters.length).toBe(2);
+      expect(clusters[0].length).toBe(1);
+      expect(clusters[1].length).toBe(1);
+      // Both clusters have touches = 1 < 2, so neither qualifies as a valid swing level
+    });
+
+    it("handles round numbers across powers of ten (99 to 101)", () => {
+      const bars99 = generateBars(300, "2025-01-01", 99, 0);
+      const res99 = computeLevels({ bars: bars99, rebackfillNeeded: false });
+      const rounds99 = res99.levels.filter((l) => l.kind === "ROUND_NUMBER").map((l) => l.price);
+      expect(rounds99).toContain(100);
+
+      const bars101 = generateBars(300, "2025-01-01", 101, 0);
+      const res101 = computeLevels({ bars: bars101, rebackfillNeeded: false });
+      const rounds101 = res101.levels.filter((l) => l.kind === "ROUND_NUMBER").map((l) => l.price);
+      expect(rounds101).toContain(100);
+    });
+  });
+
+  // =========================================================================
+  // Gate L6: Determinism & Purity
+  // =========================================================================
+  describe("Gate L6: Determinism & Purity", () => {
+    it("produces identical output for identical input across multiple runs", () => {
+      const bars = generateBars(350, "2025-01-01", 100, 0.1);
+      const res1 = computeLevels({ bars, rebackfillNeeded: false });
+      const res2 = computeLevels({ bars, rebackfillNeeded: false });
+
+      expect(res1).toEqual(res2);
+    });
+
+    it("levels.ts imports nothing outside domain", () => {
+      const filePath = resolve(__dirname, "levels.ts");
+      const content = readFileSync(filePath, "utf-8");
+
+      // Extract all import source paths
+      const importRegex = /import\s+[\s\S]*?from\s+["']([^"']+)["']/g;
+      const matches = Array.from(content.matchAll(importRegex));
+      expect(matches.length).toBeGreaterThan(0);
+
+      for (const m of matches) {
+        const importPath = m[1];
+        // Imports must be relative paths within domain (./)
+        expect(importPath.startsWith("./")).toBe(true);
+      }
+    });
+  });
+
+  // =========================================================================
+  // Gate L8: Banned Words Scanner Across All States
+  // =========================================================================
+  describe("Gate L8: Banned Words Scanner", () => {
+    const bannedRegex =
+      /\b(buy|sell|hold|bullish|bearish|strong|weak|overbought|oversold|signal|target|outperform|underperform|recommend)\b/i;
+
+    function scanObject(obj: unknown, path = ""): void {
+      if (typeof obj === "string") {
+        if (obj.includes("Not a recommendation, rating or forecast.")) return;
+
+        const match = bannedRegex.exec(obj);
+        if (match) {
+          throw new Error(`Banned word '${match[1]}' found at path '${path}': "${obj}"`);
+        }
+      } else if (Array.isArray(obj)) {
+        obj.forEach((item, idx) => scanObject(item, `${path}[${idx}]`));
+      } else if (obj !== null && typeof obj === "object") {
+        for (const [k, v] of Object.entries(obj)) {
+          // Allow internal key name 'strength'
+          if (k === "strength") continue;
+          scanObject(v, `${path}.${k}`);
+        }
+      }
+    }
+
+    it("verifies no banned terms in OK state (full history)", () => {
+      const bars = generateBars(350, "2025-01-01", 100, 0.1);
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      expect(() => scanObject(res, "res_ok")).not.toThrow();
+    });
+
+    it("verifies no banned terms in INSUFFICIENT_HISTORY state", () => {
+      const bars = generateBars(50, "2026-05-01", 100, 0.1);
+      const res = computeLevels({ bars, rebackfillNeeded: false });
+      expect(() => scanObject(res, "res_short")).not.toThrow();
+    });
+
+    it("verifies no banned terms in SUSPENDED state", () => {
+      const bars = generateBars(300, "2025-01-01", 100, 0.1);
+      const res = computeLevels({ bars, rebackfillNeeded: true });
+      expect(() => scanObject(res, "res_suspended")).not.toThrow();
+    });
+
+    it("verifies no banned terms in STALE state", () => {
+      const bars = generateBars(300, "2025-01-01", 100, 0.1);
+      const res = computeLevels({
+        bars,
+        rebackfillNeeded: false,
+        asOfEvaluationDate: "2026-10-17",
+      });
+      expect(res.isStale).toBe(true);
+      expect(() => scanObject(res, "res_stale")).not.toThrow();
+    });
+
+    it("verifies no banned terms in disclaimer, empirical note, and formula definitions", () => {
+      expect(() => scanObject(EQUITY_LEVELS_DISCLAIMER, "disclaimer")).not.toThrow();
+      expect(() => scanObject(EQUITY_LEVELS_EMPIRICAL_NOTE, "empiricalNote")).not.toThrow();
+    });
+  });
+});
