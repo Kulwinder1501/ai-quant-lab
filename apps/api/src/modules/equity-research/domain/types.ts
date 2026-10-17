@@ -129,6 +129,15 @@ export interface SourceCallLogRecord {
   error_message: string | null;
 }
 
+export interface TrendSummaryItem {
+  return1M: number | null;
+  return1Y: number | null;
+  position52W: number | null;
+  state: "OK" | "INSUFFICIENT_HISTORY" | "NOT_MEANINGFUL" | "SUSPENDED";
+  asOfDate?: string | null;
+  isStale?: boolean;
+}
+
 export interface WatchlistStockItem {
   id: string;
   symbol: string;
@@ -153,5 +162,6 @@ export interface WatchlistStockItem {
   hasDataGap: boolean;
   rebackfillNeeded: boolean;
   seriesVersion: number;
+  trendSummary?: TrendSummaryItem;
 }
 

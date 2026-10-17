@@ -28,6 +28,7 @@ export interface WatchlistStockItem {
   hasDataGap: boolean;
   rebackfillNeeded?: boolean;
   seriesVersion?: number;
+  trendSummary?: TrendSummaryItem;
 }
 
 export interface WatchlistResponse {
@@ -136,3 +137,79 @@ export interface SourceHealthResponse {
 }
 
 export type HistoryRange = "1mo" | "3mo" | "6mo" | "1y" | "2y" | "5y" | "max";
+
+export type TrendMetricState = "OK" | "INSUFFICIENT_HISTORY" | "NOT_MEANINGFUL" | "SUSPENDED";
+
+export interface TrendMetricValue {
+  formulaId: string;
+  formulaText: string;
+  window: string;
+  value: number | null;
+  formatted: string;
+  barsUsed: number;
+  firstDateUsed: string | null;
+  lastDateUsed: string | null;
+  state: TrendMetricState;
+  warnings: string[];
+}
+
+export interface LargeDailyMove {
+  date: string;
+  previousClose: number;
+  close: number;
+  percentChange: number;
+}
+
+export interface TrendSummaryItem {
+  return1M: number | null;
+  return1Y: number | null;
+  position52W: number | null;
+  state: TrendMetricState;
+  asOfDate?: string | null;
+  isStale?: boolean;
+}
+
+export interface TrendPanelResponse {
+  stock: {
+    id: string;
+    symbol: string;
+    exchange: EquityExchange;
+    yahooSymbol: string;
+    displayName: string;
+    active: boolean;
+    seriesVersion: number;
+    rebackfillNeeded: boolean;
+  };
+  asOfDate: string | null;
+  isStale: boolean;
+  staleDays: number;
+  rebackfillNeeded: boolean;
+  seriesVersion: number;
+  metrics: {
+    latestClose: TrendMetricValue;
+    return1M: TrendMetricValue;
+    return3M: TrendMetricValue;
+    return6M: TrendMetricValue;
+    returnYTD: TrendMetricValue;
+    return1Y: TrendMetricValue;
+    sma50: TrendMetricValue;
+    sma200: TrendMetricValue;
+    distanceFromSma50: TrendMetricValue;
+    distanceFromSma200: TrendMetricValue;
+    sma50VsSma200: TrendMetricValue;
+    high52W: TrendMetricValue;
+    low52W: TrendMetricValue;
+    position52W: TrendMetricValue;
+    distanceFrom52WHigh: TrendMetricValue;
+    volatility20D: TrendMetricValue;
+    volatility1Y: TrendMetricValue;
+    maxDrawdown1Y: TrendMetricValue;
+    relativeActivity: TrendMetricValue;
+    largeDailyMovesCount: TrendMetricValue;
+  };
+  largeDailyMoves: LargeDailyMove[];
+  trendSummary: TrendSummaryItem;
+  disclaimer: string;
+  warnings: string[];
+}
+

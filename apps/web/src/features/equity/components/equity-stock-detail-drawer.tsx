@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Database,
@@ -14,9 +15,10 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import type { HistoryRange, StockDetailResponse, WatchlistStockItem } from "../types";
-import { fetchStockDetail } from "../api";
+import type { HistoryRange, StockDetailResponse, TrendPanelResponse, WatchlistStockItem } from "../types";
+import { fetchStockDetail, fetchStockTrend } from "../api";
 import { EquityChart } from "./equity-chart";
+import { EquityTrendPanel } from "./equity-trend-panel";
 import { ModalPortal } from "../../../components/ui/modal-portal";
 
 interface EquityStockDetailDrawerProps {
@@ -25,18 +27,22 @@ interface EquityStockDetailDrawerProps {
   onClose: () => void;
 }
 
-type TabType = "chart" | "fundamentals" | "actions" | "logs";
+type TabType = "trend" | "chart" | "fundamentals" | "actions" | "logs";
 
 export function EquityStockDetailDrawer({
   stock,
   isOpen,
   onClose,
 }: EquityStockDetailDrawerProps) {
-  const [activeTab, setActiveTab] = useState<TabType>("chart");
+  const [activeTab, setActiveTab] = useState<TabType>("trend");
   const [range, setRange] = useState<HistoryRange>("1y");
   const [detail, setDetail] = useState<StockDetailResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [trend, setTrend] = useState<TrendPanelResponse | null>(null);
+  const [isTrendLoading, setIsTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
 
   // Defect 4: Accessibility - handle Escape key and lock body scroll
   useEffect(() => {
@@ -82,6 +88,32 @@ export function EquityStockDetailDrawer({
     };
   }, [isOpen, stock, range]);
 
+  useEffect(() => {
+    if (!isOpen || !stock) return;
+
+    let isMounted = true;
+    const stockId = stock.id;
+
+    void fetchStockTrend(stockId)
+      .then((data) => {
+        if (isMounted) {
+          setTrend(data);
+          setTrendError(null);
+          setIsTrendLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (isMounted) {
+          setTrendError(err instanceof Error ? err.message : "Failed to load trend statistics.");
+          setIsTrendLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, stock]);
+
   if (!isOpen || !stock) return null;
 
   const ranges: { label: string; value: HistoryRange }[] = [
@@ -119,13 +151,13 @@ export function EquityStockDetailDrawer({
           onClick={onClose}
           aria-hidden="true"
         />
-        <div className="absolute inset-y-0 right-0 flex max-w-full pl-10 pointer-events-none">
-          <div className="w-screen max-w-3xl pointer-events-auto transform border-l border-white/10 bg-slate-950 text-slate-200 shadow-2xl transition-all duration-300 ease-in-out flex flex-col h-full">
+        <div className="absolute inset-y-0 right-0 flex max-w-full pl-0 sm:pl-10 pointer-events-none">
+          <div className="w-screen max-w-3xl min-w-0 pointer-events-auto transform border-l border-white/10 bg-slate-950 text-slate-200 shadow-2xl transition-all duration-300 ease-in-out flex flex-col h-full overflow-hidden">
             {/* Drawer Header */}
-            <div className="border-b border-white/10 p-5 sm:p-6 bg-slate-900/50">
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="flex items-center gap-2.5">
+            <div className="border-b border-white/10 p-4 sm:p-6 bg-slate-900/50 min-w-0">
+              <div className="flex items-start justify-between gap-3 min-w-0">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2.5 flex-wrap">
                     <h2
                       id="equity-drawer-title"
                       className="text-xl font-bold text-white tracking-tight font-mono"
@@ -139,11 +171,11 @@ export function EquityStockDetailDrawer({
                       {stock.yahooSymbol}
                     </span>
                   </div>
-                  <p className="mt-1 text-sm font-medium text-slate-300">
+                  <p className="mt-1 text-sm font-medium text-slate-300 truncate">
                     {stock.displayName}
                   </p>
                   {stock.note && (
-                    <p className="text-xs text-cyan-400/80 italic mt-0.5">
+                    <p className="text-xs text-cyan-400/80 italic mt-0.5 truncate">
                       Note: {stock.note}
                     </p>
                   )}
@@ -152,7 +184,7 @@ export function EquityStockDetailDrawer({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg p-1.5 text-slate-400 hover:bg-white/5 hover:text-white transition"
+                  className="rounded-lg p-1.5 text-slate-400 hover:bg-white/5 hover:text-white transition shrink-0"
                   aria-label="Close detail view"
                 >
                   <X className="size-5" />
@@ -160,7 +192,7 @@ export function EquityStockDetailDrawer({
               </div>
 
               {/* Quick Metrics Strip */}
-              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3 text-xs">
                 <div className="rounded-lg bg-slate-900/80 border border-white/5 p-2.5">
                   <span className="text-slate-400 block text-[11px]">Last Price</span>
                   <span className="text-sm font-bold text-white font-mono">
@@ -188,12 +220,24 @@ export function EquityStockDetailDrawer({
               </div>
 
               {/* Navigation Tabs */}
-              <div className="mt-5 flex items-center justify-between border-t border-white/5 pt-3">
-                <div className="flex items-center gap-1">
+              <div className="mt-4 sm:mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between border-t border-white/5 pt-3 gap-2 min-w-0">
+                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar min-w-0 py-1">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("trend")}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
+                      activeTab === "trend"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                        : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                  >
+                    <Activity className="size-3.5" />
+                    Trend
+                  </button>
                   <button
                     type="button"
                     onClick={() => setActiveTab("chart")}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "chart"
                         ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                         : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -205,7 +249,7 @@ export function EquityStockDetailDrawer({
                   <button
                     type="button"
                     onClick={() => setActiveTab("fundamentals")}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "fundamentals"
                         ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                         : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -217,7 +261,7 @@ export function EquityStockDetailDrawer({
                   <button
                     type="button"
                     onClick={() => setActiveTab("actions")}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "actions"
                         ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                         : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -229,7 +273,7 @@ export function EquityStockDetailDrawer({
                   <button
                     type="button"
                     onClick={() => setActiveTab("logs")}
-                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "logs"
                         ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
                         : "text-slate-400 hover:text-white hover:bg-white/5"
@@ -241,7 +285,7 @@ export function EquityStockDetailDrawer({
                 </div>
 
                 {activeTab === "chart" && (
-                  <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-slate-900 p-0.5">
+                  <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-slate-900 p-0.5 overflow-x-auto min-w-0 shrink-0">
                     {ranges.map((r) => (
                       <button
                         key={r.value}
@@ -250,7 +294,7 @@ export function EquityStockDetailDrawer({
                         disabled={isLoading}
                         className={`rounded px-2 py-0.5 text-[11px] font-mono font-semibold transition ${
                           range === r.value
-                            ? "bg-cyan-500/30 text-cyan-200"
+                            ? "bg-cyan-500/20 text-cyan-300"
                             : "text-slate-400 hover:text-white"
                         }`}
                       >
@@ -263,8 +307,15 @@ export function EquityStockDetailDrawer({
             </div>
 
             {/* Drawer Body */}
-            <div className="flex-1 overflow-y-auto p-5 sm:p-6 scrollbar-thin scrollbar-thumb-white/10">
-              {isLoading && !detail ? (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 scrollbar-thin scrollbar-thumb-white/10 min-w-0">
+              {activeTab === "trend" ? (
+                <EquityTrendPanel
+                  stock={stock}
+                  trend={trend}
+                  isLoading={isTrendLoading}
+                  error={trendError}
+                />
+              ) : isLoading && !detail ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-3 text-slate-400">
                   <Loader2 className="size-8 animate-spin text-cyan-400" />
                   <span className="text-xs">Loading stock details and price bars...</span>
@@ -284,7 +335,7 @@ export function EquityStockDetailDrawer({
                     <div className="space-y-4">
                       <div className="flex items-center justify-between text-xs text-slate-400">
                         <span>
-                          Showing <strong className="text-white">{detail.priceBars.length}</strong> daily bars ({range})
+                          Showing <span className="font-bold text-white">{detail.priceBars.length}</span> daily bars ({range})
                         </span>
                         {isLoading && (
                           <span className="text-cyan-400 flex items-center gap-1">

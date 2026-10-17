@@ -355,4 +355,34 @@ describe("Postgres Equity Repositories Integration (Gates S1, S2, S3, S4)", () =
     expect(stored).toBeDefined();
     expect(Number(stored?.volume)).toBe(62200077);
   });
+
+  it("fetches recent bars (up to limit) in chronological order for single and batch stocks", async () => {
+    const nseStock = (await watchlistRepo.findBySymbol("NSE", TEST_NSE_SYMBOL))!;
+    await pool.query(`DELETE FROM equity_research.price_bar WHERE stock_id = $1`, [nseStock.id]);
+
+    // Save 5 sequential bars
+    const testBars = [
+      { stockId: nseStock.id, barDate: "2026-10-10", open: 10, high: 11, low: 9, close: 10.5, volume: 100 },
+      { stockId: nseStock.id, barDate: "2026-10-11", open: 11, high: 12, low: 10, close: 11.5, volume: 110 },
+      { stockId: nseStock.id, barDate: "2026-10-12", open: 12, high: 13, low: 11, close: 12.5, volume: 120 },
+      { stockId: nseStock.id, barDate: "2026-10-13", open: 13, high: 14, low: 12, close: 13.5, volume: 130 },
+      { stockId: nseStock.id, barDate: "2026-10-14", open: 14, high: 15, low: 13, close: 14.5, volume: 140 },
+    ];
+    await priceBarRepo.saveBars(testBars);
+
+    // Single stock: getRecentBars with limit 3 returns the LAST 3 bars in ASC order
+    const recent3 = await priceBarRepo.getRecentBars(nseStock.id, 3);
+    expect(recent3.length).toBe(3);
+    expect(recent3[0].bar_date).toBe("2026-10-12");
+    expect(recent3[1].bar_date).toBe("2026-10-13");
+    expect(recent3[2].bar_date).toBe("2026-10-14");
+
+    // Batch query: getRecentBarsForStocks
+    const batchMap = await priceBarRepo.getRecentBarsForStocks([nseStock.id], 3);
+    const stockBars = batchMap.get(nseStock.id);
+    expect(stockBars).toBeDefined();
+    expect(stockBars?.length).toBe(3);
+    expect(stockBars?.[0].bar_date).toBe("2026-10-12");
+    expect(stockBars?.[2].bar_date).toBe("2026-10-14");
+  });
 });

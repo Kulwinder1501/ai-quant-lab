@@ -66,6 +66,29 @@ export class PostgresEquityRawRecordRepository {
     return result.rows[0] ?? null;
   }
 
+  async findLatestBySymbolsAndEndpoint(
+    symbols: string[],
+    endpoint: string,
+  ): Promise<Map<string, RawRecord>> {
+    const map = new Map<string, RawRecord>();
+    if (!symbols || symbols.length === 0) return map;
+
+    const result = await this.db.query<RawRecord>(
+      `
+      SELECT DISTINCT ON (symbol) *
+      FROM equity_research.raw_record
+      WHERE symbol = ANY($1) AND endpoint = $2
+      ORDER BY symbol, requested_at DESC
+      `,
+      [symbols, endpoint],
+    );
+
+    for (const row of result.rows) {
+      map.set(row.symbol, row);
+    }
+    return map;
+  }
+
   async findBySymbol(symbol: string, limit = 20): Promise<RawRecord[]> {
     const result = await this.db.query<RawRecord>(
       `

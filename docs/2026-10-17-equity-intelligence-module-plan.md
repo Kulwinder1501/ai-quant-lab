@@ -221,3 +221,7 @@ recomputes and reports ACCEPTED, REJECTED or ACCEPTED WITH WAIVERS per phase.
 ## 12. First step chosen (2026-10-17)
 
 The owner chose to start with Slice 0 (collector, watchlist page, sidebar entry) before the full build; see `2026-10-17-equity-watch-slice0-plan.md`. The full-build decision waits for about 2 to 3 months of collected reliability data and a Phase 0 Suzlon XBRL parse.
+
+## 13. Slice 1 chosen (2026-10-17)
+
+The owner asked for a buy/sell/neutral suggestion. The planner recommended against any rating (no tested edge, see the Gate 7 memory) and wrote the descriptive trend panel instead: `2026-10-17-equity-trend-panel-slice1-plan.md`.

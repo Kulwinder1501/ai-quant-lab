@@ -4,6 +4,7 @@ import type {
   HistoryRange,
   SourceHealthResponse,
   StockDetailResponse,
+  TrendPanelResponse,
   WatchlistResponse,
   WatchlistStockItem,
 } from "./types";
@@ -134,3 +135,28 @@ export async function fetchSourceHealth(signal?: AbortSignal): Promise<SourceHea
 
   return (await res.json()) as SourceHealthResponse;
 }
+
+export async function fetchStockTrend(
+  id: string,
+  signal?: AbortSignal,
+): Promise<TrendPanelResponse> {
+  const url = `${getApiV1Url()}/equity/watchlist/${id}/trend`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to fetch trend panel (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as TrendPanelResponse;
+}
+

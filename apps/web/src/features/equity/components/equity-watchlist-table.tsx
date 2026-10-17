@@ -189,11 +189,14 @@ export function EquityWatchlistTable({
               <th scope="col" className="py-3.5 pl-4 pr-3 sm:pl-6">Stock</th>
               <th scope="col" className="px-3 py-3.5">Price</th>
               <th scope="col" className="px-3 py-3.5">Change %</th>
-              <th scope="col" className="px-3 py-3.5">As Of</th>
-              <th scope="col" className="px-3 py-3.5">Label</th>
+              <th scope="col" className="hidden md:table-cell px-3 py-3.5">1M</th>
+              <th scope="col" className="hidden md:table-cell px-3 py-3.5">1Y</th>
+              <th scope="col" className="hidden md:table-cell px-3 py-3.5">52W Position</th>
+              <th scope="col" className="hidden lg:table-cell px-3 py-3.5">As Of</th>
+              <th scope="col" className="hidden sm:table-cell px-3 py-3.5">Label</th>
               <th scope="col" className="px-3 py-3.5">State</th>
-              <th scope="col" className="px-3 py-3.5">History Depth</th>
-              <th scope="col" className="px-3 py-3.5">Data Gap</th>
+              <th scope="col" className="hidden xl:table-cell px-3 py-3.5">History Depth</th>
+              <th scope="col" className="hidden xl:table-cell px-3 py-3.5">Data Gap</th>
               <th scope="col" className="relative py-3.5 pl-3 pr-4 sm:pr-6 text-right">Actions</th>
             </tr>
           </thead>
@@ -201,7 +204,13 @@ export function EquityWatchlistTable({
             {stocks.map((stock) => (
               <tr
                 key={stock.id}
-                className="group hover:bg-white/[0.03] transition-colors"
+                className="group hover:bg-white/[0.03] transition-colors cursor-pointer"
+                onClick={(e) => {
+                  const target = e.target as HTMLElement;
+                  if (!target.closest("button")) {
+                    onSelectStock(stock);
+                  }
+                }}
               >
                 {/* Stock Symbol, Exchange & Name */}
                 <td className="py-4 pl-4 pr-3 sm:pl-6">
@@ -257,13 +266,103 @@ export function EquityWatchlistTable({
                   )}
                 </td>
 
+                {/* 1M Return (Slice 1) */}
+                <td className="whitespace-nowrap px-3 py-4 hidden md:table-cell">
+                  {stock.state === "REBACKFILL_NEEDED" || stock.trendSummary?.state === "SUSPENDED" ? (
+                    <span className="inline-flex rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 font-mono">
+                      SUSPENDED
+                    </span>
+                  ) : stock.trendSummary?.state === "INSUFFICIENT_HISTORY" || stock.trendSummary?.return1M === null || stock.trendSummary?.return1M === undefined ? (
+                    <span className="text-slate-500 font-mono text-xs">-</span>
+                  ) : (
+                    <div className="flex flex-col">
+                      <span
+                        className={`font-mono text-xs font-semibold ${
+                          stock.trendSummary.return1M > 0
+                            ? "text-emerald-400"
+                            : stock.trendSummary.return1M < 0
+                              ? "text-rose-400"
+                              : "text-slate-300"
+                        }`}
+                      >
+                        {stock.trendSummary.return1M > 0 ? "+" : ""}
+                        {(stock.trendSummary.return1M * 100).toFixed(2)}%
+                      </span>
+                      {(stock.state === "STALE" || stock.trendSummary.isStale) && stock.trendSummary.asOfDate && (
+                        <span className="text-[10px] text-amber-400/90 font-mono" title={`Stale data as of ${stock.trendSummary.asOfDate}`}>
+                          as of {stock.trendSummary.asOfDate}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </td>
+
+                {/* 1Y Return (Slice 1) */}
+                <td className="whitespace-nowrap px-3 py-4 hidden md:table-cell">
+                  {stock.state === "REBACKFILL_NEEDED" || stock.trendSummary?.state === "SUSPENDED" ? (
+                    <span className="inline-flex rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 font-mono">
+                      SUSPENDED
+                    </span>
+                  ) : stock.trendSummary?.state === "INSUFFICIENT_HISTORY" || stock.trendSummary?.return1Y === null || stock.trendSummary?.return1Y === undefined ? (
+                    <span className="text-slate-500 font-mono text-xs">-</span>
+                  ) : (
+                    <div className="flex flex-col">
+                      <span
+                        className={`font-mono text-xs font-semibold ${
+                          stock.trendSummary.return1Y > 0
+                            ? "text-emerald-400"
+                            : stock.trendSummary.return1Y < 0
+                              ? "text-rose-400"
+                              : "text-slate-300"
+                        }`}
+                      >
+                        {stock.trendSummary.return1Y > 0 ? "+" : ""}
+                        {(stock.trendSummary.return1Y * 100).toFixed(2)}%
+                      </span>
+                      {(stock.state === "STALE" || stock.trendSummary.isStale) && stock.trendSummary.asOfDate && (
+                        <span className="text-[10px] text-amber-400/90 font-mono" title={`Stale data as of ${stock.trendSummary.asOfDate}`}>
+                          as of {stock.trendSummary.asOfDate}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </td>
+
+                {/* 52W Position Bar (Slice 1 - Neutral styling per plan) */}
+                <td className="whitespace-nowrap px-3 py-4 hidden md:table-cell">
+                  {stock.state === "REBACKFILL_NEEDED" || stock.trendSummary?.state === "SUSPENDED" ? (
+                    <span className="inline-flex rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300 font-mono">
+                      SUSPENDED
+                    </span>
+                  ) : stock.trendSummary?.position52W !== null && stock.trendSummary?.position52W !== undefined ? (
+                    <div className="flex flex-col gap-1 w-24">
+                      <div className="flex items-center justify-between text-[10px] text-slate-300 font-mono">
+                        <span>{(stock.trendSummary.position52W * 100).toFixed(0)}%</span>
+                        {(stock.state === "STALE" || stock.trendSummary.isStale) && (
+                          <span className="text-amber-400 text-[9px]">stale</span>
+                        )}
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-slate-800 border border-white/5 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-cyan-400"
+                          style={{
+                            width: `${Math.min(100, Math.max(0, stock.trendSummary.position52W * 100))}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-slate-500 font-mono text-xs">-</span>
+                  )}
+                </td>
+
                 {/* As Of Date */}
-                <td className="whitespace-nowrap px-3 py-4 text-xs text-slate-400 font-mono">
+                <td className="whitespace-nowrap px-3 py-4 text-xs text-slate-400 font-mono hidden lg:table-cell">
                   {formatAsOfTime(stock.asOf)}
                 </td>
 
                 {/* Honest Quote Label (Gate G3) */}
-                <td className="whitespace-nowrap px-3 py-4">
+                <td className="whitespace-nowrap px-3 py-4 hidden sm:table-cell">
                   {renderQuoteLabel(stock.label)}
                 </td>
 
@@ -273,7 +372,7 @@ export function EquityWatchlistTable({
                 </td>
 
                 {/* History Depth */}
-                <td className="whitespace-nowrap px-3 py-4">
+                <td className="whitespace-nowrap px-3 py-4 hidden xl:table-cell">
                   <div className="flex flex-col text-xs font-mono">
                     <span className="text-slate-200">
                       {stock.historyDepth.totalBars.toLocaleString()} bars
@@ -285,7 +384,7 @@ export function EquityWatchlistTable({
                 </td>
 
                 {/* Data Gap Flag */}
-                <td className="whitespace-nowrap px-3 py-4">
+                <td className="whitespace-nowrap px-3 py-4 hidden xl:table-cell">
                   {stock.hasDataGap ? (
                     <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold bg-amber-500/10 text-amber-300 border border-amber-500/20">
                       <AlertTriangle className="size-3" />

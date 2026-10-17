@@ -475,4 +475,223 @@ export class PostgresEquityPriceBarRepository {
       hasDataGap,
     };
   }
+
+  async getPriceBarSummariesForStocks(
+    stockIds: string[],
+  ): Promise<
+    Map<
+      string,
+      {
+        totalBars: number;
+        firstBarDate: string | null;
+        lastBarDate: string | null;
+        latestClose: number | null;
+        previousClose: number | null;
+        hasDataGap: boolean;
+      }
+    >
+  > {
+    const map = new Map<
+      string,
+      {
+        totalBars: number;
+        firstBarDate: string | null;
+        lastBarDate: string | null;
+        latestClose: number | null;
+        previousClose: number | null;
+        hasDataGap: boolean;
+      }
+    >();
+    if (!stockIds || stockIds.length === 0) return map;
+
+    const query = `
+      WITH stats AS (
+        SELECT
+          stock_id,
+          count(*)::text AS total_bars,
+          min(bar_date)::text AS first_bar_date,
+          max(bar_date)::text AS last_bar_date
+        FROM equity_research.price_bar
+        WHERE stock_id = ANY($1)
+        GROUP BY stock_id
+      ),
+      ranked_bars AS (
+        SELECT
+          stock_id,
+          close,
+          ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY bar_date DESC) AS rn
+        FROM equity_research.price_bar
+        WHERE stock_id = ANY($1)
+      ),
+      latest_two AS (
+        SELECT
+          stock_id,
+          MAX(CASE WHEN rn = 1 THEN close END) AS latest_close,
+          MAX(CASE WHEN rn = 2 THEN close END) AS previous_close
+        FROM ranked_bars
+        WHERE rn <= 2
+        GROUP BY stock_id
+      ),
+      date_lags AS (
+        SELECT
+          stock_id,
+          bar_date,
+          lag(bar_date) OVER (PARTITION BY stock_id ORDER BY bar_date ASC) AS prev_bar_date
+        FROM equity_research.price_bar
+        WHERE stock_id = ANY($1) AND bar_date >= (CURRENT_DATE - INTERVAL '365 days')
+      ),
+      gaps AS (
+        SELECT
+          stock_id,
+          BOOL_OR(prev_bar_date IS NOT NULL AND (bar_date - prev_bar_date) > 10) AS has_gap
+        FROM date_lags
+        GROUP BY stock_id
+      )
+      SELECT
+        s.stock_id,
+        s.total_bars,
+        s.first_bar_date,
+        s.last_bar_date,
+        l.latest_close,
+        l.previous_close,
+        COALESCE(g.has_gap, false) AS has_gap
+      FROM stats s
+      LEFT JOIN latest_two l ON s.stock_id = l.stock_id
+      LEFT JOIN gaps g ON s.stock_id = g.stock_id
+    `;
+
+    const result = await this.db.query<{
+      stock_id: string;
+      total_bars: string;
+      first_bar_date: string | null;
+      last_bar_date: string | null;
+      latest_close: string | null;
+      previous_close: string | null;
+      has_gap: boolean;
+    }>(query, [stockIds]);
+
+    for (const r of result.rows) {
+      map.set(r.stock_id, {
+        totalBars: Number(r.total_bars ?? 0),
+        firstBarDate: r.first_bar_date ? r.first_bar_date.split("T")[0] : null,
+        lastBarDate: r.last_bar_date ? r.last_bar_date.split("T")[0] : null,
+        latestClose: r.latest_close !== null ? Number(r.latest_close) : null,
+        previousClose: r.previous_close !== null ? Number(r.previous_close) : null,
+        hasDataGap: Boolean(r.has_gap),
+      });
+    }
+
+    return map;
+  }
+
+  async getRecentBars(stockId: string, limit = 400): Promise<PriceBarRecord[]> {
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      bar_date: string;
+      open: string;
+      high: string;
+      low: string;
+      close: string;
+      volume: string;
+      source: string;
+      raw_record_id: string | null;
+      first_seen_at: Date;
+    }>(
+      `
+      SELECT id, stock_id, bar_date::text AS bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at
+      FROM (
+        SELECT id, stock_id, bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at
+        FROM equity_research.price_bar
+        WHERE stock_id = $1
+        ORDER BY bar_date DESC
+        LIMIT $2
+      ) sub
+      ORDER BY bar_date ASC
+      `,
+      [stockId, limit],
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      stock_id: r.stock_id,
+      bar_date: r.bar_date,
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+      source: r.source,
+      raw_record_id: r.raw_record_id,
+      first_seen_at: r.first_seen_at,
+      series_version: 1,
+    }));
+  }
+
+  async getRecentBarsForStocks(
+    stockIds: string[],
+    limit = 400,
+  ): Promise<Map<string, PriceBarRecord[]>> {
+    const map = new Map<string, PriceBarRecord[]>();
+    if (!stockIds || stockIds.length === 0) return map;
+
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      bar_date: string;
+      open: string;
+      high: string;
+      low: string;
+      close: string;
+      volume: string;
+      source: string;
+      raw_record_id: string | null;
+      first_seen_at: Date;
+    }>(
+      `
+      WITH ranked_bars AS (
+        SELECT
+          id,
+          stock_id,
+          bar_date::text AS bar_date,
+          open,
+          high,
+          low,
+          close,
+          volume,
+          source,
+          raw_record_id,
+          first_seen_at,
+          ROW_NUMBER() OVER (PARTITION BY stock_id ORDER BY bar_date DESC) AS rn
+        FROM equity_research.price_bar
+        WHERE stock_id = ANY($1)
+      )
+      SELECT id, stock_id, bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at
+      FROM ranked_bars
+      WHERE rn <= $2
+      ORDER BY stock_id, bar_date ASC
+      `,
+      [stockIds, limit],
+    );
+
+    for (const r of result.rows) {
+      const bars = map.get(r.stock_id) ?? [];
+      bars.push({
+        id: r.id,
+        stock_id: r.stock_id,
+        bar_date: r.bar_date,
+        open: Number(r.open),
+        high: Number(r.high),
+        low: Number(r.low),
+        close: Number(r.close),
+        volume: Number(r.volume),
+        source: r.source,
+        raw_record_id: r.raw_record_id,
+        first_seen_at: r.first_seen_at,
+        series_version: 1,
+      });
+      map.set(r.stock_id, bars);
+    }
+    return map;
+  }
 }

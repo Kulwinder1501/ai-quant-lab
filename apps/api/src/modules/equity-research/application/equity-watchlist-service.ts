@@ -1,6 +1,14 @@
 import { isValidSymbol, validateEquityIdentity } from "../domain/symbol-validator.js";
 import { deriveQuoteLabel, deriveStockState } from "../domain/state-rules.js";
-import type { EquityExchange, PriceQuoteLabel, StockHealthStatus, WatchlistStockItem, WatchlistStockRecord } from "../domain/types.js";
+import type {
+  EquityExchange,
+  PriceQuoteLabel,
+  StockHealthStatus,
+  TrendSummaryItem,
+  WatchlistStockItem,
+  WatchlistStockRecord,
+} from "../domain/types.js";
+import { computeTrendPanel, getTodayIstDate } from "../domain/trend-metrics.js";
 import { parseChartRawRecord, parseFundamentalsRawRecord } from "./parsers.js";
 import type { PostgresEquityWatchlistRepository } from "../infrastructure/repositories/postgres-equity-watchlist-repository.js";
 import type { PostgresEquityPriceBarRepository } from "../infrastructure/repositories/postgres-equity-price-bar-repository.js";
@@ -64,31 +72,40 @@ export interface EquityWatchlistServiceDependencies {
   quoteCacheRepo: PostgresEquityQuoteCacheRepository;
   sourceHealthRepo: PostgresEquitySourceHealthRepository;
   yahooClient: YahooClient;
+  nowFn?: () => Date;
 }
 
 export class EquityWatchlistService {
-  constructor(private readonly deps: EquityWatchlistServiceDependencies) {}
+  private readonly nowFn: () => Date;
 
-  private async formatStockItem(
+  constructor(private readonly deps: EquityWatchlistServiceDependencies) {
+    this.nowFn = deps.nowFn ?? (() => new Date());
+  }
+
+  private formatStockItemFromData(
     stock: WatchlistStockRecord,
     sourceHealthStatus?: StockHealthStatus,
-  ): Promise<WatchlistStockItem> {
-    const quote = await this.deps.quoteCacheRepo.getQuoteByStockId(stock.id);
-    const barSummary = await this.deps.priceBarRepo.getPriceBarSummary(stock.id);
-    const lastRaw = await this.deps.rawRecordRepo.findLatestBySymbolAndEndpoint(
-      stock.yahoo_symbol,
-      "chart",
-    );
-
+    trendSummary?: TrendSummaryItem,
+    quote?: { last_price: number | string; market_time: Date; fetched_at?: Date | null; label?: PriceQuoteLabel | null } | null,
+    barSummary?: {
+      totalBars: number;
+      firstBarDate: string | null;
+      lastBarDate: string | null;
+      latestClose: number | null;
+      previousClose: number | null;
+      hasDataGap: boolean;
+    },
+    lastRaw?: { outcome?: string | null; warnings?: string[] | null } | null,
+  ): WatchlistStockItem {
     let lastPrice: number | null = null;
     let asOf: string | null = null;
     let label: PriceQuoteLabel | null = null;
 
     if (quote) {
       lastPrice = Number(quote.last_price);
-      asOf = quote.market_time.toISOString();
+      asOf = quote.market_time instanceof Date ? quote.market_time.toISOString() : new Date(quote.market_time).toISOString();
       label = deriveQuoteLabel({ marketTime: quote.market_time });
-    } else if (barSummary.latestClose !== null) {
+    } else if (barSummary && barSummary.latestClose !== null) {
       lastPrice = barSummary.latestClose;
       asOf = barSummary.lastBarDate ? new Date(`${barSummary.lastBarDate}T00:00:00Z`).toISOString() : null;
       label = barSummary.lastBarDate
@@ -97,17 +114,18 @@ export class EquityWatchlistService {
     }
 
     let changePercent: number | null = null;
-    if (lastPrice !== null && barSummary.previousClose !== null && barSummary.previousClose > 0) {
+    if (lastPrice !== null && barSummary && barSummary.previousClose !== null && barSummary.previousClose > 0) {
       changePercent = Math.round(((lastPrice - barSummary.previousClose) / barSummary.previousClose) * 10000) / 100;
     }
 
+    const totalBars = barSummary?.totalBars ?? 0;
     const derived = deriveStockState({
-      hasBars: barSummary.totalBars > 0,
+      hasBars: totalBars > 0,
       sourceHealthStatus,
-      lastRawOutcome: lastRaw?.outcome,
+      lastRawOutcome: lastRaw?.outcome as any,
       lastRawWarning: lastRaw?.warnings?.[0] ?? null,
-      lastBarDate: barSummary.lastBarDate,
-      lastFetchedAt: quote?.fetched_at,
+      lastBarDate: barSummary?.lastBarDate ?? null,
+      lastFetchedAt: quote?.fetched_at ?? undefined,
       rebackfillNeeded: stock.rebackfill_needed,
     });
 
@@ -128,14 +146,36 @@ export class EquityWatchlistService {
       state: derived.state,
       stateReason: derived.reason,
       historyDepth: {
-        firstBarDate: barSummary.firstBarDate,
-        lastBarDate: barSummary.lastBarDate,
-        totalBars: barSummary.totalBars,
+        firstBarDate: barSummary?.firstBarDate ?? null,
+        lastBarDate: barSummary?.lastBarDate ?? null,
+        totalBars,
       },
-      hasDataGap: barSummary.hasDataGap,
+      hasDataGap: barSummary?.hasDataGap ?? false,
       rebackfillNeeded: stock.rebackfill_needed ?? false,
       seriesVersion: stock.series_version ?? 1,
+      trendSummary,
     };
+  }
+
+  private async formatStockItem(
+    stock: WatchlistStockRecord,
+    sourceHealthStatus?: StockHealthStatus,
+    trendSummary?: TrendSummaryItem,
+  ): Promise<WatchlistStockItem> {
+    const quote = await this.deps.quoteCacheRepo.getQuoteByStockId(stock.id);
+    const barSummary = await this.deps.priceBarRepo.getPriceBarSummary(stock.id);
+    const lastRaw = await this.deps.rawRecordRepo.findLatestBySymbolAndEndpoint(
+      stock.yahoo_symbol,
+      "chart",
+    );
+    return this.formatStockItemFromData(
+      stock,
+      sourceHealthStatus,
+      trendSummary,
+      quote,
+      barSummary,
+      lastRaw,
+    );
   }
 
   async getWatchlist() {
@@ -145,14 +185,91 @@ export class EquityWatchlistService {
       "chart",
     );
 
-    const items = await Promise.all(
-      activeStocks.map((stock) => this.formatStockItem(stock, sourceHealth?.status)),
-    );
+    const stockIds = activeStocks.map((s) => s.id);
+    const symbols = activeStocks.map((s) => s.yahoo_symbol);
+
+    const [barsByStockId, summariesByStockId, quotesByStockId, rawBySymbol] = await Promise.all([
+      this.deps.priceBarRepo.getRecentBarsForStocks(stockIds, 400),
+      this.deps.priceBarRepo.getPriceBarSummariesForStocks(stockIds),
+      this.deps.quoteCacheRepo.getQuotesByStockIds(stockIds),
+      this.deps.rawRecordRepo.findLatestBySymbolsAndEndpoint(symbols, "chart"),
+    ]);
+
+    const todayIst = getTodayIstDate(this.nowFn());
+
+    const items: WatchlistStockItem[] = activeStocks.map((stock) => {
+      const bars = barsByStockId.get(stock.id) ?? [];
+      const trend = computeTrendPanel({
+        bars,
+        rebackfillNeeded: stock.rebackfill_needed,
+        seriesVersion: stock.series_version,
+        asOfEvaluationDate: todayIst,
+      });
+
+      const quote = quotesByStockId.get(stock.id) ?? null;
+      const barSummary = summariesByStockId.get(stock.id) ?? {
+        totalBars: 0,
+        firstBarDate: null,
+        lastBarDate: null,
+        latestClose: null,
+        previousClose: null,
+        hasDataGap: false,
+      };
+      const lastRaw = rawBySymbol.get(stock.yahoo_symbol) ?? null;
+
+      return this.formatStockItemFromData(
+        stock,
+        sourceHealth?.status,
+        trend.trendSummary,
+        quote,
+        barSummary,
+        lastRaw,
+      );
+    });
 
     return {
       stocks: items,
       totalCount: items.length,
       sourceStatus: sourceHealth?.status ?? "UNKNOWN",
+    };
+  }
+
+  async getTrend(id: string) {
+    const stock = await this.deps.watchlistRepo.findById(id);
+    if (!stock) {
+      throw new StockNotFoundError(`Stock with ID '${id}' not found.`);
+    }
+
+    const bars = await this.deps.priceBarRepo.getRecentBars(id, 400);
+    const todayIst = getTodayIstDate(this.nowFn());
+    const trend = computeTrendPanel({
+      bars,
+      rebackfillNeeded: stock.rebackfill_needed,
+      seriesVersion: stock.series_version,
+      asOfEvaluationDate: todayIst,
+    });
+
+    return {
+      stock: {
+        id: stock.id,
+        symbol: stock.symbol,
+        exchange: stock.exchange,
+        yahooSymbol: stock.yahoo_symbol,
+        displayName: stock.display_name ?? stock.symbol,
+        active: stock.active,
+        seriesVersion: stock.series_version ?? 1,
+        rebackfillNeeded: stock.rebackfill_needed ?? false,
+      },
+      asOfDate: trend.asOfDate,
+      isStale: trend.isStale,
+      staleDays: trend.staleDays,
+      rebackfillNeeded: trend.rebackfillNeeded,
+      seriesVersion: trend.seriesVersion,
+      metrics: trend.metrics,
+      largeDailyMoves: trend.largeDailyMoves,
+      trendSummary: trend.trendSummary,
+      disclaimer: trend.disclaimer,
+      warnings: trend.warnings,
     };
   }
 
@@ -304,7 +421,14 @@ export class EquityWatchlistService {
       this.deps.yahooClient.sourceName,
       "chart",
     );
-    return await this.formatStockItem(stock, sourceHealth?.status);
+    const initialBars = await this.deps.priceBarRepo.getRecentBars(stock.id, 400);
+    const initialTrend = computeTrendPanel({
+      bars: initialBars,
+      rebackfillNeeded: stock.rebackfill_needed,
+      seriesVersion: stock.series_version,
+      asOfEvaluationDate: getTodayIstDate(this.nowFn()),
+    });
+    return await this.formatStockItem(stock, sourceHealth?.status, initialTrend.trendSummary);
   }
 
 

@@ -88,4 +88,121 @@ describe("Equity Web Feature Integration & Gate S10 Coupling Checks", () => {
     expect(err.status).toBe(404);
     expect(err.name).toBe("EquityApiError");
   });
+
+  it("enforces Gate T5 wording rules across features/equity (no advice or verdict words)", () => {
+    const featureDir = resolve(__dirname);
+    const bannedWords = [
+      "buy",
+      "sell",
+      "hold",
+      "bullish",
+      "bearish",
+      "strong",
+      "weak",
+      "overbought",
+      "oversold",
+      "signal",
+      "target",
+      "outperform",
+      "underperform",
+      "recommend",
+    ];
+
+    function scanFiles(dir: string): string[] {
+      let results: string[] = [];
+      const entries = readdirSync(dir);
+      for (const entry of entries) {
+        const fullPath = join(dir, entry);
+        const stat = statSync(fullPath);
+        if (stat.isDirectory()) {
+          results = results.concat(scanFiles(fullPath));
+        } else if (entry.endsWith(".ts") || entry.endsWith(".tsx")) {
+          results.push(fullPath);
+        }
+      }
+      return results;
+    }
+
+    function extractUiStrings(text: string): string[] {
+      const strings: string[] = [];
+      // Double quoted strings
+      const doubleQuotes = /"([^"\\]*(?:\\.[^"\\]*)*)"/g;
+      let m;
+      while ((m = doubleQuotes.exec(text)) !== null) {
+        strings.push(m[1]);
+      }
+      // Single quoted strings
+      const singleQuotes = /'([^'\\]*(?:\\.[^'\\]*)*)'/g;
+      while ((m = singleQuotes.exec(text)) !== null) {
+        strings.push(m[1]);
+      }
+      // Backtick strings
+      const backticks = /`([^`\\]*(?:\\.[^`\\]*)*)`/g;
+      while ((m = backticks.exec(text)) !== null) {
+        strings.push(m[1]);
+      }
+      // JSX text between > and <
+      const jsxText = />([^<>{}\n\r]+)</g;
+      while ((m = jsxText.exec(text)) !== null) {
+        const trimmed = m[1].trim();
+        if (trimmed) strings.push(trimmed);
+      }
+      return strings;
+    }
+
+    const files = scanFiles(featureDir);
+    for (const file of files) {
+      if (file.endsWith(".test.ts")) continue;
+      const text = readFileSync(file, "utf-8");
+      const uiStrings = extractUiStrings(text);
+
+      for (const str of uiStrings) {
+        // Skip technical API paths, CSS classes or empty strings
+        if (str.startsWith("/") || str.startsWith("http")) continue;
+        // Allow literal disclaimer phrase
+        const cleanedStr = str.replace(/Not a recommendation, rating or forecast\./g, "");
+
+        for (const word of bannedWords) {
+          const regex = new RegExp(`\\b${word}\\b`, "i");
+          const match = regex.exec(cleanedStr);
+          expect(
+            match,
+            `Banned word '${word}' found in UI string in ${file}: "${str}"`,
+          ).toBeNull();
+        }
+      }
+    }
+  });
+
+  it("verifies Gate T6 disclaimer is present in EquityTrendPanel", () => {
+    const panelPath = resolve(__dirname, "./components/equity-trend-panel.tsx");
+    const content = readFileSync(panelPath, "utf-8");
+
+    // Exact required text
+    expect(content).toContain(
+      "Descriptive statistics of past prices on Yahoo's adjusted series. Price returns only (dividends excluded). Not a recommendation, rating or forecast.",
+    );
+  });
+
+  it("verifies Detail Drawer places Trend tab first and supports phone width responsiveness", () => {
+    const drawerPath = resolve(__dirname, "./components/equity-stock-detail-drawer.tsx");
+    const content = readFileSync(drawerPath, "utf-8");
+
+    expect(content).toContain('type TabType = "trend" | "chart"');
+    expect(content).toContain('setActiveTab("trend")');
+    // Gate T11: Mobile drawer padding and horizontal tab scrolling
+    expect(content).toContain("pl-0 sm:pl-10");
+    expect(content).toContain("overflow-x-auto no-scrollbar");
+    expect(content).toContain("aria-label=\"Close detail view\"");
+  });
+
+  it("verifies Watchlist Table renders 1M, 1Y, and 52W Position with stale as-of date indicator", () => {
+    const tablePath = resolve(__dirname, "./components/equity-watchlist-table.tsx");
+    const content = readFileSync(tablePath, "utf-8");
+
+    expect(content).toContain(">1M</th>");
+    expect(content).toContain(">1Y</th>");
+    expect(content).toContain(">52W Position</th>");
+    expect(content).toContain("as of {stock.trendSummary.asOfDate}");
+  });
 });

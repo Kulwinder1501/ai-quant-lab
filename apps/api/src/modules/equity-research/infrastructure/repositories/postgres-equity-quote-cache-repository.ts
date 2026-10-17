@@ -61,4 +61,34 @@ export class PostgresEquityQuoteCacheRepository {
           : null,
     } as any;
   }
+
+  async getQuotesByStockIds(stockIds: string[]): Promise<Map<string, QuoteCacheRecord>> {
+    const map = new Map<string, QuoteCacheRecord>();
+    if (!stockIds || stockIds.length === 0) return map;
+
+    const result = await this.db.query<any>(
+      `
+      SELECT stock_id, last_price, market_time, fetched_at, label, latency_seconds
+      FROM equity_research.quote_cache
+      WHERE stock_id = ANY($1)
+      `,
+      [stockIds],
+    );
+
+    for (const row of result.rows) {
+      map.set(row.stock_id, {
+        stock_id: row.stock_id,
+        last_price: Number(row.last_price),
+        market_time: row.market_time,
+        fetched_at: row.fetched_at,
+        label: row.label,
+        latency_seconds:
+          row.latency_seconds !== null && row.latency_seconds !== undefined
+            ? Math.round(Number(row.latency_seconds))
+            : null,
+      } as any);
+    }
+
+    return map;
+  }
 }

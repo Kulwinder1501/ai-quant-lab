@@ -565,4 +565,169 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
       expect(detail.stock.stateReason).toContain("Upstream returned 500 Internal Error");
     });
   });
+
+  describe("Slice 1: Descriptive Trend Panel & Summary Routes (Gates T5, T6, T7, T9)", () => {
+    it("includes trendSummary on each watchlist item in GET /watchlist", async () => {
+      const res = await fetch(`${baseUrl}/watchlist`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(Array.isArray(data.stocks)).toBe(true);
+
+      const testStock = data.stocks.find((s: any) => s.symbol === TEST_SYMBOL);
+      expect(testStock).toBeDefined();
+      expect(testStock.trendSummary).toBeDefined();
+      expect(testStock.trendSummary).toHaveProperty("return1M");
+      expect(testStock.trendSummary).toHaveProperty("return1Y");
+      expect(testStock.trendSummary).toHaveProperty("position52W");
+      expect(["OK", "INSUFFICIENT_HISTORY", "NOT_MEANINGFUL", "SUSPENDED"]).toContain(
+        testStock.trendSummary.state,
+      );
+    });
+
+    it("returns full trend panel for a stock via GET /watchlist/:id/trend (T6, T7)", async () => {
+      const stock = (await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL))!;
+
+      // Measure call log before request (T7)
+      const callLogBefore = await pool.query(
+        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+      );
+      const rawRecordsBefore = await pool.query(
+        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+      );
+
+      const res = await fetch(`${baseUrl}/watchlist/${stock.id}/trend`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      // Verify stock identity
+      expect(data.stock).toBeDefined();
+      expect(data.stock.id).toBe(stock.id);
+      expect(data.stock.symbol).toBe(TEST_SYMBOL);
+      expect(data.stock.exchange).toBe("NSE");
+      expect(data.stock.active).toBe(true);
+
+      // Verify disclaimer is present (T6)
+      expect(data.disclaimer).toBe(
+        "Descriptive statistics of past prices on Yahoo's adjusted series. Price returns only (dividends excluded). Not a recommendation, rating or forecast.",
+      );
+
+      // Verify all 20 required metrics are present
+      expect(data.metrics).toBeDefined();
+      const requiredMetricKeys = [
+        "latestClose",
+        "return1M",
+        "return3M",
+        "return6M",
+        "returnYTD",
+        "return1Y",
+        "sma50",
+        "sma200",
+        "distanceFromSma50",
+        "distanceFromSma200",
+        "sma50VsSma200",
+        "high52W",
+        "low52W",
+        "position52W",
+        "distanceFrom52WHigh",
+        "volatility20D",
+        "volatility1Y",
+        "maxDrawdown1Y",
+        "relativeActivity",
+        "largeDailyMovesCount",
+      ];
+      for (const k of requiredMetricKeys) {
+        expect(data.metrics[k]).toBeDefined();
+        expect(data.metrics[k]).toHaveProperty("formulaId");
+        expect(data.metrics[k]).toHaveProperty("formulaText");
+        expect(data.metrics[k]).toHaveProperty("state");
+      }
+
+      // Verify largeDailyMoves array and trendSummary
+      expect(Array.isArray(data.largeDailyMoves)).toBe(true);
+      expect(data.trendSummary).toBeDefined();
+
+      // Verify ZERO new Yahoo calls were made (T7)
+      const callLogAfter = await pool.query(
+        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+      );
+      const rawRecordsAfter = await pool.query(
+        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+      );
+      expect(callLogAfter.rows[0].count).toBe(callLogBefore.rows[0].count);
+      expect(rawRecordsAfter.rows[0].count).toBe(rawRecordsBefore.rows[0].count);
+    });
+
+    it("returns 400 for an invalid UUID on GET /watchlist/:id/trend", async () => {
+      const res = await fetch(`${baseUrl}/watchlist/not-a-uuid/trend`);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("Invalid stock ID");
+    });
+
+    it("returns 404 for an unknown stock ID on GET /watchlist/:id/trend", async () => {
+      const randomUuid = "a0000000-0000-0000-0000-000000000000";
+      const res = await fetch(`${baseUrl}/watchlist/${randomUuid}/trend`);
+      expect(res.status).toBe(404);
+      const data = await res.json();
+      expect(data.error).toContain("not found");
+    });
+
+    it("returns trend panel for an inactive/removed stock with active: false", async () => {
+      // Create and remove a test stock
+      const removedStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_REMOVED",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_REMOVED.NS",
+        displayName: "Removed Stock Ltd",
+      });
+      await watchlistRepo.removeStock(removedStock.id);
+
+      const res = await fetch(`${baseUrl}/watchlist/${removedStock.id}/trend`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.stock.id).toBe(removedStock.id);
+      expect(data.stock.active).toBe(false);
+      expect(data.disclaimer).toBeDefined();
+    });
+
+    it("answers GET /watchlist rapidly (< 500ms) with batch recent bars query (T9)", async () => {
+      const start = performance.now();
+      const res = await fetch(`${baseUrl}/watchlist`);
+      const durationMs = performance.now() - start;
+
+      expect(res.status).toBe(200);
+      expect(durationMs).toBeLessThan(500);
+    });
+
+    it("flags staleness (isStale: true, staleDays > 4) for a stock whose last bar is older than 4 calendar days (T4)", async () => {
+      const staleStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_STALE",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_STALE.NS",
+        displayName: "Stale Stock Ltd",
+      });
+
+      await priceBarRepo.saveBars([
+        {
+          stockId: staleStock.id,
+          barDate: "2026-09-01",
+          open: 100,
+          high: 105,
+          low: 95,
+          close: 102,
+          volume: 10000,
+          source: TEST_SOURCE,
+        },
+      ]);
+
+      const res = await fetch(`${baseUrl}/watchlist/${staleStock.id}/trend`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      expect(data.isStale).toBe(true);
+      expect(data.staleDays).toBeGreaterThan(4);
+      expect(data.asOfDate).toBe("2026-09-01");
+      expect(data.warnings.some((w: string) => w.includes("Price data is as of 2026-09-01"))).toBe(true);
+    });
+  });
 });
