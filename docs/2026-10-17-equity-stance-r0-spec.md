@@ -147,9 +147,11 @@ At the primary horizon ($H = 63$ bars), a variant is classified as:
    - Drop non-positive or non-finite closes.
 4. **Survivorship Bias Acknowledgment:** Free daily historical data from Yahoo Finance reflects survivor constituents. The final report will document the direction and likely magnitude of this bias for each variant.
 5. **Prior Exposure Disclosure (Exploratory 50 Stocks):**
-   - The preliminary exploratory study in `docs/2026-10-17-equity-signal-research.md` inspected 50 large-cap stocks through 2026-10-16. Therefore, the 24-month holdout is not strictly pristine for these 50 names:
+   - The preliminary exploratory study in `docs/2026-10-17-equity-signal-research.md` inspected 50 large-cap stocks through 2026-10-16 (49 loaded, 1 attempted; `TATAMOTORS` returned 404 during research fetch and was not loaded, but is conservatively retained in the list). Therefore, the 24-month holdout is not strictly pristine for these 50 names:
      `RELIANCE`, `TCS`, `HDFCBANK`, `INFY`, `ICICIBANK`, `HINDUNILVR`, `ITC`, `SBIN`, `BHARTIARTL`, `KOTAKBANK`, `LT`, `AXISBANK`, `ASIANPAINT`, `MARUTI`, `SUNPHARMA`, `TITAN`, `ULTRACEMCO`, `NESTLEIND`, `WIPRO`, `HCLTECH`, `M&M`, `BAJFINANCE`, `POWERGRID`, `NTPC`, `ONGC`, `TATASTEEL`, `JSWSTEEL`, `ADANIPORTS`, `COALINDIA`, `TECHM`, `GRASIM`, `HINDALCO`, `DRREDDY`, `CIPLA`, `EICHERMOT`, `BPCL`, `HEROMOTOCO`, `DIVISLAB`, `BRITANNIA`, `INDUSINDBK`, `APOLLOHOSP`, `TATACONSUM`, `BAJAJ-AUTO`, `SUZLON`, `TATAMOTORS`, `PIDILITIND`, `DABUR`, `GAIL`, `IOC`, `SIEMENS`.
    - **Remedy:** The R0 evaluation will report holdout performance **overall (all stocks)** AND **separately for the ~450 stocks outside this 50-stock list**, ensuring a clean out-of-sample check.
+6. **Data Cut-Off Date:**
+   - Fixed data cut-off date is **2026-10-17**. All historical price series fetched from Yahoo Finance are bounded strictly by `period2 = 2026-10-17` (or truncated at `date <= 2026-10-17`). This anchors the 24-month holdout partition strictly to `2024-10-18` through `2026-10-17` and prevents partition drift regardless of which day data is fetched.
 
 ---
 
@@ -167,3 +169,6 @@ At the primary horizon ($H = 63$ bars), a variant is classified as:
   - Enforced holdout forward window boundary constraint ($T+H \ge \text{holdout\_start}$ excluded from non-holdout).
   - Added prior exposure disclosure for 50 exploratory names with separate ~450 unexposed stock holdout reporting.
   - Specified `^NSEI` daily granularity check.
+- **Amendment 2 (Step B1 Review, before any data fetched):**
+  - Fixed data cut-off date to `2026-10-17` (fetch and truncate strictly at `date <= 2026-10-17`), permanently fixing the 24-month holdout partition to `2024-10-18`..`2026-10-17`.
+  - Clarified prior exposure count: 49 loaded, 1 attempted (`TATAMOTORS` returned 404); retained conservatively in the 50-stock list.
