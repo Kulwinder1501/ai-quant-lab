@@ -6,12 +6,16 @@ Pre-registered in docs/2026-10-17-equity-stance-r0-spec.md
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
 
 from apps.ml.equity_stance_r0.evaluate import (
+    ELIGIBLE_STOCK_DAYS_PARQUET,
+    EVENTS_CSV,
+    EVENTS_PARQUET,
     REPORT_MD,
     RESULTS_JSON,
     evaluate_all_variants,
@@ -20,6 +24,7 @@ from apps.ml.equity_stance_r0.evaluate import (
     run_month_block_bootstrap,
     run_placebo_benchmark,
 )
+from apps.ml.equity_stance_r0.events import RAW_DATA_DIR, parse_raw_bars
 
 BANNED_WORDS = [
     "target price", "stop loss", "buy now", "sell now",
@@ -29,6 +34,8 @@ BANNED_WORDS = [
 
 @pytest.fixture(scope="module")
 def evaluation_results():
+    if not EVENTS_PARQUET.exists() and not EVENTS_CSV.exists():
+        pytest.skip("Research events data not found in apps/ml/research_data.")
     if not RESULTS_JSON.exists():
         res = evaluate_all_variants()
         generate_markdown_report(res)
@@ -38,38 +45,74 @@ def evaluation_results():
 
 def test_gate_r6_placebo_true_events_zero_excess():
     """
-    Gate R6: When the placebo is evaluated on the true events, the excess relative to
-    the baseline matches the observed excess (difference is approximately zero).
+    Gate R6: When the placebo pool is constructed from the true event returns,
+    the real run_placebo_benchmark function produces a placebo mean matching
+    the observed event mean (difference is approximately zero).
     """
-    rng = np.random.default_rng(20261017)
-    # Synthetic stock-year returns
-    sy_returns = rng.normal(0.05, 0.02, size=250)
-    # True event returns matching the stock-year distribution
-    event_returns = rng.choice(sy_returns, size=20, replace=False)
+    if not EVENTS_PARQUET.exists() and not EVENTS_CSV.exists():
+        pytest.skip("Events data not present.")
 
-    baseline_mean = np.mean(sy_returns)
-    event_excess = np.mean(event_returns) - baseline_mean
+    df_events = pd.read_parquet(EVENTS_PARQUET) if EVENTS_PARQUET.exists() else pd.read_csv(EVENTS_CSV)
+    v1_events = df_events[
+        (df_events["variant"] == "V1")
+        & (df_events["partition_63"].isin(["half1", "half2"]))
+        & (~df_events["has_artifact"])
+        & (df_events["gross_return_63"].notnull())
+    ]
+    observed_mean = v1_events["net_excess_stock_year_63"].mean()
 
-    # Placebo sampling from the same stock-year pool
-    placebo_draws = [np.mean(rng.choice(sy_returns, size=20, replace=True)) - baseline_mean for _ in range(500)]
-    placebo_mean_excess = np.mean(placebo_draws)
+    # Construct mock pool where each stock-year contains exactly its true event returns
+    mock_pool: dict[tuple[str, int], np.ndarray] = (
+        v1_events.groupby([v1_events["symbol"], v1_events["signal_date"].str[:4].astype(int)])["net_excess_stock_year_63"]
+        .apply(lambda x: x.values)
+        .to_dict()
+    )
 
-    # Difference should be near zero (within sampling error < 0.01)
-    assert abs(placebo_mean_excess) < 0.005
+    # Run real placebo function against mock pool containing true events
+    res = run_placebo_benchmark(
+        df_events,
+        variant="V1",
+        eligible_pool=mock_pool,
+        n_draws=500,
+        seed=20261017,
+    )
+
+    diff = abs(res["placebo_mean"] - observed_mean)
+    assert diff < 0.005, f"Placebo on true events deviated: diff={diff:.6f}"
 
 
 def test_gate_r6_planted_drift_recovery():
     """
-    Gate R6: Sets one stock's returns to a known drift and verifies it is recovered.
+    Gate R6: Takes real bars from a stock, plants an explicit +5.0% forward drift,
+    and verifies that the forward gross return and baseline recovery detect the drift exactly.
     """
-    rng = np.random.default_rng(20261017)
-    base_returns = rng.normal(0.02, 0.01, size=100)
-    known_drift = 0.050  # +5% drift
+    raw_path = RAW_DATA_DIR / "RELIANCE.json"
+    if not raw_path.exists():
+        pytest.skip("RELIANCE raw data not found.")
 
-    shifted_returns = base_returns + known_drift
-    recovered_drift = np.mean(shifted_returns) - np.mean(base_returns)
+    bars = parse_raw_bars("RELIANCE")
+    assert len(bars) > 500
 
-    assert abs(recovered_drift - known_drift) < 1e-9
+    # Base forward returns for H=63
+    base_returns = []
+    for i in range(len(bars) - 63):
+        if bars[i + 1].open > 0:
+            base_returns.append((bars[i + 63].close / bars[i + 1].open) - 1.0)
+
+    base_mean = float(np.mean(base_returns))
+
+    # Plant a known +0.050 (+5%) drift by multiplying exit closes
+    planted_drift = 0.050
+    drifted_returns = []
+    for i in range(len(bars) - 63):
+        if bars[i + 1].open > 0:
+            drifted_close = bars[i + 63].close * (1.0 + planted_drift)
+            drifted_returns.append((drifted_close / bars[i + 1].open) - 1.0)
+
+    drifted_mean = float(np.mean(drifted_returns))
+    recovered_drift = (drifted_mean - base_mean) / (1.0 + base_mean)
+
+    assert abs(recovered_drift - planted_drift) < 1e-4, f"Drift recovery error: {recovered_drift}"
 
 
 def test_gate_r7_planted_edge_detection():
@@ -78,7 +121,6 @@ def test_gate_r7_planted_edge_detection():
     """
     rng = np.random.default_rng(20261017)
     n_months = 60
-    # Planted positive edge of +1.5% with standard error ~0.4%
     monthly_edges = rng.normal(0.015, 0.010, size=n_months)
 
     df_test = pd.DataFrame({
@@ -104,7 +146,6 @@ def test_gate_r7_no_edge_false_positive_rate():
     false_positives = 0
 
     for sim_idx in range(n_simulations):
-        # Pure noise around 0.0
         monthly_noise = rng.normal(0.0, 0.03, size=n_months)
         df_null = pd.DataFrame({
             "excess": monthly_noise,
@@ -116,18 +157,16 @@ def test_gate_r7_no_edge_false_positive_rate():
             n_draws=500,
             seed=20261017 + sim_idx,
         )
-        # One-sided test at 5% alpha: LB > 0 or p <= 0.05
         if res["ci_lower_95"] > 0.0:
             false_positives += 1
 
     fp_rate = false_positives / n_simulations
-    # False positive rate for nominal 5% level should be around 5%, bounded well below 10%
     assert fp_rate <= 0.10, f"False positive rate too high: {fp_rate:.2%}"
 
 
 def test_gate_r8_costs_and_gates_reported(evaluation_results):
     """
-    Gate R8: Costs and gates applied and reported.
+    Gate R8: Costs and gates applied and reported across all 6 variants.
     """
     variants = evaluation_results["variants"]
     assert len(variants) == 6
@@ -143,7 +182,7 @@ def test_gate_r8_costs_and_gates_reported(evaluation_results):
 def test_gate_r9_verdict_and_wording(evaluation_results):
     """
     Gate R9: Verdict text matches numbers, claims no more than pass criteria allow,
-    survivorship bias direction stated, and zero banned words.
+    survivorship bias direction stated per variant, and zero banned words.
     """
     assert evaluation_results["overall_verdict"] == "NOT SUPPORTED"
 
@@ -153,9 +192,39 @@ def test_gate_r9_verdict_and_wording(evaluation_results):
     for word in BANNED_WORDS:
         assert word not in report_lower, f"Banned word '{word}' found in report"
 
-    # Survivorship bias must be explicitly stated
+    # Survivorship bias must be explicitly stated per variant direction
     assert "survivorship bias" in report_lower
+    assert "buy variants" in report_lower
+    assert "sell variants" in report_lower
     assert "unvalidated" in report_lower
+
+
+def test_gate_r9_report_numbers_match_json(evaluation_results):
+    """
+    Gate R9: Asserts that every number in the Markdown report matches the JSON results exactly.
+    """
+    report_text = REPORT_MD.read_text(encoding="utf-8")
+    variants = evaluation_results["variants"]
+
+    for v_id, v in variants.items():
+        # Scoreboard values
+        sy_mean_str = f"{v['bootstrap_stock_year']['mean'] * 100:+.2f}%"
+        lb_str = f"{v['bootstrap_stock_year']['ci_lower_95'] * 100:+.2f}%"
+        ub_str = f"{v['bootstrap_stock_year']['ci_upper_95'] * 100:+.2f}%"
+        p_sy_str = f"{v['bootstrap_stock_year']['p_value']:.4f}"
+        nifty_mean_str = f"{v['bootstrap_nifty50']['mean'] * 100:+.2f}%"
+        p_nifty_str = f"{v['bootstrap_nifty50']['p_value']:.4f}"
+        p_max_str = f"{v['variant_p_value']:.4f}"
+        verdict_str = f"**{v['classification']}**"
+
+        assert sy_mean_str in report_text, f"{v_id} SY mean {sy_mean_str} not in report"
+        assert lb_str in report_text, f"{v_id} LB {lb_str} not in report"
+        assert ub_str in report_text, f"{v_id} UB {ub_str} not in report"
+        assert p_sy_str in report_text, f"{v_id} p_sy {p_sy_str} not in report"
+        assert nifty_mean_str in report_text, f"{v_id} Nifty mean {nifty_mean_str} not in report"
+        assert p_nifty_str in report_text, f"{v_id} p_nifty {p_nifty_str} not in report"
+        assert p_max_str in report_text, f"{v_id} p_max {p_max_str} not in report"
+        assert verdict_str in report_text, f"{v_id} verdict {verdict_str} not in report"
 
 
 def test_gate_r10_reproducibility():
@@ -165,7 +234,6 @@ def test_gate_r10_reproducibility():
     with open(RESULTS_JSON, "r", encoding="utf-8") as f:
         original_json = f.read()
 
-    # Re-run evaluation
     new_res = evaluate_all_variants()
     new_json = json.dumps(new_res, indent=2)
 
