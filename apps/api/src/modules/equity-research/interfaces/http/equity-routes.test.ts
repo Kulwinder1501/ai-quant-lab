@@ -735,4 +735,212 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
       expect(data.warnings.some((w: string) => w.includes("Price data is as of 2026-09-01"))).toBe(true);
     });
   });
+
+  describe("Levels Endpoint GET /api/v1/equity/watchlist/:id/levels (WP-B Step B2)", () => {
+    it("returns 200 with full-precision levels payload for a valid stock and makes zero Yahoo calls", async () => {
+      const nse = (await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL))!;
+
+      // Capture call log count before
+      const callLogBefore = await pool.query<{ count: string }>(
+        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+      );
+
+      const res = await fetch(`${baseUrl}/watchlist/${nse.id}/levels`);
+      expect(res.status).toBe(200);
+
+      const data = await res.json();
+      expect(data.stock).toBeDefined();
+      expect(data.stock.id).toBe(nse.id);
+      expect(data.stock.symbol).toBe(TEST_SYMBOL);
+      expect(data.asOfDate).toBeDefined();
+      expect(typeof data.isStale).toBe("boolean");
+      expect(typeof data.staleDays).toBe("number");
+      expect(data.rebackfillNeeded).toBe(false);
+      expect(data.disclaimer).toBeDefined();
+      expect(data.empiricalNote).toBeDefined();
+      expect(data.formulas).toBeDefined();
+      expect(Array.isArray(data.levels)).toBe(true);
+      expect(Array.isArray(data.warnings)).toBe(true);
+
+      // Numbers are full-precision numeric values (not formatted strings)
+      if (data.atr14 !== null) {
+        expect(typeof data.atr14).toBe("number");
+      }
+      if (data.atrPercent !== null) {
+        expect(typeof data.atrPercent).toBe("number");
+      }
+
+      // Zero new Yahoo calls made
+      const callLogAfter = await pool.query<{ count: string }>(
+        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+      );
+      expect(callLogAfter.rows[0].count).toBe(callLogBefore.rows[0].count);
+    });
+
+    it("returns 400 for an invalid UUID on GET /watchlist/:id/levels", async () => {
+      const res = await fetch(`${baseUrl}/watchlist/not-a-valid-uuid/levels`);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toContain("Invalid stock ID");
+    });
+
+    it("returns 404 for an unknown stock ID on GET /watchlist/:id/levels", async () => {
+      const unknownUuid = "b0000000-0000-0000-0000-000000000000";
+      const res = await fetch(`${baseUrl}/watchlist/${unknownUuid}/levels`);
+      expect(res.status).toBe(404);
+      const data = await res.json();
+      expect(data.error).toContain("not found");
+    });
+
+    it("answers for an inactive/removed stock with active: false", async () => {
+      const removedStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_LVL_REM",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_LVL_REM.NS",
+        displayName: "Removed Levels Stock Ltd",
+      });
+      await watchlistRepo.removeStock(removedStock.id);
+
+      const res = await fetch(`${baseUrl}/watchlist/${removedStock.id}/levels`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.stock.id).toBe(removedStock.id);
+      expect(data.stock.active).toBe(false);
+    });
+
+    it("returns state: SUSPENDED with zero levels when rebackfill_needed is set", async () => {
+      const rebackfillStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_LVL_REB",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_LVL_REB.NS",
+        displayName: "Rebackfill Levels Stock Ltd",
+      });
+      await pool.query(
+        `UPDATE equity_research.watchlist_stock SET rebackfill_needed = true WHERE id = $1`,
+        [rebackfillStock.id],
+      );
+
+      const res = await fetch(`${baseUrl}/watchlist/${rebackfillStock.id}/levels`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.state).toBe("SUSPENDED");
+      expect(data.rebackfillNeeded).toBe(true);
+      expect(data.levels).toEqual([]);
+      expect(data.warnings.some((w: string) => w.includes("Calculations suspended"))).toBe(true);
+    });
+
+    it("flags staleness (isStale: true, staleDays) for an old stock evaluated against today's IST date", async () => {
+      const oldStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_LVL_OLD",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_LVL_OLD.NS",
+        displayName: "Old Levels Stock Ltd",
+      });
+
+      // Insert 20 bars ending 2026-09-01 (older than 4 calendar days from today's IST date)
+      const barsToSave = [];
+      for (let i = 0; i < 20; i++) {
+        const day = String(i + 1).padStart(2, "0");
+        barsToSave.push({
+          stockId: oldStock.id,
+          barDate: `2026-08-${day}`,
+          open: 100 + i * 0.2,
+          high: 102 + i * 0.2,
+          low: 99 + i * 0.2,
+          close: 101 + i * 0.2,
+          volume: 50000,
+          source: TEST_SOURCE,
+        });
+      }
+      barsToSave.push({
+        stockId: oldStock.id,
+        barDate: "2026-09-01",
+        open: 105,
+        high: 107,
+        low: 104,
+        close: 106,
+        volume: 60000,
+        source: TEST_SOURCE,
+      });
+
+      await priceBarRepo.saveBars(barsToSave);
+
+      const res = await fetch(`${baseUrl}/watchlist/${oldStock.id}/levels`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      expect(data.asOfDate).toBe("2026-09-01");
+      expect(data.isStale).toBe(true);
+      expect(data.staleDays).toBeGreaterThan(40);
+      expect(data.warnings.some((w: string) => w.includes("Price data is as of 2026-09-01"))).toBe(true);
+      expect(data.disclaimer).toBeDefined();
+    });
+
+    it("returns INSUFFICIENT_HISTORY when history is less than 258 bars", async () => {
+      const shortStock = await watchlistRepo.addStock({
+        symbol: "TESTAPI_LVL_SHT",
+        exchange: "NSE",
+        yahooSymbol: "TESTAPI_LVL_SHT.NS",
+        displayName: "Short Levels Stock Ltd",
+      });
+
+      // Save 50 bars
+      const barsToSave = [];
+      const cur = new Date(Date.UTC(2026, 7, 1));
+      for (let i = 0; i < 50; i++) {
+        barsToSave.push({
+          stockId: shortStock.id,
+          barDate: cur.toISOString().slice(0, 10),
+          open: 200 + i * 0.2,
+          high: 203 + i * 0.2,
+          low: 198 + i * 0.2,
+          close: 201 + i * 0.2,
+          volume: 30000,
+          source: TEST_SOURCE,
+        });
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      await priceBarRepo.saveBars(barsToSave);
+
+      const res = await fetch(`${baseUrl}/watchlist/${shortStock.id}/levels`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      expect(data.state).toBe("INSUFFICIENT_HISTORY");
+      // Swing levels not produced
+      expect(data.levels.filter((l: any) => l.kind === "SWING").length).toBe(0);
+      // Reference levels that can be computed are still shown (e.g. 50-day SMA, Round numbers)
+      expect(data.levels.some((l: any) => l.kind === "SMA_50")).toBe(true);
+      expect(data.levels.some((l: any) => l.kind === "ROUND_NUMBER")).toBe(true);
+    });
+
+    it("verifies zero banned terms across the levels route response", async () => {
+      const nse = (await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL))!;
+      const res = await fetch(`${baseUrl}/watchlist/${nse.id}/levels`);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      const bannedRegex =
+        /\b(buy|sell|hold|bullish|bearish|strong|weak|overbought|oversold|signal|target|outperform|underperform|recommend)\b/i;
+
+      function scan(obj: unknown, path = ""): void {
+        if (typeof obj === "string") {
+          if (obj.includes("Not a recommendation, rating or forecast.")) return;
+          const match = bannedRegex.exec(obj);
+          if (match) {
+            throw new Error(`Banned word '${match[1]}' found at path '${path}': "${obj}"`);
+          }
+        } else if (Array.isArray(obj)) {
+          obj.forEach((item, idx) => scan(item, `${path}[${idx}]`));
+        } else if (obj !== null && typeof obj === "object") {
+          for (const [k, v] of Object.entries(obj)) {
+            if (k === "strength") continue;
+            scan(v, `${path}.${k}`);
+          }
+        }
+      }
+
+      expect(() => scan(data, "levels_route")).not.toThrow();
+    });
+  });
 });

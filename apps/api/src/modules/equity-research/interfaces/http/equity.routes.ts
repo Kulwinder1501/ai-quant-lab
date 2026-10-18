@@ -162,6 +162,29 @@ export function createEquityRouter(service: EquityWatchlistService): Router {
     }
   });
 
+  // GET /api/v1/equity/watchlist/:id/levels
+  router.get("/watchlist/:id/levels", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const parsedParams = stockIdParamSchema.safeParse(req.params);
+      if (!parsedParams.success) {
+        res.status(400).json({
+          error: "Invalid stock ID",
+          details: parsedParams.error.issues.map((i) => i.message),
+        });
+        return;
+      }
+
+      const levels = await service.getLevels(parsedParams.data.id);
+      res.json(levels);
+    } catch (err) {
+      if (err instanceof StockNotFoundError) {
+        res.status(404).json({ error: err.message });
+      } else {
+        next(err);
+      }
+    }
+  });
+
   // GET /api/v1/equity/source-health
   router.get("/source-health", async (_req: Request, res: Response, next: NextFunction) => {
     try {
