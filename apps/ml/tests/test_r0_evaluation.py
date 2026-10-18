@@ -82,6 +82,37 @@ def test_gate_r6_placebo_true_events_zero_excess():
     assert diff < 0.005, f"Placebo on true events deviated: diff={diff:.6f}"
 
 
+def test_gate_r6_legacy_unkeyed_cache_ignored(tmp_path):
+    """
+    Gate R6: Asserts that an unkeyed 'eligible_stock_days.parquet' file is strictly ignored.
+    If a fake pool exists at the legacy unkeyed path, ensure_eligible_stock_days_pool
+    must not load it under any circumstances.
+    """
+    fake_df = pd.DataFrame([{"symbol": "FAKE_STALE_STOCK", "year": 2020, "excess_buy": 0.5, "excess_sell": -0.5}])
+    legacy_path = ELIGIBLE_STOCK_DAYS_PARQUET
+    created = False
+    try:
+        if not legacy_path.exists():
+            fake_df.to_parquet(legacy_path, index=False)
+            created = True
+
+        # 1. Canonical call must load from keyed path and NOT contain FAKE_STALE_STOCK
+        buy_pool, _ = ensure_eligible_stock_days_pool()
+        assert ("FAKE_STALE_STOCK", 2020) not in buy_pool, "Stale unkeyed cache was loaded!"
+
+        # 2. When an explicit valid keyed cache path is given, legacy unkeyed path is ignored
+        keyed_mock = tmp_path / "eligible_stock_days_valid_mock.parquet"
+        valid_mock_df = pd.DataFrame([{"symbol": "VALID_MOCK", "year": 2020, "excess_buy": 0.1, "excess_sell": -0.1}])
+        valid_mock_df.to_parquet(keyed_mock, index=False)
+
+        buy_mock, _ = ensure_eligible_stock_days_pool(cache_path=keyed_mock)
+        assert ("VALID_MOCK", 2020) in buy_mock
+        assert ("FAKE_STALE_STOCK", 2020) not in buy_mock
+    finally:
+        if created and legacy_path.exists():
+            legacy_path.unlink()
+
+
 def test_gate_r6_placebo_planted_edge_and_null_calibration():
     """
     Gate R6: Placebo calibration through the real run_placebo_benchmark function:

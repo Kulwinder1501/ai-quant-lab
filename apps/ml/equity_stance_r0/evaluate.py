@@ -90,32 +90,22 @@ def ensure_eligible_stock_days_pool(
     Keyed to SHA-256 of events.csv and equity-rules-v1.json to ensure invalidation.
     """
     target_cache = cache_path or get_eligible_pool_cache_path()
-    candidate_paths = [target_cache]
-    if ELIGIBLE_STOCK_DAYS_PARQUET != target_cache:
-        candidate_paths.append(ELIGIBLE_STOCK_DAYS_PARQUET)
-
-    for p in candidate_paths:
-        if p.exists():
-            try:
-                df_pool = pd.read_parquet(p)
-                buy_pool = (
-                    df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_buy"]
-                    .apply(lambda x: x.values)
-                    .to_dict()
-                )
-                sell_pool = (
-                    df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_sell"]
-                    .apply(lambda x: x.values)
-                    .to_dict()
-                )
-                if p != target_cache:
-                    try:
-                        df_pool.to_parquet(target_cache, index=False)
-                    except Exception:
-                        pass
-                return buy_pool, sell_pool
-            except Exception:
-                pass
+    if target_cache.exists():
+        try:
+            df_pool = pd.read_parquet(target_cache)
+            buy_pool = (
+                df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_buy"]
+                .apply(lambda x: x.values)
+                .to_dict()
+            )
+            sell_pool = (
+                df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_sell"]
+                .apply(lambda x: x.values)
+                .to_dict()
+            )
+            return buy_pool, sell_pool
+        except Exception:
+            pass
 
     config = rules or load_rules()
     min_liq = config["stance"]["liquidity"]["minMedianTradedValueInr"]
@@ -227,8 +217,6 @@ def ensure_eligible_stock_days_pool(
     df_p = pd.DataFrame(rows, columns=["symbol", "year", "excess_buy", "excess_sell"])
     try:
         df_p.to_parquet(target_cache, index=False)
-        if target_cache != ELIGIBLE_STOCK_DAYS_PARQUET:
-            df_p.to_parquet(ELIGIBLE_STOCK_DAYS_PARQUET, index=False)
     except Exception:
         pass
 
