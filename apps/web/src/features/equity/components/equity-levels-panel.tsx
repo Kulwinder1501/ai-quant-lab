@@ -190,7 +190,7 @@ export function EquityLevelsPanel({
         )}
 
         {/* Insufficient History Banner */}
-        {isShortHistory && !isSuspended && (
+        {isShortHistory && !isSuspended && levelsData.levels && levelsData.levels.length > 0 && (
           <div className="flex items-start gap-2.5 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs text-sky-200">
             <Info className="size-4 shrink-0 mt-0.5 text-sky-400" />
             <div>
@@ -205,15 +205,20 @@ export function EquityLevelsPanel({
         {/* General / Artifact Warnings */}
         {!isSuspended && warnings && warnings.length > 0 && (
           <div className="space-y-1.5">
-            {Array.from(new Set(warnings)).map((w, idx) => (
-              <div
-                key={idx}
-                className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300"
-              >
-                <AlertTriangle className="size-3.5 shrink-0 mt-0.5 text-amber-400" />
-                <span>{w}</span>
-              </div>
-            ))}
+            {Array.from(new Set(warnings))
+              .filter((w) => {
+                if (isStale && w.toLowerCase().includes("calendar days ago")) return false;
+                return true;
+              })
+              .map((w, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300"
+                >
+                  <AlertTriangle className="size-3.5 shrink-0 mt-0.5 text-amber-400" />
+                  <span>{w}</span>
+                </div>
+              ))}
           </div>
         )}
       </div>
@@ -441,8 +446,14 @@ export function EquityLevelsPanel({
                   <th className="py-2.5 px-3">Level Price</th>
                   <th className="py-2.5 px-3">Side</th>
                   <th className="py-2.5 px-3">Source</th>
-                  <th className="py-2.5 px-3 text-right">Distance (%)</th>
-                  <th className="py-2.5 px-3 text-right">Distance (ATR)</th>
+                  <th className="py-2.5 px-3 text-right">
+                    <div>Distance (%)</div>
+                    <div className="text-[9px] text-slate-500 font-normal">price vs level</div>
+                  </th>
+                  <th className="py-2.5 px-3 text-right">
+                    <div>Distance (ATR)</div>
+                    <div className="text-[9px] text-slate-500 font-normal">price vs level</div>
+                  </th>
                   <th className="py-2.5 px-3 text-center">Touches</th>
                   <th className="py-2.5 px-3 text-center">State</th>
                   <th className="py-2.5 px-3">Date Range</th>
@@ -521,6 +532,7 @@ export function EquityLevelsPanel({
         <button
           type="button"
           onClick={() => setShowFormulas(!showFormulas)}
+          aria-expanded={showFormulas}
           className="flex w-full items-center justify-between p-4 text-left text-xs font-semibold text-slate-300 hover:text-white transition"
         >
           <div className="flex items-center gap-2">
