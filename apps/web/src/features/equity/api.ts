@@ -2,6 +2,7 @@ import { getApiV1Url } from "../research/api";
 import type {
   EquityExchange,
   HistoryRange,
+  LevelsPanelResponse,
   SourceHealthResponse,
   StockDetailResponse,
   TrendPanelResponse,
@@ -158,5 +159,29 @@ export async function fetchStockTrend(
   }
 
   return (await res.json()) as TrendPanelResponse;
+}
+
+export async function fetchStockLevels(
+  id: string,
+  signal?: AbortSignal,
+): Promise<LevelsPanelResponse> {
+  const url = `${getApiV1Url()}/equity/watchlist/${id}/levels`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to fetch levels (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as LevelsPanelResponse;
 }
 
