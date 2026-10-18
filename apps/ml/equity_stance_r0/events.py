@@ -194,6 +194,8 @@ def _process_single_symbol(args: tuple) -> list[dict]:
     def get_benchmark_return(entry_date: str, exit_date: str) -> Optional[float]:
         if not benchmark_sorted_dates:
             return None
+        if entry_date < benchmark_sorted_dates[0]:
+            return None
         b_entry = benchmark_by_date.get(entry_date)
         if not b_entry:
             for d in benchmark_sorted_dates:

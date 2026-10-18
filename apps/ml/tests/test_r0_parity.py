@@ -1,6 +1,13 @@
 """Gate R4: Parity Unit Tests in Python.
 Verifies Python levels engine produces identical levels, counts, and states
 on 14 golden fixtures (5 synthetic + 3 real stocks at 3 dates each).
+
+Cross-check note:
+The expected fixture values in r0_parity_fixtures.json serve as a fixed regression baseline.
+The true cross-engine parity verification is performed bi-directionally by:
+1. `apps/api/src/modules/equity-research/domain/levels-parity.test.ts` (executes the TypeScript engine against these fixtures to 1e-9 tolerance).
+2. The independent reviewer recomputation across real and synthetic series.
+This file guards against internal Python levels engine drift.
 """
 
 import json

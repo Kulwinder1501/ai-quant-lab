@@ -172,3 +172,10 @@ At the primary horizon ($H = 63$ bars), a variant is classified as:
 - **Amendment 2 (Step B1 Review, before any data fetched):**
   - Fixed data cut-off date to `2026-10-17` (fetch and truncate strictly at `date <= 2026-10-17`), permanently fixing the 24-month holdout partition to `2024-10-18`..`2026-10-17`.
   - Clarified prior exposure count: 49 loaded, 1 attempted (`TATAMOTORS` returned 404); retained conservatively in the 50-stock list.
+- **Amendment 3 (Step A2 Review, before Step A3 evaluation):**
+  - Specified V2 support breakdown implementation: defined as any swing level in state `BROKEN` or `FLIPPED` (a break within the last 20 bars) whose price is at least $1.0 \times \text{ATR14}$ above the close (`(level.price - close) / atr14 >= 1.0`).
+  - Specified V1, V3, and V4 level matching: evaluated strictly on the engine's nearest valid swing support or resistance.
+  - Specified SMA200 calculation: computed as the arithmetic mean of the raw closes over the last 200 daily bars.
+  - Specified artifact window scope: an event is flagged for artifacts if any bar in the window $[T - 252, T + 63]$ (lookback through the 63-bar horizon exit bar) experienced an absolute 1-day move $> 40\%$.
+  - Specified month-end definition: defined as the last trading bar of each calendar month on the combined market calendar of active stocks.
+  - Specified NIFTY 50 baseline pre-start handling: for event entry dates preceding the benchmark start (`2007-09-17`), the NIFTY baseline is treated as null (`None`), rather than clamping to the initial bar.
