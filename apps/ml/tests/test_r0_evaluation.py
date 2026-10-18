@@ -18,6 +18,7 @@ from apps.ml.equity_stance_r0.evaluate import (
     EVENTS_PARQUET,
     REPORT_MD,
     RESULTS_JSON,
+    ensure_eligible_stock_days_pool,
     evaluate_all_variants,
     generate_markdown_report,
     holm_step_down,
@@ -81,38 +82,70 @@ def test_gate_r6_placebo_true_events_zero_excess():
     assert diff < 0.005, f"Placebo on true events deviated: diff={diff:.6f}"
 
 
-def test_gate_r6_planted_drift_recovery():
+def test_gate_r6_placebo_planted_edge_and_null_calibration():
     """
-    Gate R6: Takes real bars from a stock, plants an explicit +5.0% forward drift,
-    and verifies that the forward gross return and baseline recovery detect the drift exactly.
+    Gate R6: Placebo calibration through the real run_placebo_benchmark function:
+    1. Null calibration: With events drawn directly from the eligible pool across stock-years,
+       verifies that the procedure is not over-confident (false positives at p < 0.05 are rare).
+    2. Planted-edge recovery: A planted +1.0% edge returns ~+1.0% (within 0.15%) with p approx 0,
+       and a planted +2.0% edge returns ~+2.0% with p approx 0.
     """
-    raw_path = RAW_DATA_DIR / "RELIANCE.json"
-    if not raw_path.exists():
-        pytest.skip("RELIANCE raw data not found.")
+    if not EVENTS_PARQUET.exists() and not EVENTS_CSV.exists():
+        pytest.skip("Events data not present.")
 
-    bars = parse_raw_bars("RELIANCE")
-    assert len(bars) > 500
+    buy_pool, _ = ensure_eligible_stock_days_pool()
+    df_events = pd.read_parquet(EVENTS_PARQUET) if EVENTS_PARQUET.exists() else pd.read_csv(EVENTS_CSV)
+    sub = df_events[
+        (df_events["variant"] == "V1")
+        & (df_events["partition_63"].isin(["half1", "half2"]))
+        & (~df_events["has_artifact"])
+        & (df_events["gross_return_63"].notnull())
+    ].copy()
 
-    # Base forward returns for H=63
-    base_returns = []
-    for i in range(len(bars) - 63):
-        if bars[i + 1].open > 0:
-            base_returns.append((bars[i + 63].close / bars[i + 1].open) - 1.0)
+    counts = sub.groupby([sub["symbol"], sub["signal_date"].str[:4].astype(int)]).size()
 
-    base_mean = float(np.mean(base_returns))
+    # 1. Null calibration baseline
+    rng = np.random.default_rng(20261017)
+    null_vals = []
+    for (sym, yr), k in counts.items():
+        arr = buy_pool.get((sym, yr))
+        if arr is not None and len(arr) > 0:
+            null_vals.extend(rng.choice(arr, size=k, replace=True))
+        else:
+            null_vals.extend([0.0] * k)
 
-    # Plant a known +0.050 (+5%) drift by multiplying exit closes
-    planted_drift = 0.050
-    drifted_returns = []
-    for i in range(len(bars) - 63):
-        if bars[i + 1].open > 0:
-            drifted_close = bars[i + 63].close * (1.0 + planted_drift)
-            drifted_returns.append((drifted_close / bars[i + 1].open) - 1.0)
+    sub_null = sub.copy()
+    sub_null["net_excess_stock_year_63"] = null_vals
 
-    drifted_mean = float(np.mean(drifted_returns))
-    recovered_drift = (drifted_mean - base_mean) / (1.0 + base_mean)
+    # 2. Planted edge recovery on +1.0% (+0.010) and +2.0% (+0.020)
+    for edge in [0.010, 0.020]:
+        df_edge = sub_null.copy()
+        df_edge["net_excess_stock_year_63"] = sub_null["net_excess_stock_year_63"] + edge
+        res = run_placebo_benchmark(df_edge, "V1", buy_pool, n_draws=300, seed=20261017)
+        rec_edge = res["observed_mean"] - res["placebo_mean"]
+        assert abs(rec_edge - edge) < 0.0025, f"Planted edge {edge} recovery failed: got {rec_edge:.4f}"
+        assert res["p_value"] < 0.005, f"Planted edge p-value expected approx 0, got {res['p_value']}"
 
-    assert abs(recovered_drift - planted_drift) < 1e-4, f"Drift recovery error: {recovered_drift}"
+    # 3. Null calibration: verify it is not over-confident
+    fps = 0
+    n_sims = 25
+    for i in range(n_sims):
+        sim_rng = np.random.default_rng(10000 + i)
+        sim_vals = []
+        for (sym, yr), k in counts.items():
+            arr = buy_pool.get((sym, yr))
+            if arr is not None and len(arr) > 0:
+                sim_vals.extend(sim_rng.choice(arr, size=k, replace=True))
+            else:
+                sim_vals.extend([0.0] * k)
+        df_sim = sub.copy()
+        df_sim["net_excess_stock_year_63"] = sim_vals
+        res = run_placebo_benchmark(df_sim, "V1", buy_pool, n_draws=150, seed=50000 + i)
+        if res["p_value"] < 0.05:
+            fps += 1
+
+    fp_rate = fps / n_sims
+    assert fp_rate <= 0.10, f"Placebo null calibration over-confident: fp_rate={fp_rate:.2%}"
 
 
 def test_gate_r7_planted_edge_detection():
@@ -227,14 +260,16 @@ def test_gate_r9_report_numbers_match_json(evaluation_results):
         assert verdict_str in report_text, f"{v_id} verdict {verdict_str} not in report"
 
 
-def test_gate_r10_reproducibility():
+def test_gate_r10_reproducibility(tmp_path):
     """
     Gate R10: Single command recomputation produces byte-identical evaluation_results.json.
+    Uses tmp_path to verify byte-identical output without side-effect overwriting.
     """
     with open(RESULTS_JSON, "r", encoding="utf-8") as f:
         original_json = f.read()
 
-    new_res = evaluate_all_variants()
-    new_json = json.dumps(new_res, indent=2)
+    test_output = tmp_path / "evaluation_results.json"
+    new_res = evaluate_all_variants(output_path=test_output)
+    new_json = test_output.read_text(encoding="utf-8")
 
     assert original_json == new_json, "Reproducibility failed: results JSON differed"

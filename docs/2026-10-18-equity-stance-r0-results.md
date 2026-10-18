@@ -33,9 +33,13 @@ To prevent hiding divergent benchmark behaviors, the table below explicitly pres
 | **V5** | Trend Context Alone | 34,393 | 34,393 | -4.21% | -5.35% | -3.03% | 1.0000 | +1.76% | 0.0000 | -1.06% | 1.0000 | 1.0000 | No | **FAIL** |
 | **V6** | 52W High Proximity | 5,511 | 5,511 | -6.08% | -7.22% | -4.90% | 1.0000 | +1.58% | 0.0010 | -0.64% | 1.0000 | 1.0000 | No | **FAIL** |
 
+
 > **Note on Benchmark Divergence:**  
-> - **V1 and V3** beat NIFTY 50 (+1.13% and +1.31%, p < 0.005) because individual high-beta equities in the universe outperformed the index, but they underperformed the stock's own same-year baseline (-1.91% and -1.23%), indicating that support touches lagged random holding periods of the same stocks after friction.  
+> - **V1 and V3** beat NIFTY 50 (+1.13% and +1.31%, p < 0.005), likely reflecting survivorship bias in the universe outperforming the index, but they underperformed the stock's own same-year baseline (-1.91% and -1.23%), indicating that support touches lagged random holding periods of the same stocks after friction.  
 > - **V4** shows the exact reverse: avoided loss of +5.94% against the stock-year baseline (stocks pulled back from extreme stretches), but -5.29% against NIFTY 50 (p = 1.0000) because strong trending stocks continued outperforming the broader market.
+
+> **Methodological Limitation of the Placebo Benchmark:**  
+> The random-date placebo benchmark draws eligible stock-days independently without calendar-month clustering. Consequently, its standard errors and analytical p-values do not account for cross-sectional market correlation and appear narrower / more precise than clustered estimators (e.g., producing large z-statistics such as z ≈ −22 on large sample sizes). This limitation cannot alter any variant classification or verdict because the pre-registered decision protocol takes the conservative maximum p-value across all three baselines (`variant_p_value = max(p_sy, p_nifty, p_placebo)`), and the month-clustered stock-year and NIFTY 50 baselines already govern the classification.
 
 ---
 
@@ -47,12 +51,12 @@ The evaluation reports two distinct estimators:
 
 | Variant | Month-Weighted Mean (SY) | Event-Weighted Mean (SY) | Difference | Rationale |
 | :--- | :---: | :---: | :---: | :--- |
-| **V1** | -1.91% | -1.10% | -0.81% | Equal weighting of early thin months pulls month-mean down |
-| **V2** | -1.25% | -1.76% | +0.51% | Equal weighting of early thin months pulls month-mean down |
-| **V3** | -1.23% | -0.58% | -0.65% | Equal weighting of early thin months pulls month-mean down |
-| **V4** | +5.94% | +5.06% | +0.88% | Equal weighting of early thin months pulls month-mean down |
-| **V5** | -4.21% | -3.44% | -0.78% | Equal weighting of early thin months pulls month-mean down |
-| **V6** | -6.08% | -5.50% | -0.58% | Equal weighting of early thin months pulls month-mean down |
+| **V1** | -1.91% | -1.10% | -0.81% | Equal weighting of early thin months with lower returns pulls month-mean down |
+| **V2** | -1.25% | -1.76% | +0.51% | Equal weighting of early thin months with higher returns pushes month-mean up |
+| **V3** | -1.23% | -0.58% | -0.65% | Equal weighting of early thin months with lower returns pulls month-mean down |
+| **V4** | +5.94% | +5.06% | +0.88% | Equal weighting of early thin months with higher returns pushes month-mean up |
+| **V5** | -4.21% | -3.44% | -0.78% | Equal weighting of early thin months with lower returns pulls month-mean down |
+| **V6** | -6.08% | -5.50% | -0.58% | Equal weighting of early thin months with lower returns pulls month-mean down |
 
 ---
 
@@ -91,7 +95,7 @@ Using consistent estimators throughout, artifact exclusion has virtually zero ef
    - **SELL Variants (V2, V4):** Survivorship bias penalizes exit strategies. Because surviving equities in the Nifty 500 exhibited persistent multi-year compounding, exiting stocks that were stretched above their 200-day average or breaking down resulted in forgone returns when those survivor stocks resumed their secular advance.
 
 2. **Half Imbalance & Liquidity Gate Dynamics:**
-   - Half 1 spans 1995 to 2007 (data begins in 1995 when stocks first met the ₹20,000,000 median traded value liquidity threshold; Half 1 ends 2007-11-23).
+   - Half 1 spans 1995 to 2007 (data series starts in 1995; Half 1 ends 2007-11-23).
    - Early years had far fewer qualified stocks than Half 2 (2007-11-24 to 2024-10-17). The month-block bootstrap explicitly controls for this imbalance by weighting each calendar month equally rather than allowing the volume of recent years to dominate.
 
 ---
@@ -100,4 +104,3 @@ Using consistent estimators throughout, artifact exclusion has virtually zero ef
 
 1. **Strict Reference Labeling:** Support and resistance levels must be presented strictly as historical price zones, with zero forward advice or timing claims.
 2. **Unvalidated Badge Enforcement:** In accordance with the pre-registration protocol, all stance components must display the `UNVALIDATED` badge in all user interfaces.
-3. **Scientific Integrity:** The research conclusion of `NOT SUPPORTED` stands on frozen criteria with full byte-identical reproducibility.

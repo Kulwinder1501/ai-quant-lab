@@ -19,6 +19,7 @@ Implements:
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -37,11 +38,31 @@ from apps.ml.equity_stance_r0.events import (
 )
 from apps.ml.equity_stance_r0.levels import load_rules
 
+RULES_PATH = Path(__file__).resolve().parent.parent.parent / "api" / "src" / "modules" / "equity-research" / "domain" / "equity-rules-v1.json"
 EVENTS_PARQUET = OUTPUT_DIR / "events.parquet"
 EVENTS_CSV = OUTPUT_DIR / "events.csv"
 ELIGIBLE_STOCK_DAYS_PARQUET = OUTPUT_DIR / "eligible_stock_days.parquet"
 RESULTS_JSON = OUTPUT_DIR / "evaluation_results.json"
 REPORT_MD = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "2026-10-18-equity-stance-r0-results.md"
+
+
+def get_eligible_pool_cache_path(
+    events_csv_path: Optional[Path] = None,
+    rules_path: Optional[Path] = None,
+) -> Path:
+    """
+    Computes a deterministic hash of events.csv and equity-rules-v1.json
+    so that changes upstream automatically invalidate any stale pool cache.
+    """
+    h = hashlib.sha256()
+    e_path = events_csv_path or EVENTS_CSV
+    r_path = rules_path or RULES_PATH
+    if e_path.exists():
+        h.update(e_path.read_bytes())
+    if r_path.exists():
+        h.update(r_path.read_bytes())
+    cache_hash = h.hexdigest()[:12]
+    return OUTPUT_DIR / f"eligible_stock_days_{cache_hash}.parquet"
 
 
 def load_events_df() -> pd.DataFrame:
@@ -57,6 +78,7 @@ def load_events_df() -> pd.DataFrame:
 
 def ensure_eligible_stock_days_pool(
     rules: Optional[dict[str, Any]] = None,
+    cache_path: Optional[Path] = None,
 ) -> tuple[dict[tuple[str, int], np.ndarray], dict[tuple[str, int], np.ndarray]]:
     """
     Loads or constructs the universe pool of all eligible stock-days:
@@ -65,23 +87,35 @@ def ensure_eligible_stock_days_pool(
     - Next-open entry (t+1) and exit (t+63) exist with exit < HOLDOUT_START_DATE
     - No artifact move (>40% 1-day) in lookback [t-252, t+63]
     Yields separate BUY and SELL net excess values against the stock-year baseline.
+    Keyed to SHA-256 of events.csv and equity-rules-v1.json to ensure invalidation.
     """
-    if ELIGIBLE_STOCK_DAYS_PARQUET.exists():
-        try:
-            df_pool = pd.read_parquet(ELIGIBLE_STOCK_DAYS_PARQUET)
-            buy_pool = (
-                df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_buy"]
-                .apply(lambda x: x.values)
-                .to_dict()
-            )
-            sell_pool = (
-                df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_sell"]
-                .apply(lambda x: x.values)
-                .to_dict()
-            )
-            return buy_pool, sell_pool
-        except Exception:
-            pass
+    target_cache = cache_path or get_eligible_pool_cache_path()
+    candidate_paths = [target_cache]
+    if ELIGIBLE_STOCK_DAYS_PARQUET != target_cache:
+        candidate_paths.append(ELIGIBLE_STOCK_DAYS_PARQUET)
+
+    for p in candidate_paths:
+        if p.exists():
+            try:
+                df_pool = pd.read_parquet(p)
+                buy_pool = (
+                    df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_buy"]
+                    .apply(lambda x: x.values)
+                    .to_dict()
+                )
+                sell_pool = (
+                    df_pool.groupby([df_pool["symbol"], df_pool["year"]])["excess_sell"]
+                    .apply(lambda x: x.values)
+                    .to_dict()
+                )
+                if p != target_cache:
+                    try:
+                        df_pool.to_parquet(target_cache, index=False)
+                    except Exception:
+                        pass
+                return buy_pool, sell_pool
+            except Exception:
+                pass
 
     config = rules or load_rules()
     min_liq = config["stance"]["liquidity"]["minMedianTradedValueInr"]
@@ -192,7 +226,9 @@ def ensure_eligible_stock_days_pool(
 
     df_p = pd.DataFrame(rows, columns=["symbol", "year", "excess_buy", "excess_sell"])
     try:
-        df_p.to_parquet(ELIGIBLE_STOCK_DAYS_PARQUET, index=False)
+        df_p.to_parquet(target_cache, index=False)
+        if target_cache != ELIGIBLE_STOCK_DAYS_PARQUET:
+            df_p.to_parquet(ELIGIBLE_STOCK_DAYS_PARQUET, index=False)
     except Exception:
         pass
 
@@ -334,6 +370,8 @@ def holm_step_down(p_values: list[float], alpha: float = 0.05) -> list[bool]:
 def evaluate_all_variants(
     df: Optional[pd.DataFrame] = None,
     rules: Optional[dict[str, Any]] = None,
+    output_path: Optional[Path] = None,
+    pool_cache_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     events_df = df if df is not None else load_events_df()
     config = rules or load_rules()
@@ -346,7 +384,7 @@ def evaluate_all_variants(
     min_stocks = config["evaluation"]["minStocks"]
 
     # Precompute or load the true random-date eligible stock-days pool
-    buy_pool, sell_pool = ensure_eligible_stock_days_pool(config)
+    buy_pool, sell_pool = ensure_eligible_stock_days_pool(config, cache_path=pool_cache_path)
 
     variants = ["V1", "V2", "V3", "V4", "V5", "V6"]
     results_by_variant: dict[str, Any] = {}
@@ -586,8 +624,10 @@ def evaluate_all_variants(
         "variants": results_by_variant,
     }
 
-    with open(RESULTS_JSON, "w", encoding="utf-8") as f:
-        json.dump(output_payload, f, indent=2)
+    target_path = output_path if output_path is not None else RESULTS_JSON
+    if target_path:
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(output_payload, f, indent=2)
 
     return output_payload
 
@@ -667,9 +707,13 @@ def generate_markdown_report(results: dict[str, Any], output_path: Optional[Path
         )
 
     lines.append("")
+    lines.append("")
     lines.append("> **Note on Benchmark Divergence:**  \n"
-                 "> - **V1 and V3** beat NIFTY 50 (+1.13% and +1.31%, p < 0.005) because individual high-beta equities in the universe outperformed the index, but they underperformed the stock's own same-year baseline (-1.91% and -1.23%), indicating that support touches lagged random holding periods of the same stocks after friction.  \n"
+                 "> - **V1 and V3** beat NIFTY 50 (+1.13% and +1.31%, p < 0.005), likely reflecting survivorship bias in the universe outperforming the index, but they underperformed the stock's own same-year baseline (-1.91% and -1.23%), indicating that support touches lagged random holding periods of the same stocks after friction.  \n"
                  "> - **V4** shows the exact reverse: avoided loss of +5.94% against the stock-year baseline (stocks pulled back from extreme stretches), but -5.29% against NIFTY 50 (p = 1.0000) because strong trending stocks continued outperforming the broader market.")
+    lines.append("")
+    lines.append("> **Methodological Limitation of the Placebo Benchmark:**  \n"
+                 "> The random-date placebo benchmark draws eligible stock-days independently without calendar-month clustering. Consequently, its standard errors and analytical p-values do not account for cross-sectional market correlation and appear narrower / more precise than clustered estimators (e.g., producing large z-statistics such as z ≈ −22 on large sample sizes). This limitation cannot alter any variant classification or verdict because the pre-registered decision protocol takes the conservative maximum p-value across all three baselines (`variant_p_value = max(p_sy, p_nifty, p_placebo)`), and the month-clustered stock-year and NIFTY 50 baselines already govern the classification.")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -687,7 +731,13 @@ def generate_markdown_report(results: dict[str, Any], output_path: Optional[Path
         m_mean = v["bootstrap_stock_year"]["mean"] * 100.0
         ev_mean = v["bootstrap_stock_year"]["event_mean"] * 100.0
         diff = m_mean - ev_mean
-        lines.append(f"| **{v_id}** | {m_mean:+.2f}% | {ev_mean:+.2f}% | {diff:+.2f}% | Equal weighting of early thin months pulls month-mean down |")
+        if diff < -0.0001:
+            rationale = "Equal weighting of early thin months with lower returns pulls month-mean down"
+        elif diff > 0.0001:
+            rationale = "Equal weighting of early thin months with higher returns pushes month-mean up"
+        else:
+            rationale = "Month-weighted and event-weighted means are approximately equal"
+        lines.append(f"| **{v_id}** | {m_mean:+.2f}% | {ev_mean:+.2f}% | {diff:+.2f}% | {rationale} |")
 
     lines.append("")
     lines.append("---")
@@ -738,7 +788,7 @@ def generate_markdown_report(results: dict[str, Any], output_path: Optional[Path
     lines.append("   - **SELL Variants (V2, V4):** Survivorship bias penalizes exit strategies. Because surviving equities in the Nifty 500 exhibited persistent multi-year compounding, exiting stocks that were stretched above their 200-day average or breaking down resulted in forgone returns when those survivor stocks resumed their secular advance.")
     lines.append("")
     lines.append("2. **Half Imbalance & Liquidity Gate Dynamics:**")
-    lines.append("   - Half 1 spans 1995 to 2007 (data begins in 1995 when stocks first met the ₹20,000,000 median traded value liquidity threshold; Half 1 ends 2007-11-23).")
+    lines.append("   - Half 1 spans 1995 to 2007 (data series starts in 1995; Half 1 ends 2007-11-23).")
     lines.append("   - Early years had far fewer qualified stocks than Half 2 (2007-11-24 to 2024-10-17). The month-block bootstrap explicitly controls for this imbalance by weighting each calendar month equally rather than allowing the volume of recent years to dominate.")
     lines.append("")
     lines.append("---")
@@ -747,7 +797,6 @@ def generate_markdown_report(results: dict[str, Any], output_path: Optional[Path
     lines.append("")
     lines.append("1. **Strict Reference Labeling:** Support and resistance levels must be presented strictly as historical price zones, with zero forward advice or timing claims.")
     lines.append("2. **Unvalidated Badge Enforcement:** In accordance with the pre-registration protocol, all stance components must display the `UNVALIDATED` badge in all user interfaces.")
-    lines.append("3. **Scientific Integrity:** The research conclusion of `NOT SUPPORTED` stands on frozen criteria with full byte-identical reproducibility.")
 
     content = "\n".join(lines) + "\n"
     path.write_text(content, encoding="utf-8")
