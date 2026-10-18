@@ -84,8 +84,8 @@ export interface LevelsInput {
     volume: number;
   }>;
   rebackfillNeeded: boolean;
+  asOfEvaluationDate: string; // REQUIRED: Reference date (YYYY-MM-DD, e.g. today in IST) for staleness
   seriesVersion?: number;
-  asOfEvaluationDate?: string;
   rulesConfig?: typeof rulesData;
 }
 
@@ -354,6 +354,7 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     valueAreaPct,
     brokenLookbackBars,
     largeMovePct,
+    artifactMovePct = 0.40,
   } = levelsRules;
 
   const formulas: Record<string, string> = {
@@ -395,11 +396,15 @@ export function computeLevels(input: LevelsInput): LevelsResult {
   const lastBar = totalBars > 0 ? validBars[totalBars - 1] : null;
   const asOfDate = lastBar?.bar_date ?? null;
 
-  // Evaluation date staleness check (defaulting to last bar date)
-  const evalDate = input.asOfEvaluationDate ?? asOfDate;
+  // Condition 5: Evaluation date is required to evaluate data freshness
+  const evalDate = input.asOfEvaluationDate;
+  if (!evalDate) {
+    throw new Error("asOfEvaluationDate is required to evaluate data freshness.");
+  }
+
   let isStale = false;
   let staleDays = 0;
-  if (asOfDate && evalDate) {
+  if (asOfDate) {
     staleDays = calendarDaysDifference(evalDate, asOfDate);
     if (staleDays > 4) {
       isStale = true;
@@ -429,8 +434,50 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     };
   }
 
-  // Insufficient history minimum requirement: needs at least 14 bars for ATR
-  if (totalBars < atrPeriod || !lastBar) {
+  // Condition 1: Check for large moves (> 20%) and suspected corporate-action artifacts (> 40%)
+  let latestArtifactIndex = -1;
+  let latestArtifactDate: string | null = null;
+  let latestArtifactMove = 0;
+
+  for (let i = 1; i < totalBars; i++) {
+    const prevC = validBars[i - 1].close;
+    const currC = validBars[i].close;
+    const change = currC / prevC - 1;
+    const absChange = Math.abs(change);
+
+    if (absChange > artifactMovePct) {
+      latestArtifactIndex = i;
+      latestArtifactDate = validBars[i].bar_date;
+      latestArtifactMove = change;
+    }
+
+    if (absChange > largeMovePct) {
+      const pctStr = `${change > 0 ? "+" : ""}${(change * 100).toFixed(2)}%`;
+      globalWarnings.push(
+        `Contains a one-day move of ${pctStr} on ${validBars[i].bar_date}, which may be an unadjusted corporate action.`,
+      );
+    }
+  }
+
+  // Slicing series strictly after the latest corporate-action artifact
+  let usableBars = validBars;
+  if (latestArtifactIndex >= 0) {
+    const pctStr = `${latestArtifactMove > 0 ? "+" : ""}${(latestArtifactMove * 100).toFixed(2)}%`;
+    globalWarnings.push(
+      `Suspected corporate-action artifact of ${pctStr} on ${latestArtifactDate}: calculations use only subsequent data.`,
+    );
+    usableBars = validBars.slice(latestArtifactIndex + 1);
+  }
+
+  const usableCount = usableBars.length;
+  const currentClose = usableCount > 0 ? usableBars[usableCount - 1].close : (lastBar?.close ?? 0);
+
+  // Condition 4: Requires at least atrPeriod (14) bars. No invented 2% fallback.
+  if (usableCount < atrPeriod || !lastBar) {
+    const reasonWarning =
+      latestArtifactIndex >= 0
+        ? `Requires at least ${atrPeriod} trading bars after artifact on ${latestArtifactDate} to compute price levels; ${usableCount} available.`
+        : `Requires at least ${atrPeriod} trading bars to compute price levels; ${usableCount} available.`;
     return {
       asOfDate,
       isStale,
@@ -444,9 +491,7 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       nearestSupport: null,
       nearestResistance: null,
       riskDistanceAtr: null,
-      warnings: [
-        `Requires at least ${atrPeriod} trading bars to compute price levels; ${totalBars} available.`,
-      ],
+      warnings: Array.from(new Set([...globalWarnings, reasonWarning])),
       disclaimer: EQUITY_LEVELS_DISCLAIMER,
       empiricalNote: EQUITY_LEVELS_EMPIRICAL_NOTE,
       formulas,
@@ -456,30 +501,34 @@ export function computeLevels(input: LevelsInput): LevelsResult {
   // Preliminary volume notice
   globalWarnings.push("Latest day volume is preliminary.");
 
-  // Check for large daily moves > 20% within lookback
-  const lookbackStart = Math.max(0, totalBars - lookbackBars);
-  for (let i = Math.max(1, lookbackStart); i < totalBars; i++) {
-    const prevC = validBars[i - 1].close;
-    const currC = validBars[i].close;
-    const change = currC / prevC - 1;
-    if (Math.abs(change) > largeMovePct) {
-      const pctStr = `${change > 0 ? "+" : ""}${(change * 100).toFixed(2)}%`;
-      globalWarnings.push(
-        `Contains a one-day move of ${pctStr} on ${validBars[i].bar_date}, which may be an unadjusted corporate action.`,
-      );
-    }
+  // Calculate ATR14 and ATR%
+  const atr14 = computeAtr14(usableBars, atrPeriod);
+  if (atr14 === null) {
+    return {
+      asOfDate,
+      isStale,
+      staleDays,
+      rebackfillNeeded: false,
+      seriesVersion: input.seriesVersion ?? 1,
+      state: "INSUFFICIENT_HISTORY",
+      atr14: null,
+      atrPercent: null,
+      levels: [],
+      nearestSupport: null,
+      nearestResistance: null,
+      riskDistanceAtr: null,
+      warnings: Array.from(new Set([...globalWarnings, `Requires at least ${atrPeriod} trading bars to compute ATR.`])),
+      disclaimer: EQUITY_LEVELS_DISCLAIMER,
+      empiricalNote: EQUITY_LEVELS_EMPIRICAL_NOTE,
+      formulas,
+    };
   }
 
-  // 1. Calculate ATR14 and ATR%
-  const atr14 = computeAtr14(validBars, atrPeriod);
-  const currentClose = lastBar.close;
-  const atrPercent = atr14 !== null ? atr14 / currentClose : null;
-  const activeAtr = atr14 ?? currentClose * 0.02; // safe fallback if ATR cannot be computed
-
+  const atrPercent = atr14 / currentClose;
   const levels: LevelItem[] = [];
-  const T = totalBars - 1;
+  const T = usableCount - 1;
 
-  // Helper to build a level item
+  // Condition 2: Helper to build a level item (Full precision, no rounding inside domain)
   const buildLevelItem = (params: {
     id: string;
     price: number;
@@ -493,11 +542,11 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     brokenOn?: string | null;
     volume?: number;
   }): LevelItem => {
-    const price = Math.round(params.price * 100) / 100;
+    const price = params.price;
     const side: LevelSide = price < currentClose ? "SUPPORT" : "RESISTANCE";
-    const w = Math.max(zoneMinPct * price, zoneAtrMultiple * activeAtr);
+    const w = Math.max(zoneMinPct * price, zoneAtrMultiple * atr14);
     const distPct = (currentClose - price) / price;
-    const distAtr = activeAtr > 0 ? (currentClose - price) / activeAtr : 0;
+    const distAtr = (currentClose - price) / atr14;
 
     return {
       id: params.id,
@@ -506,23 +555,23 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       source: params.source,
       side,
       touches: params.touches,
-      strength: Math.round(params.strength * 100) / 100,
+      strength: params.strength,
       firstDate: params.firstDate,
       lastDate: params.lastDate,
-      distancePct: Math.round(distPct * 10_000) / 10_000,
-      distanceAtr: Math.round(distAtr * 100) / 100,
-      zoneLow: Math.round((price - w) * 100) / 100,
-      zoneHigh: Math.round((price + w) * 100) / 100,
+      distancePct: distPct,
+      distanceAtr: distAtr,
+      zoneLow: price - w,
+      zoneHigh: price + w,
       state: params.state ?? "INTACT",
       brokenOn: params.brokenOn ?? null,
       volume: params.volume,
     };
   };
 
-  // 2. Swing Clusters (Requires at least lookbackBars + pivotHalfWindow + 1 or at least 2*pivotHalfWindow+1)
-  const requiredBarsForSwing = 2 * pivotHalfWindow + 1;
-  if (totalBars >= requiredBarsForSwing) {
-    const pivots = findSwingPivots(validBars, pivotHalfWindow, lookbackBars);
+  // Condition 3: Swing Clusters requires at least lookbackBars + pivotHalfWindow + 1 (258 bars)
+  const requiredBarsForSwing = lookbackBars + pivotHalfWindow + 1;
+  if (usableCount >= requiredBarsForSwing) {
+    const pivots = findSwingPivots(usableBars, pivotHalfWindow, lookbackBars);
     const clusters = clusterPivots(pivots, clusterGapPct);
 
     clusters.forEach((cluster, idx) => {
@@ -552,11 +601,11 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       // Check bars in last brokenLookbackBars after the latest pivot was known.
       const knownFromBar = latestPivotIndex + pivotHalfWindow;
       const checkStart = Math.max(T - brokenLookbackBars + 1, knownFromBar);
-      const w = Math.max(zoneMinPct * levelPrice, zoneAtrMultiple * activeAtr);
+      const w = Math.max(zoneMinPct * levelPrice, zoneAtrMultiple * atr14);
 
       // Determine the side of the level prior to the observation window
       const priorBarIndex = Math.max(0, checkStart - 1);
-      const priorClose = validBars[priorBarIndex].close;
+      const priorClose = usableBars[priorBarIndex].close;
       let priorSide: LevelSide;
       if (priorClose > levelPrice) {
         priorSide = "SUPPORT";
@@ -574,21 +623,20 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       let brokenOn: string | null = null;
 
       for (let bi = checkStart; bi <= T; bi++) {
-        const barClose = validBars[bi].close;
+        const barClose = usableBars[bi].close;
         if (priorSide === "SUPPORT" && barClose < levelPrice - w) {
           isBroken = true;
-          brokenOn = validBars[bi].bar_date;
+          brokenOn = usableBars[bi].bar_date;
           break;
         } else if (priorSide === "RESISTANCE" && barClose > levelPrice + w) {
           isBroken = true;
-          brokenOn = validBars[bi].bar_date;
+          brokenOn = usableBars[bi].bar_date;
           break;
         }
       }
 
       let state: LevelState = "INTACT";
       if (isBroken) {
-        // FLIPPED if current price now sits on the other side
         const currentSide: LevelSide = levelPrice < currentClose ? "SUPPORT" : "RESISTANCE";
         state = currentSide !== priorSide ? "FLIPPED" : "BROKEN";
       }
@@ -609,24 +657,28 @@ export function computeLevels(input: LevelsInput): LevelsResult {
         }),
       );
     });
+  } else {
+    globalWarnings.push(
+      `Requires at least ${requiredBarsForSwing} trading bars to compute swing levels; ${usableCount} available.`,
+    );
   }
 
-  // 3. Reference Level: 52-Week High & Low (bars within last 365 days)
+  // 3. Reference Level: 52-Week High & Low (bars strictly within last 365 days)
   const cutoffDate = subtractCalendarDays(lastBar.bar_date, 365);
   let high52W = -Infinity;
   let high52WDate = lastBar.bar_date;
   let low52W = Infinity;
   let low52WDate = lastBar.bar_date;
 
-  for (let i = totalBars - 1; i >= 0; i--) {
-    if (validBars[i].bar_date <= cutoffDate) break;
-    if (validBars[i].high > high52W) {
-      high52W = validBars[i].high;
-      high52WDate = validBars[i].bar_date;
+  for (let i = usableCount - 1; i >= 0; i--) {
+    if (usableBars[i].bar_date <= cutoffDate) break;
+    if (usableBars[i].high > high52W) {
+      high52W = usableBars[i].high;
+      high52WDate = usableBars[i].bar_date;
     }
-    if (validBars[i].low < low52W) {
-      low52W = validBars[i].low;
-      low52WDate = validBars[i].bar_date;
+    if (usableBars[i].low < low52W) {
+      low52W = usableBars[i].low;
+      low52WDate = usableBars[i].bar_date;
     }
   }
 
@@ -661,8 +713,8 @@ export function computeLevels(input: LevelsInput): LevelsResult {
   }
 
   // 4. Reference Level: 50-Day SMA
-  if (totalBars >= 50) {
-    const sum50 = validBars.slice(totalBars - 50).reduce((a, b) => a + b.close, 0);
+  if (usableCount >= 50) {
+    const sum50 = usableBars.slice(usableCount - 50).reduce((a, b) => a + b.close, 0);
     const sma50 = sum50 / 50;
     levels.push(
       buildLevelItem({
@@ -672,15 +724,15 @@ export function computeLevels(input: LevelsInput): LevelsResult {
         source: "50-Day SMA",
         touches: 1,
         strength: 1.0,
-        firstDate: validBars[totalBars - 50].bar_date,
+        firstDate: usableBars[usableCount - 50].bar_date,
         lastDate: lastBar.bar_date,
       }),
     );
   }
 
   // 5. Reference Level: 200-Day SMA
-  if (totalBars >= 200) {
-    const sum200 = validBars.slice(totalBars - 200).reduce((a, b) => a + b.close, 0);
+  if (usableCount >= 200) {
+    const sum200 = usableBars.slice(usableCount - 200).reduce((a, b) => a + b.close, 0);
     const sma200 = sum200 / 200;
     levels.push(
       buildLevelItem({
@@ -690,14 +742,13 @@ export function computeLevels(input: LevelsInput): LevelsResult {
         source: "200-Day SMA",
         touches: 1,
         strength: 1.0,
-        firstDate: validBars[totalBars - 200].bar_date,
+        firstDate: usableBars[usableCount - 200].bar_date,
         lastDate: lastBar.bar_date,
       }),
     );
   }
 
   // 6. Reference Level: Round Numbers
-  // Magnitude m = 10^floor(log10(close)), step = m / 2. Multiples within 15% range.
   if (currentClose > 0) {
     const magnitude = Math.pow(10, Math.floor(Math.log10(currentClose)));
     const step = magnitude / 2;
@@ -725,19 +776,19 @@ export function computeLevels(input: LevelsInput): LevelsResult {
   }
 
   // 7. Reference Level: Unfilled Gaps (>= 1.0 * ATR14 within lookback)
-  if (activeAtr > 0) {
-    const minGapSize = gapMinAtr * activeAtr;
-    for (let i = Math.max(1, lookbackStart); i <= T; i++) {
-      const prevBar = validBars[i - 1];
-      const currBar = validBars[i];
+  if (atr14 > 0) {
+    const minGapSize = gapMinAtr * atr14;
+    const usableLookbackStart = Math.max(0, usableCount - lookbackBars);
+    for (let i = Math.max(1, usableLookbackStart); i <= T; i++) {
+      const prevBar = usableBars[i - 1];
+      const currBar = usableBars[i];
 
       // Gap Up: low_i > high_{i-1}
       if (currBar.low - prevBar.high >= minGapSize) {
         const gapEdge = prevBar.high;
-        // Check if filled later
         let isFilled = false;
         for (let j = i + 1; j <= T; j++) {
-          if (validBars[j].low <= gapEdge) {
+          if (usableBars[j].low <= gapEdge) {
             isFilled = true;
             break;
           }
@@ -761,10 +812,9 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       // Gap Down: high_i < low_{i-1}
       if (prevBar.low - currBar.high >= minGapSize) {
         const gapEdge = prevBar.low;
-        // Check if filled later
         let isFilled = false;
         for (let j = i + 1; j <= T; j++) {
-          if (validBars[j].high >= gapEdge) {
+          if (usableBars[j].high >= gapEdge) {
             isFilled = true;
             break;
           }
@@ -788,7 +838,7 @@ export function computeLevels(input: LevelsInput): LevelsResult {
   }
 
   // 8. Reference Level: Volume Profile (POC, VAH, VAL over lookback)
-  const windowBarsForVp = validBars.slice(lookbackStart);
+  const windowBarsForVp = usableBars.slice(Math.max(0, usableCount - lookbackBars));
   const vp = computeVolumeProfile(windowBarsForVp, volumeProfileBins, valueAreaPct);
   if (vp) {
     levels.push(
@@ -857,15 +907,15 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     }
   }
 
-  // Risk distance in ATR: distance to nearest support
+  // Risk distance in ATR: distance to nearest support (Full precision, no rounding)
   const riskDistanceAtr =
-    nearestSupport && activeAtr > 0
-      ? Math.round(((currentClose - nearestSupport.price) / activeAtr) * 100) / 100
+    nearestSupport && atr14 > 0
+      ? (currentClose - nearestSupport.price) / atr14
       : null;
 
-  // Determine overall state
+  // Condition 3: Determine overall state (OK only if swing levels could be produced with >= 258 bars)
   const state =
-    totalBars < lookbackBars + pivotHalfWindow + 1
+    usableCount < requiredBarsForSwing
       ? "INSUFFICIENT_HISTORY"
       : "OK";
 
@@ -876,8 +926,8 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     rebackfillNeeded: false,
     seriesVersion: input.seriesVersion ?? 1,
     state,
-    atr14: atr14 !== null ? Math.round(atr14 * 100) / 100 : null,
-    atrPercent: atrPercent !== null ? Math.round(atrPercent * 10_000) / 10_000 : null,
+    atr14,
+    atrPercent,
     levels,
     nearestSupport,
     nearestResistance,

@@ -191,6 +191,9 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
     it("adds a valid stock, lands raw, stores bars, actions and quote", async () => {
       fetchMock.mockClear();
 
+      const nowSec = Math.floor(Date.now() / 1000);
+      const prevSec = nowSec - 86400;
+
       const mockChartData = {
         chart: {
           result: [
@@ -199,11 +202,11 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
                 symbol: `${TEST_SYMBOL}.NS`,
                 currency: "INR",
                 regularMarketPrice: 55.4,
-                regularMarketTime: 1791949500,
+                regularMarketTime: nowSec,
                 dataGranularity: "1d",
                 longName: "Test API Stock Limited",
               },
-              timestamp: [1791863100, 1791949500],
+              timestamp: [prevSec, nowSec],
               indicators: {
                 quote: [
                   {
@@ -217,7 +220,7 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
               },
               events: {
                 dividends: {
-                  "1791949500": { amount: 1.5, date: 1791949500 },
+                  [String(nowSec)]: { amount: 1.5, date: nowSec },
                 },
               },
             },
@@ -291,6 +294,8 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
     it("keeps BSE and NSE listings as two separate rows, not merged (Gate S1)", async () => {
       fetchMock.mockClear();
 
+      const nowSec = Math.floor(Date.now() / 1000);
+
       const mockBseChart = {
         chart: {
           result: [
@@ -299,11 +304,11 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
                 symbol: `${TEST_SYMBOL}.BO`,
                 currency: "INR",
                 regularMarketPrice: 55.3,
-                regularMarketTime: 1791949500,
+                regularMarketTime: nowSec,
                 dataGranularity: "1d",
                 longName: "Test API Stock Limited (BSE)",
               },
-              timestamp: [1791949500],
+              timestamp: [nowSec],
               indicators: {
                 quote: [
                   {
