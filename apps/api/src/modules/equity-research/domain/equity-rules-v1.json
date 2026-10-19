@@ -1,0 +1,58 @@
+{
+  "version": "equity-rules-v1",
+  "levels": {
+    "pivotHalfWindow": 5,
+    "lookbackBars": 252,
+    "clusterGapPct": 0.015,
+    "minPivots": 2,
+    "zoneMinPct": 0.01,
+    "zoneAtrMultiple": 0.5,
+    "atrPeriod": 14,
+    "recencyHalfLifeBars": 126,
+    "roundNumberRangePct": 0.15,
+    "gapMinAtr": 1.0,
+    "volumeProfileBins": 60,
+    "valueAreaPct": 0.70,
+    "brokenLookbackBars": 20,
+    "largeMovePct": 0.20,
+    "artifactMovePct": 0.40
+  },
+  "stance": {
+    "buy": {
+      "maxAtrAboveSupport": 1.5,
+      "minStrengthTouches": 2,
+      "maxBelowSma200Pct": 0.10,
+      "negativeEventLookbackTradingDays": 10,
+      "resultsBlackoutTradingDays": 5
+    },
+    "sell": {
+      "maxAtrBelowResistance": 1.0,
+      "minStrengthTouches": 2,
+      "stretchAboveSma200Pct": 0.25,
+      "breakBelowSupportAtr": 1.0
+    },
+    "liquidity": {
+      "medianTradedValueBars": 60,
+      "minMedianTradedValueInr": 20000000
+    }
+  },
+  "costs": {
+    "roundTripLargeCapPct": 0.003,
+    "roundTripOtherPct": 0.01,
+    "largeCapTradedValueRankMax": 100
+  },
+  "evaluation": {
+    "primaryHorizonBars": 63,
+    "secondaryHorizonBars": [21, 126],
+    "cooldownBars": 10,
+    "minIndependentEvents": 300,
+    "minStocks": 40,
+    "bootstrap": "calendarMonthBlock",
+    "bootstrapDraws": 5000,
+    "ciLevel": 0.95,
+    "placeboDraws": 1000,
+    "holdoutMonths": 24,
+    "holmAlpha": 0.05,
+    "seed": 20261017
+  }
+}

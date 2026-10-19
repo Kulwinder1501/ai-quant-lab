@@ -9,16 +9,24 @@ import {
   FileSpreadsheet,
   History,
   Info,
+  Layers,
   Loader2,
   PieChart,
   RefreshCw,
   TrendingUp,
   X,
 } from "lucide-react";
-import type { HistoryRange, StockDetailResponse, TrendPanelResponse, WatchlistStockItem } from "../types";
-import { fetchStockDetail, fetchStockTrend } from "../api";
+import type {
+  HistoryRange,
+  LevelsPanelResponse,
+  StockDetailResponse,
+  TrendPanelResponse,
+  WatchlistStockItem,
+} from "../types";
+import { fetchStockDetail, fetchStockLevels, fetchStockTrend } from "../api";
 import { EquityChart } from "./equity-chart";
 import { EquityTrendPanel } from "./equity-trend-panel";
+import { EquityLevelsPanel } from "./equity-levels-panel";
 import { ModalPortal } from "../../../components/ui/modal-portal";
 
 interface EquityStockDetailDrawerProps {
@@ -27,7 +35,7 @@ interface EquityStockDetailDrawerProps {
   onClose: () => void;
 }
 
-type TabType = "trend" | "chart" | "fundamentals" | "actions" | "logs";
+type TabType = "trend" | "chart" | "levels" | "fundamentals" | "actions" | "logs";
 
 export function EquityStockDetailDrawer({
   stock,
@@ -43,6 +51,10 @@ export function EquityStockDetailDrawer({
   const [trend, setTrend] = useState<TrendPanelResponse | null>(null);
   const [isTrendLoading, setIsTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState<string | null>(null);
+
+  const [levels, setLevels] = useState<LevelsPanelResponse | null>(null);
+  const [isLevelsLoading, setIsLevelsLoading] = useState(false);
+  const [levelsError, setLevelsError] = useState<string | null>(null);
 
   // Defect 4: Accessibility - handle Escape key and lock body scroll
   useEffect(() => {
@@ -106,6 +118,32 @@ export function EquityStockDetailDrawer({
         if (isMounted) {
           setTrendError(err instanceof Error ? err.message : "Failed to load trend statistics.");
           setIsTrendLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, stock]);
+
+  useEffect(() => {
+    if (!isOpen || !stock) return;
+
+    let isMounted = true;
+    const stockId = stock.id;
+
+    void fetchStockLevels(stockId)
+      .then((data) => {
+        if (isMounted) {
+          setLevels(data);
+          setLevelsError(null);
+          setIsLevelsLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (isMounted) {
+          setLevelsError(err instanceof Error ? err.message : "Failed to load price levels.");
+          setIsLevelsLoading(false);
         }
       });
 
@@ -236,6 +274,18 @@ export function EquityStockDetailDrawer({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setActiveTab("levels")}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
+                      activeTab === "levels"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                        : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                  >
+                    <Layers className="size-3.5" />
+                    Levels
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setActiveTab("chart")}
                     className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "chart"
@@ -315,6 +365,13 @@ export function EquityStockDetailDrawer({
                   isLoading={isTrendLoading}
                   error={trendError}
                 />
+              ) : activeTab === "levels" ? (
+                <EquityLevelsPanel
+                  stock={stock}
+                  levelsData={levels}
+                  isLoading={isLevelsLoading}
+                  error={levelsError}
+                />
               ) : isLoading && !detail ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-3 text-slate-400">
                   <Loader2 className="size-8 animate-spin text-cyan-400" />
@@ -361,6 +418,7 @@ export function EquityStockDetailDrawer({
                             bars={detail.priceBars}
                             currency={stock.currency}
                             className="h-[380px] w-full"
+                            levels={levels?.levels}
                           />
                         </div>
                       )}

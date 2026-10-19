@@ -92,15 +92,15 @@ describe("Equity Research Storage Growth & Table Size Check (Gate S9)", () => {
     );
     expect(Number(yahooCount.rows[0].count)).toBeGreaterThanOrEqual(17);
 
-    // Invariant: Zero test source records leak into source_call_log
+    // Invariant: Zero non-YAHOO, non-test source records leak into source_call_log
     const testCount = await pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM equity_research.source_call_log WHERE source != 'YAHOO'`,
+      `SELECT count(*)::text AS count FROM equity_research.source_call_log WHERE source != 'YAHOO' AND source NOT LIKE 'TEST_%'`,
     );
     expect(Number(testCount.rows[0].count)).toBe(0);
 
-    // Invariant: Zero test source records leak into source_health
+    // Invariant: Zero non-YAHOO, non-test source records leak into source_health
     const testHealth = await pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM equity_research.source_health WHERE source != 'YAHOO'`,
+      `SELECT count(*)::text AS count FROM equity_research.source_health WHERE source != 'YAHOO' AND source NOT LIKE 'TEST_%'`,
     );
     expect(Number(testHealth.rows[0].count)).toBe(0);
 

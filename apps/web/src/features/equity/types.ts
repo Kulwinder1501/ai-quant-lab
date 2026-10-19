@@ -213,3 +213,66 @@ export interface TrendPanelResponse {
   warnings: string[];
 }
 
+export type LevelState = "INTACT" | "BROKEN" | "FLIPPED";
+export type LevelSide = "SUPPORT" | "RESISTANCE";
+export type LevelKind =
+  | "SWING"
+  | "52W_HIGH"
+  | "52W_LOW"
+  | "SMA_50"
+  | "SMA_200"
+  | "ROUND_NUMBER"
+  | "GAP"
+  | "VOLUME_PROFILE_POC"
+  | "VOLUME_PROFILE_VAH"
+  | "VOLUME_PROFILE_VAL";
+
+export interface LevelItem {
+  id: string;
+  price: number;
+  kind: LevelKind;
+  source: string;
+  side: LevelSide;
+  touches: number;
+  strength: number;
+  firstDate: string;
+  lastDate: string;
+  distancePct: number;
+  distanceAtr: number;
+  zoneLow: number;
+  zoneHigh: number;
+  state: LevelState;
+  brokenOn: string | null;
+  volume?: number;
+}
+
+export type LevelsState = "OK" | "INSUFFICIENT_HISTORY" | "SUSPENDED" | "NOT_MEANINGFUL";
+
+export interface LevelsPanelResponse {
+  stock: {
+    id: string;
+    symbol: string;
+    exchange: EquityExchange;
+    yahooSymbol: string;
+    displayName: string;
+    active: boolean;
+    seriesVersion: number;
+    rebackfillNeeded: boolean;
+  };
+  asOfDate: string | null;
+  isStale: boolean;
+  staleDays: number;
+  rebackfillNeeded: boolean;
+  seriesVersion: number;
+  state: LevelsState;
+  atr14: number | null;
+  atrPercent: number | null;
+  levels: LevelItem[];
+  nearestSupport: LevelItem | null;
+  nearestResistance: LevelItem | null;
+  riskDistanceAtr: number | null;
+  warnings: string[];
+  disclaimer: string;
+  empiricalNote: string;
+  formulas: Record<string, string>;
+}

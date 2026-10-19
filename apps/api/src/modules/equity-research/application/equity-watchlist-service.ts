@@ -9,6 +9,7 @@ import type {
   WatchlistStockRecord,
 } from "../domain/types.js";
 import { computeTrendPanel, getTodayIstDate } from "../domain/trend-metrics.js";
+import { computeLevels } from "../domain/levels.js";
 import { parseChartRawRecord, parseFundamentalsRawRecord } from "./parsers.js";
 import type { PostgresEquityWatchlistRepository } from "../infrastructure/repositories/postgres-equity-watchlist-repository.js";
 import type { PostgresEquityPriceBarRepository } from "../infrastructure/repositories/postgres-equity-price-bar-repository.js";
@@ -273,6 +274,50 @@ export class EquityWatchlistService {
     };
   }
 
+  async getLevels(id: string) {
+    const stock = await this.deps.watchlistRepo.findById(id);
+    if (!stock) {
+      throw new StockNotFoundError(`Stock with ID '${id}' not found.`);
+    }
+
+    const bars = await this.deps.priceBarRepo.getRecentBars(id, 600);
+    const todayIst = getTodayIstDate(this.nowFn());
+    const levelsResult = computeLevels({
+      bars,
+      rebackfillNeeded: stock.rebackfill_needed,
+      seriesVersion: stock.series_version,
+      asOfEvaluationDate: todayIst,
+    });
+
+    return {
+      stock: {
+        id: stock.id,
+        symbol: stock.symbol,
+        exchange: stock.exchange,
+        yahooSymbol: stock.yahoo_symbol,
+        displayName: stock.display_name ?? stock.symbol,
+        active: stock.active,
+        seriesVersion: stock.series_version ?? 1,
+        rebackfillNeeded: stock.rebackfill_needed ?? false,
+      },
+      asOfDate: levelsResult.asOfDate,
+      isStale: levelsResult.isStale,
+      staleDays: levelsResult.staleDays,
+      rebackfillNeeded: levelsResult.rebackfillNeeded,
+      seriesVersion: levelsResult.seriesVersion,
+      state: levelsResult.state,
+      atr14: levelsResult.atr14,
+      atrPercent: levelsResult.atrPercent,
+      levels: levelsResult.levels,
+      nearestSupport: levelsResult.nearestSupport,
+      nearestResistance: levelsResult.nearestResistance,
+      riskDistanceAtr: levelsResult.riskDistanceAtr,
+      warnings: levelsResult.warnings,
+      disclaimer: levelsResult.disclaimer,
+      empiricalNote: levelsResult.empiricalNote,
+      formulas: levelsResult.formulas,
+    };
+  }
 
   async addStock(input: { symbol: string; exchange: EquityExchange; note?: string }) {
     // 1. Validation before ANY network call (Gate S1)
