@@ -30,6 +30,7 @@ import {
   type TenorImpliedVolatilityObservation,
 } from "../../domain/iv-percentile-by-tenor.js";
 import { resolveFyersSymbol } from "../../domain/fyers-symbol-resolver.js";
+import { SubscriptionRefCounter } from "../../../../infrastructure/market-data/subscription-ref-counter.js";
 
 export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
 
@@ -99,6 +100,9 @@ export function toChartIctStructure(structure: IctStructureSnapshot | null | und
       : null,
   };
 }
+
+/** Which open chain pages hold which option contracts on the shared socket, so the last one out lets them go. */
+const chainStreamHolders = new SubscriptionRefCounter();
 
 export function registerMarketDataRoutes(
   app: Express,
@@ -661,6 +665,7 @@ export function registerMarketDataRoutes(
 
       // Collect symbols to subscribe to (strike calls and puts) + underlying spot if it has a symbol
       const symbolsToSubscribe = new Set<string>();
+      let underlyingProviderSymbol: string | null = null;
       for (const quote of snapshot.quotes) {
         if (quote.providerSymbol) {
           symbolsToSubscribe.add(quote.providerSymbol);
@@ -670,7 +675,8 @@ export function registerMarketDataRoutes(
       // Underlying is mapped to its provider symbol (e.g. NSE:NIFTY50-INDEX, NSE:NIFTYBANK-INDEX, NSE:SBIN-EQ)
       if (snapshot.provider === "fyers-api-v3") {
         try {
-          symbolsToSubscribe.add(resolveFyersSymbol(underlyingSymbol));
+          underlyingProviderSymbol = resolveFyersSymbol(underlyingSymbol);
+          symbolsToSubscribe.add(underlyingProviderSymbol);
         } catch {
           // If symbol cannot be resolved, continue with option legs
         }
@@ -684,6 +690,8 @@ export function registerMarketDataRoutes(
       response.flushHeaders();
 
       // Ensure we are connected and subscribed
+      const optionSymbols = [...symbolsToSubscribe].filter((symbol) => symbol !== underlyingProviderSymbol);
+      chainStreamHolders.acquire(optionSymbols);
       dependencies.fyersLiveStreamer.subscribe(symbolsArray);
 
       const tickListener = (tick: any) => {
@@ -695,11 +703,18 @@ export function registerMarketDataRoutes(
 
       dependencies.fyersLiveStreamer.on("tick", tickListener);
 
+      let released = false;
       request.on("close", () => {
+        if (released) return;
+        released = true;
         if (dependencies.fyersLiveStreamer) {
           dependencies.fyersLiveStreamer.off("tick", tickListener);
-          // If we want to be clean, we can unsubscribe, but other clients might still need them.
-          // For simplicity, we can just leave it subscribed or implement a reference counter in FyersLiveStreamer.
+          // Give the option contracts back once the last page streaming them closes. The socket holds a limited
+          // number of symbols and every chain page used to add its full set for good, so the second chain opened
+          // in a session could subscribe only what still fitted: on 2026-10-19 that was three of BANKNIFTY's 63.
+          // The underlying is left alone; the quote readers share it.
+          const freed = chainStreamHolders.release(optionSymbols);
+          if (freed.length > 0) dependencies.fyersLiveStreamer.unsubscribe(freed);
         }
       });
     } catch (error) {

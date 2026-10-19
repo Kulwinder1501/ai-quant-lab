@@ -33,11 +33,22 @@ export interface StreamFirstQuoteReaderOptions {
   maxTickAgeMs?: number;
   /** How long a REST quote stays good as the base for tick-derived ones. */
   baseMaxAgeMs?: number;
+  /**
+   * A request for more symbols than this goes straight to the wrapped reader and subscribes nothing.
+   *
+   * The socket holds a limited number of symbols, and a subscription is never given back. The index-drivers heatmap
+   * asks for a whole index's constituents in one call (about 114 symbols across the supported indices) at a cost of
+   * one REST request, so streaming it would spend most of the socket's slots to save a call that is cached for two
+   * seconds anyway. On 2026-10-19 that filled the API's socket until the BANKNIFTY option chain could subscribe only
+   * its last three contracts.
+   */
+  maxStreamedSymbols?: number;
   now?: () => number;
 }
 
 const DEFAULT_MAX_TICK_AGE_MS = 10_000;
 const DEFAULT_BASE_MAX_AGE_MS = 5 * 60_000;
+const DEFAULT_MAX_STREAMED_SYMBOLS = 8;
 
 /** The base quote with the live price laid over it. */
 export function overlayTick(base: MarketQuote, price: number, observedAt: Date): MarketQuote {
@@ -62,12 +73,14 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
   private readonly resolveProviderSymbol: (symbol: string) => string;
   private readonly maxTickAgeMs: number;
   private readonly baseMaxAgeMs: number;
+  private readonly maxStreamedSymbols: number;
   private readonly now: () => number;
 
   constructor(private readonly options: StreamFirstQuoteReaderOptions) {
     this.resolveProviderSymbol = options.resolveProviderSymbol ?? resolveFyersSymbol;
     this.maxTickAgeMs = options.maxTickAgeMs ?? DEFAULT_MAX_TICK_AGE_MS;
     this.baseMaxAgeMs = options.baseMaxAgeMs ?? DEFAULT_BASE_MAX_AGE_MS;
+    this.maxStreamedSymbols = options.maxStreamedSymbols ?? DEFAULT_MAX_STREAMED_SYMBOLS;
     this.now = options.now ?? Date.now;
   }
 
@@ -78,6 +91,7 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
   async quoteSymbols(symbols: readonly string[]): Promise<Map<string, MarketQuote>> {
     const canonical = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
     if (canonical.length === 0) return new Map();
+    if (canonical.length > this.maxStreamedSymbols) return this.options.inner.quoteSymbols(canonical);
 
     const nowMs = this.now();
     const answers = new Map<string, MarketQuote>();

@@ -82,6 +82,23 @@ export function reconnectDelayMs(attempt: number): number {
   return Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** (bounded - 1));
 }
 
+/**
+ * What a non-tick message says, when it reads as a refusal or an error, otherwise null.
+ *
+ * Every message that cannot become a tick is counted as dropped, and for a long time that was all that was known
+ * about them -- including the one Fyers sends when a subscription is refused. A socket that quietly delivers
+ * three of 63 requested symbols looked exactly like a quiet market.
+ */
+export function describeControlMessage(message: unknown): string | null {
+  if (typeof message !== "object" || message === null) return null;
+  const record = message as Record<string, unknown>;
+  const code = typeof record.code === "number" ? record.code : null;
+  const text = typeof record.message === "string" ? record.message : null;
+  const failed = record.s === "error" || (code !== null && code < 0);
+  if (!failed) return null;
+  return JSON.stringify({ s: record.s ?? null, code, message: text });
+}
+
 function finiteOrNull(value: unknown): number | null {
   const parsed = typeof value === "string" ? Number(value) : value;
   return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : null;
@@ -140,6 +157,7 @@ export class FyersLiveStreamer extends EventEmitter {
   private reconnecting = false;
   private reconnectAttempts = 0;
   private droppedMessages = 0;
+  private readonly reportedControlMessages = new Set<string>();
   /**
    * Set by `close()` so a deliberate shutdown is not read as a dropped connection.
    *
@@ -188,6 +206,13 @@ export class FyersLiveStreamer extends EventEmitter {
           // Counted, not logged per message. The previous version logged every raw tick at
           // info level, which floods a session's container log and hides everything else.
           this.droppedMessages += 1;
+          const refusal = describeControlMessage(payload);
+          // Each distinct refusal once, and no more than twenty kinds: a socket that is being refused
+          // repeatedly must not turn the log into the thing that hides everything else.
+          if (refusal !== null && !this.reportedControlMessages.has(refusal) && this.reportedControlMessages.size < 20) {
+            this.reportedControlMessages.add(refusal);
+            log("error", "Fyers data socket refused or reported an error", { response: refusal });
+          }
           return;
         }
         this.emit("tick", tick);

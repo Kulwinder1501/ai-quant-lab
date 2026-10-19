@@ -136,6 +136,16 @@ describe("StreamFirstQuoteReader", () => {
     expect(innerCalls).toHaveLength(1);
   });
 
+  it("sends a large set straight to REST and subscribes none of it, so a heatmap cannot fill the socket", async () => {
+    const { reader, innerCalls, subscribe } = setup();
+    const constituents = Array.from({ length: 50 }, (_, index) => `STOCK${index}`);
+
+    const quotes = await reader.quoteSymbols(constituents);
+    expect(innerCalls).toEqual([constituents]);
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(quotes.size).toBe(50);
+  });
+
   it("works without a subscriber", async () => {
     const reader = new StreamFirstQuoteReader({
       inner: { quoteSymbol: async () => null, quoteSymbols: async (s) => new Map(s.map((x) => [x, quote(x, 22_997)])) },
