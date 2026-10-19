@@ -297,6 +297,8 @@ async function main(): Promise<void> {
     ETF_INTRADAY_HEAL: 15 * 60 * 1000,
     // Reads and counts only.
     SESSION_COVERAGE_CHECK: 5 * 60 * 1000,
+    // Gap heal for five sessions, ETF and VIX history, and the futures collector: a few dozen requests.
+    PREOPEN_DATA_CATCHUP: 20 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -660,30 +662,61 @@ async function main(): Promise<void> {
    * returns the bars (57 of 57 on 2026-10-19), replaces the socket-built ones with the exchange's, and costs four
    * requests. Indicators follow so the new bars are not left without them.
    */
+  /** NIFTYBEES and BANKBEES 1m/5m from history for the last `lookbackDays` days, then their indicators. */
+  const healEtfBars = async (lookbackDays: number): Promise<void> => {
+    const now = new Date();
+    const from = istDateKey(new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000));
+    const to = istDateKey(now);
+    for (const instrument of ["NIFTYBEES", "BANKBEES"]) {
+      for (const timeframe of ["1m", "5m"]) {
+        await runCommand("npm", [
+          "run", "data:collect:historical", "--",
+          "--provider", "fyers",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", from,
+          "--to", to,
+          "--skip-existing",
+        ]);
+        await runCommand("npm", [
+          "run", "analysis:calculate-indicators", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", from,
+        ]);
+      }
+    }
+  };
+
+  // Five days rather than today: when the daily request limit is spent mid-afternoon (2026-10-19, from 14:22) this
+  // evening's run fails, and the gap would otherwise wait for a run that only looked at its own day.
   cronSchedule("10 16 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("ETF_INTRADAY_HEAL", async () => {
       if ((await isNseHoliday(database, new Date())).holiday) return;
-      const today = istDateKey(new Date());
-      for (const instrument of ["NIFTYBEES", "BANKBEES"]) {
-        for (const timeframe of ["1m", "5m"]) {
-          await runCommand("npm", [
-            "run", "data:collect:historical", "--",
-            "--provider", "fyers",
-            "--instrument", instrument,
-            "--timeframe", timeframe,
-            "--from", today,
-            "--to", today,
-            "--skip-existing",
-          ]);
-          await runCommand("npm", [
-            "run", "analysis:calculate-indicators", "--",
-            "--instrument", instrument,
-            "--timeframe", timeframe,
-            "--from", today,
-          ]);
-        }
+      await healEtfBars(5);
+    });
+  });
+
+  /**
+   * Catches up, before the open, whatever the previous session could not fetch.
+   *
+   * The Fyers daily request limit resets overnight. On 2026-10-19 the limit was spent at 14:22: history, the chain
+   * and the VIX failed for the rest of the session, and the evening heals ran against the same spent limit. Today's
+   * bars were therefore still missing when the next session's early indicators read them. At 08:25 the limit is fresh
+   * and the heals are a few dozen requests: the index gap healer over five sessions, the ETF bars, the VIX series and
+   * the futures. Every call skips what is already stored, so a clean day makes this a no-op.
+   */
+  cronSchedule("25 8 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("PREOPEN_DATA_CATCHUP", async () => {
+      if ((await isNseHoliday(database, new Date())).holiday) return;
+      for (const timeframe of GAP_SCANNED_TIMEFRAMES) {
+        await runCommand("npm", ["run", "data:heal-gaps", "--", "--apply", "--timeframe", timeframe, "--lookback-days", "5"]);
       }
+      await healEtfBars(5);
+      await collectIndiaVix(["1m", "5m", "15m"], 5);
+      await runCommand("npm", ["run", "data:collect:index-futures", "--", "--auto"]);
     });
   });
 
@@ -1829,6 +1862,7 @@ async function main(): Promise<void> {
       "PREMARKET_RUN_CHECK",
       "ETF_INTRADAY_HEAL",
       "SESSION_COVERAGE_CHECK",
+      "PREOPEN_DATA_CATCHUP",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",

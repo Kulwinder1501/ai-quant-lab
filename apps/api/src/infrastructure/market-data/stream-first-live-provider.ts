@@ -175,7 +175,11 @@ export class StreamFirstLiveMarketDataProvider implements LiveMarketDataProvider
     const anchorVolume = anchor.quote.cumulativeVolume;
 
     let cumulativeVolume = anchorVolume;
-    if (newer !== undefined && anchorVolume !== null) {
+    // A volume of zero is the quotes endpoint saying it does not report volume for this symbol (every index), not a
+    // baseline to add to: index ticks carry no volume either, so there is nothing to compose and the zero stands.
+    // Treating it as a real baseline sent every index poll back to REST, so the index collector spent a request per
+    // poll anyway and, when Fyers refused on 2026-10-19, had no anchor to carry and stopped building bars.
+    if (newer !== undefined && anchorVolume !== null && Number(anchorVolume) > 0) {
       if (newer.volume === null || anchor.tickVolume === null) return null;
       const traded = newer.volume - anchor.tickVolume;
       if (traded < 0) return null;

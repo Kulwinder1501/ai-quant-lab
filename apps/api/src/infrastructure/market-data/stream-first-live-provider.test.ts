@@ -166,6 +166,22 @@ describe("StreamFirstLiveMarketDataProvider", () => {
     expect(quote?.cumulativeVolume).toBeNull();
   });
 
+  it("serves an index from the stream although the anchor's volume is zero and its ticks carry none", async () => {
+    const { provider, restCalls, emit, advance, setRest } = setup();
+    setRest(22_900, "0");
+    emit(tick(INDEX, 22_890, null));
+    await provider.fetchQuotes([INDEX]);
+    advance(2_000);
+    emit(tick(INDEX, 22_905, null));
+    advance(2_000);
+    emit(tick(INDEX, 22_911, null));
+
+    const [quote] = await provider.fetchQuotes([INDEX]);
+    expect(restCalls).toHaveLength(1);
+    expect(quote?.lastPrice).toBe("22911");
+    expect(quote?.cumulativeVolume).toBe("0");
+  });
+
   it("sends one request for the whole set when any one symbol cannot be answered", async () => {
     const { provider, restCalls, emit, advance } = setup();
     emit(tick(ETF, 249, 5_000));
