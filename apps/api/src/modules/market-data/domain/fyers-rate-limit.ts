@@ -143,13 +143,16 @@ export const FYERS_DAILY_REQUEST_CAP = 5_000;
 export const FYERS_DAILY_BUDGET_WARNING_THRESHOLD = 3_500;
 
 /**
- * Low-value/non-critical jobs that should pause when daily usage passes the 70% threshold (3,500).
- * High-value execution (PAPER_TRADING_BOT, PAPER_TRADE_EXIT_SWEEP, INDICES_INTRADAY) stays active.
+ * Non-critical jobs that pause when daily usage passes the 70% threshold (3,500).
+ * Execution (PAPER_TRADING_BOT, PAPER_TRADE_EXIT_SWEEP, INDICES_INTRADAY) stays active.
+ *
+ * OPTION_CHAIN and INDIA_VIX_INTRADAY are deliberately not here. The chain costs about five requests every twelve
+ * minutes, and the premium tick collector selects its contracts from a snapshot no more than forty minutes old, so
+ * pausing it stops the whole option series: on 2026-10-19 the guard paused it at 11:54, the last snapshot was
+ * 11:41, and ticks and the chain page degraded from there. The VIX feeds the implied volatility behind option marks.
  */
 export const LOW_PRIORITY_FYERS_JOBS: ReadonlySet<string> = new Set([
   "AI_AGENT_TICK",
-  "OPTION_CHAIN",
-  "INDIA_VIX_INTRADAY",
   "INDEX_FUTURES_INTRADAY",
 ]);
 

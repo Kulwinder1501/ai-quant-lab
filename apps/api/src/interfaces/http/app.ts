@@ -43,7 +43,7 @@ export interface ApplicationDependencies {
  */
 export function createApp({ database, environment }: ApplicationDependencies): Express {
   const app = express();
-  const dependencies = buildHttpDependencies(database);
+  const dependencies = buildHttpDependencies(database, { streamQuotes: true });
   // Origins and the mutation limit are parsed and defaulted by the schema in `config/`, not
   // here. This function used to split the raw string and coerce the number itself, so the
   // effective default and the documented one in `.env.example` could drift with nothing to

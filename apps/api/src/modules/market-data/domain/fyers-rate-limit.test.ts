@@ -102,7 +102,8 @@ describe("Daily Budget Guard Constants", () => {
     expect(FYERS_DAILY_REQUEST_CAP).toBe(5_000);
     expect(FYERS_DAILY_BUDGET_WARNING_THRESHOLD).toBe(3_500);
     expect(LOW_PRIORITY_FYERS_JOBS.has("AI_AGENT_TICK")).toBe(true);
-    expect(LOW_PRIORITY_FYERS_JOBS.has("OPTION_CHAIN")).toBe(true);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("OPTION_CHAIN")).toBe(false);
+    expect(LOW_PRIORITY_FYERS_JOBS.has("INDIA_VIX_INTRADAY")).toBe(false);
     // Crucial: high-value trading bot and exit sweep must NOT be in low priority
     expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADING_BOT")).toBe(false);
     expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADE_EXIT_SWEEP")).toBe(false);

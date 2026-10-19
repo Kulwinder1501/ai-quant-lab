@@ -51,7 +51,19 @@ import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-tra
 import { AiAutonomousAgent } from "../../modules/strategy-engine/application/ai-autonomous-agent.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
 
-export function buildHttpDependencies(database: DatabaseQueryable) {
+export interface HttpDependencyOptions {
+  /**
+   * Serve spot quotes from the live websocket's ticks (see stream-first-quote-reader.ts). Only a long-running
+   * process should ask for this: the reader subscribes its symbols on first use, and a subscription opens the
+   * Fyers socket, which keeps a short-lived CLI alive after its work is done and, on a dropped connection,
+   * reconnects forever against a closed database pool. On 2026-10-19 three `run-agent-tick` processes hung that
+   * way, and their sockets pushed the API's own socket into a reconnect loop every two minutes, which sent every
+   * quote back to REST.
+   */
+  streamQuotes?: boolean;
+}
+
+export function buildHttpDependencies(database: DatabaseQueryable, options: HttpDependencyOptions = {}) {
   // Production passes a Pool; HTTP unit tests intentionally pass only its query
   // surface. Repository constructors do not access pool lifecycle methods here.
   const pool = database as DatabasePool;
@@ -105,7 +117,9 @@ export function buildHttpDependencies(database: DatabaseQueryable) {
   // laid over (previous close, open, volume). The market-watch and live-agent streams asked REST for the same few
   // symbols every 2.5 seconds per open tab; see stream-first-quote-reader.ts.
   const streamFirst = (inner: MarketQuoteReader): MarketQuoteReader =>
-    new StreamFirstQuoteReader({ inner, ticks: liveQuoteCache, subscriber: fyersLiveStreamer });
+    options.streamQuotes
+      ? new StreamFirstQuoteReader({ inner, ticks: liveQuoteCache, subscriber: fyersLiveStreamer })
+      : inner;
 
   // Identical quote requests within this window share one Fyers call. The UI's live-price, market-watch and live-agent
   // polls asked for the same few symbols about 860 times in two hours on 2026-10-16.

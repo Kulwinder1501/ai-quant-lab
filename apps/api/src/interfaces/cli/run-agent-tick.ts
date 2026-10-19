@@ -54,9 +54,13 @@ async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
+  let closeSocket: (() => void) | undefined;
 
   try {
     const dependencies = buildHttpDependencies(database);
+    // A socket keeps the process alive after the work is done. Nothing here opens one today, but a process that
+    // is meant to end should not depend on that staying true.
+    closeSocket = () => dependencies.fyersLiveStreamer?.close();
     // The coordinator's per-key interval guard is what keeps a slow pass from being entered
     // twice when the scheduler's cron and a manual run land together.
     const coordinator = new AiAgentTickCoordinator();
@@ -128,6 +132,7 @@ async function main(): Promise<void> {
       thoughts: dependencies.aiAutonomousAgent.getThoughts(5),
     }));
   } finally {
+    closeSocket?.();
     await database.end();
   }
 }

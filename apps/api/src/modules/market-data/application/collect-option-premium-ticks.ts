@@ -1,5 +1,6 @@
 import type { PostgresOptionChainRepository } from "../../../infrastructure/database/repositories/postgres-option-chain-repository.js";
 import { recordFyersRequest } from "../domain/fyers-request-counter.js";
+import { classifyFyersRateLimit, rateLimitCooldownMs } from "../domain/fyers-rate-limit.js";
 import type { PostgresOptionPremiumTickRepository } from "../../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { FYERS_PROVIDER_ID } from "../../../infrastructure/market-data/fyers-token-service.js";
 import { resolveFyersSymbol } from "../domain/fyers-symbol-resolver.js";
@@ -48,6 +49,25 @@ export interface CollectOptionPremiumTicksResult {
 
 type FetchFunction = typeof fetch;
 
+interface PremiumQuotePayload {
+  s?: string;
+  code?: number;
+  message?: string;
+  d?: Array<{
+    n?: string;
+    s?: string;
+    v?: {
+      lp?: number;
+      bid?: number;
+      ask?: number;
+      volume?: number | null;
+    };
+  }>;
+}
+
+/** Retries after a per-second refusal. Two lets a second pass twice; more would only add load. */
+const PREMIUM_PER_SECOND_RETRIES = 2;
+
 export interface AdditionalPremiumContractReader {
   listForUnderlying(underlyingSymbol: string): Promise<AtmPremiumContract[]>;
 }
@@ -66,6 +86,8 @@ export class CollectOptionPremiumTicks {
       tokenService: { getAccessToken(): Promise<string> };
       fetch?: FetchFunction;
       baseUrl?: string;
+      /** Injectable so a test need not wait out the per-second window. */
+      sleep?: (ms: number) => Promise<void>;
     },
     private readonly additionalContracts?: AdditionalPremiumContractReader,
   ) {}
@@ -224,25 +246,25 @@ export class CollectOptionPremiumTicks {
     const endpoint = new URL("/data/quotes", baseUrl);
     endpoint.searchParams.set("symbols", [...new Set(providerSymbols)].join(","));
 
-    recordFyersRequest("quotes:premium");
-    const response = await fetchFn(endpoint, {
-      headers: { Authorization: `${this.options.appId}:${accessToken}` },
-    });
-    const payload = await response.json().catch(() => undefined) as {
-      s?: string;
-      code?: number;
-      message?: string;
-      d?: Array<{
-        n?: string;
-        s?: string;
-        v?: {
-          lp?: number;
-          bid?: number;
-          ask?: number;
-          volume?: number | null;
-        };
-      }>;
-    } | undefined;
+    const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    let response: Response;
+    let payload: PremiumQuotePayload | undefined;
+    // Every Fyers caller shares one 5-requests-a-second allowance and they all fire on the minute, so this call is
+    // often the one refused. That kind clears in about a second, and giving up cost a whole minute of ticks: on
+    // 2026-10-19 the job alternated failed, completed, failed. The daily and per-minute limits do not clear that
+    // fast, so they are not retried.
+    for (let attempt = 0; ; attempt += 1) {
+      recordFyersRequest("quotes:premium");
+      response = await fetchFn(endpoint, {
+        headers: { Authorization: `${this.options.appId}:${accessToken}` },
+      });
+      payload = await response.json().catch(() => undefined) as PremiumQuotePayload | undefined;
+      const refusal = response.status === 429 || payload?.code === 429
+        ? classifyFyersRateLimit({ status: response.status, code: payload?.code, message: payload?.message })
+        : null;
+      if (refusal !== "PER_SECOND" || attempt >= PREMIUM_PER_SECOND_RETRIES) break;
+      await sleep(rateLimitCooldownMs("PER_SECOND", Date.now()));
+    }
 
     const out = new Map<string, {
       lastPrice: number | null;
