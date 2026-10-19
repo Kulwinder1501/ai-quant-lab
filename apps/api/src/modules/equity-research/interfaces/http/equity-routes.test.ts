@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import "dotenv/config";
 import { loadEnvironment } from "../../../../config/environment.js";
@@ -460,9 +460,16 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
 
   describe("Gate S6: Localhost Binding & Security Assertions", () => {
     it("asserts that all published compose ports are strictly bound to 127.0.0.1", () => {
+      const findCompose = (filename: string) => {
+        const rootCandidate = resolve(process.cwd(), filename);
+        if (existsSync(rootCandidate)) return rootCandidate;
+        const relativeCandidate = resolve(process.cwd(), "../../", filename);
+        if (existsSync(relativeCandidate)) return relativeCandidate;
+        return rootCandidate;
+      };
       const composePaths = [
-        resolve(process.cwd(), "../../docker-compose.yml"),
-        resolve(process.cwd(), "../../docker-compose.v2.yml"),
+        findCompose("docker-compose.yml"),
+        findCompose("docker-compose.v2.yml"),
       ];
 
       for (const composePath of composePaths) {

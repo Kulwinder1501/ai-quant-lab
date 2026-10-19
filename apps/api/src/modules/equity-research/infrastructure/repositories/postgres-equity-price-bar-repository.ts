@@ -694,4 +694,57 @@ export class PostgresEquityPriceBarRepository {
     }
     return map;
   }
+
+  /**
+   * Fetches price bars up to a given date in ascending order (Gate E2: point-in-time enforcement).
+   */
+  async getBarsUpToDate(
+    stockId: string,
+    asOfDate: string,
+    limit = 600,
+  ): Promise<PriceBarRecord[]> {
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      bar_date: string;
+      open: string;
+      high: string;
+      low: string;
+      close: string;
+      volume: string;
+      source: string;
+      raw_record_id: string | null;
+      first_seen_at: Date;
+      series_version: number;
+    }>(
+      `
+      SELECT id, stock_id, bar_date::text AS bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at, series_version
+      FROM (
+        SELECT id, stock_id, bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at, series_version
+        FROM equity_research.price_bar
+        WHERE stock_id = $1 AND bar_date <= $2::date
+        ORDER BY bar_date DESC
+        LIMIT $3
+      ) sub
+      ORDER BY bar_date ASC
+      `,
+      [stockId, asOfDate, limit],
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      stock_id: r.stock_id,
+      bar_date: r.bar_date.split("T")[0],
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+      source: r.source,
+      raw_record_id: r.raw_record_id,
+      first_seen_at: r.first_seen_at,
+      series_version: Number(r.series_version ?? 1),
+    }));
+  }
 }
+

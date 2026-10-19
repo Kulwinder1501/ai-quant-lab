@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import rulesData from "./equity-alerts-v1.json" with { type: "json" };
 import {
   checkBannedWords,
+  computeAlertRulesHash,
   EQUITY_ALERT_FOOTER,
   EQUITY_ALERT_RULES_HASH,
   EQUITY_ALERT_RULES_VERSION,
@@ -109,11 +111,31 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
     it("exports version, calibrated hash, and mandatory disclaimer footer", () => {
       expect(EQUITY_ALERT_RULES_VERSION).toBe("equity-alerts-v1");
       expect(EQUITY_ALERT_RULES_HASH).toBe(
-        "6c202c9c6e524f58f1af8df495446d82dca9f2032009bef67532e6c3681bad58",
+        "b0afe011ab0e9a93dc6500b5f65924f5546663d5940590530c2919129c9d86ab",
       );
+      expect(EQUITY_ALERT_RULES_HASH).toBe(computeAlertRulesHash());
       expect(EQUITY_ALERT_FOOTER).toBe(
         "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.",
       );
+    });
+
+    it("hash covers only rule parameters, so editing calibration narrative leaves hash unchanged", () => {
+      const rulesClone = JSON.parse(JSON.stringify(rulesData));
+      expect(computeAlertRulesHash(rulesClone)).toBe(EQUITY_ALERT_RULES_HASH);
+
+      // Editing calibration narrative or disclaimer does NOT alter the hash
+      rulesClone.calibration.statement = "Modified narrative for testing";
+      rulesClone.calibration.history.push({
+        iteration: 99,
+        date: "2099-01-01",
+        description: "Future iteration note",
+      });
+      rulesClone.disclaimer = "Altered disclaimer text";
+      expect(computeAlertRulesHash(rulesClone)).toBe(EQUITY_ALERT_RULES_HASH);
+
+      // But modifying an actual rule parameter DOES alter the hash
+      rulesClone.levelApproach.minTouches = 999;
+      expect(computeAlertRulesHash(rulesClone)).not.toBe(EQUITY_ALERT_RULES_HASH);
     });
 
     it("ensures alert payloads carry the frozen SHA-256 hash (64 hex characters), not version text", () => {

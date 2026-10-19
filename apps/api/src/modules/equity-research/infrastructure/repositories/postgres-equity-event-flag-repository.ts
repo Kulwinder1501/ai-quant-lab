@@ -1,0 +1,293 @@
+import type { Pool } from "pg";
+import type { EventFlagKind, EventFlagOrigin, EventFlagRecord } from "../../domain/types.js";
+
+export type DatabaseQueryable = Pick<Pool, "query">;
+
+export interface DetectedEventInput {
+  stockId: string;
+  kind: EventFlagKind;
+  eventDate: string; // YYYY-MM-DD
+  headline: string;
+  detail?: Record<string, unknown>;
+  sourceUrl?: string | null;
+}
+
+export interface ManualEventInput {
+  stockId: string;
+  kind: EventFlagKind;
+  eventDate: string; // YYYY-MM-DD
+  headline: string;
+  sourceUrl: string; // Must be https (Gate E8)
+  detail?: Record<string, unknown>;
+  supersedesId?: string | null; // Revision pointer (Gate E9)
+}
+
+export class PostgresEquityEventFlagRepository {
+  constructor(private readonly db: DatabaseQueryable) {}
+
+  /**
+   * Persists a detected event flag idempotently.
+   * Unique constraint per (stock_id, kind, event_date, detail key) prevents duplicate flags on re-runs.
+   */
+  async saveDetectedEvent(
+    event: DetectedEventInput,
+  ): Promise<{ id?: string; inserted: boolean }> {
+    const detail = event.detail ?? {};
+    const key = (detail.key as string) ?? "";
+    const detailWithKey = { ...detail, key };
+
+    const result = await this.db.query<{ id: string }>(
+      `
+      INSERT INTO equity_research.event_flag (
+        stock_id, kind, origin, event_date, headline, source_url, detail_json
+      )
+      VALUES ($1, $2, 'DETECTED', $3, $4, $5, $6)
+      ON CONFLICT (stock_id, kind, event_date, (COALESCE(detail_json->>'key', '')))
+      WHERE origin = 'DETECTED'
+      DO NOTHING
+      RETURNING id
+      `,
+      [
+        event.stockId,
+        event.kind,
+        event.eventDate,
+        event.headline,
+        event.sourceUrl ?? null,
+        JSON.stringify(detailWithKey),
+      ],
+    );
+
+    if (result.rows.length > 0) {
+      return { id: result.rows[0].id, inserted: true };
+    }
+    return { inserted: false };
+  }
+
+  /**
+   * Persists a manual, owner-entered event flag.
+   * Gate E8: Rejects without a valid https URL at both the API and database levels.
+   * Gate E9: Immutability: An edit creates a new revision with supersedes_id pointing to the prior row;
+   *          the old row remains strictly untouched.
+   */
+  async saveManualEvent(event: ManualEventInput): Promise<EventFlagRecord> {
+    const trimmedUrl = event.sourceUrl ? event.sourceUrl.trim() : "";
+    if (
+      !trimmedUrl ||
+      !trimmedUrl.toLowerCase().startsWith("https://") ||
+      trimmedUrl.length <= 8
+    ) {
+      throw new Error(
+        "Manual event requires a valid https source link (Gate E8)",
+      );
+    }
+
+    if (event.supersedesId) {
+      const priorCheck = await this.db.query<{ id: string }>(
+        `SELECT id FROM equity_research.event_flag WHERE id = $1`,
+        [event.supersedesId],
+      );
+      if (priorCheck.rows.length === 0) {
+        throw new Error(
+          `Superseded event ${event.supersedesId} not found (Gate E9)`,
+        );
+      }
+    }
+
+    const detail = event.detail ?? {};
+
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      kind: string;
+      origin: EventFlagOrigin;
+      event_date: string;
+      headline: string;
+      source_url: string | null;
+      detail_json: unknown;
+      supersedes_id: string | null;
+      created_at: Date;
+    }>(
+      `
+      INSERT INTO equity_research.event_flag (
+        stock_id, kind, origin, event_date, headline, source_url, detail_json, supersedes_id
+      )
+      VALUES ($1, $2, 'MANUAL', $3, $4, $5, $6, $7)
+      RETURNING
+        id,
+        stock_id,
+        kind,
+        origin,
+        event_date::text AS event_date,
+        headline,
+        source_url,
+        detail_json,
+        supersedes_id,
+        created_at
+      `,
+      [
+        event.stockId,
+        event.kind,
+        event.eventDate,
+        event.headline,
+        trimmedUrl,
+        JSON.stringify(detail),
+        event.supersedesId ?? null,
+      ],
+    );
+
+    const r = result.rows[0];
+    return {
+      id: r.id,
+      stock_id: r.stock_id,
+      kind: r.kind,
+      origin: r.origin,
+      event_date: r.event_date.split("T")[0],
+      headline: r.headline,
+      source_url: r.source_url,
+      detail_json:
+        typeof r.detail_json === "string"
+          ? JSON.parse(r.detail_json)
+          : (r.detail_json as Record<string, unknown>),
+      supersedes_id: r.supersedes_id,
+      created_at: r.created_at,
+    };
+  }
+
+  /**
+   * Fetches event flags for a stock in reverse chronological order.
+   */
+  async getEventsByStockId(
+    stockId: string,
+    options?: { limit?: number; offset?: number; origin?: EventFlagOrigin },
+  ): Promise<EventFlagRecord[]> {
+    const conditions: string[] = ["stock_id = $1"];
+    const values: unknown[] = [stockId];
+
+    if (options?.origin) {
+      values.push(options.origin);
+      conditions.push(`origin = $${values.length}`);
+    }
+
+    const limit = options?.limit ?? 100;
+    values.push(limit);
+    const limitClause = `LIMIT $${values.length}`;
+
+    let offsetClause = "";
+    if (options?.offset) {
+      values.push(options.offset);
+      offsetClause = `OFFSET $${values.length}`;
+    }
+
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      kind: string;
+      origin: EventFlagOrigin;
+      event_date: string;
+      headline: string;
+      source_url: string | null;
+      detail_json: unknown;
+      supersedes_id: string | null;
+      created_at: Date;
+    }>(
+      `
+      SELECT
+        id,
+        stock_id,
+        kind,
+        origin,
+        event_date::text AS event_date,
+        headline,
+        source_url,
+        detail_json,
+        supersedes_id,
+        created_at
+      FROM equity_research.event_flag
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY event_date DESC, created_at DESC
+      ${limitClause}
+      ${offsetClause}
+      `,
+      values,
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      stock_id: r.stock_id,
+      kind: r.kind,
+      origin: r.origin,
+      event_date: r.event_date.split("T")[0],
+      headline: r.headline,
+      source_url: r.source_url,
+      detail_json:
+        typeof r.detail_json === "string"
+          ? JSON.parse(r.detail_json)
+          : (r.detail_json as Record<string, unknown>),
+      supersedes_id: r.supersedes_id,
+      created_at: r.created_at,
+    }));
+  }
+
+  /**
+   * Fetches a specific event flag by ID.
+   */
+  async getEventById(id: string): Promise<EventFlagRecord | null> {
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      kind: string;
+      origin: EventFlagOrigin;
+      event_date: string;
+      headline: string;
+      source_url: string | null;
+      detail_json: unknown;
+      supersedes_id: string | null;
+      created_at: Date;
+    }>(
+      `
+      SELECT
+        id,
+        stock_id,
+        kind,
+        origin,
+        event_date::text AS event_date,
+        headline,
+        source_url,
+        detail_json,
+        supersedes_id,
+        created_at
+      FROM equity_research.event_flag
+      WHERE id = $1
+      `,
+      [id],
+    );
+
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0];
+    return {
+      id: r.id,
+      stock_id: r.stock_id,
+      kind: r.kind,
+      origin: r.origin,
+      event_date: r.event_date.split("T")[0],
+      headline: r.headline,
+      source_url: r.source_url,
+      detail_json:
+        typeof r.detail_json === "string"
+          ? JSON.parse(r.detail_json)
+          : (r.detail_json as Record<string, unknown>),
+      supersedes_id: r.supersedes_id,
+      created_at: r.created_at,
+    };
+  }
+
+  /**
+   * Deletes events for a stock (used in test isolation).
+   */
+  async deleteEventsForStock(stockId: string): Promise<void> {
+    await this.db.query(
+      `DELETE FROM equity_research.event_flag WHERE stock_id = $1`,
+      [stockId],
+    );
+  }
+}

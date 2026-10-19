@@ -1,8 +1,11 @@
 import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
+import { EquityAlertsEvaluationService } from "../../modules/equity-research/application/equity-alerts-evaluation-service.js";
 import { EquityEodCollector } from "../../modules/equity-research/application/equity-eod-collector.js";
+import { PostgresEquityAlertRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-alert-repository.js";
 import { PostgresEquityCorporateActionRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-corporate-action-repository.js";
+import { PostgresEquityEventFlagRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-event-flag-repository.js";
 import { PostgresEquityPriceBarRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-price-bar-repository.js";
 import { PostgresEquityQuoteCacheRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-quote-cache-repository.js";
 import { PostgresEquityRawRecordRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-raw-record-repository.js";
@@ -46,6 +49,17 @@ async function main(): Promise<void> {
       minIntervalMs: 1000, // 1 req/s per-host gate
     });
 
+    const alertRepo = new PostgresEquityAlertRepository(database);
+    const eventFlagRepo = new PostgresEquityEventFlagRepository(database);
+    const alertsService = new EquityAlertsEvaluationService(
+      watchlistRepo,
+      priceBarRepo,
+      alertRepo,
+      eventFlagRepo,
+      sourceHealthRepo,
+      corporateActionRepo,
+    );
+
     const collector = new EquityEodCollector(
       watchlistRepo,
       rawRecordRepo,
@@ -54,6 +68,7 @@ async function main(): Promise<void> {
       secondaryFactRepo,
       quoteCacheRepo,
       yahooClient,
+      alertsService,
     );
 
     const options = parseArgs(process.argv.slice(2));

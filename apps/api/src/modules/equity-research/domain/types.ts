@@ -165,3 +165,66 @@ export interface WatchlistStockItem {
   trendSummary?: TrendSummaryItem;
 }
 
+export type AlertStatus = "NEW" | "SEEN" | "DISMISSED";
+
+export interface AlertRecord {
+  id: string;
+  stock_id: string;
+  kind: string;
+  level_key: string | null;
+  evaluated_date: string; // YYYY-MM-DD
+  severity: "INFO" | "NOTICE";
+  title: string;
+  payload_json: Record<string, unknown>;
+  created_at: Date;
+}
+
+export interface AlertStateRecord {
+  alert_id: string;
+  status: AlertStatus;
+  updated_at: Date;
+}
+
+export interface AlertWithState {
+  id: string;
+  stock_id: string;
+  kind: string;
+  level_key: string | null;
+  evaluated_date: string;
+  severity: "INFO" | "NOTICE";
+  title: string;
+  payload_json: Record<string, unknown>;
+  created_at: Date;
+  status: AlertStatus;
+  state_updated_at: Date;
+  symbol?: string;
+  display_name?: string | null;
+}
+
+export type EventFlagOrigin = "DETECTED" | "MANUAL";
+
+export type EventFlagKind =
+  | "RESULTS_PUBLISHED"
+  | "CORPORATE_ACTION"
+  | "LARGE_MOVE_DAY"
+  | "RESULTS_DATE_UPCOMING"
+  | "MATERIAL_NEGATIVE"
+  | "ORDER_WIN"
+  | "REGULATORY"
+  | "MANAGEMENT"
+  | "OTHER"
+  | string;
+
+export interface EventFlagRecord {
+  id: string;
+  stock_id: string;
+  kind: EventFlagKind;
+  origin: EventFlagOrigin;
+  event_date: string; // YYYY-MM-DD
+  headline: string;
+  source_url: string | null;
+  detail_json: Record<string, unknown>;
+  supersedes_id: string | null;
+  created_at: Date;
+}
+

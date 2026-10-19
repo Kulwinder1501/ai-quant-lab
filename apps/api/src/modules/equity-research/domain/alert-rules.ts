@@ -17,6 +17,7 @@
  * 11. Data-health throttling: enter alert, single 5-day reminder repeat, and recovery note on exit (<= 2 per 30-day unhealthy run).
  */
 
+import { createHash } from "node:crypto";
 import rulesData from "./equity-alerts-v1.json" with { type: "json" };
 import type { LevelItem, LevelsResult } from "./levels.js";
 import { subtractCalendarDays } from "./trend-metrics.js";
@@ -25,9 +26,28 @@ import type { StockHealthStatus } from "./types.js";
 export const EQUITY_ALERT_FOOTER =
   "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.";
 
+/**
+ * Computes the canonical SHA-256 hash of the equity alert rule parameters.
+ * Excludes narrative and metadata blocks ('calibration', 'disclaimer') so edits to
+ * calibration history or disclaimer wording leave the frozen hash unchanged.
+ */
+export function computeAlertRulesHash(
+  rulesDataInput: Record<string, unknown> = rulesData as Record<string, unknown>,
+): string {
+  const { calibration, disclaimer, ...params } = rulesDataInput;
+  const sortedKeys = Object.keys(params).sort();
+  const canonicalObj: Record<string, unknown> = {};
+  for (const k of sortedKeys) {
+    canonicalObj[k] = params[k];
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalObj))
+    .digest("hex");
+}
+
 export const EQUITY_ALERT_RULES_VERSION = rulesData.version;
 export const EQUITY_ALERT_RULES_HASH =
-  "6c202c9c6e524f58f1af8df495446d82dca9f2032009bef67532e6c3681bad58";
+  "b0afe011ab0e9a93dc6500b5f65924f5546663d5940590530c2919129c9d86ab";
 
 export type AlertKind =
   | "LEVEL_APPROACH"
@@ -95,6 +115,13 @@ export interface AlertRulesConfig {
   disclaimer: string;
 }
 
+export type AlertSubtype =
+  | "UNHEALTHY_ENTER"
+  | "UNHEALTHY_REPEAT"
+  | "RECOVERED"
+  | "SPLIT"
+  | "RESTATEMENT";
+
 export interface AlertPayload {
   close: number;
   evaluatedDate: string;
@@ -116,7 +143,7 @@ export interface AlertPayload {
   rulesHash: string;
   disclaimer: string;
   reason?: string;
-  subtype?: "UNHEALTHY_ENTER" | "UNHEALTHY_REPEAT" | "RECOVERED";
+  subtype?: AlertSubtype;
   [key: string]: unknown;
 }
 
@@ -135,7 +162,7 @@ export interface HistoricalAlertRef {
   levelKey: string | null;
   evaluatedDate: string;
   payload?: {
-    subtype?: "UNHEALTHY_ENTER" | "UNHEALTHY_REPEAT" | "RECOVERED";
+    subtype?: AlertSubtype;
     [key: string]: unknown;
   };
 }

@@ -84,7 +84,7 @@
             "scope": "KIND_AND_LEVEL"
           }
         },
-        "outcome": "Budget met on full 433-stock replay (91,188 stock-months): Median 2.0 <= 3.0, p95 8.0 <= 8.0, Mean 2.96. Note: 3.3% of stock-months are above 8, meeting the p95=8 budget at the exact edge. Step 6 tripwire recorded: if live alerts over first 20 trading days show p95 > 8 per stock-month, tighten once more by frequency only."
+        "outcome": "Budget met on full 433-stock replay (91,188 stock-months): Median 2.0 <= 3.0, p95 8.0 <= 8.0, Mean 2.86. Note: 2.89% of stock-months are above 8, meeting the p95=8 budget at the exact edge. Step 6 tripwire recorded: if live alerts over first 20 trading days show p95 > 8 per stock-month, tighten once more by frequency only."
       }
     ]
   },

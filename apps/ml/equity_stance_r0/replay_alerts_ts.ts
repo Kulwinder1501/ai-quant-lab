@@ -246,8 +246,8 @@ export function runReplay(limitStocks?: number) {
 | 99th Percentile | Descriptive | ${p99.toFixed(1)} | Info |
 | Maximum Single Stock-Month | Descriptive | ${max} | Info |
 | Total Stocks Evaluated | - | ${symbols.length} | Confirmed |
-| Total Active Stock-Months | - | ${n.toLocaleString()} | Robust Sample |
-| Alert Kind Breakdown | - | BREAK: ${levelCountsByKind.LEVEL_BREAK.toLocaleString()} (${breakPct}%), ZONE_ENTER: ${levelCountsByKind.LEVEL_ZONE_ENTER.toLocaleString()} (${zonePct}%), APPROACH: ${levelCountsByKind.LEVEL_APPROACH.toLocaleString()} (${approachPct}%) | Measured Distribution |
+| Total Active Stock-Months | - | ${n.toLocaleString("en-US")} | Robust Sample |
+| Alert Kind Breakdown | - | BREAK: ${levelCountsByKind.LEVEL_BREAK.toLocaleString("en-US")} (${breakPct}%), ZONE_ENTER: ${levelCountsByKind.LEVEL_ZONE_ENTER.toLocaleString("en-US")} (${zonePct}%), APPROACH: ${levelCountsByKind.LEVEL_APPROACH.toLocaleString("en-US")} (${approachPct}%) | Measured Distribution |
 
 ---
 

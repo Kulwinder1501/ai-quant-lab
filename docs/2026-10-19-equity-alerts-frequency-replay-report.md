@@ -20,7 +20,7 @@
 | Maximum Single Stock-Month | Descriptive | 20 | Info |
 | Total Stocks Evaluated | - | 433 | Confirmed |
 | Total Active Stock-Months | - | 91,188 | Robust Sample |
-| Alert Kind Breakdown | - | BREAK: 41,411 (15.9%), ZONE_ENTER: 1,41,660 (54.4%), APPROACH: 77,521 (29.7%) | Measured Distribution |
+| Alert Kind Breakdown | - | BREAK: 41,411 (15.9%), ZONE_ENTER: 141,660 (54.4%), APPROACH: 77,521 (29.7%) | Measured Distribution |
 
 ---
 

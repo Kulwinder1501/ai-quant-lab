@@ -50,7 +50,21 @@ export function findForbiddenImports(source: string): string[] {
   return violations;
 }
 
-describe("Equity Research isolation and no-coupling boundary (G1, S10)", () => {
+export function findForeignSchemaQueries(source: string): string[] {
+  const matches = [
+    ...source.matchAll(/(?:FROM|JOIN|INTO|UPDATE)\s+([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)/gi),
+  ];
+  const violations: string[] = [];
+  for (const match of matches) {
+    const schema = match[1].toLowerCase();
+    if (schema !== "equity_research" && !schema.startsWith("pg_")) {
+      violations.push(`${match[0]} (schema '${schema}' is forbidden in equity-research)`);
+    }
+  }
+  return violations;
+}
+
+describe("Equity Research isolation and no-coupling boundary (G1, S10, Gate E13)", () => {
   it("never imports from trading, strategy, risk, orders, or fyers", () => {
     const files = getAllTsFiles(MODULE_DIR);
     const violations: { file: string; violations: string[] }[] = [];
@@ -78,4 +92,33 @@ describe("Equity Research isolation and no-coupling boundary (G1, S10)", () => {
     expect(findForbiddenImports(syntheticSourceWithFyers).length).toBeGreaterThan(0);
     expect(findForbiddenImports(cleanSource).length).toBe(0);
   });
+
+  it("strictly queries only equity_research schema, never foreign schemas (Gate E13)", () => {
+    const files = getAllTsFiles(MODULE_DIR);
+    const violations: { file: string; violations: string[] }[] = [];
+
+    for (const file of files) {
+      const content = readFileSync(file, "utf8");
+      const found = findForeignSchemaQueries(content);
+      if (found.length > 0) {
+        violations.push({ file: file.slice(MODULE_DIR.length + 1), violations: found });
+      }
+    }
+
+    expect(
+      violations,
+      `Gate E13 violated! equity-research must never read or write tables outside equity_research schema: ${JSON.stringify(violations)}`,
+    ).toEqual([]);
+  });
+
+  it("actively detects foreign schema queries (Gate E13 test guard)", () => {
+    const syntheticQueryWithPaperTrading = `SELECT * FROM paper_trading.trades WHERE id = $1;`;
+    const syntheticQueryWithPublicCandles = `SELECT * FROM public.candles_1m WHERE symbol = 'NIFTY';`;
+    const cleanQuery = `SELECT * FROM equity_research.alert WHERE stock_id = $1;`;
+
+    expect(findForeignSchemaQueries(syntheticQueryWithPaperTrading).length).toBeGreaterThan(0);
+    expect(findForeignSchemaQueries(syntheticQueryWithPublicCandles).length).toBeGreaterThan(0);
+    expect(findForeignSchemaQueries(cleanQuery).length).toBe(0);
+  });
 });
+

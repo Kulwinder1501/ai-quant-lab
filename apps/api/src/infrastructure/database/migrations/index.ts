@@ -137,6 +137,7 @@ import { aedlsForensicSchemaMigration } from "./136-aedls-forensic-schema.js";
 import { fyersDailyRequestLedgerMigration } from "./137-fyers-daily-request-ledger.js";
 import { equityResearchSchemaMigration } from "./138-equity-research-schema.js";
 import { equitySeriesVersioningMigration } from "./139-equity-series-versioning.js";
+import { equityAlertsAndEventsMigration } from "./140-equity-alerts-and-events.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -278,4 +279,5 @@ export const migrations = [
   fyersDailyRequestLedgerMigration,
   equityResearchSchemaMigration,
   equitySeriesVersioningMigration,
+  equityAlertsAndEventsMigration,
 ];
