@@ -149,6 +149,8 @@ function build(socket: FyersDataSocket, scheduled: Scheduled) {
     appId: "APPID-100",
     tokenService: { getAccessToken: vi.fn(async () => "access-token") },
     createSocket: () => socket,
+    // Packets are sent inline here; the pacing has its own tests below.
+    subscribeSpacingMs: 0,
     setTimeoutFn: (handler, ms) => {
       scheduled.delays.push(ms);
       // Held rather than run inline, which would recurse through connect on every close.
@@ -263,6 +265,57 @@ describe("FyersLiveStreamer", () => {
     streamer.subscribe(["NSE:SBIN-EQ"]);
 
     expect(socket.subscribed).toEqual([]);
+  });
+
+  it("sends subscription packets one at a time, spaced apart, even when two callers queue at once", async () => {
+    const socket = fakeSocket();
+    const timers: Array<() => void> = [];
+    const delays: number[] = [];
+    const streamer = new FyersLiveStreamer({
+      appId: "APPID-100",
+      tokenService: { getAccessToken: vi.fn(async () => "access-token") },
+      createSocket: () => socket,
+      subscribeSpacingMs: 300,
+      setTimeoutFn: (handler, ms) => { timers.push(handler); delays.push(ms); return 0; },
+    });
+    await streamer.connect();
+    socket.fire("connect");
+
+    const chainA = Array.from({ length: 45 }, (_, i) => `NSE:NIFTY26OCT${22000 + i * 50}CE`);
+    const chainB = Array.from({ length: 45 }, (_, i) => `NSE:BANKNIFTY26OCT${54000 + i * 100}CE`);
+    streamer.subscribe(chainA);
+    streamer.subscribe(chainB);
+
+    // Only the first packet leaves at once; the other five wait their turn.
+    expect(socket.subscribed).toHaveLength(1);
+    expect(socket.subscribed[0]).toEqual(chainA.slice(0, 20));
+
+    while (timers.length > 0) timers.shift()!();
+    expect(socket.subscribed.map((packet) => packet.length)).toEqual([20, 20, 5, 20, 20, 5]);
+    // Order is preserved: A's packets, then B's, never interleaved.
+    expect(socket.subscribed[3]).toEqual(chainB.slice(0, 20));
+    expect(delays.every((ms) => ms === 300)).toBe(true);
+  });
+
+  it("drops what was queued for a socket that has gone and sends everything wanted again on reconnect", async () => {
+    const socket = fakeSocket();
+    const timers: Array<() => void> = [];
+    const streamer = new FyersLiveStreamer({
+      appId: "APPID-100",
+      tokenService: { getAccessToken: vi.fn(async () => "access-token") },
+      createSocket: () => socket,
+      subscribeSpacingMs: 300,
+      setTimeoutFn: (handler) => { timers.push(handler); return 0; },
+    });
+    await streamer.connect();
+    socket.fire("connect");
+    streamer.subscribe(Array.from({ length: 45 }, (_, i) => `NSE:S${i}`));
+    expect(socket.subscribed).toHaveLength(1);
+
+    socket.fire("close");
+    // The pending packets run against a socket that is gone and send nothing.
+    while (timers.length > 0) timers.shift()!();
+    expect(socket.subscribed).toHaveLength(1);
   });
 
   it("chunks large subscription batches into sizes under Fyers frame limits", async () => {

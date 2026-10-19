@@ -50,6 +50,14 @@ export interface FyersLiveStreamerOptions {
   createSocket?: (authHeader: string) => FyersDataSocket;
   /** Injectable so a reconnect test does not have to wait in real time. */
   setTimeoutFn?: (handler: () => void, ms: number) => unknown;
+  /**
+   * Gap between subscription packets, in milliseconds. Zero sends everything at once.
+   *
+   * Fyers drops packets when several arrive back to back, and says nothing: two option chains opened together on
+   * 2026-10-19 sent eight packets in a burst and one of the two streams kept only its last three symbols (and
+   * which one it was changed from run to run). Packets now leave one at a time through a single queue.
+   */
+  subscribeSpacingMs?: number;
 }
 
 const RECONNECT_BASE_MS = 5_000;
@@ -60,6 +68,8 @@ const RECONNECT_MAX_MS = 5 * 60_000;
  * strikes) must be sent in chunks of 20 or fewer to avoid silent drops by the vendor socket.
  */
 export const MAX_SOCKET_SUBSCRIBE_CHUNK = 20;
+
+const DEFAULT_SUBSCRIBE_SPACING_MS = 300;
 
 export function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -158,6 +168,9 @@ export class FyersLiveStreamer extends EventEmitter {
   private reconnectAttempts = 0;
   private droppedMessages = 0;
   private readonly reportedControlMessages = new Set<string>();
+  /** Subscription packets waiting to be sent, in order, shared by every caller. */
+  private readonly outbox: Array<{ operation: "subscribe" | "unsubscribe"; symbols: string[] }> = [];
+  private draining = false;
   /**
    * Set by `close()` so a deliberate shutdown is not read as a dropped connection.
    *
@@ -192,11 +205,10 @@ export class FyersLiveStreamer extends EventEmitter {
         log("info", "Connected to the Fyers data socket", {
           resubscribing: this.currentSubscriptions.size,
         });
+        // Whatever was queued for the previous connection is moot: everything wanted is sent again below.
+        this.outbox.length = 0;
         if (this.currentSubscriptions.size > 0) {
-          const subs = [...this.currentSubscriptions];
-          for (const batch of chunkArray(subs, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
-            socket.subscribe(batch);
-          }
+          this.send("subscribe", [...this.currentSubscriptions]);
         }
       });
 
@@ -269,9 +281,7 @@ export class FyersLiveStreamer extends EventEmitter {
     }
 
     if (this.isSocketConnected()) {
-      for (const batch of chunkArray(symbols, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
-        this.socket!.subscribe(batch);
-      }
+      this.send("subscribe", symbols);
     } else if (isNew) {
       void this.connect();
     }
@@ -281,10 +291,47 @@ export class FyersLiveStreamer extends EventEmitter {
     if (!symbols || symbols.length === 0) return;
     for (const symbol of symbols) this.currentSubscriptions.delete(symbol);
     if (this.isSocketConnected()) {
-      for (const batch of chunkArray(symbols, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
-        this.socket!.unsubscribe(batch);
-      }
+      this.send("unsubscribe", symbols);
     }
+  }
+
+  private send(operation: "subscribe" | "unsubscribe", symbols: string[]): void {
+    for (const batch of chunkArray(symbols, MAX_SOCKET_SUBSCRIBE_CHUNK)) {
+      this.outbox.push({ operation, symbols: batch });
+    }
+    this.drainOutbox();
+  }
+
+  /** Sends the queued packets one at a time, `subscribeSpacingMs` apart. The first goes out immediately. */
+  private drainOutbox(): void {
+    if (this.draining) return;
+    const spacing = this.options.subscribeSpacingMs ?? DEFAULT_SUBSCRIBE_SPACING_MS;
+    this.draining = true;
+    const step = (): void => {
+      const next = this.outbox.shift();
+      if (next === undefined) {
+        this.draining = false;
+        return;
+      }
+      // A socket that has gone is skipped, not retried: the connect handler sends everything wanted again.
+      if (this.socket !== null) {
+        try {
+          this.socket[next.operation](next.symbols);
+        } catch (error) {
+          log("error", "Could not send a Fyers subscription packet", {
+            operation: next.operation,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      if (spacing <= 0) {
+        step();
+        return;
+      }
+      const schedule = this.options.setTimeoutFn ?? ((handler: () => void, ms: number) => setTimeout(handler, ms));
+      schedule(step, spacing);
+    };
+    step();
   }
 
   /** Shuts the socket for good. A closed streamer stays closed; `connect()` becomes a no-op. */
