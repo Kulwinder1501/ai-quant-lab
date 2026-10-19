@@ -13,14 +13,14 @@
 |---|:---:|:---:|:---:|
 | **Median Level Alerts per Stock-Month** | $\le 3.0$ | **2.0** | **PASS** |
 | **95th Percentile per Stock-Month** | $\le 8.0$ | **8.0** | **PASS** |
-| Mean Level Alerts per Stock-Month | Descriptive | 2.84 | Info |
+| Mean Level Alerts per Stock-Month | Descriptive | 2.86 | Info |
 | 75th Percentile | Descriptive | 4.0 | Info |
 | 90th Percentile | Descriptive | 6.0 | Info |
-| 99th Percentile | Descriptive | 11.0 | Info |
-| Maximum Single Stock-Month | Descriptive | 16 | Info |
-| Total Stocks Evaluated | - | 25 | Confirmed |
-| Total Active Stock-Months | - | 4,278 | Robust Sample |
-| Alert Kind Breakdown | - | BREAK: 2,264 (18.6%), ZONE_ENTER: 6,406 (52.7%), APPROACH: 3,495 (28.7%) | Measured Distribution |
+| 99th Percentile | Descriptive | 10.0 | Info |
+| Maximum Single Stock-Month | Descriptive | 20 | Info |
+| Total Stocks Evaluated | - | 433 | Confirmed |
+| Total Active Stock-Months | - | 91,188 | Robust Sample |
+| Alert Kind Breakdown | - | BREAK: 41,411 (15.9%), ZONE_ENTER: 1,41,660 (54.4%), APPROACH: 77,521 (29.7%) | Measured Distribution |
 
 ---
 

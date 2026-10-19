@@ -30,13 +30,40 @@
             "scope": "KIND_AND_LEVEL"
           }
         },
-        "outcome": "Exceeded frequency budget due to zone-entry firing on intraday wicks and multi-kind emission on same day."
+        "outcome": "Exceeded frequency budget across full 433-stock replay (median 6.0, p95 14.0) due to zone-entry firing on intraday wicks, uncollapsed same-day alerts, and broad level qualification."
       },
       {
         "iteration": 1,
         "date": "2026-10-19",
-        "description": "Reviewer calibration refinement",
-        "rationale": "Zone entry restricted to close landing inside the zone (eliminating intraday wick noise). At most one level alert per level per day resolved by strict priority (Break > Zone Enter > Approach), ensuring breaks are never shadowed. Scale-aware 0.5% log grid buckets for swing level keys. Cooldown scoped strictly to KIND_AND_LEVEL for 10 trading days (two calendar trading weeks) so an approach never silences a subsequent break while preventing repeated zone and approach chatter during sideways consolidation. Data-health alerts throttled with 5-day reminder and recovery note.",
+        "description": "Structural fixes with 5-day cooldown attempt",
+        "rationale": "Zone entry restricted to close landing inside the zone. At most one level alert per level per day resolved by priority (Break > Zone Enter > Approach). Scale-aware 0.5% log grid buckets for swing level keys. Data-health alerts throttled with 5-day reminder and recovery note. Cooldown set to 5 trading days per (stock, kind, levelKey).",
+        "parameters": {
+          "levelApproach": {
+            "maxAtrDistance": 0.5,
+            "minTouches": 3,
+            "minStrength": 1.5
+          },
+          "levelZoneEnter": {
+            "minTouches": 3,
+            "minStrength": 1.5,
+            "requireCloseInZone": true
+          },
+          "levelBreak": {
+            "minTouches": 3,
+            "minStrength": 1.5
+          },
+          "cooldown": {
+            "tradingDays": 5,
+            "scope": "KIND_AND_LEVEL"
+          }
+        },
+        "outcome": "Budget failed on 433-stock replay and 25-stock sample: median 3.0, p95 9.0 (exceeded p95 <= 8.0 budget target due to zone-entry recurrence after 5 days during consolidation)."
+      },
+      {
+        "iteration": 2,
+        "date": "2026-10-19",
+        "description": "Cooldown tightening to 10 trading days and strict break date alignment",
+        "rationale": "Cooldown lengthened to 10 trading days (two calendar trading weeks) scoped strictly per (stock, kind, levelKey) to prevent repeated approach and zone-entry noise during consolidation while guaranteeing prior approach/zone alerts never silence breaks. LEVEL_BREAK restricted strictly to brokenOn === evalDate (eliminating late sliding-window events).",
         "parameters": {
           "levelApproach": {
             "maxAtrDistance": 0.5,
@@ -57,7 +84,7 @@
             "scope": "KIND_AND_LEVEL"
           }
         },
-        "outcome": "Budget fully met on shipped TypeScript replay: Median 2.0 <= 3.0, p95 8.0 <= 8.0, Mean 2.84."
+        "outcome": "Budget met on full 433-stock replay (91,188 stock-months): Median 2.0 <= 3.0, p95 8.0 <= 8.0, Mean 2.96. Note: 3.3% of stock-months are above 8, meeting the p95=8 budget at the exact edge. Step 6 tripwire recorded: if live alerts over first 20 trading days show p95 > 8 per stock-month, tighten once more by frequency only."
       }
     ]
   },

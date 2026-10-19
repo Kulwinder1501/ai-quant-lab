@@ -109,7 +109,7 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
     it("exports version, calibrated hash, and mandatory disclaimer footer", () => {
       expect(EQUITY_ALERT_RULES_VERSION).toBe("equity-alerts-v1");
       expect(EQUITY_ALERT_RULES_HASH).toBe(
-        "a9395c383901de063a25f833a849c0ddc952ee1f31f158030df9deaf2412ed91",
+        "6c202c9c6e524f58f1af8df495446d82dca9f2032009bef67532e6c3681bad58",
       );
       expect(EQUITY_ALERT_FOOTER).toBe(
         "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.",
@@ -317,6 +317,49 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
         "Resistance level 105.00 (Swing Clusters) changed to BROKEN. In our test, breaks reversed more often than they continued.",
       );
       expect(checkBannedWords(breakAlert!.title, false)).toBeNull();
+    });
+
+    it("does not fire late LEVEL_BREAK if level is BROKEN or FLIPPED but brokenOn was weeks ago (sliding-window re-evaluation)", () => {
+      const bars = createSyntheticBars(260, 100);
+      const evalDate = bars[bars.length - 1].bar_date; // e.g. 2018-02-21
+      const pastBrokenDate = bars[bars.length - 20].bar_date; // e.g. 2018-01-24
+
+      const lateBrokenLevel = mockLevelItem({
+        price: 105.0,
+        kind: "SWING",
+        side: "RESISTANCE",
+        state: "FLIPPED",
+        brokenOn: pastBrokenDate, // Broke 20 bars ago
+      });
+
+      const levelsResult = mockLevelsResult({
+        asOfDate: evalDate,
+        levels: [lateBrokenLevel],
+      });
+
+      // Even if prior day in levelsAtTMinus1 had INTACT due to engine's sliding window,
+      // it must NOT fire a break alert today because brokenOn is not today
+      const yesterdayLevel = mockLevelItem({
+        price: 105.0,
+        kind: "SWING",
+        side: "RESISTANCE",
+        state: "INTACT",
+        brokenOn: null,
+      });
+
+      const alerts = evaluateAlerts({
+        stockId: "ALKEM_SLIDING_WINDOW",
+        levelsAtT: levelsResult,
+        levelsAtTMinus1: mockLevelsResult({
+          asOfDate: bars[bars.length - 2].bar_date,
+          levels: [yesterdayLevel],
+        }),
+        bars,
+        evaluationDate: evalDate,
+      });
+
+      const breakAlert = alerts.find((a) => a.kind === "LEVEL_BREAK");
+      expect(breakAlert).toBeUndefined();
     });
   });
 

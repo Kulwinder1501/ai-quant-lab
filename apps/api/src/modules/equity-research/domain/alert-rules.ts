@@ -27,7 +27,7 @@ export const EQUITY_ALERT_FOOTER =
 
 export const EQUITY_ALERT_RULES_VERSION = rulesData.version;
 export const EQUITY_ALERT_RULES_HASH =
-  "a9395c383901de063a25f833a849c0ddc952ee1f31f158030df9deaf2412ed91";
+  "6c202c9c6e524f58f1af8df495446d82dca9f2032009bef67532e6c3681bad58";
 
 export type AlertKind =
   | "LEVEL_APPROACH"
@@ -601,13 +601,8 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
     const levelCandidates = candidatesByLevelKey.get(key)!;
 
     // A. LEVEL_BREAK (Gate E3 - Highest Priority)
-    const isBrokenToday =
-      level.brokenOn === evalDate ||
-      ((level.state === "BROKEN" || level.state === "FLIPPED") &&
-        levelsAtTMinus1 &&
-        levelsAtTMinus1.levels.some(
-          (prevL) => getLevelKey(prevL) === key && prevL.state === "INTACT",
-        ));
+    // Strictly fires on the exact date of the break (brokenOn === evalDate), preventing late events
+    const isBrokenToday = level.brokenOn === evalDate;
 
     if (isBrokenToday) {
       levelCandidates.push({
