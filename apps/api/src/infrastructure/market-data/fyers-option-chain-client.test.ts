@@ -28,13 +28,18 @@ function chainBody(overrides: Record<string, unknown> = {}) {
   }), { status: 200 });
 }
 
-function build(fetchImpl: typeof fetch) {
+function build(fetchImpl: typeof fetch, sleep?: (ms: number) => Promise<void>) {
   return new FyersOptionChainClient({
     tokenService: { getAccessToken: vi.fn(async () => "access-token") },
     appId: "APPID-100",
     fetch: fetchImpl,
     now: () => NOW,
+    ...(sleep === undefined ? {} : { sleep }),
   });
+}
+
+function refusal(message: string) {
+  return new Response(JSON.stringify({ s: "error", code: -360, message }), { status: 429 });
 }
 
 describe("FyersOptionChainClient", () => {
@@ -133,6 +138,37 @@ describe("FyersOptionChainClient", () => {
   });
 
   // Fyers signals failure in the body with HTTP 200, so response.ok is not a verdict.
+  it("waits out a per-second refusal and asks again, so the last of several back-to-back chains still lands", async () => {
+    const responses = [refusal("You've reached the Standard plan limit of 5 requests/second."), chainBody()];
+    const fetchImpl = vi.fn(async () => responses.shift()!);
+    const sleep = vi.fn(async () => undefined);
+
+    const snapshot = await build(fetchImpl as unknown as typeof fetch, sleep).fetchChain({ underlyingSymbol: "NIFTY50" });
+
+    expect(snapshot.quotes).toHaveLength(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(1_100);
+  });
+
+  it("does not retry a per-minute refusal", async () => {
+    const fetchImpl = vi.fn(async () => refusal("You've reached the Standard plan limit of 50 requests/minute."));
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(build(fetchImpl as unknown as typeof fetch, sleep).fetchChain({ underlyingSymbol: "NIFTY50" }))
+      .rejects.toThrow("requests/minute");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("gives up after two retries of a per-second refusal", async () => {
+    const fetchImpl = vi.fn(async () => refusal("You've reached the Standard plan limit of 5 requests/second."));
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(build(fetchImpl as unknown as typeof fetch, sleep).fetchChain({ underlyingSymbol: "NIFTY50" }))
+      .rejects.toThrow("requests/second");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it("treats an error body as a failure despite a 200 status", async () => {
     const client = build(async () => new Response(
       JSON.stringify({ s: "error", code: -300, message: "invalid symbol" }),

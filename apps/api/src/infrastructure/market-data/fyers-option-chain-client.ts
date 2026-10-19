@@ -1,5 +1,6 @@
 import { resolveFyersSymbol } from "../../modules/market-data/domain/fyers-symbol-resolver.js";
 import { recordFyersRequest } from "../../modules/market-data/domain/fyers-request-counter.js";
+import { classifyFyersRateLimit, rateLimitCooldownMs } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import type {
   ExpiryKind,
   OptionChainQuote,
@@ -41,6 +42,8 @@ export interface FyersOptionChainClientOptions {
   fetch?: FetchFunction;
   baseUrl?: string;
   now?: () => Date;
+  /** Injectable so a test need not wait out the per-second window. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -94,11 +97,25 @@ export class FyersOptionChainClient {
     // one. Naming the expiry is the only way to reach any other listed contract's book.
     if (input.expiryToken) endpoint.searchParams.set("timestamp", input.expiryToken);
 
-    recordFyersRequest("optionchain");
-    const response = await this.fetch(endpoint, {
-      headers: { Authorization: `${this.options.appId}:${accessToken}` },
-    });
-    const payload = await response.json().catch(() => undefined) as FyersChainResponse | undefined;
+    // The four underlyings are requested back to back and share the account's 5-requests-a-second allowance with
+    // every other Fyers caller, so the last one is often the refused one: RELIANCE's chain failed on 2026-10-19 with
+    // "5 requests/second" and had 9 snapshots against 15-18 for the others. That kind clears in about a second, so it
+    // is retried (twice at most); the daily and per-minute limits do not, so they are not.
+    const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    let response: Response;
+    let payload: FyersChainResponse | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      recordFyersRequest("optionchain");
+      response = await this.fetch(endpoint, {
+        headers: { Authorization: `${this.options.appId}:${accessToken}` },
+      });
+      payload = await response.json().catch(() => undefined) as FyersChainResponse | undefined;
+      const refusal = response.status === 429 || payload?.code === 429
+        ? classifyFyersRateLimit({ status: response.status, code: payload?.code, message: payload?.message })
+        : null;
+      if (refusal !== "PER_SECOND" || attempt >= 2) break;
+      await sleep(rateLimitCooldownMs("PER_SECOND", Date.now()));
+    }
 
     // Fyers reports failures in the body with HTTP 200, so status alone is not a verdict.
     if (!response.ok || payload?.s !== "ok" || !payload.data) {

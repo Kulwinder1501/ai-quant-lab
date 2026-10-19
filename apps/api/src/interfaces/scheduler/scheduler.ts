@@ -293,6 +293,10 @@ async function main(): Promise<void> {
     EQUITY_EOD_COLLECT: 15 * 60 * 1000,
     // Three indexed reads and a comparison; nothing is fetched or computed.
     PREMARKET_RUN_CHECK: 2 * 60 * 1000,
+    // Four history fetches and four indicator passes for the two ETFs: about a minute.
+    ETF_INTRADAY_HEAL: 15 * 60 * 1000,
+    // Reads and counts only.
+    SESSION_COVERAGE_CHECK: 5 * 60 * 1000,
     // Every intraday job below is on a cron faster than this, so a run that outlives its
     // horizon has stopped being useful anyway -- the next tick's data supersedes it.
     INDICES_INTRADAY: 10 * 60 * 1000,
@@ -645,6 +649,54 @@ async function main(): Promise<void> {
    */
   cronSchedule("50 15 * * 1-5", () => {
     void schedule("ICT_GATE_REPORT", () => runCommand("npm", ["run", "research:ict-gates:report"]));
+  });
+
+  /**
+   * Fills the ETF bars from history after the close.
+   *
+   * NIFTYBEES and BANKBEES bars are built from the live socket during the session and are the volume source for the
+   * index-option entry gate. When the collector is down for any stretch (it stopped at 11:03 on 2026-10-16 and the
+   * bars stayed missing) nothing refilled them, because only the index series had a history job. Same-day history
+   * returns the bars (57 of 57 on 2026-10-19), replaces the socket-built ones with the exchange's, and costs four
+   * requests. Indicators follow so the new bars are not left without them.
+   */
+  cronSchedule("10 16 * * 1-5", () => {
+    if (!fyersTokenService) return;
+    void schedule("ETF_INTRADAY_HEAL", async () => {
+      if ((await isNseHoliday(database, new Date())).holiday) return;
+      const today = istDateKey(new Date());
+      for (const instrument of ["NIFTYBEES", "BANKBEES"]) {
+        for (const timeframe of ["1m", "5m"]) {
+          await runCommand("npm", [
+            "run", "data:collect:historical", "--",
+            "--provider", "fyers",
+            "--instrument", instrument,
+            "--timeframe", timeframe,
+            "--from", today,
+            "--to", today,
+            "--skip-existing",
+          ]);
+          await runCommand("npm", [
+            "run", "analysis:calculate-indicators", "--",
+            "--instrument", instrument,
+            "--timeframe", timeframe,
+            "--from", today,
+          ]);
+        }
+      }
+    });
+  });
+
+  /**
+   * Counts what the session left in the database and fails if it is short, after the heals have run (the ETF heal at
+   * 16:10, the index gap heal at 16:18). A FAILED row names what is missing and says which of it can be recovered:
+   * bars can, option snapshots and ticks cannot. Two sessions lost data without anything saying so.
+   */
+  cronSchedule("40 16 * * 1-5", () => {
+    void schedule("SESSION_COVERAGE_CHECK", async () => {
+      if ((await isNseHoliday(database, new Date())).holiday) return;
+      await runCommand("npm", ["run", "ops:session-coverage"]);
+    });
   });
 
   /**
@@ -1428,6 +1480,15 @@ async function main(): Promise<void> {
     cronSchedule("0 8 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
     });
+    // The access token lasts about eight hours and the overnight refresh has been refused for hours at a time
+    // (2026-08-25, and 2026-10-17 from the small hours until 14:08), so the first attempt at 08:00 left one retry
+    // before the open. A valid token makes each of these a database read; an expired one makes each an attempt.
+    cronSchedule("*/10 6-8 * * 1-5", () => {
+      void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
+    });
+    cronSchedule("*/5 9 * * 1-5", () => {
+      void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
+    });
     cronSchedule("*/15 9-15 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
     });
@@ -1766,6 +1827,8 @@ async function main(): Promise<void> {
       "ICT_GATE_REPORT",
       "EQUITY_EOD_COLLECT",
       "PREMARKET_RUN_CHECK",
+      "ETF_INTRADAY_HEAL",
+      "SESSION_COVERAGE_CHECK",
       "INDIA_VIX_EOD",
       "INDIA_VIX_EOD_RETRY",
       "INDIA_VIX_INTRADAY",
