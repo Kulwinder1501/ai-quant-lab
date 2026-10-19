@@ -159,6 +159,13 @@ async function main(): Promise<void> {
           ticks: streamer,
           anchorMs: anchorSeconds * 1_000,
           onParity: (parity) => console.info(JSON.stringify({ level: "info", message: "Stream-first parity", ...parity })),
+          onCarryChange: (carrying, detail) => console.warn(JSON.stringify({
+            level: "warn",
+            message: carrying
+              ? "Fyers REST refused; carrying the stream's anchors so collection continues"
+              : "Fyers REST answering again; anchors refreshed",
+            ...detail,
+          })),
         });
         provider = streamFirstProvider;
         console.info(JSON.stringify({ level: "info", message: "Live collection is stream-first", restAnchorSeconds: anchorSeconds }));

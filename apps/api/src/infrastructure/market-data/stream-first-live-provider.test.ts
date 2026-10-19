@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../../modules/market-data/domain/live-market-data-provider.js";
 import type { Tick } from "./fyers-live-streamer.js";
+import { FyersRateLimitedError } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import { StreamFirstLiveMarketDataProvider, type StreamFirstParity } from "./stream-first-live-provider.js";
 
 const ETF = "NSE:NIFTYBEES-EQ";
@@ -198,6 +199,86 @@ describe("StreamFirstLiveMarketDataProvider", () => {
     subscribe.mockImplementation(() => { throw new Error("socket down"); });
     const quotes = await provider.fetchQuotes([ETF]);
     expect(quotes[0]?.lastPrice).toBe("250");
+  });
+
+  describe("when Fyers refuses REST", () => {
+    function limited() {
+      let refuse = false;
+      const emitter = new EventEmitter();
+      let now = 1_000_000;
+      const carries: Array<{ carrying: boolean; kind: string }> = [];
+      const provider = new StreamFirstLiveMarketDataProvider({
+        rest: {
+          id: "fyers-api-v3",
+          fetchQuotes: async (ids) => {
+            if (refuse) throw new FyersRateLimitedError("daily cap", "DAILY", now + 600_000);
+            return ids.map((id): LiveMarketQuote => ({
+              providerInstrumentId: id, lastPrice: "250", cumulativeVolume: "1000", observedAt: new Date(now), exchangeTimestamp: null,
+            }));
+          },
+        },
+        ticks: { on: (e, l) => emitter.on(e, l), off: (e, l) => emitter.off(e, l), subscribe: () => undefined },
+        now: () => now,
+        anchorMs: 60_000,
+        onCarryChange: (carrying, detail) => carries.push({ carrying, kind: detail.kind }),
+      });
+      return {
+        provider, carries,
+        emit: (t: Tick) => emitter.emit("tick", t),
+        advance: (ms: number) => { now += ms; },
+        refuseRest: () => { refuse = true; },
+        allowRest: () => { refuse = false; },
+      };
+    }
+
+    it("carries the old anchor past its age limit, so a spent daily quota does not stop the bars", async () => {
+      const { provider, carries, emit, advance, refuseRest } = limited();
+      emit(tick(ETF, 249, 5_000));
+      await provider.fetchQuotes([ETF]);
+      refuseRest();
+      advance(10 * 60_000);
+      emit(tick(ETF, 255, 5_450));
+
+      const [quote] = await provider.fetchQuotes([ETF]);
+      expect(quote?.lastPrice).toBe("255");
+      // anchor volume 1000 plus the 450 the stream says traded since it, however old the anchor is
+      expect(quote?.cumulativeVolume).toBe("1450");
+      expect(carries).toEqual([{ carrying: true, kind: "DAILY" }]);
+    });
+
+    it("says so once when REST comes back, and re-anchors", async () => {
+      const { provider, carries, emit, advance, refuseRest, allowRest } = limited();
+      emit(tick(ETF, 249, 5_000));
+      await provider.fetchQuotes([ETF]);
+      refuseRest();
+      advance(2 * 60_000);
+      emit(tick(ETF, 255, 5_450));
+      await provider.fetchQuotes([ETF]);
+      await provider.fetchQuotes([ETF]);
+      allowRest();
+      advance(1_000);
+      emit(tick(ETF, 256, 5_460));
+
+      const [quote] = await provider.fetchQuotes([ETF]);
+      expect(quote?.lastPrice).toBe("250");
+      expect(carries.map((entry) => entry.carrying)).toEqual([true, false]);
+    });
+
+    it("still fails when there is no anchor to carry", async () => {
+      const { provider, emit, refuseRest } = limited();
+      emit(tick(ETF, 249, 5_000));
+      refuseRest();
+      await expect(provider.fetchQuotes([ETF])).rejects.toBeInstanceOf(FyersRateLimitedError);
+    });
+
+    it("still fails when the socket is quiet, because ticks are what the carried anchor relies on", async () => {
+      const { provider, emit, advance, refuseRest } = limited();
+      emit(tick(ETF, 249, 5_000));
+      await provider.fetchQuotes([ETF]);
+      refuseRest();
+      advance(5 * 60_000);
+      await expect(provider.fetchQuotes([ETF])).rejects.toBeInstanceOf(FyersRateLimitedError);
+    });
   });
 
   it("lets a REST failure through unchanged", async () => {

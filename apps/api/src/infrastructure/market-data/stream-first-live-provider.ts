@@ -1,4 +1,5 @@
 import type { LiveMarketDataProvider, LiveMarketQuote } from "../../modules/market-data/domain/live-market-data-provider.js";
+import { isFyersRateLimitedError } from "../../modules/market-data/domain/fyers-rate-limit.js";
 import type { Tick } from "./fyers-live-streamer.js";
 
 /**
@@ -21,8 +22,13 @@ import type { Tick } from "./fyers-live-streamer.js";
  *
  * Anything it cannot answer exactly -- no anchor yet, anchor too old, a socket that has gone quiet, a tick that
  * carries no volume where the anchor has one, a stream volume that went backwards -- is answered by one REST call
- * for the whole set, which is the behaviour before this class existed. Rate-limit errors from that call propagate
- * unchanged.
+ * for the whole set, which is the behaviour before this class existed.
+ *
+ * One exception to "REST failures propagate": when the refresh is refused by a Fyers rate limit and every symbol
+ * already has an anchor and the socket is alive, the old anchors are carried on past their age limit. The anchor
+ * only supplies the level; price and the volume change come from the ticks, so a carried anchor does not go stale
+ * the way a polled quote would. This is the difference between losing the rest of the session's bars when the
+ * 5,000-a-day quota runs out (what happened to the ETF series on 2026-10-16) and not noticing it.
  */
 export interface LiveTickSource {
   on(event: "tick", listener: (tick: Tick) => void): unknown;
@@ -50,6 +56,8 @@ export interface StreamFirstLiveMarketDataProviderOptions {
   socketAliveMs?: number;
   now?: () => number;
   onParity?: (parity: StreamFirstParity) => void;
+  /** Called when REST is refused and the old anchors are being carried, and again when REST is back. */
+  onCarryChange?: (carrying: boolean, detail: { anchorAgeSeconds: number; kind: string }) => void;
 }
 
 interface TickState {
@@ -74,6 +82,7 @@ export class StreamFirstLiveMarketDataProvider implements LiveMarketDataProvider
   private readonly anchors = new Map<string, Anchor>();
   private readonly subscribed = new Set<string>();
   private lastAnyTickAt: number | null = null;
+  private carrying = false;
   private readonly anchorMs: number;
   private readonly socketAliveMs: number;
   private readonly now: () => number;
@@ -103,7 +112,29 @@ export class StreamFirstLiveMarketDataProvider implements LiveMarketDataProvider
 
     const answered = this.answerFromStream(ids);
     if (answered !== null) return answered;
-    return this.refreshAnchors(ids);
+    try {
+      const refreshed = await this.refreshAnchors(ids);
+      this.setCarrying(false, 0, "");
+      return refreshed;
+    } catch (error) {
+      if (!isFyersRateLimitedError(error)) throw error;
+      const carried = this.answerFromStream(ids, true);
+      if (carried === null) throw error;
+      this.setCarrying(true, this.oldestAnchorAgeSeconds(ids), error.kind);
+      return carried;
+    }
+  }
+
+  private oldestAnchorAgeSeconds(ids: string[]): number {
+    const at = this.now();
+    const ages = ids.map((id) => at - (this.anchors.get(id.toUpperCase())?.at ?? at));
+    return Math.round(Math.max(0, ...ages) / 1000);
+  }
+
+  private setCarrying(carrying: boolean, anchorAgeSeconds: number, kind: string): void {
+    if (carrying === this.carrying) return;
+    this.carrying = carrying;
+    this.options.onCarryChange?.(carrying, { anchorAgeSeconds, kind });
   }
 
   private subscribe(ids: string[]): void {
@@ -123,13 +154,13 @@ export class StreamFirstLiveMarketDataProvider implements LiveMarketDataProvider
   }
 
   /** The quotes for every id from anchors and ticks, or null if even one cannot be answered exactly. */
-  private answerFromStream(ids: string[]): LiveMarketQuote[] | null {
+  private answerFromStream(ids: string[], ignoreAnchorAge = false): LiveMarketQuote[] | null {
     const at = this.now();
     if (!this.socketAlive(at)) return null;
     const quotes: LiveMarketQuote[] = [];
     for (const id of ids) {
       const anchor = this.anchors.get(id.toUpperCase());
-      if (anchor === undefined || at - anchor.at > this.anchorMs) return null;
+      if (anchor === undefined || (!ignoreAnchorAge && at - anchor.at > this.anchorMs)) return null;
       const composed = this.compose(id, anchor, at);
       if (composed === null) return null;
       quotes.push(composed);
