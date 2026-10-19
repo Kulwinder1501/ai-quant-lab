@@ -31,6 +31,7 @@ import {
 } from "../../domain/iv-percentile-by-tenor.js";
 import { resolveFyersSymbol } from "../../domain/fyers-symbol-resolver.js";
 import { SubscriptionRefCounter } from "../../../../infrastructure/market-data/subscription-ref-counter.js";
+import { chainStreamSymbols, parseChainStreamStrikes } from "../../domain/chain-stream-window.js";
 
 export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
 
@@ -666,10 +667,11 @@ export function registerMarketDataRoutes(
       // Collect symbols to subscribe to (strike calls and puts) + underlying spot if it has a symbol
       const symbolsToSubscribe = new Set<string>();
       let underlyingProviderSymbol: string | null = null;
-      for (const quote of snapshot.quotes) {
-        if (quote.providerSymbol) {
-          symbolsToSubscribe.add(quote.providerSymbol);
-        }
+      // Only the strikes nearest the money stream live (`?strikes=N` each side, `all` for the lot): the socket
+      // holds about 65 symbols, so a full chain per page left room for one underlying. See chain-stream-window.ts.
+      const strikesEachSide = parseChainStreamStrikes(queryString(request, "strikes") || undefined);
+      for (const symbol of chainStreamSymbols(snapshot.quotes, snapshot.underlyingValue, strikesEachSide)) {
+        symbolsToSubscribe.add(symbol);
       }
       
       // Underlying is mapped to its provider symbol (e.g. NSE:NIFTY50-INDEX, NSE:NIFTYBANK-INDEX, NSE:SBIN-EQ)
