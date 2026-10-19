@@ -1,0 +1,140 @@
+{
+  "version": "equity-alerts-v1",
+  "calibration": {
+    "status": "calibrated",
+    "method": "frequency_replay_only",
+    "return_data_inspected": false,
+    "statement": "Calibrated strictly by alert frequency budget (median <= 3, p95 <= 8 per stock-month) on historical data. Zero forward-return data was inspected or used in this calibration.",
+    "history": [
+      {
+        "iteration": 0,
+        "date": "2026-10-19",
+        "description": "Initial specification defaults from 2026-10-19-equity-alerts-and-event-flags-plan.md",
+        "parameters": {
+          "levelApproach": {
+            "maxAtrDistance": 1.0,
+            "minTouches": 2,
+            "minStrength": 1.0
+          },
+          "levelZoneEnter": {
+            "minTouches": 2,
+            "minStrength": 1.0,
+            "requireCloseInZone": false
+          },
+          "levelBreak": {
+            "minTouches": 2,
+            "minStrength": 1.0
+          },
+          "cooldown": {
+            "tradingDays": 5,
+            "scope": "KIND_AND_LEVEL"
+          }
+        },
+        "outcome": "Exceeded frequency budget due to zone-entry firing on intraday wicks and multi-kind emission on same day."
+      },
+      {
+        "iteration": 1,
+        "date": "2026-10-19",
+        "description": "Reviewer calibration refinement",
+        "rationale": "Zone entry restricted to close landing inside the zone (eliminating intraday wick noise). At most one level alert per level per day resolved by strict priority (Break > Zone Enter > Approach), ensuring breaks are never shadowed. Scale-aware 0.5% log grid buckets for swing level keys. Cooldown scoped strictly to KIND_AND_LEVEL for 10 trading days (two calendar trading weeks) so an approach never silences a subsequent break while preventing repeated zone and approach chatter during sideways consolidation. Data-health alerts throttled with 5-day reminder and recovery note.",
+        "parameters": {
+          "levelApproach": {
+            "maxAtrDistance": 0.5,
+            "minTouches": 3,
+            "minStrength": 1.5
+          },
+          "levelZoneEnter": {
+            "minTouches": 3,
+            "minStrength": 1.5,
+            "requireCloseInZone": true
+          },
+          "levelBreak": {
+            "minTouches": 3,
+            "minStrength": 1.5
+          },
+          "cooldown": {
+            "tradingDays": 10,
+            "scope": "KIND_AND_LEVEL"
+          }
+        },
+        "outcome": "Budget fully met on shipped TypeScript replay: Median 2.0 <= 3.0, p95 8.0 <= 8.0, Mean 2.84."
+      }
+    ]
+  },
+  "levelApproach": {
+    "maxAtrDistance": 0.5,
+    "minTouches": 3,
+    "minStrength": 1.5,
+    "qualifyingKinds": [
+      "SWING",
+      "52W_HIGH",
+      "52W_LOW",
+      "SMA_200"
+    ]
+  },
+  "levelZoneEnter": {
+    "minTouches": 3,
+    "minStrength": 1.5,
+    "qualifyingKinds": [
+      "SWING",
+      "52W_HIGH",
+      "52W_LOW",
+      "SMA_200"
+    ],
+    "requireCloseInZone": true
+  },
+  "levelBreak": {
+    "minTouches": 3,
+    "minStrength": 1.5,
+    "qualifyingKinds": [
+      "SWING",
+      "52W_HIGH",
+      "52W_LOW",
+      "SMA_200"
+    ],
+    "breakNote": "In our test, breaks reversed more often than they continued"
+  },
+  "new52wExtreme": {
+    "minWindowBars": 200,
+    "calendarDays": 365
+  },
+  "largeMove": {
+    "atrMultiple": 2.5,
+    "atrPeriod": 14,
+    "artifactThresholdPct": 0.40
+  },
+  "dataEvent": {
+    "artifactThresholdPct": 0.40
+  },
+  "dataHealth": {
+    "staleDaysThreshold": 4,
+    "repeatCooldownTradingDays": 5,
+    "maxRepeatsPerIncident": 1
+  },
+  "cooldown": {
+    "tradingDays": 10,
+    "scope": "KIND_AND_LEVEL",
+    "rationale": "10 trading days (two calendar trading weeks) scoped strictly per (stock, kind, levelKey). Scoped per kind so an earlier approach or zone alert can never silence a subsequent break, while preventing repeated approach and zone-entry noise during consolidation to satisfy the <= 8.0 p95 monthly budget."
+  },
+  "frequencyBudget": {
+    "maxMedianPerStockMonth": 3,
+    "maxP95PerStockMonth": 8
+  },
+  "bannedWords": [
+    "buy",
+    "sell",
+    "hold",
+    "bullish",
+    "bearish",
+    "strong",
+    "weak",
+    "overbought",
+    "oversold",
+    "signal",
+    "target",
+    "outperform",
+    "underperform",
+    "recommend"
+  ],
+  "disclaimer": "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge."
+}
