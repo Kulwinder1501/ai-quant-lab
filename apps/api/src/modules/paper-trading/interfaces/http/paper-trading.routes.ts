@@ -1,5 +1,6 @@
 import type { Express, Request } from "express";
 import { respondToRouteError } from "../../../../interfaces/http/common/route-errors.js";
+import { liveBookOnDemand } from "../../../../infrastructure/market-data/on-demand-live-book.js";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import {
   InvalidHttpQueryError,
@@ -168,6 +169,7 @@ export function registerPaperTradingRoutes(
   dependencies: Pick<HttpDependencies,
     | "database"
     | "liveQuoteCache"
+    | "fyersLiveStreamer"
     | "listPaperTradeHistory"
     | "dashboardRepository"
     | "paperTradeRepository"
@@ -684,7 +686,7 @@ export function registerPaperTradingRoutes(
           MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS,
           quoteNow.getTime(),
         ) ?? null;
-      const chosenFill = chooseManualOptionFill({
+      let chosenFill = chooseManualOptionFill({
         stream: liveBook === null
           ? null
           : { bid: liveBook.bid, ask: liveBook.ask, observedAt: liveBook.observedAt, underlyingValue: liveSpot?.price ?? null },
@@ -692,6 +694,26 @@ export function registerPaperTradingRoutes(
         chainQuote: chainQuote === null ? null : { bid: chainQuote.bid, ask: chainQuote.ask, observedAt: chainQuote.observedAt },
         now: quoteNow,
       });
+      // No fresh quote from the stream, the stored ticks or the chain: this strike is outside what is being streamed
+      // (the chain stream covers the strikes nearest the money, the stored ticks a somewhat wider band). Ask the socket
+      // for just this contract and wait a few seconds for its book, rather than refuse a buy the market could fill.
+      // Near-the-money buys never reach this, so they pay no delay.
+      if (!chosenFill.ok && providerSymbol !== null && dependencies.liveQuoteCache !== undefined) {
+        const onDemandBook = await liveBookOnDemand(
+          { cache: dependencies.liveQuoteCache, subscriber: dependencies.fyersLiveStreamer },
+          providerSymbol,
+          { maxAgeMs: MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS },
+        );
+        if (onDemandBook !== null) {
+          const retriedAt = new Date();
+          chosenFill = chooseManualOptionFill({
+            stream: { bid: onDemandBook.bid, ask: onDemandBook.ask, observedAt: onDemandBook.observedAt, underlyingValue: liveSpot?.price ?? null },
+            tick: liveTick,
+            chainQuote: chainQuote === null ? null : { bid: chainQuote.bid, ask: chainQuote.ask, observedAt: chainQuote.observedAt },
+            now: retriedAt,
+          });
+        }
+      }
       if (!chosenFill.ok) {
         response.status(422).json({ error: chosenFill.error });
         return;
