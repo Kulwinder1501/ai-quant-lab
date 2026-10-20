@@ -138,7 +138,7 @@ export class PostgresEquitySecondaryFactRepository {
   }
 
   /**
-   * Returns the maximum period_end for quarterly facts observed strictly BEFORE the given date.
+   * Returns the maximum period_end for quarterly facts observed on or before the given date.
    */
   async getMaxPriorQuarterPeriodEnd(
     stockId: string,
@@ -150,7 +150,7 @@ export class PostgresEquitySecondaryFactRepository {
       FROM equity_research.secondary_fact
       WHERE stock_id = $1
         AND period_type = 'QUARTERLY'
-        AND (first_seen_at AT TIME ZONE 'Asia/Kolkata')::date < $2::date
+        AND (first_seen_at AT TIME ZONE 'Asia/Kolkata')::date <= $2::date
       `,
       [stockId, beforeDate],
     );

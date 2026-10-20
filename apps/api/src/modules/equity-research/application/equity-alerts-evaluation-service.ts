@@ -48,41 +48,8 @@ export interface AlertEvaluationSummary {
   message?: string;
 }
 
-/**
- * Default NSE Trading Holidays for Calendar Year 2026.
- *
- * Source / Provenance:
- * NSE Circular Ref. No: NSE/CMTR/65488 (Trading Holidays for the Calendar Year 2026,
- * Capital Market Segment, National Stock Exchange of India).
- *
- * Operational Maintenance:
- * NOTE: This list requires mandatory annual review and update prior to January of each
- * calendar year when the exchange publishes its official schedule for the forthcoming year.
- *
- * Weekend Annotations:
- * - 2026-08-15: Independence Day falls on a Saturday.
- * - 2026-11-08: Diwali (Laxmi Pujan) falls on a Sunday. Normal daytime trading is closed;
- *   a special 1-hour Muhurat Trading session is conducted in the evening.
- */
-export const DEFAULT_NSE_HOLIDAYS = [
-  "2026-01-26", // Republic Day
-  "2026-02-18", // Maha Shivratri
-  "2026-03-03", // Holi
-  "2026-03-20", // Id-Ul-Fitr
-  "2026-04-03", // Good Friday
-  "2026-04-14", // Dr. Baba Saheb Ambedkar Jayanti
-  "2026-05-01", // Maharashtra Day
-  "2026-05-28", // Bakri Id
-  "2026-06-26", // Muharram
-  "2026-08-15", // Independence Day (Weekend: Saturday)
-  "2026-09-04", // Milad-un-Nabi
-  "2026-10-02", // Mahatma Gandhi Jayanti
-  "2026-10-20", // Dussehra
-  "2026-11-08", // Diwali (Laxmi Pujan) (Weekend: Sunday - Muhurat trading session only)
-  "2026-11-10", // Diwali (Balipratipada)
-  "2026-11-24", // Gurunanak Jayanti
-  "2026-12-25", // Christmas
-];
+export const ITEM_QUARTERLY_TOTAL_REVENUE = "quarterlyTotalRevenue";
+export const ITEM_QUARTERLY_NET_INCOME = "quarterlyNetIncomeCommonStockholders";
 
 export class EquityAlertsEvaluationService {
   private readonly holidays: Set<string>;
@@ -116,12 +83,27 @@ export class EquityAlertsEvaluationService {
       .filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h));
 
     if (passedHolidays instanceof Set) {
-      this.holidays = passedHolidays;
+      this.holidays = new Set([...passedHolidays, ...envHolidays]);
     } else if (Array.isArray(passedHolidays)) {
-      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...passedHolidays, ...envHolidays]);
+      this.holidays = new Set([...passedHolidays, ...envHolidays]);
     } else {
-      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...envHolidays]);
+      this.holidays = new Set([...envHolidays]);
     }
+  }
+
+  /**
+   * Checks whether the given date is an official exchange holiday.
+   * Reads from passed holiday overrides / NSE_HOLIDAYS env, and queries
+   * the persistent nse_holidays table (migrations 056 & 073).
+   */
+  async isHoliday(date: string): Promise<boolean> {
+    if (this.holidays.has(date)) {
+      return true;
+    }
+    if (typeof this.priceBarRepo?.isExchangeHoliday === "function") {
+      return await this.priceBarRepo.isExchangeHoliday(date);
+    }
+    return false;
   }
 
   /**
@@ -171,8 +153,8 @@ export class EquityAlertsEvaluationService {
         return result;
       }
 
-      // Check if evaluationDate is an exchange holiday from NSE_HOLIDAYS
-      if (this.holidays.has(evaluationDate)) {
+      // Check if evaluationDate is an exchange holiday from nse_holidays / NSE_HOLIDAYS
+      if (await this.isHoliday(evaluationDate)) {
         result.reason = `Exchange holiday ${evaluationDate} (Gate E12)`;
         return result;
       }
@@ -417,12 +399,8 @@ export class EquityAlertsEvaluationService {
 
           for (const [newPeriodEnd, facts] of factsByPeriod.entries()) {
             if (newPeriodEnd > maxPriorPeriodEnd) {
-              const revFact = facts.find((f) => f.item.toLowerCase().includes("revenue"));
-              const netFact = facts.find(
-                (f) =>
-                  f.item.toLowerCase().includes("netincome") ||
-                  f.item.toLowerCase().includes("net_income"),
-              );
+              const revFact = facts.find((f) => f.item === ITEM_QUARTERLY_TOTAL_REVENUE);
+              const netFact = facts.find((f) => f.item === ITEM_QUARTERLY_NET_INCOME);
 
               const [yStr, mStr, dStr] = newPeriodEnd.split("-");
               const priorYear = Number(yStr) - 1;
@@ -432,14 +410,8 @@ export class EquityAlertsEvaluationService {
                 stock.id,
                 yoyTargetPeriodEnd,
               );
-              const priorRevFact = yoyFacts.find((f) =>
-                f.item.toLowerCase().includes("revenue"),
-              );
-              const priorNetFact = yoyFacts.find(
-                (f) =>
-                  f.item.toLowerCase().includes("netincome") ||
-                  f.item.toLowerCase().includes("net_income"),
-              );
+              const priorRevFact = yoyFacts.find((f) => f.item === ITEM_QUARTERLY_TOTAL_REVENUE);
+              const priorNetFact = yoyFacts.find((f) => f.item === ITEM_QUARTERLY_NET_INCOME);
 
               let revPart = "";
               let revYoYPct: number | null = null;
@@ -733,8 +705,8 @@ export class EquityAlertsEvaluationService {
     // Check if ANY bar exists on evalDate across all stocks
     const isTradingDay = await this.priceBarRepo.hasAnyBarOnDate(evalDate);
     if (!isTradingDay) {
-      // 1. Check if this date is a listed exchange holiday from NSE_HOLIDAYS (Gate E12)
-      if (this.holidays.has(evalDate)) {
+      // 1. Check if this date is a listed exchange holiday from nse_holidays / NSE_HOLIDAYS (Gate E12)
+      if (await this.isHoliday(evalDate)) {
         return {
           evaluationDate: evalDate,
           totalStocks: stocks.length,

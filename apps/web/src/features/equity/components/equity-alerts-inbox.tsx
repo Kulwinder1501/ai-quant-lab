@@ -180,7 +180,7 @@ export function EquityAlertsInbox({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void loadAlerts()}
+              onClick={() => void reloadAlerts()}
               disabled={isLoading}
               className="rounded-lg p-2 text-slate-400 hover:bg-white/5 hover:text-white transition disabled:opacity-50"
               title="Refresh alerts"

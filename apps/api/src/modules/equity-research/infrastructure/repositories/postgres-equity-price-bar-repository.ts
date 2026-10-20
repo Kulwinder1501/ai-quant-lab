@@ -779,6 +779,40 @@ export class PostgresEquityPriceBarRepository {
     );
     return Boolean(result.rows[0]?.exists);
   }
+
+  /**
+   * Checks if the given date is an official exchange holiday recorded in the nse_holidays table.
+   */
+  async isExchangeHoliday(date: string): Promise<boolean> {
+    try {
+      const result = await this.db.query<{ exists: boolean }>(
+        `
+        SELECT EXISTS (
+          SELECT 1 FROM nse_holidays
+          WHERE holiday_date = $1::date
+        ) AS exists
+        `,
+        [date],
+      );
+      return Boolean(result.rows[0]?.exists);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fetches all official exchange holidays from nse_holidays as YYYY-MM-DD strings.
+   */
+  async getExchangeHolidays(): Promise<string[]> {
+    try {
+      const result = await this.db.query<{ holiday_date: string }>(
+        `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date FROM nse_holidays ORDER BY holiday_date ASC`,
+      );
+      return result.rows.map((r) => r.holiday_date);
+    } catch {
+      return [];
+    }
+  }
 }
 
 

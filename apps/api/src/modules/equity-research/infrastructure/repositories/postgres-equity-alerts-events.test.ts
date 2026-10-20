@@ -56,7 +56,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     sourceHealthRepo = new PostgresEquitySourceHealthRepository(pool);
     corporateActionRepo = new PostgresEquityCorporateActionRepository(pool);
     secondaryFactRepo = new PostgresEquitySecondaryFactRepository(pool);
-    process.env.NSE_HOLIDAYS = "2026-05-01";
+    delete process.env.NSE_HOLIDAYS;
     evalService = new EquityAlertsEvaluationService(
       watchlistRepo,
       priceBarRepo,
@@ -821,15 +821,20 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
   });
 
   it("Condition 3: full outage on non-holiday weekday raises source-level data-health notice, while listed holiday produces 0 alerts", async () => {
-    // Case A: Exchange holiday in NSE_HOLIDAYS (2026-05-01 is in test holidays)
-    // 0 bars stored anywhere in database on 2026-05-01
+    // Case A: Exchange holiday in nse_holidays table (2026-05-01 Maharashtra Day, 2026-01-26 Republic Day)
+    // 0 bars stored anywhere in database on exchange holidays; read directly from nse_holidays
     const holidayRes = await evalService.evaluateAll("2026-05-01");
     expect(holidayRes.totalAlertsEmitted).toBe(0);
     expect(holidayRes.stocksEvaluated).toBe(0);
     expect(holidayRes.message).toContain("Exchange holiday (2026-05-01); zero alerts evaluated");
 
+    const repDayRes = await evalService.evaluateAll("2026-01-26");
+    expect(repDayRes.totalAlertsEmitted).toBe(0);
+    expect(repDayRes.stocksEvaluated).toBe(0);
+    expect(repDayRes.message).toContain("Exchange holiday (2026-01-26); zero alerts evaluated");
+
     // Case B: Non-holiday weekday with 0 bars stored anywhere in database (2026-10-28, a Wednesday)
-    // 2026-10-28 is NOT in NSE_HOLIDAYS
+    // 2026-10-28 is NOT in nse_holidays
     await alertRepo.deleteAlertsForStock(testStockId);
     const outageDate = "2026-10-28";
     const outageRes = await evalService.evaluateAll(outageDate, { symbol: TEST_SYMBOL });
@@ -983,7 +988,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
         },
         {
           stockId: step5StockId,
-          item: "quarterlyNetIncome",
+          item: "quarterlyNetIncomeCommonStockholders",
           periodType: "QUARTERLY",
           periodEnd: "2026-06-30",
           value: 100000000,
@@ -1079,7 +1084,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
         },
         {
           stockId: step5StockId,
-          item: "quarterlyNetIncome",
+          item: "quarterlyNetIncomeCommonStockholders",
           periodType: "QUARTERLY",
           periodEnd: "2025-09-30",
           value: 100000000, // 10 Cr
@@ -1108,7 +1113,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
         },
         {
           stockId: step5StockId,
-          item: "quarterlyNetIncome",
+          item: "quarterlyNetIncomeCommonStockholders",
           periodType: "QUARTERLY",
           periodEnd: "2026-09-30",
           value: 120000000, // 12 Cr
@@ -1140,13 +1145,70 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
       expect(resultsFlag?.detail_json.priorNetIncome).toBe(100000000);
       expect(resultsFlag?.detail_json.netIncomeYoYPercent).toBe(20);
 
-      // Idempotency check: re-evaluation produces 0 duplicates
+      // Idempotency check: re-evaluation on same date produces 0 duplicates
       await evalService.evaluateStock(stock, "2026-10-22");
       const flagsRepeat = await eventFlagRepo.getEventsByStockId(step5StockId, {
         origin: "DETECTED",
         kind: "RESULTS_PUBLISHED",
       });
       expect(flagsRepeat.length).toBe(flags.length);
+    });
+
+    it("Next-day restatement of same quarter and next-day second item produce zero duplicate RESULTS_PUBLISHED flags", async () => {
+      const stock = (await watchlistRepo.findById(step5StockId))!;
+
+      // Add bar for 2026-10-23 (Day T+1)
+      await priceBarRepo.saveBars([
+        {
+          stockId: step5StockId,
+          barDate: "2026-10-23",
+          open: 106, high: 108, low: 105, close: 107, volume: 115000, source: TEST_SOURCE,
+        },
+      ]);
+
+      // 1. Next-day restatement: Yahoo updates quarterlyTotalRevenue for 2026-09-30 on 2026-10-23
+      await secondaryFactRepo.saveFacts([
+        {
+          stockId: step5StockId,
+          item: "quarterlyTotalRevenue",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-09-30",
+          value: 1260000000, // restated value
+          firstSeenAt: "2026-10-23 17:00:00+05:30",
+        },
+      ]);
+
+      const evalDay2Restate = await evalService.evaluateStock(stock, "2026-10-23");
+      expect(evalDay2Restate.evaluated).toBe(true);
+
+      const flagsAfterRestatement = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "RESULTS_PUBLISHED",
+      });
+      // Zero duplicate flags! Exactly 1 flag remains
+      expect(flagsAfterRestatement.length).toBe(1);
+
+      // 2. Next-day addition of a second item: Yahoo adds another fact for 2026-09-30 on 2026-10-23
+      await secondaryFactRepo.saveFacts([
+        {
+          stockId: step5StockId,
+          item: "quarterlyOperatingRevenue",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-09-30",
+          value: 1240000000,
+          firstSeenAt: "2026-10-23 17:30:00+05:30",
+        },
+      ]);
+
+      const evalDay2SecondItem = await evalService.evaluateStock(stock, "2026-10-23");
+      expect(evalDay2SecondItem.evaluated).toBe(true);
+
+      const flagsAfterSecondItem = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "RESULTS_PUBLISHED",
+      });
+      // Still exactly 1 flag!
+      expect(flagsAfterSecondItem.length).toBe(1);
     });
 
     it("Gate E11 scanner: All stored event flags contain zero banned words", async () => {

@@ -213,7 +213,7 @@ export class PostgresEquityEventFlagRepository {
    */
   async getEventsByStockId(
     stockId: string,
-    options?: { limit?: number; offset?: number; origin?: EventFlagOrigin; includeHistory?: boolean },
+    options?: { limit?: number; offset?: number; origin?: EventFlagOrigin; kind?: string; includeHistory?: boolean },
   ): Promise<EventFlagRecord[]> {
     const conditions: string[] = ["stock_id = $1"];
     const values: unknown[] = [stockId];
@@ -227,6 +227,11 @@ export class PostgresEquityEventFlagRepository {
     if (options?.origin) {
       values.push(options.origin);
       conditions.push(`origin = $${values.length}`);
+    }
+
+    if (options?.kind) {
+      values.push(options.kind);
+      conditions.push(`kind = $${values.length}`);
     }
 
     const limit = options?.limit ?? 100;
