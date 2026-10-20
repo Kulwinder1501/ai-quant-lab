@@ -1,0 +1,9 @@
+{
+  "source": "NSE India",
+  "inspected_url": "https://www.nseindia.com/static/nse-terms-of-use",
+  "robots_url": "https://www.nseindia.com/robots.txt",
+  "inspected_at": "2026-10-20T19:35:00+05:30",
+  "automated_access_allowed": false,
+  "verbatim_clause": "User is prohibited to conduct any systematic or automated data collection activities (including scraping, data mining, data extraction and data harvesting) on or in relation to our Website / Mobile Application.",
+  "notes": "Verified directly in browser on /static/nse-terms-of-use. The prohibition is unconditional with no exception or consent proviso at the end of the clause. Automated HTTP requests to this domain are also actively blocked at network boundary by Akamai Edge (HTTP 403 / HTTP2 stream error)."
+}

@@ -1,0 +1,8 @@
+{
+  "source": "BSE India",
+  "inspected_url": "https://www.bseindia.com/static/about/terms_condition.aspx",
+  "robots_url": "https://www.bseindia.com/robots.txt",
+  "inspected_at": "2026-10-20T19:35:00+05:30",
+  "automated_access_allowed": "UNVERIFIED",
+  "findings": "Inspected /static/about/terms_condition.aspx. Content is ~3,700 characters and solely covers downloadable freeware tools and software provided by the exchange. A search for 'automated', 'scrap', 'harvest', 'data mining', and 'systematic' yielded 0 hits. The previously cited clause was an ungrounded secondary attribution and is NOT present on this page. bseindia.com/robots.txt rewrites to an Angular SPA shell. BSE formal legal position on website scraping is therefore unverified from official primary terms."
+}

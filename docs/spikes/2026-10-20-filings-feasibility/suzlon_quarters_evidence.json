@@ -1,0 +1,86 @@
+{
+  "symbol": "SUZLON",
+  "data_provenance": "Local database equity_research.secondary_fact (populated from Yahoo Finance API ws/fundamentals-timeseries during Slice 0 backfill on 2026-10-17). Primary exchange raw feeds could not be directly downloaded due to automated access restrictions.",
+  "quarters": [
+    {
+      "quarter": "Q1 FY27",
+      "period_end": "2026-06-30",
+      "secondary_fact_revenue_inr": 38193600000.0,
+      "secondary_fact_net_income_inr": 3052200000.0,
+      "first_seen_at": "2026-10-17T11:08:08.792005+00:00",
+      "filing_date_unverified_secondary": "2026-07-28",
+      "board_notice_date_unverified_secondary": "2026-07-21",
+      "status": "PRESENT_IN_DATABASE"
+    },
+    {
+      "quarter": "Q4 FY26",
+      "period_end": "2026-03-31",
+      "secondary_fact_revenue_inr": 54680600000.0,
+      "secondary_fact_net_income_inr": 11143500000.0,
+      "first_seen_at": "2026-10-17T11:08:08.786151+00:00",
+      "filing_date_unverified_secondary": "2026-05-25",
+      "board_notice_date_unverified_secondary": "2026-05-16",
+      "status": "PRESENT_IN_DATABASE"
+    },
+    {
+      "quarter": "Q3 FY26",
+      "period_end": "2025-12-31",
+      "secondary_fact_revenue_inr": 42281800000.0,
+      "secondary_fact_net_income_inr": 4452800000.0,
+      "first_seen_at": "2026-10-17T11:08:08.770579+00:00",
+      "filing_date_unverified_secondary": "2026-02-05",
+      "board_notice_date_unverified_secondary": "2026-01-28",
+      "status": "PRESENT_IN_DATABASE"
+    },
+    {
+      "quarter": "Q2 FY26",
+      "period_end": "2025-09-30",
+      "secondary_fact_revenue_inr": null,
+      "secondary_fact_net_income_inr": null,
+      "first_seen_at": null,
+      "filing_date_unverified_secondary": "2025-11-04",
+      "board_notice_date_unverified_secondary": "2025-10-27",
+      "status": "MISSING_IN_YAHOO_DATABASE"
+    },
+    {
+      "quarter": "Q1 FY26",
+      "period_end": "2025-06-30",
+      "secondary_fact_revenue_inr": 31173300000.0,
+      "secondary_fact_net_income_inr": 3243200000.0,
+      "first_seen_at": "2026-10-17T11:08:08.763531+00:00",
+      "filing_date_unverified_secondary": "2025-08-12",
+      "board_notice_date_unverified_secondary": "2025-08-04",
+      "status": "PRESENT_IN_DATABASE"
+    },
+    {
+      "quarter": "Q4 FY25",
+      "period_end": "2025-03-31",
+      "secondary_fact_revenue_inr": 37735400000.0,
+      "secondary_fact_net_income_inr": 11822200000.0,
+      "first_seen_at": "2026-10-17T11:08:08.75799+00:00",
+      "filing_date_unverified_secondary": "2025-05-29",
+      "board_notice_date_unverified_secondary": "2025-05-20",
+      "status": "PRESENT_IN_DATABASE"
+    },
+    {
+      "quarter": "Q3 FY25",
+      "period_end": "2024-12-31",
+      "secondary_fact_revenue_inr": null,
+      "secondary_fact_net_income_inr": null,
+      "first_seen_at": null,
+      "filing_date_unverified_secondary": "2025-01-28",
+      "board_notice_date_unverified_secondary": "2025-01-20",
+      "status": "DROPPED_FROM_YAHOO_ROLLING_WINDOW"
+    },
+    {
+      "quarter": "Q2 FY25",
+      "period_end": "2024-09-30",
+      "secondary_fact_revenue_inr": null,
+      "secondary_fact_net_income_inr": null,
+      "first_seen_at": null,
+      "filing_date_unverified_secondary": "2024-10-28",
+      "board_notice_date_unverified_secondary": "2024-10-21",
+      "status": "DROPPED_FROM_YAHOO_ROLLING_WINDOW"
+    }
+  ]
+}
