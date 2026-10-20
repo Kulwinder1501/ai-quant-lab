@@ -12,6 +12,7 @@ import { PostgresEquityCorporateActionRepository } from "./postgres-equity-corpo
 import { PostgresEquitySecondaryFactRepository } from "./postgres-equity-secondary-fact-repository.js";
 import { EquityAlertsEvaluationService } from "../../application/equity-alerts-evaluation-service.js";
 import { EQUITY_ALERT_FOOTER, EQUITY_ALERT_RULES_HASH } from "../../domain/alert-rules.js";
+import { auditTripwire } from "../../../../interfaces/cli/measure-equity-alerts-tripwire.js";
 
 describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9, E12, E16)", () => {
   let pool: Pool;
@@ -1240,6 +1241,160 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
           }
         }
       }
+    });
+  });
+
+  describe("Step 6: Live tripwire measurement & trading days resolution", () => {
+    const TEST_TRIPWIRE_SYMBOL = "TEST_TRIPWIRE_STOCK";
+    let tripwireStockId: string;
+
+    beforeAll(async () => {
+      await cleanupStockBySymbol(TEST_TRIPWIRE_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: TEST_TRIPWIRE_SYMBOL,
+        yahooSymbol: `${TEST_TRIPWIRE_SYMBOL}.NS`,
+        displayName: "Synthetic Tripwire Test Stock",
+      });
+      tripwireStockId = stock.id;
+    });
+
+    afterAll(async () => {
+      await cleanupStockBySymbol(TEST_TRIPWIRE_SYMBOL);
+    });
+
+    it("Default mode counts trading days from price bars (not alert dates) and does not false-alarm on quiet watchlist", async () => {
+      // 1. Seed 25 bar dates (Monday-Friday trading days)
+      const barsToSave = [];
+      const barDates: string[] = [];
+      const cur = new Date("2026-08-03T00:00:00Z"); // Monday
+      while (barDates.length < 25) {
+        const day = cur.getUTCDay();
+        if (day !== 0 && day !== 6) {
+          const dStr = cur.toISOString().split("T")[0];
+          barDates.push(dStr);
+          barsToSave.push({
+            stockId: tripwireStockId,
+            barDate: dStr,
+            open: 100,
+            high: 105,
+            low: 99,
+            close: 102,
+            volume: 10000,
+            source: TEST_SOURCE,
+          });
+        }
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      await priceBarRepo.saveBars(barsToSave);
+
+      // 2. Insert 4 level alerts across only 3 distinct dates (barDates[2], barDates[8], barDates[15])
+      await alertRepo.saveAlerts([
+        {
+          stockId: tripwireStockId,
+          kind: "LEVEL_BREAK",
+          levelKey: "R_100",
+          evaluatedDate: barDates[2],
+          severity: "INFO",
+          title: "Break alert 1",
+          payload: {
+            close: 102,
+            evaluatedDate: barDates[2],
+            seriesVersion: 1,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
+          },
+        },
+        {
+          stockId: tripwireStockId,
+          kind: "LEVEL_ZONE_ENTER",
+          levelKey: "R_100",
+          evaluatedDate: barDates[8],
+          severity: "INFO",
+          title: "Zone enter alert",
+          payload: {
+            close: 102,
+            evaluatedDate: barDates[8],
+            seriesVersion: 1,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
+          },
+        },
+        {
+          stockId: tripwireStockId,
+          kind: "LEVEL_BREAK",
+          levelKey: "S_90",
+          evaluatedDate: barDates[15],
+          severity: "INFO",
+          title: "Break alert 2",
+          payload: {
+            close: 102,
+            evaluatedDate: barDates[15],
+            seriesVersion: 1,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
+          },
+        },
+        {
+          stockId: tripwireStockId,
+          kind: "LEVEL_APPROACH",
+          levelKey: "S_90",
+          evaluatedDate: barDates[15],
+          severity: "INFO",
+          title: "Approach alert",
+          payload: {
+            close: 102,
+            evaluatedDate: barDates[15],
+            seriesVersion: 1,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
+          },
+        },
+      ]);
+
+      // 3. Run auditTripwire in default mode (no fromDate/toDate specified, symbol: TEST_TRIPWIRE_SYMBOL)
+      const audit = await auditTripwire(pool, { symbol: TEST_TRIPWIRE_SYMBOL, tradingDays: 20 });
+
+      // Invariant: tradingDaysCount must be 20 (from bar dates), NOT 3 (from alert dates)!
+      expect(audit.evaluatedWindow.tradingDaysCount).toBe(20);
+      expect(audit.evaluatedWindow.startDate).toBe(barDates[2]); // starts at earliest alert date
+      expect(audit.metrics.scalingFactor).toBe(1.0); // 20 / 20 = 1.0
+
+      // The stock had 4 level alerts across 20 trading days -> 4.0 alerts/month
+      expect(audit.stocks[0].levelAlertsCount).toBe(4);
+      expect(audit.metrics.median).toBe(4);
+      expect(audit.metrics.p95).toBe(4);
+
+      // Invariant: Tripwire must NOT false alarm!
+      expect(audit.metrics.tripwireTriggered).toBe(false);
+      expect(audit.metrics.status).toBe("TRIPWIRE_CLEAR");
+    });
+
+    it("Window shorter than 20 days scales proportionally and clears quiet watchlist", async () => {
+      // Query with a 5-day window from the seeded dates
+      const allBarDatesRes = await pool.query<{ d: string }>(
+        `SELECT DISTINCT bar_date::text AS d FROM equity_research.price_bar WHERE stock_id = $1 ORDER BY d ASC LIMIT 5`,
+        [tripwireStockId],
+      );
+      const first5Dates = allBarDatesRes.rows.map((r) => r.d);
+      expect(first5Dates.length).toBe(5);
+
+      const auditShort = await auditTripwire(pool, {
+        symbol: TEST_TRIPWIRE_SYMBOL,
+        fromDate: first5Dates[0],
+        toDate: first5Dates[4],
+      });
+
+      expect(auditShort.evaluatedWindow.tradingDaysCount).toBe(5);
+      expect(auditShort.metrics.scalingFactor).toBe(4.0); // 20 / 5 = 4.0
+
+      // In the first 5 bar dates (barDates[0..4]), only 1 alert was seeded (at barDates[2])
+      expect(auditShort.stocks[0].levelAlertsCount).toBe(1);
+      // Scaled count = 1 * 4.0 = 4.0 alerts/month <= 8.0 -> TRIPWIRE_CLEAR
+      expect(auditShort.metrics.median).toBe(4);
+      expect(auditShort.metrics.p95).toBe(4);
+      expect(auditShort.metrics.tripwireTriggered).toBe(false);
+      expect(auditShort.metrics.status).toBe("TRIPWIRE_CLEAR");
     });
   });
 });

@@ -11,7 +11,62 @@ describe("Live Tripwire Metrics (Gate Step 6)", () => {
     expect(res.status).toBe("TRIPWIRE_CLEAR");
   });
 
-  it("evaluates a compliant distribution as TRIPWIRE_CLEAR (median <= 3.0, p95 <= 8.0)", () => {
+  it("evaluates a quiet watchlist in default mode (20 trading days) as TRIPWIRE_CLEAR", () => {
+    // Reviewer case: 3 stocks with 4 level alerts each across 20 bar dates
+    const counts: StockAlertCount[] = [
+      { stockId: "s1", symbol: "SUZLON", levelAlertsCount: 4, totalAlertsCount: 4 },
+      { stockId: "s2", symbol: "TMPV", levelAlertsCount: 4, totalAlertsCount: 4 },
+      { stockId: "s3", symbol: "INFY", levelAlertsCount: 4, totalAlertsCount: 4 },
+    ];
+
+    const res = computeTripwireMetrics(counts, 20);
+    expect(res.sampleSize).toBe(3);
+    expect(res.tradingDays).toBe(20);
+    expect(res.scalingFactor).toBe(1.0);
+    expect(res.median).toBe(4);
+    expect(res.p95).toBe(4);
+    expect(res.tripwireTriggered).toBe(false);
+    expect(res.status).toBe("TRIPWIRE_CLEAR");
+    expect(res.message).toContain("satisfy frequency budget");
+  });
+
+  it("evaluates a window shorter than 20 days for a quiet watchlist without false alarms", () => {
+    // 5 trading days observed (soak just started): 3 stocks with 1 alert each
+    const counts: StockAlertCount[] = [
+      { stockId: "s1", symbol: "SUZLON", levelAlertsCount: 1, totalAlertsCount: 1 },
+      { stockId: "s2", symbol: "TMPV", levelAlertsCount: 1, totalAlertsCount: 1 },
+      { stockId: "s3", symbol: "INFY", levelAlertsCount: 0, totalAlertsCount: 0 },
+    ];
+
+    const res = computeTripwireMetrics(counts, 5);
+    expect(res.tradingDays).toBe(5);
+    expect(res.scalingFactor).toBe(4.0); // 20 / 5 = 4.0
+    // Scaled counts: [0, 4, 4]
+    expect(res.median).toBe(4);
+    expect(res.p95).toBe(4);
+    expect(res.tripwireTriggered).toBe(false);
+    expect(res.status).toBe("TRIPWIRE_CLEAR");
+  });
+
+  it("triggers tripwire when window shorter than 20 days has excessive alert rate", () => {
+    // 5 trading days observed: 3 stocks with 3 alerts each (rate = 12/month)
+    const counts: StockAlertCount[] = [
+      { stockId: "s1", symbol: "SUZLON", levelAlertsCount: 3, totalAlertsCount: 3 },
+      { stockId: "s2", symbol: "TMPV", levelAlertsCount: 3, totalAlertsCount: 3 },
+      { stockId: "s3", symbol: "INFY", levelAlertsCount: 3, totalAlertsCount: 3 },
+    ];
+
+    const res = computeTripwireMetrics(counts, 5);
+    expect(res.tradingDays).toBe(5);
+    expect(res.scalingFactor).toBe(4.0);
+    expect(res.median).toBe(12);
+    expect(res.p95).toBe(12);
+    expect(res.tripwireTriggered).toBe(true);
+    expect(res.status).toBe("TRIPWIRE_TRIGGERED");
+    expect(res.message).toContain("exceeds budget limit of 8.0");
+  });
+
+  it("evaluates a 20-stock compliant distribution as TRIPWIRE_CLEAR (median <= 3.0, p95 <= 8.0)", () => {
     // 20 stocks with alerts [1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 6, 7, 8, 8]
     const counts: StockAlertCount[] = [
       1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 6, 7, 8, 8,
@@ -32,7 +87,7 @@ describe("Live Tripwire Metrics (Gate Step 6)", () => {
   });
 
   it("evaluates an elevated distribution as TRIPWIRE_TRIGGERED when p95 > 8.0", () => {
-    // 20 stocks with elevated tail: p95 = 11.0 > 8.0
+    // 20 stocks with elevated tail: p95 = 14.0 > 8.0
     const counts: StockAlertCount[] = [
       1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6, 7, 8, 9, 10, 11, 14,
     ].map((val, idx) => ({

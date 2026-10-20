@@ -72,7 +72,7 @@ npm run equity:alerts:eval --workspace @ai-quant-lab/api
 ### Calendar & Holiday Guards
 - **Weekends**: Saturdays and Sundays evaluate 0 stocks and 0 alerts (`Weekend date (YYYY-MM-DD) has no trading session`).
 - **Exchange Holidays**: Official exchange holidays stored in `nse_holidays` evaluate 0 stocks and 0 alerts.
-- **Outage Detection**: Non-holiday weekdays with zero bars and zero successful chart calls emit a throttled `DATA_HEALTH` notice (`Data source is unavailable`).
+- **Outage Detection**: Non-holiday weekdays with zero bars and zero successful chart calls emit a throttled `DATA_HEALTH` notice (`Market data source outage detected on YYYY-MM-DD: zero bars stored on non-holiday weekday; raised data-health notices`).
 
 ---
 
@@ -80,14 +80,20 @@ npm run equity:alerts:eval --workspace @ai-quant-lab/api
 
 During the live deployment soak period, the live tripwire monitors alert frequency against the pre-registered budget.
 
-### Tripwire Threshold
-- **Pre-registered Budget**: Median $\le 3.0$ and 95th percentile $\le 8.0$ alerts per stock-month.
-- **Tripwire Rule**: If 95th percentile exceeds **8.0 alerts per stock-month** over the first 20 trading days, pause deployments and tighten calibration parameters in `apps/api/src/modules/equity-research/domain/equity-alerts-v1.json`.
+### Tripwire Threshold & Rules
+- **Level Alerts Only**: The tripwire strictly counts **level alerts only** (`LEVEL_BREAK`, `LEVEL_ZONE_ENTER`, `LEVEL_APPROACH`), matching the calibration protocol. Informational data-health notices and detected events are excluded from the frequency budget.
+- **Pre-registered Budget**: Median $\le 3.0$ and 95th percentile $\le 8.0$ level alerts per stock-month.
+- **Tripwire Rule**: If 95th percentile exceeds **8.0 level alerts per stock-month** over the first 20 trading days, pause deployments and tighten calibration parameters in `apps/api/src/modules/equity-research/domain/equity-alerts-v1.json`.
+- **Trading Days from Bar Dates**: Trading days in the evaluation window are counted strictly from price bars stored in `equity_research.price_bar`, NEVER from dates on which alerts fired. Days with zero alerts are legitimate quiet trading days in the denominator.
+- **Watchlist Sample Size**: With tiny watchlists (e.g. the 2 live stocks SUZLON and TMPV), percentiles ($p95$) are descriptive and equal the sample maximum. The tripwire distribution ($p95$ and median) becomes statistically meaningful once the watchlist scales to approximately 20 or more stocks. For smaller watchlists, inspect raw alert counts per stock directly.
 
 ### Tripwire Command
 ```bash
-# Print live tripwire status across active watchlist stocks
+# Print live tripwire status in default mode (starts at first alert date, audits first 20 bar dates)
 npm run equity:alerts:tripwire --workspace @ai-quant-lab/api
+
+# Audit specific trading date range
+npm run equity:alerts:tripwire --workspace @ai-quant-lab/api -- --from-date 2026-09-01 --to-date 2026-10-19
 
 # Specify custom trading-day window (default: 20)
 npm run equity:alerts:tripwire --workspace @ai-quant-lab/api -- --trading-days 20
