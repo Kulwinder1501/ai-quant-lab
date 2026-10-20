@@ -11,10 +11,11 @@ from ai_quant_lab_ml.gex_experiment import (
 
 
 def test_synthetic_gex_validation_all_gates():
-    """Verify that all three synthetic validation gates pass:
+    """Verify that all four synthetic validation gates pass:
     Gate A: Injected effect -> SUPPORTED
-    Gate B: Known null -> Not SUPPORTED
+    Gate B: Known null -> Not SUPPORTED (FALSIFIED / null)
     Gate C: Sample floor binding (12 pairs: 9 vs 3) -> INCONCLUSIVE_INSUFFICIENT_DATA
+    Gate D: Market drift confound (+15 bps short vs -5 bps long for both cohorts, zero interaction) -> Not SUPPORTED (FALSIFIED)
     """
     results = run_synthetic_gex_validation()
     assert results["allGatesPassed"] is True
@@ -24,6 +25,8 @@ def test_synthetic_gex_validation_all_gates():
     assert results["gateB_knownNull"]["verdict"] in ("FALSIFIED", "NULL_NO_EDGE")
     assert results["gateC_sampleFloorBinding"]["passed"] is True
     assert results["gateC_sampleFloorBinding"]["verdict"] == "INCONCLUSIVE_INSUFFICIENT_DATA"
+    assert results["gateD_marketDriftConfound"]["passed"] is True
+    assert results["gateD_marketDriftConfound"]["verdict"] in ("FALSIFIED", "NULL_NO_EDGE")
 
 
 def test_gex_standalone_evaluator_catches_consecutive_overlap():
