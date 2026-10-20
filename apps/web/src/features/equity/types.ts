@@ -276,3 +276,80 @@ export interface LevelsPanelResponse {
   empiricalNote: string;
   formulas: Record<string, string>;
 }
+
+export type AlertStatus = "NEW" | "SEEN" | "DISMISSED";
+
+export type AlertSeverity = "INFO" | "NOTICE";
+
+export type AlertKind =
+  | "LEVEL_APPROACH"
+  | "LEVEL_ZONE_ENTER"
+  | "LEVEL_BREAK"
+  | "NEW_52W_EXTREME"
+  | "LARGE_MOVE"
+  | "DATA_EVENT"
+  | "DATA_HEALTH";
+
+export interface AlertRecord {
+  id: string;
+  stock_id: string;
+  kind: AlertKind;
+  level_key: string | null;
+  evaluated_date: string;
+  severity: AlertSeverity;
+  title: string;
+  payload_json: {
+    close?: number | null;
+    level?: number;
+    atr?: number;
+    seriesVersion?: number;
+    rulesHash?: string;
+    disclaimer?: string;
+    reason?: string;
+    subtype?: string;
+    [key: string]: unknown;
+  };
+  created_at: string;
+  status: AlertStatus;
+  state_updated_at: string;
+  symbol?: string;
+  display_name?: string | null;
+}
+
+export type EventFlagOrigin = "DETECTED" | "MANUAL";
+
+export const MANUAL_EVENT_KINDS = [
+  "RESULTS_DATE_UPCOMING",
+  "MATERIAL_NEGATIVE",
+  "ORDER_WIN",
+  "REGULATORY",
+  "MANAGEMENT",
+  "OTHER",
+] as const;
+
+export type ManualEventKind = typeof MANUAL_EVENT_KINDS[number];
+
+export type EventFlagKind =
+  | "RESULTS_PUBLISHED"
+  | "CORPORATE_ACTION"
+  | "LARGE_MOVE_DAY"
+  | ManualEventKind
+  | string;
+
+export interface EventFlagRecord {
+  id: string;
+  stock_id: string;
+  kind: EventFlagKind;
+  origin: EventFlagOrigin;
+  event_date: string;
+  headline: string;
+  source_url: string | null;
+  detail_json: Record<string, unknown>;
+  supersedes_id: string | null;
+  created_at: string;
+  symbol?: string;
+}
+
+export const EQUITY_ALERT_FOOTER =
+  "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.";
+

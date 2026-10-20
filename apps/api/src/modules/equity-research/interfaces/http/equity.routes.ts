@@ -18,7 +18,11 @@ import { PostgresEquityRawRecordRepository } from "../../infrastructure/reposito
 import { PostgresEquityQuoteCacheRepository } from "../../infrastructure/repositories/postgres-equity-quote-cache-repository.js";
 import { PostgresEquitySourceHealthRepository } from "../../infrastructure/repositories/postgres-equity-source-health-repository.js";
 import { PostgresEquityAlertRepository } from "../../infrastructure/repositories/postgres-equity-alert-repository.js";
-import { PostgresEquityEventFlagRepository } from "../../infrastructure/repositories/postgres-equity-event-flag-repository.js";
+import {
+  PostgresEquityEventFlagRepository,
+  EventAlreadySupersededError,
+} from "../../infrastructure/repositories/postgres-equity-event-flag-repository.js";
+import { MANUAL_EVENT_KINDS } from "../../domain/types.js";
 import { YahooClient } from "../../infrastructure/yahoo-client.js";
 
 const addStockSchema = z.object({
@@ -91,13 +95,20 @@ const eventQuerySchema = z.object({
   kind: z.string().trim().min(1).optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "From date must be YYYY-MM-DD").optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "To date must be YYYY-MM-DD").optional(),
+  includeHistory: z
+    .preprocess((val) => val === "true" || val === true, z.boolean())
+    .optional(),
   limit: z.coerce.number().int().positive().max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
 
 const createManualEventSchema = z.object({
   stockId: z.string().uuid("Stock ID must be a valid UUID"),
-  kind: z.string().trim().min(1, "Kind is required").max(50),
+  kind: z.enum(MANUAL_EVENT_KINDS, {
+    errorMap: () => ({
+      message: `Invalid event kind. Manual events must be one of: ${MANUAL_EVENT_KINDS.join(", ")}`,
+    }),
+  }),
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Event date must be YYYY-MM-DD"),
   headline: z.string().trim().min(1, "Headline is required").max(200, "Headline must be at most 200 characters"),
   sourceUrl: z
@@ -125,7 +136,13 @@ const editEventSchema = z.object({
       message: "Manual event requires a valid https source link (Gate E8)",
     })
     .optional(),
-  kind: z.string().trim().min(1).max(50).optional(),
+  kind: z
+    .enum(MANUAL_EVENT_KINDS, {
+      errorMap: () => ({
+        message: `Invalid event kind. Manual events must be one of: ${MANUAL_EVENT_KINDS.join(", ")}`,
+      }),
+    })
+    .optional(),
   eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Event date must be YYYY-MM-DD").optional(),
   detail: z.record(z.unknown()).optional(),
 });
@@ -461,6 +478,17 @@ export function createEquityRouter(
           return;
         }
 
+        // Fork protection: check if event has already been superseded
+        const newer = await eventFlagRepo.getNewerRevision(existing.id);
+        if (newer) {
+          res.status(409).json({
+            error: `Event has already been superseded by ${newer.id}`,
+            newerRevisionId: newer.id,
+            supersededBy: newer.id,
+          });
+          return;
+        }
+
         const sourceUrl = parsedBody.data.sourceUrl ?? existing.source_url ?? "";
         if (!sourceUrl || !sourceUrl.toLowerCase().startsWith("https://") || sourceUrl.length <= 8) {
           res.status(400).json({ error: "Manual event requires a valid https source link (Gate E8)" });
@@ -480,7 +508,13 @@ export function createEquityRouter(
 
         res.json(revision);
       } catch (err) {
-        if (err instanceof Error && err.message.includes("Gate E8")) {
+        if (err instanceof EventAlreadySupersededError) {
+          res.status(409).json({
+            error: err.message,
+            newerRevisionId: err.newerRevisionId,
+            supersededBy: err.newerRevisionId,
+          });
+        } else if (err instanceof Error && err.message.includes("Gate E8")) {
           res.status(400).json({ error: err.message });
         } else {
           next(err);

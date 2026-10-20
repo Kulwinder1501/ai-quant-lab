@@ -38,6 +38,26 @@ export interface AlertEvaluationSummary {
   message?: string;
 }
 
+export const DEFAULT_NSE_HOLIDAYS = [
+  "2026-01-26", // Republic Day
+  "2026-02-18", // Maha Shivratri
+  "2026-03-03", // Holi
+  "2026-03-20", // Id-Ul-Fitr
+  "2026-04-03", // Good Friday
+  "2026-04-14", // Dr. Baba Saheb Ambedkar Jayanti
+  "2026-05-01", // Maharashtra Day
+  "2026-05-28", // Bakri Id
+  "2026-06-26", // Muharram
+  "2026-08-15", // Independence Day
+  "2026-09-04", // Milad-un-Nabi
+  "2026-10-02", // Mahatma Gandhi Jayanti
+  "2026-10-20", // Dussehra
+  "2026-11-08", // Diwali (Laxmi Pujan)
+  "2026-11-10", // Diwali (Balipratipada)
+  "2026-11-24", // Gurunanak Jayanti
+  "2026-12-25", // Christmas
+];
+
 export class EquityAlertsEvaluationService {
   private readonly holidays: Set<string>;
 
@@ -50,17 +70,17 @@ export class EquityAlertsEvaluationService {
     private readonly corporateActionRepo?: PostgresEquityCorporateActionRepository,
     holidays?: Set<string> | string[],
   ) {
+    const envHolidays = (process.env.NSE_HOLIDAYS ?? "")
+      .split(",")
+      .map((h) => h.trim())
+      .filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h));
+
     if (holidays instanceof Set) {
       this.holidays = holidays;
     } else if (Array.isArray(holidays)) {
-      this.holidays = new Set(holidays);
+      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...holidays, ...envHolidays]);
     } else {
-      this.holidays = new Set(
-        (process.env.NSE_HOLIDAYS ?? "")
-          .split(",")
-          .map((h) => h.trim())
-          .filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h)),
-      );
+      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...envHolidays]);
     }
   }
 
@@ -510,7 +530,7 @@ export class EquityAlertsEvaluationService {
     // Check if ANY bar exists on evalDate across all stocks
     const isTradingDay = await this.priceBarRepo.hasAnyBarOnDate(evalDate);
     if (!isTradingDay) {
-      // Check if this date is a listed exchange holiday from NSE_HOLIDAYS (Gate E12)
+      // 1. Check if this date is a listed exchange holiday from NSE_HOLIDAYS (Gate E12)
       if (this.holidays.has(evalDate)) {
         return {
           evaluationDate: evalDate,
@@ -525,13 +545,30 @@ export class EquityAlertsEvaluationService {
         };
       }
 
-      // Outage: Non-holiday weekday with zero bars stored across all stocks!
+      // 2. Evidence check (Condition 3): Check call log for successful chart calls on evalDate
+      const hasSuccessfulCalls = await this.sourceHealthRepo.hasSuccessfulChartCallsOnDate(evalDate);
+      if (hasSuccessfulCalls) {
+        // Calls succeeded and no new bar arrived: treat it as a no-new-data day
+        return {
+          evaluationDate: evalDate,
+          totalStocks: stocks.length,
+          stocksEvaluated: 0,
+          stocksSkipped: stocks.length,
+          totalAlertsEmitted: 0,
+          totalAlertsInserted: 0,
+          totalAlertsSkipped: 0,
+          results: [],
+          message: `Calls succeeded with zero new bars on ${evalDate}; treated as no-new-data day`,
+        };
+      }
+
+      // 3. Outage: Non-holiday weekday with zero bars AND zero successful chart calls in call log!
       await this.sourceHealthRepo.updateHealth({
         source: "YAHOO",
         endpoint: "chart",
         success: false,
         dateKey: evalDate,
-        errorMessage: `Market outage detected: 0 bars stored across all stocks on non-holiday weekday ${evalDate}`,
+        errorMessage: `Market outage detected: 0 bars stored and 0 successful calls on non-holiday weekday ${evalDate}`,
       });
 
       const outageResults: StockAlertEvaluationResult[] = [];

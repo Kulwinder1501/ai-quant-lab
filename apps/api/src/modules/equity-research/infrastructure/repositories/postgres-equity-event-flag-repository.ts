@@ -1,7 +1,14 @@
 import type { Pool } from "pg";
-import type { EventFlagKind, EventFlagOrigin, EventFlagRecord } from "../../domain/types.js";
+import { MANUAL_EVENT_KINDS, type EventFlagKind, type EventFlagOrigin, type EventFlagRecord } from "../../domain/types.js";
 
 export type DatabaseQueryable = Pick<Pool, "query">;
+
+export class EventAlreadySupersededError extends Error {
+  constructor(message: string, public readonly newerRevisionId: string) {
+    super(message);
+    this.name = "EventAlreadySupersededError";
+  }
+}
 
 export interface DetectedEventInput {
   stockId: string;
@@ -29,6 +36,7 @@ export interface EventFlagQueryFilter {
   kind?: string;
   from?: string; // YYYY-MM-DD
   to?: string;   // YYYY-MM-DD
+  includeHistory?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -81,6 +89,13 @@ export class PostgresEquityEventFlagRepository {
    *          the old row remains strictly untouched.
    */
   async saveManualEvent(event: ManualEventInput): Promise<EventFlagRecord> {
+    // Gate: kind must be one of the plan's manual event kinds
+    if (!MANUAL_EVENT_KINDS.includes(event.kind as any)) {
+      throw new Error(
+        `Invalid event kind '${event.kind}'. Manual events must use one of: ${MANUAL_EVENT_KINDS.join(", ")}`,
+      );
+    }
+
     const trimmedUrl = event.sourceUrl ? event.sourceUrl.trim() : "";
     if (
       !trimmedUrl ||
@@ -100,6 +115,18 @@ export class PostgresEquityEventFlagRepository {
       if (priorCheck.rows.length === 0) {
         throw new Error(
           `Superseded event ${event.supersedesId} not found (Gate E9)`,
+        );
+      }
+
+      // Fork protection: check if event has already been superseded
+      const branchCheck = await this.db.query<{ id: string }>(
+        `SELECT id FROM equity_research.event_flag WHERE supersedes_id = $1 LIMIT 1`,
+        [event.supersedesId],
+      );
+      if (branchCheck.rows.length > 0) {
+        throw new EventAlreadySupersededError(
+          `Event ${event.supersedesId} has already been superseded by ${branchCheck.rows[0].id}`,
+          branchCheck.rows[0].id,
         );
       }
     }
@@ -166,13 +193,20 @@ export class PostgresEquityEventFlagRepository {
 
   /**
    * Fetches event flags for a stock in reverse chronological order.
+   * By default, hides superseded revisions (only returns latest/current).
    */
   async getEventsByStockId(
     stockId: string,
-    options?: { limit?: number; offset?: number; origin?: EventFlagOrigin },
+    options?: { limit?: number; offset?: number; origin?: EventFlagOrigin; includeHistory?: boolean },
   ): Promise<EventFlagRecord[]> {
     const conditions: string[] = ["stock_id = $1"];
     const values: unknown[] = [stockId];
+
+    if (!options?.includeHistory) {
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM equity_research.event_flag sub WHERE sub.supersedes_id = equity_research.event_flag.id
+      )`);
+    }
 
     if (options?.origin) {
       values.push(options.origin);
@@ -241,10 +275,17 @@ export class PostgresEquityEventFlagRepository {
 
   /**
    * Queries event flags with optional filtering across stocks.
+   * By default, returns only current revisions (hides superseded rows).
    */
   async getEvents(filter?: EventFlagQueryFilter): Promise<EventFlagRecord[]> {
     const conditions: string[] = [];
     const values: unknown[] = [];
+
+    if (!filter?.includeHistory) {
+      conditions.push(`NOT EXISTS (
+        SELECT 1 FROM equity_research.event_flag sub WHERE sub.supersedes_id = e.id
+      )`);
+    }
 
     if (filter?.stockId) {
       values.push(filter.stockId);
@@ -392,6 +433,18 @@ export class PostgresEquityEventFlagRepository {
       supersedes_id: r.supersedes_id,
       created_at: r.created_at,
     };
+  }
+
+  /**
+   * Fetches the newer revision that supersedes this event (if any).
+   */
+  async getNewerRevision(id: string): Promise<EventFlagRecord | null> {
+    const result = await this.db.query<{ id: string }>(
+      `SELECT id FROM equity_research.event_flag WHERE supersedes_id = $1 LIMIT 1`,
+      [id],
+    );
+    if (result.rows.length === 0) return null;
+    return this.getEventById(result.rows[0].id);
   }
 
   /**

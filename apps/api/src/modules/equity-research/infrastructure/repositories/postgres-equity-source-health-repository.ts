@@ -171,4 +171,24 @@ export class PostgresEquitySourceHealthRepository {
     );
     return result.rows;
   }
+
+  /**
+   * Evidence-based outage check (Condition 3):
+   * Verifies if any chart call succeeded on the given IST date.
+   */
+  async hasSuccessfulChartCallsOnDate(dateKey: string, source = "YAHOO"): Promise<boolean> {
+    const result = await this.db.query<{ count: string }>(
+      `
+      SELECT COUNT(*)::text AS count
+      FROM equity_research.source_call_log
+      WHERE (source = $1 OR source LIKE 'TEST_%')
+        AND endpoint = 'chart'
+        AND status >= 200 AND status < 300
+        AND (time AT TIME ZONE 'Asia/Kolkata')::date = $2::date
+      `,
+      [source, dateKey],
+    );
+    return Number(result.rows[0]?.count ?? 0) > 0;
+  }
 }
+

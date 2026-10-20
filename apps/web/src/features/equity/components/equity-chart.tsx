@@ -5,21 +5,25 @@ import {
   CandlestickSeries,
   ColorType,
   createChart,
+  createSeriesMarkers,
   HistogramSeries,
   LineStyle,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
   type Time,
 } from "lightweight-charts";
 import { Eye, EyeOff } from "lucide-react";
-import type { LevelItem, PriceBar } from "../types";
+import type { EventFlagRecord, LevelItem, PriceBar } from "../types";
 
 interface EquityChartProps {
   bars: PriceBar[];
   currency?: string;
   className?: string;
   levels?: LevelItem[];
+  events?: EventFlagRecord[];
 }
 
 export function EquityChart({
@@ -27,11 +31,13 @@ export function EquityChart({
   currency = "INR",
   className = "h-[360px] w-full",
   levels,
+  events,
 }: EquityChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   const [showLevels, setShowLevels] = useState(true);
 
@@ -126,6 +132,9 @@ export function EquityChart({
 
     candleSeriesRef.current = candleSeries;
 
+    const markersPlugin = createSeriesMarkers(candleSeries);
+    markersPluginRef.current = markersPlugin;
+
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: {
         type: "volume",
@@ -155,8 +164,38 @@ export function EquityChart({
       chartRef.current = null;
       candleSeriesRef.current = null;
       priceLinesRef.current = [];
+      markersPluginRef.current = null;
     };
   }, [bars, currency]);
+
+  // Manage event flag markers on chart
+  useEffect(() => {
+    const plugin = markersPluginRef.current;
+    if (!plugin) return;
+
+    if (!events || events.length === 0 || bars.length === 0) {
+      plugin.setMarkers([]);
+      return;
+    }
+
+    const barDates = new Set(bars.map((b) => b.barDate));
+    const sortedEvents = [...events]
+      .filter((e) => barDates.has(e.event_date))
+      .sort((a, b) => a.event_date.localeCompare(b.event_date));
+
+    const markers: SeriesMarker<Time>[] = sortedEvents.map((evt) => {
+      const isManual = evt.origin === "MANUAL";
+      return {
+        time: evt.event_date as Time,
+        position: isManual ? "aboveBar" : "belowBar",
+        color: isManual ? "rgb(245 158 11)" : "rgb(6 182 212)",
+        shape: isManual ? "arrowDown" : "circle",
+        text: evt.headline.length > 20 ? `${evt.headline.slice(0, 18)}…` : evt.headline,
+      };
+    });
+
+    plugin.setMarkers(markers);
+  }, [events, bars]);
 
   // Manage descriptive price lines (Gate L9, Section 5.3)
   useEffect(() => {

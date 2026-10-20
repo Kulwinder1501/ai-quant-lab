@@ -246,8 +246,13 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     expect(fetchedOriginal?.source_url).toBe("https://www.bseindia.com/xml-data/corpfiling/AttachLive/111.pdf");
     expect(fetchedOriginal?.supersedes_id).toBeNull();
 
-    // 4. Verify history in getEventsByStockId contains both revisions
-    const allEvents = await eventFlagRepo.getEventsByStockId(testStockId, { origin: "MANUAL" });
+    // 4. By default, only current revision is returned (superseded original is hidden)
+    const currentEvents = await eventFlagRepo.getEventsByStockId(testStockId, { origin: "MANUAL" });
+    expect(currentEvents.find((e) => e.id === original.id)).toBeUndefined();
+    expect(currentEvents.find((e) => e.id === revised.id)).toBeDefined();
+
+    // 5. With includeHistory: true, both revisions are returned
+    const allEvents = await eventFlagRepo.getEventsByStockId(testStockId, { origin: "MANUAL", includeHistory: true });
     const originalInList = allEvents.find((e) => e.id === original.id);
     const revisedInList = allEvents.find((e) => e.id === revised.id);
     expect(originalInList).toBeDefined();
@@ -842,8 +847,34 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     expect(reOutageRes.totalAlertsEmitted).toBe(0);
     expect(reOutageRes.totalAlertsInserted).toBe(0);
 
-    // Clean up: restore source health to OK so subsequent test suites aren't affected
+    // Clean up: restore source health to OK
     await sourceHealthRepo.setStatus("YAHOO", "chart", "OK");
+
+    // Case C: Non-holiday weekday with 0 bars, BUT chart calls succeeded in source_call_log
+    // (Evidence check: treated as no-new-data day, zero alerts emitted, source_health untouched)
+    const noDataDate = "2026-10-27"; // Tuesday
+    await pool.query(
+      `INSERT INTO equity_research.source_call_log (source, endpoint, status, duration_ms, time)
+       VALUES ('YAHOO', 'chart', 200, 150, ($1::date + time '17:05:00') AT TIME ZONE 'Asia/Kolkata')`,
+      [noDataDate],
+    );
+
+    try {
+      const noDataRes = await evalService.evaluateAll(noDataDate, { symbol: TEST_SYMBOL });
+      expect(noDataRes.totalAlertsEmitted).toBe(0);
+      expect(noDataRes.totalAlertsInserted).toBe(0);
+      expect(noDataRes.message).toContain("treated as no-new-data day");
+
+      // Verify YAHOO source health remained OK (never marked UNAVAILABLE)
+      const healthAfter = await sourceHealthRepo.getHealth("YAHOO", "chart");
+      expect(healthAfter?.status).toBe("OK");
+    } finally {
+      await pool.query(
+        `DELETE FROM equity_research.source_call_log WHERE (time AT TIME ZONE 'Asia/Kolkata')::date = $1::date`,
+        [noDataDate],
+      );
+      await sourceHealthRepo.setStatus("YAHOO", "chart", "OK");
+    }
   });
 
   it("Stored payload invariants: rulesHash is 64-hex SHA-256, disclaimer is EQUITY_ALERT_FOOTER, zero banned words", async () => {

@@ -6,3 +6,5 @@ export * from "./components/equity-watchlist-table";
 export * from "./components/remove-stock-modal";
 export * from "./components/equity-chart";
 export * from "./components/equity-stock-detail-drawer";
+export * from "./components/equity-alerts-inbox";
+export * from "./components/equity-events-panel";

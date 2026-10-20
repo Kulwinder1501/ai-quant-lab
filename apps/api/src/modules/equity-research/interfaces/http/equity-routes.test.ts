@@ -1314,6 +1314,153 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
         const dataManual = await resManual.json();
         expect(dataManual.every((e: any) => e.origin === "MANUAL")).toBe(true);
       });
+
+      it("returns current revisions only by default, and full chain with includeHistory=true (Condition 1)", async () => {
+        // Create an event: Revision 1
+        const r1Res = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "ORDER_WIN",
+            eventDate: "2026-10-21",
+            headline: "Won initial contract rev 1",
+            sourceUrl: "https://bseindia.com/order1.pdf",
+          }),
+        });
+        expect(r1Res.status).toBe(201);
+        const rev1 = await r1Res.json();
+
+        // Edit to Revision 2
+        const r2Res = await fetch(`${baseUrl}/events/${rev1.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Won expanded contract rev 2",
+            sourceUrl: "https://bseindia.com/order2.pdf",
+          }),
+        });
+        expect(r2Res.status).toBe(200);
+        const rev2 = await r2Res.json();
+
+        // Edit to Revision 3
+        const r3Res = await fetch(`${baseUrl}/events/${rev2.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Won final contract rev 3",
+            sourceUrl: "https://bseindia.com/order3.pdf",
+          }),
+        });
+        expect(r3Res.status).toBe(200);
+        const rev3 = await r3Res.json();
+
+        // 1. By default, GET /events returns only current revisions (rev 1 and rev 2 are hidden!)
+        const defaultListRes = await fetch(`${baseUrl}/events?stockId=${testStockId}`);
+        expect(defaultListRes.status).toBe(200);
+        const defaultEvents = await defaultListRes.json();
+        const foundRev1 = defaultEvents.find((e: any) => e.id === rev1.id);
+        const foundRev2 = defaultEvents.find((e: any) => e.id === rev2.id);
+        const foundRev3 = defaultEvents.find((e: any) => e.id === rev3.id);
+
+        expect(foundRev1).toBeUndefined(); // Hidden!
+        expect(foundRev2).toBeUndefined(); // Hidden!
+        expect(foundRev3).toBeDefined();   // Current!
+
+        // 2. With includeHistory=true, GET /events returns the entire revision chain
+        const historyListRes = await fetch(`${baseUrl}/events?stockId=${testStockId}&includeHistory=true`);
+        expect(historyListRes.status).toBe(200);
+        const historyEvents = await historyListRes.json();
+        expect(historyEvents.some((e: any) => e.id === rev1.id)).toBe(true);
+        expect(historyEvents.some((e: any) => e.id === rev2.id)).toBe(true);
+        expect(historyEvents.some((e: any) => e.id === rev3.id)).toBe(true);
+      });
+
+      it("returns 409 Conflict when editing an already-superseded revision to prevent forks (Condition 1)", async () => {
+        // Create an event: revA
+        const createRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "REGULATORY",
+            eventDate: "2026-10-22",
+            headline: "Regulatory notice received revA",
+            sourceUrl: "https://bseindia.com/noticeA.pdf",
+          }),
+        });
+        const revA = await createRes.json();
+
+        // Edit revA -> revB (now revA is superseded by revB)
+        const editRes1 = await fetch(`${baseUrl}/events/${revA.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Regulatory notice updated revB",
+            sourceUrl: "https://bseindia.com/noticeB.pdf",
+          }),
+        });
+        expect(editRes1.status).toBe(200);
+        const revB = await editRes1.json();
+
+        // Attempt to edit revA AGAIN (fork attempt!): Must return 409 Conflict with newerRevisionId
+        const forkAttemptRes = await fetch(`${baseUrl}/events/${revA.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Attempting to fork revA",
+            sourceUrl: "https://bseindia.com/noticeFork.pdf",
+          }),
+        });
+        expect(forkAttemptRes.status).toBe(409);
+        const forkData = await forkAttemptRes.json();
+        expect(forkData.newerRevisionId).toBe(revB.id);
+        expect(forkData.supersededBy).toBe(revB.id);
+      });
+
+      it("validates manual kind: rejects banana and CORPORATE_ACTION with 400 (Condition 2)", async () => {
+        // Reject random string kind
+        const bananaRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "banana",
+            eventDate: "2026-10-22",
+            headline: "Invalid fruit event",
+            sourceUrl: "https://bseindia.com/notice.pdf",
+          }),
+        });
+        expect(bananaRes.status).toBe(400);
+
+        // Reject detected kind from being manually spoofed
+        const detectedSpoofRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "CORPORATE_ACTION",
+            eventDate: "2026-10-22",
+            headline: "Spoofed corporate action",
+            sourceUrl: "https://bseindia.com/notice.pdf",
+          }),
+        });
+        expect(detectedSpoofRes.status).toBe(400);
+
+        // Valid manual kind passes
+        const validRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "RESULTS_DATE_UPCOMING",
+            eventDate: "2026-11-14",
+            headline: "Upcoming Q2 results scheduled",
+            sourceUrl: "https://bseindia.com/results_notice.pdf",
+          }),
+        });
+        expect(validRes.status).toBe(201);
+      });
     });
   });
 });

@@ -203,16 +203,22 @@ export interface AlertWithState {
 
 export type EventFlagOrigin = "DETECTED" | "MANUAL";
 
+export const MANUAL_EVENT_KINDS = [
+  "RESULTS_DATE_UPCOMING",
+  "MATERIAL_NEGATIVE",
+  "ORDER_WIN",
+  "REGULATORY",
+  "MANAGEMENT",
+  "OTHER",
+] as const;
+
+export type ManualEventKind = typeof MANUAL_EVENT_KINDS[number];
+
 export type EventFlagKind =
   | "RESULTS_PUBLISHED"
   | "CORPORATE_ACTION"
   | "LARGE_MOVE_DAY"
-  | "RESULTS_DATE_UPCOMING"
-  | "MATERIAL_NEGATIVE"
-  | "ORDER_WIN"
-  | "REGULATORY"
-  | "MANAGEMENT"
-  | "OTHER"
+  | ManualEventKind
   | string;
 
 export interface EventFlagRecord {
