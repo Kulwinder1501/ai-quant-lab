@@ -249,3 +249,26 @@ def test_quasi_separation_reports_inconclusive_not_falsified():
     assert gp_result["incrementalSurplusPassed"] is False
     assert gp_result["verdict"] == "INCONCLUSIVE_INSUFFICIENT_DATA"
     assert manifest["zoneBoundingVerdicts"]["GOLDEN_POCKET"] == "INCONCLUSIVE_INSUFFICIENT_DATA"
+
+
+def test_observation_episode_net_dealer_gamma_exposure_field():
+    """Verify netDealerGammaExposure is an additive optional field defaulting to None."""
+    ep_default = ObservationEpisode(
+        episodeId="EP_DEF", symbol="NIFTY", sessionDate="2026-10-20", entryTimestamp=1000,
+        isSessionCloseExcluded=False, isTreatment=True, fibZone="GOLDEN_POCKET",
+        hasRealActiveAnchor=True, retracementRatio=0.62, netReturnBps=5.0,
+        impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0, todSin=0.1, todCos=0.2,
+        breadthAd=0.3, l2DepthLiquidity=500.0,
+    )
+    assert ep_default.netDealerGammaExposure is None
+
+    ep_gex = ObservationEpisode(
+        episodeId="EP_GEX", symbol="NIFTY", sessionDate="2026-10-20", entryTimestamp=1000,
+        isSessionCloseExcluded=False, isTreatment=True, fibZone="GOLDEN_POCKET",
+        hasRealActiveAnchor=True, retracementRatio=0.62, netReturnBps=5.0,
+        impulseRange=10.0, yzVolRatio=1.2, anchorAgeBars=5.0, todSin=0.1, todCos=0.2,
+        breadthAd=0.3, l2DepthLiquidity=500.0,
+        netDealerGammaExposure=1234567.89,
+    )
+    assert ep_gex.netDealerGammaExposure == 1234567.89
+

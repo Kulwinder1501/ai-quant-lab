@@ -685,6 +685,7 @@ def _scan_direction(rows, instrument: str, direction: str, timeframe_minutes: in
             "yzVolRatio": vol_ratio_series[idx],
             "ofiValue": ofi_value,
             "breadthAd": breadth_val,
+            "netDealerGammaExposure": fv.netDealerGammaExposure if fv.gexState == "FRESH" else None,
         })
 
     events = scanner.layer1.event_history
@@ -776,6 +777,7 @@ def build_episodes_from_records(records: List[dict], opens: List[float], closes:
             todSin=rec["todSin"], todCos=rec["todCos"],
             breadthAd=rec["breadthAd"],
             l2DepthLiquidity=0.0,
+            netDealerGammaExposure=rec.get("netDealerGammaExposure"),
         ))
     with_ofi = sum(1 for rec in treatments + controls if rec["ofiValue"] is not None)
     return episodes, len(treatments), len(controls), with_ofi

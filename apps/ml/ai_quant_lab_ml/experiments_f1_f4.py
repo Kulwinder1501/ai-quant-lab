@@ -75,6 +75,9 @@ class ObservationEpisode:
     todCos: float
     breadthAd: float
     l2DepthLiquidity: float
+    # Dealer gamma exposure at entry bar (OptionsContext.netDealerGammaExposure when FRESH).
+    # Threaded through additively; does not participate in propensity score matching or covariates.
+    netDealerGammaExposure: Optional[float] = None
 
 
 @dataclass
