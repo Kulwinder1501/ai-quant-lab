@@ -1,0 +1,95 @@
+{
+  "governanceStatus": "RESEARCH_EXECUTION_COMPLETE",
+  "tradingExecutionAuthorized": false,
+  "exploratoryNotice": "EXPLORATORY RESEARCH ONLY -- NOT A TRADING SIGNAL. Depletion-at-unchanged-price is an L2-only proxy for an executed trade, built because no vendor integrated in this system (Fyers, Kite, TrueData) exposes real trade prints with or without aggressor-side classification -- confirmed directly against the installed Fyers SDK's protobuf schema. It is NOT the tick rule (no trade price exists to classify). Compared head-to-head against touch-level OFI (cks_ofi_touch.py), which Phase 28 already found unstable (sign does not replicate across time windows).",
+  "methodology": {
+    "windowMs": 5000,
+    "horizonsMs": [
+      1000,
+      5000,
+      30000
+    ],
+    "priceUsed": "touch mid ((bid+ask)/2) -- not the TS reference's qty-weighted microprice",
+    "icDefinition": "Spearman rank correlation, feature vs forward touch-mid return"
+  },
+  "byContract": [
+    {
+      "symbol": "NSE:BANKNIFTY26AUGFUT",
+      "framesExamined": 89421,
+      "validPairs": 89211,
+      "inferredTradeCount": 12489,
+      "inferredTradeFraction": 0.13999394693479503,
+      "ofiVsDepletionPearsonR": 0.20186858103100006,
+      "ofiVsDepletionSpearmanRho": 0.17881900078898091,
+      "icByHorizon": {
+        "1000": {
+          "ofi": -0.05554165465561227,
+          "depletion": 0.011838338632579376,
+          "nObs": 88859
+        },
+        "5000": {
+          "ofi": -0.045616322672324565,
+          "depletion": 0.022204939451839312,
+          "nObs": 88979
+        },
+        "30000": {
+          "ofi": -0.03595933757145183,
+          "depletion": 0.023258879433251948,
+          "nObs": 88558
+        }
+      }
+    },
+    {
+      "symbol": "NSE:BANKNIFTY26SEPFUT",
+      "framesExamined": 1011042,
+      "validPairs": 889091,
+      "inferredTradeCount": 96543,
+      "inferredTradeFraction": 0.10858618521613649,
+      "ofiVsDepletionPearsonR": -0.015272827269258932,
+      "ofiVsDepletionSpearmanRho": 0.12533465335535554,
+      "icByHorizon": {
+        "1000": {
+          "ofi": -0.027744271326120683,
+          "depletion": 0.007348896188628938,
+          "nObs": 884423
+        },
+        "5000": {
+          "ofi": -0.008665598312846514,
+          "depletion": 0.003230982353523213,
+          "nObs": 885735
+        },
+        "30000": {
+          "ofi": 0.012181223168209219,
+          "depletion": -0.003120675743913172,
+          "nObs": 885788
+        }
+      }
+    },
+    {
+      "symbol": "NSE:BANKNIFTY26OCTFUT",
+      "framesExamined": 572103,
+      "validPairs": 571955,
+      "inferredTradeCount": 29501,
+      "inferredTradeFraction": 0.051579232631937824,
+      "ofiVsDepletionPearsonR": 0.22021009737921893,
+      "ofiVsDepletionSpearmanRho": 0.15935793036314697,
+      "icByHorizon": {
+        "1000": {
+          "ofi": 0.09668762523876606,
+          "depletion": 0.02119172056102325,
+          "nObs": 567506
+        },
+        "5000": {
+          "ofi": 0.12311587639844772,
+          "depletion": 0.03021938953046486,
+          "nObs": 569874
+        },
+        "30000": {
+          "ofi": 0.11599444030083049,
+          "depletion": 0.02535126527643348,
+          "nObs": 570446
+        }
+      }
+    }
+  ]
+}

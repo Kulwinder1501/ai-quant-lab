@@ -183,14 +183,23 @@ def _touch_level_delta(previous: DepthFrameRow, current: DepthFrameRow) -> Optio
     return bid_flow + ask_flow
 
 
-def _split_into_segments(frames: Sequence[DepthFrameRow]) -> List[List[Tuple[datetime, float]]]:
+def split_into_valid_frame_pairs(
+    frames: Sequence[DepthFrameRow],
+) -> List[List[Tuple[DepthFrameRow, DepthFrameRow]]]:
     """
     Port of accumulateOrderFlowImbalance's segmenting: a snapshot, a duplicate, a sequence gap,
     a sequence reset (regression) or a one-sided (not comparable) book all break the chain. The opening frame of the whole
     series (or of a segment) establishes a baseline and contributes no observation of its own.
+
+    Public (shared) because it is the chain-validity rule itself, not just an OFI implementation
+    detail: any other feature computed from consecutive touch-level frames (e.g.
+    depletion_trade_inference.py's book-depletion trade proxy) must honor the exact same breaks,
+    or two features computed from "the same data" would silently disagree about which pairs are
+    even comparable. Yields (previous, current) frame pairs per valid segment; callers derive
+    their own per-pair metric from the pair.
     """
-    segments: List[List[Tuple[datetime, float]]] = []
-    current: List[Tuple[datetime, float]] = []
+    segments: List[List[Tuple[DepthFrameRow, DepthFrameRow]]] = []
+    current: List[Tuple[DepthFrameRow, DepthFrameRow]] = []
     previous: Optional[DepthFrameRow] = None
 
     for frame in frames:
@@ -213,20 +222,28 @@ def _split_into_segments(frames: Sequence[DepthFrameRow]) -> List[List[Tuple[dat
             previous = frame
             continue
 
-        delta = _touch_level_delta(previous, frame)
-        if delta is None:
+        if _touch_level_delta(previous, frame) is None:
             if current:
                 segments.append(current)
             current = []
             previous = frame
             continue
 
-        current.append((frame.received_at, delta))
+        current.append((previous, frame))
         previous = frame
 
     if current:
         segments.append(current)
     return segments
+
+
+def _split_into_segments(frames: Sequence[DepthFrameRow]) -> List[List[Tuple[datetime, float]]]:
+    """OFI's own view of the shared segmenting: each valid pair's touch-level delta, timestamped
+    at the later frame. See split_into_valid_frame_pairs for the chain-validity rule itself."""
+    return [
+        [(current.received_at, _touch_level_delta(previous, current)) for previous, current in segment]
+        for segment in split_into_valid_frame_pairs(frames)
+    ]
 
 
 def compute_windowed_ofi_series(frames: Sequence[DepthFrameRow]) -> List[OfiWindowObservation]:
