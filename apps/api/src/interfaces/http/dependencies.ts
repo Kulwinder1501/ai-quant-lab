@@ -4,6 +4,8 @@ import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { LiveQuoteCache } from "../../infrastructure/market-data/live-quote-cache.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
+import { QuoteSessionClock, UiQuoteBudget } from "../../infrastructure/market-data/quote-guards.js";
+import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
 import { StreamFirstQuoteReader } from "../../infrastructure/market-data/stream-first-quote-reader.js";
 import type { MarketQuoteReader } from "../../modules/market-data/domain/market-quote.js";
 import { ProviderRoutedQuoteClient } from "../../infrastructure/market-data/provider-routed-quote-client.js";
@@ -116,9 +118,30 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
   // Spot prices come from the live socket's ticks when they are fresh, and Fyers REST only refreshes the base they are
   // laid over (previous close, open, volume). The market-watch and live-agent streams asked REST for the same few
   // symbols every 2.5 seconds per open tab; see stream-first-quote-reader.ts.
+  // The API stops asking Fyers for quotes that cannot have changed (market shut) and caps what the browser may spend.
+  // On 2026-10-20, a holiday, an open dashboard tab used 4,779 of the day's 5,000 requests with nothing new to show.
+  const quoteSessionClock = options.streamQuotes
+    ? new QuoteSessionClock(async () => {
+      const result = await pool.query("SELECT holiday_date::text AS holiday FROM nse_holidays WHERE holiday_date >= CURRENT_DATE - 1");
+      return (result.rows as Array<{ holiday: string }>).map((row) => row.holiday);
+    })
+    : null;
+  const requestLedger = new PostgresFyersRequestLedger(pool);
+  const uiQuoteBudget = options.streamQuotes
+    ? new UiQuoteBudget(() => requestLedger.getDailyEndpointTotal(
+      new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10),
+      "quotes:api",
+    ))
+    : null;
   const streamFirst = (inner: MarketQuoteReader): MarketQuoteReader =>
     options.streamQuotes
-      ? new StreamFirstQuoteReader({ inner, ticks: liveQuoteCache, subscriber: fyersLiveStreamer })
+      ? new StreamFirstQuoteReader({
+        inner,
+        ticks: liveQuoteCache,
+        subscriber: fyersLiveStreamer,
+        ...(quoteSessionClock === null ? {} : { isSessionOpen: () => quoteSessionClock.isOpen() }),
+        ...(uiQuoteBudget === null ? {} : { restBudget: uiQuoteBudget }),
+      })
       : inner;
 
   // Identical quote requests within this window share one Fyers call. The UI's live-price, market-watch and live-agent

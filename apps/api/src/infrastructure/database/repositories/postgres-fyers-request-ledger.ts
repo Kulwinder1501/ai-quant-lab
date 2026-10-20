@@ -34,6 +34,17 @@ export class PostgresFyersRequestLedger {
     return Number(result.rows[0]?.total ?? 0);
   }
 
+  /** One endpoint's total for a day, across every process that reports to the ledger. */
+  async getDailyEndpointTotal(dateKey: string, endpoint: string): Promise<number> {
+    const result = await this.pool.query<{ total: string }>(
+      `SELECT COALESCE(SUM(request_count), 0)::text as total
+       FROM fyers_daily_request_ledger
+       WHERE date_key = $1 AND endpoint = $2;`,
+      [dateKey, endpoint],
+    );
+    return Number(result.rows[0]?.total ?? 0);
+  }
+
   /**
    * Connects this ledger instance to the process's global fyersRequestCounter.
    * Any Fyers REST request executed by this process will be recorded to this database ledger

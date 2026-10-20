@@ -43,12 +43,29 @@ export interface StreamFirstQuoteReaderOptions {
    * its last three contracts.
    */
   maxStreamedSymbols?: number;
+  /**
+   * Whether the exchange is in session. While it is not, a quote is the last close and cannot change, so a quote
+   * already held is served for up to `closedSessionBaseMaxAgeMs` instead of asking REST again. Without this, every
+   * open dashboard stream sent a request each 2.5 seconds all night and on holidays: the API spent 4,779 of the
+   * 5,000-a-day quota by mid-afternoon on 2026-10-20 (Dussehra) with nothing new to show. Absent means always open.
+   */
+  isSessionOpen?: () => boolean;
+  closedSessionBaseMaxAgeMs?: number;
+  /**
+   * A cap on what the browser may spend. When it says no, held quotes are served (up to `budgetSpentBaseMaxAgeMs`
+   * old, with a fresh tick laid over them) and REST is not called for anything already held. A symbol never held is
+   * still fetched once, so a new panel is not left blank.
+   */
+  restBudget?: { allow(): boolean };
+  budgetSpentBaseMaxAgeMs?: number;
   now?: () => number;
 }
 
 const DEFAULT_MAX_TICK_AGE_MS = 10_000;
 const DEFAULT_BASE_MAX_AGE_MS = 5 * 60_000;
 const DEFAULT_MAX_STREAMED_SYMBOLS = 8;
+const DEFAULT_CLOSED_SESSION_BASE_MAX_AGE_MS = 30 * 60_000;
+const DEFAULT_BUDGET_SPENT_BASE_MAX_AGE_MS = 12 * 60 * 60_000;
 
 /** The base quote with the live price laid over it. */
 export function overlayTick(base: MarketQuote, price: number, observedAt: Date): MarketQuote {
@@ -74,6 +91,8 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
   private readonly maxTickAgeMs: number;
   private readonly baseMaxAgeMs: number;
   private readonly maxStreamedSymbols: number;
+  private readonly closedSessionBaseMaxAgeMs: number;
+  private readonly budgetSpentBaseMaxAgeMs: number;
   private readonly now: () => number;
 
   constructor(private readonly options: StreamFirstQuoteReaderOptions) {
@@ -81,7 +100,31 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
     this.maxTickAgeMs = options.maxTickAgeMs ?? DEFAULT_MAX_TICK_AGE_MS;
     this.baseMaxAgeMs = options.baseMaxAgeMs ?? DEFAULT_BASE_MAX_AGE_MS;
     this.maxStreamedSymbols = options.maxStreamedSymbols ?? DEFAULT_MAX_STREAMED_SYMBOLS;
+    this.closedSessionBaseMaxAgeMs = options.closedSessionBaseMaxAgeMs ?? DEFAULT_CLOSED_SESSION_BASE_MAX_AGE_MS;
+    this.budgetSpentBaseMaxAgeMs = options.budgetSpentBaseMaxAgeMs ?? DEFAULT_BUDGET_SPENT_BASE_MAX_AGE_MS;
     this.now = options.now ?? Date.now;
+  }
+
+  /**
+   * Every requested symbol from the quotes already held, or null to go on to the normal path. Only answers when the
+   * session is closed or the budget is spent; in an open session with budget left, the tick-and-base logic below
+   * decides, exactly as before.
+   */
+  private answerFromHeldQuotes(canonical: readonly string[]): Map<string, MarketQuote> | null {
+    const sessionOpen = this.options.isSessionOpen?.() ?? true;
+    const budgetSpent = this.options.restBudget?.allow() === false;
+    if (sessionOpen && !budgetSpent) return null;
+
+    const nowMs = this.now();
+    const maxAgeMs = budgetSpent ? this.budgetSpentBaseMaxAgeMs : this.closedSessionBaseMaxAgeMs;
+    const answers = new Map<string, MarketQuote>();
+    for (const symbol of canonical) {
+      const base = this.bases.get(symbol);
+      if (base === undefined || nowMs - base.at > maxAgeMs) return null;
+      const tick = this.options.ticks.lastPrice(this.resolveProviderSymbol(symbol), this.maxTickAgeMs, nowMs);
+      answers.set(symbol, tick === null ? base.quote : overlayTick(base.quote, tick.price, tick.observedAt));
+    }
+    return answers;
   }
 
   async quoteSymbol(symbol: string): Promise<MarketQuote | null> {
@@ -91,7 +134,17 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
   async quoteSymbols(symbols: readonly string[]): Promise<Map<string, MarketQuote>> {
     const canonical = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
     if (canonical.length === 0) return new Map();
-    if (canonical.length > this.maxStreamedSymbols) return this.options.inner.quoteSymbols(canonical);
+
+    const held = this.answerFromHeldQuotes(canonical);
+    if (held !== null) return held;
+
+    if (canonical.length > this.maxStreamedSymbols) {
+      const fetchedAt = this.now();
+      const fetched = await this.options.inner.quoteSymbols(canonical);
+      // Kept so a closed session or a spent budget can serve the next request without REST.
+      for (const [symbol, quote] of fetched) this.bases.set(symbol, { quote, at: fetchedAt });
+      return fetched;
+    }
 
     const nowMs = this.now();
     const answers = new Map<string, MarketQuote>();
