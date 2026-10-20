@@ -541,5 +541,71 @@ describe("EquityEodCollector and Land-First parser (Gates S2, S3, S4, S8)", () =
     expect(result.totalBarsInserted).toBe(1);
     expect(mockAlertsService.evaluateAll).toHaveBeenCalled();
   });
+
+  it("completes collection and runs alerts evaluation when alerts service hook is healthy", async () => {
+    const mockWatchlistRepo = {
+      findActiveStocks: vi.fn().mockResolvedValue([mockStock]),
+      setRebackfillNeeded: vi.fn().mockResolvedValue(undefined),
+      setRebackfillStatus: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockRawRepo = {
+      saveRawRecord: vi.fn().mockImplementation(async (r) => ({
+        id: "raw-1",
+        ...r,
+        requested_at: new Date(),
+      })),
+      appendWarnings: vi.fn(),
+    };
+    const mockPriceRepo = {
+      hasBars: vi.fn().mockResolvedValue(true),
+      saveBars: vi.fn().mockResolvedValue({ inserted: 1, revisions: 0, unchanged: 0, restatedDates: [] }),
+    };
+    const mockClient = {
+      fetchChart: vi.fn().mockResolvedValue({
+        httpStatus: 200,
+        body: sampleChartBody,
+        bodySha256: "hash123",
+        outcome: "OK",
+        warnings: [],
+        requestedAt: new Date(),
+      }),
+      fetchFundamentals: vi.fn().mockResolvedValue({
+        httpStatus: 200,
+        body: sampleFundBody,
+        outcome: "OK",
+        warnings: [],
+        requestedAt: new Date(),
+      }),
+    };
+    const mockAlertsService = {
+      evaluateAll: vi.fn().mockResolvedValue({
+        evaluationDate: "2026-10-20",
+        totalStocks: 1,
+        stocksEvaluated: 1,
+        stocksSkipped: 0,
+        totalAlertsEmitted: 2,
+        totalAlertsInserted: 2,
+        totalAlertsSkipped: 0,
+        results: [],
+      }),
+    };
+
+    const collector = new EquityEodCollector(
+      mockWatchlistRepo as any,
+      mockRawRepo as any,
+      mockPriceRepo as any,
+      { saveActions: vi.fn().mockResolvedValue({ inserted: 0 }) } as any,
+      { saveFacts: vi.fn().mockResolvedValue({ inserted: 0 }) } as any,
+      { upsertQuote: vi.fn() } as any,
+      mockClient as any,
+      mockAlertsService as any,
+    );
+
+    const result = await collector.collectAll();
+    expect(result.successfulStocks).toBe(1);
+    expect(result.failedStocks).toBe(0);
+    expect(result.totalBarsInserted).toBe(1);
+    expect(mockAlertsService.evaluateAll).toHaveBeenCalledTimes(1);
+  });
 });
 
