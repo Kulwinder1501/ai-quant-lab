@@ -106,8 +106,9 @@ To determine whether `netDealerGammaExposure` contains any predictive informatio
 
 ### 4.3 Statistical Test & Falsification Posture
 - Modeled directly on [apps/ml/oi_pcr_signal_check.py](../apps/ml/oi_pcr_signal_check.py).
-- **Association:** Spearman rank correlation and Pearson correlation between continuous `netDealerGammaExposure` and forward `netReturnBps`.
-- **Regime Comparison:** Welch's two-sample t-test and session-block bootstrap difference in means between Short Gamma (`GEX < 0`) and Long Gamma (`GEX > 0`).
+- **Overlapping-Window Confound (Critical Statistical Hazard):** Each 5m bar evaluates forward returns over a 15-minute (3-bar) horizon. Bar $i$'s window $[i+1, i+3]$ and Bar $i+1$'s window $[i+2, i+4]$ share 2 of 3 bars. Standard tests assuming independent observations (Pearson/Spearman correlation and Welch's t-test) will suffer severe variance underestimation and manufacture artificially deflated p-values from intra-session serial dependence.
+- **Sole Primary Decision-Bearing Test:** The **session-block bootstrap difference in means** (`_session_bootstrap_means` from `experiments_f1_f4.py`) is the sole primary, decision-bearing test. By resampling entire sessions as indivisible blocks, it preserves the true intraday autocorrelation and serial dependence structure. A finding of significance requires the 95% session-block bootstrap CI on $\overline{\text{netReturnBps}}_{S^-} - \overline{\text{netReturnBps}}_{S^+}$ to exclude zero.
+- **Descriptive-Only Metrics:** Pearson $r$, Spearman $\rho$, and Welch's two-sample $t$-test are demoted to descriptive diagnostics only and must be explicitly labeled: *"not a significance claim, confounded by window overlap."*
 - **Baseline Benchmarking:** If discretized into binary direction (positive vs. negative net return), report **both** accuracy and macro-F1 against the trivial majority baseline (preventing F1 artifacts from masking accuracy edges).
 
 ---
@@ -121,8 +122,8 @@ Track 2 tests the literal interaction hypothesis: does conditioning the Phase C 
 - **Counterfactual Control Cohort:** Non-zone observations from the same live anchors prior to first zone contact.
 - **Matching Algorithm:** Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement (`PropensityMatcher.match_1to1_deterministic`), with:
   - Exact match on instrument (`symbol`) and session (`sessionDate`).
-  - Caliper $\le 0.20$ standard deviations of logit propensity scores.
-  - Maximum temporal distance $\le 60$ minutes (`SAME_SESSION_MATCH_WINDOW_MS`).
+  - Caliper $\le 0.20$ standard deviations of logit propensity scores (`PROPENSITY_CALIPER_SD = 0.20`).
+  - Maximum temporal distance $\le 30$ minutes (`SAME_SESSION_MATCH_WINDOW_MS = 30 * 60 * 1000`, the frozen spec value restored on 2026-10-10).
 
 ### 5.2 Conditioning Rule
 For each matched pair, the treatment episode's GEX regime is determined strictly at the moment of entry bar contact:
