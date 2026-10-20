@@ -44,6 +44,16 @@ export interface MarketContextObservationInput {
    * require them; trend fields become UNKNOWN / null without them.
    */
   higherTimeframeContexts?: Partial<Record<HistoricalTimeframe, StrategyMarketContext>>;
+  /**
+   * Loads the latest closed 5m / 15m context of the index at or before `asOf`. Used when the caller has not attached
+   * contexts itself: the live bot never did, so all 53 stamps up to 2026-10-20 read htf UNKNOWN. A failed load leaves
+   * that timeframe UNKNOWN; it never fails the stamp.
+   */
+  loadHigherTimeframeContext?: (input: {
+    instrumentId: string;
+    timeframe: HistoricalTimeframe;
+    asOf: Date;
+  }) => Promise<StrategyMarketContext | null>;
 }
 
 function indiaDate(instant: Date): string {
@@ -227,7 +237,21 @@ export async function observeMarketContext(input: MarketContextObservationInput)
       swingLevels = [];
     }
 
-    const slices = trendSlicesFromHigherTimeframeContexts(input.higherTimeframeContexts);
+    let higherTimeframeContexts = input.higherTimeframeContexts;
+    if (higherTimeframeContexts === undefined && input.loadHigherTimeframeContext) {
+      const attached: Partial<Record<HistoricalTimeframe, StrategyMarketContext>> = {};
+      for (const timeframe of ["5m", "15m"] as const) {
+        try {
+          const htf = await input.loadHigherTimeframeContext({ instrumentId: String(indexId), timeframe, asOf: completedBefore });
+          // Same anti-lookahead assertion as the idea generator: an unclosed bar is dropped, not used.
+          if (htf && htf.candle.closeTime.getTime() <= completedBefore.getTime()) attached[timeframe] = htf;
+        } catch {
+          // UNKNOWN for this timeframe.
+        }
+      }
+      higherTimeframeContexts = attached;
+    }
+    const slices = trendSlicesFromHigherTimeframeContexts(higherTimeframeContexts);
     const atr = atr14(sessionBars);
     const map = buildMarketContextMap({
       sessionBars,

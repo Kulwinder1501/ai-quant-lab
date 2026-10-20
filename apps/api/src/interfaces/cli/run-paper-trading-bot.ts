@@ -330,9 +330,10 @@ async function main(): Promise<void> {
     const nseStrategies = liveTradableStrategies().filter(
       (strategy) => strategy.registration.strategyKey !== "momentum-scalp-gold",
     );
+    const marketContextRepository = new PostgresStrategyMarketContextRepository(database);
     const generator = new GenerateTradeIdeas(
       new PostgresStrategyVersionRepository(database),
-      new PostgresStrategyMarketContextRepository(database),
+      marketContextRepository,
       new PostgresTradeIdeaRepository(database),
       nseStrategies,
     );
@@ -581,6 +582,7 @@ async function main(): Promise<void> {
                 tradeIdeaId,
                 direction: entry.underlyingDirection,
                 now,
+                loadHigherTimeframeContext: (query) => marketContextRepository.findCompletedBefore(query),
               })
               : null;
             // Log-only as well: where this entry sits against the prior session's volume profile. Last in
