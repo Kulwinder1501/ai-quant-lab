@@ -140,19 +140,23 @@ For each matched pair, the treatment episode's GEX regime is determined strictly
 
 ### 5.4 Test Statistic (Applicable Only if Floor Passes)
 If and only if both buckets meet the $n \ge 15$ floor:
-$$\widehat{\Delta}_{\text{interaction}} = \overline{\text{netReturnBps}}_{S^-} - \overline{\text{netReturnBps}}_{S^+}$$
-- Standard Error and 95% Confidence Interval computed via session-block bootstrap (`_session_bootstrap_means` from `experiments_f1_f4.py`).
-- Minimum Detectable Effect (MDE) reported at $\alpha = 0.05, \beta = 0.20$.
+$$\widehat{\Delta}_{\text{interaction}} = \overline{\Delta\text{NetReturnBps}}_{S^-} - \overline{\Delta\text{NetReturnBps}}_{S^+}$$
+where $\Delta\text{NetReturnBps} = \text{netReturnBps}_{\text{treatment}} - \text{netReturnBps}_{\text{control}}$ is the matched pair's causal incremental surplus over its own counterfactual anchor control (`pair.deltaNetReturnBps`).
+- **Crucial Methodological Guard:** Testing raw treatment returns (`treat_ep.netReturnBps`) across GEX buckets is strictly prohibited because it conflates general market drift (GEX predicting market movement for all assets) with a specific Fibonacci setup interaction. The test must operate on matched pair deltas.
+- **Null-Centered Session-Block Bootstrap:** Standard Error and 95% One-Sided Confidence Interval (5th percentile lower bound) computed via session-block bootstrap resampling whole sessions. One-sided p-value is computed by shifting the bootstrap distribution to the 0.0 null boundary following the pipeline's exact house convention (`run_null_centered_bootstrap`).
+- **Verdict Rule:** `SUPPORTED` if `lowerCi95Bps > 0.0`, else `FALSIFIED`.
+- Minimum Detectable Effect (MDE) reported at $\alpha = 0.05, \beta = 0.20$ via $\text{MDE} = 2.4865 \times \text{SE}$.
 
 ---
 
 ## 6. Synthetic Plumbing Validation Gate
 
-In accordance with Phase C pipeline protocol (Contract v1.4.1), no empirical outcome from real data will be computed or reported until the statistical machinery passes synthetic validation:
+In accordance with Phase C pipeline protocol (Contract v1.4.1), no empirical outcome from real data will be computed or reported until the statistical machinery passes synthetic validation across four mandatory gates:
 
-1. **Injected Interaction Validation:** Generate synthetic episodes with a known injected GEX interaction ($\Delta = +10.0\text{ bps}$ in short gamma vs. $-2.0\text{ bps}$ in long gamma; $n \ge 50$ per bucket). The code must correctly recover the sign and reach `SUPPORTED`.
-2. **Known Null Validation:** Generate synthetic episodes with zero interaction ($\Delta = 0.0\text{ bps}$; identical outcome distributions across GEX sign). The code must reach `FALSIFIED` or null without false-positive inflation.
-3. **Floor Enforcement Validation:** Generate synthetic episodes with $n = 12$ matched pairs (9 vs. 3). The code must strictly emit `INCONCLUSIVE_INSUFFICIENT_DATA` and refuse point estimation.
+1. **Injected Interaction Validation (Gate A):** Generate synthetic episodes with a known injected GEX interaction ($\Delta = +10.0\text{ bps}$ in short gamma vs. $-2.0\text{ bps}$ in long gamma; $n \ge 50$ per bucket). The code must correctly recover the sign and reach `SUPPORTED`.
+2. **Known Null Validation (Gate B):** Generate synthetic episodes with zero interaction ($\Delta = 0.0\text{ bps}$; identical outcome distributions across GEX sign). The code must reach `FALSIFIED` or null without false-positive inflation.
+3. **Floor Enforcement Validation (Gate C):** Generate synthetic episodes with $n = 12$ matched pairs (9 vs. 3). The code must strictly emit `INCONCLUSIVE_INSUFFICIENT_DATA` and refuse point estimation.
+4. **General Market-Drift Confound Discrimination (Gate D):** Generate synthetic episodes where GEX predicts market direction for both treatments and controls equally (+15 bps in short gamma, -5 bps in long gamma for both cohorts) while Fibonacci adds a constant +5.0 bps edge across all regimes ($\Delta_{\text{short}} = \Delta_{\text{long}} = +5.0\text{ bps}$, true interaction $\Delta_{\text{interaction}} = 0.0\text{ bps}$). The code must correctly identify that the interaction is null, emit `FALSIFIED`, and prove it cannot be fooled by general market drift.
 
 ---
 

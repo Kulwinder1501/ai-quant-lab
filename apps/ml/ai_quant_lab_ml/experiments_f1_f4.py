@@ -172,7 +172,7 @@ class PropensityMatcher:
         """
         Deterministic 1:1 Nearest-Neighbor Propensity Matching without replacement.
         Restricted to same-symbol, same-session observations, delta_t <= SAME_SESSION_MATCH_WINDOW_MS
-        (60 minutes; widened from the spec's original 30 -- see that constant's own comment).
+        (30 minutes; restored to spec on 2026-10-10 -- see that constant's own comment).
         Primary tie-break = logit distance; Secondary tie-break = episodeId ascending.
         Common-support overlap trimmed strictly on logit scores.
 
