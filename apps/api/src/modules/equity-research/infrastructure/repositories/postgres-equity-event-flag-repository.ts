@@ -22,6 +22,17 @@ export interface ManualEventInput {
   supersedesId?: string | null; // Revision pointer (Gate E9)
 }
 
+export interface EventFlagQueryFilter {
+  stockId?: string;
+  symbol?: string;
+  origin?: EventFlagOrigin;
+  kind?: string;
+  from?: string; // YYYY-MM-DD
+  to?: string;   // YYYY-MM-DD
+  limit?: number;
+  offset?: number;
+}
+
 export class PostgresEquityEventFlagRepository {
   constructor(private readonly db: DatabaseQueryable) {}
 
@@ -225,6 +236,108 @@ export class PostgresEquityEventFlagRepository {
           : (r.detail_json as Record<string, unknown>),
       supersedes_id: r.supersedes_id,
       created_at: r.created_at,
+    }));
+  }
+
+  /**
+   * Queries event flags with optional filtering across stocks.
+   */
+  async getEvents(filter?: EventFlagQueryFilter): Promise<EventFlagRecord[]> {
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+
+    if (filter?.stockId) {
+      values.push(filter.stockId);
+      conditions.push(`e.stock_id = $${values.length}`);
+    }
+
+    if (filter?.symbol) {
+      values.push(filter.symbol.trim().toUpperCase());
+      conditions.push(`w.symbol = $${values.length}`);
+    }
+
+    if (filter?.origin) {
+      values.push(filter.origin);
+      conditions.push(`e.origin = $${values.length}`);
+    }
+
+    if (filter?.kind) {
+      values.push(filter.kind);
+      conditions.push(`e.kind = $${values.length}`);
+    }
+
+    if (filter?.from) {
+      values.push(filter.from);
+      conditions.push(`e.event_date >= $${values.length}::date`);
+    }
+
+    if (filter?.to) {
+      values.push(filter.to);
+      conditions.push(`e.event_date <= $${values.length}::date`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const limit = filter?.limit ?? 100;
+    values.push(limit);
+    const limitClause = `LIMIT $${values.length}`;
+
+    let offsetClause = "";
+    if (filter?.offset) {
+      values.push(filter.offset);
+      offsetClause = `OFFSET $${values.length}`;
+    }
+
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      kind: string;
+      origin: EventFlagOrigin;
+      event_date: string;
+      headline: string;
+      source_url: string | null;
+      detail_json: unknown;
+      supersedes_id: string | null;
+      created_at: Date;
+      symbol?: string;
+    }>(
+      `
+      SELECT
+        e.id,
+        e.stock_id,
+        e.kind,
+        e.origin,
+        e.event_date::text AS event_date,
+        e.headline,
+        e.source_url,
+        e.detail_json,
+        e.supersedes_id,
+        e.created_at,
+        w.symbol
+      FROM equity_research.event_flag e
+      LEFT JOIN equity_research.watchlist_stock w ON e.stock_id = w.id
+      ${whereClause}
+      ORDER BY e.event_date DESC, e.created_at DESC
+      ${limitClause}
+      ${offsetClause}
+      `,
+      values,
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      stock_id: r.stock_id,
+      kind: r.kind,
+      origin: r.origin,
+      event_date: r.event_date.split("T")[0],
+      headline: r.headline,
+      source_url: r.source_url,
+      detail_json:
+        typeof r.detail_json === "string"
+          ? JSON.parse(r.detail_json)
+          : (r.detail_json as Record<string, unknown>),
+      supersedes_id: r.supersedes_id,
+      created_at: r.created_at,
+      symbol: r.symbol,
     }));
   }
 

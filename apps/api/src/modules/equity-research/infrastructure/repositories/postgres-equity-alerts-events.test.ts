@@ -52,6 +52,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     eventFlagRepo = new PostgresEquityEventFlagRepository(pool);
     sourceHealthRepo = new PostgresEquitySourceHealthRepository(pool);
     corporateActionRepo = new PostgresEquityCorporateActionRepository(pool);
+    process.env.NSE_HOLIDAYS = "2026-05-01";
     evalService = new EquityAlertsEvaluationService(
       watchlistRepo,
       priceBarRepo,
@@ -80,6 +81,8 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
       await cleanupStockBySymbol(TEST_SYMBOL);
       await cleanupStockBySymbol(TEST_TMPV_SYMBOL);
       await cleanupStockBySymbol(TEST_MISSING_SYMBOL);
+      await sourceHealthRepo.setStatus("YAHOO", "chart", "OK");
+      await sourceHealthRepo.setStatus("YAHOO", "quote", "OK");
     } finally {
       await pool.end();
     }
@@ -649,6 +652,198 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     expect(errAlert?.payload_json.reason).toContain("Simulated transient connection timeout");
     expect(errAlert?.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
     expect(errAlert?.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+  });
+
+  it("Condition 1: newly added stock with historical 2008 split gets no alert, and a split on the evaluation date does", async () => {
+    const TEST_COND1_SYMBOL = "TESTSPLIT08";
+    await cleanupStockBySymbol(TEST_COND1_SYMBOL);
+
+    const stock = await watchlistRepo.addStock({
+      exchange: "NSE",
+      symbol: TEST_COND1_SYMBOL,
+      yahooSymbol: `${TEST_COND1_SYMBOL}.NS`,
+      displayName: "Synthetic Stock With 2008 Split",
+    });
+
+    try {
+      // Seed historical bars up to 2026-10-16
+      const barsToInsert = [];
+      const baseDate = new Date("2026-09-15T00:00:00Z");
+      for (let i = 0; i < 40; i++) {
+        const d = new Date(baseDate.getTime() + i * 86400000);
+        const dayOfWeek = d.getUTCDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+        const dateStr = d.toISOString().split("T")[0];
+        if (dateStr > "2026-10-16") break;
+        barsToInsert.push({
+          stockId: stock.id,
+          barDate: dateStr,
+          open: 100,
+          high: 105,
+          low: 95,
+          close: 102,
+          volume: 50000,
+        });
+      }
+      await priceBarRepo.saveBars(barsToInsert);
+
+      // Insert historical 2008 split added today (first_seen_at = today, but ex_date = 2008-06-15)
+      await pool.query(
+        `
+        INSERT INTO equity_research.corporate_action (
+          id, stock_id, ex_date, kind, value, source, first_seen_at
+        ) VALUES (
+          gen_random_uuid(), $1, '2008-06-15', 'SPLIT', 2.0, $2, CURRENT_TIMESTAMP
+        )
+        `,
+        [stock.id, TEST_SOURCE],
+      );
+
+      // Evaluating on 2026-10-16: 2008 split MUST NOT produce any alert!
+      await evalService.evaluateStock(stock, "2026-10-16");
+      const alerts1 = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-16" });
+      const falseSplitAlert = alerts1.find((a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "SPLIT");
+      expect(falseSplitAlert).toBeUndefined();
+
+      // Now insert a real SPLIT effective on evaluation date 2026-10-16
+      await pool.query(
+        `
+        INSERT INTO equity_research.corporate_action (
+          id, stock_id, ex_date, kind, value, source, first_seen_at
+        ) VALUES (
+          gen_random_uuid(), $1, '2026-10-16', 'SPLIT', 5.0, $2, CURRENT_TIMESTAMP
+        )
+        `,
+        [stock.id, TEST_SOURCE],
+      );
+
+      // Clear alerts and re-evaluate with real split
+      await pool.query(`DELETE FROM equity_research.alert WHERE stock_id = $1`, [stock.id]);
+      const eval2 = await evalService.evaluateStock(stock, "2026-10-16");
+      expect(eval2.evaluated).toBe(true);
+
+      const alerts2 = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-16" });
+      const realSplitAlert = alerts2.find((a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "SPLIT");
+      expect(realSplitAlert).toBeDefined();
+      expect(realSplitAlert?.title).toContain("Stock split effective on 2026-10-16");
+    } finally {
+      await cleanupStockBySymbol(TEST_COND1_SYMBOL);
+    }
+  });
+
+  it("Condition 2: repeated evaluation errors throttle over consecutive days and carry lastKnownClose or null", async () => {
+    const TEST_ERR_SYMBOL = "TESTERRSTK";
+    await cleanupStockBySymbol(TEST_ERR_SYMBOL);
+
+    const stock = await watchlistRepo.addStock({
+      exchange: "NSE",
+      symbol: TEST_ERR_SYMBOL,
+      yahooSymbol: `${TEST_ERR_SYMBOL}.NS`,
+      displayName: "Synthetic Error Throttle Stock",
+    });
+
+    try {
+      // Insert one bar on 2026-10-13 so lastKnownClose = 150.5
+      await priceBarRepo.saveBars([
+        {
+          stockId: stock.id,
+          barDate: "2026-10-13",
+          open: 150,
+          high: 152,
+          low: 149,
+          close: 150.5,
+          volume: 10000,
+        },
+      ]);
+
+      const failingPriceBar = {
+        getBarsUpToDate: vi.fn().mockImplementation((stockId: string, date: string, limit: number) => {
+          if (stockId === stock.id && limit === 600) {
+            throw new Error("Repeated persistent timeout");
+          }
+          return priceBarRepo.getBarsUpToDate(stockId, date, limit);
+        }),
+        hasAnyBarOnDate: vi.fn().mockResolvedValue(true),
+      } as unknown as PostgresEquityPriceBarRepository;
+
+      const failingService = new EquityAlertsEvaluationService(
+        watchlistRepo,
+        failingPriceBar,
+        alertRepo,
+        eventFlagRepo,
+        sourceHealthRepo,
+        corporateActionRepo,
+        new Set(["2026-05-01"]),
+      );
+
+      // Day 1: 2026-10-14 -> enters unhealthy state
+      const resDay1 = await failingService.evaluateAll("2026-10-14", { symbol: stock.symbol });
+      expect(resDay1.totalAlertsEmitted).toBe(1);
+      expect(resDay1.totalAlertsInserted).toBe(1);
+      const day1Alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-14" });
+      const day1Err = day1Alerts.find((a) => a.kind === "DATA_HEALTH");
+      expect(day1Err).toBeDefined();
+      expect(day1Err?.payload_json.subtype).toBe("UNHEALTHY_ENTER");
+      expect(day1Err?.payload_json.close).toBe(150.5); // lastKnownClose, NOT 0!
+
+      // Day 2: 2026-10-15 -> throttled! 0 alerts emitted, 0 alerts inserted (not hardcoded to 1)
+      const resDay2 = await failingService.evaluateAll("2026-10-15", { symbol: stock.symbol });
+      expect(resDay2.totalAlertsEmitted).toBe(0);
+      expect(resDay2.totalAlertsInserted).toBe(0);
+      expect(resDay2.results[0].alertsInserted).toBe(0);
+
+      // Day 3: 2026-10-16 -> still throttled!
+      const resDay3 = await failingService.evaluateAll("2026-10-16", { symbol: stock.symbol });
+      expect(resDay3.totalAlertsEmitted).toBe(0);
+      expect(resDay3.totalAlertsInserted).toBe(0);
+
+      // Day 6: 2026-10-20 (diffDays = 6 >= 5) -> reminder UNHEALTHY_REPEAT emitted
+      const resDay6 = await failingService.evaluateAll("2026-10-20", { symbol: stock.symbol });
+      expect(resDay6.totalAlertsEmitted).toBe(1);
+      expect(resDay6.totalAlertsInserted).toBe(1);
+      const day6Alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-20" });
+      const day6Err = day6Alerts.find((a) => a.kind === "DATA_HEALTH");
+      expect(day6Err?.payload_json.subtype).toBe("UNHEALTHY_REPEAT");
+      expect(day6Err?.payload_json.close).toBe(150.5); // not 0!
+    } finally {
+      await cleanupStockBySymbol(TEST_ERR_SYMBOL);
+    }
+  });
+
+  it("Condition 3: full outage on non-holiday weekday raises source-level data-health notice, while listed holiday produces 0 alerts", async () => {
+    // Case A: Exchange holiday in NSE_HOLIDAYS (2026-05-01 is in test holidays)
+    // 0 bars stored anywhere in database on 2026-05-01
+    const holidayRes = await evalService.evaluateAll("2026-05-01");
+    expect(holidayRes.totalAlertsEmitted).toBe(0);
+    expect(holidayRes.stocksEvaluated).toBe(0);
+    expect(holidayRes.message).toContain("Exchange holiday (2026-05-01); zero alerts evaluated");
+
+    // Case B: Non-holiday weekday with 0 bars stored anywhere in database (2026-10-28, a Wednesday)
+    // 2026-10-28 is NOT in NSE_HOLIDAYS
+    await alertRepo.deleteAlertsForStock(testStockId);
+    const outageDate = "2026-10-28";
+    const outageRes = await evalService.evaluateAll(outageDate, { symbol: TEST_SYMBOL });
+    expect(outageRes.totalAlertsEmitted).toBeGreaterThanOrEqual(1);
+    expect(outageRes.totalAlertsInserted).toBeGreaterThanOrEqual(1);
+
+    // Source health status updated to mark outage
+    const health = await sourceHealthRepo.getHealth("YAHOO", "chart");
+    expect(health).toBeDefined();
+
+    // Data-health alert emitted for stock
+    const alerts = await alertRepo.getAlerts({ stockId: testStockId, evaluatedDate: outageDate });
+    const outageAlert = alerts.find((a) => a.kind === "DATA_HEALTH");
+    expect(outageAlert).toBeDefined();
+    expect(outageAlert?.title).toContain("Data source is unavailable (zero price bars stored on trading day 2026-10-28)");
+    expect(outageAlert?.payload_json.subtype).toBe("UNHEALTHY_ENTER");
+
+    // Re-running evaluateAll on same outage date is idempotent
+    const reOutageRes = await evalService.evaluateAll(outageDate, { symbol: TEST_SYMBOL });
+    expect(reOutageRes.totalAlertsEmitted).toBe(0);
+    expect(reOutageRes.totalAlertsInserted).toBe(0);
+
+    // Clean up: restore source health to OK so subsequent test suites aren't affected
+    await sourceHealthRepo.setStatus("YAHOO", "chart", "OK");
   });
 
   it("Stored payload invariants: rulesHash is 64-hex SHA-256, disclaimer is EQUITY_ALERT_FOOTER, zero banned words", async () => {

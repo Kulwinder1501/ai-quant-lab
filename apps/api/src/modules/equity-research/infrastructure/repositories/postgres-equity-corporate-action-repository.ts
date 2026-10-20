@@ -66,16 +66,40 @@ export class PostgresEquityCorporateActionRepository {
   }
 
   /**
-   * Checks if a SPLIT corporate action was effective on or first seen on the given date.
+   * Checks if a SPLIT corporate action was effective on the given evaluation date.
+   * Hard rule: Use ex_date alone. Never check first_seen_at, as historical splits on
+   * newly added stocks must not fire split alerts.
+   * If priorBarDate is provided, also checks whether a split was effective in the gap
+   * between priorBarDate and evaluationDate (e.g. over a weekend or holiday).
    */
-  async hasSplitForDate(stockId: string, evaluationDate: string): Promise<boolean> {
+  async hasSplitForDate(
+    stockId: string,
+    evaluationDate: string,
+    priorBarDate?: string,
+  ): Promise<boolean> {
+    if (priorBarDate) {
+      const result = await this.db.query<{ exists: boolean }>(
+        `
+        SELECT EXISTS (
+          SELECT 1 FROM equity_research.corporate_action
+          WHERE stock_id = $1
+            AND kind = 'SPLIT'
+            AND ex_date > $2::date
+            AND ex_date <= $3::date
+        ) AS exists
+        `,
+        [stockId, priorBarDate, evaluationDate],
+      );
+      return Boolean(result.rows[0]?.exists);
+    }
+
     const result = await this.db.query<{ exists: boolean }>(
       `
       SELECT EXISTS (
         SELECT 1 FROM equity_research.corporate_action
         WHERE stock_id = $1
           AND kind = 'SPLIT'
-          AND (ex_date = $2::date OR first_seen_at::date = $2::date)
+          AND ex_date = $2::date
       ) AS exists
       `,
       [stockId, evaluationDate],

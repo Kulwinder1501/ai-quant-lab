@@ -116,7 +116,8 @@ export class PostgresEquitySourceHealthRepository {
     await this.db.query(
       `
       UPDATE equity_research.source_health
-      SET status = $3
+      SET status = $3,
+          consecutive_failures = CASE WHEN $3 = 'OK' THEN 0 ELSE consecutive_failures END
       WHERE source = $1 AND endpoint = $2
       `,
       [source, endpoint, status],

@@ -19,6 +19,19 @@ export interface AlertInput {
   payload: AlertPayload;
 }
 
+export interface AlertQueryFilter {
+  stockId?: string;
+  symbol?: string;
+  status?: AlertStatus;
+  kind?: AlertKind;
+  severity?: AlertSeverity;
+  evaluatedDate?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export class PostgresEquityAlertRepository {
   constructor(private readonly db: DatabaseQueryable) {}
 
@@ -159,13 +172,7 @@ export class PostgresEquityAlertRepository {
   /**
    * Queries alerts joined with their state and watchlist stock metadata.
    */
-  async getAlerts(filter?: {
-    stockId?: string;
-    status?: AlertStatus;
-    evaluatedDate?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<AlertWithState[]> {
+  async getAlerts(filter?: AlertQueryFilter): Promise<AlertWithState[]> {
     const conditions: string[] = [];
     const values: unknown[] = [];
 
@@ -174,14 +181,39 @@ export class PostgresEquityAlertRepository {
       conditions.push(`a.stock_id = $${values.length}`);
     }
 
+    if (filter?.symbol) {
+      values.push(filter.symbol.trim().toUpperCase());
+      conditions.push(`w.symbol = $${values.length}`);
+    }
+
     if (filter?.status) {
       values.push(filter.status);
-      conditions.push(`s.status = $${values.length}`);
+      conditions.push(`COALESCE(s.status, 'NEW') = $${values.length}`);
+    }
+
+    if (filter?.kind) {
+      values.push(filter.kind);
+      conditions.push(`a.kind = $${values.length}`);
+    }
+
+    if (filter?.severity) {
+      values.push(filter.severity);
+      conditions.push(`a.severity = $${values.length}`);
     }
 
     if (filter?.evaluatedDate) {
       values.push(filter.evaluatedDate);
       conditions.push(`a.evaluated_date = $${values.length}::date`);
+    }
+
+    if (filter?.from) {
+      values.push(filter.from);
+      conditions.push(`a.evaluated_date >= $${values.length}::date`);
+    }
+
+    if (filter?.to) {
+      values.push(filter.to);
+      conditions.push(`a.evaluated_date <= $${values.length}::date`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -256,9 +288,82 @@ export class PostgresEquityAlertRepository {
   }
 
   /**
+   * Finds a specific alert with state by ID.
+   */
+  async findAlertById(alertId: string): Promise<AlertWithState | null> {
+    const query = `
+      SELECT
+        a.id,
+        a.stock_id,
+        a.kind,
+        a.level_key,
+        a.evaluated_date::text AS evaluated_date,
+        a.severity,
+        a.title,
+        a.payload_json,
+        a.created_at,
+        COALESCE(s.status, 'NEW') AS status,
+        COALESCE(s.updated_at, a.created_at) AS state_updated_at,
+        w.symbol,
+        w.display_name
+      FROM equity_research.alert a
+      LEFT JOIN equity_research.alert_state s ON a.id = s.alert_id
+      LEFT JOIN equity_research.watchlist_stock w ON a.stock_id = w.id
+      WHERE a.id = $1
+      LIMIT 1
+    `;
+
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      kind: string;
+      level_key: string | null;
+      evaluated_date: string;
+      severity: "INFO" | "NOTICE";
+      title: string;
+      payload_json: unknown;
+      created_at: Date;
+      status: AlertStatus;
+      state_updated_at: Date;
+      symbol: string;
+      display_name: string | null;
+    }>(query, [alertId]);
+
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0];
+    return {
+      id: r.id,
+      stock_id: r.stock_id,
+      kind: r.kind,
+      level_key: r.level_key,
+      evaluated_date: r.evaluated_date.split("T")[0],
+      severity: r.severity,
+      title: r.title,
+      payload_json:
+        typeof r.payload_json === "string"
+          ? JSON.parse(r.payload_json)
+          : (r.payload_json as Record<string, unknown>),
+      created_at: r.created_at,
+      status: r.status,
+      state_updated_at: r.state_updated_at,
+      symbol: r.symbol,
+      display_name: r.display_name,
+    };
+  }
+
+  /**
    * Updates or upserts alert status (NEW, SEEN, DISMISSED).
+   * Returns false if the alert does not exist (Gate: unknown ID returns 404, never a raw database error).
    */
   async updateAlertState(alertId: string, status: AlertStatus): Promise<boolean> {
+    const alertExists = await this.db.query<{ id: string }>(
+      `SELECT id FROM equity_research.alert WHERE id = $1`,
+      [alertId],
+    );
+    if (alertExists.rows.length === 0) {
+      return false;
+    }
+
     const result = await this.db.query<{ alert_id: string }>(
       `
       INSERT INTO equity_research.alert_state (alert_id, status, updated_at)

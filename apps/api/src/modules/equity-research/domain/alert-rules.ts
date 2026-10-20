@@ -137,7 +137,7 @@ export type AlertSubtype =
   | "DEMERGER_40PCT";
 
 export interface AlertPayload {
-  close: number;
+  close: number | null;
   evaluatedDate: string;
   levelPrice?: number | null;
   levelKey?: string | null;
