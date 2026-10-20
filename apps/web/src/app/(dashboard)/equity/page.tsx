@@ -1,15 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, ShieldAlert } from "lucide-react";
 import {
   AddStockCard,
+  EquityAlertsInbox,
   EquityHeader,
   EquityStockDetailDrawer,
   EquityWatchlistTable,
+  fetchEquityAlerts,
   fetchEquityWatchlist,
   RemoveStockModal,
   removeStockFromWatchlist,
+  type AlertRecord,
   type WatchlistStockItem,
 } from "../../../features/equity";
 import { useToast } from "../../../components/ui/toast";
@@ -30,6 +33,38 @@ export default function EquityWatchPage() {
   // Remove Modal State
   const [stockForRemoval, setStockForRemoval] = useState<WatchlistStockItem | null>(null);
   const [isRemoving, setIsRemoving] = useState<boolean>(false);
+
+  // Alerts State
+  const [alertsSummary, setAlertsSummary] = useState<AlertRecord[]>([]);
+  const [isAlertsInboxOpen, setIsAlertsInboxOpen] = useState<boolean>(false);
+  const [selectedStockForAlerts, setSelectedStockForAlerts] = useState<string | undefined>(undefined);
+
+  const loadAlertsSummary = useCallback(async () => {
+    try {
+      const res = await fetchEquityAlerts();
+      setAlertsSummary(res);
+    } catch {
+      // Non-blocking for summary badge
+    }
+  }, []);
+
+  const unreadAlertsCount = useMemo(() => {
+    return alertsSummary.filter((a) => a.status === "NEW").length;
+  }, [alertsSummary]);
+
+  const alertCountsByStockId = useMemo(() => {
+    const map: Record<string, { newCount: number; totalCount: number }> = {};
+    for (const a of alertsSummary) {
+      if (!map[a.stock_id]) {
+        map[a.stock_id] = { newCount: 0, totalCount: 0 };
+      }
+      map[a.stock_id].totalCount += 1;
+      if (a.status === "NEW") {
+        map[a.stock_id].newCount += 1;
+      }
+    }
+    return map;
+  }, [alertsSummary]);
 
   const loadWatchlist = useCallback(async (showLoading = true) => {
     try {
@@ -76,6 +111,14 @@ export default function EquityWatchPage() {
         }
       });
 
+    void fetchEquityAlerts()
+      .then((res) => {
+        if (!isCancelled) {
+          setAlertsSummary(res);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       isCancelled = true;
     };
@@ -89,6 +132,7 @@ export default function EquityWatchPage() {
     });
     // Refresh to get full list with latest metrics
     loadWatchlist(false);
+    void loadAlertsSummary();
   };
 
   const handleConfirmRemoval = async () => {
@@ -125,7 +169,15 @@ export default function EquityWatchPage() {
         sourceStatus={sourceStatus}
         lastRefreshedAt={lastRefreshedAt}
         isLoading={isLoading}
-        onRefresh={() => loadWatchlist(true)}
+        onRefresh={() => {
+          loadWatchlist(true);
+          void loadAlertsSummary();
+        }}
+        unreadAlertsCount={unreadAlertsCount}
+        onOpenAlerts={() => {
+          setSelectedStockForAlerts(undefined);
+          setIsAlertsInboxOpen(true);
+        }}
       />
 
       {/* 2. Source-Down / Rate-Limited Alert Banner (Gate S11) */}
@@ -159,7 +211,10 @@ export default function EquityWatchPage() {
           </div>
           <button
             type="button"
-            onClick={() => loadWatchlist(true)}
+            onClick={() => {
+              loadWatchlist(true);
+              void loadAlertsSummary();
+            }}
             className="rounded-lg bg-rose-500/20 px-3 py-1.5 font-semibold text-rose-300 hover:bg-rose-500/30 transition border border-rose-500/30"
           >
             Retry Connection
@@ -179,6 +234,11 @@ export default function EquityWatchPage() {
         stocks={stocks}
         isLoading={isLoading}
         hasError={Boolean(error)}
+        alertCountsByStockId={alertCountsByStockId}
+        onOpenStockAlerts={(stock) => {
+          setSelectedStockForAlerts(stock.symbol);
+          setIsAlertsInboxOpen(true);
+        }}
         onSelectStock={(stock) => setSelectedStockForDetail(stock)}
         onRemoveStock={(stock) => setStockForRemoval(stock)}
       />
@@ -197,6 +257,17 @@ export default function EquityWatchPage() {
         isRemoving={isRemoving}
         onClose={() => setStockForRemoval(null)}
         onConfirm={handleConfirmRemoval}
+      />
+
+      {/* 8. Alerts Inbox Drawer */}
+      <EquityAlertsInbox
+        isOpen={isAlertsInboxOpen}
+        onClose={() => setIsAlertsInboxOpen(false)}
+        stocks={stocks}
+        selectedStockSymbol={selectedStockForAlerts}
+        onAlertStatusChanged={() => {
+          void loadAlertsSummary();
+        }}
       />
     </div>
   );

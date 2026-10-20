@@ -1,4 +1,4 @@
-import { deriveQuoteLabel } from "../domain/state-rules.js";
+import { deriveQuoteLabel, formatIstDateString } from "../domain/state-rules.js";
 import type { WatchlistStockRecord } from "../domain/types.js";
 import type { PostgresEquityCorporateActionRepository } from "../infrastructure/repositories/postgres-equity-corporate-action-repository.js";
 import type { PostgresEquityPriceBarRepository } from "../infrastructure/repositories/postgres-equity-price-bar-repository.js";
@@ -7,6 +7,7 @@ import type { PostgresEquityRawRecordRepository } from "../infrastructure/reposi
 import type { PostgresEquitySecondaryFactRepository } from "../infrastructure/repositories/postgres-equity-secondary-fact-repository.js";
 import type { PostgresEquityWatchlistRepository } from "../infrastructure/repositories/postgres-equity-watchlist-repository.js";
 import type { YahooClient } from "../infrastructure/yahoo-client.js";
+import type { EquityAlertsEvaluationService } from "./equity-alerts-evaluation-service.js";
 import { parseChartRawRecord, parseFundamentalsRawRecord } from "./parsers.js";
 
 export interface StockCollectionSummary {
@@ -42,6 +43,7 @@ export class EquityEodCollector {
     private readonly secondaryFactRepo: PostgresEquitySecondaryFactRepository,
     private readonly quoteCacheRepo: PostgresEquityQuoteCacheRepository,
     private readonly yahooClient: YahooClient,
+    private readonly alertsService?: EquityAlertsEvaluationService,
   ) {}
 
   /**
@@ -290,6 +292,22 @@ export class EquityEodCollector {
       totalBarsRestated += summary.barsRestated;
       totalActionsInserted += summary.actionsInserted;
       totalFactsInserted += summary.factsInserted;
+    }
+
+    // Final step: Trigger EOD alerts evaluation with failure isolation (Gate E10)
+    if (this.alertsService) {
+      try {
+        const todayIst = formatIstDateString(new Date());
+        await this.alertsService.evaluateAll(todayIst, options);
+      } catch (err: unknown) {
+        console.error(
+          JSON.stringify({
+            level: "error",
+            message: "EOD alert evaluation failed; collection succeeded (Gate E10)",
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
     }
 
     return {

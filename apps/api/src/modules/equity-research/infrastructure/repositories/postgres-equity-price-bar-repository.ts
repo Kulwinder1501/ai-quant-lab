@@ -694,4 +694,125 @@ export class PostgresEquityPriceBarRepository {
     }
     return map;
   }
+
+  /**
+   * Fetches price bars up to a given date in ascending order (Gate E2: point-in-time enforcement).
+   */
+  async getBarsUpToDate(
+    stockId: string,
+    asOfDate: string,
+    limit = 600,
+  ): Promise<PriceBarRecord[]> {
+    const result = await this.db.query<{
+      id: string;
+      stock_id: string;
+      bar_date: string;
+      open: string;
+      high: string;
+      low: string;
+      close: string;
+      volume: string;
+      source: string;
+      raw_record_id: string | null;
+      first_seen_at: Date;
+      series_version: number;
+    }>(
+      `
+      SELECT id, stock_id, bar_date::text AS bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at, series_version
+      FROM (
+        SELECT id, stock_id, bar_date, open, high, low, close, volume, source, raw_record_id, first_seen_at, series_version
+        FROM equity_research.price_bar
+        WHERE stock_id = $1 AND bar_date <= $2::date
+        ORDER BY bar_date DESC
+        LIMIT $3
+      ) sub
+      ORDER BY bar_date ASC
+      `,
+      [stockId, asOfDate, limit],
+    );
+
+    return result.rows.map((r) => ({
+      id: r.id,
+      stock_id: r.stock_id,
+      bar_date: r.bar_date.split("T")[0],
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume),
+      source: r.source,
+      raw_record_id: r.raw_record_id,
+      first_seen_at: r.first_seen_at,
+      series_version: Number(r.series_version ?? 1),
+    }));
+  }
+
+  /**
+   * Checks if price bar revisions were recorded or observed on the given date.
+   */
+  async hasRevisionsForDate(stockId: string, evaluationDate: string): Promise<boolean> {
+    const result = await this.db.query<{ exists: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM equity_research.price_bar_revision
+        WHERE stock_id = $1
+          AND (seen_at::date = $2::date OR bar_date = $2::date)
+      ) AS exists
+      `,
+      [stockId, evaluationDate],
+    );
+    return Boolean(result.rows[0]?.exists);
+  }
+
+  /**
+   * Checks if ANY price bar exists in the database on the given date (indicating an active trading day).
+   */
+  async hasAnyBarOnDate(date: string): Promise<boolean> {
+    const result = await this.db.query<{ exists: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM equity_research.price_bar
+        WHERE bar_date = $1
+      ) AS exists
+      `,
+      [date],
+    );
+    return Boolean(result.rows[0]?.exists);
+  }
+
+  /**
+   * Checks if the given date is an official exchange holiday recorded in the nse_holidays table.
+   */
+  async isExchangeHoliday(date: string): Promise<boolean> {
+    try {
+      const result = await this.db.query<{ exists: boolean }>(
+        `
+        SELECT EXISTS (
+          SELECT 1 FROM nse_holidays
+          WHERE holiday_date = $1::date
+        ) AS exists
+        `,
+        [date],
+      );
+      return Boolean(result.rows[0]?.exists);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fetches all official exchange holidays from nse_holidays as YYYY-MM-DD strings.
+   */
+  async getExchangeHolidays(): Promise<string[]> {
+    try {
+      const result = await this.db.query<{ holiday_date: string }>(
+        `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date FROM nse_holidays ORDER BY holiday_date ASC`,
+      );
+      return result.rows.map((r) => r.holiday_date);
+    } catch {
+      return [];
+    }
+  }
 }
+
+

@@ -25,6 +25,8 @@
     "research:ict-shadow:resolve": "tsx src/interfaces/cli/resolve-ict-shadow-signals.ts",
     "research:ict-shadow:report": "tsx src/interfaces/cli/ict-shadow-signals-report.ts",
     "equity:collect:eod": "tsx src/interfaces/cli/collect-equity-eod.ts",
+    "equity:alerts:eval": "tsx src/interfaces/cli/eval-equity-alerts.ts",
+    "equity:alerts:tripwire": "tsx src/interfaces/cli/measure-equity-alerts-tripwire.ts",
     "research:ict-gates:report": "tsx src/interfaces/cli/report-ict-gates.ts",
     "data:collect:option-chain": "tsx src/interfaces/cli/collect-option-chain.ts",
     "data:collect:option-premium-ticks": "tsx src/interfaces/cli/collect-option-premium-ticks.ts",

@@ -1,8 +1,12 @@
 import { getApiV1Url } from "../research/api";
 import type {
+  AlertRecord,
+  AlertStatus,
   EquityExchange,
+  EventFlagRecord,
   HistoryRange,
   LevelsPanelResponse,
+  ManualEventKind,
   SourceHealthResponse,
   StockDetailResponse,
   TrendPanelResponse,
@@ -184,4 +188,193 @@ export async function fetchStockLevels(
 
   return (await res.json()) as LevelsPanelResponse;
 }
+
+export async function fetchEquityAlerts(
+  filter?: {
+    stockId?: string;
+    symbol?: string;
+    status?: AlertStatus;
+    kind?: string;
+    severity?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    offset?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AlertRecord[]> {
+  const params = new URLSearchParams();
+  if (filter?.stockId) params.set("stockId", filter.stockId);
+  if (filter?.symbol) params.set("symbol", filter.symbol);
+  if (filter?.status) params.set("status", filter.status);
+  if (filter?.kind) params.set("kind", filter.kind);
+  if (filter?.severity) params.set("severity", filter.severity);
+  if (filter?.from) params.set("from", filter.from);
+  if (filter?.to) params.set("to", filter.to);
+  if (filter?.limit) params.set("limit", String(filter.limit));
+  if (filter?.offset) params.set("offset", String(filter.offset));
+
+  const qs = params.toString();
+  const url = `${getApiV1Url()}/equity/alerts${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to fetch alerts (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as AlertRecord[];
+}
+
+export async function updateAlertStatus(
+  id: string,
+  status: AlertStatus,
+  signal?: AbortSignal,
+): Promise<{ success: boolean; status: AlertStatus }> {
+  const url = `${getApiV1Url()}/equity/alerts/${id}/state`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ status }),
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to update alert state (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as { success: boolean; status: AlertStatus };
+}
+
+export async function fetchEquityEvents(
+  filter?: {
+    stockId?: string;
+    symbol?: string;
+    origin?: string;
+    kind?: string;
+    from?: string;
+    to?: string;
+    includeHistory?: boolean;
+    limit?: number;
+    offset?: number;
+  },
+  signal?: AbortSignal,
+): Promise<EventFlagRecord[]> {
+  const params = new URLSearchParams();
+  if (filter?.stockId) params.set("stockId", filter.stockId);
+  if (filter?.symbol) params.set("symbol", filter.symbol);
+  if (filter?.origin) params.set("origin", filter.origin);
+  if (filter?.kind) params.set("kind", filter.kind);
+  if (filter?.from) params.set("from", filter.from);
+  if (filter?.to) params.set("to", filter.to);
+  if (filter?.includeHistory) params.set("includeHistory", "true");
+  if (filter?.limit) params.set("limit", String(filter.limit));
+  if (filter?.offset) params.set("offset", String(filter.offset));
+
+  const qs = params.toString();
+  const url = `${getApiV1Url()}/equity/events${qs ? `?${qs}` : ""}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to fetch events (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as EventFlagRecord[];
+}
+
+export async function createManualEvent(
+  input: {
+    stockId: string;
+    kind: ManualEventKind;
+    eventDate: string;
+    headline: string;
+    sourceUrl: string;
+    detail?: Record<string, unknown>;
+  },
+  signal?: AbortSignal,
+): Promise<EventFlagRecord> {
+  const url = `${getApiV1Url()}/equity/events`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(input),
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to create event (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as EventFlagRecord;
+}
+
+export async function editManualEvent(
+  id: string,
+  input: {
+    headline?: string;
+    sourceUrl?: string;
+    kind?: ManualEventKind;
+    eventDate?: string;
+    detail?: Record<string, unknown>;
+  },
+  signal?: AbortSignal,
+): Promise<EventFlagRecord> {
+  const url = `${getApiV1Url()}/equity/events/${id}`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(input),
+    signal,
+  });
+
+  if (!res.ok) {
+    let msg = `Failed to edit event (${res.status})`;
+    try {
+      const err = (await res.json()) as { error?: string };
+      if (err.error) msg = err.error;
+    } catch {}
+    throw new EquityApiError(msg, res.status);
+  }
+
+  return (await res.json()) as EventFlagRecord;
+}
+
 

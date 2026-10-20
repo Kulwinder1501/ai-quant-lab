@@ -514,7 +514,10 @@ export class EquityWatchlistService {
     const facts = await this.deps.secondaryFactRepo.getFactsByStockId(id);
     const recentLogs = await this.deps.rawRecordRepo.findBySymbol(stock.yahoo_symbol, 20);
     const barSummary = await this.deps.priceBarRepo.getPriceBarSummary(id);
-    const sourceHealth = await this.deps.sourceHealthRepo.getHealth("YAHOO", "chart");
+    const sourceHealth = await this.deps.sourceHealthRepo.getHealth(
+      this.deps.yahooClient.sourceName,
+      "chart",
+    );
     const lastRaw = await this.deps.rawRecordRepo.findLatestBySymbolAndEndpoint(
       stock.yahoo_symbol,
       "chart",

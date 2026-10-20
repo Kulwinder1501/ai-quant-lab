@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, AlertTriangle, CheckCircle2, Clock, RefreshCw, ShieldAlert, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, Bell, CheckCircle2, Clock, RefreshCw, ShieldAlert, XCircle } from "lucide-react";
 
 interface EquityHeaderProps {
   totalCount: number;
@@ -8,6 +8,8 @@ interface EquityHeaderProps {
   lastRefreshedAt: Date | null;
   isLoading: boolean;
   onRefresh: () => void;
+  unreadAlertsCount?: number;
+  onOpenAlerts?: () => void;
 }
 
 export function EquityHeader({
@@ -16,6 +18,8 @@ export function EquityHeader({
   lastRefreshedAt,
   isLoading,
   onRefresh,
+  unreadAlertsCount,
+  onOpenAlerts,
 }: EquityHeaderProps) {
   const getSourceBadge = (status: string) => {
     switch (status) {
@@ -79,6 +83,23 @@ export function EquityHeader({
               <Clock className="size-3.5" />
               Updated {lastRefreshedAt.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })} IST
             </span>
+          )}
+          {onOpenAlerts && (
+            <button
+              type="button"
+              onClick={onOpenAlerts}
+              className="relative inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-slate-900/60 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/5 hover:text-white"
+              title="View equity alerts"
+              aria-label="Open Alerts Inbox"
+            >
+              <Bell className="size-3.5 text-cyan-400" />
+              <span>Alerts</span>
+              {unreadAlertsCount !== undefined && unreadAlertsCount > 0 && (
+                <span className="inline-flex items-center justify-center rounded-full bg-cyan-500 px-1.5 py-0.2 text-[10px] font-bold text-slate-950">
+                  {unreadAlertsCount}
+                </span>
+              )}
+            </button>
           )}
           <button
             type="button"

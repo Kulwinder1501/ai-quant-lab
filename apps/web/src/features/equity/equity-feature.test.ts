@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { EquityApiError } from "./api";
+import { EQUITY_ALERT_FOOTER } from "./types";
 
 describe("Equity Web Feature Integration & Gate S10 Coupling Checks", () => {
   it("verifies sidebar contains EQUITY navigation rail item (Gate S11)", () => {
@@ -280,6 +281,97 @@ describe("Equity Web Feature Integration & Gate S10 Coupling Checks", () => {
     expect(content).toContain('onClick={() => setActiveTab("levels")}');
     expect(content).toContain("<EquityLevelsPanel");
     expect(content).toContain("levels={levels?.levels}");
+  });
+
+  // =========================================================================
+  // WP-C Step 4: Equity Alerts and Event Flags Web UI Integration Checks (Gate E14)
+  // =========================================================================
+  it("verifies EquityHeader includes alert bell with unread count badge (Gate E14)", () => {
+    const headerPath = resolve(__dirname, "./components/equity-header.tsx");
+    const content = readFileSync(headerPath, "utf-8");
+
+    expect(content).toContain("unreadAlertsCount");
+    expect(content).toContain("onOpenAlerts");
+    expect(content).toContain("aria-label=\"Open Alerts Inbox\"");
+    expect(content).toContain("Bell");
+  });
+
+  it("verifies EquityWatchlistTable renders alert chips on stock rows (Gate E14)", () => {
+    const tablePath = resolve(__dirname, "./components/equity-watchlist-table.tsx");
+    const content = readFileSync(tablePath, "utf-8");
+
+    expect(content).toContain("alertCountsByStockId");
+    expect(content).toContain("onOpenStockAlerts");
+    expect(content).toContain("{alertCountsByStockId[stock.id].newCount} new");
+  });
+
+  it("verifies EquityAlertsInbox implements loading, empty, error, and populated states with mandatory footer (Gate E14)", () => {
+    const inboxPath = resolve(__dirname, "./components/equity-alerts-inbox.tsx");
+    const content = readFileSync(inboxPath, "utf-8");
+
+    // All states handled
+    expect(content).toContain("animate-pulse"); // Loading state skeleton
+    expect(content).toContain("No alerts found"); // Empty state
+    expect(content).toContain("Failed to load alerts"); // Error state
+    expect(content).toContain("EQUITY_ALERT_FOOTER"); // Mandatory footer on every alert
+
+    // Exact mandatory disclaimer footer text
+    expect(EQUITY_ALERT_FOOTER).toBe(
+      "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.",
+    );
+
+    // Filters and status actions
+    expect(content).toContain("Mark as Seen");
+    expect(content).toContain("Dismiss");
+    expect(content).toContain("statusFilter");
+    expect(content).toContain("stockFilter");
+
+    // Responsiveness
+    expect(content).toContain("w-full max-w-xl");
+  });
+
+  it("verifies EquityStockDetailDrawer integrates Events tab and passes events to EquityChart (Gate E14)", () => {
+    const drawerPath = resolve(__dirname, "./components/equity-stock-detail-drawer.tsx");
+    const content = readFileSync(drawerPath, "utf-8");
+
+    expect(content).toContain('onClick={() => setActiveTab("events")}');
+    expect(content).toContain("<EquityEventsPanel");
+    expect(content).toContain("events={events}");
+    expect(content).toContain("loadStockEvents");
+  });
+
+  it("verifies EquityEventsPanel enforces https link requirement, revision history toggle, rel=noopener, and manual kinds (Gate E14)", () => {
+    const panelPath = resolve(__dirname, "./components/equity-events-panel.tsx");
+    const content = readFileSync(panelPath, "utf-8");
+
+    // Mandatory https validation
+    expect(content).toContain("startsWith(\"https://\")");
+    expect(content).toContain("Valid https link is required");
+
+    // Revision history toggle
+    expect(content).toContain("Include revision history");
+    expect(content).toContain("includeHistory");
+
+    // rel="noopener noreferrer" on external links
+    expect(content).toContain('rel="noopener noreferrer"');
+    expect(content).toContain('target="_blank"');
+
+    // Conflict handling (409 fork)
+    expect(content).toContain("editManualEvent");
+    expect(content).toContain("createManualEvent");
+
+    // Manual event kinds only
+    expect(content).toContain("MANUAL_EVENT_KINDS");
+  });
+
+  it("verifies EquityChart renders event markers using createSeriesMarkers (Gate E14)", () => {
+    const chartPath = resolve(__dirname, "./components/equity-chart.tsx");
+    const content = readFileSync(chartPath, "utf-8");
+
+    expect(content).toContain("createSeriesMarkers");
+    expect(content).toContain("markersPluginRef");
+    expect(content).toContain("setMarkers");
+    expect(content).toContain("events");
   });
 });
 

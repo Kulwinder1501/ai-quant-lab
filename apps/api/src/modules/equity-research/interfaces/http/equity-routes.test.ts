@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import "dotenv/config";
 import { loadEnvironment } from "../../../../config/environment.js";
@@ -15,6 +15,8 @@ import { PostgresEquitySecondaryFactRepository } from "../../infrastructure/repo
 import { PostgresEquityRawRecordRepository } from "../../infrastructure/repositories/postgres-equity-raw-record-repository.js";
 import { PostgresEquityQuoteCacheRepository } from "../../infrastructure/repositories/postgres-equity-quote-cache-repository.js";
 import { PostgresEquitySourceHealthRepository } from "../../infrastructure/repositories/postgres-equity-source-health-repository.js";
+import { PostgresEquityAlertRepository } from "../../infrastructure/repositories/postgres-equity-alert-repository.js";
+import { PostgresEquityEventFlagRepository } from "../../infrastructure/repositories/postgres-equity-event-flag-repository.js";
 import { YahooClient } from "../../infrastructure/yahoo-client.js";
 import { EquityWatchlistService } from "../../application/equity-watchlist-service.js";
 import { createEquityRouter } from "./equity.routes.js";
@@ -32,6 +34,8 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
   let rawRecordRepo: PostgresEquityRawRecordRepository;
   let quoteCacheRepo: PostgresEquityQuoteCacheRepository;
   let sourceHealthRepo: PostgresEquitySourceHealthRepository;
+  let alertRepo: PostgresEquityAlertRepository;
+  let eventFlagRepo: PostgresEquityEventFlagRepository;
   let yahooClient: YahooClient;
   let service: EquityWatchlistService;
 
@@ -52,6 +56,8 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
     rawRecordRepo = new PostgresEquityRawRecordRepository(pool);
     quoteCacheRepo = new PostgresEquityQuoteCacheRepository(pool);
     sourceHealthRepo = new PostgresEquitySourceHealthRepository(pool);
+    alertRepo = new PostgresEquityAlertRepository(pool);
+    eventFlagRepo = new PostgresEquityEventFlagRepository(pool);
 
     // Defect 1 Fix: Explicitly pass test source name so tests NEVER write to live YAHOO records!
     yahooClient = new YahooClient({
@@ -74,7 +80,7 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
 
     const app = express();
     app.use(express.json());
-    app.use("/api/v1/equity", createEquityRouter(service));
+    app.use("/api/v1/equity", createEquityRouter(service, { alertRepo, eventFlagRepo, watchlistRepo }));
     app.use(errorHandler);
 
     // Clean up any leftover test data before starting
@@ -460,9 +466,16 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
 
   describe("Gate S6: Localhost Binding & Security Assertions", () => {
     it("asserts that all published compose ports are strictly bound to 127.0.0.1", () => {
+      const findCompose = (filename: string) => {
+        const rootCandidate = resolve(process.cwd(), filename);
+        if (existsSync(rootCandidate)) return rootCandidate;
+        const relativeCandidate = resolve(process.cwd(), "../../", filename);
+        if (existsSync(relativeCandidate)) return relativeCandidate;
+        return rootCandidate;
+      };
       const composePaths = [
-        resolve(process.cwd(), "../../docker-compose.yml"),
-        resolve(process.cwd(), "../../docker-compose.v2.yml"),
+        findCompose("docker-compose.yml"),
+        findCompose("docker-compose.v2.yml"),
       ];
 
       for (const composePath of composePaths) {
@@ -592,12 +605,15 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
     it("returns full trend panel for a stock via GET /watchlist/:id/trend (T6, T7)", async () => {
       const stock = (await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL))!;
 
-      // Measure call log before request (T7)
+      // Measure call log before request (T7, Gate E15: parallel test hygiene)
+      const requestStart = new Date();
       const callLogBefore = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+        `SELECT count(*)::text as count FROM equity_research.source_call_log WHERE time >= $1`,
+        [requestStart],
       );
       const rawRecordsBefore = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+        `SELECT count(*)::text as count FROM equity_research.raw_record WHERE requested_at >= $1`,
+        [requestStart],
       );
 
       const res = await fetch(`${baseUrl}/watchlist/${stock.id}/trend`);
@@ -651,12 +667,14 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
       expect(Array.isArray(data.largeDailyMoves)).toBe(true);
       expect(data.trendSummary).toBeDefined();
 
-      // Verify ZERO new Yahoo calls were made (T7)
+      // Verify ZERO new Yahoo calls were made (T7, Gate E15: parallel test hygiene)
       const callLogAfter = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+        `SELECT count(*)::text as count FROM equity_research.source_call_log WHERE time >= $1`,
+        [requestStart],
       );
       const rawRecordsAfter = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+        `SELECT count(*)::text as count FROM equity_research.raw_record WHERE requested_at >= $1`,
+        [requestStart],
       );
       expect(callLogAfter.rows[0].count).toBe(callLogBefore.rows[0].count);
       expect(rawRecordsAfter.rows[0].count).toBe(rawRecordsBefore.rows[0].count);
@@ -941,6 +959,513 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
       }
 
       expect(() => scan(data, "levels_route")).not.toThrow();
+    });
+  });
+
+  describe("Step 3: Equity Alerts and Event Flags HTTP Routes (Gates E8, E9, E13)", () => {
+    let testStockId: string;
+    let alert1Id: string;
+    let alert2Id: string;
+
+    beforeAll(async () => {
+      // Ensure test stock exists
+      let stock = await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL);
+      if (!stock) {
+        stock = await watchlistRepo.addStock({
+          exchange: "NSE",
+          symbol: TEST_SYMBOL,
+          yahooSymbol: `${TEST_SYMBOL}.NS`,
+          displayName: "Test API Stock",
+        });
+      }
+      testStockId = stock.id;
+
+      // Clean prior alerts for test stock
+      await alertRepo.deleteAlertsForStock(testStockId);
+      await eventFlagRepo.deleteEventsForStock(testStockId);
+
+      // Seed 2 alerts for testing
+      const alerts = await alertRepo.saveAlerts([
+        {
+          stockId: testStockId,
+          kind: "LEVEL_APPROACH",
+          levelKey: "SWING_100.50",
+          evaluatedDate: "2026-10-15",
+          severity: "INFO",
+          title: "Approaching swing level at 100.50",
+          payload: {
+            close: 101.2,
+            evaluatedDate: "2026-10-15",
+            seriesVersion: 1,
+            rulesHash: "058320a1e578ad59f977422562f6a09e5bb36c2a3da3867d5202e8bd5fdfba58",
+            disclaimer: "Not financial advice.",
+          },
+        },
+        {
+          stockId: testStockId,
+          kind: "NEW_52W_EXTREME",
+          levelKey: null,
+          evaluatedDate: "2026-10-16",
+          severity: "NOTICE",
+          title: "New 52-week high",
+          payload: {
+            close: 110.0,
+            evaluatedDate: "2026-10-16",
+            seriesVersion: 1,
+            rulesHash: "058320a1e578ad59f977422562f6a09e5bb36c2a3da3867d5202e8bd5fdfba58",
+            disclaimer: "Not financial advice.",
+          },
+        },
+      ]);
+      alert1Id = alerts.insertedIds[0];
+      alert2Id = alerts.insertedIds[1];
+    });
+
+    afterAll(async () => {
+      await alertRepo.deleteAlertsForStock(testStockId);
+      await eventFlagRepo.deleteEventsForStock(testStockId);
+    });
+
+    describe("GET /api/v1/equity/alerts", () => {
+      it("lists alerts with state and symbol info", async () => {
+        const res = await fetch(`${baseUrl}/alerts`);
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBeGreaterThanOrEqual(2);
+        const item = data.find((a: any) => a.id === alert1Id);
+        expect(item).toBeDefined();
+        expect(item.status).toBe("NEW");
+        expect(item.symbol).toBe(TEST_SYMBOL);
+      });
+
+      it("filters alerts by stockId and symbol", async () => {
+        const res1 = await fetch(`${baseUrl}/alerts?stockId=${testStockId}`);
+        expect(res1.status).toBe(200);
+        const data1 = await res1.json();
+        expect(data1.every((a: any) => a.stock_id === testStockId)).toBe(true);
+
+        const res2 = await fetch(`${baseUrl}/alerts?symbol=${TEST_SYMBOL}`);
+        expect(res2.status).toBe(200);
+        const data2 = await res2.json();
+        expect(data2.every((a: any) => a.symbol === TEST_SYMBOL)).toBe(true);
+      });
+
+      it("filters alerts by status, kind, and date range", async () => {
+        const resKind = await fetch(`${baseUrl}/alerts?kind=NEW_52W_EXTREME`);
+        expect(resKind.status).toBe(200);
+        const dataKind = await resKind.json();
+        expect(dataKind.every((a: any) => a.kind === "NEW_52W_EXTREME")).toBe(true);
+
+        const resDate = await fetch(`${baseUrl}/alerts?from=2026-10-16&to=2026-10-16`);
+        expect(resDate.status).toBe(200);
+        const dataDate = await resDate.json();
+        expect(dataDate.every((a: any) => a.evaluated_date === "2026-10-16")).toBe(true);
+      });
+
+      it("returns 400 on invalid query parameters", async () => {
+        const res = await fetch(`${baseUrl}/alerts?status=INVALID_FILTER`);
+        expect(res.status).toBe(400);
+        const data = await res.json();
+        expect(data.error).toBe("Invalid query parameters");
+      });
+    });
+
+    describe("PATCH /api/v1/equity/alerts/:id/state", () => {
+      it("updates alert status to SEEN and DISMISSED", async () => {
+        const resSeen = await fetch(`${baseUrl}/alerts/${alert1Id}/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "SEEN" }),
+        });
+        expect(resSeen.status).toBe(200);
+        const dataSeen = await resSeen.json();
+        expect(dataSeen.success).toBe(true);
+        expect(dataSeen.status).toBe("SEEN");
+
+        const resDismissed = await fetch(`${baseUrl}/alerts/${alert1Id}/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "DISMISSED" }),
+        });
+        expect(resDismissed.status).toBe(200);
+        const dataDismissed = await resDismissed.json();
+        expect(dataDismissed.status).toBe("DISMISSED");
+
+        // Verify status in GET /alerts
+        const resGet = await fetch(`${baseUrl}/alerts?stockId=${testStockId}`);
+        const list = await resGet.json();
+        const updated = list.find((a: any) => a.id === alert1Id);
+        expect(updated.status).toBe("DISMISSED");
+      });
+
+      it("returns 404 for unknown alert ID (never raw database error)", async () => {
+        const unknownId = "00000000-0000-0000-0000-000000000000";
+        const res = await fetch(`${baseUrl}/alerts/${unknownId}/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "SEEN" }),
+        });
+        expect(res.status).toBe(404);
+        const data = await res.json();
+        expect(data.error).toContain("not found");
+      });
+
+      it("returns 400 for invalid status (never raw database error)", async () => {
+        const res = await fetch(`${baseUrl}/alerts/${alert1Id}/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "INVALID_STATUS" }),
+        });
+        expect(res.status).toBe(400);
+        const data = await res.json();
+        expect(data.error).toBe("Invalid alert status");
+      });
+
+      it("returns 400 for non-UUID alert ID", async () => {
+        const res = await fetch(`${baseUrl}/alerts/not-a-uuid/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "SEEN" }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    describe("Event Flags: POST /api/v1/equity/events (Gate E8)", () => {
+      it("rejects manual event without source link with 400 (Gate E8)", async () => {
+        const res = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "RESULTS_DATE_UPCOMING",
+            eventDate: "2026-11-15",
+            headline: "Q2 FY27 Earnings Announcement",
+          }),
+        });
+        expect(res.status).toBe(400);
+        const data = await res.json();
+        expect(data.error).toBe("Invalid event payload");
+        expect(data.details.some((d: string) => d.includes("Gate E8"))).toBe(true);
+      });
+
+      it("rejects non-https source link (http://, bare https://) with 400 (Gate E8)", async () => {
+        const nonHttpsBodies = [
+          {
+            stockId: testStockId,
+            kind: "OTHER",
+            eventDate: "2026-10-25",
+            headline: "Annual General Meeting",
+            sourceUrl: "http://bseindia.com/agm.pdf", // http not allowed
+          },
+          {
+            stockId: testStockId,
+            kind: "OTHER",
+            eventDate: "2026-10-25",
+            headline: "Annual General Meeting",
+            sourceUrl: "https://", // bare prefix not allowed
+          },
+          {
+            stockId: testStockId,
+            kind: "OTHER",
+            eventDate: "2026-10-25",
+            headline: "Annual General Meeting",
+            sourceUrl: "ftp://bseindia.com/agm.pdf", // ftp not allowed
+          },
+        ];
+
+        for (const body of nonHttpsBodies) {
+          const res = await fetch(`${baseUrl}/events`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          expect(res.status).toBe(400);
+        }
+      });
+
+      it("creates a manual event flag with valid https link (Gate E8)", async () => {
+        const res = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "ORDER_WIN",
+            eventDate: "2026-10-20",
+            headline: "Secured INR 500 Cr infrastructure order",
+            sourceUrl: "https://www.bseindia.com/xml-data/corpfiling/AttachLive/order_win.pdf",
+            detail: { orderValueCr: 500 },
+          }),
+        });
+        expect(res.status).toBe(201);
+        const data = await res.json();
+        expect(data.id).toBeDefined();
+        expect(data.origin).toBe("MANUAL");
+        expect(data.source_url).toContain("https://");
+        expect(data.headline).toBe("Secured INR 500 Cr infrastructure order");
+      });
+
+      it("returns 404 if stockId does not exist in watchlist", async () => {
+        const res = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: "00000000-0000-0000-0000-000000000000",
+            kind: "OTHER",
+            eventDate: "2026-10-20",
+            headline: "Generic Corporate Announcement",
+            sourceUrl: "https://example.com/filing.pdf",
+          }),
+        });
+        expect(res.status).toBe(404);
+      });
+    });
+
+    describe("Event Flags: PUT /api/v1/equity/events/:id (Gate E9)", () => {
+      it("creates a new revision with supersedes_id and leaves the old row unchanged (Gate E9)", async () => {
+        // First create original manual event
+        const createRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "MANAGEMENT",
+            eventDate: "2026-10-18",
+            headline: "CFO transition announced",
+            sourceUrl: "https://bseindia.com/cfo_transition.pdf",
+          }),
+        });
+        expect(createRes.status).toBe(201);
+        const originalEvent = await createRes.json();
+        const originalId = originalEvent.id;
+
+        // Edit via PUT /events/:id
+        const editRes = await fetch(`${baseUrl}/events/${originalId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "CFO transition effective immediately; interim CFO appointed",
+            sourceUrl: "https://bseindia.com/cfo_transition_update.pdf",
+          }),
+        });
+        expect(editRes.status).toBe(200);
+        const revisedEvent = await editRes.json();
+
+        // New revision ID is different and points to original via supersedes_id
+        expect(revisedEvent.id).not.toBe(originalId);
+        expect(revisedEvent.supersedes_id).toBe(originalId);
+        expect(revisedEvent.headline).toBe("CFO transition effective immediately; interim CFO appointed");
+
+        // Gate E9 Verification: Original row in database remains strictly unchanged!
+        const originalInDb = await eventFlagRepo.getEventById(originalId);
+        expect(originalInDb).toBeDefined();
+        expect(originalInDb?.id).toBe(originalId);
+        expect(originalInDb?.headline).toBe("CFO transition announced");
+        expect(originalInDb?.source_url).toBe("https://bseindia.com/cfo_transition.pdf");
+        expect(originalInDb?.supersedes_id).toBeNull();
+      });
+
+      it("returns 404 when editing an unknown event ID", async () => {
+        const res = await fetch(`${baseUrl}/events/00000000-0000-0000-0000-000000000000`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Updated headline",
+            sourceUrl: "https://example.com/updated.pdf",
+          }),
+        });
+        expect(res.status).toBe(404);
+      });
+
+      it("returns 400 when editing with a non-https URL (Gate E8)", async () => {
+        // Create an event first
+        const createRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "OTHER",
+            eventDate: "2026-10-19",
+            headline: "Board meeting outcome",
+            sourceUrl: "https://example.com/board.pdf",
+          }),
+        });
+        const created = await createRes.json();
+
+        // Attempt edit with http://
+        const editRes = await fetch(`${baseUrl}/events/${created.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sourceUrl: "http://example.com/board.pdf",
+          }),
+        });
+        expect(editRes.status).toBe(400);
+      });
+    });
+
+    describe("GET /api/v1/equity/events", () => {
+      it("lists events with origin, symbol and date filtering", async () => {
+        const res = await fetch(`${baseUrl}/events?stockId=${testStockId}`);
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(Array.isArray(data)).toBe(true);
+        expect(data.length).toBeGreaterThanOrEqual(1);
+        expect(data.every((e: any) => e.stock_id === testStockId)).toBe(true);
+
+        const resManual = await fetch(`${baseUrl}/events?origin=MANUAL`);
+        expect(resManual.status).toBe(200);
+        const dataManual = await resManual.json();
+        expect(dataManual.every((e: any) => e.origin === "MANUAL")).toBe(true);
+      });
+
+      it("returns current revisions only by default, and full chain with includeHistory=true (Condition 1)", async () => {
+        // Create an event: Revision 1
+        const r1Res = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "ORDER_WIN",
+            eventDate: "2026-10-21",
+            headline: "Won initial contract rev 1",
+            sourceUrl: "https://bseindia.com/order1.pdf",
+          }),
+        });
+        expect(r1Res.status).toBe(201);
+        const rev1 = await r1Res.json();
+
+        // Edit to Revision 2
+        const r2Res = await fetch(`${baseUrl}/events/${rev1.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Won expanded contract rev 2",
+            sourceUrl: "https://bseindia.com/order2.pdf",
+          }),
+        });
+        expect(r2Res.status).toBe(200);
+        const rev2 = await r2Res.json();
+
+        // Edit to Revision 3
+        const r3Res = await fetch(`${baseUrl}/events/${rev2.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Won final contract rev 3",
+            sourceUrl: "https://bseindia.com/order3.pdf",
+          }),
+        });
+        expect(r3Res.status).toBe(200);
+        const rev3 = await r3Res.json();
+
+        // 1. By default, GET /events returns only current revisions (rev 1 and rev 2 are hidden!)
+        const defaultListRes = await fetch(`${baseUrl}/events?stockId=${testStockId}`);
+        expect(defaultListRes.status).toBe(200);
+        const defaultEvents = await defaultListRes.json();
+        const foundRev1 = defaultEvents.find((e: any) => e.id === rev1.id);
+        const foundRev2 = defaultEvents.find((e: any) => e.id === rev2.id);
+        const foundRev3 = defaultEvents.find((e: any) => e.id === rev3.id);
+
+        expect(foundRev1).toBeUndefined(); // Hidden!
+        expect(foundRev2).toBeUndefined(); // Hidden!
+        expect(foundRev3).toBeDefined();   // Current!
+
+        // 2. With includeHistory=true, GET /events returns the entire revision chain
+        const historyListRes = await fetch(`${baseUrl}/events?stockId=${testStockId}&includeHistory=true`);
+        expect(historyListRes.status).toBe(200);
+        const historyEvents = await historyListRes.json();
+        expect(historyEvents.some((e: any) => e.id === rev1.id)).toBe(true);
+        expect(historyEvents.some((e: any) => e.id === rev2.id)).toBe(true);
+        expect(historyEvents.some((e: any) => e.id === rev3.id)).toBe(true);
+      });
+
+      it("returns 409 Conflict when editing an already-superseded revision to prevent forks (Condition 1)", async () => {
+        // Create an event: revA
+        const createRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "REGULATORY",
+            eventDate: "2026-10-22",
+            headline: "Regulatory notice received revA",
+            sourceUrl: "https://bseindia.com/noticeA.pdf",
+          }),
+        });
+        const revA = await createRes.json();
+
+        // Edit revA -> revB (now revA is superseded by revB)
+        const editRes1 = await fetch(`${baseUrl}/events/${revA.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Regulatory notice updated revB",
+            sourceUrl: "https://bseindia.com/noticeB.pdf",
+          }),
+        });
+        expect(editRes1.status).toBe(200);
+        const revB = await editRes1.json();
+
+        // Attempt to edit revA AGAIN (fork attempt!): Must return 409 Conflict with newerRevisionId
+        const forkAttemptRes = await fetch(`${baseUrl}/events/${revA.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headline: "Attempting to fork revA",
+            sourceUrl: "https://bseindia.com/noticeFork.pdf",
+          }),
+        });
+        expect(forkAttemptRes.status).toBe(409);
+        const forkData = await forkAttemptRes.json();
+        expect(forkData.newerRevisionId).toBe(revB.id);
+        expect(forkData.supersededBy).toBe(revB.id);
+      });
+
+      it("validates manual kind: rejects banana and CORPORATE_ACTION with 400 (Condition 2)", async () => {
+        // Reject random string kind
+        const bananaRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "banana",
+            eventDate: "2026-10-22",
+            headline: "Invalid fruit event",
+            sourceUrl: "https://bseindia.com/notice.pdf",
+          }),
+        });
+        expect(bananaRes.status).toBe(400);
+
+        // Reject detected kind from being manually spoofed
+        const detectedSpoofRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "CORPORATE_ACTION",
+            eventDate: "2026-10-22",
+            headline: "Spoofed corporate action",
+            sourceUrl: "https://bseindia.com/notice.pdf",
+          }),
+        });
+        expect(detectedSpoofRes.status).toBe(400);
+
+        // Valid manual kind passes
+        const validRes = await fetch(`${baseUrl}/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stockId: testStockId,
+            kind: "RESULTS_DATE_UPCOMING",
+            eventDate: "2026-11-14",
+            headline: "Upcoming Q2 results scheduled",
+            sourceUrl: "https://bseindia.com/results_notice.pdf",
+          }),
+        });
+        expect(validRes.status).toBe(201);
+      });
     });
   });
 });

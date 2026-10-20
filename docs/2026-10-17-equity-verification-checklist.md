@@ -127,3 +127,12 @@ Real vs mocked: what ran on live providers
 Defects found: numbered, with file/line or SQL
 Waivers requested from the owner: ...
 ```
+
+## 4. Annual Operations Checklist (Year-End Maintenance)
+
+### Year-End NSE Calendar Refresh
+* **Action**: Prior to December 20, 2026 (before January 1, 2027), fetch the official NSE Trading Holidays circular for the forthcoming year (Calendar Year 2027) from the National Stock Exchange of India.
+* **SQL Seeding**: Insert the new holiday dates into the `nse_holidays` table with valid holiday date, official description, and verified provenance.
+* **Verification**: Run `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date, name FROM nse_holidays WHERE holiday_date >= '2027-01-01' ORDER BY holiday_date ASC;` and confirm that all exchange closures are recorded.
+* **Provenance Rule**: Cite only the official exchange circular reference number actually inspected. Never extrapolate or cite unverified circular numbers.
+

@@ -6,6 +6,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart2,
+  Bell,
   Calendar,
   CheckCircle,
   Clock,
@@ -19,6 +20,8 @@ interface EquityWatchlistTableProps {
   stocks: WatchlistStockItem[];
   isLoading: boolean;
   hasError?: boolean;
+  alertCountsByStockId?: Record<string, { newCount: number; totalCount: number }>;
+  onOpenStockAlerts?: (stock: WatchlistStockItem) => void;
   onSelectStock: (stock: WatchlistStockItem) => void;
   onRemoveStock: (stock: WatchlistStockItem) => void;
 }
@@ -27,6 +30,8 @@ export function EquityWatchlistTable({
   stocks,
   isLoading,
   hasError = false,
+  alertCountsByStockId,
+  onOpenStockAlerts,
   onSelectStock,
   onRemoveStock,
 }: EquityWatchlistTableProps) {
@@ -222,6 +227,22 @@ export function EquityWatchlistTable({
                       <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300 border border-white/10 font-mono">
                         {stock.exchange}
                       </span>
+                      {alertCountsByStockId?.[stock.id]?.newCount ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            if (onOpenStockAlerts) {
+                              e.stopPropagation();
+                              onOpenStockAlerts(stock);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full bg-cyan-500/20 border border-cyan-500/40 px-2 py-0.5 text-[10px] font-bold text-cyan-300 hover:bg-cyan-500/30 transition cursor-pointer"
+                          title={`${alertCountsByStockId[stock.id].newCount} new alert(s)`}
+                        >
+                          <Bell className="size-2.5" />
+                          <span>{alertCountsByStockId[stock.id].newCount} new</span>
+                        </button>
+                      ) : null}
                     </div>
                     <span className="text-xs text-slate-400 line-clamp-1 max-w-[200px]" title={stock.displayName}>
                       {stock.displayName}

@@ -483,4 +483,64 @@ describe("EquityEodCollector and Land-First parser (Gates S2, S3, S4, S8)", () =
     expect(summary.barsInserted).toBe(0);
     expect(mockPriceRepo.saveBars).not.toHaveBeenCalled();
   });
+
+  it("preserves collection success when alerts evaluation throws an error (Gate E10: collector isolation)", async () => {
+    const mockWatchlistRepo = {
+      findActiveStocks: vi.fn().mockResolvedValue([mockStock]),
+      setRebackfillNeeded: vi.fn().mockResolvedValue(undefined),
+      setRebackfillStatus: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockRawRepo = {
+      saveRawRecord: vi.fn().mockImplementation(async (r) => ({
+        id: "raw-1",
+        ...r,
+        requested_at: new Date(),
+      })),
+      appendWarnings: vi.fn(),
+    };
+    const mockPriceRepo = {
+      hasBars: vi.fn().mockResolvedValue(true),
+      saveBars: vi.fn().mockResolvedValue({ inserted: 1, revisions: 0, unchanged: 0, restatedDates: [] }),
+    };
+    const mockClient = {
+      fetchChart: vi.fn().mockResolvedValue({
+        httpStatus: 200,
+        body: sampleChartBody,
+        bodySha256: "hash123",
+        outcome: "OK",
+        warnings: [],
+        requestedAt: new Date(),
+      }),
+      fetchFundamentals: vi.fn().mockResolvedValue({
+        httpStatus: 200,
+        body: sampleFundBody,
+        outcome: "OK",
+        warnings: [],
+        requestedAt: new Date(),
+      }),
+    };
+    const mockAlertsService = {
+      evaluateAll: vi.fn().mockRejectedValue(new Error("Forced alert evaluation crash (Gate E10 test)")),
+    };
+
+    const collector = new EquityEodCollector(
+      mockWatchlistRepo as any,
+      mockRawRepo as any,
+      mockPriceRepo as any,
+      { saveActions: vi.fn().mockResolvedValue({ inserted: 0 }) } as any,
+      { saveFacts: vi.fn().mockResolvedValue({ inserted: 0 }) } as any,
+      { upsertQuote: vi.fn() } as any,
+      mockClient as any,
+      mockAlertsService as any,
+    );
+
+    const result = await collector.collectAll();
+    // Invariant: Collection succeeds despite the alerts evaluation crash!
+    expect(result.successfulStocks).toBe(1);
+    expect(result.failedStocks).toBe(0);
+    expect(result.totalBarsInserted).toBe(1);
+    expect(mockAlertsService.evaluateAll).toHaveBeenCalled();
+  });
 });
+
+

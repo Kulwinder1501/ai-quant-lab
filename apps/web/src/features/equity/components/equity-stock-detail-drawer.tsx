@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   AlertCircle,
   AlertTriangle,
+  Calendar,
   Database,
   FileSpreadsheet,
   History,
@@ -17,16 +18,18 @@ import {
   X,
 } from "lucide-react";
 import type {
+  EventFlagRecord,
   HistoryRange,
   LevelsPanelResponse,
   StockDetailResponse,
   TrendPanelResponse,
   WatchlistStockItem,
 } from "../types";
-import { fetchStockDetail, fetchStockLevels, fetchStockTrend } from "../api";
+import { fetchEquityEvents, fetchStockDetail, fetchStockLevels, fetchStockTrend } from "../api";
 import { EquityChart } from "./equity-chart";
 import { EquityTrendPanel } from "./equity-trend-panel";
 import { EquityLevelsPanel } from "./equity-levels-panel";
+import { EquityEventsPanel } from "./equity-events-panel";
 import { ModalPortal } from "../../../components/ui/modal-portal";
 
 interface EquityStockDetailDrawerProps {
@@ -35,7 +38,7 @@ interface EquityStockDetailDrawerProps {
   onClose: () => void;
 }
 
-type TabType = "trend" | "chart" | "levels" | "fundamentals" | "actions" | "logs";
+type TabType = "trend" | "chart" | "levels" | "events" | "fundamentals" | "actions" | "logs";
 
 export function EquityStockDetailDrawer({
   stock,
@@ -55,6 +58,37 @@ export function EquityStockDetailDrawer({
   const [levels, setLevels] = useState<LevelsPanelResponse | null>(null);
   const [isLevelsLoading, setIsLevelsLoading] = useState(false);
   const [levelsError, setLevelsError] = useState<string | null>(null);
+
+  const [events, setEvents] = useState<EventFlagRecord[]>([]);
+
+  const loadStockEvents = useCallback(async () => {
+    if (!stock) return;
+    try {
+      const data = await fetchEquityEvents({ stockId: stock.id });
+      setEvents(data);
+    } catch {
+      // Best-effort for chart markers
+    }
+  }, [stock]);
+
+  useEffect(() => {
+    if (!isOpen || !stock) return;
+
+    let isMounted = true;
+    const stockId = stock.id;
+
+    void fetchEquityEvents({ stockId })
+      .then((data) => {
+        if (isMounted) {
+          setEvents(data);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, stock]);
 
   // Defect 4: Accessibility - handle Escape key and lock body scroll
   useEffect(() => {
@@ -298,6 +332,18 @@ export function EquityStockDetailDrawer({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setActiveTab("events")}
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
+                      activeTab === "events"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                        : "text-slate-400 hover:text-white hover:bg-white/5"
+                    }`}
+                  >
+                    <Calendar className="size-3.5" />
+                    Events
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setActiveTab("fundamentals")}
                     className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold shrink-0 whitespace-nowrap transition ${
                       activeTab === "fundamentals"
@@ -372,6 +418,11 @@ export function EquityStockDetailDrawer({
                   isLoading={isLevelsLoading}
                   error={levelsError}
                 />
+              ) : activeTab === "events" ? (
+                <EquityEventsPanel
+                  stock={stock}
+                  onEventCreated={loadStockEvents}
+                />
               ) : isLoading && !detail ? (
                 <div className="flex h-64 flex-col items-center justify-center gap-3 text-slate-400">
                   <Loader2 className="size-8 animate-spin text-cyan-400" />
@@ -419,6 +470,7 @@ export function EquityStockDetailDrawer({
                             currency={stock.currency}
                             className="h-[380px] w-full"
                             levels={levels?.levels}
+                            events={events}
                           />
                         </div>
                       )}
