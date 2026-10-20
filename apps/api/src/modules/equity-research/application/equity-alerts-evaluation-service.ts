@@ -6,13 +6,23 @@ import {
 } from "../domain/alert-rules.js";
 import { computeLevels } from "../domain/levels.js";
 import { formatIstDateString } from "../domain/state-rules.js";
-import type { WatchlistStockRecord } from "../domain/types.js";
+import type { SecondaryFactRecord, WatchlistStockRecord } from "../domain/types.js";
 import type { PostgresEquityAlertRepository } from "../infrastructure/repositories/postgres-equity-alert-repository.js";
 import type { PostgresEquityCorporateActionRepository } from "../infrastructure/repositories/postgres-equity-corporate-action-repository.js";
 import type { PostgresEquityEventFlagRepository } from "../infrastructure/repositories/postgres-equity-event-flag-repository.js";
 import type { PostgresEquityPriceBarRepository } from "../infrastructure/repositories/postgres-equity-price-bar-repository.js";
+import type { PostgresEquitySecondaryFactRepository } from "../infrastructure/repositories/postgres-equity-secondary-fact-repository.js";
 import type { PostgresEquitySourceHealthRepository } from "../infrastructure/repositories/postgres-equity-source-health-repository.js";
 import type { PostgresEquityWatchlistRepository } from "../infrastructure/repositories/postgres-equity-watchlist-repository.js";
+
+function formatFactCurrency(value: number): string {
+  const absVal = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (absVal >= 1e7) {
+    return `${sign}₹${(absVal / 1e7).toFixed(2)} Cr`;
+  }
+  return `${sign}₹${absVal.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
 
 export interface StockAlertEvaluationResult {
   stockId: string;
@@ -38,6 +48,22 @@ export interface AlertEvaluationSummary {
   message?: string;
 }
 
+/**
+ * Default NSE Trading Holidays for Calendar Year 2026.
+ *
+ * Source / Provenance:
+ * NSE Circular Ref. No: NSE/CMTR/65488 (Trading Holidays for the Calendar Year 2026,
+ * Capital Market Segment, National Stock Exchange of India).
+ *
+ * Operational Maintenance:
+ * NOTE: This list requires mandatory annual review and update prior to January of each
+ * calendar year when the exchange publishes its official schedule for the forthcoming year.
+ *
+ * Weekend Annotations:
+ * - 2026-08-15: Independence Day falls on a Saturday.
+ * - 2026-11-08: Diwali (Laxmi Pujan) falls on a Sunday. Normal daytime trading is closed;
+ *   a special 1-hour Muhurat Trading session is conducted in the evening.
+ */
 export const DEFAULT_NSE_HOLIDAYS = [
   "2026-01-26", // Republic Day
   "2026-02-18", // Maha Shivratri
@@ -48,11 +74,11 @@ export const DEFAULT_NSE_HOLIDAYS = [
   "2026-05-01", // Maharashtra Day
   "2026-05-28", // Bakri Id
   "2026-06-26", // Muharram
-  "2026-08-15", // Independence Day
+  "2026-08-15", // Independence Day (Weekend: Saturday)
   "2026-09-04", // Milad-un-Nabi
   "2026-10-02", // Mahatma Gandhi Jayanti
   "2026-10-20", // Dussehra
-  "2026-11-08", // Diwali (Laxmi Pujan)
+  "2026-11-08", // Diwali (Laxmi Pujan) (Weekend: Sunday - Muhurat trading session only)
   "2026-11-10", // Diwali (Balipratipada)
   "2026-11-24", // Gurunanak Jayanti
   "2026-12-25", // Christmas
@@ -60,6 +86,7 @@ export const DEFAULT_NSE_HOLIDAYS = [
 
 export class EquityAlertsEvaluationService {
   private readonly holidays: Set<string>;
+  private readonly secondaryFactRepo?: PostgresEquitySecondaryFactRepository;
 
   constructor(
     private readonly watchlistRepo: PostgresEquityWatchlistRepository,
@@ -68,17 +95,30 @@ export class EquityAlertsEvaluationService {
     private readonly eventFlagRepo: PostgresEquityEventFlagRepository,
     private readonly sourceHealthRepo: PostgresEquitySourceHealthRepository,
     private readonly corporateActionRepo?: PostgresEquityCorporateActionRepository,
+    secondaryFactRepoOrHolidays?: PostgresEquitySecondaryFactRepository | Set<string> | string[],
     holidays?: Set<string> | string[],
   ) {
+    let passedHolidays: Set<string> | string[] | undefined;
+    if (
+      secondaryFactRepoOrHolidays instanceof Set ||
+      Array.isArray(secondaryFactRepoOrHolidays)
+    ) {
+      passedHolidays = secondaryFactRepoOrHolidays;
+      this.secondaryFactRepo = undefined;
+    } else {
+      this.secondaryFactRepo = secondaryFactRepoOrHolidays;
+      passedHolidays = holidays;
+    }
+
     const envHolidays = (process.env.NSE_HOLIDAYS ?? "")
       .split(",")
       .map((h) => h.trim())
       .filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h));
 
-    if (holidays instanceof Set) {
-      this.holidays = holidays;
-    } else if (Array.isArray(holidays)) {
-      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...holidays, ...envHolidays]);
+    if (passedHolidays instanceof Set) {
+      this.holidays = passedHolidays;
+    } else if (Array.isArray(passedHolidays)) {
+      this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...passedHolidays, ...envHolidays]);
     } else {
       this.holidays = new Set([...DEFAULT_NSE_HOLIDAYS, ...envHolidays]);
     }
@@ -101,6 +141,7 @@ export class EquityAlertsEvaluationService {
       isOldRestatement?: boolean;
       hasNewSplit?: boolean;
       isTradingDay?: boolean;
+      isInitialLoad?: boolean;
     },
   ): Promise<StockAlertEvaluationResult> {
     const result: StockAlertEvaluationResult = {
@@ -275,7 +316,18 @@ export class EquityAlertsEvaluationService {
       );
     }
 
-    // 8. Record detected event flags for large moves and corporate data events
+    // 8. Record detected event flags (Gate Step 5)
+    // Guard against backfilled history: A newly added stock's initial backfill inserts all its
+    // history; a flag must NEVER fire for backfilled history.
+    const isInitialStockLoad =
+      options?.isInitialLoad !== undefined
+        ? options.isInitialLoad
+        : ((stock.added_at instanceof Date
+            ? stock.added_at.toISOString().split("T")[0]
+            : String(stock.added_at).split("T")[0]) >= evaluationDate ||
+          bars.length <= 1);
+
+    // 8a. Large Move Day flags (from pure LARGE_MOVE alerts) & Demerger corporate actions
     for (const alert of emitted) {
       if (alert.kind === "LARGE_MOVE") {
         await this.eventFlagRepo.saveDetectedEvent({
@@ -287,20 +339,171 @@ export class EquityAlertsEvaluationService {
             key: "LARGE_MOVE",
             returnPct: alert.payload.returnPct,
             atrPercent: alert.payload.atrPercent,
+            note: "no note attached",
           },
         });
       } else if (alert.kind === "DATA_EVENT") {
-        await this.eventFlagRepo.saveDetectedEvent({
-          stockId: stock.id,
-          kind: "CORPORATE_ACTION",
-          eventDate: evaluationDate,
-          headline: alert.title,
-          detail: {
-            key: (alert.payload.subtype as string) ?? "DEMERGER_40PCT",
-            returnPct: alert.payload.returnPct,
-            note: "Possible corporate action",
-          },
-        });
+        const subtype = (alert.payload.subtype as string) ?? "DEMERGER_40PCT";
+        if (subtype === "DEMERGER_40PCT") {
+          await this.eventFlagRepo.saveDetectedEvent({
+            stockId: stock.id,
+            kind: "CORPORATE_ACTION",
+            eventDate: evaluationDate,
+            headline: alert.title,
+            detail: {
+              key: "DEMERGER_40PCT",
+              returnPct: alert.payload.returnPct,
+              note: "Possible corporate action",
+            },
+          });
+        }
+      }
+    }
+
+    // 8b. Corporate Action flags (SPLIT / DIVIDEND in evaluation window)
+    if (!isInitialStockLoad && this.corporateActionRepo) {
+      const actions = priorBarDate
+        ? await this.corporateActionRepo.getActionsInWindow(stock.id, priorBarDate, evaluationDate)
+        : await this.corporateActionRepo.getActionsForDate(stock.id, evaluationDate);
+
+      for (const action of actions) {
+        let headline = "";
+        if (action.kind === "DIVIDEND") {
+          headline = `Dividend effective ${action.ex_date} (₹${Number(action.value).toFixed(2)} per share). No future announcements available from this source.`;
+        } else if (action.kind === "SPLIT") {
+          headline = `Stock split effective ${action.ex_date} (ratio ${Number(action.value)}). No future announcements available from this source.`;
+        }
+
+        if (headline) {
+          await this.eventFlagRepo.saveDetectedEvent({
+            stockId: stock.id,
+            kind: "CORPORATE_ACTION",
+            eventDate: action.ex_date,
+            headline,
+            detail: {
+              key: `${action.kind}_${action.ex_date}`,
+              actionKind: action.kind,
+              value: Number(action.value),
+              exDate: action.ex_date,
+              source: action.source,
+              note: "No future announcements available from this source.",
+            },
+          });
+        }
+      }
+    }
+
+    // 8c. Results Published flags (newly published quarterly results in secondary_fact)
+    if (!isInitialStockLoad && this.secondaryFactRepo) {
+      const newFacts = await this.secondaryFactRepo.getNewQuarterlyFacts(
+        stock.id,
+        evaluationDate,
+        priorBarDate,
+      );
+
+      if (newFacts.length > 0) {
+        const maxPriorPeriodEnd = await this.secondaryFactRepo.getMaxPriorQuarterPeriodEnd(
+          stock.id,
+          priorBarDate ?? evaluationDate,
+        );
+
+        if (maxPriorPeriodEnd !== null) {
+          const factsByPeriod = new Map<string, SecondaryFactRecord[]>();
+          for (const fact of newFacts) {
+            const list = factsByPeriod.get(fact.period_end) ?? [];
+            list.push(fact);
+            factsByPeriod.set(fact.period_end, list);
+          }
+
+          for (const [newPeriodEnd, facts] of factsByPeriod.entries()) {
+            if (newPeriodEnd > maxPriorPeriodEnd) {
+              const revFact = facts.find((f) => f.item.toLowerCase().includes("revenue"));
+              const netFact = facts.find(
+                (f) =>
+                  f.item.toLowerCase().includes("netincome") ||
+                  f.item.toLowerCase().includes("net_income"),
+              );
+
+              const [yStr, mStr, dStr] = newPeriodEnd.split("-");
+              const priorYear = Number(yStr) - 1;
+              const yoyTargetPeriodEnd = `${priorYear}-${mStr}-${dStr}`;
+
+              const yoyFacts = await this.secondaryFactRepo.getFactsForPeriod(
+                stock.id,
+                yoyTargetPeriodEnd,
+              );
+              const priorRevFact = yoyFacts.find((f) =>
+                f.item.toLowerCase().includes("revenue"),
+              );
+              const priorNetFact = yoyFacts.find(
+                (f) =>
+                  f.item.toLowerCase().includes("netincome") ||
+                  f.item.toLowerCase().includes("net_income"),
+              );
+
+              let revPart = "";
+              let revYoYPct: number | null = null;
+              if (revFact) {
+                const val = Number(revFact.value);
+                const valFormatted = formatFactCurrency(val);
+                if (priorRevFact && Number(priorRevFact.value) !== 0) {
+                  const pVal = Number(priorRevFact.value);
+                  revYoYPct = ((val - pVal) / Math.abs(pVal)) * 100;
+                  const sign = revYoYPct >= 0 ? "+" : "";
+                  revPart = `Revenue ${valFormatted} (${sign}${revYoYPct.toFixed(1)}% YoY)`;
+                } else {
+                  revPart = `Revenue ${valFormatted}`;
+                }
+              }
+
+              let netPart = "";
+              let netYoYPct: number | null = null;
+              if (netFact) {
+                const val = Number(netFact.value);
+                const valFormatted = formatFactCurrency(val);
+                if (priorNetFact && Number(priorNetFact.value) !== 0) {
+                  const pVal = Number(priorNetFact.value);
+                  netYoYPct = ((val - pVal) / Math.abs(pVal)) * 100;
+                  const sign = netYoYPct >= 0 ? "+" : "";
+                  netPart = `Net income ${valFormatted} (${sign}${netYoYPct.toFixed(1)}% YoY)`;
+                } else {
+                  netPart = `Net income ${valFormatted}`;
+                }
+              }
+
+              let summaryDetails = "";
+              if (revPart && netPart) {
+                summaryDetails = `: ${revPart}, ${netPart}.`;
+              } else if (revPart) {
+                summaryDetails = `: ${revPart}.`;
+              } else if (netPart) {
+                summaryDetails = `: ${netPart}.`;
+              } else {
+                summaryDetails = ".";
+              }
+
+              const headline = `Quarterly results published for period ending ${newPeriodEnd}${summaryDetails}`;
+
+              await this.eventFlagRepo.saveDetectedEvent({
+                stockId: stock.id,
+                kind: "RESULTS_PUBLISHED",
+                eventDate: evaluationDate,
+                headline,
+                detail: {
+                  key: `RESULTS_${newPeriodEnd}`,
+                  periodEnd: newPeriodEnd,
+                  yoyPeriodEnd: yoyTargetPeriodEnd,
+                  revenue: revFact ? Number(revFact.value) : null,
+                  priorRevenue: priorRevFact ? Number(priorRevFact.value) : null,
+                  revenueYoYPercent: revYoYPct !== null ? Number(revYoYPct.toFixed(2)) : null,
+                  netIncome: netFact ? Number(netFact.value) : null,
+                  priorNetIncome: priorNetFact ? Number(priorNetFact.value) : null,
+                  netIncomeYoYPercent: netYoYPct !== null ? Number(netYoYPct.toFixed(2)) : null,
+                },
+              });
+            }
+          }
+        }
       }
     }
 

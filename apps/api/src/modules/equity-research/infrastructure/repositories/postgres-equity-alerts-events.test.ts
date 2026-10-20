@@ -9,6 +9,7 @@ import { PostgresEquityAlertRepository } from "./postgres-equity-alert-repositor
 import { PostgresEquityEventFlagRepository } from "./postgres-equity-event-flag-repository.js";
 import { PostgresEquitySourceHealthRepository } from "./postgres-equity-source-health-repository.js";
 import { PostgresEquityCorporateActionRepository } from "./postgres-equity-corporate-action-repository.js";
+import { PostgresEquitySecondaryFactRepository } from "./postgres-equity-secondary-fact-repository.js";
 import { EquityAlertsEvaluationService } from "../../application/equity-alerts-evaluation-service.js";
 import { EQUITY_ALERT_FOOTER, EQUITY_ALERT_RULES_HASH } from "../../domain/alert-rules.js";
 
@@ -20,6 +21,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
   let eventFlagRepo: PostgresEquityEventFlagRepository;
   let sourceHealthRepo: PostgresEquitySourceHealthRepository;
   let corporateActionRepo: PostgresEquityCorporateActionRepository;
+  let secondaryFactRepo: PostgresEquitySecondaryFactRepository;
   let evalService: EquityAlertsEvaluationService;
 
   const TEST_SYMBOL = "TEST_ALERTS_STOCK";
@@ -37,6 +39,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
       await alertRepo.deleteAlertsForStock(existing.id);
       await eventFlagRepo.deleteEventsForStock(existing.id);
       await corporateActionRepo.deleteDerivedRows(existing.id);
+      await secondaryFactRepo.deleteDerivedRows(existing.id);
       await pool.query(`DELETE FROM equity_research.price_bar_revision WHERE stock_id = $1`, [existing.id]);
       await priceBarRepo.deleteDerivedRows(existing.id);
       await pool.query(`DELETE FROM equity_research.watchlist_stock WHERE id = $1`, [existing.id]);
@@ -52,6 +55,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     eventFlagRepo = new PostgresEquityEventFlagRepository(pool);
     sourceHealthRepo = new PostgresEquitySourceHealthRepository(pool);
     corporateActionRepo = new PostgresEquityCorporateActionRepository(pool);
+    secondaryFactRepo = new PostgresEquitySecondaryFactRepository(pool);
     process.env.NSE_HOLIDAYS = "2026-05-01";
     evalService = new EquityAlertsEvaluationService(
       watchlistRepo,
@@ -60,6 +64,7 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
       eventFlagRepo,
       sourceHealthRepo,
       corporateActionRepo,
+      secondaryFactRepo,
     );
 
     // Clean up any stale test stock data
@@ -915,5 +920,264 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
         }
       }
     }
+  });
+
+  describe("Step 5: Detected event flags (Gate Step 5)", () => {
+    const TEST_STEP5_SYMBOL = "TEST_STEP5_STOCK";
+    let step5StockId: string;
+
+    beforeAll(async () => {
+      await cleanupStockBySymbol(TEST_STEP5_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: TEST_STEP5_SYMBOL,
+        yahooSymbol: `${TEST_STEP5_SYMBOL}.NS`,
+        displayName: "Synthetic Step 5 Stock",
+      });
+      step5StockId = stock.id;
+    });
+
+    afterAll(async () => {
+      await cleanupStockBySymbol(TEST_STEP5_SYMBOL);
+    });
+
+    it("Initial stock backfill produces 0 detected event flags for past history", async () => {
+      // Set added_at to 2026-10-20 (simulating newly added stock)
+      await pool.query(
+        `UPDATE equity_research.watchlist_stock SET added_at = '2026-10-20 00:00:00Z' WHERE id = $1`,
+        [step5StockId],
+      );
+
+      // Save historical bars up to 2026-10-20
+      await priceBarRepo.saveBars([
+        {
+          stockId: step5StockId,
+          barDate: "2026-10-19",
+          open: 100, high: 105, low: 99, close: 102, volume: 100000, source: TEST_SOURCE,
+        },
+        {
+          stockId: step5StockId,
+          barDate: "2026-10-20",
+          open: 102, high: 106, low: 101, close: 104, volume: 120000, source: TEST_SOURCE,
+        },
+      ]);
+
+      // Backfill historical split and historical quarterly facts
+      await corporateActionRepo.saveActions([
+        {
+          stockId: step5StockId,
+          exDate: "2026-10-20",
+          kind: "SPLIT",
+          value: 2.0,
+          source: TEST_SOURCE,
+        },
+      ]);
+
+      await secondaryFactRepo.saveFacts([
+        {
+          stockId: step5StockId,
+          item: "quarterlyTotalRevenue",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-06-30",
+          value: 1000000000,
+        },
+        {
+          stockId: step5StockId,
+          item: "quarterlyNetIncome",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-06-30",
+          value: 100000000,
+        },
+      ]);
+
+      // Evaluate for 2026-10-20 with isInitialLoad = true (or auto-detected from added_at >= evaluationDate)
+      const stock = (await watchlistRepo.findById(step5StockId))!;
+      const evalRes = await evalService.evaluateStock(stock, "2026-10-20");
+      expect(evalRes.evaluated).toBe(true);
+
+      // Verify that NO detected event flags were created for the backfilled history
+      const flags = await eventFlagRepo.getEventsByStockId(step5StockId, { origin: "DETECTED" });
+      const corpFlags = flags.filter((f) => f.kind === "CORPORATE_ACTION" || f.kind === "RESULTS_PUBLISHED");
+      expect(corpFlags.length).toBe(0);
+    });
+
+    it("Subsequent EOD run records CORPORATE_ACTION flags for SPLIT and DIVIDEND with provenance disclaimer", async () => {
+      // Simulate stock added earlier (e.g. 2026-10-01)
+      await pool.query(
+        `UPDATE equity_research.watchlist_stock SET added_at = '2026-10-01 00:00:00Z' WHERE id = $1`,
+        [step5StockId],
+      );
+
+      // Add bars for 2026-10-21
+      await priceBarRepo.saveBars([
+        {
+          stockId: step5StockId,
+          barDate: "2026-10-21",
+          open: 104, high: 108, low: 103, close: 105, volume: 150000, source: TEST_SOURCE,
+        },
+      ]);
+
+      // Add new corporate actions effective on 2026-10-21: split and dividend
+      await corporateActionRepo.saveActions([
+        {
+          stockId: step5StockId,
+          exDate: "2026-10-21",
+          kind: "SPLIT",
+          value: 2.0,
+          source: TEST_SOURCE,
+        },
+        {
+          stockId: step5StockId,
+          exDate: "2026-10-21",
+          kind: "DIVIDEND",
+          value: 3.5,
+          source: TEST_SOURCE,
+        },
+      ]);
+
+      const stock = (await watchlistRepo.findById(step5StockId))!;
+      const evalRes = await evalService.evaluateStock(stock, "2026-10-21");
+      expect(evalRes.evaluated).toBe(true);
+
+      const flags = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "CORPORATE_ACTION",
+      });
+
+      const splitFlag = flags.find((f) => f.detail_json?.actionKind === "SPLIT");
+      expect(splitFlag).toBeDefined();
+      expect(splitFlag?.headline).toContain("Stock split effective 2026-10-21 (ratio 2)");
+      expect(splitFlag?.headline).toContain("No future announcements available from this source.");
+      expect(splitFlag?.event_date).toBe("2026-10-21");
+
+      const divFlag = flags.find((f) => f.detail_json?.actionKind === "DIVIDEND");
+      expect(divFlag).toBeDefined();
+      expect(divFlag?.headline).toContain("Dividend effective 2026-10-21 (₹3.50 per share)");
+      expect(divFlag?.headline).toContain("No future announcements available from this source.");
+      expect(divFlag?.event_date).toBe("2026-10-21");
+
+      // Idempotency check: running evaluateStock again must not add duplicate rows
+      const evalRepeat = await evalService.evaluateStock(stock, "2026-10-21");
+      expect(evalRepeat.evaluated).toBe(true);
+      const flagsRepeat = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "CORPORATE_ACTION",
+      });
+      expect(flagsRepeat.length).toBe(flags.length);
+    });
+
+    it("Subsequent EOD run records RESULTS_PUBLISHED flag with YoY comparison and no banned words", async () => {
+      // Prior quarter 1 year ago (2025-09-30) seen earlier
+      await secondaryFactRepo.saveFacts([
+        {
+          stockId: step5StockId,
+          item: "quarterlyTotalRevenue",
+          periodType: "QUARTERLY",
+          periodEnd: "2025-09-30",
+          value: 1000000000, // 100 Cr
+          firstSeenAt: "2025-11-01 10:00:00Z",
+        },
+        {
+          stockId: step5StockId,
+          item: "quarterlyNetIncome",
+          periodType: "QUARTERLY",
+          periodEnd: "2025-09-30",
+          value: 100000000, // 10 Cr
+          firstSeenAt: "2025-11-01 10:00:00Z",
+        },
+      ]);
+
+      // Add bars for 2026-10-22
+      await priceBarRepo.saveBars([
+        {
+          stockId: step5StockId,
+          barDate: "2026-10-22",
+          open: 105, high: 107, low: 104, close: 106, volume: 110000, source: TEST_SOURCE,
+        },
+      ]);
+
+      // New quarter (2026-09-30) first seen on 2026-10-22: Revenue 125 Cr (+25% YoY), Net income 12 Cr (+20% YoY)
+      await secondaryFactRepo.saveFacts([
+        {
+          stockId: step5StockId,
+          item: "quarterlyTotalRevenue",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-09-30",
+          value: 1250000000, // 125 Cr
+          firstSeenAt: "2026-10-22 17:00:00+05:30",
+        },
+        {
+          stockId: step5StockId,
+          item: "quarterlyNetIncome",
+          periodType: "QUARTERLY",
+          periodEnd: "2026-09-30",
+          value: 120000000, // 12 Cr
+          firstSeenAt: "2026-10-22 17:00:00+05:30",
+        },
+      ]);
+
+      const stock = (await watchlistRepo.findById(step5StockId))!;
+      const evalRes = await evalService.evaluateStock(stock, "2026-10-22");
+      expect(evalRes.evaluated).toBe(true);
+
+      const flags = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "RESULTS_PUBLISHED",
+      });
+
+      const resultsFlag = flags.find((f) => f.detail_json?.periodEnd === "2026-09-30");
+      expect(resultsFlag).toBeDefined();
+      expect(resultsFlag?.headline).toContain("Quarterly results published for period ending 2026-09-30");
+      expect(resultsFlag?.headline).toContain("Revenue ₹125.00 Cr (+25.0% YoY)");
+      expect(resultsFlag?.headline).toContain("Net income ₹12.00 Cr (+20.0% YoY)");
+      expect(resultsFlag?.event_date).toBe("2026-10-22");
+
+      // Verify detail json
+      expect(resultsFlag?.detail_json.revenue).toBe(1250000000);
+      expect(resultsFlag?.detail_json.priorRevenue).toBe(1000000000);
+      expect(resultsFlag?.detail_json.revenueYoYPercent).toBe(25);
+      expect(resultsFlag?.detail_json.netIncome).toBe(120000000);
+      expect(resultsFlag?.detail_json.priorNetIncome).toBe(100000000);
+      expect(resultsFlag?.detail_json.netIncomeYoYPercent).toBe(20);
+
+      // Idempotency check: re-evaluation produces 0 duplicates
+      await evalService.evaluateStock(stock, "2026-10-22");
+      const flagsRepeat = await eventFlagRepo.getEventsByStockId(step5StockId, {
+        origin: "DETECTED",
+        kind: "RESULTS_PUBLISHED",
+      });
+      expect(flagsRepeat.length).toBe(flags.length);
+    });
+
+    it("Gate E11 scanner: All stored event flags contain zero banned words", async () => {
+      const allFlags = await pool.query<{ headline: string; kind: string; detail_json: any }>(
+        `SELECT headline, kind, detail_json FROM equity_research.event_flag WHERE stock_id = $1`,
+        [step5StockId],
+      );
+
+      expect(allFlags.rows.length).toBeGreaterThan(0);
+
+      const bannedWords = [
+        "buy", "sell", "hold", "bullish", "bearish", "strong", "weak",
+        "overbought", "oversold", "signal", "target", "outperform", "underperform", "recommend"
+      ];
+
+      for (const row of allFlags.rows) {
+        const lowerHeadline = row.headline.toLowerCase();
+        for (const banned of bannedWords) {
+          const regex = new RegExp(`\\b${banned}\\b`, "i");
+          expect(regex.test(lowerHeadline)).toBe(false);
+        }
+
+        const note = row.detail_json?.note;
+        if (typeof note === "string") {
+          const lowerNote = note.toLowerCase();
+          for (const banned of bannedWords) {
+            const regex = new RegExp(`\\b${banned}\\b`, "i");
+            expect(regex.test(lowerNote)).toBe(false);
+          }
+        }
+      }
+    });
   });
 });

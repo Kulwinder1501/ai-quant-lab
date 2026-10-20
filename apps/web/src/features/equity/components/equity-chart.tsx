@@ -183,16 +183,59 @@ export function EquityChart({
       .filter((e) => barDates.has(e.event_date))
       .sort((a, b) => a.event_date.localeCompare(b.event_date));
 
-    const markers: SeriesMarker<Time>[] = sortedEvents.map((evt) => {
-      const isManual = evt.origin === "MANUAL";
-      return {
-        time: evt.event_date as Time,
-        position: isManual ? "aboveBar" : "belowBar",
-        color: isManual ? "rgb(245 158 11)" : "rgb(6 182 212)",
-        shape: isManual ? "arrowDown" : "circle",
-        text: evt.headline.length > 20 ? `${evt.headline.slice(0, 18)}…` : evt.headline,
-      };
-    });
+    const eventsByDate = new Map<string, EventFlagRecord[]>();
+    for (const evt of sortedEvents) {
+      const list = eventsByDate.get(evt.event_date) ?? [];
+      list.push(evt);
+      eventsByDate.set(evt.event_date, list);
+    }
+
+    const formatEventText = (evt: EventFlagRecord): string => {
+      switch (evt.kind) {
+        case "RESULTS_PUBLISHED":
+        case "RESULTS_DATE_UPCOMING":
+          return "Results";
+        case "CORPORATE_ACTION":
+          return "Corp Act";
+        case "LARGE_MOVE_DAY":
+          return "Move";
+        case "MATERIAL_NEGATIVE":
+          return "Negative";
+        case "ORDER_WIN":
+          return "Order";
+        case "REGULATORY":
+          return "Reg";
+        case "MANAGEMENT":
+          return "Mgmt";
+        default:
+          return evt.headline.length > 8 ? `${evt.headline.slice(0, 7)}…` : evt.headline;
+      }
+    };
+
+    const markers: SeriesMarker<Time>[] = [];
+    for (const [date, dayEvents] of eventsByDate.entries()) {
+      if (dayEvents.length > 1) {
+        // Clustered on same date: render single consolidated marker
+        const hasManual = dayEvents.some((e) => e.origin === "MANUAL");
+        markers.push({
+          time: date as Time,
+          position: hasManual ? "aboveBar" : "belowBar",
+          color: hasManual ? "rgb(245 158 11)" : "rgb(6 182 212)",
+          shape: hasManual ? "arrowDown" : "circle",
+          text: `${dayEvents.length} events`,
+        });
+      } else {
+        const evt = dayEvents[0];
+        const isManual = evt.origin === "MANUAL";
+        markers.push({
+          time: date as Time,
+          position: isManual ? "aboveBar" : "belowBar",
+          color: isManual ? "rgb(245 158 11)" : "rgb(6 182 212)",
+          shape: isManual ? "arrowDown" : "circle",
+          text: formatEventText(evt),
+        });
+      }
+    }
 
     plugin.setMarkers(markers);
   }, [events, bars]);

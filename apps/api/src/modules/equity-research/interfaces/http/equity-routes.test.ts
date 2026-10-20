@@ -605,12 +605,15 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
     it("returns full trend panel for a stock via GET /watchlist/:id/trend (T6, T7)", async () => {
       const stock = (await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL))!;
 
-      // Measure call log before request (T7)
+      // Measure call log before request (T7, Gate E15: parallel test hygiene)
+      const requestStart = new Date();
       const callLogBefore = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+        `SELECT count(*)::text as count FROM equity_research.source_call_log WHERE time >= $1`,
+        [requestStart],
       );
       const rawRecordsBefore = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+        `SELECT count(*)::text as count FROM equity_research.raw_record WHERE requested_at >= $1`,
+        [requestStart],
       );
 
       const res = await fetch(`${baseUrl}/watchlist/${stock.id}/trend`);
@@ -664,12 +667,14 @@ describe("Equity Research HTTP Routes (Gates S1, S6, S7, S8)", () => {
       expect(Array.isArray(data.largeDailyMoves)).toBe(true);
       expect(data.trendSummary).toBeDefined();
 
-      // Verify ZERO new Yahoo calls were made (T7)
+      // Verify ZERO new Yahoo calls were made (T7, Gate E15: parallel test hygiene)
       const callLogAfter = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.source_call_log`,
+        `SELECT count(*)::text as count FROM equity_research.source_call_log WHERE time >= $1`,
+        [requestStart],
       );
       const rawRecordsAfter = await pool.query(
-        `SELECT count(*)::text as count FROM equity_research.raw_record`,
+        `SELECT count(*)::text as count FROM equity_research.raw_record WHERE requested_at >= $1`,
+        [requestStart],
       );
       expect(callLogAfter.rows[0].count).toBe(callLogBefore.rows[0].count);
       expect(rawRecordsAfter.rows[0].count).toBe(rawRecordsBefore.rows[0].count);

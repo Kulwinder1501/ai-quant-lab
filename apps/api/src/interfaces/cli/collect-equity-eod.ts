@@ -58,6 +58,7 @@ async function main(): Promise<void> {
       eventFlagRepo,
       sourceHealthRepo,
       corporateActionRepo,
+      secondaryFactRepo,
     );
 
     const collector = new EquityEodCollector(

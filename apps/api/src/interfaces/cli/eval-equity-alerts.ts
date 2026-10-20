@@ -7,6 +7,7 @@ import { PostgresEquityAlertRepository } from "../../modules/equity-research/inf
 import { PostgresEquityCorporateActionRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-corporate-action-repository.js";
 import { PostgresEquityEventFlagRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-event-flag-repository.js";
 import { PostgresEquityPriceBarRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-price-bar-repository.js";
+import { PostgresEquitySecondaryFactRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-secondary-fact-repository.js";
 import { PostgresEquitySourceHealthRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-source-health-repository.js";
 import { PostgresEquityWatchlistRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-watchlist-repository.js";
 
@@ -44,6 +45,7 @@ async function main(): Promise<void> {
     const eventFlagRepo = new PostgresEquityEventFlagRepository(database);
     const sourceHealthRepo = new PostgresEquitySourceHealthRepository(database);
     const corporateActionRepo = new PostgresEquityCorporateActionRepository(database);
+    const secondaryFactRepo = new PostgresEquitySecondaryFactRepository(database);
 
     const alertsService = new EquityAlertsEvaluationService(
       watchlistRepo,
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
       eventFlagRepo,
       sourceHealthRepo,
       corporateActionRepo,
+      secondaryFactRepo,
     );
 
     const { date, symbol, exchange } = parseArgs(process.argv.slice(2));

@@ -111,12 +111,18 @@ export default function EquityWatchPage() {
         }
       });
 
-    void loadAlertsSummary();
+    void fetchEquityAlerts()
+      .then((res) => {
+        if (!isCancelled) {
+          setAlertsSummary(res);
+        }
+      })
+      .catch(() => {});
 
     return () => {
       isCancelled = true;
     };
-  }, [loadAlertsSummary]);
+  }, []);
 
   const handleStockAdded = (_newStock: WatchlistStockItem) => {
     toast({

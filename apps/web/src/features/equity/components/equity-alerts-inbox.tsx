@@ -43,13 +43,13 @@ export function EquityAlertsInbox({
   const [stockFilter, setStockFilter] = useState<string>(selectedStockSymbol ?? "ALL");
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (selectedStockSymbol) {
-      setStockFilter(selectedStockSymbol);
-    }
-  }, [selectedStockSymbol]);
+  const [prevSelectedSymbol, setPrevSelectedSymbol] = useState(selectedStockSymbol);
+  if (selectedStockSymbol !== prevSelectedSymbol) {
+    setPrevSelectedSymbol(selectedStockSymbol);
+    setStockFilter(selectedStockSymbol ?? "ALL");
+  }
 
-  const loadAlerts = useCallback(async () => {
+  const reloadAlerts = useCallback(async () => {
     try {
       setIsLoading(true);
       setError(null);
@@ -78,10 +78,41 @@ export function EquityAlertsInbox({
   }, [stockFilter, statusFilter]);
 
   useEffect(() => {
-    if (isOpen) {
-      void loadAlerts();
+    if (!isOpen) return;
+
+    let isMounted = true;
+    const filter: {
+      symbol?: string;
+      status?: AlertStatus;
+    } = {};
+
+    if (stockFilter !== "ALL") {
+      filter.symbol = stockFilter;
     }
-  }, [isOpen, loadAlerts]);
+
+    if (statusFilter !== "ALL") {
+      filter.status = statusFilter;
+    }
+
+    void fetchEquityAlerts(filter)
+      .then((res) => {
+        if (isMounted) {
+          setAlerts(res);
+          setError(null);
+          setIsLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : "Failed to load alerts.");
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, stockFilter, statusFilter]);
 
   const handleUpdateStatus = async (alertId: string, newStatus: AlertStatus) => {
     try {
@@ -237,7 +268,7 @@ export function EquityAlertsInbox({
               <p className="text-xs text-slate-400 mt-1 mb-4">{error}</p>
               <button
                 type="button"
-                onClick={() => void loadAlerts()}
+                onClick={() => void reloadAlerts()}
                 className="rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-500/30 transition border border-rose-500/30"
               >
                 Retry
@@ -320,7 +351,9 @@ export function EquityAlertsInbox({
                     {alert.payload_json.close !== undefined &&
                       alert.payload_json.close !== null && (
                         <div>
-                          <span className="text-slate-500 block text-[10px]">Close</span>
+                          <span className="text-slate-500 block text-[10px]">
+                            {alert.kind === "DATA_HEALTH" ? "Last close" : "Close"}
+                          </span>
                           <span className="font-mono text-slate-200">
                             ₹{Number(alert.payload_json.close).toFixed(2)}
                           </span>

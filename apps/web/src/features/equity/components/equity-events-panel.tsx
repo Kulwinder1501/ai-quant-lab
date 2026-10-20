@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   Calendar,
-  CheckCircle2,
   Clock,
   ExternalLink,
   GitBranch,
@@ -68,8 +67,39 @@ export function EquityEventsPanel({
   }, [stock.id, includeHistory]);
 
   useEffect(() => {
-    void loadEvents();
-  }, [loadEvents]);
+    let isMounted = true;
+    void fetchEquityEvents({
+      stockId: stock.id,
+      includeHistory,
+    })
+      .then((res) => {
+        if (isMounted) {
+          setEvents(res);
+          setError(null);
+          setIsLoading(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : "Failed to load events.");
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [stock.id, includeHistory]);
+
+  const supersededIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of events) {
+      if (e.supersedes_id) {
+        set.add(e.supersedes_id);
+      }
+    }
+    return set;
+  }, [events]);
 
   const handleOpenAdd = () => {
     setEditingEvent(null);
@@ -410,7 +440,7 @@ export function EquityEventsPanel({
                   )}
                 </div>
 
-                {event.origin === "MANUAL" && (
+                {event.origin === "MANUAL" && !supersededIds.has(event.id) && (
                   <button
                     type="button"
                     onClick={() => handleOpenEdit(event)}
@@ -419,6 +449,11 @@ export function EquityEventsPanel({
                     <PenSquare className="size-3" />
                     Edit
                   </button>
+                )}
+                {supersededIds.has(event.id) && (
+                  <span className="text-[10px] text-slate-500 font-mono italic">
+                    Superseded
+                  </span>
                 )}
               </div>
 

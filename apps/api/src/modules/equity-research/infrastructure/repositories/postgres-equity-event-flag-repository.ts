@@ -118,9 +118,25 @@ export class PostgresEquityEventFlagRepository {
         );
       }
 
-      // Fork protection: check if event has already been superseded
+      // Fork protection: check if event has already been superseded (points to head of chain)
       const branchCheck = await this.db.query<{ id: string }>(
-        `SELECT id FROM equity_research.event_flag WHERE supersedes_id = $1 LIMIT 1`,
+        `
+        WITH RECURSIVE chain AS (
+          SELECT id, supersedes_id, created_at
+          FROM equity_research.event_flag
+          WHERE supersedes_id = $1
+          UNION ALL
+          SELECT e.id, e.supersedes_id, e.created_at
+          FROM equity_research.event_flag e
+          JOIN chain c ON e.supersedes_id = c.id
+        )
+        SELECT id FROM chain
+        WHERE NOT EXISTS (
+          SELECT 1 FROM equity_research.event_flag sub WHERE sub.supersedes_id = chain.id
+        )
+        ORDER BY created_at DESC
+        LIMIT 1
+        `,
         [event.supersedesId],
       );
       if (branchCheck.rows.length > 0) {
@@ -436,11 +452,27 @@ export class PostgresEquityEventFlagRepository {
   }
 
   /**
-   * Fetches the newer revision that supersedes this event (if any).
+   * Fetches the latest active head of the revision chain that supersedes this event (if any).
    */
   async getNewerRevision(id: string): Promise<EventFlagRecord | null> {
     const result = await this.db.query<{ id: string }>(
-      `SELECT id FROM equity_research.event_flag WHERE supersedes_id = $1 LIMIT 1`,
+      `
+      WITH RECURSIVE chain AS (
+        SELECT id, supersedes_id, created_at
+        FROM equity_research.event_flag
+        WHERE supersedes_id = $1
+        UNION ALL
+        SELECT e.id, e.supersedes_id, e.created_at
+        FROM equity_research.event_flag e
+        JOIN chain c ON e.supersedes_id = c.id
+      )
+      SELECT id FROM chain
+      WHERE NOT EXISTS (
+        SELECT 1 FROM equity_research.event_flag sub WHERE sub.supersedes_id = chain.id
+      )
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
       [id],
     );
     if (result.rows.length === 0) return null;

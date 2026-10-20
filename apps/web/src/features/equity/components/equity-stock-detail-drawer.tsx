@@ -73,8 +73,22 @@ export function EquityStockDetailDrawer({
 
   useEffect(() => {
     if (!isOpen || !stock) return;
-    void loadStockEvents();
-  }, [isOpen, stock, loadStockEvents]);
+
+    let isMounted = true;
+    const stockId = stock.id;
+
+    void fetchEquityEvents({ stockId })
+      .then((data) => {
+        if (isMounted) {
+          setEvents(data);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, stock]);
 
   // Defect 4: Accessibility - handle Escape key and lock body scroll
   useEffect(() => {
