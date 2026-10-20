@@ -1,4 +1,6 @@
 import {
+  EQUITY_ALERT_FOOTER,
+  EQUITY_ALERT_RULES_HASH,
   evaluateAlerts,
   type EvaluatedAlert,
 } from "../domain/alert-rules.js";
@@ -52,14 +54,18 @@ export class EquityAlertsEvaluationService {
    * - E1: Idempotent duplicate runs add 0 rows (ON CONFLICT DO NOTHING).
    * - E2: Point-in-time enforcement: only price bars up to evaluationDate are queried.
    * - E5: Non-OK stocks produce throttled DATA_HEALTH alerts and 0 level alerts.
-   * - E6: Demerger / 40%+ move yields DATA_EVENT, never LARGE_MOVE.
+   * - E6: Demerger / 40%+ move yields DATA_EVENT (possible corporate action), never LARGE_MOVE.
    * - E12: If no bar exists on evaluationDate (weekend, holiday, missing bar), returns 0 alerts.
    * - E16: Passes recentAlerts containing the latest DATA_HEALTH alert regardless of age.
    */
   async evaluateStock(
     stock: WatchlistStockRecord,
     evaluationDate: string,
-    options?: { isOldRestatement?: boolean; hasNewSplit?: boolean },
+    options?: {
+      isOldRestatement?: boolean;
+      hasNewSplit?: boolean;
+      isTradingDay?: boolean;
+    },
   ): Promise<StockAlertEvaluationResult> {
     const result: StockAlertEvaluationResult = {
       stockId: stock.id,
@@ -75,18 +81,36 @@ export class EquityAlertsEvaluationService {
     // 1. Fetch bars strictly up to evaluationDate (Gate E2: point-in-time enforcement)
     const bars = await this.priceBarRepo.getBarsUpToDate(stock.id, evaluationDate, 600);
 
-    if (!bars || bars.length === 0) {
-      result.reason = "No bars found up to evaluation date";
-      return result;
+    const hasBarOnDate = Boolean(
+      bars && bars.length > 0 && bars[bars.length - 1].bar_date === evaluationDate,
+    );
+
+    if (!hasBarOnDate) {
+      // Gate E12: Weekend guard (Saturday = 6, Sunday = 0)
+      const dateObj = new Date(`${evaluationDate}T00:00:00Z`);
+      const dayOfWeek = dateObj.getUTCDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) {
+        result.reason = `Weekend date ${evaluationDate} (Gate E12)`;
+        return result;
+      }
+
+      // Check if evaluationDate is an active trading day across the market
+      const isTradingDay =
+        options?.isTradingDay !== undefined
+          ? options.isTradingDay
+          : await this.priceBarRepo.hasAnyBarOnDate(evaluationDate);
+
+      if (!isTradingDay) {
+        result.reason = `No bars stored for any stock on ${evaluationDate} (market holiday / non-trading day); zero alerts evaluated (Gate E12)`;
+        return result;
+      }
+
+      // It IS a trading day, but this active stock stored NO bar on evaluationDate!
+      // This is an unhealthy-data event: emit throttled DATA_HEALTH alert.
+      return await this.handleMissingBarStock(stock, evaluationDate);
     }
 
     const lastBar = bars[bars.length - 1];
-
-    // Gate E12: Only stocks that stored a bar on evaluationDate are evaluated
-    if (lastBar.bar_date !== evaluationDate) {
-      result.reason = `No bar stored on evaluation date ${evaluationDate} (last bar was ${lastBar.bar_date})`;
-      return result;
-    }
 
     // 2. Fetch recent alerts including the single latest DATA_HEALTH alert regardless of age (Gate E16)
     const recentAlerts = await this.alertRepo.getRecentAlertsForStock(stock.id, {
@@ -130,8 +154,21 @@ export class EquityAlertsEvaluationService {
       evaluationDate,
     });
 
-    // 6. Check for extra DATA_EVENT conditions (new split or older bar restatement)
-    if (options?.hasNewSplit) {
+    // 6. Check for extra DATA_EVENT conditions derived from stored database state
+    // (A) Stored SPLIT corporate action effective on or first seen on evaluationDate
+    const hasSplit =
+      Boolean(options?.hasNewSplit) ||
+      (this.corporateActionRepo
+        ? await this.corporateActionRepo.hasSplitForDate(stock.id, evaluationDate)
+        : false);
+
+    // (B) Stored price-bar revision or re-backfill observed on evaluationDate
+    const hasRevision =
+      Boolean(options?.isOldRestatement) ||
+      stock.rebackfill_needed ||
+      (await this.priceBarRepo.hasRevisionsForDate(stock.id, evaluationDate));
+
+    if (hasSplit) {
       const alreadyHasSplitAlert = emitted.some(
         (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "SPLIT",
       );
@@ -142,20 +179,20 @@ export class EquityAlertsEvaluationService {
           levelKey: null,
           evaluatedDate: evaluationDate,
           severity: "NOTICE",
-          title: `Stock split effective on ${evaluationDate}: historical series re-scaled.`,
+          title: `Stock split effective on ${evaluationDate} (possible corporate action).`,
           payload: {
             close: lastBar.close,
             evaluatedDate: evaluationDate,
             subtype: "SPLIT",
             seriesVersion: stock.series_version ?? 1,
-            rulesHash: levelsAtT.disclaimer ? "equity-alerts-v1" : "",
-            disclaimer: levelsAtT.disclaimer,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
     }
 
-    if (options?.isOldRestatement) {
+    if (hasRevision) {
       const alreadyHasRestatement = emitted.some(
         (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "RESTATEMENT",
       );
@@ -172,8 +209,8 @@ export class EquityAlertsEvaluationService {
             evaluatedDate: evaluationDate,
             subtype: "RESTATEMENT",
             seriesVersion: stock.series_version ?? 1,
-            rulesHash: levelsAtT.disclaimer ? "equity-alerts-v1" : "",
-            disclaimer: levelsAtT.disclaimer,
+            rulesHash: EQUITY_ALERT_RULES_HASH,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
@@ -216,8 +253,9 @@ export class EquityAlertsEvaluationService {
           eventDate: evaluationDate,
           headline: alert.title,
           detail: {
-            key: (alert.payload.subtype as string) ?? "DATA_EVENT_DEMERGER",
+            key: (alert.payload.subtype as string) ?? "DEMERGER_40PCT",
             returnPct: alert.payload.returnPct,
+            note: "Possible corporate action",
           },
         });
       }
@@ -233,9 +271,122 @@ export class EquityAlertsEvaluationService {
   }
 
   /**
+   * Handles an active stock that stored NO bar on an active trading day.
+   * Throttles DATA_HEALTH notice: emits UNHEALTHY_ENTER on first missing day,
+   * single UNHEALTHY_REPEAT after >= 5 days, then suppresses.
+   */
+  private async handleMissingBarStock(
+    stock: WatchlistStockRecord,
+    evalDate: string,
+  ): Promise<StockAlertEvaluationResult> {
+    // Gate E1: Idempotency guard for same-day re-runs
+    const existingToday = await this.alertRepo.getAlerts({
+      stockId: stock.id,
+      evaluatedDate: evalDate,
+    });
+    if (existingToday.some((a) => a.kind === "DATA_HEALTH")) {
+      return {
+        stockId: stock.id,
+        symbol: stock.symbol,
+        evaluatedDate: evalDate,
+        evaluated: false,
+        alertsEmitted: 0,
+        alertsInserted: 0,
+        alertsSkipped: 1,
+        alerts: [],
+        reason: `Missing price bar on trading day ${evalDate} (already evaluated today)`,
+      };
+    }
+
+    const recentAlerts = await this.alertRepo.getRecentAlertsForStock(stock.id, {
+      asOfDate: evalDate,
+      lookbackCalendarDays: 30,
+    });
+
+    const recentHealthAlerts = recentAlerts
+      .filter((a) => a.kind === "DATA_HEALTH")
+      .sort((a, b) => b.evaluatedDate.localeCompare(a.evaluatedDate));
+    const lastHealthAlert = recentHealthAlerts[0] ?? null;
+    const lastHealthSubtype = lastHealthAlert?.payload?.subtype;
+
+    const diffDays = lastHealthAlert
+      ? Math.floor(
+          (new Date(`${evalDate}T00:00:00Z`).getTime() -
+            new Date(`${lastHealthAlert.evaluatedDate}T00:00:00Z`).getTime()) /
+            (1000 * 60 * 60 * 24),
+        )
+      : 999;
+
+    let shouldEmit = false;
+    let subtype: "UNHEALTHY_ENTER" | "UNHEALTHY_REPEAT" = "UNHEALTHY_ENTER";
+
+    if (!lastHealthAlert || lastHealthSubtype === "RECOVERED") {
+      shouldEmit = true;
+      subtype = "UNHEALTHY_ENTER";
+    } else if (lastHealthSubtype === "UNHEALTHY_ENTER" && diffDays >= 5) {
+      shouldEmit = true;
+      subtype = "UNHEALTHY_REPEAT";
+    }
+
+    if (!shouldEmit) {
+      return {
+        stockId: stock.id,
+        symbol: stock.symbol,
+        evaluatedDate: evalDate,
+        evaluated: false,
+        alertsEmitted: 0,
+        alertsInserted: 0,
+        alertsSkipped: 0,
+        alerts: [],
+        reason: `Missing price bar on trading day ${evalDate} (throttled)`,
+      };
+    }
+
+    const title =
+      subtype === "UNHEALTHY_ENTER"
+        ? `Data health notice: Entering unhealthy state - Missing price bar on trading day ${evalDate}.`
+        : `Data health notice: Persisting unhealthy state (reminder) - Missing price bar on trading day ${evalDate}.`;
+
+    const alert: EvaluatedAlert = {
+      stockId: stock.id,
+      kind: "DATA_HEALTH",
+      levelKey: null,
+      evaluatedDate: evalDate,
+      severity: "NOTICE",
+      title,
+      payload: {
+        close: 0,
+        evaluatedDate: evalDate,
+        seriesVersion: stock.series_version ?? 1,
+        rulesHash: EQUITY_ALERT_RULES_HASH,
+        disclaimer: EQUITY_ALERT_FOOTER,
+        reason: `Missing price bar on trading day ${evalDate}.`,
+        subtype,
+      },
+    };
+
+    const saveResult = await this.alertRepo.saveAlerts([alert]);
+
+    return {
+      stockId: stock.id,
+      symbol: stock.symbol,
+      evaluatedDate: evalDate,
+      evaluated: true,
+      alertsEmitted: 1,
+      alertsInserted: saveResult.inserted,
+      alertsSkipped: saveResult.skipped,
+      alerts: [alert],
+      reason: `Missing price bar on trading day ${evalDate}`,
+    };
+  }
+
+  /**
    * Runs End-of-Day alert evaluation across all active watchlist stocks for the given date.
    * If evaluationDate is omitted, uses current IST date.
-   * Gate E12: Weekends and market holidays produce 0 evaluation and 0 alerts.
+   * Gates satisfied:
+   * - E12: Weekends and market holidays produce 0 evaluation and 0 alerts.
+   * - When at least one active stock stored a bar on evalDate, stocks without a bar get a DATA_HEALTH notice.
+   * - Evaluation errors are persisted as DATA_HEALTH items into equity_research.alert.
    */
   async evaluateAll(
     evaluationDate?: string,
@@ -268,6 +419,36 @@ export class EquityAlertsEvaluationService {
       }
     }
 
+    if (stocks.length === 0) {
+      return {
+        evaluationDate: evalDate,
+        totalStocks: 0,
+        stocksEvaluated: 0,
+        stocksSkipped: 0,
+        totalAlertsEmitted: 0,
+        totalAlertsInserted: 0,
+        totalAlertsSkipped: 0,
+        results: [],
+      };
+    }
+
+    // Check if ANY bar exists on evalDate across all stocks (market holiday / non-trading day check)
+    const isTradingDay = await this.priceBarRepo.hasAnyBarOnDate(evalDate);
+    if (!isTradingDay) {
+      return {
+        evaluationDate: evalDate,
+        totalStocks: stocks.length,
+        stocksEvaluated: 0,
+        stocksSkipped: stocks.length,
+        totalAlertsEmitted: 0,
+        totalAlertsInserted: 0,
+        totalAlertsSkipped: 0,
+        results: [],
+        message: `No bars stored for any stock on ${evalDate} (market holiday / non-trading day); zero alerts evaluated (Gate E12)`,
+      };
+    }
+
+    // At least one active stock traded: evalDate is a real trading day
     const results: StockAlertEvaluationResult[] = [];
     let stocksEvaluated = 0;
     let stocksSkipped = 0;
@@ -277,7 +458,7 @@ export class EquityAlertsEvaluationService {
 
     for (const stock of stocks) {
       try {
-        const res = await this.evaluateStock(stock, evalDate);
+        const res = await this.evaluateStock(stock, evalDate, { isTradingDay: true });
         results.push(res);
         if (res.evaluated) {
           stocksEvaluated++;
@@ -289,16 +470,45 @@ export class EquityAlertsEvaluationService {
         totalAlertsSkipped += res.alertsSkipped;
       } catch (err: unknown) {
         stocksSkipped++;
+        const errorMsg = err instanceof Error ? err.message : String(err);
+
+        // Persist evaluation error as a DATA_HEALTH item in database (Plan Section 7)
+        try {
+          const errAlert: EvaluatedAlert = {
+            stockId: stock.id,
+            kind: "DATA_HEALTH",
+            levelKey: null,
+            evaluatedDate: evalDate,
+            severity: "NOTICE",
+            title: `Data health notice: Entering unhealthy state - Evaluation error: ${errorMsg}`,
+            payload: {
+              close: 0,
+              evaluatedDate: evalDate,
+              seriesVersion: stock.series_version ?? 1,
+              rulesHash: EQUITY_ALERT_RULES_HASH,
+              disclaimer: EQUITY_ALERT_FOOTER,
+              reason: `Evaluation error: ${errorMsg}`,
+              subtype: "UNHEALTHY_ENTER",
+            },
+          };
+          const saveRes = await this.alertRepo.saveAlerts([errAlert]);
+          totalAlertsEmitted += 1;
+          totalAlertsInserted += saveRes.inserted;
+          totalAlertsSkipped += saveRes.skipped;
+        } catch (saveErr) {
+          console.error("Failed to persist evaluation error data health item:", saveErr);
+        }
+
         results.push({
           stockId: stock.id,
           symbol: stock.symbol,
           evaluatedDate: evalDate,
           evaluated: false,
-          alertsEmitted: 0,
-          alertsInserted: 0,
+          alertsEmitted: 1,
+          alertsInserted: 1,
           alertsSkipped: 0,
           alerts: [],
-          reason: `Evaluation error: ${err instanceof Error ? err.message : String(err)}`,
+          reason: `Evaluation error: ${errorMsg}`,
         });
       }
     }

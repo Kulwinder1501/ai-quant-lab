@@ -746,5 +746,39 @@ export class PostgresEquityPriceBarRepository {
       series_version: Number(r.series_version ?? 1),
     }));
   }
+
+  /**
+   * Checks if price bar revisions were recorded or observed on the given date.
+   */
+  async hasRevisionsForDate(stockId: string, evaluationDate: string): Promise<boolean> {
+    const result = await this.db.query<{ exists: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM equity_research.price_bar_revision
+        WHERE stock_id = $1
+          AND (seen_at::date = $2::date OR bar_date = $2::date)
+      ) AS exists
+      `,
+      [stockId, evaluationDate],
+    );
+    return Boolean(result.rows[0]?.exists);
+  }
+
+  /**
+   * Checks if ANY price bar exists in the database on the given date (indicating an active trading day).
+   */
+  async hasAnyBarOnDate(date: string): Promise<boolean> {
+    const result = await this.db.query<{ exists: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM equity_research.price_bar
+        WHERE bar_date = $1
+      ) AS exists
+      `,
+      [date],
+    );
+    return Boolean(result.rows[0]?.exists);
+  }
 }
+
 

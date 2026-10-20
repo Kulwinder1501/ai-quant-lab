@@ -26,20 +26,33 @@ import type { StockHealthStatus } from "./types.js";
 export const EQUITY_ALERT_FOOTER =
   "Reference only. Not a forecast. In our test of six rule sets on 433 stocks none showed an edge.";
 
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  const obj = value as Record<string, unknown>;
+  const sortedKeys = Object.keys(obj).sort();
+  const result: Record<string, unknown> = {};
+  for (const k of sortedKeys) {
+    result[k] = canonicalize(obj[k]);
+  }
+  return result;
+}
+
 /**
  * Computes the canonical SHA-256 hash of the equity alert rule parameters.
  * Excludes narrative and metadata blocks ('calibration', 'disclaimer') so edits to
  * calibration history or disclaimer wording leave the frozen hash unchanged.
+ * Recursively sorts keys at all depths to guarantee canonical representation.
  */
 export function computeAlertRulesHash(
   rulesDataInput: Record<string, unknown> = rulesData as Record<string, unknown>,
 ): string {
   const { calibration, disclaimer, ...params } = rulesDataInput;
-  const sortedKeys = Object.keys(params).sort();
-  const canonicalObj: Record<string, unknown> = {};
-  for (const k of sortedKeys) {
-    canonicalObj[k] = params[k];
-  }
+  const canonicalObj = canonicalize(params);
   return createHash("sha256")
     .update(JSON.stringify(canonicalObj))
     .digest("hex");
@@ -47,7 +60,7 @@ export function computeAlertRulesHash(
 
 export const EQUITY_ALERT_RULES_VERSION = rulesData.version;
 export const EQUITY_ALERT_RULES_HASH =
-  "b0afe011ab0e9a93dc6500b5f65924f5546663d5940590530c2919129c9d86ab";
+  "058320a1e578ad59f977422562f6a09e5bb36c2a3da3867d5202e8bd5fdfba58";
 
 export type AlertKind =
   | "LEVEL_APPROACH"
@@ -120,7 +133,8 @@ export type AlertSubtype =
   | "UNHEALTHY_REPEAT"
   | "RECOVERED"
   | "SPLIT"
-  | "RESTATEMENT";
+  | "RESTATEMENT"
+  | "DEMERGER_40PCT";
 
 export interface AlertPayload {
   close: number;
@@ -335,6 +349,54 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
   const priorBar = usableBars.length > 1 ? usableBars[usableBars.length - 2] : null;
 
   const seriesVersion = levelsAtT.seriesVersion ?? 1;
+  const currentClose = currentBar.close;
+  const prevClose = priorBar ? priorBar.close : null;
+  const atr14 = levelsAtT.atr14 ?? 0;
+  const atrPercent = levelsAtT.atrPercent ?? 0;
+
+  // Gate E6: Evaluate 40%+ artifact move BEFORE the health branch.
+  // The levels engine restarts its series after a 40%+ move so levelsAtT becomes INSUFFICIENT_HISTORY.
+  // We evaluate the artifact move first to emit DATA_EVENT, never DATA_HEALTH, on the day of the move.
+  if (prevClose !== null && prevClose > 0) {
+    const oneDayReturn = (currentClose - prevClose) / prevClose;
+    const absOneDayReturn = Math.abs(oneDayReturn);
+
+    if (absOneDayReturn >= rules.dataEvent.artifactThresholdPct) {
+      if (
+        !isSuppressedByCooldown(
+          "DATA_EVENT",
+          null,
+          currentBarIndex,
+          bars,
+          recentAlerts,
+          rules.cooldown.tradingDays,
+        )
+      ) {
+        return [
+          {
+            stockId,
+            kind: "DATA_EVENT",
+            levelKey: null,
+            evaluatedDate: evalDate,
+            severity: "NOTICE",
+            title: `Large price movement of ${(oneDayReturn * 100).toFixed(2)}% on ${evalDate} (possible corporate action).`,
+            payload: {
+              close: currentClose,
+              evaluatedDate: evalDate,
+              returnPct: oneDayReturn,
+              atr14: null,
+              atrPercent: null,
+              seriesVersion,
+              rulesHash,
+              disclaimer: EQUITY_ALERT_FOOTER,
+              subtype: "DEMERGER_40PCT",
+            },
+          },
+        ];
+      }
+      return [];
+    }
+  }
 
   // Gate E5: Non-OK stocks produce throttled DATA_HEALTH alerts and zero level alerts
   const isDataHealthProblem =
@@ -356,7 +418,21 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
     if (levelsAtT.rebackfillNeeded) {
       reason = "Stock data is suspended due to pending historical re-backfill.";
     } else if (levelsAtT.state === "INSUFFICIENT_HISTORY") {
-      reason = "Insufficient history to compute levels.";
+      // Check if insufficient history was caused by a recent corporate action / artifact move
+      let artifactDate: string | null = null;
+      for (let i = currentBarIndex; i >= Math.max(1, currentBarIndex - 30); i--) {
+        const c = bars[i].close;
+        const p = bars[i - 1].close;
+        if (p > 0 && Math.abs((c - p) / p) >= rules.dataEvent.artifactThresholdPct) {
+          artifactDate = bars[i].bar_date;
+          break;
+        }
+      }
+      if (artifactDate) {
+        reason = `Insufficient history to compute levels (possible corporate action on ${artifactDate}).`;
+      } else {
+        reason = "Insufficient history to compute levels.";
+      }
     } else if (levelsAtT.isStale) {
       reason = `Data is stale (${levelsAtT.staleDays} days since last bar).`;
     } else if (input.sourceHealthStatus === "RATE_LIMITED") {
@@ -401,7 +477,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
         evaluatedDate: evalDate,
         seriesVersion,
         rulesHash,
-        disclaimer: rules.disclaimer,
+        disclaimer: EQUITY_ALERT_FOOTER,
         reason,
         subtype,
       };
@@ -442,54 +518,18 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
         evaluatedDate: evalDate,
         seriesVersion,
         rulesHash,
-        disclaimer: rules.disclaimer,
+        disclaimer: EQUITY_ALERT_FOOTER,
         subtype: "RECOVERED",
       },
     });
   }
 
-  const currentClose = currentBar.close;
-  const prevClose = priorBar ? priorBar.close : null;
-  const atr14 = levelsAtT.atr14 ?? 0;
-  const atrPercent = levelsAtT.atrPercent ?? 0;
-
-  // 1. One-day return and 40% artifact check (Gate E6)
+  // 1. Large Move Check (abs return >= 2.5 * ATR%, strictly below 40% artifact threshold)
   if (prevClose !== null && prevClose > 0) {
     const oneDayReturn = (currentClose - prevClose) / prevClose;
     const absOneDayReturn = Math.abs(oneDayReturn);
 
-    if (absOneDayReturn >= rules.dataEvent.artifactThresholdPct) {
-      // Gate E6: A 40%+ day yields DATA_EVENT, never LARGE_MOVE
-      if (
-        !isSuppressedByCooldown(
-          "DATA_EVENT",
-          null,
-          currentBarIndex,
-          bars,
-          recentAlerts,
-          rules.cooldown.tradingDays,
-        )
-      ) {
-        alerts.push({
-          stockId,
-          kind: "DATA_EVENT",
-          levelKey: null,
-          evaluatedDate: evalDate,
-          severity: "NOTICE",
-          title: `Large price movement of ${(oneDayReturn * 100).toFixed(2)}% detected (suspected corporate action or data restatement).`,
-          payload: {
-            close: currentClose,
-            evaluatedDate: evalDate,
-            returnPct: oneDayReturn,
-            atr14,
-            atrPercent,
-            seriesVersion,
-            rulesHash,
-            disclaimer: rules.disclaimer,
-          },
-        });
-      }
-    } else if (
+    if (
       atrPercent > 0 &&
       absOneDayReturn >= rules.largeMove.atrMultiple * atrPercent
     ) {
@@ -520,7 +560,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
             atrPercent,
             seriesVersion,
             rulesHash,
-            disclaimer: rules.disclaimer,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
@@ -570,7 +610,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
             atr14,
             seriesVersion,
             rulesHash,
-            disclaimer: rules.disclaimer,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
@@ -600,7 +640,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
             atr14,
             seriesVersion,
             rulesHash,
-            disclaimer: rules.disclaimer,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
@@ -654,7 +694,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
           atr14,
           seriesVersion,
           rulesHash,
-          disclaimer: rules.disclaimer,
+          disclaimer: EQUITY_ALERT_FOOTER,
         },
       });
     }
@@ -690,7 +730,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
             atr14,
             seriesVersion,
             rulesHash,
-            disclaimer: rules.disclaimer,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }
@@ -730,7 +770,7 @@ export function evaluateAlerts(input: EvaluateAlertsInput): EvaluatedAlert[] {
             atr14,
             seriesVersion,
             rulesHash,
-            disclaimer: rules.disclaimer,
+            disclaimer: EQUITY_ALERT_FOOTER,
           },
         });
       }

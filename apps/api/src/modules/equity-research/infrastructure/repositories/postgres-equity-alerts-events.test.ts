@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import "dotenv/config";
 import { loadEnvironment } from "../../../../config/environment.js";
 import { createDatabasePool } from "../../../../infrastructure/database/database.js";
@@ -8,6 +8,7 @@ import { PostgresEquityPriceBarRepository } from "./postgres-equity-price-bar-re
 import { PostgresEquityAlertRepository } from "./postgres-equity-alert-repository.js";
 import { PostgresEquityEventFlagRepository } from "./postgres-equity-event-flag-repository.js";
 import { PostgresEquitySourceHealthRepository } from "./postgres-equity-source-health-repository.js";
+import { PostgresEquityCorporateActionRepository } from "./postgres-equity-corporate-action-repository.js";
 import { EquityAlertsEvaluationService } from "../../application/equity-alerts-evaluation-service.js";
 import { EQUITY_ALERT_FOOTER, EQUITY_ALERT_RULES_HASH } from "../../domain/alert-rules.js";
 
@@ -18,11 +19,29 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
   let alertRepo: PostgresEquityAlertRepository;
   let eventFlagRepo: PostgresEquityEventFlagRepository;
   let sourceHealthRepo: PostgresEquitySourceHealthRepository;
+  let corporateActionRepo: PostgresEquityCorporateActionRepository;
   let evalService: EquityAlertsEvaluationService;
 
   const TEST_SYMBOL = "TEST_ALERTS_STOCK";
+  const TEST_TMPV_SYMBOL = "TEST_TMPV_STOCK";
+  const TEST_MISSING_SYMBOL = "TEST_MISSING_STOCK";
   const TEST_SOURCE = "TEST_ALERTS_SOURCE";
+
   let testStockId: string;
+  let tmpvStockId: string;
+  let missingStockId: string;
+
+  async function cleanupStockBySymbol(symbol: string) {
+    const existing = await watchlistRepo.findBySymbol("NSE", symbol);
+    if (existing) {
+      await alertRepo.deleteAlertsForStock(existing.id);
+      await eventFlagRepo.deleteEventsForStock(existing.id);
+      await corporateActionRepo.deleteDerivedRows(existing.id);
+      await pool.query(`DELETE FROM equity_research.price_bar_revision WHERE stock_id = $1`, [existing.id]);
+      await priceBarRepo.deleteDerivedRows(existing.id);
+      await pool.query(`DELETE FROM equity_research.watchlist_stock WHERE id = $1`, [existing.id]);
+    }
+  }
 
   beforeAll(async () => {
     const env = loadEnvironment();
@@ -32,22 +51,20 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     alertRepo = new PostgresEquityAlertRepository(pool);
     eventFlagRepo = new PostgresEquityEventFlagRepository(pool);
     sourceHealthRepo = new PostgresEquitySourceHealthRepository(pool);
+    corporateActionRepo = new PostgresEquityCorporateActionRepository(pool);
     evalService = new EquityAlertsEvaluationService(
       watchlistRepo,
       priceBarRepo,
       alertRepo,
       eventFlagRepo,
       sourceHealthRepo,
+      corporateActionRepo,
     );
 
     // Clean up any stale test stock data
-    const existing = await watchlistRepo.findBySymbol("NSE", TEST_SYMBOL);
-    if (existing) {
-      await alertRepo.deleteAlertsForStock(existing.id);
-      await eventFlagRepo.deleteEventsForStock(existing.id);
-      await priceBarRepo.deleteDerivedRows(existing.id);
-      await pool.query(`DELETE FROM equity_research.watchlist_stock WHERE id = $1`, [existing.id]);
-    }
+    await cleanupStockBySymbol(TEST_SYMBOL);
+    await cleanupStockBySymbol(TEST_TMPV_SYMBOL);
+    await cleanupStockBySymbol(TEST_MISSING_SYMBOL);
 
     const stock = await watchlistRepo.addStock({
       exchange: "NSE",
@@ -60,12 +77,9 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
 
   afterAll(async () => {
     try {
-      if (testStockId) {
-        await alertRepo.deleteAlertsForStock(testStockId);
-        await eventFlagRepo.deleteEventsForStock(testStockId);
-        await priceBarRepo.deleteDerivedRows(testStockId);
-        await pool.query(`DELETE FROM equity_research.watchlist_stock WHERE id = $1`, [testStockId]);
-      }
+      await cleanupStockBySymbol(TEST_SYMBOL);
+      await cleanupStockBySymbol(TEST_TMPV_SYMBOL);
+      await cleanupStockBySymbol(TEST_MISSING_SYMBOL);
     } finally {
       await pool.end();
     }
@@ -391,5 +405,289 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
     await alertRepo.updateAlertState(alertId, "DISMISSED");
     const dismissedAlerts = await alertRepo.getAlerts({ stockId: testStockId, status: "DISMISSED" });
     expect(dismissedAlerts.some((a) => a.id === alertId)).toBe(true);
+  });
+
+  it("Gate E6 end-to-end: TMPV demerger (-40.15% on 2025-10-14) produces DATA_EVENT, creates event flag, and next day cites corporate action date in DATA_HEALTH", async () => {
+    const tmpvStock = await watchlistRepo.addStock({
+      exchange: "NSE",
+      symbol: TEST_TMPV_SYMBOL,
+      yahooSymbol: `${TEST_TMPV_SYMBOL}.NS`,
+      displayName: "Synthetic TMPV Demerger Stock",
+    });
+    tmpvStockId = tmpvStock.id;
+
+    // Seed 30 bars up to 2025-10-13 at ~100
+    const seedBars = [];
+    const baseDate = new Date("2025-09-01T00:00:00Z");
+    let barCount = 0;
+    const d = new Date(baseDate);
+    while (barCount < 30) {
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) {
+        const dateStr = d.toISOString().split("T")[0];
+        if (dateStr >= "2025-10-14") break;
+        seedBars.push({
+          stockId: tmpvStockId,
+          barDate: dateStr,
+          open: 100.0,
+          high: 102.0,
+          low: 98.0,
+          close: 100.0,
+          volume: 1000000,
+          source: TEST_SOURCE,
+        });
+        barCount++;
+      }
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+
+    // Day of demerger: 2025-10-14, drop of -40.15% (from 100.0 to 59.85)
+    seedBars.push({
+      stockId: tmpvStockId,
+      barDate: "2025-10-14",
+      open: 60.0,
+      high: 61.0,
+      low: 58.0,
+      close: 59.85,
+      volume: 5000000,
+      source: TEST_SOURCE,
+    });
+
+    await priceBarRepo.saveBars(seedBars);
+
+    // Evaluate 2025-10-14
+    const evalResult = await evalService.evaluateStock(tmpvStock, "2025-10-14");
+    expect(evalResult.evaluated).toBe(true);
+    expect(evalResult.alertsEmitted).toBe(1);
+
+    const alertsOnMove = await alertRepo.getAlerts({ stockId: tmpvStockId, evaluatedDate: "2025-10-14" });
+    const dataEventAlert = alertsOnMove.find((a) => a.kind === "DATA_EVENT");
+    const dataHealthAlert = alertsOnMove.find((a) => a.kind === "DATA_HEALTH");
+    const largeMoveAlert = alertsOnMove.find((a) => a.kind === "LARGE_MOVE");
+
+    expect(dataEventAlert).toBeDefined();
+    expect(dataEventAlert?.title).toContain("-40.15%");
+    expect(dataEventAlert?.title).toContain("possible corporate action");
+    expect(dataHealthAlert).toBeUndefined();
+    expect(largeMoveAlert).toBeUndefined();
+
+    // Verify event flag recorded in equity_research.event_flag
+    const flags = await eventFlagRepo.getEventsByStockId(tmpvStockId, { origin: "DETECTED" });
+    const demergerFlag = flags.find((f) => f.event_date === "2025-10-14" && f.kind === "CORPORATE_ACTION");
+    expect(demergerFlag).toBeDefined();
+    expect(demergerFlag?.headline).toContain("-40.15%");
+
+    // Day after: 2025-10-15 (close 59.50)
+    await priceBarRepo.saveBars([
+      {
+        stockId: tmpvStockId,
+        barDate: "2025-10-15",
+        open: 59.85,
+        high: 60.50,
+        low: 59.00,
+        close: 59.50,
+        volume: 800000,
+        source: TEST_SOURCE,
+      },
+    ]);
+
+    const nextDayResult = await evalService.evaluateStock(tmpvStock, "2025-10-15");
+    expect(nextDayResult.evaluated).toBe(true);
+    expect(nextDayResult.alertsEmitted).toBe(1);
+
+    const alertsNextDay = await alertRepo.getAlerts({ stockId: tmpvStockId, evaluatedDate: "2025-10-15" });
+    const nextDayHealthAlert = alertsNextDay.find((a) => a.kind === "DATA_HEALTH");
+    expect(nextDayHealthAlert).toBeDefined();
+    expect(nextDayHealthAlert?.payload_json.subtype).toBe("UNHEALTHY_ENTER");
+    expect(nextDayHealthAlert?.payload_json.reason).toContain("possible corporate action on 2025-10-14");
+
+    // Second day after: 2025-10-16 (close 60.00) -> Throttled!
+    await priceBarRepo.saveBars([
+      {
+        stockId: tmpvStockId,
+        barDate: "2025-10-16",
+        open: 59.50,
+        high: 60.50,
+        low: 59.20,
+        close: 60.00,
+        volume: 750000,
+        source: TEST_SOURCE,
+      },
+    ]);
+
+    const day2Result = await evalService.evaluateStock(tmpvStock, "2025-10-16");
+    expect(day2Result.alertsEmitted).toBe(0); // Throttled!
+  });
+
+  it("Stored SPLIT in corporate_action produces DATA_EVENT under evaluateAll without options", async () => {
+    // Clear previous alerts for testStockId on 2026-10-16
+    await pool.query(
+      `DELETE FROM equity_research.alert WHERE stock_id = $1 AND evaluated_date = '2026-10-16'`,
+      [testStockId],
+    );
+
+    // Insert SPLIT row
+    await pool.query(
+      `
+      INSERT INTO equity_research.corporate_action (
+        id, stock_id, ex_date, kind, value, source, first_seen_at
+      ) VALUES (
+        gen_random_uuid(), $1, '2026-10-16', 'SPLIT', 2.0, $2, CURRENT_TIMESTAMP
+      )
+      `,
+      [testStockId, TEST_SOURCE],
+    );
+
+    const stock = (await watchlistRepo.findById(testStockId))!;
+    const evalRes = await evalService.evaluateAll("2026-10-16", { symbol: stock.symbol });
+    expect(evalRes.totalAlertsEmitted).toBeGreaterThanOrEqual(1);
+
+    const alerts = await alertRepo.getAlerts({ stockId: testStockId, evaluatedDate: "2026-10-16" });
+    const splitAlert = alerts.find((a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "SPLIT");
+    expect(splitAlert).toBeDefined();
+    expect(splitAlert?.title).toContain("Stock split effective on 2026-10-16");
+    expect(splitAlert?.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+    expect(splitAlert?.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+  });
+
+  it("Stored revision in price_bar_revision produces DATA_EVENT under evaluateAll without options", async () => {
+    // Clear previous alerts for testStockId on 2026-10-16 and delete corporate actions
+    await pool.query(
+      `DELETE FROM equity_research.alert WHERE stock_id = $1 AND evaluated_date = '2026-10-16'`,
+      [testStockId],
+    );
+    await corporateActionRepo.deleteDerivedRows(testStockId);
+
+    // Insert price bar revision
+    await pool.query(
+      `
+      INSERT INTO equity_research.price_bar_revision (
+        id, stock_id, bar_date, previous_values, new_values, seen_at
+      ) VALUES (
+        gen_random_uuid(), $1, '2026-10-10', '{"close": 100}'::jsonb, '{"close": 98}'::jsonb, '2026-10-16 10:00:00Z'
+      )
+      `,
+      [testStockId],
+    );
+
+    const stock = (await watchlistRepo.findById(testStockId))!;
+    const evalRes = await evalService.evaluateAll("2026-10-16", { symbol: stock.symbol });
+    expect(evalRes.totalAlertsEmitted).toBeGreaterThanOrEqual(1);
+
+    const alerts = await alertRepo.getAlerts({ stockId: testStockId, evaluatedDate: "2026-10-16" });
+    const restatementAlert = alerts.find((a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT");
+    expect(restatementAlert).toBeDefined();
+    expect(restatementAlert?.title).toContain("Historical price restatement detected");
+    expect(restatementAlert?.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+    expect(restatementAlert?.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+  });
+
+  it("Missing price bar on active trading day raises DATA_HEALTH notice; market holiday produces 0 alerts", async () => {
+    const missingStock = await watchlistRepo.addStock({
+      exchange: "NSE",
+      symbol: TEST_MISSING_SYMBOL,
+      yahooSymbol: `${TEST_MISSING_SYMBOL}.NS`,
+      displayName: "Synthetic Stock Missing Bar",
+    });
+    missingStockId = missingStock.id;
+
+    // missingStock has NO bar for 2026-10-16 (an active trading day because testStockId has bar for 2026-10-16)
+    const directEval = await evalService.evaluateStock(missingStock, "2026-10-16");
+    expect(directEval.evaluated).toBe(true);
+    expect(directEval.alertsEmitted).toBe(1);
+
+    const alerts = await alertRepo.getAlerts({ stockId: missingStockId, evaluatedDate: "2026-10-16" });
+    const missingHealthAlert = alerts.find((a) => a.kind === "DATA_HEALTH");
+    expect(missingHealthAlert).toBeDefined();
+    expect(missingHealthAlert?.title).toContain("Missing price bar on trading day 2026-10-16");
+    expect(missingHealthAlert?.payload_json.subtype).toBe("UNHEALTHY_ENTER");
+    expect(missingHealthAlert?.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+    expect(missingHealthAlert?.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+
+    // Re-evaluating on same day is throttled:
+    const reEval = await evalService.evaluateStock(missingStock, "2026-10-16");
+    expect(reEval.alertsEmitted).toBe(0);
+
+    // Market holiday check: evaluating on a weekday with zero bars across entire database (e.g. 2026-05-01)
+    const holidayEval = await evalService.evaluateStock(missingStock, "2026-05-01");
+    expect(holidayEval.evaluated).toBe(false);
+    expect(holidayEval.alertsEmitted).toBe(0);
+  });
+
+  it("Gate E10: Evaluation error during evaluateAll persists DATA_HEALTH row while collection succeeds", async () => {
+    const failingPriceBarRepo = {
+      getBarsUpToDate: vi.fn().mockImplementation((stockId: string, date: string, limit: number) => {
+        if (stockId === testStockId) {
+          throw new Error("Simulated transient connection timeout");
+        }
+        return priceBarRepo.getBarsUpToDate(stockId, date, limit);
+      }),
+      hasAnyBarOnDate: vi.fn().mockResolvedValue(true),
+    } as unknown as PostgresEquityPriceBarRepository;
+
+    const isolatedEvalService = new EquityAlertsEvaluationService(
+      watchlistRepo,
+      failingPriceBarRepo,
+      alertRepo,
+      eventFlagRepo,
+      sourceHealthRepo,
+      corporateActionRepo,
+    );
+
+    // Clear any previous alerts for testStockId on 2026-10-16
+    await pool.query(
+      `DELETE FROM equity_research.alert WHERE stock_id = $1 AND evaluated_date = '2026-10-16'`,
+      [testStockId],
+    );
+
+    // evaluateAll must NOT throw
+    const evalRes = await isolatedEvalService.evaluateAll("2026-10-16", { symbol: TEST_SYMBOL });
+    expect(evalRes).toBeDefined();
+
+    const alerts = await alertRepo.getAlerts({ stockId: testStockId, evaluatedDate: "2026-10-16" });
+    const errAlert = alerts.find((a) => a.kind === "DATA_HEALTH" && a.title.includes("Evaluation error"));
+    expect(errAlert).toBeDefined();
+    expect(errAlert?.payload_json.reason).toContain("Simulated transient connection timeout");
+    expect(errAlert?.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+    expect(errAlert?.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+  });
+
+  it("Stored payload invariants: rulesHash is 64-hex SHA-256, disclaimer is EQUITY_ALERT_FOOTER, zero banned words", async () => {
+    const allAlerts = await pool.query<{ payload_json: any; title: string; kind: string }>(
+      `SELECT payload_json, title, kind FROM equity_research.alert WHERE stock_id IN ($1, $2, $3)`,
+      [testStockId, tmpvStockId, missingStockId],
+    );
+
+    expect(allAlerts.rows.length).toBeGreaterThan(0);
+
+    const bannedWords = [
+      "buy", "sell", "hold", "bullish", "bearish", "strong", "weak",
+      "overbought", "oversold", "signal", "target", "outperform", "underperform", "recommend"
+    ];
+
+    for (const row of allAlerts.rows) {
+      const payload = row.payload_json;
+      // 1. Strict 64-hex SHA-256 hash
+      expect(payload.rulesHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(payload.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+
+      // 2. Alert footer disclaimer (NOT levels disclaimer)
+      expect(payload.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+
+      // 3. Gate E11: No banned words in title
+      const lowerTitle = row.title.toLowerCase();
+      for (const banned of bannedWords) {
+        const regex = new RegExp(`\\b${banned}\\b`, "i");
+        expect(regex.test(lowerTitle)).toBe(false);
+      }
+
+      // 4. Gate E11: No banned words in payload reason if present
+      if (typeof payload.reason === "string") {
+        const lowerReason = payload.reason.toLowerCase();
+        for (const banned of bannedWords) {
+          const regex = new RegExp(`\\b${banned}\\b`, "i");
+          expect(regex.test(lowerReason)).toBe(false);
+        }
+      }
+    }
   });
 });

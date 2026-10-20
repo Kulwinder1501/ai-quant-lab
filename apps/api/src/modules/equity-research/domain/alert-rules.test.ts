@@ -111,7 +111,7 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
     it("exports version, calibrated hash, and mandatory disclaimer footer", () => {
       expect(EQUITY_ALERT_RULES_VERSION).toBe("equity-alerts-v1");
       expect(EQUITY_ALERT_RULES_HASH).toBe(
-        "b0afe011ab0e9a93dc6500b5f65924f5546663d5940590530c2919129c9d86ab",
+        "058320a1e578ad59f977422562f6a09e5bb36c2a3da3867d5202e8bd5fdfba58",
       );
       expect(EQUITY_ALERT_RULES_HASH).toBe(computeAlertRulesHash());
       expect(EQUITY_ALERT_FOOTER).toBe(
@@ -131,6 +131,16 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
         description: "Future iteration note",
       });
       rulesClone.disclaimer = "Altered disclaimer text";
+      expect(computeAlertRulesHash(rulesClone)).toBe(EQUITY_ALERT_RULES_HASH);
+
+      // Reordering nested object keys does NOT alter the hash because of recursive canonical sorting
+      const reorderedLevelApproach = {
+        minStrength: rulesClone.levelApproach.minStrength,
+        maxAtrDistance: rulesClone.levelApproach.maxAtrDistance,
+        qualifyingKinds: rulesClone.levelApproach.qualifyingKinds,
+        minTouches: rulesClone.levelApproach.minTouches,
+      };
+      rulesClone.levelApproach = reorderedLevelApproach;
       expect(computeAlertRulesHash(rulesClone)).toBe(EQUITY_ALERT_RULES_HASH);
 
       // But modifying an actual rule parameter DOES alter the hash
@@ -769,6 +779,72 @@ describe("Equity Alert Rules & Evaluation Engine", () => {
       expect(dataEventAlert?.severity).toBe("NOTICE");
       expect(dataEventAlert?.title).toContain("-40.15%");
       expect(largeMoveAlert).toBeUndefined();
+    });
+
+    it("evaluates DATA_EVENT even when levelsAtT has state INSUFFICIENT_HISTORY on 40%+ drop day", () => {
+      const bars = createSyntheticBars(260, 100);
+      const T = bars.length - 1;
+      bars[T].bar_date = "2025-10-14";
+      bars[T - 1].close = 100.0;
+      bars[T].close = 59.85; // -40.15% drop
+
+      // Levels engine sets state to INSUFFICIENT_HISTORY after corporate-action artifact move
+      const levelsResult = mockLevelsResult({
+        asOfDate: "2025-10-14",
+        state: "INSUFFICIENT_HISTORY",
+        atr14: null,
+        atrPercent: null,
+      });
+
+      const alerts = evaluateAlerts({
+        stockId: "TMPV",
+        levelsAtT: levelsResult,
+        bars,
+        evaluationDate: "2025-10-14",
+      });
+
+      // Must produce DATA_EVENT, NEVER DATA_HEALTH
+      const dataEventAlert = alerts.find((a) => a.kind === "DATA_EVENT");
+      const dataHealthAlert = alerts.find((a) => a.kind === "DATA_HEALTH");
+      const largeMoveAlert = alerts.find((a) => a.kind === "LARGE_MOVE");
+
+      expect(dataEventAlert).toBeDefined();
+      expect(dataEventAlert?.title).toContain("-40.15%");
+      expect(dataEventAlert?.title).toContain("possible corporate action");
+      expect(dataHealthAlert).toBeUndefined();
+      expect(largeMoveAlert).toBeUndefined();
+    });
+
+    it("evaluates DATA_HEALTH on day after 40%+ move citing the move date in the reason", () => {
+      const bars = createSyntheticBars(261, 100);
+      const T = bars.length - 1;
+      bars[T - 1].bar_date = "2025-10-14";
+      bars[T - 2].close = 100.0;
+      bars[T - 1].close = 59.85; // -40.15% artifact on day T-1
+
+      bars[T].bar_date = "2025-10-15";
+      bars[T].close = 59.50; // normal day after
+
+      const levelsResult = mockLevelsResult({
+        asOfDate: "2025-10-15",
+        state: "INSUFFICIENT_HISTORY",
+        atr14: null,
+        atrPercent: null,
+      });
+
+      const alerts = evaluateAlerts({
+        stockId: "TMPV",
+        levelsAtT: levelsResult,
+        bars,
+        evaluationDate: "2025-10-15",
+      });
+
+      const dataHealthAlert = alerts.find((a) => a.kind === "DATA_HEALTH");
+      expect(dataHealthAlert).toBeDefined();
+      expect(dataHealthAlert?.payload?.subtype).toBe("UNHEALTHY_ENTER");
+      expect(dataHealthAlert?.payload?.reason).toBe(
+        "Insufficient history to compute levels (possible corporate action on 2025-10-14).",
+      );
     });
 
     it("normal volatility move of 2.8x ATR (e.g. +5.6% with ATR% 2.0%) produces LARGE_MOVE", () => {

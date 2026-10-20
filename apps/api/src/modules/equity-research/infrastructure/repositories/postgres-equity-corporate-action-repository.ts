@@ -64,4 +64,23 @@ export class PostgresEquityCorporateActionRepository {
   async deleteDerivedRows(stockId: string): Promise<void> {
     await this.db.query(`DELETE FROM equity_research.corporate_action WHERE stock_id = $1`, [stockId]);
   }
+
+  /**
+   * Checks if a SPLIT corporate action was effective on or first seen on the given date.
+   */
+  async hasSplitForDate(stockId: string, evaluationDate: string): Promise<boolean> {
+    const result = await this.db.query<{ exists: boolean }>(
+      `
+      SELECT EXISTS (
+        SELECT 1 FROM equity_research.corporate_action
+        WHERE stock_id = $1
+          AND kind = 'SPLIT'
+          AND (ex_date = $2::date OR first_seen_at::date = $2::date)
+      ) AS exists
+      `,
+      [stockId, evaluationDate],
+    );
+    return Boolean(result.rows[0]?.exists);
+  }
 }
+
