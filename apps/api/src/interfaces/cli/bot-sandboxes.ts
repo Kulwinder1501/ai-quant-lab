@@ -181,22 +181,11 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
     allowedSeries: [{ symbol: "BANKNIFTY", timeframe: "5m" }],
     initialBalance: 1_000_000,
   },
-  {
-    name: "AutoBot-HybridConfluence",
-    allowedStrategies: ["hybrid-liquidity-confluence-v1"],
-    allowedSeries: [
-      { symbol: "BANKNIFTY", timeframe: "1m" },
-      { symbol: "BANKNIFTY", timeframe: "3m" },
-      { symbol: "BANKNIFTY", timeframe: "5m" },
-      { symbol: "NIFTY50", timeframe: "3m" },
-      { symbol: "NIFTY50", timeframe: "5m" },
-    ],
-    initialBalance: 1_000_000,
-  },
-  {
-    name: "AutoBot-Nifty5mTrendCont",
-    allowedStrategies: ["trend-continuation-v1"],
-    allowedSeries: [{ symbol: "NIFTY50", timeframe: "5m" }],
-    initialBalance: 1_000_000,
-  },
 ];
+
+/**
+ * Note: `AutoBot-HybridConfluence` and `AutoBot-Nifty5mTrendCont` were removed on request (2026-10-20).
+ * Their underlying strategies (`hybrid-liquidity-confluence-v1` and `trend-continuation-v1`)
+ * have both sides gated (`executableSides: []`) in `strategy-registry.ts`.
+ * Their accounts have been deactivated in `paper_accounts` and their trades cleared from the database.
+ */

@@ -395,21 +395,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     StrategyClass: HybridLiquidityConfluenceStrategy,
     supportedTimeframes: ["1m", "3m", "5m"],
     /*
-     * Enabled live 2026-10-13 on explicit operator request (AutoBot-HybridConfluence) so a paper
-     * record can accumulate. Prior state: both sides disabled 2026-09-28 pending validation.
-     *
-     * History (kept so the enable is not read as a research clearance):
-     * This strategy shipped 2026-09-28 with two real defects, both fixed the same day (Pillar A
-     * threshold mismatch settled at 0.10; Pillar C stub replaced with a real as-of PCR join). An
-     * in-sample random-subsample comparison looked strong, then a 2026-10-10 amendment ruled the
-     * "29 SD" figure out as evidence (wrong null, no costs, clustered PCR). Enabling here is an
-     * operator override to gather live paper fills -- not OOS / walk-forward clearance. Re-gate
-     * both sides if the live record fails, the same way other unvalidated strategies were gated.
-     *
-     * No `executableSides` restriction: both LONG and SHORT may propose. No
-     * `terminalResearchAcknowledgement` / `operationalDisposition` -- there is still no TERMINAL
-     * research twin for this strategy.
+     * Disabled entirely 2026-10-20 on operator request (AutoBot-HybridConfluence removed).
+     * Prior state: enabled live 2026-10-13 for paper observation.
+     * Both sides disabled (`executableSides: []`). Registered so lineage and logic survive.
      */
+    executableSides: [],
   },
   {
     registration: trendContinuationStrategyRegistration,
@@ -417,13 +407,11 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     supportedTimeframes: ["1m", "5m", "15m"],
     readsIctContext: true,
     /*
-     * Enabled live 2026-10-13 on explicit operator request (AutoBot-Nifty5mTrendCont) so a paper
-     * record can accumulate. Prior state: both sides disabled 2026-09-29 -- shipped with zero
-     * backtest or research validation (compile fixes only). Enabling here is an operator override
-     * to gather live paper fills -- not a measured clearance. No `executableSides` restriction:
-     * both LONG and SHORT may propose. No `terminalResearchAcknowledgement` /
-     * `operationalDisposition` -- there is still no research twin or TERMINAL verdict.
+     * Disabled entirely 2026-10-20 on operator request (AutoBot-Nifty5mTrendCont removed).
+     * Prior state: enabled live 2026-10-13 for paper observation.
+     * Both sides disabled (`executableSides: []`). Registered so lineage and logic survive.
      */
+    executableSides: [],
   },
   {
     registration: eventReversalStrategyRegistration,
@@ -443,8 +431,8 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
      * Per this project's own discipline (train -> shadow -> settle -> compete, OOS validation before
      * going live), a strategy with no measurement at all does not get to trade.
      *
-     * Note: `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` were enabled for live paper
-     * observation on 2026-10-13; this entry remains gated until an explicit enable.
+     * Note: `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` were disabled on 2026-10-20
+     * on operator request (previously observed live 2026-10-13..2026-10-20); this entry also remains gated.
      */
     executableSides: [],
     // Deliberately no `terminalResearchAcknowledgement`: that field is enforced against

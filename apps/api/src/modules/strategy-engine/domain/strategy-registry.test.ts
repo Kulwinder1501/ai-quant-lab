@@ -124,8 +124,8 @@ describe("strategy registry", () => {
      * purpose -- a global side filter would silence that side everywhere -- so the risk worth
      * guarding is a restriction spreading to a strategy whose evidence never justified one.
      *
-     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` left this set 2026-10-13 when
-     * both were enabled for live paper observation on operator request.
+     * `hybrid-liquidity-confluence-v1` and `trend-continuation-v1` were gated off on operator request
+     * 2026-10-20 (AutoBot-HybridConfluence and AutoBot-Nifty5mTrendCont retired).
      */
     const restricted = registeredStrategies
       .filter((strategy) => strategy.executableSides !== undefined)
@@ -133,7 +133,11 @@ describe("strategy registry", () => {
       .sort();
 
     expect(restricted).toEqual([
-      "event-reversal-v1", "momentum-scalp-index", "momentum-scalp-pattern-v2",
+      "event-reversal-v1",
+      "hybrid-liquidity-confluence-v1",
+      "momentum-scalp-index",
+      "momentum-scalp-pattern-v2",
+      "trend-continuation-v1",
     ]);
     for (const strategy of registeredStrategies) {
       if (restricted.includes(strategy.registration.strategyKey)) continue;
@@ -142,22 +146,17 @@ describe("strategy registry", () => {
     }
   });
 
-  it("allows hybrid-liquidity-confluence-v1 both sides for live paper observation", () => {
+  it("disables hybrid-liquidity-confluence-v1 and trend-continuation-v1 on operator request; keeps event-reversal-v1 gated", () => {
     const hybrid = requireRegisteredStrategy("hybrid-liquidity-confluence-v1");
-
-    expect(strategyExecutableSides(hybrid)).toEqual(["LONG", "SHORT"]);
-    expect(hybrid.executableSides).toBeUndefined();
-    // Still no terminalResearchAcknowledgement: enabling paper observation is not a TERMINAL clearance.
-    expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
-  });
-
-  it("allows trend-continuation-v1 both sides; keeps event-reversal-v1 gated", () => {
     const trendContinuation = requireRegisteredStrategy("trend-continuation-v1");
     const eventReversal = requireRegisteredStrategy("event-reversal-v1");
 
-    expect(strategyExecutableSides(trendContinuation)).toEqual(["LONG", "SHORT"]);
-    expect(trendContinuation.executableSides).toBeUndefined();
+    expect(strategyExecutableSides(hybrid)).toEqual([]);
+    expect(hybrid.executableSides).toEqual([]);
+    expect(strategyExecutableSides(trendContinuation)).toEqual([]);
+    expect(trendContinuation.executableSides).toEqual([]);
     expect(strategyExecutableSides(eventReversal)).toEqual([]);
+    expect(hybrid.terminalResearchAcknowledgement).toBeUndefined();
     expect(trendContinuation.terminalResearchAcknowledgement).toBeUndefined();
     expect(eventReversal.terminalResearchAcknowledgement).toBeUndefined();
   });
