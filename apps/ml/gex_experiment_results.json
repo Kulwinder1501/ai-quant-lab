@@ -1,0 +1,269 @@
+{
+  "protocolVersion": "RESEARCH_SPECIFICATION_V1.1_CONTRACT_V1.4.1",
+  "preRegistrationId": "PREREG-2026-10-20-GEX-FIB-INTERACTION-V1",
+  "preRegistrationCommits": [
+    "b80b522b",
+    "71c614fb",
+    "8e8d985c"
+  ],
+  "pipelineRevision": "2026-10-20_GEX_TRACK1_TRACK2_EXECUTION",
+  "governanceStatus": "RESEARCH_EXECUTION_COMPLETE",
+  "tradingExecutionAuthorized": false,
+  "exploratoryNotice": "EXPLORATORY RESEARCH ONLY \u2014 NOT A TRADING SIGNAL. This manifest records both Track 1 (standalone continuous GEX predictability) and Track 2 (conditioned Golden Pocket interaction test). Track 2 strictly enforces a minimum sample floor of 15 matched pairs per GEX-sign bucket; failure to clear the floor mandates INCONCLUSIVE_INSUFFICIENT_DATA and refuses to emit an ungrounded point estimate. Track 1 evaluates 15-minute continuous forward net returns (minus 2 bps friction) and designates the session-block bootstrap difference in means as the sole primary decision-bearing test to avoid overlapping-window variance deflations.",
+  "track1_standalone_continuous_test": {
+    "population": "All completed 5m candle bars in the post-2026-08-05 window where gexState == 'FRESH' and entry <= 15:15 IST",
+    "horizon": "15 minutes (3 bars at 5m)",
+    "frictionBps": 2.0,
+    "pooled": {
+      "bullish": {
+        "status": "EVALUATED",
+        "nBars": 5116,
+        "nShortGammaBars": 1482,
+        "nLongGammaBars": 3634,
+        "primaryDecisionBearingTest": {
+          "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+          "estimateBps": 0.26156313063786385,
+          "lowerCi95Bps": -0.6124711434617314,
+          "upperCi95Bps": 1.0946961142532698,
+          "bootstrapSeBps": 0.4347343197016648,
+          "minDetectableEffectBps": 1.0809668859381896,
+          "pValTwoSided": 0.56,
+          "verdict": "NULL_NO_EDGE"
+        },
+        "descriptiveConfoundedDiagnostics": {
+          "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+          "pearsonR": -0.010050156659467402,
+          "pearsonP": 0.47233059194396765,
+          "spearmanRho": -0.01812624747820357,
+          "spearmanP": 0.19487503321794322,
+          "welchT": 0.8067040222039754,
+          "welchP": 0.4199120037226156,
+          "meanShortGammaReturnBps": -2.432549942881213,
+          "meanLongGammaReturnBps": -2.694113073519077
+        },
+        "classificationPerformance": {
+          "directionalAccuracy": 0.5617670054730258,
+          "trivialMajorityBaselineAccuracy": 0.6481626270523847,
+          "accuracyBeatsBaseline": false,
+          "macroF1": 0.4971450115958422
+        }
+      },
+      "bearish": {
+        "status": "EVALUATED",
+        "nBars": 5116,
+        "nShortGammaBars": 1482,
+        "nLongGammaBars": 3634,
+        "primaryDecisionBearingTest": {
+          "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+          "estimateBps": -0.26156313063786385,
+          "lowerCi95Bps": -1.0946961142532707,
+          "upperCi95Bps": 0.6124711434617305,
+          "bootstrapSeBps": 0.4347343197016648,
+          "minDetectableEffectBps": 1.0809668859381896,
+          "pValTwoSided": 0.56,
+          "verdict": "NULL_NO_EDGE"
+        },
+        "descriptiveConfoundedDiagnostics": {
+          "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+          "pearsonR": 0.010050156659467405,
+          "pearsonP": 0.4723305919439564,
+          "spearmanRho": 0.01812624747820357,
+          "spearmanP": 0.19487503321794322,
+          "welchT": -0.8067040222039754,
+          "welchP": 0.4199120037226156,
+          "meanShortGammaReturnBps": -1.567450057118787,
+          "meanLongGammaReturnBps": -1.3058869264809232
+        },
+        "classificationPerformance": {
+          "directionalAccuracy": 0.5250195465207194,
+          "trivialMajorityBaselineAccuracy": 0.5742767787333855,
+          "accuracyBeatsBaseline": false,
+          "macroF1": 0.4831575586442234
+        }
+      }
+    },
+    "byInstrument": {
+      "NIFTY50": {
+        "bullish": {
+          "status": "EVALUATED",
+          "nBars": 2486,
+          "nShortGammaBars": 732,
+          "nLongGammaBars": 1754,
+          "primaryDecisionBearingTest": {
+            "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+            "estimateBps": 0.15384731542764163,
+            "lowerCi95Bps": -1.0234895254119318,
+            "upperCi95Bps": 1.3329002036678466,
+            "bootstrapSeBps": 0.5995729201767055,
+            "minDetectableEffectBps": 1.490838066019378,
+            "pValTwoSided": 0.797,
+            "verdict": "NULL_NO_EDGE"
+          },
+          "descriptiveConfoundedDiagnostics": {
+            "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+            "pearsonR": -0.008088909579983762,
+            "pearsonP": 0.686863480739276,
+            "spearmanRho": -0.022231752436696606,
+            "spearmanP": 0.2678401108692409,
+            "welchT": 0.38561331603788246,
+            "welchP": 0.6998442870252493,
+            "meanShortGammaReturnBps": -2.6899741934118433,
+            "meanLongGammaReturnBps": -2.843821508839485
+          },
+          "classificationPerformance": {
+            "directionalAccuracy": 0.5611423974255833,
+            "trivialMajorityBaselineAccuracy": 0.6641190667739341,
+            "accuracyBeatsBaseline": false,
+            "macroF1": 0.4916769981454878
+          }
+        },
+        "bearish": {
+          "status": "EVALUATED",
+          "nBars": 2486,
+          "nShortGammaBars": 732,
+          "nLongGammaBars": 1754,
+          "primaryDecisionBearingTest": {
+            "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+            "estimateBps": -0.15384731542764163,
+            "lowerCi95Bps": -1.3329002036678463,
+            "upperCi95Bps": 1.0234895254119312,
+            "bootstrapSeBps": 0.5995729201767056,
+            "minDetectableEffectBps": 1.4908380660193785,
+            "pValTwoSided": 0.797,
+            "verdict": "NULL_NO_EDGE"
+          },
+          "descriptiveConfoundedDiagnostics": {
+            "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+            "pearsonR": 0.008088909579983759,
+            "pearsonP": 0.6868634807392887,
+            "spearmanRho": 0.022231752436696606,
+            "spearmanP": 0.2678401108692409,
+            "welchT": -0.38561331603788246,
+            "welchP": 0.6998442870252493,
+            "meanShortGammaReturnBps": -1.310025806588157,
+            "meanLongGammaReturnBps": -1.1561784911605153
+          },
+          "classificationPerformance": {
+            "directionalAccuracy": 0.5168946098149638,
+            "trivialMajorityBaselineAccuracy": 0.5772325020112631,
+            "accuracyBeatsBaseline": false,
+            "macroF1": 0.4749045328453969
+          }
+        }
+      },
+      "BANKNIFTY": {
+        "bullish": {
+          "status": "EVALUATED",
+          "nBars": 2630,
+          "nShortGammaBars": 750,
+          "nLongGammaBars": 1880,
+          "primaryDecisionBearingTest": {
+            "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+            "estimateBps": 0.37313441428767646,
+            "lowerCi95Bps": -1.1023942814024763,
+            "upperCi95Bps": 2.0326817839010847,
+            "bootstrapSeBps": 0.7842720634150622,
+            "minDetectableEffectBps": 1.950092485681552,
+            "pValTwoSided": 0.6155,
+            "verdict": "NULL_NO_EDGE"
+          },
+          "descriptiveConfoundedDiagnostics": {
+            "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+            "pearsonR": -0.01892455816614849,
+            "pearsonP": 0.3319749372743508,
+            "spearmanRho": -0.006063561544932231,
+            "spearmanP": 0.755940624477359,
+            "welchT": 0.7345025323768994,
+            "welchP": 0.4627810223168505,
+            "meanShortGammaReturnBps": -2.181303874363318,
+            "meanLongGammaReturnBps": -2.5544382886509944
+          },
+          "classificationPerformance": {
+            "directionalAccuracy": 0.5623574144486692,
+            "trivialMajorityBaselineAccuracy": 0.6330798479087453,
+            "accuracyBeatsBaseline": false,
+            "macroF1": 0.502090161069465
+          }
+        },
+        "bearish": {
+          "status": "EVALUATED",
+          "nBars": 2630,
+          "nShortGammaBars": 750,
+          "nLongGammaBars": 1880,
+          "primaryDecisionBearingTest": {
+            "test": "Session-Block Bootstrap Difference in Means (Short Gamma - Long Gamma)",
+            "estimateBps": -0.3731344142876758,
+            "lowerCi95Bps": -2.032681783901085,
+            "upperCi95Bps": 1.102394281402476,
+            "bootstrapSeBps": 0.7842720634150622,
+            "minDetectableEffectBps": 1.950092485681552,
+            "pValTwoSided": 0.6155,
+            "verdict": "NULL_NO_EDGE"
+          },
+          "descriptiveConfoundedDiagnostics": {
+            "warning": "DESCRIPTIVE_ONLY_OVERLAPPING_WINDOW_CONFOUND: 15m returns over 5m bars share 2/3 bars; standard iid tests overstate significance",
+            "pearsonR": 0.018924558166148492,
+            "pearsonP": 0.3319749372743508,
+            "spearmanRho": 0.006063561544932231,
+            "spearmanP": 0.755940624477359,
+            "welchT": -0.7345025323768982,
+            "welchP": 0.46278102231685125,
+            "meanShortGammaReturnBps": -1.8186961256366818,
+            "meanLongGammaReturnBps": -1.445561711349006
+          },
+          "classificationPerformance": {
+            "directionalAccuracy": 0.5326996197718631,
+            "trivialMajorityBaselineAccuracy": 0.5714828897338403,
+            "accuracyBeatsBaseline": false,
+            "macroF1": 0.49097236472248107
+          }
+        }
+      }
+    }
+  },
+  "track2_conditioned_golden_pocket_interaction_test": {
+    "hypothesis": "Dealers net short gamma (negative) -> dealers hedge with the move -> trending/continuation. Dealers net long gamma (positive) -> dealers hedge against the move -> pinning/reversal. Prediction: Golden Pocket continuation causal delta is higher in short gamma than in long gamma.",
+    "floorRule": "Minimum 15 matched pairs per bucket required to estimate interaction",
+    "metric": "Matched pair deltaNetReturnBps (treatment minus matched control)",
+    "bullishGoldenPocket": {
+      "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "nTotalMatchedPairs": 35,
+      "nShortGammaMatched": 3,
+      "nLongGammaMatched": 9,
+      "floorThreshold": 15,
+      "floorPassed": false,
+      "estimateHatDeltaBps": null,
+      "lowerCi95Bps": null,
+      "upperCi95Bps": null,
+      "bootstrapSeBps": null,
+      "minDetectableEffectBps": null,
+      "pValRaw": null,
+      "meanShortGammaDeltaBps": 22.12144455724291,
+      "meanLongGammaDeltaBps": 10.13099398280519,
+      "details": {
+        "reason": "Sample floor violated: n_short=3, n_long=9, required=15",
+        "refusalToEstimate": true
+      }
+    },
+    "bearishGoldenPocket": {
+      "verdict": "INCONCLUSIVE_INSUFFICIENT_DATA",
+      "nTotalMatchedPairs": 11,
+      "nShortGammaMatched": 0,
+      "nLongGammaMatched": 0,
+      "floorThreshold": 15,
+      "floorPassed": false,
+      "estimateHatDeltaBps": null,
+      "lowerCi95Bps": null,
+      "upperCi95Bps": null,
+      "bootstrapSeBps": null,
+      "minDetectableEffectBps": null,
+      "pValRaw": null,
+      "meanShortGammaDeltaBps": null,
+      "meanLongGammaDeltaBps": null,
+      "details": {
+        "reason": "Sample floor violated: n_short=0, n_long=0, required=15",
+        "refusalToEstimate": true
+      }
+    }
+  }
+}
