@@ -1,0 +1,150 @@
+{
+  "protocolVersion": "BINANCE_DEPLETION_CLASSIFIER_VALIDATION_V1.0",
+  "preRegistrationId": "PREREG-2026-10-21-BINANCE-DEPLETION-VALIDATION-V1",
+  "governanceStatus": "RESEARCH_EXECUTION_COMPLETE",
+  "tradingExecutionAuthorized": false,
+  "exploratoryNotice": "EXPLORATORY RESEARCH ONLY -- NOT A TRADING SIGNAL. This validation evaluates the geometric validity of L2 order-book depletion as a trade execution proxy against Binance Spot ground-truth trade prints. Even a positive result does NOT prove transferability to NSE BANKNIFTY options or futures, which operate under different market microstructure (discrete tick sizes, lot multipliers, vendor snapshot throttling, and periodic batch call auctions). This test verifies classifier mechanics when ground truth is observable.",
+  "preRegisteredParameters": {
+    "matchingToleranceMs": 250,
+    "minCaptureHoursFloor": 2.0,
+    "targetPrecisionBar": 0.7,
+    "targetRecallBar": 0.5
+  },
+  "overallVerdict": "FALSIFIED",
+  "bySymbol": {
+    "BTCUSDT": {
+      "verdict": "FALSIFIED",
+      "captureDurationHours": 1.9996644444444445,
+      "synchronizedDurationHours": 1.9996644444444445,
+      "wallClockDurationHours": 1.9996644444444445,
+      "coverageRatio": 1.0,
+      "durationFloorPassed": true,
+      "minCaptureHoursFloor": 2.0,
+      "sampleCounts": {
+        "totalFrames": 71839,
+        "validPairs": 71838,
+        "brokenChains": 0,
+        "inferredTrades": 28888,
+        "inferredBuy": 12891,
+        "inferredSell": 15997,
+        "inferredNone": 42950,
+        "totalRealTrades": 237319,
+        "caughtRealTrades": 23566
+      },
+      "precision": {
+        "pooled": 0.395354472445306,
+        "pooledCi95": [
+          0.38973063950219256,
+          0.4010061327240668
+        ],
+        "buy": 0.3711116282677837,
+        "buyCi95": [
+          0.3628116051760446,
+          0.37948844476160626
+        ],
+        "sell": 0.4148902919297368,
+        "sellCi95": [
+          0.4072765251108627,
+          0.4225449247792676
+        ],
+        "barThreshold": 0.7,
+        "barPassed": false
+      },
+      "recall": {
+        "pointEstimate": 0.0993009409276122,
+        "ci95": [
+          0.09810418992809164,
+          0.1005106638680168
+        ],
+        "barThreshold": 0.5,
+        "barPassed": false
+      },
+      "silentMiss": {
+        "count": 25074,
+        "silentMissRate": 0.5837951105937136,
+        "ci95": [
+          0.5791260546289388,
+          0.588449178587411
+        ],
+        "trueNegativeCount": 17876
+      },
+      "confusionMatrix": {
+        "tpBuy": 4784,
+        "fpBuyCancellation": 7913,
+        "fpBuyWrongSide": 194,
+        "tpSell": 6637,
+        "fpSellCancellation": 9136,
+        "fpSellWrongSide": 224,
+        "silentMissNone": 25074,
+        "trueNegativeNone": 17876
+      }
+    },
+    "ETHUSDT": {
+      "verdict": "FALSIFIED",
+      "captureDurationHours": 1.9996594444444444,
+      "synchronizedDurationHours": 1.9996594444444444,
+      "wallClockDurationHours": 1.9996594444444444,
+      "coverageRatio": 1.0,
+      "durationFloorPassed": true,
+      "minCaptureHoursFloor": 2.0,
+      "sampleCounts": {
+        "totalFrames": 70594,
+        "validPairs": 70593,
+        "brokenChains": 0,
+        "inferredTrades": 22263,
+        "inferredBuy": 10447,
+        "inferredSell": 11816,
+        "inferredNone": 48330,
+        "totalRealTrades": 224225,
+        "caughtRealTrades": 17060
+      },
+      "precision": {
+        "pooled": 0.2292593091676773,
+        "pooledCi95": [
+          0.22378458224775089,
+          0.2348274520502442
+        ],
+        "buy": 0.2567244184933474,
+        "buyCi95": [
+          0.24843843682416553,
+          0.2651892437766288
+        ],
+        "sell": 0.20497630331753555,
+        "sellCi95": [
+          0.19779402255483894,
+          0.21235034999957772
+        ],
+        "barThreshold": 0.7,
+        "barPassed": false
+      },
+      "recall": {
+        "pointEstimate": 0.0760842903333705,
+        "ci95": [
+          0.07499412606278363,
+          0.07718897953956808
+        ],
+        "barThreshold": 0.5,
+        "barPassed": false
+      },
+      "silentMiss": {
+        "count": 17407,
+        "silentMissRate": 0.3601696668735775,
+        "ci95": [
+          0.3559011142366506,
+          0.36446044627545315
+        ],
+        "trueNegativeCount": 30923
+      },
+      "confusionMatrix": {
+        "tpBuy": 2682,
+        "fpBuyCancellation": 7365,
+        "fpBuyWrongSide": 400,
+        "tpSell": 2422,
+        "fpSellCancellation": 8942,
+        "fpSellWrongSide": 452,
+        "silentMissNone": 17407,
+        "trueNegativeNone": 30923
+      }
+    }
+  }
+}

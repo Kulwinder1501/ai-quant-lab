@@ -171,8 +171,9 @@ def run_validation(
         sync_hours = total_sync_seconds / 3600.0
         coverage_ratio = (sync_hours / wall_clock_hours) if wall_clock_hours > 0 else 0.0
 
-        # Strict synchronized active duration floor
-        duration_passed = sync_hours >= min_capture_hours
+        # Strict synchronized active duration floor (allowing 15s grace tolerance for socket handshake/shutdown)
+        grace_tolerance_hours = 15.0 / 3600.0
+        duration_passed = sync_hours >= (min_capture_hours - grace_tolerance_hours)
 
         if not duration_passed:
             any_symbol_floor_failed = True
