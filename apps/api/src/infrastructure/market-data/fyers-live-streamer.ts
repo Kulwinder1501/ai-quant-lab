@@ -99,7 +99,17 @@ export function reconnectDelayMs(attempt: number): number {
  * about them -- including the one Fyers sends when a subscription is refused. A socket that quietly delivers
  * three of 63 requested symbols looked exactly like a quiet market.
  */
-export /** Readable text for whatever the Fyers SDK passes to its error callback. Never includes the auth header. */
+export function describeControlMessage(message: unknown): string | null {
+  if (typeof message !== "object" || message === null) return null;
+  const record = message as Record<string, unknown>;
+  const code = typeof record.code === "number" ? record.code : null;
+  const text = typeof record.message === "string" ? record.message : null;
+  const failed = record.s === "error" || (code !== null && code < 0);
+  if (!failed) return null;
+  return JSON.stringify({ s: record.s ?? null, code, message: text });
+}
+
+/** Readable text for whatever the Fyers SDK passes to its error callback. Never includes the auth header. */
 export function describeSocketError(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -108,16 +118,6 @@ export function describeSocketError(error: unknown): string {
   } catch {
     return String(error);
   }
-}
-
-function describeControlMessage(message: unknown): string | null {
-  if (typeof message !== "object" || message === null) return null;
-  const record = message as Record<string, unknown>;
-  const code = typeof record.code === "number" ? record.code : null;
-  const text = typeof record.message === "string" ? record.message : null;
-  const failed = record.s === "error" || (code !== null && code < 0);
-  if (!failed) return null;
-  return JSON.stringify({ s: record.s ?? null, code, message: text });
 }
 
 function finiteOrNull(value: unknown): number | null {
