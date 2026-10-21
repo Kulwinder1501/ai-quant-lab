@@ -1228,7 +1228,8 @@ def main():
         "syntheticPlumbingValidation_NOT_EVIDENCE": manifest_synthetic,
     }
 
-    out_file = "phase_c_results.json"
+    # Next to this script, not the current directory: a run from the repo root left a second, different manifest there.
+    out_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phase_c_results.json")
     with open(out_file, "w") as f:
         json.dump(final_output, f, indent=2)
 
