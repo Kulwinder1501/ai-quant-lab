@@ -347,3 +347,14 @@ describe("describeSocketError", () => {
     expect(describeSocketError("plain")).toBe("plain");
   });
 });
+
+describe("describeSocketError with an event-like object", () => {
+  it("reads non-enumerable fields instead of answering {}", () => {
+    const event = Object.create({}, { message: { value: "ECONNRESET", enumerable: false }, type: { value: "error", enumerable: false } });
+    expect(describeSocketError(event)).toContain("ECONNRESET");
+  });
+
+  it("names the object when nothing is readable", () => {
+    expect(describeSocketError(new (class Closed {})())).toBe("Closed with no readable fields");
+  });
+});

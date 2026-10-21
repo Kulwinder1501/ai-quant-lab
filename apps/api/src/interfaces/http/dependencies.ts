@@ -141,6 +141,8 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
         subscriber: fyersLiveStreamer,
         ...(quoteSessionClock === null ? {} : { isSessionOpen: () => quoteSessionClock.isOpen() }),
         ...(uiQuoteBudget === null ? {} : { restBudget: uiQuoteBudget }),
+        // Ten seconds between REST calls for the same symbols, so a dropped socket cannot turn open tabs into a burst.
+        minRestIntervalMs: 10_000,
       })
       : inner;
 

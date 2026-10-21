@@ -113,6 +113,13 @@ export function describeControlMessage(message: unknown): string | null {
 export function describeSocketError(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null) {
+    // A browser-style error event keeps its fields non-enumerable, so a plain stringify of it is "{}".
+    const own = JSON.stringify(error, Object.getOwnPropertyNames(error));
+    if (own !== undefined && own !== "{}") return own.slice(0, 500);
+    const named = (error as { constructor?: { name?: string } }).constructor?.name;
+    return `${named ?? "object"} with no readable fields`;
+  }
   try {
     return JSON.stringify(error)?.slice(0, 500) ?? String(error);
   } catch {

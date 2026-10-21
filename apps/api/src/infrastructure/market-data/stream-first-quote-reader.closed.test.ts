@@ -108,3 +108,43 @@ describe("StreamFirstQuoteReader when the browser's quote budget is spent", () =
     expect(innerCalls).toEqual([["BANKNIFTY"]]);
   });
 });
+
+describe("StreamFirstQuoteReader REST floor when ticks are missing", () => {
+  function floorSetup() {
+    let now = 1_000_000;
+    const innerCalls: string[][] = [];
+    const inner: MarketQuoteReader = {
+      quoteSymbol: async (symbol) => (await inner.quoteSymbols([symbol])).get(symbol) ?? null,
+      quoteSymbols: async (symbols) => {
+        innerCalls.push([...symbols]);
+        return new Map(symbols.map((symbol) => [symbol, quote(symbol, 22_956)]));
+      },
+    };
+    const reader = new StreamFirstQuoteReader({
+      inner,
+      ticks: { lastPrice: () => null },
+      subscriber: { subscribe: () => undefined },
+      now: () => now,
+      isSessionOpen: () => true,
+      minRestIntervalMs: 10_000,
+    });
+    return { reader, innerCalls, advance: (ms: number) => { now += ms; } };
+  }
+
+  it("sends at most one REST call per ten seconds for a symbol that has no tick, however often it is asked", async () => {
+    const { reader, innerCalls, advance } = floorSetup();
+    for (let elapsed = 0; elapsed < 60_000; elapsed += 700) {
+      await reader.quoteSymbols(["NIFTY50"]);
+      advance(700);
+    }
+    expect(innerCalls.length).toBeLessThanOrEqual(7);
+    expect(innerCalls.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("never serves a symbol it has not fetched yet from the floor", async () => {
+    const { reader, innerCalls } = floorSetup();
+    await reader.quoteSymbols(["NIFTY50"]);
+    await reader.quoteSymbols(["BANKNIFTY"]);
+    expect(innerCalls).toEqual([["NIFTY50"], ["BANKNIFTY"]]);
+  });
+});

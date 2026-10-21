@@ -58,6 +58,14 @@ export interface StreamFirstQuoteReaderOptions {
    */
   restBudget?: { allow(): boolean };
   budgetSpentBaseMaxAgeMs?: number;
+  /**
+   * The least time between two REST calls for the same set of symbols. Inside it, held quotes are served (with a fresh
+   * tick laid over them when there is one). It matters when the socket is down or quiet: every request then falls to
+   * REST, and open dashboard tabs ask about once a second, so on 2026-10-21 the API sent 64 to 76 requests in a minute
+   * against a limit of 50 each time Fyers dropped every socket for a few seconds, and was refused for the next minute.
+   * Absent means no floor.
+   */
+  minRestIntervalMs?: number;
   now?: () => number;
 }
 
@@ -94,6 +102,7 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
   private readonly closedSessionBaseMaxAgeMs: number;
   private readonly budgetSpentBaseMaxAgeMs: number;
   private readonly now: () => number;
+  private readonly lastRestAt = new Map<string, number>();
 
   constructor(private readonly options: StreamFirstQuoteReaderOptions) {
     this.resolveProviderSymbol = options.resolveProviderSymbol ?? resolveFyersSymbol;
@@ -127,6 +136,27 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
     return answers;
   }
 
+  /** The held quotes, when the last REST call for this same set of symbols is newer than `minRestIntervalMs`. */
+  private answerWithinRestFloor(canonical: readonly string[]): Map<string, MarketQuote> | null {
+    const floorMs = this.options.minRestIntervalMs;
+    if (floorMs === undefined) return null;
+    const nowMs = this.now();
+    const last = this.lastRestAt.get(this.restKey(canonical));
+    if (last === undefined || nowMs - last >= floorMs) return null;
+    const answers = new Map<string, MarketQuote>();
+    for (const symbol of canonical) {
+      const base = this.bases.get(symbol);
+      if (base === undefined || nowMs - base.at > this.baseMaxAgeMs) return null;
+      const tick = this.options.ticks.lastPrice(this.resolveProviderSymbol(symbol), this.maxTickAgeMs, nowMs);
+      answers.set(symbol, tick === null ? base.quote : overlayTick(base.quote, tick.price, tick.observedAt));
+    }
+    return answers;
+  }
+
+  private restKey(canonical: readonly string[]): string {
+    return [...canonical].sort().join("|");
+  }
+
   async quoteSymbol(symbol: string): Promise<MarketQuote | null> {
     return (await this.quoteSymbols([symbol])).get(symbol) ?? null;
   }
@@ -139,7 +169,10 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
     if (held !== null) return held;
 
     if (canonical.length > this.maxStreamedSymbols) {
+      const withinFloor = this.answerWithinRestFloor(canonical);
+      if (withinFloor !== null) return withinFloor;
       const fetchedAt = this.now();
+      this.lastRestAt.set(this.restKey(canonical), fetchedAt);
       const fetched = await this.options.inner.quoteSymbols(canonical);
       // Kept so a closed session or a spent budget can serve the next request without REST.
       for (const [symbol, quote] of fetched) this.bases.set(symbol, { quote, at: fetchedAt });
@@ -172,8 +205,12 @@ export class StreamFirstQuoteReader implements MarketQuoteReader {
       }
     }
 
+    const withinFloor = this.answerWithinRestFloor(canonical);
+    if (withinFloor !== null) return withinFloor;
+
     // One call for the whole request, not one for the missing symbols: a mixed request is rare, and a single call
     // keeps every returned quote the same age.
+    this.lastRestAt.set(this.restKey(canonical), nowMs);
     const fetched = await this.options.inner.quoteSymbols(canonical);
     for (const [symbol, quote] of fetched) this.bases.set(symbol, { quote, at: nowMs });
     return fetched;
