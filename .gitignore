@@ -41,3 +41,9 @@ venv/
 # Equity Watch R0 raw research data cache (downloaded external series)
 apps/ml/research_data/
 
+# SQLite databases and WAL files from capture scripts
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
