@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  describeSocketError,
   FyersLiveStreamer,
   parseTick,
   reconnectDelayMs,
@@ -333,5 +334,16 @@ describe("FyersLiveStreamer", () => {
     expect(socket.subscribed[0]).toHaveLength(20);
     expect(socket.subscribed[1]).toHaveLength(20);
     expect(socket.subscribed[2]).toHaveLength(5);
+  });
+});
+
+describe("describeSocketError", () => {
+  it("prints an object error's content instead of [object Object]", () => {
+    expect(describeSocketError({ s: "error", code: -300, message: "bad symbol" })).toBe('{"s":"error","code":-300,"message":"bad symbol"}');
+  });
+
+  it("uses an Error's message and passes a string through", () => {
+    expect(describeSocketError(new Error("boom"))).toBe("boom");
+    expect(describeSocketError("plain")).toBe("plain");
   });
 });

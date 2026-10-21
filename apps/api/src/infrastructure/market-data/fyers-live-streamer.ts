@@ -99,7 +99,18 @@ export function reconnectDelayMs(attempt: number): number {
  * about them -- including the one Fyers sends when a subscription is refused. A socket that quietly delivers
  * three of 63 requested symbols looked exactly like a quiet market.
  */
-export function describeControlMessage(message: unknown): string | null {
+export /** Readable text for whatever the Fyers SDK passes to its error callback. Never includes the auth header. */
+export function describeSocketError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error)?.slice(0, 500) ?? String(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function describeControlMessage(message: unknown): string | null {
   if (typeof message !== "object" || message === null) return null;
   const record = message as Record<string, unknown>;
   const code = typeof record.code === "number" ? record.code : null;
@@ -231,7 +242,9 @@ export class FyersLiveStreamer extends EventEmitter {
       });
 
       socket.on("error", (error) => {
-        log("error", "Fyers data socket error", { error: String(error) });
+        // The SDK hands over plain objects (Fyers' own error replies) as well as Errors; String() turned every one of
+        // them into "[object Object]", which hid why the API's socket reconnected every two minutes on 2026-10-21.
+        log("error", "Fyers data socket error", { error: describeSocketError(error) });
       });
 
       socket.on("close", () => {
