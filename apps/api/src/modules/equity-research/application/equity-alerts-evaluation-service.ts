@@ -229,10 +229,15 @@ export class EquityAlertsEvaluationService {
         : false);
 
     // (B) Stored price-bar revision or re-backfill observed on evaluationDate
+    const materialRevisions = await this.priceBarRepo.getMaterialRevisionsForDate(
+      stock.id,
+      evaluationDate,
+    );
+
     const hasRevision =
       Boolean(options?.isOldRestatement) ||
       stock.rebackfill_needed ||
-      (await this.priceBarRepo.hasRevisionsForDate(stock.id, evaluationDate));
+      materialRevisions.length > 0;
 
     if (hasSplit) {
       const alreadyHasSplitAlert = emitted.some(
@@ -263,13 +268,23 @@ export class EquityAlertsEvaluationService {
         (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "RESTATEMENT",
       );
       if (!alreadyHasRestatement) {
+        let title: string;
+        if (materialRevisions.length > 0) {
+          const details = materialRevisions
+            .map((r) => `${r.barDate} (${r.changedFields.join(", ")})`)
+            .join(", ");
+          title = `Historical price restatement detected for ${details}.`;
+        } else {
+          title = "Historical price restatement detected for older bars.";
+        }
+
         emitted.push({
           stockId: stock.id,
           kind: "DATA_EVENT",
           levelKey: null,
           evaluatedDate: evaluationDate,
           severity: "NOTICE",
-          title: "Historical price restatement detected for older bars.",
+          title,
           payload: {
             close: lastBar.close,
             evaluatedDate: evaluationDate,
@@ -277,6 +292,16 @@ export class EquityAlertsEvaluationService {
             seriesVersion: stock.series_version ?? 1,
             rulesHash: EQUITY_ALERT_RULES_HASH,
             disclaimer: EQUITY_ALERT_FOOTER,
+            ...(materialRevisions.length > 0
+              ? {
+                  restatedBarDate: materialRevisions[0].barDate,
+                  restatedFields: materialRevisions[0].changedFields,
+                  restatedBars: materialRevisions.map((r) => ({
+                    barDate: r.barDate,
+                    changedFields: r.changedFields,
+                  })),
+                }
+              : {}),
           },
         });
       }

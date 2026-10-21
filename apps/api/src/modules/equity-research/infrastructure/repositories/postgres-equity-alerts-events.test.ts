@@ -1397,4 +1397,260 @@ describe("Postgres Equity Alerts & Event Flags Integration (Gates E1, E2, E8, E9
       expect(auditShort.metrics.status).toBe("TRIPWIRE_CLEAR");
     });
   });
+
+  describe("Restatement filter gates (G1-G5)", () => {
+    const G1_SYMBOL = "TEST_G1_MID_SESSION";
+    const G2_SYMBOL = "TEST_G2_VOL_ONLY";
+    const G3_SYMBOL = "TEST_G3_FLOAT_NOISE";
+    const G4_SYMBOL = "TEST_G4_RESTATEMENT";
+    const G_POST_ADD_SYMBOL = "TEST_G_POST_ADD_RESTATEMENT";
+
+    afterAll(async () => {
+      await cleanupStockBySymbol(G1_SYMBOL);
+      await cleanupStockBySymbol(G2_SYMBOL);
+      await cleanupStockBySymbol(G3_SYMBOL);
+      await cleanupStockBySymbol(G4_SYMBOL);
+      await cleanupStockBySymbol(G_POST_ADD_SYMBOL);
+    });
+
+    it("G1: partial then final bar on the add date still gives 0 alerts", async () => {
+      await cleanupStockBySymbol(G1_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: G1_SYMBOL,
+        yahooSymbol: `${G1_SYMBOL}.NS`,
+        displayName: "G1 Mid-session Stock",
+      });
+
+      // 1. Partial bar collected mid-session
+      await priceBarRepo.saveBars([
+        {
+          stockId: stock.id,
+          barDate: "2026-10-21",
+          open: 764.9,
+          high: 770.0,
+          low: 755.0,
+          close: 764.9,
+          volume: 25510,
+        },
+      ]);
+
+      // 2. Final bar replaces partial bar at 17:00 (restating close from 764.9 to 760 and volume to 44694)
+      await priceBarRepo.saveBars([
+        {
+          stockId: stock.id,
+          barDate: "2026-10-21",
+          open: 764.9,
+          high: 770.0,
+          low: 755.0,
+          close: 760.0,
+          volume: 44694,
+        },
+      ]);
+
+      // 3. Evaluate stock on evaluationDate 2026-10-21
+      const evalRes = await evalService.evaluateStock(stock, "2026-10-21");
+      const alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatementAlert = alerts.find(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+
+      expect(restatementAlert).toBeUndefined();
+      const restatementsEmitted = evalRes.alerts.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "RESTATEMENT",
+      );
+      expect(restatementsEmitted.length).toBe(0);
+    });
+
+    it("G2: yesterday’s bar revised in volume only gives none.", async () => {
+      await cleanupStockBySymbol(G2_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: G2_SYMBOL,
+        yahooSymbol: `${G2_SYMBOL}.NS`,
+        displayName: "G2 Volume-Only Stock",
+      });
+
+      // Seed yesterday's bar (2026-10-20) and today's bar (2026-10-21)
+      await priceBarRepo.saveBars([
+        { stockId: stock.id, barDate: "2026-10-20", open: 100, high: 105, low: 95, close: 102, volume: 10000 },
+        { stockId: stock.id, barDate: "2026-10-21", open: 102, high: 106, low: 101, close: 105, volume: 15000 },
+      ]);
+
+      // Yesterday's bar revised in volume only (10000 -> 25000)
+      await priceBarRepo.saveBars([
+        { stockId: stock.id, barDate: "2026-10-20", open: 100, high: 105, low: 95, close: 102, volume: 25000 },
+      ]);
+
+      await evalService.evaluateStock(stock, "2026-10-21");
+      const alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatementAlert = alerts.find(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+
+      expect(restatementAlert).toBeUndefined();
+    });
+
+    it("G3: float noise only (760 vs 760.0000001) gives none.", async () => {
+      await cleanupStockBySymbol(G3_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: G3_SYMBOL,
+        yahooSymbol: `${G3_SYMBOL}.NS`,
+        displayName: "G3 Float Noise Stock",
+      });
+
+      // Seed 30-day-old bar (2026-09-21) and today's bar (2026-10-21)
+      await priceBarRepo.saveBars([
+        { stockId: stock.id, barDate: "2026-09-21", open: 755, high: 765, low: 750, close: 760, volume: 10000 },
+        { stockId: stock.id, barDate: "2026-10-21", open: 760, high: 770, low: 755, close: 765, volume: 15000 },
+      ]);
+
+      // Float noise revision on 30-day-old bar: 760 vs 760.0000001 (rel diff ~1.3e-10 <= 1e-6)
+      await pool.query(
+        `
+        INSERT INTO equity_research.price_bar_revision (
+          id, stock_id, bar_date, previous_values, new_values, seen_at
+        ) VALUES (
+          gen_random_uuid(), $1, '2026-09-21',
+          '{"open": 755, "high": 765, "low": 750, "close": 760}'::jsonb,
+          '{"open": 755, "high": 765, "low": 750, "close": 760.0000001}'::jsonb,
+          '2026-10-21 10:00:00Z'
+        )
+        `,
+        [stock.id],
+      );
+
+      await evalService.evaluateStock(stock, "2026-10-21");
+      const alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatementAlert = alerts.find(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+
+      expect(restatementAlert).toBeUndefined();
+    });
+
+    it("G4: a bar 30 days old with its close changed by 2% gives exactly one RESTATEMENT, naming the bar date and the field.", async () => {
+      await cleanupStockBySymbol(G4_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: G4_SYMBOL,
+        yahooSymbol: `${G4_SYMBOL}.NS`,
+        displayName: "G4 Material Restatement Stock",
+      });
+
+      // Seed 30-day-old bar (2026-09-21) and today's bar (2026-10-21)
+      await priceBarRepo.saveBars([
+        { stockId: stock.id, barDate: "2026-09-21", open: 100, high: 105, low: 95, close: 100, volume: 10000 },
+        { stockId: stock.id, barDate: "2026-10-21", open: 110, high: 115, low: 108, close: 112, volume: 15000 },
+      ]);
+
+      // Revision of 30-day-old bar with close changed by 2% (100 -> 98)
+      await pool.query(
+        `
+        INSERT INTO equity_research.price_bar_revision (
+          id, stock_id, bar_date, previous_values, new_values, seen_at
+        ) VALUES (
+          gen_random_uuid(), $1, '2026-09-21',
+          '{"open": 100, "high": 105, "low": 95, "close": 100}'::jsonb,
+          '{"open": 100, "high": 105, "low": 95, "close": 98}'::jsonb,
+          '2026-10-21 10:00:00Z'
+        )
+        `,
+        [stock.id],
+      );
+
+      const evalRes = await evalService.evaluateStock(stock, "2026-10-21");
+      const restatementsEmitted = evalRes.alerts.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "RESTATEMENT",
+      );
+      expect(restatementsEmitted.length).toBe(1);
+
+      const alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatements = alerts.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+      expect(restatements.length).toBe(1);
+
+      const alert = restatements[0];
+      expect(alert.title).toBe("Historical price restatement detected for 2026-09-21 (close).");
+      expect(alert.title).toContain("2026-09-21");
+      expect(alert.title).toContain("close");
+      expect(alert.title).not.toContain("older bars");
+      expect(alert.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+      expect(alert.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+      expect(alert.payload_json.restatedBarDate).toBe("2026-09-21");
+      expect(alert.payload_json.restatedFields).toEqual(["close"]);
+    });
+
+    it("G5: re-running the same date gives no duplicate.", async () => {
+      const stock = (await watchlistRepo.findBySymbol("NSE", G4_SYMBOL))!;
+      const evalRepeat = await evalService.evaluateStock(stock, "2026-10-21");
+      expect(evalRepeat.alertsInserted).toBe(0);
+      expect(evalRepeat.alertsSkipped).toBeGreaterThanOrEqual(1);
+
+      const alertsAfter = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatementsAfter = alertsAfter.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+      expect(restatementsAfter.length).toBe(1);
+    });
+
+    it("a real 2% restatement of a 30-day-old bar collected after the add date gives 1 alert", async () => {
+      await cleanupStockBySymbol(G_POST_ADD_SYMBOL);
+      const stock = await watchlistRepo.addStock({
+        exchange: "NSE",
+        symbol: G_POST_ADD_SYMBOL,
+        yahooSymbol: `${G_POST_ADD_SYMBOL}.NS`,
+        displayName: "Post-Add Material Restatement Stock",
+      });
+
+      // Explicitly set added_at to 2026-08-01, strictly before the bar_date 2026-09-21
+      await pool.query(
+        `UPDATE equity_research.watchlist_stock SET added_at = '2026-08-01 09:15:00Z' WHERE id = $1`,
+        [stock.id],
+      );
+      const updatedStock = (await watchlistRepo.findById(stock.id))!;
+
+      // Bar for 2026-09-21 (30 days old relative to 2026-10-21) and today's bar 2026-10-21
+      await priceBarRepo.saveBars([
+        { stockId: stock.id, barDate: "2026-09-21", open: 100, high: 105, low: 95, close: 100, volume: 10000 },
+        { stockId: stock.id, barDate: "2026-10-21", open: 110, high: 115, low: 108, close: 112, volume: 15000 },
+      ]);
+
+      // Revision of 30-day-old bar with close changed by 2% (100 -> 98) observed on 2026-10-21
+      await pool.query(
+        `
+        INSERT INTO equity_research.price_bar_revision (
+          id, stock_id, bar_date, previous_values, new_values, seen_at
+        ) VALUES (
+          gen_random_uuid(), $1, '2026-09-21',
+          '{"open": 100, "high": 105, "low": 95, "close": 100}'::jsonb,
+          '{"open": 100, "high": 105, "low": 95, "close": 98}'::jsonb,
+          '2026-10-21 10:00:00Z'
+        )
+        `,
+        [stock.id],
+      );
+
+      const evalRes = await evalService.evaluateStock(updatedStock, "2026-10-21");
+      const restatementsEmitted = evalRes.alerts.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload.subtype === "RESTATEMENT",
+      );
+      expect(restatementsEmitted.length).toBe(1);
+
+      const alerts = await alertRepo.getAlerts({ stockId: stock.id, evaluatedDate: "2026-10-21" });
+      const restatements = alerts.filter(
+        (a) => a.kind === "DATA_EVENT" && a.payload_json.subtype === "RESTATEMENT",
+      );
+      expect(restatements.length).toBe(1);
+
+      const alert = restatements[0];
+      expect(alert.title).toBe("Historical price restatement detected for 2026-09-21 (close).");
+      expect(alert.payload_json.rulesHash).toBe(EQUITY_ALERT_RULES_HASH);
+      expect(alert.payload_json.disclaimer).toBe(EQUITY_ALERT_FOOTER);
+      expect(alert.payload_json.restatedBarDate).toBe("2026-09-21");
+      expect(alert.payload_json.restatedFields).toEqual(["close"]);
+    });
+  });
 });

@@ -16,6 +16,35 @@ export interface PriceBarInput {
   seriesVersion?: number;
 }
 
+export interface MaterialRevision {
+  barDate: string; // YYYY-MM-DD
+  changedFields: Array<"open" | "high" | "low" | "close">;
+  prevValues: Record<string, unknown>;
+  newValues: Record<string, unknown>;
+}
+
+export const RESTATEMENT_PRICE_FIELDS = ["open", "high", "low", "close"] as const;
+
+export function extractMaterialPriceChanges(
+  previousValues: Record<string, unknown>,
+  newValues: Record<string, unknown>,
+): Array<"open" | "high" | "low" | "close"> {
+  const changedFields: Array<"open" | "high" | "low" | "close"> = [];
+  for (const field of RESTATEMENT_PRICE_FIELDS) {
+    const prev = Number(previousValues[field]);
+    const next = Number(newValues[field]);
+    if (!Number.isFinite(prev) || !Number.isFinite(next)) {
+      continue;
+    }
+    const denom = Math.abs(prev) > 0 ? Math.abs(prev) : 1;
+    const relDiff = Math.abs(next - prev) / denom;
+    if (relDiff > 1e-6) {
+      changedFields.push(field);
+    }
+  }
+  return changedFields;
+}
+
 export class PostgresEquityPriceBarRepository {
   constructor(private readonly db: DatabaseQueryable) {}
 
@@ -748,20 +777,61 @@ export class PostgresEquityPriceBarRepository {
   }
 
   /**
-   * Checks if price bar revisions were recorded or observed on the given date.
+   * Fetches material price bar revisions for a stock observed on evaluationDate.
+   *
+   * A revision counts toward RESTATEMENT only if:
+   * 1. Its bar_date is more than 4 days before the evaluation date ((evaluationDate - bar_date) > 4).
+   * 2. At least one of open, high, low, close differs by more than 1e-6 relative to previous value.
+   * Volume-only changes and float noise (<= 1e-6 relative diff) never count.
    */
-  async hasRevisionsForDate(stockId: string, evaluationDate: string): Promise<boolean> {
-    const result = await this.db.query<{ exists: boolean }>(
+  async getMaterialRevisionsForDate(
+    stockId: string,
+    evaluationDate: string,
+  ): Promise<MaterialRevision[]> {
+    const result = await this.db.query<{
+      bar_date: string;
+      previous_values: Record<string, unknown>;
+      new_values: Record<string, unknown>;
+    }>(
       `
-      SELECT EXISTS (
-        SELECT 1 FROM equity_research.price_bar_revision
-        WHERE stock_id = $1
-          AND (seen_at::date = $2::date OR bar_date = $2::date)
-      ) AS exists
+      SELECT
+        pbr.bar_date::text AS bar_date,
+        pbr.previous_values,
+        pbr.new_values
+      FROM equity_research.price_bar_revision pbr
+      WHERE pbr.stock_id = $1
+        AND pbr.seen_at::date = $2::date
+        AND ($2::date - pbr.bar_date) > 4
+      ORDER BY pbr.bar_date ASC, pbr.seen_at ASC
       `,
       [stockId, evaluationDate],
     );
-    return Boolean(result.rows[0]?.exists);
+
+    const materialRevisions: MaterialRevision[] = [];
+    for (const row of result.rows) {
+      const changedFields = extractMaterialPriceChanges(row.previous_values, row.new_values);
+      if (changedFields.length > 0) {
+        materialRevisions.push({
+          barDate: row.bar_date,
+          changedFields,
+          prevValues: row.previous_values,
+          newValues: row.new_values,
+        });
+      }
+    }
+
+    return materialRevisions;
+  }
+
+  /**
+   * Checks if price bar revisions were recorded or observed on the given date.
+   */
+  async hasRevisionsForDate(
+    stockId: string,
+    evaluationDate: string,
+  ): Promise<boolean> {
+    const revisions = await this.getMaterialRevisionsForDate(stockId, evaluationDate);
+    return revisions.length > 0;
   }
 
   /**
