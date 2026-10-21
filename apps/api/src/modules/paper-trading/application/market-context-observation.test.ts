@@ -126,14 +126,15 @@ describe("observeMarketContext", () => {
       priceActionEvents: [],
     }) as never;
 
-    it("asks for the index's closed 5m and 15m bars and stamps a known trend", async () => {
+    it("asks for the index's closed 5m, 15m and 60m bars and stamps a known trend", async () => {
       const loader = vi.fn(async (q: { instrumentId: string; timeframe: string; asOf: Date }) => htfContext(q.timeframe, q.asOf));
       const note = await observeMarketContext({
         database: database(), underlyingSymbol: "NIFTY50", tradeIdeaId: "idea-1", direction: "LONG", now: NOW,
         loadHigherTimeframeContext: loader,
       });
-      expect(loader.mock.calls.map(([q]) => [q.instrumentId, q.timeframe])).toEqual([[indexId, "5m"], [indexId, "15m"]]);
+      expect(loader.mock.calls.map(([q]) => [q.instrumentId, q.timeframe])).toEqual([[indexId, "5m"], [indexId, "15m"], [indexId, "60m"]]);
       expect(note).not.toContain('"htf":"UNKNOWN"');
+      expect(note).toContain('"t60":"UP"');
     });
 
     it("stays UNKNOWN, and still stamps, when the loader fails or returns a bar closing after the decision", async () => {

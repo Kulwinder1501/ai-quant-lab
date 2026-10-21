@@ -240,7 +240,7 @@ export async function observeMarketContext(input: MarketContextObservationInput)
     let higherTimeframeContexts = input.higherTimeframeContexts;
     if (higherTimeframeContexts === undefined && input.loadHigherTimeframeContext) {
       const attached: Partial<Record<HistoricalTimeframe, StrategyMarketContext>> = {};
-      for (const timeframe of ["5m", "15m"] as const) {
+      for (const timeframe of ["5m", "15m", "60m"] as const) {
         try {
           const htf = await input.loadHigherTimeframeContext({ instrumentId: String(indexId), timeframe, asOf: completedBefore });
           // Same anti-lookahead assertion as the idea generator: an unclosed bar is dropped, not used.
@@ -263,6 +263,7 @@ export async function observeMarketContext(input: MarketContextObservationInput)
       priorValueArea,
       tf5: slices.tf5,
       tf15: slices.tf15,
+      tf60: slices.tf60,
       sessionDateIst: today,
     });
 

@@ -94,6 +94,8 @@ export interface MarketContextMap {
   trend: {
     tf5: TrendSlice | null;
     tf15: TrendSlice | null;
+    /** Hourly trend, recorded for the review only; it takes no part in htfAgreement. */
+    tf60?: TrendSlice | null;
     sessionBias: TrendLabel;
     htfAgreement: HtfAgreement;
   };
@@ -119,6 +121,7 @@ export interface BuildMarketContextInput {
   /** Digested HTF trend labels when available. */
   tf5?: TrendSlice | null;
   tf15?: TrendSlice | null;
+  tf60?: TrendSlice | null;
   /** IST calendar date of the session being evaluated, YYYY-MM-DD. */
   sessionDateIst: string;
 }
@@ -419,6 +422,7 @@ export function buildMarketContextMap(input: BuildMarketContextInput): MarketCon
       trend: {
         tf5: input.tf5 ?? null,
         tf15: input.tf15 ?? null,
+        tf60: input.tf60 ?? null,
         sessionBias: "MIXED" as const,
         htfAgreement: "UNKNOWN" as const,
       },
@@ -450,6 +454,7 @@ export function buildMarketContextMap(input: BuildMarketContextInput): MarketCon
       trend: {
         tf5: input.tf5 ?? null,
         tf15: input.tf15 ?? null,
+        tf60: input.tf60 ?? null,
         sessionBias: "MIXED" as const,
         htfAgreement: htfAgreement(input.direction, input.tf5, input.tf15),
       },
@@ -513,6 +518,7 @@ export function buildMarketContextMap(input: BuildMarketContextInput): MarketCon
     trend: {
       tf5: input.tf5 ?? null,
       tf15: input.tf15 ?? null,
+      tf60: input.tf60 ?? null,
       sessionBias: sessionBias(usable),
       htfAgreement: agreement,
     },
@@ -544,6 +550,8 @@ export function marketContextStampBody(map: MarketContextMap): Record<string, un
     t5s: map.trend.tf5?.strict ?? null,
     t15: map.trend.tf15?.soft ?? null,
     t15s: map.trend.tf15?.strict ?? null,
+    t60: map.trend.tf60?.soft ?? null,
+    t60s: map.trend.tf60?.strict ?? null,
     sess: map.trend.sessionBias,
     htf: map.trend.htfAgreement,
     sh: r1(map.levels.sessionHigh),

@@ -166,8 +166,8 @@ export function digestHigherTimeframeContexts(
 export function trendSlicesFromHigherTimeframeContexts(
   attached: Partial<Record<HistoricalTimeframe, StrategyMarketContext>> | undefined,
   options: DigestHigherTimeframesOptions = {},
-): { tf5: TrendSlice | null; tf15: TrendSlice | null } {
-  if (!attached) return { tf5: null, tf15: null };
+): { tf5: TrendSlice | null; tf15: TrendSlice | null; tf60: TrendSlice | null } {
+  if (!attached) return { tf5: null, tf15: null, tf60: null };
   const resolved: Required<DigestHigherTimeframesOptions> = {
     indicatorAlgorithmVersion: options.indicatorAlgorithmVersion ?? "ta-v1",
     emaPeriod: options.emaPeriod ?? DEFAULT_EMA_PERIOD,
@@ -183,5 +183,5 @@ export function trendSlicesFromHigherTimeframeContexts(
     });
   };
 
-  return { tf5: sliceFor("5m"), tf15: sliceFor("15m") };
+  return { tf5: sliceFor("5m"), tf15: sliceFor("15m"), tf60: sliceFor("60m") };
 }
