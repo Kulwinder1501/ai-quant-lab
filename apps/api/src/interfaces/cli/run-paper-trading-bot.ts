@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { DUAL_BOT_SANDBOX, type BotSandboxSpec } from "./bot-sandboxes.js";
+import { DUAL_BOT_SANDBOX, selectBotSandboxes, type BotSandboxSpec } from "./bot-sandboxes.js";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresCandleRepository } from "../../infrastructure/database/repositories/postgres-candle-repository.js";
@@ -413,7 +413,7 @@ async function main(): Promise<void> {
     const unexpectedOpenFailures: Array<Record<string, unknown>> = [];
 
     // Execute isolated trading logic for each bot sandbox in DUAL_BOT_SANDBOX
-    for (const botSpec of DUAL_BOT_SANDBOX) {
+    for (const botSpec of selectBotSandboxes(DUAL_BOT_SANDBOX, process.argv.slice(2))) {
       let account = await accountRepository.findByName(botSpec.name);
       if (!account) {
         account = await accountRepository.create({ name: botSpec.name, openingBalance: botSpec.initialBalance });

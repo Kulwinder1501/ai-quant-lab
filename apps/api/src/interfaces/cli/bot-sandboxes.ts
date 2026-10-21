@@ -189,3 +189,27 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
  * have both sides gated (`executableSides: []`) in `strategy-registry.ts`.
  * Their accounts have been deactivated in `paper_accounts` and their trades cleared from the database.
  */
+
+/**
+ * `--only-bots=A,B` keeps just those bots, `--skip-bots=A,B` drops them; both absent keeps every bot, exactly as before.
+ *
+ * Used to run one bot a little after the others. The bar a 5-minute job reads is the one that closed five minutes
+ * earlier, because at the boundary the bar that has just closed is not yet saved as complete (3 to 15 seconds later,
+ * measured 2026-10-21), so every decision was a bar stale. The scheduler can now run a chosen bot 30 seconds after the
+ * boundary to read the newer bar, while the rest are untouched. Unknown names throw, so a typo cannot silently run
+ * nothing or everything.
+ */
+export function selectBotSandboxes(specs: readonly BotSandboxSpec[], argv: readonly string[]): readonly BotSandboxSpec[] {
+  const read = (flag: string): string[] | null => {
+    const entry = argv.find((argument) => argument.startsWith(`${flag}=`));
+    if (entry === undefined) return null;
+    return entry.slice(flag.length + 1).split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+  };
+  const only = read("--only-bots");
+  const skip = read("--skip-bots");
+  const known = new Set(specs.map((spec) => spec.name));
+  for (const name of [...(only ?? []), ...(skip ?? [])]) {
+    if (!known.has(name)) throw new Error(`Unknown bot "${name}"; known bots are ${[...known].join(", ")}.`);
+  }
+  return specs.filter((spec) => (only === null || only.includes(spec.name)) && (skip === null || !skip.includes(spec.name)));
+}

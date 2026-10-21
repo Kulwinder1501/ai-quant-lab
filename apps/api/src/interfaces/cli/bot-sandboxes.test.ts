@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DUAL_BOT_SANDBOX, type BotSandboxSpec } from "./bot-sandboxes.js";
+import { DUAL_BOT_SANDBOX, selectBotSandboxes, type BotSandboxSpec } from "./bot-sandboxes.js";
 import { findRegisteredStrategy, strategyKeys } from "../../modules/strategy-engine/domain/strategy-registry.js";
 
 /**
@@ -90,5 +90,24 @@ describe("bot sandboxes", () => {
 
     expect(owners).toHaveLength(1);
     expect(owners[0]!.name).toBe("AutoBot-Scalp1m");
+  });
+});
+
+describe("selectBotSandboxes", () => {
+  const names = (argv: string[]) => selectBotSandboxes(DUAL_BOT_SANDBOX, argv).map((bot) => bot.name);
+
+  it("keeps every bot when no flag is given", () => {
+    expect(names([])).toEqual(DUAL_BOT_SANDBOX.map((bot) => bot.name));
+  });
+
+  it("keeps only the named bot, or drops it, and the two together partition the roster", () => {
+    expect(names(["--only-bots=AutoBot-Sniper"])).toEqual(["AutoBot-Sniper"]);
+    const rest = names(["--skip-bots=AutoBot-Sniper"]);
+    expect(rest).not.toContain("AutoBot-Sniper");
+    expect([...rest, "AutoBot-Sniper"].sort()).toEqual(DUAL_BOT_SANDBOX.map((bot) => bot.name).sort());
+  });
+
+  it("refuses an unknown bot name instead of running nothing or everything", () => {
+    expect(() => names(["--only-bots=AutoBot-Sniperr"])).toThrow(/Unknown bot/);
   });
 });

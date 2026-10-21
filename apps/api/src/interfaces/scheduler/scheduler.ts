@@ -307,6 +307,7 @@ async function main(): Promise<void> {
     // Two collects + ~25s sleep fits under a minute; 90s recovers the next tick after a dead claimant.
     OPTION_PREMIUM_TICKS: 90 * 1000,
     PAPER_TRADING_BOT: 10 * 60 * 1000,
+    PAPER_TRADING_BOT_DELAYED: 10 * 60 * 1000,
     // Two instruments, one bar each, no execution. Short because a dead claimant should not hold
     // the next tick: a missed shadow decision is a gap in the differential record, and P13 counts
     // comparisons.
@@ -1036,9 +1037,20 @@ async function main(): Promise<void> {
     }
   });
 
+  // Bots named here read the bar 30 seconds after the boundary instead of at it. At the boundary the bar that has just
+  // closed is not yet saved as complete, so the job read the bar before it: ideas were a full bar stale (measured
+  // 2026-10-21: Sniper 303 s median). Empty keeps every bot on the original timing. The delayed run uses the same
+  // command, so ideas are upserted per (strategy, bar, side) and nothing is created twice.
+  const delayedBots = (process.env.PAPER_BOT_DELAYED_BOTS ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+  const delayedBotMs = Math.max(5, Number(process.env.PAPER_BOT_DELAY_SECONDS ?? 30)) * 1000;
   cronSchedule("*/5 9-15 * * 1-5", () => {
     if (fyersTokenService) {
-      void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot"]));
+      void schedule("PAPER_TRADING_BOT", () => runCommand("npm", ["run", "trading:paper:bot", ...(delayedBots.length > 0 ? ["--", `--skip-bots=${delayedBots.join(",")}`] : [])]));
+      if (delayedBots.length > 0) {
+        setTimeout(() => {
+          void schedule("PAPER_TRADING_BOT_DELAYED", () => runCommand("npm", ["run", "trading:paper:bot", "--", `--only-bots=${delayedBots.join(",")}`]));
+        }, delayedBotMs);
+      }
     }
   });
 

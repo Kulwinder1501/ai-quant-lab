@@ -89,6 +89,8 @@ services:
       # (`npm run trading:paper:bot`, a child process that inherits this environment), which is
       # the reachable path into the gate.
       ORDERBOOK01_LIVE_GATE_ENABLED: ${ORDERBOOK01_LIVE_GATE_ENABLED:-false}
+      # Bots that read the bar 30 s after the 5-minute boundary (see scheduler.ts). Empty restores the old timing.
+      PAPER_BOT_DELAYED_BOTS: ${PAPER_BOT_DELAYED_BOTS:-AutoBot-Sniper}
       # Twelve Data: powers XAU_USD candle collection (XAU_CANDLE_COLLECTION) and the gold paper
       # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
       # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
