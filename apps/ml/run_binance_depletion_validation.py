@@ -48,7 +48,7 @@ from ai_quant_lab_ml.binance_book_adapter import (
     ValidationMetrics,
     evaluate_depletion_classifier,
 )
-from ai_quant_lab_ml.cks_ofi_touch import DepthFrameRow
+from ai_quant_lab_ml.cks_ofi_touch import DepthFrameRow, split_into_valid_frame_pairs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -160,13 +160,25 @@ def run_validation(
 
         start_dt = frames[0].received_at
         end_dt = frames[-1].received_at
-        duration_hours = (end_dt - start_dt).total_seconds() / 3600.0
-        duration_passed = duration_hours >= min_capture_hours
+        wall_clock_hours = (end_dt - start_dt).total_seconds() / 3600.0
+
+        # Compute synchronized active time across valid segments (accounting for mid-capture gaps/drops)
+        segments = split_into_valid_frame_pairs(frames)
+        total_sync_seconds = sum(
+            (seg[-1][1].received_at - seg[0][0].received_at).total_seconds()
+            for seg in segments if seg
+        )
+        sync_hours = total_sync_seconds / 3600.0
+        coverage_ratio = (sync_hours / wall_clock_hours) if wall_clock_hours > 0 else 0.0
+
+        # Strict synchronized active duration floor
+        duration_passed = sync_hours >= min_capture_hours
 
         if not duration_passed:
             any_symbol_floor_failed = True
             logger.warning(
-                f"[{symbol}] Capture duration floor violated: {duration_hours:.2f}h < {min_capture_hours:.1f}h"
+                f"[{symbol}] Capture duration floor violated: {sync_hours:.2f}h synchronized "
+                f"({wall_clock_hours:.2f}h wall-clock, coverage={coverage_ratio*100:.1f}%) < {min_capture_hours:.1f}h"
             )
 
         metrics = evaluate_depletion_classifier(
@@ -189,7 +201,10 @@ def run_validation(
 
         results_by_symbol[symbol] = {
             "verdict": verdict,
-            "captureDurationHours": duration_hours,
+            "captureDurationHours": sync_hours,
+            "synchronizedDurationHours": sync_hours,
+            "wallClockDurationHours": wall_clock_hours,
+            "coverageRatio": coverage_ratio,
             "durationFloorPassed": duration_passed,
             "minCaptureHoursFloor": min_capture_hours,
             "sampleCounts": {
@@ -322,7 +337,10 @@ def main():
         dur = res["captureDurationHours"]
         fl_pass = res["durationFloorPassed"]
 
-        print(f"\nSymbol: {sym} | Verdict: {res['verdict']} | Duration: {dur:.2f}h (Floor >= {res['minCaptureHoursFloor']}h: {fl_pass})")
+        dur_sync = res.get("synchronizedDurationHours", res["captureDurationHours"])
+        dur_wall = res.get("wallClockDurationHours", dur_sync)
+        cov = res.get("coverageRatio", 1.0)
+        print(f"\nSymbol: {sym} | Verdict: {res['verdict']} | Synchronized Duration: {dur_sync:.2f}h (Wall-clock: {dur_wall:.2f}h, Coverage: {cov*100:.1f}%) | Floor >= {res['minCaptureHoursFloor']}h: {fl_pass}")
         print(f"  Total Frames: {sc['totalFrames']:,} | Valid Pairs: {sc['validPairs']:,} | Broken Chains: {sc['brokenChains']:,}")
         print(f"  Real Trades: {sc['totalRealTrades']:,} | Caught Trades: {sc['caughtRealTrades']:,}")
         print(f"  Inferred Trades: {sc['inferredTrades']:,} (BUY: {sc['inferredBuy']:,}, SELL: {sc['inferredSell']:,}, None: {sc['inferredNone']:,})")
