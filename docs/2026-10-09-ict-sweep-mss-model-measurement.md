@@ -116,12 +116,12 @@ control for live behaviour, and earlier headline numbers overstate the trade cou
 
 **Deployed 2026-10-09 evening** (image rebuilt from the working tree; `api-v2` and `scheduler-v2`
 recreated with no open ICT positions): engine `ict-state-v3`, the ICT exit clock, the zone size floors.
-Entry model unchanged (`ALIGNMENT`). Verified by running the compiled live code against the live
+Entry model unchanged (`ALIGNMENT`). **[Superseded 2026-10-10 -- see Amendment 4 below.]** Verified by running the compiled live code against the live
 database on both bot cells (NIFTY50 15m, BANKNIFTY 5m, 2026-09-01..10-08) with no overrides.
 
 | Audit item | Disposition |
 | --- | --- |
-| Market entry at signal close | New `SWEEP_MSS_RETRACE` / `SWEEP_MSS_LIMIT` models and a limit-fill backtester. Measured UNDERPOWERED (29 trades pooled each). Not live. |
+| Market entry at signal close | New `SWEEP_MSS_RETRACE` / `SWEEP_MSS_LIMIT` models and a limit-fill backtester. Measured UNDERPOWERED (29 trades pooled each). Not live. **[Superseded 2026-10-10 -- see Amendment 4 below.]** |
 | No MSS / displacement | Built (`mss.ts`), tested, in the v3 snapshot. |
 | 15-minute TIME_STOP on a multi-bar thesis | Fixed live: 4 bars of the trade's own timeframe. **Deviation to flag:** the audit advised measuring this in shadow first. The backtester does not simulate the O1 option exits, so there is nothing to measure it against; it was applied as a minutes-to-bars scale correction. To revert, set `ICT_TIME_STOP_BARS` in `o1-exit-timings.ts` so that `4 * barMinutes <= 15`, or return the default timings for the key. |
 | Live against its own evidence | Unchanged by design. The registry override stays the owner's decision. |
@@ -229,6 +229,34 @@ leaves roughly 25-30 signals a year and 10-19 fills. That is a property of a sel
 on two instruments, not a bug; it also means this model could not accumulate a confirmable
 sample in under several years of live trading.
 
-**Decision.** `entryModel` stays `ALIGNMENT` in live. `SWEEP_MSS_RETRACE` and `SWEEP_MSS_LIMIT`
+**Decision.** **[Superseded 2026-10-10 -- see Amendment 4 below.]** `entryModel` stays `ALIGNMENT` in live. `SWEEP_MSS_RETRACE` and `SWEEP_MSS_LIMIT`
 ship as opt-in, default-off models, available to the backtester and strategy config, not enabled on
 any bot. `SWEEP_MSS_LIMIT` is a backtest-only construct (no live limit-order path exists).
+
+## Amendment 4 -- 2026-10-21, documentation correction: what is live (not a measurement)
+
+This amendment changes no result and re-scores nothing. It records what the live bots run, because three passages
+above (marked *Superseded*) still say the live entry model is `ALIGNMENT` and that the new models are "not live".
+
+**What is live.** On 2026-10-10 (commit `5a715eba`) the owner pinned `ict-structure-v1` version 3 with
+`entryModel: "SWEEP_MSS_RETRACE"` for both bots, `AutoBot-IctNifty15m` (NIFTY50 15m) and `AutoBot-IctBankNifty5m`
+(BANKNIFTY 5m). Version 2 (`ALIGNMENT`) was deactivated. The engine is `ict-state-v3`. The recommendation in
+Amendment 3 to stop the two bots stands as recorded; the owner decided instead to keep them live on the new model,
+and confirmed that decision again on 2026-10-21. `SWEEP_MSS_RETRACE` is not validated on NIFTY50 or BANKNIFTY (its
+training-era arm above is UNDERPOWERED, 29 trades pooled), and `SWEEP_MSS_LIMIT` is still backtest-only.
+
+**Observations on 2026-10-21 (exploratory, not pre-registered, not evidence for or against the model).**
+
+- Since the version-3 pin neither bot has opened a trade. The only Indian-index ICT ideas on record are from
+  2026-10-07 and 2026-10-09, under `ALIGNMENT`. Across both bots the lifetime record is four trades, all before
+  version 3: `AutoBot-IctBankNifty5m` 3 trades (+18,630), `AutoBot-IctNifty15m` 1 trade (-506).
+- A replay of version 3 over 2026-08-01..2026-10-21 found no trades on NIFTY50 15m and four on BANKNIFTY 5m (17 Sep,
+  24 Sep and two on 30 Sep; three stop-outs and one target; -167 net per unit). A replay that starts at 2026-09-21
+  is invalid: it lacks the higher-timeframe history the bias needs and reads bias UNKNOWN. The saved runs were deleted.
+- The 2026-10-09 14:30 NIFTY50 15m idea, generated under `ALIGNMENT`, does not reproduce under version 3 (zero
+  proposals at that bar on either the live path or a replay), because the entry model changed after it.
+- At roughly one qualifying setup every two to three weeks across both cells, version 3 could not accumulate a
+  confirmable sample in under several years, as the sample-rate paragraph above already estimated.
+
+**Decision recorded.** The two ICT bots stay live on `SWEEP_MSS_RETRACE` (owner, 2026-10-21). No code changed with
+this amendment.
