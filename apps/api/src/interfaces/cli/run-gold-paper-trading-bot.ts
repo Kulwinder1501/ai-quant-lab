@@ -48,7 +48,7 @@ import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/ap
 
 const XAU_EXCHANGE = "OANDA" as const;
 const XAU_SYMBOL = "XAU_USD";
-const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
+const SCAN_TIMEFRAMES = ["5m"] as const;
 /**
  * Every strategy this bot is responsible for executing on gold. `momentum-scalp-gold` was added
  * 2026-10-07: its own file header says it was forked specifically "so its live record accumulates
@@ -58,7 +58,12 @@ const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
  * its own independent live-entries switch (see GOLD_LIVE_ENTRIES_ENABLED), so enabling one never
  * silently re-arms the other's evidence-gathering.
  */
-const GOLD_STRATEGY_KEYS = ["ict-structure-v1", "momentum-scalp-gold"] as const;
+/**
+ * Every strategy this bot scans on gold.
+ * momentum-scalp-gold was retired 2026-10-22 after accumulating -28.02 R across 210 shadow settlements.
+ * Replaced by gold-asian-sweep-v1 (London liquidity sweep model on Asian range).
+ */
+const GOLD_STRATEGY_KEYS = ["ict-structure-v1", "gold-asian-sweep-v1"] as const;
 const MAX_CONCURRENT_POSITIONS = 1;
 const GOLD_ACCOUNT_NAME = "AutoBot-Gold";
 /** Arbitrary, illustrative paper balance -- not derived from any real account. */
@@ -67,32 +72,16 @@ const GOLD_INITIAL_BALANCE_USD = 100_000;
 const WEEKLY_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE = 30;
 
 /**
- * Kill switch, same shape as `ORDERBOOK01_LIVE_GATE_ENABLED`
- * (options-entry-validator.ts): `ict-structure-v1`'s only real evidence is being
- * TERMINAL_UNOWNED for sign-instability on NIFTY50/BANKNIFTY, and it was re-enabled here
- * (2026-09-30, alongside `XAU_BOT_ENABLED`) for XAU_USD specifically with zero validation on
- * that instrument. Trade-idea generation and the ICT reasoning below run unconditionally --
- * this only gates the last step, actually opening a real (paper) position -- so the bot still
- * scans, still logs what it would have done, and every signal is still recorded on the
- * candidate ledger as a decision, just as REFUSED rather than EXECUTED while this is off.
- * Defaults OFF; set to exactly "true" to let the bot open positions on gold.
+ * Kill switches for gold strategies.
+ * Defaults OFF; set to exactly "true" to let the bot open live paper positions.
+ * In shadow mode (false), every signal is evaluated, gated by DXY, and logged to candidate_decisions as REFUSED.
  */
 const GOLD_ICT_LIVE_ENTRIES_ENABLED = process.env.GOLD_ICT_LIVE_ENTRIES_ENABLED === "true";
-
-/**
- * `momentum-scalp-gold`'s own independent kill switch -- deliberately NOT
- * `GOLD_ICT_LIVE_ENTRIES_ENABLED`. The whole point of forking this strategy under its own key
- * (see the strategy file's header) was to accumulate evidence separately from ICT's; sharing one
- * switch would mean flipping ICT live also silently arms a strategy with zero evidence of its
- * own, and vice versa. Defaults OFF, same as every other strategy's first exposure to live
- * entries this session (ICT included) -- it starts in shadow (REFUSED-logged, not silently
- * dropped) until it has a real settled record to review.
- */
-const GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED = process.env.GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED === "true";
+const GOLD_ASIAN_SWEEP_LIVE_ENTRIES_ENABLED = process.env.GOLD_ASIAN_SWEEP_LIVE_ENTRIES_ENABLED === "true";
 
 const GOLD_LIVE_ENTRIES_ENABLED: Record<(typeof GOLD_STRATEGY_KEYS)[number], boolean> = {
   "ict-structure-v1": GOLD_ICT_LIVE_ENTRIES_ENABLED,
-  "momentum-scalp-gold": GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
+  "gold-asian-sweep-v1": GOLD_ASIAN_SWEEP_LIVE_ENTRIES_ENABLED,
 };
 
 function isUserOperatingWindow(now: Date): boolean {
@@ -322,7 +311,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
             if (!GOLD_LIVE_ENTRIES_ENABLED[strategyKey]) {
               const envVarName = strategyKey === "ict-structure-v1"
                 ? "GOLD_ICT_LIVE_ENTRIES_ENABLED"
-                : "GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED";
+                : "GOLD_ASIAN_SWEEP_LIVE_ENTRIES_ENABLED";
               refused.push({
                 tradeIdeaId, timeframe, reason: `${envVarName.replace(/_ENABLED$/, "")}_DISABLED`,
                 explanation: `Would have opened at ${entry.fillPrice} (qty ${entry.quantity}, ${entry.leverage ?? 20}x); ${envVarName} is not "true".`,
@@ -481,7 +470,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       timestamp: now.toISOString(),
       accountId: account.id,
       goldIctLiveEntriesEnabled: GOLD_ICT_LIVE_ENTRIES_ENABLED,
-      goldMomentumScalpLiveEntriesEnabled: GOLD_MOMENTUM_SCALP_LIVE_ENTRIES_ENABLED,
+      goldAsianSweepLiveEntriesEnabled: GOLD_ASIAN_SWEEP_LIVE_ENTRIES_ENABLED,
       decisionsRecorded,
       skippedSeries,
       strategyOutcomes,

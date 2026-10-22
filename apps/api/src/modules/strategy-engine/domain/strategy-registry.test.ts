@@ -18,6 +18,7 @@ import {
 
 import { TrendContinuationStrategy } from "./trend-continuation-strategy.js";
 import { EventReversalStrategy } from "./event-reversal-strategy.js";
+import { GoldAsianSweepStrategy } from "./gold-asian-sweep-strategy.js";
 
 describe("strategy registry", () => {
   it("pairs every registration with the class that implements its key", () => {
@@ -26,6 +27,7 @@ describe("strategy registry", () => {
       "momentum-scalp",
       "momentum-scalp-index",
       "momentum-scalp-gold",
+      "gold-asian-sweep-v1",
       "momentum-scalp-pattern",
       "momentum-scalp-pattern-v2",
       "ict-structure-v1",
@@ -36,6 +38,7 @@ describe("strategy registry", () => {
     expect(requireRegisteredStrategy("trend-breakout").StrategyClass).toBe(TrendBreakoutStrategy);
     expect(requireRegisteredStrategy("momentum-scalp").StrategyClass).toBe(MomentumScalpStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-gold").StrategyClass).toBe(MomentumScalpGoldStrategy);
+    expect(requireRegisteredStrategy("gold-asian-sweep-v1").StrategyClass).toBe(GoldAsianSweepStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern").StrategyClass).toBe(MomentumScalpPatternStrategy);
     expect(requireRegisteredStrategy("momentum-scalp-pattern-v2").StrategyClass).toBe(MomentumScalpPatternStrategyV2);
     expect(requireRegisteredStrategy("ict-structure-v1").StrategyClass).toBe(IctStructureStrategy);
@@ -213,7 +216,8 @@ describe("trend-breakout is marked out, and the marking is enforced not asserted
     expect(fifteenMinute).toContain("ict-structure-v1");
     expect(fifteenMinute).toContain("trend-continuation-v1");
     expect(fifteenMinute).toContain("event-reversal-v1");
-    expect(fifteenMinute).toHaveLength(4);
+    expect(fifteenMinute).toContain("gold-asian-sweep-v1");
+    expect(fifteenMinute).toHaveLength(5);
   });
 
   it("owns timeframes above the scalp band", () => {

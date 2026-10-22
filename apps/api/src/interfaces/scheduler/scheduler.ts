@@ -1115,7 +1115,7 @@ async function main(): Promise<void> {
    * back to `true`, not rebuilding anything.
    */
   const XAU_BOT_ENABLED = true;
-  cronSchedule("*/15 * * * *", () => {
+  cronSchedule("*/5 * * * *", () => {
     if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {

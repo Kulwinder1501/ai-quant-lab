@@ -30,6 +30,10 @@ import {
   EventReversalStrategy,
   eventReversalStrategyRegistration,
 } from "./event-reversal-strategy.js";
+import {
+  GoldAsianSweepStrategy,
+  goldAsianSweepStrategyRegistration,
+} from "./gold-asian-sweep-strategy.js";
 
 /** What every strategy implementation must offer to a caller that replays candles. */
 export interface StrategyEvaluator {
@@ -273,13 +277,17 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
   {
     registration: momentumScalpGoldStrategyRegistration,
     StrategyClass: MomentumScalpGoldStrategy,
-    // Same rule set as momentum-scalp-index (see that file's header) under its own key, so gold's
-    // live record accumulates independently and never re-arms the Indian-index verdict above.
-    // 1m/5m: what run-gold-paper-trading-bot.ts scans, matching the timeframes Twelve Data has
-    // backfilled for XAU_USD.
+    // Same rule set as momentum-scalp-index under its own key. Forked 2026-10-07.
+    // Retired from active gold bot scanning on 2026-10-22 after shadow tracking across 210 settled
+    // candidate decisions produced 137 STOPs vs 73 TARGETs (34.7% win rate, -28.02 R loss).
+    // Replaced by gold-asian-sweep-v1. Retained for historical replay and tests.
     supportedTimeframes: ["1m", "5m"],
-    // No operationalDisposition, no executableSides restriction: unowned and unmeasured on this
-    // instrument, same starting position as momentum-scalp on AutoBot-Scalp1m.
+  },
+  {
+    registration: goldAsianSweepStrategyRegistration,
+    StrategyClass: GoldAsianSweepStrategy,
+    // London liquidity sweep model on Gold Asian range (00:00-06:00 UTC range, 06:30-11:30 UTC execution).
+    supportedTimeframes: ["5m", "15m"],
   },
   {
     registration: momentumScalpPatternStrategyRegistration,
