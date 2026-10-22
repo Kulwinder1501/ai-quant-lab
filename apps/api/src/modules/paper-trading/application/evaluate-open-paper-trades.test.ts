@@ -1374,6 +1374,83 @@ describe("EvaluateOpenPaperTrades", () => {
   });
 });
 
+describe("EvaluateOpenPaperTrades: manual option trades without an O1 entry snapshot", () => {
+  // Manual trades are saved as O1 but carry no invalidation level or risk distance. The evaluator used to throw on
+  // them, so their premium stop and target were never checked (five manual trades on 2026-10-21/22 were closed by hand
+  // through their own stop).
+  const openedAt = new Date("2026-08-06T09:15:00.000Z");
+  const asOf = new Date("2026-08-06T09:20:00.000Z");
+  const candleRepository: CandleRepository = {
+    upsert: async () => { throw new Error("not used"); },
+    findByKey: async () => null,
+    listIncomplete: async () => [],
+    listCompleted: async () => [],
+  };
+
+  function manualTrade(overrides: Partial<PaperTrade> = {}): PaperTrade {
+    return optionBuyerTrade({
+      exitEngineVersion: "O1",
+      underlyingDirection: "LONG",
+      entryUnderlying: 24000,
+      invalidationLevelAtEntry: null,
+      initialRiskDistance: null,
+      entryPrice: 180,
+      stopLoss: 150,
+      targetPrice: 260,
+      openedAt,
+      ...overrides,
+    });
+  }
+
+  async function run(trade: PaperTrade, bid: number) {
+    const closings: ClosePaperTradeInput[] = [];
+    const quote = sample("2026-08-06T09:19:45.000Z", bid, 24020);
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(trade, closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(quote, [quote]),
+    ).execute({ accountId: "account-1", asOf, exitFees: 0 });
+    return { result, closings };
+  }
+
+  it("closes at the stop when the quoted bid is through it, instead of throwing", async () => {
+    const { result, closings } = await run(manualTrade(), 140);
+    expect(result.evaluationFailures).toEqual([]);
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({ exitPrice: 140, exitReason: "STOP_LOSS" });
+  });
+
+  it("closes at the target when the quoted bid is through it", async () => {
+    const { result, closings } = await run(manualTrade(), 270);
+    expect(result.evaluationFailures).toEqual([]);
+    expect(result.tradesClosed).toBe(1);
+    expect(closings[0]).toMatchObject({ exitPrice: 270, exitReason: "TARGET" });
+  });
+
+  it("stays open, with no failure recorded, while the bid is between stop and target", async () => {
+    const { result, closings } = await run(manualTrade(), 190);
+    expect(result.evaluationFailures).toEqual([]);
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toEqual([]);
+  });
+
+  it("does not apply the strategy-only rules (time stop, invalidation) to a manual trade", async () => {
+    // 40 minutes held, flat underlying, a premium above the stop: an O1 strategy trade would be stopped by its clock.
+    const closings: ClosePaperTradeInput[] = [];
+    const late = new Date("2026-08-06T09:55:00.000Z");
+    const quote = sample("2026-08-06T09:54:45.000Z", 175, 24000);
+    const result = await new EvaluateOpenPaperTrades(
+      stubRepo(manualTrade(), closings),
+      candleRepository,
+      new FixedImpliedVolatilitySource(0.12),
+      denseReader(quote, [quote]),
+    ).execute({ accountId: "account-1", asOf: late, exitFees: 0 });
+    expect(result.tradesClosed).toBe(0);
+    expect(closings).toEqual([]);
+  });
+});
+
 describe("EvaluateOpenPaperTrades: working option limit orders", () => {
   const placedAt = "2026-10-13T06:40:59.000Z";
   const asOf = new Date("2026-10-13T06:50:00.000Z");

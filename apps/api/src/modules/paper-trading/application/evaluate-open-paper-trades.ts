@@ -197,6 +197,22 @@ function resolveLiveSpot(trade: PaperTrade, livePrices?: Record<string, number>)
  *
  * Every step above the model is observed data; the model is the fallback and never overrules one.
  */
+/** The entry fields the O1 exit state machine reads. A trade without them cannot be judged by it. */
+function hasCompleteO1Snapshot(
+  trade: PaperTrade,
+): trade is PaperTrade & {
+  underlyingDirection: NonNullable<PaperTrade["underlyingDirection"]>;
+  entryUnderlying: number;
+  invalidationLevelAtEntry: number;
+  initialRiskDistance: number;
+} {
+  return Boolean(trade.underlyingDirection)
+    && trade.entryUnderlying != null
+    && trade.invalidationLevelAtEntry != null
+    && trade.initialRiskDistance != null
+    && trade.initialRiskDistance > 0;
+}
+
 export class EvaluateOpenPaperTrades {
   constructor(
     private readonly paperTradeRepository: PaperTradeRepository,
@@ -638,16 +654,19 @@ export class EvaluateOpenPaperTrades {
       asOf,
     ) ?? [];
 
-    if (trade.exitEngineVersion === "O1") {
-      if (
-        !trade.underlyingDirection ||
-        trade.entryUnderlying == null ||
-        trade.invalidationLevelAtEntry == null ||
-        trade.initialRiskDistance == null ||
-        trade.initialRiskDistance <= 0
-      ) {
-        throw new Error(`O1 trade ${trade.id} has incomplete entry snapshot fields.`);
-      }
+    if (trade.exitEngineVersion === "O1" && !hasCompleteO1Snapshot(trade)) {
+      // Manual option trades are saved as O1 without an invalidation level or risk distance (they have no strategy
+      // thesis), and this used to throw, which skipped the trade's stop and target on every sweep: on 2026-10-21/22 five
+      // manual trades were each closed by hand through their own stop. A position with no exit check is worse than one
+      // judged on its stop and target alone, so it falls through to the stop/target evaluation below.
+      console.warn(JSON.stringify({
+        level: "warn",
+        message: "O1 trade has no entry snapshot; evaluating on its premium stop and target only",
+        tradeId: trade.id,
+      }));
+    }
+
+    if (trade.exitEngineVersion === "O1" && hasCompleteO1Snapshot(trade)) {
       // Scale-appropriate clock for this strategy/timeframe (15m legacy default for everyone else).
       const o1Timings = resolveO1ExitTimings(trade.strategyKey, trade.timeframe);
 
