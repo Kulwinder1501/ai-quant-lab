@@ -364,7 +364,10 @@ describe("GenerateTradeIdeas", () => {
       },
     };
 
-    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, registeredStrategies)
+    const testStrategies = registeredStrategies.map((s) =>
+      s.registration.strategyKey === "momentum-scalp-gold" ? { ...s, executableSides: ["LONG", "SHORT"] as const } : s
+    );
+    const result = await new GenerateTradeIdeas(strategyVersions, contexts, ideas, testStrategies)
       .execute({ instrumentId: "instrument-1", timeframe: "1m" });
 
     expect(saved).toHaveLength(0);

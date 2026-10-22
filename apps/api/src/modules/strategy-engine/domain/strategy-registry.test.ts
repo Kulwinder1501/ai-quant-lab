@@ -138,6 +138,7 @@ describe("strategy registry", () => {
     expect(restricted).toEqual([
       "event-reversal-v1",
       "hybrid-liquidity-confluence-v1",
+      "momentum-scalp-gold",
       "momentum-scalp-index",
       "momentum-scalp-pattern-v2",
       "trend-continuation-v1",

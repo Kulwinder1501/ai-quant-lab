@@ -48,7 +48,7 @@ import { buildAndEvaluateDxyIntermarket } from "../../modules/strategy-engine/ap
 
 const XAU_EXCHANGE = "OANDA" as const;
 const XAU_SYMBOL = "XAU_USD";
-const SCAN_TIMEFRAMES = ["5m"] as const;
+const SCAN_TIMEFRAMES = ["5m", "15m"] as const;
 /**
  * Every strategy this bot is responsible for executing on gold. `momentum-scalp-gold` was added
  * 2026-10-07: its own file header says it was forked specifically "so its live record accumulates

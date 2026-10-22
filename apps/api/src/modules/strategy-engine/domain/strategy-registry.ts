@@ -83,6 +83,8 @@ export interface RegisteredStrategy {
    * consumer's supported set changes.
    */
   readsIctContext?: boolean;
+  /** Whether this strategy reads `StrategyMarketContext.asianSessionContext`. */
+  readsAsianSession?: boolean;
   /**
    * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.
    *
@@ -277,17 +279,19 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
   {
     registration: momentumScalpGoldStrategyRegistration,
     StrategyClass: MomentumScalpGoldStrategy,
-    // Same rule set as momentum-scalp-index under its own key. Forked 2026-10-07.
-    // Retired from active gold bot scanning on 2026-10-22 after shadow tracking across 210 settled
-    // candidate decisions produced 137 STOPs vs 73 TARGETs (34.7% win rate, -28.02 R loss).
-    // Replaced by gold-asian-sweep-v1. Retained for historical replay and tests.
+    // Decommissioned 2026-10-22 on empirical shadow evidence:
+    // Across 208 resolved shadow candidate decisions on XAU_USD spanning 9 trading days and ~18 day-and-side clusters,
+    // the strategy produced 136 STOPs vs 72 TARGETs (34.6% win rate, -28.59 R loss).
+    // Disabling via executableSides: [] stops idea generation and candidate settlement bleed.
     supportedTimeframes: ["1m", "5m"],
+    executableSides: [],
   },
   {
     registration: goldAsianSweepStrategyRegistration,
     StrategyClass: GoldAsianSweepStrategy,
     // London liquidity sweep model on Gold Asian range (00:00-06:00 UTC range, 06:30-11:30 UTC execution).
     supportedTimeframes: ["5m", "15m"],
+    readsAsianSession: true,
   },
   {
     registration: momentumScalpPatternStrategyRegistration,
@@ -473,6 +477,13 @@ export function ictContextTimeframes(): readonly string[] {
 /** Whether assembling an ICT snapshot at `timeframe` can be read by anything. */
 export function ictContextConsumedAt(timeframe: string): boolean {
   return ictContextTimeframes().includes(timeframe);
+}
+
+/** Whether assembling an Asian session snapshot at `timeframe` can be read by anything. */
+export function asianSessionConsumedAt(timeframe: string): boolean {
+  return registeredStrategies.some(
+    (strategy) => strategy.readsAsianSession === true && strategy.supportedTimeframes.includes(timeframe),
+  );
 }
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {

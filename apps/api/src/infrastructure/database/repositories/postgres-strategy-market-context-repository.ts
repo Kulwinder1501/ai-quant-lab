@@ -10,7 +10,8 @@ import type {
   StrategyMarketContext,
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
-import { ictContextConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
+import { ictContextConsumedAt, asianSessionConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
+import { evaluateAsianSession, type AsianCandleLike, type AsianRangeSnapshot } from "../../../modules/technical-analysis/domain/ict/asian-session.js";
 import {
   deriveVolatilityRegime,
   regimeSourceIndicatorAlgorithmVersion,
@@ -559,6 +560,40 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
     }
 
+    let asianSessionContext: AsianRangeSnapshot | undefined;
+    if (asianSessionConsumedAt(input.timeframe)) {
+      const utcDayStart = new Date(Date.UTC(
+        candle.open_time.getUTCFullYear(),
+        candle.open_time.getUTCMonth(),
+        candle.open_time.getUTCDate(),
+        0, 0, 0, 0,
+      ));
+      const dayCandlesRes = await this.database.query<CompletedCandleRow>(`
+        SELECT id, instrument_id, timeframe, open_time, close_time, open, high, low, close, volume, is_complete
+        FROM candles
+        WHERE instrument_id = $1
+          AND timeframe = $2
+          AND is_complete = TRUE
+          AND open_time >= $3
+          AND open_time <= $4
+        ORDER BY open_time ASC
+      `, [input.instrumentId, input.timeframe, utcDayStart, candle.open_time]);
+
+      const toCandleLike = (r: CompletedCandleRow): AsianCandleLike => ({
+        openTime: r.open_time,
+        closeTime: r.close_time,
+        open: toNumber(r.open, "open"),
+        high: toNumber(r.high, "high"),
+        low: toNumber(r.low, "low"),
+        close: toNumber(r.close, "close"),
+        volume: r.volume === null ? undefined : toNumber(r.volume, "volume"),
+      });
+
+      const dayCandles = dayCandlesRes.rows.map(toCandleLike);
+      const currentCandleLike = toCandleLike(candle);
+      asianSessionContext = evaluateAsianSession(dayCandles, currentCandleLike);
+    }
+
     return {
       candle: toCandle(candle),
       indicators: indicators.rows.map((row) => ({
@@ -587,6 +622,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       ...(confluenceSignal ? { confluenceSignal } : {}),
       ...(optionChainSignal ? { optionChainSignal } : {}),
       ...(ictSnapshot ? { ictSnapshot } : {}),
+      ...(asianSessionContext ? { asianSessionContext } : {}),
     };
   }
 

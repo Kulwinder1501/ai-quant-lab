@@ -1,31 +1,40 @@
-import {
-  type EnsureStrategyVersionInput,
-  type ProposedTradeIdea,
-  type StrategyMarketContext,
-  type TradeIdeaEvidence,
-  type TradeSide,
+import type {
+  EnsureStrategyVersionInput,
+  ProposedTradeIdea,
+  StrategyMarketContext,
+  TradeIdeaEvidence,
+  TradeSide,
 } from "./strategy.js";
 import type { StrategyEvaluator } from "./strategy-registry.js";
-import {
-  AsianSessionRangeTracker,
-  type AsianSessionTrackerConfig,
-  defaultAsianSessionConfig,
-} from "../../technical-analysis/domain/ict/asian-session.js";
 
 export const GOLD_ASIAN_SWEEP_STRATEGY_KEY = "gold-asian-sweep-v1";
+export const goldAsianSweepStrategyVersion = 1;
 
-export interface GoldAsianSweepStrategyConfig extends AsianSessionTrackerConfig {
-  stopBuffer: number; // 0.40 USD buffer outside sweep extreme
-  targetR: number; // 1.5R default target
-  confidence: number; // 0.75
-  expiryCandles: number; // 4
+export interface GoldAsianSweepStrategyConfiguration {
+  minPenetrationBps: number;
+  maxPenetrationBps: number;
+  minRejectionWickPct: number;
+  minRangeBps: number;
+  maxRangeBps: number;
+  stopBuffer: number;
+  rewardRiskMultiple: number;
+  minRiskDistance: number;
+  maxRiskDistance: number;
+  confidence: number;
+  expiryCandles: number;
 }
 
-export const defaultGoldAsianSweepConfig: GoldAsianSweepStrategyConfig = {
-  ...defaultAsianSessionConfig,
+export const defaultGoldAsianSweepConfiguration: GoldAsianSweepStrategyConfiguration = {
+  minPenetrationBps: 3.0,
+  maxPenetrationBps: 50.0,
+  minRejectionWickPct: 0.30,
+  minRangeBps: 15.0,
+  maxRangeBps: 180.0,
   stopBuffer: 0.40,
-  targetR: 1.5,
-  confidence: 0.75,
+  rewardRiskMultiple: 1.5,
+  minRiskDistance: 0.20,
+  maxRiskDistance: 15.0,
+  confidence: 0.50, // Uncalibrated baseline score prior to OOS replication
   expiryCandles: 4,
 };
 
@@ -35,37 +44,41 @@ export const goldAsianSweepStrategyRegistration: EnsureStrategyVersionInput = {
   description:
     "Trades London-session liquidity sweeps and reclaims of the Asian session high/low on XAU/USD. "
     + "Enforces strict range validity, penetration bounds, and rejection wicks.",
-  version: 1,
-  configuration: defaultGoldAsianSweepConfig as unknown as Record<string, unknown>,
+  version: goldAsianSweepStrategyVersion,
+  configuration: defaultGoldAsianSweepConfiguration as unknown as Record<string, unknown>,
 };
 
+/**
+ * Stateless evaluator for the Asian Session Sweep strategy on XAU/USD.
+ *
+ * Reads `context.asianSessionContext`, which is loaded causally and point-in-time
+ * by the context repository from the day's completed candle history.
+ */
 export class GoldAsianSweepStrategy implements StrategyEvaluator {
-  private readonly tracker: AsianSessionRangeTracker;
-
-  constructor(private readonly config: GoldAsianSweepStrategyConfig = defaultGoldAsianSweepConfig) {
-    this.tracker = new AsianSessionRangeTracker(config);
-  }
-
   evaluate(
     context: StrategyMarketContext,
     strategyConfiguration: Record<string, unknown> = {}
   ): ProposedTradeIdea[] {
-    const config: GoldAsianSweepStrategyConfig = {
-      ...this.config,
+    const config: GoldAsianSweepStrategyConfiguration = {
+      ...defaultGoldAsianSweepConfiguration,
       ...strategyConfiguration,
     };
 
-    const candle = context.candle;
-    const snapshot = this.tracker.processCandle(candle);
+    // Instrument guard: this strategy is calibrated specifically for XAU_USD (0.01 tickSize)
+    // and requires the point-in-time asianSessionContext supplied for gold.
+    const snapshot = context.asianSessionContext;
+    if (!snapshot || !snapshot.isValid || !snapshot.sweepEvent) {
+      return [];
+    }
 
-    if (!snapshot.sweepEvent || !snapshot.isValid) {
+    if (context.candle.tickSize !== 0.01) {
       return [];
     }
 
     const sweep = snapshot.sweepEvent;
     const isBullish = sweep.type === "BULLISH_SWEEP";
     const side: TradeSide = isBullish ? "LONG" : "SHORT";
-    const entryPrice = candle.close;
+    const entryPrice = context.candle.close;
 
     let stopLoss: number;
     let targetPrice: number;
@@ -74,24 +87,29 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
     if (isBullish) {
       stopLoss = Number((sweep.sweepExtreme - config.stopBuffer).toFixed(2));
       riskDistance = entryPrice - stopLoss;
-      if (riskDistance <= 0.20 || riskDistance > 15.0) return [];
-      targetPrice = Number((entryPrice + riskDistance * config.targetR).toFixed(2));
+      if (riskDistance < config.minRiskDistance || riskDistance > config.maxRiskDistance) {
+        return [];
+      }
+      targetPrice = Number((entryPrice + riskDistance * config.rewardRiskMultiple).toFixed(2));
     } else {
       stopLoss = Number((sweep.sweepExtreme + config.stopBuffer).toFixed(2));
       riskDistance = stopLoss - entryPrice;
-      if (riskDistance <= 0.20 || riskDistance > 15.0) return [];
-      targetPrice = Number((entryPrice - riskDistance * config.targetR).toFixed(2));
+      if (riskDistance < config.minRiskDistance || riskDistance > config.maxRiskDistance) {
+        return [];
+      }
+      targetPrice = Number((entryPrice - riskDistance * config.rewardRiskMultiple).toFixed(2));
     }
 
-    const candleDurationMs = candle.closeTime.getTime() - candle.openTime.getTime();
-    const expiresAt = new Date(candle.closeTime.getTime() + config.expiryCandles * candleDurationMs);
+    const candleDurationMs = context.candle.closeTime.getTime() - context.candle.openTime.getTime();
+    const expiresAt = new Date(context.candle.closeTime.getTime() + config.expiryCandles * candleDurationMs);
 
-    const evidence: TradeIdeaEvidence[] = [
+    const evidenceItems: TradeIdeaEvidence[] = [
       {
-        source: "STRATEGY",
-        description: `${sweep.type} of Asian ${isBullish ? "Low" : "High"} at ${sweep.level.toFixed(2)} (penetration ${sweep.penetrationBps} bps, wick ${Math.round(sweep.rejectionWickPct * 100)}%)`,
-        confidence: config.confidence,
-        data: {
+        sourceType: "STRATEGY",
+        sourceReference: `${GOLD_ASIAN_SWEEP_STRATEGY_KEY}:v${goldAsianSweepStrategyVersion}`,
+        label: `Asian session sweep (${sweep.type}) at ${sweep.level.toFixed(2)} with ${Math.round(sweep.rejectionWickPct * 100)}% rejection wick`,
+        contribution: config.confidence,
+        details: {
           asianHigh: snapshot.asiaHigh,
           asianLow: snapshot.asiaLow,
           asianRangeBps: snapshot.asiaRangeBps,
@@ -109,11 +127,17 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
       entryPrice,
       stopLoss,
       targetPrice,
-      riskReward: config.targetR,
+      riskReward: config.rewardRiskMultiple,
       confidence: config.confidence,
-      reasoning: {
+      reasoning: [
+        `Asian session sweep (${sweep.type}) at ${sweep.level.toFixed(2)}.`,
+        `Penetration was ${sweep.penetrationBps} bps, rejection wick ${Math.round(sweep.rejectionWickPct * 100)}%.`,
+        `Entry ${entryPrice.toFixed(2)}, stop ${stopLoss.toFixed(2)}, target ${targetPrice.toFixed(2)} (${config.rewardRiskMultiple.toFixed(2)}R).`,
+      ],
+      evidence: {
         strategy: GOLD_ASIAN_SWEEP_STRATEGY_KEY,
-        sweepType: sweep.type,
+        strategyVersion: goldAsianSweepStrategyVersion,
+        sourceCandleId: context.candle.id,
         asianHigh: snapshot.asiaHigh,
         asianLow: snapshot.asiaLow,
         asianMidpoint: snapshot.midpoint,
@@ -122,7 +146,7 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
         penetrationBps: sweep.penetrationBps,
         rejectionWickPct: sweep.rejectionWickPct,
       },
-      evidence,
+      evidenceItems,
       expiresAt,
     };
 

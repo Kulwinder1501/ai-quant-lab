@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { GoldAsianSweepStrategy, defaultGoldAsianSweepConfig } from "./gold-asian-sweep-strategy.js";
+import { GoldAsianSweepStrategy } from "./gold-asian-sweep-strategy.js";
 import type { StrategyMarketContext } from "./strategy.js";
+import type { AsianRangeSnapshot } from "../../technical-analysis/domain/ict/asian-session.js";
 
 function makeContext(params: {
   openTime: string;
@@ -9,13 +10,14 @@ function makeContext(params: {
   high: number;
   low: number;
   close: number;
-  timeframe?: string;
+  tickSize?: number;
+  asianSessionContext?: AsianRangeSnapshot | null;
 }): StrategyMarketContext {
   return {
     candle: {
       id: "candle-1",
       instrumentId: "inst-gold",
-      timeframe: params.timeframe ?? "15m",
+      timeframe: "5m",
       openTime: new Date(params.openTime),
       closeTime: new Date(params.closeTime),
       open: params.open,
@@ -23,122 +25,124 @@ function makeContext(params: {
       low: params.low,
       close: params.close,
       volume: 1000,
-      tickSize: 0.01,
+      tickSize: params.tickSize ?? 0.01,
     },
     indicators: [],
     patterns: [],
     priceActionEvents: [],
+    asianSessionContext: params.asianSessionContext,
   };
 }
 
-describe("GoldAsianSweepStrategy", () => {
-  it("generates a SHORT proposal when Asia High is swept and reclaimed in London", () => {
+describe("GoldAsianSweepStrategy (Stateless)", () => {
+  it("generates a SHORT proposal when context carries a valid BEARISH_SWEEP", () => {
+    // Brand new instance per call, identical to production
     const strategy = new GoldAsianSweepStrategy();
 
-    // 1. Asian bar setting high at 2710
-    strategy.evaluate(makeContext({
-      openTime: "2026-10-22T02:00:00Z",
-      closeTime: "2026-10-22T02:15:00Z",
-      open: 2700,
-      high: 2710,
-      low: 2695,
-      close: 2705,
-    }));
+    const snapshot: AsianRangeSnapshot = {
+      dateKey: "2026-10-22",
+      state: "LOCKED",
+      asiaHigh: 2710.0,
+      asiaLow: 2695.0,
+      asiaRange: 15.0,
+      asiaRangeBps: 55.66,
+      midpoint: 2702.5,
+      isValid: true,
+      sweepEvent: {
+        type: "BEARISH_SWEEP",
+        level: 2710.0,
+        sweepExtreme: 2713.0,
+        penetrationBps: 11.07,
+        reclaimBps: 11.07,
+        rejectionWickPct: 0.60,
+        time: new Date("2026-10-22T07:30:00Z"),
+      },
+    };
 
-    // 2. Bar at 06:00 UTC locking the range
-    strategy.evaluate(makeContext({
-      openTime: "2026-10-22T06:00:00Z",
-      closeTime: "2026-10-22T06:15:00Z",
-      open: 2705,
-      high: 2708,
-      low: 2702,
-      close: 2706,
-    }));
-
-    // 3. London bar at 07:30 UTC: sweeps to 2713 (> 2710) and reclaims to close at 2707 (< 2710)
-    const proposals = strategy.evaluate(makeContext({
+    const context = makeContext({
       openTime: "2026-10-22T07:30:00Z",
-      closeTime: "2026-10-22T07:45:00Z",
-      open: 2706,
+      closeTime: "2026-10-22T07:35:00Z",
+      open: 2706.0,
       high: 2713.0,
       low: 2703.0,
       close: 2707.0,
-    }));
+      asianSessionContext: snapshot,
+    });
+
+    const proposals = strategy.evaluate(context);
 
     expect(proposals).toHaveLength(1);
     const p = proposals[0]!;
     expect(p.side).toBe("SHORT");
     expect(p.entryPrice).toBe(2707.0);
     expect(p.stopLoss).toBe(2713.4); // 2713.0 + 0.40 buffer
-    expect(p.targetPrice).toBeLessThan(2707.0);
-    expect(p.riskReward).toBeGreaterThanOrEqual(1.5);
-    expect(p.reasoning).toHaveProperty("asianHigh", 2710);
-    expect(p.reasoning).toHaveProperty("sweepExtreme", 2713.0);
+    expect(p.targetPrice).toBe(2697.4); // 2707 - (6.4 * 1.5)
+    expect(p.riskReward).toBe(1.5);
+    expect(Array.isArray(p.reasoning)).toBe(true);
+    expect(p.evidence).toHaveProperty("asianHigh", 2710.0);
+    expect(p.evidenceItems).toBeDefined();
+    expect(p.evidenceItems?.[0]?.sourceType).toBe("STRATEGY");
   });
 
-  it("generates a LONG proposal when Asia Low is swept and reclaimed in London", () => {
+  it("generates a LONG proposal when context carries a valid BULLISH_SWEEP", () => {
     const strategy = new GoldAsianSweepStrategy();
 
-    strategy.evaluate(makeContext({
-      openTime: "2026-10-22T02:00:00Z",
-      closeTime: "2026-10-22T02:15:00Z",
-      open: 2700,
-      high: 2710,
-      low: 2695,
-      close: 2705,
-    }));
+    const snapshot: AsianRangeSnapshot = {
+      dateKey: "2026-10-22",
+      state: "LOCKED",
+      asiaHigh: 2710.0,
+      asiaLow: 2695.0,
+      asiaRange: 15.0,
+      asiaRangeBps: 55.66,
+      midpoint: 2702.5,
+      isValid: true,
+      sweepEvent: {
+        type: "BULLISH_SWEEP",
+        level: 2695.0,
+        sweepExtreme: 2691.5,
+        penetrationBps: 12.99,
+        reclaimBps: 9.28,
+        rejectionWickPct: 0.54,
+        time: new Date("2026-10-22T08:00:00Z"),
+      },
+    };
 
-    strategy.evaluate(makeContext({
-      openTime: "2026-10-22T06:00:00Z",
-      closeTime: "2026-10-22T06:15:00Z",
-      open: 2705,
-      high: 2708,
-      low: 2702,
-      close: 2706,
-    }));
-
-    // London bar at 08:00 UTC: dips to 2691.5 (< 2695) and reclaims to close at 2697.5 (> 2695)
-    const proposals = strategy.evaluate(makeContext({
+    const context = makeContext({
       openTime: "2026-10-22T08:00:00Z",
-      closeTime: "2026-10-22T08:15:00Z",
+      closeTime: "2026-10-22T08:05:00Z",
       open: 2694.0,
       high: 2698.0,
       low: 2691.5,
       close: 2697.5,
-    }));
+      asianSessionContext: snapshot,
+    });
+
+    const proposals = strategy.evaluate(context);
 
     expect(proposals).toHaveLength(1);
     const p = proposals[0]!;
     expect(p.side).toBe("LONG");
     expect(p.entryPrice).toBe(2697.5);
     expect(p.stopLoss).toBe(2691.1); // 2691.5 - 0.40 buffer
-    expect(p.targetPrice).toBeGreaterThan(2697.5);
-    expect(p.riskReward).toBeGreaterThanOrEqual(1.5);
+    expect(p.targetPrice).toBe(2707.1); // 2697.5 + (6.4 * 1.5)
+    expect(p.riskReward).toBe(1.5);
   });
 
-  it("does not emit proposals outside the London execution window", () => {
+  it("rejects non-Gold instruments or contexts without asianSessionContext", () => {
     const strategy = new GoldAsianSweepStrategy();
 
-    // Asian setup
-    strategy.evaluate(makeContext({
-      openTime: "2026-10-22T02:00:00Z",
-      closeTime: "2026-10-22T02:15:00Z",
-      open: 2700,
-      high: 2710,
-      low: 2695,
-      close: 2705,
-    }));
+    // Indian index candle (tickSize 0.05)
+    const nseContext = makeContext({
+      openTime: "2026-10-22T07:30:00Z",
+      closeTime: "2026-10-22T07:35:00Z",
+      open: 24500,
+      high: 24550,
+      low: 24480,
+      close: 24520,
+      tickSize: 0.05,
+      asianSessionContext: null,
+    });
 
-    // Post-London bar (14:00 UTC)
-    const proposals = strategy.evaluate(makeContext({
-      openTime: "2026-10-22T14:00:00Z",
-      closeTime: "2026-10-22T14:15:00Z",
-      open: 2708,
-      high: 2715,
-      low: 2705,
-      close: 2708,
-    }));
-
-    expect(proposals).toHaveLength(0);
+    expect(strategy.evaluate(nseContext)).toHaveLength(0);
   });
 });

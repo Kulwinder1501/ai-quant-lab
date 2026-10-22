@@ -13,6 +13,7 @@ import type {
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
+import type { AsianRangeSnapshot } from "../../technical-analysis/domain/ict/asian-session.js";
 import type { OPTION_CHAIN_PCR_SCOPE, OptionChainPcrUnavailableReason } from "./option-chain-signal.js";
 
 /** The ORDERBOOK-01 gate's verdict on direction; `NO_ACTION` when depth is missing or di_tilde <= 0. */
@@ -199,6 +200,7 @@ export interface StrategyMarketContext {
    * `closeTime <= decisionAt` -- which `findCompletedBefore` enforces in SQL.
    */
   higherTimeframeContexts?: Partial<Record<HistoricalTimeframe, StrategyMarketContext>>;
+  asianSessionContext?: AsianRangeSnapshot | null;
 }
 
 export interface StrategyMarketContextRepository {
