@@ -90,7 +90,7 @@ export interface RegisteredStrategy {
    * consumer's supported set changes.
    */
   readsIctContext?: boolean;
-  /** Whether this strategy reads `StrategyMarketContext.asianSessionContext`. */
+  /** Whether this strategy reads `StrategyMarketContext.dayCandles`. */
   readsAsianSession?: boolean;
   /**
    * Required when this strategy's research twin has been closed as TERMINAL and it is still enabled.

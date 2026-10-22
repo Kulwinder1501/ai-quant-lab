@@ -27,7 +27,7 @@ export interface GoldAsianSweepStrategyConfiguration {
   maxRiskDistance: number;
   confidence: number;
   expiryCandles: number;
-  minAsiaCoveragePct?: number;
+  minAsiaCoveragePct: number;
 }
 
 export const defaultGoldAsianSweepConfiguration: GoldAsianSweepStrategyConfiguration = {
@@ -70,10 +70,9 @@ export const goldAsianSweepStrategyRegistration: EnsureStrategyVersionInput = {
  * A liquidity sweep event consumes the session's single execution allowance for the day,
  * regardless of whether the resulting proposal is subsequently filtered out by risk distance
  * bounds (minRiskDistance 0.20 / maxRiskDistance 15.0 USD) or other downstream trade guards.
- * This is an intentional doctrinal choice: once the Asian level is swept and reclaimed, the
- * initial liquidity pool has been absorbed and the session's directional displacement is underway;
- * subsequent penetrations on the same day represent churn or secondary tests rather than clean
- * liquidity raids.
+ * This is an intentional design choice, not yet measured: once the Asian level is swept and reclaimed,
+ * the initial liquidity pool is treated as absorbed and the session's directional displacement underway;
+ * whether subsequent penetrations on the same day offer viable edge remains an open empirical question.
  */
 export class GoldAsianSweepStrategy implements StrategyEvaluator {
   evaluate(
@@ -111,7 +110,7 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
       minRejectionWickPct: config.minRejectionWickPct,
       minRangeBps: config.minRangeBps,
       maxRangeBps: config.maxRangeBps,
-      minAsiaCoveragePct: config.minAsiaCoveragePct ?? 0.90,
+      minAsiaCoveragePct: config.minAsiaCoveragePct,
     });
 
     if (!snapshot || !snapshot.isValid || !snapshot.sweepEvent) {
