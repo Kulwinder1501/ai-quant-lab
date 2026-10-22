@@ -1115,7 +1115,7 @@ async function main(): Promise<void> {
    * back to `true`, not rebuilding anything.
    */
   const XAU_BOT_ENABLED = true;
-  cronSchedule("*/5 * * * *", () => {
+  const xauCollectionTick = () => {
     if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
     void (async () => {
       await schedule("XAU_CANDLE_COLLECTION", async () => {
@@ -1201,7 +1201,20 @@ async function main(): Promise<void> {
       });
       await schedule("PAPER_TRADING_BOT_GOLD", () => runCommand("npm", ["run", "trading:paper:bot:gold"]));
     })();
-  });
+  };
+
+  /*
+   * Every five minutes only while the Asian-sweep strategy's London window can fire, every fifteen otherwise.
+   *
+   * The tick was every fifteen minutes until 2026-10-22, when it went to every five round the clock so the 5m
+   * sweep bar is never skipped (the generator evaluates only the newest bar of a run). Measured the same night:
+   * one tick takes 235-270 s -- XAU_USD indicators over about 2.4 million 1m candles, six FX legs spaced for the
+   * Twelve Data credit cap, DXY -- against a 300 s interval, so it ran about 85% of the clock with no slack
+   * before the next tick overlapped. The sweep window is 06:30-11:30 UTC (12:00-17:00 IST) and the bot itself
+   * only runs 09:00-21:00 IST, so the fast cadence covers 11:00-17:55 IST and the rest stays at fifteen.
+   */
+  cronSchedule("*/5 11-17 * * *", xauCollectionTick);
+  cronSchedule("*/15 0-10,18-23 * * *", xauCollectionTick);
 
   /**
    * Hourly backfill of OANDA 1m holes: XAU_USD, the six FX pairs DXY is rebuilt from, and DXY.

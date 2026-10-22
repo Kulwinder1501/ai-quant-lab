@@ -9,7 +9,18 @@ import type { StrategyEvaluator } from "./strategy-registry.js";
 import { evaluateAsianSession } from "../../technical-analysis/domain/ict/asian-session.js";
 
 export const GOLD_ASIAN_SWEEP_STRATEGY_KEY = "gold-asian-sweep-v1";
-export const goldAsianSweepStrategyVersion = 1;
+/**
+ * Version 2. A version 1 row was registered in the shared database on 2026-10-22 (about 20:58 IST) by a
+ * local run of the first commit, with that commit's configuration (`targetR`, `confidence: 0.75`, none of
+ * the risk-distance or coverage fields). A registered version's configuration is immutable, so the corrected
+ * configuration below could not be registered under 1: the first gold-bot pass would have thrown "already
+ * exists with a different immutable configuration" and the strategy would have returned STRATEGY_FAILED on
+ * every run. Registering under 2 deactivates the stray 1, which has no ideas or backtests attached.
+ *
+ * From here on, any change to `defaultGoldAsianSweepConfiguration` needs a new version number;
+ * `gold-asian-sweep-config-pin.test.ts` fails when the configuration changes without one.
+ */
+export const goldAsianSweepStrategyVersion = 2;
 
 export interface GoldAsianSweepStrategyConfiguration {
   asiaStartHourUtc: number;
