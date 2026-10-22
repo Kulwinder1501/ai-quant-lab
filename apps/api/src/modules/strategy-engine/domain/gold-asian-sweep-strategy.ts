@@ -6,6 +6,7 @@ import type {
   TradeSide,
 } from "./strategy.js";
 import type { StrategyEvaluator } from "./strategy-registry.js";
+import { evaluateAsianSession } from "../../technical-analysis/domain/ict/asian-session.js";
 
 export const GOLD_ASIAN_SWEEP_STRATEGY_KEY = "gold-asian-sweep-v1";
 export const goldAsianSweepStrategyVersion = 1;
@@ -22,6 +23,7 @@ export interface GoldAsianSweepStrategyConfiguration {
   maxRiskDistance: number;
   confidence: number;
   expiryCandles: number;
+  minAsiaCoveragePct?: number;
 }
 
 export const defaultGoldAsianSweepConfiguration: GoldAsianSweepStrategyConfiguration = {
@@ -36,6 +38,7 @@ export const defaultGoldAsianSweepConfiguration: GoldAsianSweepStrategyConfigura
   maxRiskDistance: 15.0,
   confidence: 0.50, // Uncalibrated baseline score prior to OOS replication
   expiryCandles: 4,
+  minAsiaCoveragePct: 0.90,
 };
 
 export const goldAsianSweepStrategyRegistration: EnsureStrategyVersionInput = {
@@ -51,8 +54,8 @@ export const goldAsianSweepStrategyRegistration: EnsureStrategyVersionInput = {
 /**
  * Stateless evaluator for the Asian Session Sweep strategy on XAU/USD.
  *
- * Reads `context.asianSessionContext`, which is loaded causally and point-in-time
- * by the context repository from the day's completed candle history.
+ * Evaluates the day's candle history causally and point-in-time using its own
+ * versioned configuration thresholds (penetration, rejection wick, Asian range limits, coverage).
  */
 export class GoldAsianSweepStrategy implements StrategyEvaluator {
   evaluate(
@@ -64,14 +67,32 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
       ...strategyConfiguration,
     };
 
-    // Instrument guard: this strategy is calibrated specifically for XAU_USD (0.01 tickSize)
-    // and requires the point-in-time asianSessionContext supplied for gold.
-    const snapshot = context.asianSessionContext;
-    if (!snapshot || !snapshot.isValid || !snapshot.sweepEvent) {
+    // Strict symbol guard: this strategy is calibrated solely for XAU_USD
+    if (context.candle.symbol && context.candle.symbol !== "XAU_USD") {
       return [];
     }
 
     if (context.candle.tickSize !== 0.01) {
+      return [];
+    }
+
+    // Evaluate Asian session using the strategy's own versioned config thresholds
+    const snapshot = context.dayCandles
+      ? evaluateAsianSession(context.dayCandles, context.candle, {
+          asiaStartHourUtc: 0,
+          asiaEndHourUtc: 6,
+          londonStartHourUtc: 6.5,
+          londonEndHourUtc: 11.5,
+          minPenetrationBps: config.minPenetrationBps,
+          maxPenetrationBps: config.maxPenetrationBps,
+          minRejectionWickPct: config.minRejectionWickPct,
+          minRangeBps: config.minRangeBps,
+          maxRangeBps: config.maxRangeBps,
+          minAsiaCoveragePct: config.minAsiaCoveragePct ?? 0.90,
+        })
+      : context.asianSessionContext;
+
+    if (!snapshot || !snapshot.isValid || !snapshot.sweepEvent) {
       return [];
     }
 

@@ -13,7 +13,7 @@ import type {
 import type { RegimeContext } from "./regime.js";
 import type { HigherTimeframeContext } from "./multi-timeframe-confluence.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
-import type { AsianRangeSnapshot } from "../../technical-analysis/domain/ict/asian-session.js";
+import type { AsianCandleLike, AsianRangeSnapshot } from "../../technical-analysis/domain/ict/asian-session.js";
 import type { OPTION_CHAIN_PCR_SCOPE, OptionChainPcrUnavailableReason } from "./option-chain-signal.js";
 
 /** The ORDERBOOK-01 gate's verdict on direction; `NO_ACTION` when depth is missing or di_tilde <= 0. */
@@ -98,6 +98,7 @@ export interface StrategyMarketContext {
     close: number;
     volume: number;
     tickSize: number;
+    symbol?: string;
   };
   indicators: Array<{
     code: IndicatorCode;
@@ -201,6 +202,11 @@ export interface StrategyMarketContext {
    */
   higherTimeframeContexts?: Partial<Record<HistoricalTimeframe, StrategyMarketContext>>;
   asianSessionContext?: AsianRangeSnapshot | null;
+  /**
+   * Completed candles of the same UTC calendar day up to (and including) this candle.
+   * Loaded causally and point-in-time for strategies declaring `readsAsianSession: true`.
+   */
+  dayCandles?: readonly AsianCandleLike[];
 }
 
 export interface StrategyMarketContextRepository {

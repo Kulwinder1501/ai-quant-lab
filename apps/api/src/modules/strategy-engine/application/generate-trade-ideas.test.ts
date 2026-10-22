@@ -10,6 +10,12 @@ import type {
 import { defaultTrendBreakoutStrategyConfiguration } from "../domain/trend-breakout-strategy.js";
 import { mayProposeLiveTrades, registeredStrategies } from "../domain/strategy-registry.js";
 import { GenerateTradeIdeas } from "./generate-trade-ideas.js";
+import {
+  GoldAsianSweepStrategy,
+  goldAsianSweepStrategyRegistration,
+  GOLD_ASIAN_SWEEP_STRATEGY_KEY,
+} from "../domain/gold-asian-sweep-strategy.js";
+import type { AsianCandleLike } from "../../technical-analysis/domain/ict/asian-session.js";
 
 function qualifyingContext(): StrategyMarketContext {
   return {
@@ -753,5 +759,135 @@ describe("GenerateTradeIdeas higher-timeframe attachment", () => {
     expect(captured.context?.higherTimeframeContexts?.["5m"]).toBeDefined();
     expect(captured.context?.higherTimeframes?.length).toBeGreaterThan(0);
     expect(captured.context?.higherTimeframes?.some((h) => h.htfTimeframe === "5m")).toBe(true);
+  });
+
+  it("executes gold-asian-sweep-v1 with fresh instance on XAU_USD and generates proposals", async () => {
+    // 72 5m candles covering Asian session [00:00, 06:00) UTC
+    const dayCandles: AsianCandleLike[] = [];
+    for (let i = 0; i < 72; i++) {
+      const openTime = new Date(Date.UTC(2026, 9, 22, 0, i * 5));
+      const closeTime = new Date(openTime.getTime() + 5 * 60_000);
+      dayCandles.push({
+        openTime,
+        closeTime,
+        open: 2700,
+        high: i === 10 ? 2710 : 2705,
+        low: i === 20 ? 2695 : 2698,
+        close: 2702,
+      });
+    }
+
+    const londonSweepBar = {
+      id: "candle-sweep",
+      instrumentId: "inst-gold",
+      timeframe: "5m",
+      openTime: new Date(Date.UTC(2026, 9, 22, 7, 30)),
+      closeTime: new Date(Date.UTC(2026, 9, 22, 7, 35)),
+      open: 2705,
+      high: 2712.5,
+      low: 2703,
+      close: 2706,
+      volume: 500,
+      tickSize: 0.01,
+      symbol: "XAU_USD",
+    };
+    dayCandles.push(londonSweepBar);
+
+    const goldContext: StrategyMarketContext = {
+      candle: londonSweepBar,
+      indicators: [],
+      patterns: [],
+      priceActionEvents: [],
+      dayCandles,
+    };
+
+    const versions: StrategyVersionRepository = {
+      ensure: async (input) => ({
+        id: "sv-gold",
+        strategyId: "s-gold",
+        strategyKey: input.strategyKey,
+        name: input.name,
+        description: input.description,
+        version: input.version,
+        configuration: { ...input.configuration },
+        isActive: true,
+        isArchived: false,
+      }),
+    };
+
+    const savedProposals: SaveTradeIdeaProposalInput[] = [];
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async (input) => {
+        savedProposals.push(input);
+        return {
+          id: `idea-${savedProposals.length}`,
+          instrumentId: "inst-gold",
+          strategyVersionId: input.strategyVersionId,
+          sourceCandleId: input.sourceCandleId,
+          side: input.side,
+          entryPrice: input.entryPrice,
+          stopLoss: input.stopLoss,
+          targetPrice: input.targetPrice,
+          confidence: input.confidence,
+          riskReward: input.riskReward,
+          status: "PROPOSED",
+          reasoning: input.reasoning,
+          evidence: input.evidence,
+          evidenceItems: input.evidenceItems,
+          proposedAt: new Date(),
+          expiresAt: input.expiresAt,
+        };
+      },
+      findActiveDuplicate: async () => null,
+    };
+
+    const contexts = {
+      findLatestCompleted: async () => goldContext,
+      listCompletedContexts: async () => [goldContext],
+    } as StrategyMarketContextRepository;
+
+    const generator = new GenerateTradeIdeas(versions, contexts, ideas, [{
+      registration: goldAsianSweepStrategyRegistration,
+      StrategyClass: GoldAsianSweepStrategy,
+      supportedTimeframes: ["5m", "15m"],
+      supportedSymbols: ["XAU_USD"],
+      readsAsianSession: true,
+    }]);
+
+    const results = await generator.execute({ instrumentId: "inst-gold", timeframe: "5m", symbol: "XAU_USD" });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.candidatesGenerated).toBe(1);
+    expect(results[0]?.strategyKey).toBe(GOLD_ASIAN_SWEEP_STRATEGY_KEY);
+    expect(savedProposals).toHaveLength(1);
+    expect(savedProposals[0]?.side).toBe("SHORT");
+  });
+
+  it("skips gold-asian-sweep-v1 when executed against unsupported symbol (e.g. NIFTY50)", async () => {
+    const versions: StrategyVersionRepository = {
+      ensure: async () => { throw new Error("Should not ensure version for unsupported symbol"); },
+    };
+    const ideas: TradeIdeaRepository = {
+      saveProposal: async () => { throw new Error("Should not save"); },
+      findActiveDuplicate: async () => null,
+    };
+    const contexts = {
+      findLatestCompleted: async () => qualifyingContext(),
+      listCompletedContexts: async () => [],
+    } as StrategyMarketContextRepository;
+
+    const generator = new GenerateTradeIdeas(versions, contexts, ideas, [{
+      registration: goldAsianSweepStrategyRegistration,
+      StrategyClass: GoldAsianSweepStrategy,
+      supportedTimeframes: ["5m", "15m"],
+      supportedSymbols: ["XAU_USD"],
+      readsAsianSession: true,
+    }]);
+
+    const results = await generator.execute({ instrumentId: "inst-nse", timeframe: "5m", symbol: "NIFTY50" });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.candidatesGenerated).toBe(0);
+    expect(results[0]?.skippedReason).toBe("SYMBOL_UNSUPPORTED");
   });
 });

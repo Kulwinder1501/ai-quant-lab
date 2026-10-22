@@ -12,6 +12,7 @@ import {
   liveTradableStrategies,
   type RegisteredStrategy,
   strategyExecutableSides,
+  strategySupportsSymbol,
   strategySupportsTimeframe,
 } from "../domain/strategy-registry.js";
 import { applySmcConfluenceToProposal } from "../domain/smc-confluence.js";
@@ -39,7 +40,7 @@ export interface GenerateTradeIdeasResult {
   sourceCandleId: string | null;
   candidatesGenerated: number;
   tradeIdeaIds: string[];
-  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | "DUPLICATE_ACTIVE_IDEA" | null;
+  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | "SYMBOL_UNSUPPORTED" | "DUPLICATE_ACTIVE_IDEA" | null;
   /** Present only when skippedReason is STRATEGY_FAILED. */
   failureMessage?: string;
   /**
@@ -77,7 +78,7 @@ export interface ScanTradeIdeasResult {
   longIdeas: number;
   shortIdeas: number;
   tradeIdeaIds: string[];
-  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | null;
+  skippedReason: "NO_COMPLETED_CANDLE" | "STRATEGY_INACTIVE" | "RULES_NOT_MET" | "STRATEGY_FAILED" | "TIMEFRAME_UNSUPPORTED" | "SYMBOL_UNSUPPORTED" | null;
   failureMessage?: string;
 }
 
@@ -181,6 +182,20 @@ export class GenerateTradeIdeas {
             candidatesGenerated: 0,
             tradeIdeaIds: [],
             skippedReason: "TIMEFRAME_UNSUPPORTED",
+            regime: context?.regime ?? null,
+          });
+          continue;
+        }
+
+        const symbol = input.symbol ?? context?.candle.symbol;
+        if (!strategySupportsSymbol(strategyEntry, symbol)) {
+          results.push({
+            strategyVersionId: null,
+            strategyKey: registration.strategyKey,
+            sourceCandleId: null,
+            candidatesGenerated: 0,
+            tradeIdeaIds: [],
+            skippedReason: "SYMBOL_UNSUPPORTED",
             regime: context?.regime ?? null,
           });
           continue;
@@ -351,6 +366,21 @@ export class GenerateTradeIdeas {
             shortIdeas: 0,
             tradeIdeaIds: [],
             skippedReason: "TIMEFRAME_UNSUPPORTED",
+          });
+          continue;
+        }
+
+        const scanSymbol = contexts[0]?.candle.symbol;
+        if (!strategySupportsSymbol(strategyEntry, scanSymbol)) {
+          results.push({
+            strategyVersionId: null,
+            strategyKey: registration.strategyKey,
+            contextsScanned: contexts.length,
+            candidatesGenerated: 0,
+            longIdeas: 0,
+            shortIdeas: 0,
+            tradeIdeaIds: [],
+            skippedReason: "SYMBOL_UNSUPPORTED",
           });
           continue;
         }

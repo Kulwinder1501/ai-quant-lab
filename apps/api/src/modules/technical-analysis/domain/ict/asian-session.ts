@@ -26,20 +26,27 @@ export interface AsianRangeSnapshot {
   asiaRange: number | null;
   asiaRangeBps: number | null;
   midpoint: number | null;
+  barCount: number;
+  expectedBars: number;
+  coveragePct: number;
   isValid: boolean;
   sweepEvent: AsianSessionSweepEvent | null;
 }
 
-export interface AsianSessionTrackerConfig {
+export interface AsianSessionSweepConfig {
+  minPenetrationBps: number;
+  maxPenetrationBps: number;
+  minRejectionWickPct: number;
+}
+
+export interface AsianSessionTrackerConfig extends AsianSessionSweepConfig {
   asiaStartHourUtc: number; // 0
   asiaEndHourUtc: number; // 6
   londonStartHourUtc: number; // 6.5 (06:30 UTC)
   londonEndHourUtc: number; // 11.5 (11:30 UTC)
-  minPenetrationBps: number; // 3.0
-  maxPenetrationBps: number; // 50.0
-  minRejectionWickPct: number; // 0.30 (30%)
   minRangeBps: number; // 15.0
   maxRangeBps: number; // 180.0
+  minAsiaCoveragePct?: number; // 0.90 (90% minimum fraction of Asian session bars required)
 }
 
 export const defaultAsianSessionConfig: AsianSessionTrackerConfig = {
@@ -52,7 +59,72 @@ export const defaultAsianSessionConfig: AsianSessionTrackerConfig = {
   minRejectionWickPct: 0.30,
   minRangeBps: 15.0,
   maxRangeBps: 180.0,
+  minAsiaCoveragePct: 0.90,
 };
+
+/**
+ * Pure helper that evaluates whether a single candle constitutes a valid liquidity sweep
+ * and reclaim of either the Asian session high or low.
+ */
+export function detectBarSweep(
+  bar: AsianCandleLike,
+  asiaHigh: number,
+  asiaLow: number,
+  config: AsianSessionSweepConfig
+): AsianSessionSweepEvent | null {
+  const span = bar.high - bar.low;
+  if (span <= 0) return null;
+
+  // 1. Bearish Sweep of Asia High: High breaks above AH, but bar closes back below AH
+  if (bar.high > asiaHigh && bar.close < asiaHigh) {
+    const penBps = ((bar.high - asiaHigh) / asiaHigh) * 10000;
+    const upperWick = bar.high - Math.max(bar.open, bar.close);
+    const upperWickPct = upperWick / span;
+    const reclaimBps = ((asiaHigh - bar.close) / asiaHigh) * 10000;
+
+    if (
+      penBps >= config.minPenetrationBps &&
+      penBps <= config.maxPenetrationBps &&
+      upperWickPct >= config.minRejectionWickPct
+    ) {
+      return {
+        type: "BEARISH_SWEEP",
+        level: asiaHigh,
+        sweepExtreme: bar.high,
+        penetrationBps: Number(penBps.toFixed(2)),
+        reclaimBps: Number(reclaimBps.toFixed(2)),
+        rejectionWickPct: Number(upperWickPct.toFixed(2)),
+        time: bar.openTime,
+      };
+    }
+  }
+
+  // 2. Bullish Sweep of Asia Low: Low breaks below AL, but bar closes back above AL
+  if (bar.low < asiaLow && bar.close > asiaLow) {
+    const penBps = ((asiaLow - bar.low) / asiaLow) * 10000;
+    const lowerWick = Math.min(bar.open, bar.close) - bar.low;
+    const lowerWickPct = lowerWick / span;
+    const reclaimBps = ((bar.close - asiaLow) / asiaLow) * 10000;
+
+    if (
+      penBps >= config.minPenetrationBps &&
+      penBps <= config.maxPenetrationBps &&
+      lowerWickPct >= config.minRejectionWickPct
+    ) {
+      return {
+        type: "BULLISH_SWEEP",
+        level: asiaLow,
+        sweepExtreme: bar.low,
+        penetrationBps: Number(penBps.toFixed(2)),
+        reclaimBps: Number(reclaimBps.toFixed(2)),
+        rejectionWickPct: Number(lowerWickPct.toFixed(2)),
+        time: bar.openTime,
+      };
+    }
+  }
+
+  return null;
+}
 
 /**
  * Pure, stateless function that computes the Asian session range and evaluates
@@ -103,14 +175,26 @@ export function evaluateAsianSession(
     : null;
   const midpoint = (asiaHigh !== null && asiaLow !== null) ? Number(((asiaHigh + asiaLow) / 2).toFixed(4)) : null;
 
+  // Measure data coverage: verify the collector didn't drop bars during the Asian window [00:00, 06:00)
+  const barDurationMs = currentCandle.closeTime.getTime() - currentCandle.openTime.getTime();
+  const windowDurationMs = (config.asiaEndHourUtc - config.asiaStartHourUtc) * 3600 * 1000;
+  const expectedBars = barDurationMs > 0 ? Math.floor(windowDurationMs / barDurationMs) : 1;
+  const barCount = asiaCandles.length;
+  const coveragePct = expectedBars > 0 ? Number((barCount / expectedBars).toFixed(4)) : 1.0;
+  const minCoveragePct = config.minAsiaCoveragePct ?? 0.90;
+
   const inAsiaWindow = decHour >= config.asiaStartHourUtc && decHour < config.asiaEndHourUtc;
-  const isValid = asiaRangeBps !== null &&
+  const hasCoverage = inAsiaWindow || coveragePct >= minCoveragePct;
+
+  const isValid = hasCoverage &&
+    asiaRangeBps !== null &&
     asiaRangeBps >= config.minRangeBps &&
     asiaRangeBps <= config.maxRangeBps;
 
+  // Before 06:00: FORMING; 06:00 - 11:30: LOCKED; 11:30+: COMPLETED
   const state: AsianRangeSnapshot["state"] = inAsiaWindow
     ? "FORMING"
-    : decHour >= config.asiaEndHourUtc && decHour < 18
+    : decHour < config.londonEndHourUtc
     ? "LOCKED"
     : "COMPLETED";
 
@@ -121,88 +205,20 @@ export function evaluateAsianSession(
     for (const prior of dayCandles) {
       if (prior.openTime.getTime() >= currentCandle.openTime.getTime()) continue;
       const pHour = prior.openTime.getUTCHours() + prior.openTime.getUTCMinutes() / 60;
-      if (pHour < config.londonStartHourUtc || pHour > config.londonEndHourUtc) continue;
+      if (pHour < config.londonStartHourUtc || pHour >= config.londonEndHourUtc) continue;
 
-      const pSpan = prior.high - prior.low;
-      if (pSpan <= 0) continue;
-
-      // Prior bearish sweep check
-      if (prior.high > asiaHigh && prior.close < asiaHigh) {
-        const penBps = ((prior.high - asiaHigh) / asiaHigh) * 10000;
-        const upperWick = prior.high - Math.max(prior.open, prior.close);
-        const upperWickPct = upperWick / pSpan;
-        if (penBps >= config.minPenetrationBps && penBps <= config.maxPenetrationBps && upperWickPct >= config.minRejectionWickPct) {
-          priorSweepObserved = true;
-          break;
-        }
-      }
-
-      // Prior bullish sweep check
-      if (prior.low < asiaLow && prior.close > asiaLow) {
-        const penBps = ((asiaLow - prior.low) / asiaLow) * 10000;
-        const lowerWick = Math.min(prior.open, prior.close) - prior.low;
-        const lowerWickPct = lowerWick / pSpan;
-        if (penBps >= config.minPenetrationBps && penBps <= config.maxPenetrationBps && lowerWickPct >= config.minRejectionWickPct) {
-          priorSweepObserved = true;
-          break;
-        }
+      if (detectBarSweep(prior, asiaHigh, asiaLow, config) !== null) {
+        priorSweepObserved = true;
+        break;
       }
     }
   }
 
   let sweepEvent: AsianSessionSweepEvent | null = null;
-  const inLondonWindow = decHour >= config.londonStartHourUtc && decHour <= config.londonEndHourUtc;
+  const inLondonWindow = decHour >= config.londonStartHourUtc && decHour < config.londonEndHourUtc;
 
   if (inLondonWindow && isValid && asiaHigh !== null && asiaLow !== null && !priorSweepObserved) {
-    const span = currentCandle.high - currentCandle.low;
-
-    // 1. Bearish Sweep of Asia High: High breaks above AH, but bar closes back below AH
-    if (currentCandle.high > asiaHigh && currentCandle.close < asiaHigh && span > 0) {
-      const penBps = ((currentCandle.high - asiaHigh) / asiaHigh) * 10000;
-      const upperWick = currentCandle.high - Math.max(currentCandle.open, currentCandle.close);
-      const upperWickPct = upperWick / span;
-      const reclaimBps = ((asiaHigh - currentCandle.close) / asiaHigh) * 10000;
-
-      if (
-        penBps >= config.minPenetrationBps &&
-        penBps <= config.maxPenetrationBps &&
-        upperWickPct >= config.minRejectionWickPct
-      ) {
-        sweepEvent = {
-          type: "BEARISH_SWEEP",
-          level: asiaHigh,
-          sweepExtreme: currentCandle.high,
-          penetrationBps: Number(penBps.toFixed(2)),
-          reclaimBps: Number(reclaimBps.toFixed(2)),
-          rejectionWickPct: Number(upperWickPct.toFixed(2)),
-          time: currentCandle.openTime,
-        };
-      }
-    }
-
-    // 2. Bullish Sweep of Asia Low: Low breaks below AL, but bar closes back above AL
-    if (!sweepEvent && currentCandle.low < asiaLow && currentCandle.close > asiaLow && span > 0) {
-      const penBps = ((asiaLow - currentCandle.low) / asiaLow) * 10000;
-      const lowerWick = Math.min(currentCandle.open, currentCandle.close) - currentCandle.low;
-      const lowerWickPct = lowerWick / span;
-      const reclaimBps = ((currentCandle.close - asiaLow) / asiaLow) * 10000;
-
-      if (
-        penBps >= config.minPenetrationBps &&
-        penBps <= config.maxPenetrationBps &&
-        lowerWickPct >= config.minRejectionWickPct
-      ) {
-        sweepEvent = {
-          type: "BULLISH_SWEEP",
-          level: asiaLow,
-          sweepExtreme: currentCandle.low,
-          penetrationBps: Number(penBps.toFixed(2)),
-          reclaimBps: Number(reclaimBps.toFixed(2)),
-          rejectionWickPct: Number(lowerWickPct.toFixed(2)),
-          time: currentCandle.openTime,
-        };
-      }
-    }
+    sweepEvent = detectBarSweep(currentCandle, asiaHigh, asiaLow, config);
   }
 
   return {
@@ -213,6 +229,9 @@ export function evaluateAsianSession(
     asiaRange,
     asiaRangeBps,
     midpoint,
+    barCount,
+    expectedBars,
+    coveragePct,
     isValid,
     sweepEvent,
   };

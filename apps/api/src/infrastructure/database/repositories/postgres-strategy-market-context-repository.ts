@@ -11,7 +11,7 @@ import type {
   StrategyMarketContextRepository,
 } from "../../../modules/strategy-engine/domain/strategy.js";
 import { ictContextConsumedAt, asianSessionConsumedAt } from "../../../modules/strategy-engine/domain/strategy-registry.js";
-import { evaluateAsianSession, type AsianCandleLike, type AsianRangeSnapshot } from "../../../modules/technical-analysis/domain/ict/asian-session.js";
+import type { AsianCandleLike } from "../../../modules/technical-analysis/domain/ict/asian-session.js";
 import {
   deriveVolatilityRegime,
   regimeSourceIndicatorAlgorithmVersion,
@@ -125,6 +125,7 @@ function toCandle(row: CompletedCandleRow): StrategyMarketContext["candle"] {
     close: toNumber(row.close, "candle close"),
     volume: toNumber(row.volume, "candle volume"),
     tickSize: toNumber(row.tick_size, "instrument tick size"),
+    symbol: row.symbol,
   };
 }
 
@@ -560,8 +561,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       ictSnapshot = await this.computeAndPersistIctSnapshot(input, candle, ictConfigHash);
     }
 
-    let asianSessionContext: AsianRangeSnapshot | undefined;
-    if (asianSessionConsumedAt(input.timeframe)) {
+    let dayCandles: AsianCandleLike[] | undefined;
+    if (asianSessionConsumedAt(input.timeframe, candle.symbol)) {
       const utcDayStart = new Date(Date.UTC(
         candle.open_time.getUTCFullYear(),
         candle.open_time.getUTCMonth(),
@@ -589,9 +590,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         volume: r.volume === null ? undefined : toNumber(r.volume, "volume"),
       });
 
-      const dayCandles = dayCandlesRes.rows.map(toCandleLike);
-      const currentCandleLike = toCandleLike(candle);
-      asianSessionContext = evaluateAsianSession(dayCandles, currentCandleLike);
+      dayCandles = dayCandlesRes.rows.map(toCandleLike);
     }
 
     return {
@@ -622,7 +621,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       ...(confluenceSignal ? { confluenceSignal } : {}),
       ...(optionChainSignal ? { optionChainSignal } : {}),
       ...(ictSnapshot ? { ictSnapshot } : {}),
-      ...(asianSessionContext ? { asianSessionContext } : {}),
+      ...(dayCandles ? { dayCandles } : {}),
     };
   }
 

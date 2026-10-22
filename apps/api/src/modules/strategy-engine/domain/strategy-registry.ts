@@ -55,6 +55,13 @@ export interface RegisteredStrategy {
    */
   supportedTimeframes: readonly string[];
   /**
+   * The symbols this strategy is calibrated to evaluate, or absent for all symbols.
+   *
+   * Restricts asset-specific strategies (e.g. gold Asian sweep) from evaluating
+   * instruments with incompatible trading hours, quote conventions, or market structures.
+   */
+  supportedSymbols?: readonly string[];
+  /**
    * The sides this strategy is permitted to trade, or absent for both.
    *
    * A side-specific measurement, kept beside the strategy rather than in a caller, because a global
@@ -291,6 +298,7 @@ export const registeredStrategies: readonly RegisteredStrategy[] = [
     StrategyClass: GoldAsianSweepStrategy,
     // London liquidity sweep model on Gold Asian range (00:00-06:00 UTC range, 06:30-11:30 UTC execution).
     supportedTimeframes: ["5m", "15m"],
+    supportedSymbols: ["XAU_USD"],
     readsAsianSession: true,
   },
   {
@@ -480,11 +488,20 @@ export function ictContextConsumedAt(timeframe: string): boolean {
 }
 
 /** Whether assembling an Asian session snapshot at `timeframe` can be read by anything. */
-export function asianSessionConsumedAt(timeframe: string): boolean {
+export function strategySupportsSymbol(strategy: RegisteredStrategy, symbol?: string): boolean {
+  if (!strategy.supportedSymbols || !symbol) return true;
+  return strategy.supportedSymbols.includes(symbol);
+}
+
+export function asianSessionConsumedAt(timeframe: string, symbol?: string): boolean {
   return registeredStrategies.some(
-    (strategy) => strategy.readsAsianSession === true && strategy.supportedTimeframes.includes(timeframe),
+    (strategy) =>
+      strategy.readsAsianSession === true &&
+      strategy.supportedTimeframes.includes(timeframe) &&
+      strategySupportsSymbol(strategy, symbol),
   );
 }
+
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
   return strategy.supportedTimeframes.includes(timeframe);
