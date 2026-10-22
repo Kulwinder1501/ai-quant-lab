@@ -358,3 +358,92 @@ describe("describeSocketError with an event-like object", () => {
     expect(describeSocketError(new (class Closed {})())).toBe("Closed with no readable fields");
   });
 });
+
+describe("FyersLiveStreamer socket slot recycling", () => {
+  function setup(limit: number) {
+    const sockets: Array<ReturnType<typeof fakeSocket>> = [];
+    const timers: Array<() => void> = [];
+    let nowMs = 1_000_000;
+    const streamer = new FyersLiveStreamer({
+      appId: "APPID-100",
+      tokenService: { getAccessToken: vi.fn(async () => "access-token") },
+      createSocket: () => { const s = fakeSocket(); sockets.push(s); return s; },
+      subscribeSpacingMs: 0,
+      socketSlotLimit: limit,
+      nowFn: () => nowMs,
+      setTimeoutFn: (handler) => { timers.push(handler); return 0; },
+    });
+    const symbols = (prefix: string, count: number) => Array.from({ length: count }, (_, i) => `NSE:${prefix}${i}`);
+    const flush = async () => { while (timers.length > 0) { timers.shift()!(); await Promise.resolve(); await Promise.resolve(); } };
+    return { streamer, sockets, symbols, flush, advance: (ms: number) => { nowMs += ms; } };
+  }
+
+  it("replaces the socket when churned strikes have used the slots, and resubscribes only what is wanted now", async () => {
+    const { streamer, sockets, symbols, flush } = setup(60);
+    await streamer.connect();
+    sockets[0]!.fire("connect");
+    streamer.subscribe(symbols("A", 27));
+    streamer.unsubscribe(symbols("A", 27));
+    streamer.subscribe(symbols("B", 27));
+    streamer.unsubscribe(symbols("B", 27));
+    // 54 slots are used and nothing is wanted. Asking for 27 more would pass 60 on the old connection.
+    streamer.subscribe(symbols("C", 27));
+    expect(sockets[0]!.connected).toBe(false); // closed to recycle
+    expect(sockets[0]!.subscribed.flat().filter((s) => s.startsWith("NSE:C"))).toEqual([]); // not sent to the full socket
+
+    sockets[0]!.fire("close");
+    await flush();
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.fire("connect");
+    expect(sockets[1]!.subscribed.flat().sort()).toEqual(symbols("C", 27).sort());
+  });
+
+  it("does not replace the socket while the slots are not exhausted", async () => {
+    const { streamer, sockets, symbols } = setup(60);
+    await streamer.connect();
+    sockets[0]!.fire("connect");
+    streamer.subscribe(symbols("A", 27));
+    streamer.subscribe(symbols("B", 27));
+    expect(sockets[0]!.connected).toBe(true);
+    expect(sockets[0]!.subscribed.flat()).toHaveLength(54);
+  });
+
+  it("does not count a symbol twice when it is requested again on the same connection", async () => {
+    const { streamer, sockets, symbols } = setup(60);
+    await streamer.connect();
+    sockets[0]!.fire("connect");
+    for (let i = 0; i < 10; i += 1) streamer.subscribe(symbols("A", 27));
+    expect(sockets[0]!.connected).toBe(true);
+  });
+
+  it("does not reconnect in a loop when what is wanted cannot fit on one socket", async () => {
+    const { streamer, sockets, symbols } = setup(60);
+    await streamer.connect();
+    sockets[0]!.fire("connect");
+    streamer.subscribe(symbols("A", 61));
+    expect(sockets[0]!.connected).toBe(true);
+    streamer.subscribe(symbols("B", 5));
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("replaces the socket at most once a minute", async () => {
+    const { streamer, sockets, symbols, flush, advance } = setup(60);
+    await streamer.connect();
+    sockets[0]!.fire("connect");
+    streamer.subscribe(symbols("A", 50));
+    streamer.unsubscribe(symbols("A", 50));
+    streamer.subscribe(symbols("B", 30)); // 80 > 60: recycle
+    sockets[0]!.fire("close");
+    await flush();
+    sockets[1]!.fire("connect");
+    streamer.unsubscribe(symbols("B", 30));
+    streamer.subscribe(symbols("C", 40));
+    streamer.unsubscribe(symbols("C", 40));
+    streamer.subscribe(symbols("D", 40)); // would pass 60 again, but only seconds after the last recycle
+    expect(sockets[1]!.connected).toBe(true);
+    advance(61_000);
+    streamer.unsubscribe(symbols("D", 40));
+    streamer.subscribe(symbols("E", 40));
+    expect(sockets[1]!.connected).toBe(false);
+  });
+});

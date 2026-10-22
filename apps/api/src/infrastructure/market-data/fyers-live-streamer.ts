@@ -58,6 +58,16 @@ export interface FyersLiveStreamerOptions {
    * which one it was changed from run to run). Packets now leave one at a time through a single queue.
    */
   subscribeSpacingMs?: number;
+  /**
+   * How many distinct symbols one socket connection may be asked for before it is replaced. Fyers holds about 65 per
+   * connection and an unsubscribe does not give a slot back, so a long-lived socket fills up as the option chain's
+   * strikes move with the index; past the limit new symbols are silently ignored (on 2026-10-22 the BANKNIFTY chain
+   * streamed only its index while NIFTY50's kept streaming). Reconnecting resubscribes just the symbols wanted now,
+   * which frees every stale slot. Default 64, one under the capacity measured on 2026-10-19 (about 65).
+   */
+  socketSlotLimit?: number;
+  /** Clock for the recycle rate limit; injectable for tests. */
+  nowFn?: () => number;
 }
 
 const RECONNECT_BASE_MS = 5_000;
@@ -70,6 +80,9 @@ const RECONNECT_MAX_MS = 5 * 60_000;
 export const MAX_SOCKET_SUBSCRIBE_CHUNK = 20;
 
 const DEFAULT_SUBSCRIBE_SPACING_MS = 300;
+const DEFAULT_SOCKET_SLOT_LIMIT = 64;
+/** A socket is not replaced again within this long, so a wanted set that cannot fit does not reconnect in a loop. */
+const MIN_RECYCLE_INTERVAL_MS = 60_000;
 
 export function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -182,6 +195,11 @@ function log(level: "info" | "error", message: string, extra: Record<string, unk
 export class FyersLiveStreamer extends EventEmitter {
   private socket: FyersDataSocket | null = null;
   private readonly currentSubscriptions = new Set<string>();
+  /** Every symbol requested on the current connection, whether or not it was later unsubscribed: each used a slot. */
+  private readonly socketSlots = new Set<string>();
+  private recycling = false;
+  private lastRecycleAt = 0;
+  private overCapacityLogged = false;
   private reconnecting = false;
   private reconnectAttempts = 0;
   private droppedMessages = 0;
@@ -225,7 +243,9 @@ export class FyersLiveStreamer extends EventEmitter {
         });
         // Whatever was queued for the previous connection is moot: everything wanted is sent again below.
         this.outbox.length = 0;
+        this.socketSlots.clear();
         if (this.currentSubscriptions.size > 0) {
+          for (const symbol of this.currentSubscriptions) this.socketSlots.add(symbol);
           this.send("subscribe", [...this.currentSubscriptions]);
         }
       });
@@ -257,6 +277,7 @@ export class FyersLiveStreamer extends EventEmitter {
       socket.on("close", () => {
         log("info", "Fyers data socket closed", { droppedMessages: this.droppedMessages });
         this.socket = null;
+        this.recycling = false;
         this.scheduleReconnect();
       });
 
@@ -300,17 +321,62 @@ export class FyersLiveStreamer extends EventEmitter {
       }
     }
 
+    // A socket on its way out is not sent to; the new connection subscribes everything wanted.
+    if (this.recycling) return;
+
     if (this.isSocketConnected()) {
+      const fresh = symbols.filter((symbol) => !this.socketSlots.has(symbol));
+      const limit = this.options.socketSlotLimit ?? DEFAULT_SOCKET_SLOT_LIMIT;
+      if (fresh.length > 0 && this.socketSlots.size + fresh.length > limit && this.tryRecycleSocket(limit)) return;
+      for (const symbol of fresh) this.socketSlots.add(symbol);
       this.send("subscribe", symbols);
     } else if (isNew) {
       void this.connect();
     }
   }
 
+  /**
+   * Replaces the connection so the slots used by symbols no longer wanted are freed. Only when what is wanted now fits
+   * (otherwise a new connection would be just as full) and not more than once a minute. The vendor socket's own close
+   * event then reconnects, after the usual short delay, and resubscribes the wanted set.
+   */
+  private tryRecycleSocket(limit: number): boolean {
+    if (this.currentSubscriptions.size > limit) {
+      if (!this.overCapacityLogged) {
+        this.overCapacityLogged = true;
+        log("error", "More symbols are wanted than one Fyers socket holds; the extra will not stream", {
+          wanted: this.currentSubscriptions.size,
+          limit,
+        });
+      }
+      return false;
+    }
+    const now = (this.options.nowFn ?? Date.now)();
+    if (now - this.lastRecycleAt < MIN_RECYCLE_INTERVAL_MS || this.socket === null) return false;
+    this.lastRecycleAt = now;
+    this.recycling = true;
+    this.reconnectAttempts = 0;
+    log("info", "Replacing the Fyers data socket to free subscription slots", {
+      slotsUsed: this.socketSlots.size,
+      wanted: this.currentSubscriptions.size,
+      limit,
+    });
+    try {
+      this.socket.close();
+    } catch (error) {
+      log("error", "Could not close the Fyers data socket to recycle it", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.recycling = false;
+      return false;
+    }
+    return true;
+  }
+
   unsubscribe(symbols: string[]): void {
     if (!symbols || symbols.length === 0) return;
     for (const symbol of symbols) this.currentSubscriptions.delete(symbol);
-    if (this.isSocketConnected()) {
+    if (this.isSocketConnected() && !this.recycling) {
       this.send("unsubscribe", symbols);
     }
   }
