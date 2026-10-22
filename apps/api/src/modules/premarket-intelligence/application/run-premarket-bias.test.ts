@@ -65,7 +65,7 @@ function llm(responses: Array<string | Error>): LlmClient & { calls: number } {
 }
 
 const gift = evidence("GIFT_NIFTY", "market-evidence-001", 0.24);
-const run = (src: SnapshotSource, store: PremarketBiasStore, client: LlmClient | null) => new RunPremarketBias(src, store, client, () => NOW);
+const run = (src: SnapshotSource, store: PremarketBiasStore, client: LlmClient | null) => new RunPremarketBias(src, store, client, () => NOW, null, async () => {});
 
 describe("RunPremarketBias", () => {
   it("stores the snapshot and baselines when no model is configured, and says so", async () => {
@@ -111,6 +111,37 @@ describe("RunPremarketBias", () => {
     expect(result).toMatchObject({ outcome: "RECORDED", llmStatus: "FAILED", modelAttempts: 2 });
     expect(terminals[0]).toMatchObject({ status: "VALID", llmStatus: "FAILED", assessments: null });
     expect(attempts.every((a) => a.status === "FAILED")).toBe(true);
+  });
+
+  it("retries transport failures up to four attempts, waiting longer each time", async () => {
+    const { store, attempts } = fakeStore();
+    const waits: number[] = [];
+    const client = llm([new Error("503"), new Error("503"), new Error("no response"), validResponse]);
+    const result = await new RunPremarketBias(source([gift]), store, client, () => NOW, null, async (ms) => { waits.push(ms); })
+      .execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+
+    expect(result).toMatchObject({ llmStatus: "VALIDATED", modelAttempts: 4 });
+    expect(attempts.map((a) => a.status)).toEqual(["FAILED", "FAILED", "FAILED", "SUCCESS"]);
+    expect(waits).toEqual([5_000, 10_000, 20_000]);
+  });
+
+  it("gives up after four transport failures and records FAILED", async () => {
+    const { store } = fakeStore();
+    const client = llm([new Error("503")]);
+    const result = await run(source([gift]), store, client).execute({ slot: "0850", finalAttempt: true, requirePreOpen: false });
+
+    expect(client.calls).toBe(4);
+    expect(result).toMatchObject({ llmStatus: "FAILED", modelAttempts: 4 });
+  });
+
+  it("does not wait before retrying an answer that failed validation", async () => {
+    const { store } = fakeStore();
+    const waits: number[] = [];
+    const client = llm([JSON.stringify({ assessments: [entry("NIFTY50")] }), validResponse]);
+    await new RunPremarketBias(source([gift]), store, client, () => NOW, null, async (ms) => { waits.push(ms); })
+      .execute({ slot: "0850", finalAttempt: false, requirePreOpen: false });
+
+    expect(waits).toEqual([]);
   });
 
   it("treats a request error as a failed attempt and still stores the baseline", async () => {

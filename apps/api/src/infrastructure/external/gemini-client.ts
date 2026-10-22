@@ -47,7 +47,9 @@ export class GeminiClient implements LlmClient {
     if (!options.model.trim()) throw new Error("GeminiClient needs an explicit model id.");
     this.apiKey = options.apiKey.trim();
     this.model = options.model.trim();
-    this.timeoutMs = options.timeoutMs ?? 45_000;
+    // 60 s: a successful pre-market call returns in about 15-25 s, so this leaves room without letting a hung request
+    // hold a slot (the 2026-10-16 "no response" failures each ran out the previous 45 s).
+    this.timeoutMs = options.timeoutMs ?? 60_000;
     this.baseUrl = options.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
   }
 

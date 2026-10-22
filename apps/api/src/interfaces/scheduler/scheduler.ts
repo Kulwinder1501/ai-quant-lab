@@ -622,7 +622,7 @@ async function main(): Promise<void> {
   cronSchedule("40 16 * * 1-5", () => {
     void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
   });
-  cronSchedule("30 8 * * 1-5", () => {
+  cronSchedule("47 8 * * 1-5", () => {
     void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
   });
 
@@ -641,7 +641,7 @@ async function main(): Promise<void> {
   cronSchedule("45 15 * * 1-5", () => {
     void schedule("ICT_SHADOW_RESOLVE", () => runCommand("npm", ["run", "research:ict-shadow:resolve"]));
   });
-  cronSchedule("35 8 * * 1-5", () => {
+  cronSchedule("48 8 * * 1-5", () => {
     void schedule("ICT_SHADOW_RESOLVE", () => runCommand("npm", ["run", "research:ict-shadow:resolve"]));
   });
 
@@ -704,11 +704,15 @@ async function main(): Promise<void> {
    *
    * The Fyers daily request limit resets overnight. On 2026-10-19 the limit was spent at 14:22: history, the chain
    * and the VIX failed for the rest of the session, and the evening heals ran against the same spent limit. Today's
-   * bars were therefore still missing when the next session's early indicators read them. At 08:25 the limit is fresh
+   * bars were therefore still missing when the next session's early indicators read them. At 08:46 the limit is fresh
    * and the heals are a few dozen requests: the index gap healer over five sessions, the ETF bars, the VIX series and
    * the futures. Every call skips what is already stored, so a clean day makes this a no-op.
+   *
+   * 08:46, not the 08:25 it ran at until 2026-10-22: the pre-open jobs before 08:45 kept not running on mornings the
+   * host was suspended (the pre-market job was missing on four of its first eight days), and the operator has the
+   * machine on by 08:45. The Fyers health check also runs at 08:45 so a refreshable token is in place first.
    */
-  cronSchedule("25 8 * * 1-5", () => {
+  cronSchedule("46 8 * * 1-5", () => {
     if (!fyersTokenService) return;
     void schedule("PREOPEN_DATA_CATCHUP", async () => {
       if ((await isNseHoliday(database, new Date())).holiday) return;
@@ -1525,6 +1529,10 @@ async function main(): Promise<void> {
     cronSchedule("0 8 * * 1-5", () => {
       void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
     });
+    // Just before the 08:46 catch-up, which needs a usable token.
+    cronSchedule("45 8 * * 1-5", () => {
+      void schedule("FYERS_AUTH_HEALTH_CHECK", () => checkFyersAuthHealth(fyersTokenService, database));
+    });
     // The access token lasts about eight hours and the overnight refresh has been refused for hours at a time
     // (2026-08-25, and 2026-10-17 from the small hours until 14:08), so the first attempt at 08:00 left one retry
     // before the open. A valid token makes each of these a database read; an expired one makes each an attempt.
@@ -2048,6 +2056,40 @@ async function main(): Promise<void> {
       });
       log("Pre-market run check", { sessionDate, outcome: verdict.outcome, detail: verdict.detail });
       if (verdict.outcome === "MISSED" || verdict.outcome === "RAN_NO_RESULT") throw new Error(verdict.detail);
+    });
+  }, 60_000);
+
+  /**
+   * Runs the pre-market bias when neither of its timers fired today.
+   *
+   * The 08:52 and 08:57 crons are hour-restricted, which is the kind that does not fire again after a host suspend,
+   * and a scheduler restarted between 08:52 and 09:05 has an empty fire record. Either way the job was simply missing
+   * on 14, 20, 21 and 22 October. A plain interval on wall-clock time, the same shape as the run check below, so it
+   * does not depend on the timers it covers for. It looks from 08:58, after the final slot's timer is due, and stops
+   * at 09:07 because the pre-open update owns the window from 09:08. The run is idempotent: once a slot has recorded,
+   * the final run is a no-op, so covering for a timer that did fire in an earlier process costs nothing.
+   */
+  const PREMARKET_CATCHUP_FROM_IST_MINUTE = 8 * 60 + 58;
+  const PREMARKET_CATCHUP_UNTIL_IST_MINUTE = 9 * 60 + 7;
+  let premarketCatchUpDate: string | null = null;
+  setInterval(() => {
+    const now = new Date();
+    const ist = new Date(now.getTime() + 5.5 * 60 * 60_000);
+    const sessionDate = ist.toISOString().slice(0, 10);
+    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    const weekday = ist.getUTCDay();
+    if (weekday === 0 || weekday === 6 || premarketCatchUpDate === sessionDate) return;
+    if (minute < PREMARKET_CATCHUP_FROM_IST_MINUTE || minute > PREMARKET_CATCHUP_UNTIL_IST_MINUTE) return;
+    premarketCatchUpDate = sessionDate;
+    const timerFiredToday = [PREMARKET_FIRST_SLOT_CRON, PREMARKET_FINAL_SLOT_CRON].some((expression) => {
+      const firedAt = cronLastFiredAt.get(expression);
+      return firedAt !== undefined && istDateKey(firedAt) === sessionDate;
+    });
+    if (timerFiredToday) return;
+    void schedule("PREMARKET_BIAS", async () => {
+      if ((await isNseHoliday(database, now)).holiday) return;
+      log("Pre-market catch-up: neither slot timer fired today", { sessionDate });
+      await runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]);
     });
   }, 60_000);
 

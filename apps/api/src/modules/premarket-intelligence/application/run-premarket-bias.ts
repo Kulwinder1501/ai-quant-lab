@@ -70,7 +70,22 @@ export interface RunPremarketBiasResult {
   modelAttempts: number;
 }
 
-const MAX_MODEL_ATTEMPTS = 2;
+/**
+ * A slot's model calls, in total. Four rather than two because the failures that cost days were Gemini's own
+ * (503 and no response on 2026-10-13, -15 and -16) and the two attempts ran back to back, so a provider that
+ * was briefly overloaded failed both within a second of each other.
+ *
+ * Only transport failures get the extra attempts, each after a wait (below). A response that arrives but fails to
+ * parse or validate is a different failure -- the model answered and got it wrong -- and keeps the original two.
+ */
+const MAX_MODEL_ATTEMPTS = 4;
+const MAX_QUALITY_ATTEMPTS = 2;
+/**
+ * Waits before the 2nd, 3rd and 4th attempt after a transport failure. The worst case for one slot is four
+ * 60-second timeouts plus these 35 seconds, about 275 s, which ends before the final slot's timer five minutes
+ * after the first.
+ */
+const REQUEST_RETRY_DELAYS_MS = [5_000, 10_000, 20_000] as const;
 
 /** `{"assessments": ...}` sometimes arrives wrapped in a markdown fence despite JSON mode. */
 function parseModelJson(text: string): unknown {
@@ -100,6 +115,8 @@ export class RunPremarketBias {
     private readonly now: () => Date = () => new Date(),
     /** When given, an NSE holiday is skipped: the Indian market is shut, so there is nothing to score. */
     private readonly holidayLookup: HolidayLookup | null = null,
+    /** Injected so the backoff does not make the tests wait. */
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
   async execute(options: RunPremarketBiasOptions): Promise<RunPremarketBiasResult> {
@@ -193,8 +210,14 @@ export class RunPremarketBias {
     const hash = promptHash(SYSTEM_INSTRUCTION, user);
     const knownEvidenceIds = new Set(snapshot.evidence.map((item) => item.id));
     let lastFailure: Record<string, unknown> = {};
+    let qualityFailures = 0;
+    let attemptsMade = 0;
 
     for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt += 1) {
+      if (attempt > 1 && lastFailure.stage === "request") {
+        await this.sleep(REQUEST_RETRY_DELAYS_MS[Math.min(attempt - 2, REQUEST_RETRY_DELAYS_MS.length - 1)]!);
+      }
+      attemptsMade = attempt;
       try {
         const completion = await this.llm.completeJson({ system: SYSTEM_INSTRUCTION, user });
         let parsed: unknown;
@@ -203,6 +226,8 @@ export class RunPremarketBias {
         } catch {
           lastFailure = { stage: "parse", attempt, rawResponse: completion.text.slice(0, 4000) };
           await this.store.recordAttempt({ runSlot: key, status: "FAILED", errorDetails: lastFailure });
+          qualityFailures += 1;
+          if (qualityFailures >= MAX_QUALITY_ATTEMPTS) break;
           continue;
         }
         const result = validateAssessmentContract({
@@ -214,6 +239,8 @@ export class RunPremarketBias {
         if (!result.ok) {
           lastFailure = { stage: "validate", attempt, errors: result.errors, rawResponse: completion.text.slice(0, 4000) };
           await this.store.recordAttempt({ runSlot: key, status: "FAILED", errorDetails: lastFailure });
+          qualityFailures += 1;
+          if (qualityFailures >= MAX_QUALITY_ATTEMPTS) break;
           continue;
         }
         await this.store.recordAttempt({ runSlot: key, status: "SUCCESS", errorDetails: { attempt } });
@@ -235,6 +262,6 @@ export class RunPremarketBias {
         await this.store.recordAttempt({ runSlot: key, status: "FAILED", errorDetails: lastFailure });
       }
     }
-    return { llmStatus: "FAILED", assessments: null, attempts: MAX_MODEL_ATTEMPTS, metadata: { model: this.llm.model, promptHash: hash, lastFailure } };
+    return { llmStatus: "FAILED", assessments: null, attempts: attemptsMade, metadata: { model: this.llm.model, promptHash: hash, lastFailure } };
   }
 }
