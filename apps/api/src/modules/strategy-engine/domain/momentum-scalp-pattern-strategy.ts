@@ -5,7 +5,13 @@ import {
   type TradeIdeaEvidence,
   type TradeSide,
 } from "./strategy.js";
-import { type CandlestickPatternCode, type PatternDirection, type PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
+import {
+  candlestickAlgorithmVersion,
+  priceActionAlgorithmVersion,
+  type CandlestickPatternCode,
+  type PatternDirection,
+  type PriceActionEventCode,
+} from "../../pattern-recognition/domain/market-pattern.js";
 import {
   calculateHtfSrConfluence,
   calculateHtfTrendAlignment,
@@ -81,7 +87,22 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * alongside this one purely because it shares this file's default config -- it carries no live
  * trades and no checksummed research cohort, so no pin was needed for it.
  */
-export const momentumScalpPatternStrategyVersion = 2;
+/**
+ * Bumped 2026-10-22: priceActionAlgorithmVersion moved from "price-action-v2" to the detector's current
+ * version (v3). The detector moved on 2026-10-10 and this strategy was left naming v2, which stopped
+ * being written on 2026-10-09 10:36 UTC. The strategy matches events on that exact string, so from then
+ * on the "near support/resistance" points (+2) and the chart-pattern confluence points (+2) could not
+ * be awarded: of 180 AutoBot-Sniper ideas after the cutoff, none had a v2 support/resistance event on
+ * its source candle (25 of 85 before it), while 47 had a v3 one. Ideas per day rose from about 9 to
+ * about 22 over the same stretch, which is what a gate that no longer needs four of its nine points
+ * would do. Sniper results from 2026-10-10 until this deploy are therefore a different, looser
+ * strategy than either version describes, and are confounded with the candlestick-v2 change that landed
+ * the same day -- do not compare them against earlier or later records as if they were one arm.
+ *
+ * The frozen `pattern-v5-research` cohort carries its own explicit `priceActionAlgorithmVersion` pin
+ * in research-strategies.ts, so its definition hash is unchanged.
+ */
+export const momentumScalpPatternStrategyVersion = 3;
 
 export interface MomentumScalpPatternStrategyConfiguration {
   indicatorAlgorithmVersion: string;
@@ -157,8 +178,13 @@ export interface MomentumScalpPatternStrategyConfiguration {
 
 export const defaultMomentumScalpPatternStrategyConfiguration: MomentumScalpPatternStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
-  candlestickAlgorithmVersion: "candlestick-v2",
-  priceActionAlgorithmVersion: "price-action-v2",
+  // The detector's CURRENT versions, imported rather than written as literals. This strategy filters
+  // stored events by exact version, so a literal that falls behind the detector reads nothing, silently:
+  // `priceActionAlgorithmVersion` stayed "price-action-v2" after the detector moved to v3 on
+  // 2026-10-10, and from 2026-10-09 10:36 UTC no idea carried a support/resistance or chart-pattern
+  // event (see the v3 bump note above `momentumScalpPatternStrategyVersion`).
+  candlestickAlgorithmVersion,
+  priceActionAlgorithmVersion,
   scoreThreshold: 5,
   atrStopMultiple: 1.0,
   rewardRiskMultiple: 1.5,
@@ -541,7 +567,7 @@ export class MomentumScalpPatternStrategy {
 }
 
 /** Bumped alongside momentumScalpPatternStrategyVersion above -- same shared default, same reason. */
-export const momentumScalpPatternStrategyV2Version = 3;
+export const momentumScalpPatternStrategyV2Version = 4;
 
 export const momentumScalpPatternStrategyV2Registration = {
   strategyKey: "momentum-scalp-pattern-v2",

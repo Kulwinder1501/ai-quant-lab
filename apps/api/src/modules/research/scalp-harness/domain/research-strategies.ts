@@ -88,7 +88,12 @@ export const frozenSourceContentDigests = Object.freeze({
   // Re-pinned again 2026-10-10, same reason and same shape as momentum-scalp-strategy.ts above
   // (momentumScalpPatternStrategyVersion bumped 1->2, momentumScalpPatternStrategyV2Version 2->3).
   // pattern-v5-research was given its own explicit candlestick-v1 override first.
-  "momentum-scalp-pattern-strategy.ts": "a401768d96fa8689a35a1acf900df4a7369b6787369cab2155d61cb4c685fa15",
+  // Re-pinned 2026-10-22: priceActionAlgorithmVersion moved from "price-action-v2" to the detector's
+  // current version (momentumScalpPatternStrategyVersion bumped 2->3, momentumScalpPatternStrategyV2Version
+  // 3->4). pattern-v5-research was given its own explicit priceActionAlgorithmVersion: "price-action-v2"
+  // override first, so its registered behaviour and researchStrategySourceChecksums entry are unchanged --
+  // only this drift-detector pin moves.
+  "momentum-scalp-pattern-strategy.ts": "035548bd3bb6e4350f1b61fa1187c09ab70481c0f67c7adbbf21c14c87d02d32",
 });
 
 export const researchStrategySourceChecksums = Object.freeze({
@@ -483,6 +488,9 @@ const patternDefinition = buildStrategyDefinition({
   configuration: {
     ...defaultMomentumScalpPatternStrategyConfiguration,
     candlestickAlgorithmVersion: "candlestick-v1",
+    // Pinned explicitly 2026-10-22 -- same reasoning as the candlestick pin above, now for the default's
+    // priceActionAlgorithmVersion moving from "price-action-v2" to the detector's current version.
+    priceActionAlgorithmVersion: "price-action-v2",
     scoreThreshold: 0,
   } as Record<string, unknown>,
 });

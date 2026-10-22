@@ -1,3 +1,4 @@
+import { priceActionAlgorithmVersion } from "../../pattern-recognition/domain/market-pattern.js";
 import { describe, expect, it } from "vitest";
 import {
   defaultMomentumScalpPatternStrategyConfiguration,
@@ -76,7 +77,7 @@ describe("MomentumScalpPatternStrategy", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_990, // near support (distance 10 / 20 = 0.5 ATR <= 1.5 ATR -> +2)
           confidence: 0.8,
@@ -117,7 +118,7 @@ describe("MomentumScalpPatternStrategy", () => {
       priceActionEvents: [
         {
           eventCode: "RESISTANCE",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BEARISH",
           level: 23_910, // near resistance (+2)
           confidence: 0.8,
@@ -154,7 +155,7 @@ describe("MomentumScalpPatternStrategy", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_995,
           confidence: 0.8,
@@ -186,7 +187,7 @@ describe("MomentumScalpPatternStrategy", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_990,
           confidence: 0.8,
@@ -402,7 +403,7 @@ describe("MomentumScalpPatternStrategy", () => {
         atr: 20,
         priceActionEvents: [{
           eventCode: "RESISTANCE",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BEARISH",
           level: 24_005, // 5 / 20 = 0.25 ATR away -- well inside maxSrDistanceAtr (1.5)
           confidence: 0.8,
@@ -439,7 +440,7 @@ describe("MomentumScalpPatternStrategy", () => {
         atr: 20,
         priceActionEvents: [{
           eventCode: "RESISTANCE",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BEARISH",
           level: 24_100, // 100 / 20 = 5 ATR away -- outside maxSrDistanceAtr (1.5)
           confidence: 0.8,
@@ -465,7 +466,7 @@ describe("MomentumScalpPatternStrategy", () => {
         atr: 20,
         priceActionEvents: [{
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_895, // 5 / 20 = 0.25 ATR away
           confidence: 0.8,
@@ -495,11 +496,11 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       expiryCandles: 3,
       indicatorAlgorithmVersion: "ta-v1",
       candlestickAlgorithmVersion: "candlestick-v2",
-      priceActionAlgorithmVersion: "price-action-v2",
+      priceActionAlgorithmVersion: priceActionAlgorithmVersion,
     };
 
     const configB = {
-      priceActionAlgorithmVersion: "price-action-v2",
+      priceActionAlgorithmVersion: priceActionAlgorithmVersion,
       candlestickAlgorithmVersion: "candlestick-v2",
       indicatorAlgorithmVersion: "ta-v1",
       expiryCandles: 3,
@@ -529,7 +530,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_990,
           confidence: 0.8,
@@ -554,7 +555,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
     expect(idea.evidence).toMatchObject({
       strategyVersion: "momentum-scalp-pattern-v2",
       candlestickEngineVersion: "candlestick-v2",
-      chartPatternEngineVersion: "price-action-v2",
+      chartPatternEngineVersion: priceActionAlgorithmVersion,
       featureSchemaVersion: null,
     });
     expect(typeof (idea.evidence as any).configurationHash).toBe("string");
@@ -573,7 +574,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_990,
           confidence: 0.8,
@@ -606,7 +607,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       priceActionEvents: [
         {
           eventCode: "SUPPORT",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 23_990, // near support (+2, plus Inverted Hammer support bonus +1)
           confidence: 0.8,
@@ -648,7 +649,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       priceActionEvents: [
         {
           eventCode: "RESISTANCE",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BEARISH",
           level: 23_910,
           confidence: 0.8,
@@ -693,7 +694,7 @@ describe("MomentumScalpPatternStrategyV2 & Configuration Hashing", () => {
       priceActionEvents: [
         {
           eventCode: "INVERSE_HEAD_AND_SHOULDERS",
-          algorithmVersion: "price-action-v2",
+          algorithmVersion: priceActionAlgorithmVersion,
           direction: "BULLISH",
           level: 24_000,
           confidence: 0.85,
