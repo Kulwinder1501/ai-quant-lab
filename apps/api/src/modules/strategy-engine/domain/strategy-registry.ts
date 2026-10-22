@@ -487,12 +487,14 @@ export function ictContextConsumedAt(timeframe: string): boolean {
   return ictContextTimeframes().includes(timeframe);
 }
 
-/** Whether assembling an Asian session snapshot at `timeframe` can be read by anything. */
+/** Whether the strategy allows evaluation of `symbol`. If restricted, symbol is strictly required. */
 export function strategySupportsSymbol(strategy: RegisteredStrategy, symbol?: string): boolean {
-  if (!strategy.supportedSymbols || !symbol) return true;
+  if (!strategy.supportedSymbols) return true;
+  if (!symbol) return false;
   return strategy.supportedSymbols.includes(symbol);
 }
 
+/** Whether assembling Asian session data at `timeframe` and optional `symbol` can be read by anything. */
 export function asianSessionConsumedAt(timeframe: string, symbol?: string): boolean {
   return registeredStrategies.some(
     (strategy) =>
@@ -501,7 +503,6 @@ export function asianSessionConsumedAt(timeframe: string, symbol?: string): bool
       strategySupportsSymbol(strategy, symbol),
   );
 }
-
 
 export function strategySupportsTimeframe(strategy: RegisteredStrategy, timeframe: string): boolean {
   return strategy.supportedTimeframes.includes(timeframe);

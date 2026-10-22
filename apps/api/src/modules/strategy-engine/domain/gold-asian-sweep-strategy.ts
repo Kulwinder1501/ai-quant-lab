@@ -12,6 +12,10 @@ export const GOLD_ASIAN_SWEEP_STRATEGY_KEY = "gold-asian-sweep-v1";
 export const goldAsianSweepStrategyVersion = 1;
 
 export interface GoldAsianSweepStrategyConfiguration {
+  asiaStartHourUtc: number;
+  asiaEndHourUtc: number;
+  londonStartHourUtc: number;
+  londonEndHourUtc: number;
   minPenetrationBps: number;
   maxPenetrationBps: number;
   minRejectionWickPct: number;
@@ -27,6 +31,10 @@ export interface GoldAsianSweepStrategyConfiguration {
 }
 
 export const defaultGoldAsianSweepConfiguration: GoldAsianSweepStrategyConfiguration = {
+  asiaStartHourUtc: 0,
+  asiaEndHourUtc: 6,
+  londonStartHourUtc: 6.5,
+  londonEndHourUtc: 11.5,
   minPenetrationBps: 3.0,
   maxPenetrationBps: 50.0,
   minRejectionWickPct: 0.30,
@@ -55,7 +63,17 @@ export const goldAsianSweepStrategyRegistration: EnsureStrategyVersionInput = {
  * Stateless evaluator for the Asian Session Sweep strategy on XAU/USD.
  *
  * Evaluates the day's candle history causally and point-in-time using its own
- * versioned configuration thresholds (penetration, rejection wick, Asian range limits, coverage).
+ * versioned configuration thresholds (session hours, penetration, rejection wick,
+ * Asian range limits, coverage).
+ *
+ * Design note on "First Sweep of the Day" lifecycle:
+ * A liquidity sweep event consumes the session's single execution allowance for the day,
+ * regardless of whether the resulting proposal is subsequently filtered out by risk distance
+ * bounds (minRiskDistance 0.20 / maxRiskDistance 15.0 USD) or other downstream trade guards.
+ * This is an intentional doctrinal choice: once the Asian level is swept and reclaimed, the
+ * initial liquidity pool has been absorbed and the session's directional displacement is underway;
+ * subsequent penetrations on the same day represent churn or secondary tests rather than clean
+ * liquidity raids.
  */
 export class GoldAsianSweepStrategy implements StrategyEvaluator {
   evaluate(
@@ -67,8 +85,9 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
       ...strategyConfiguration,
     };
 
-    // Strict symbol guard: this strategy is calibrated solely for XAU_USD
-    if (context.candle.symbol && context.candle.symbol !== "XAU_USD") {
+    // Strict symbol guard (fail-closed): this strategy is calibrated solely for XAU_USD.
+    // Missing symbol or non-XAU_USD is strictly rejected.
+    if (!context.candle.symbol || context.candle.symbol !== "XAU_USD") {
       return [];
     }
 
@@ -76,21 +95,24 @@ export class GoldAsianSweepStrategy implements StrategyEvaluator {
       return [];
     }
 
-    // Evaluate Asian session using the strategy's own versioned config thresholds
-    const snapshot = context.dayCandles
-      ? evaluateAsianSession(context.dayCandles, context.candle, {
-          asiaStartHourUtc: 0,
-          asiaEndHourUtc: 6,
-          londonStartHourUtc: 6.5,
-          londonEndHourUtc: 11.5,
-          minPenetrationBps: config.minPenetrationBps,
-          maxPenetrationBps: config.maxPenetrationBps,
-          minRejectionWickPct: config.minRejectionWickPct,
-          minRangeBps: config.minRangeBps,
-          maxRangeBps: config.maxRangeBps,
-          minAsiaCoveragePct: config.minAsiaCoveragePct ?? 0.90,
-        })
-      : context.asianSessionContext;
+    // Single source of truth: Asian session state must be derived from point-in-time dayCandles
+    if (!context.dayCandles || context.dayCandles.length === 0) {
+      return [];
+    }
+
+    // Evaluate Asian session using the strategy's own versioned configuration
+    const snapshot = evaluateAsianSession(context.dayCandles, context.candle, {
+      asiaStartHourUtc: config.asiaStartHourUtc,
+      asiaEndHourUtc: config.asiaEndHourUtc,
+      londonStartHourUtc: config.londonStartHourUtc,
+      londonEndHourUtc: config.londonEndHourUtc,
+      minPenetrationBps: config.minPenetrationBps,
+      maxPenetrationBps: config.maxPenetrationBps,
+      minRejectionWickPct: config.minRejectionWickPct,
+      minRangeBps: config.minRangeBps,
+      maxRangeBps: config.maxRangeBps,
+      minAsiaCoveragePct: config.minAsiaCoveragePct ?? 0.90,
+    });
 
     if (!snapshot || !snapshot.isValid || !snapshot.sweepEvent) {
       return [];

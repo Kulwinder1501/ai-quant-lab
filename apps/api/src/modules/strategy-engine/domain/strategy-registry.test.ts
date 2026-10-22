@@ -12,6 +12,8 @@ import {
   strategyExecutableSides,
   strategyKeys,
   strategySupportsTimeframe,
+  strategySupportsSymbol,
+  asianSessionConsumedAt,
   ictContextTimeframes,
   ictContextConsumedAt,
 } from "./strategy-registry.js";
@@ -257,5 +259,31 @@ describe("ICT context consumption", () => {
     expect(keys).toContain("ict-structure-v1");
     expect(keys).toContain("trend-continuation-v1");
     expect(keys).toContain("event-reversal-v1");
+  });
+});
+
+describe("strategySupportsSymbol and Asian session consumption", () => {
+  it("enforces strict symbol checking on gold-asian-sweep-v1", () => {
+    const goldStrategy = requireRegisteredStrategy("gold-asian-sweep-v1");
+    expect(goldStrategy.supportedSymbols).toEqual(["XAU_USD"]);
+    expect(strategySupportsSymbol(goldStrategy, "XAU_USD")).toBe(true);
+    expect(strategySupportsSymbol(goldStrategy, "NIFTY50")).toBe(false);
+    expect(strategySupportsSymbol(goldStrategy, "NIFTYBEES")).toBe(false);
+    expect(strategySupportsSymbol(goldStrategy, undefined)).toBe(false);
+  });
+
+  it("permits any symbol for strategies that do not restrict supportedSymbols", () => {
+    const breakoutStrategy = requireRegisteredStrategy("trend-breakout");
+    expect(breakoutStrategy.supportedSymbols).toBeUndefined();
+    expect(strategySupportsSymbol(breakoutStrategy, "NIFTY50")).toBe(true);
+    expect(strategySupportsSymbol(breakoutStrategy, undefined)).toBe(true);
+  });
+
+  it("gates asianSessionConsumedAt by both timeframe and symbol", () => {
+    expect(asianSessionConsumedAt("5m", "XAU_USD")).toBe(true);
+    expect(asianSessionConsumedAt("15m", "XAU_USD")).toBe(true);
+    expect(asianSessionConsumedAt("1m", "XAU_USD")).toBe(false);
+    expect(asianSessionConsumedAt("5m", "NIFTYBEES")).toBe(false);
+    expect(asianSessionConsumedAt("5m", undefined)).toBe(false);
   });
 });

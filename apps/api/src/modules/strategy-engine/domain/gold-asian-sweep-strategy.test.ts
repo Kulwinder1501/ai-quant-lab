@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { GoldAsianSweepStrategy } from "./gold-asian-sweep-strategy.js";
 import type { StrategyMarketContext } from "./strategy.js";
-import type { AsianCandleLike, AsianRangeSnapshot } from "../../technical-analysis/domain/ict/asian-session.js";
+import type { AsianCandleLike } from "../../technical-analysis/domain/ict/asian-session.js";
+
+/** Builds a 72-bar Asian session covering 00:00 to 06:00 UTC at 5m cadence. */
+function buildAsianSessionCandles(minLow = 2695.0, maxHigh = 2710.0): AsianCandleLike[] {
+  const candles: AsianCandleLike[] = [];
+  for (let i = 0; i < 72; i++) {
+    const openTime = new Date(Date.UTC(2026, 9, 22, 0, i * 5));
+    const closeTime = new Date(openTime.getTime() + 5 * 60_000);
+    const high = i === 10 ? maxHigh : 2705.0;
+    const low = i === 20 ? minLow : 2698.0;
+    candles.push({ openTime, closeTime, open: 2700, high, low, close: 2702 });
+  }
+  return candles;
+}
 
 function makeContext(params: {
   openTime: string;
@@ -12,7 +25,6 @@ function makeContext(params: {
   close: number;
   symbol?: string;
   tickSize?: number;
-  asianSessionContext?: AsianRangeSnapshot | null;
   dayCandles?: AsianCandleLike[];
 }): StrategyMarketContext {
   return {
@@ -28,42 +40,30 @@ function makeContext(params: {
       close: params.close,
       volume: 1000,
       tickSize: params.tickSize ?? 0.01,
-      symbol: params.symbol ?? "XAU_USD",
+      symbol: params.symbol,
     },
     indicators: [],
     patterns: [],
     priceActionEvents: [],
-    asianSessionContext: params.asianSessionContext,
     dayCandles: params.dayCandles,
   };
 }
 
-describe("GoldAsianSweepStrategy (Stateless)", () => {
-  it("generates a SHORT proposal when context carries a valid BEARISH_SWEEP snapshot", () => {
+describe("GoldAsianSweepStrategy (Stateless & Strict)", () => {
+  it("generates a SHORT proposal when dayCandles forms a valid BEARISH_SWEEP in London window", () => {
     const strategy = new GoldAsianSweepStrategy();
+    const dayCandles = buildAsianSessionCandles(2695.0, 2710.0);
 
-    const snapshot: AsianRangeSnapshot = {
-      dateKey: "2026-10-22",
-      state: "LOCKED",
-      asiaHigh: 2710.0,
-      asiaLow: 2695.0,
-      asiaRange: 15.0,
-      asiaRangeBps: 55.66,
-      midpoint: 2702.5,
-      barCount: 72,
-      expectedBars: 72,
-      coveragePct: 1.0,
-      isValid: true,
-      sweepEvent: {
-        type: "BEARISH_SWEEP",
-        level: 2710.0,
-        sweepExtreme: 2713.0,
-        penetrationBps: 11.07,
-        reclaimBps: 11.07,
-        rejectionWickPct: 0.60,
-        time: new Date("2026-10-22T07:30:00Z"),
-      },
+    // Candle at 07:30 UTC sweeps Asia High (2710) up to 2713.0 and closes at 2707.0 (reclaim, 60% upper wick)
+    const londonSweepBar: AsianCandleLike = {
+      openTime: new Date("2026-10-22T07:30:00Z"),
+      closeTime: new Date("2026-10-22T07:35:00Z"),
+      open: 2706.0,
+      high: 2713.0,
+      low: 2703.0,
+      close: 2707.0,
     };
+    dayCandles.push(londonSweepBar);
 
     const context = makeContext({
       openTime: "2026-10-22T07:30:00Z",
@@ -72,7 +72,8 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
       high: 2713.0,
       low: 2703.0,
       close: 2707.0,
-      asianSessionContext: snapshot,
+      symbol: "XAU_USD",
+      dayCandles,
     });
 
     const proposals = strategy.evaluate(context);
@@ -90,31 +91,20 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
     expect(p.evidenceItems?.[0]?.sourceType).toBe("STRATEGY");
   });
 
-  it("generates a LONG proposal when context carries a valid BULLISH_SWEEP snapshot", () => {
+  it("generates a LONG proposal when dayCandles forms a valid BULLISH_SWEEP in London window", () => {
     const strategy = new GoldAsianSweepStrategy();
+    const dayCandles = buildAsianSessionCandles(2695.0, 2710.0);
 
-    const snapshot: AsianRangeSnapshot = {
-      dateKey: "2026-10-22",
-      state: "LOCKED",
-      asiaHigh: 2710.0,
-      asiaLow: 2695.0,
-      asiaRange: 15.0,
-      asiaRangeBps: 55.66,
-      midpoint: 2702.5,
-      barCount: 72,
-      expectedBars: 72,
-      coveragePct: 1.0,
-      isValid: true,
-      sweepEvent: {
-        type: "BULLISH_SWEEP",
-        level: 2695.0,
-        sweepExtreme: 2691.5,
-        penetrationBps: 12.99,
-        reclaimBps: 9.28,
-        rejectionWickPct: 0.54,
-        time: new Date("2026-10-22T08:00:00Z"),
-      },
+    // Candle at 08:00 UTC sweeps Asia Low (2695) down to 2691.5 and closes at 2697.5 (reclaim, 54% lower wick)
+    const londonSweepBar: AsianCandleLike = {
+      openTime: new Date("2026-10-22T08:00:00Z"),
+      closeTime: new Date("2026-10-22T08:05:00Z"),
+      open: 2694.0,
+      high: 2698.0,
+      low: 2691.5,
+      close: 2697.5,
     };
+    dayCandles.push(londonSweepBar);
 
     const context = makeContext({
       openTime: "2026-10-22T08:00:00Z",
@@ -123,7 +113,8 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
       high: 2698.0,
       low: 2691.5,
       close: 2697.5,
-      asianSessionContext: snapshot,
+      symbol: "XAU_USD",
+      dayCandles,
     });
 
     const proposals = strategy.evaluate(context);
@@ -137,25 +128,15 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
     expect(p.riskReward).toBe(1.5);
   });
 
-  it("evaluates dayCandles with its own versioned configuration (Fix 1 verification)", () => {
+  it("evaluates dayCandles using versioned configuration thresholds & session hours", () => {
     const strategy = new GoldAsianSweepStrategy();
+    const dayCandles = buildAsianSessionCandles(2695.0, 2710.0);
 
-    // Build 72 5m candles covering 00:00 to 06:00 UTC
-    const dayCandles: AsianCandleLike[] = [];
-    for (let i = 0; i < 72; i++) {
-      const openTime = new Date(Date.UTC(2026, 9, 22, 0, i * 5));
-      const closeTime = new Date(openTime.getTime() + 5 * 60_000);
-      const high = i === 10 ? 2710.0 : 2705.0;
-      const low = i === 20 ? 2695.0 : 2698.0;
-      dayCandles.push({ openTime, closeTime, open: 2700, high, low, close: 2702 });
-    }
-
-    // London sweep bar at 07:30 UTC: High 2712.5 (penetration ~9.2 bps, rejection wick 60%)
     const londonSweepBar: AsianCandleLike = {
       openTime: new Date(Date.UTC(2026, 9, 22, 7, 30)),
       closeTime: new Date(Date.UTC(2026, 9, 22, 7, 35)),
       open: 2705.0,
-      high: 2712.5,
+      high: 2712.5, // 9.2 bps penetration
       low: 2703.0,
       close: 2706.0,
     };
@@ -168,23 +149,40 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
       high: londonSweepBar.high,
       low: londonSweepBar.low,
       close: londonSweepBar.close,
+      symbol: "XAU_USD",
       dayCandles,
     });
 
-    // 1. With standard config (minPenetrationBps: 3.0), penetration of 9.2 bps passes
+    // 1. Default config (minPenetrationBps: 3.0, londonStartHourUtc: 6.5) -> passes
     const defaultProposals = strategy.evaluate(context);
     expect(defaultProposals).toHaveLength(1);
-    expect(defaultProposals[0]?.side).toBe("SHORT");
 
-    // 2. With customized versioned config (minPenetrationBps: 15.0), the 9.2 bps penetration is rejected
+    // 2. Strict threshold override (minPenetrationBps: 15.0) -> rejected
     const strictProposals = strategy.evaluate(context, { minPenetrationBps: 15.0 });
     expect(strictProposals).toHaveLength(0);
+
+    // 3. Strict session hour override (londonStartHourUtc: 8.0) -> rejected as bar is at 07:30 UTC
+    const lateLondonProposals = strategy.evaluate(context, { londonStartHourUtc: 8.0 });
+    expect(lateLondonProposals).toHaveLength(0);
   });
 
-  it("strictly enforces symbol guard against colliding ETFs with tickSize 0.01 (Fix 2 verification)", () => {
+  it("strictly enforces fail-closed symbol guard (missing symbol or non-XAU_USD rejected)", () => {
     const strategy = new GoldAsianSweepStrategy();
+    const dayCandles = buildAsianSessionCandles(2695.0, 2710.0);
 
-    // NIFTYBEES has tickSize 0.01 in the database, but is NOT XAU_USD
+    // 1. Missing symbol entirely -> strictly rejected (fail-closed)
+    const missingSymbolContext = makeContext({
+      openTime: "2026-10-22T07:30:00Z",
+      closeTime: "2026-10-22T07:35:00Z",
+      open: 2706.0,
+      high: 2713.0,
+      low: 2703.0,
+      close: 2707.0,
+      dayCandles,
+    });
+    expect(strategy.evaluate(missingSymbolContext)).toHaveLength(0);
+
+    // 2. Colliding instrument symbol with 0.01 tickSize (e.g. NIFTYBEES) -> strictly rejected
     const collidingNseContext = makeContext({
       openTime: "2026-10-22T07:30:00Z",
       closeTime: "2026-10-22T07:35:00Z",
@@ -194,12 +192,11 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
       close: 261.0,
       symbol: "NIFTYBEES",
       tickSize: 0.01,
-      asianSessionContext: null,
+      dayCandles,
     });
-
     expect(strategy.evaluate(collidingNseContext)).toHaveLength(0);
 
-    // Instrument with non-0.01 tickSize is also rejected
+    // 3. Wrong tickSize on XAU_USD -> strictly rejected
     const wrongTickSizeContext = makeContext({
       openTime: "2026-10-22T07:30:00Z",
       closeTime: "2026-10-22T07:35:00Z",
@@ -209,6 +206,7 @@ describe("GoldAsianSweepStrategy (Stateless)", () => {
       close: 2707.0,
       symbol: "XAU_USD",
       tickSize: 0.05,
+      dayCandles,
     });
     expect(strategy.evaluate(wrongTickSizeContext)).toHaveLength(0);
   });
