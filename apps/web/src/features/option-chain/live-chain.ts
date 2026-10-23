@@ -57,6 +57,13 @@ export interface ChainResponse {
   provider?: string;
   observedAt?: string;
   underlyingValue?: number | null;
+  /**
+   * The spot at the instant of the stored snapshot, kept once the first tick starts moving
+   * `underlyingValue`. It is the denominator that carries the snapshot's implied forward to the live
+   * spot (see `applyChainTick`). Absent on a response straight from the server, where it equals
+   * `underlyingValue`.
+   */
+  snapshotUnderlyingValue?: number | null;
   atmStrike?: number | null;
   atmImpliedVolatility?: number | null;
   impliedForwardByExpiry?: Record<string, number>;
@@ -113,6 +120,12 @@ export function applyChainTick(prevChain: ChainResponse | null, tick: ChainTick)
   // 0.53, and it showed up as the number jumping the instant a tick arrived.
   const forwardByExpiry = prevChain.impliedForwardByExpiry ?? {};
 
+  /**
+   * The spot the snapshot's forward belongs to. `underlyingValue` is replaced by every index tick, so
+   * the first tick has to remember what it replaced.
+   */
+  const snapshotSpot = prevChain.snapshotUnderlyingValue ?? prevChain.underlyingValue ?? null;
+
   const recalculateLeg = (leg: Leg, strikePrice: number, optionType: "CE" | "PE", isLegTick: boolean): Leg => {
     const newLastPrice = isLegTick ? (tick.ltp ?? leg.lastPrice) : leg.lastPrice;
     const newBid = isLegTick ? (tick.bid ?? leg.bid) : leg.bid;
@@ -146,7 +159,21 @@ export function applyChainTick(prevChain: ChainResponse | null, tick: ChainTick)
       : Math.max(0, leg.daysToExpiry / 365);
     // Only the expiry's own forward may price it; spot is the fallback, and then
     // the bias is the known one rather than a silent one.
-    const legForward = Object.values(forwardByExpiry)[0];
+    const snapshotForward = Object.values(forwardByExpiry)[0];
+    /*
+     * A premium and the forward it is solved against must belong to the same instant.
+     *
+     * A leg that just ticked carries a premium from now, but the snapshot forward is from the snapshot,
+     * up to 18 minutes ago. Solved against it, the implied vol absorbs however far spot has moved since:
+     * with spot 30 points up on a 7-day ATM NIFTY option (delta ~0.5, vega ~12.4 a vol point) that is
+     * 15 / 12.4, roughly 1.2 vol points of error, and the delta moves with it. So a ticking leg is priced at the snapshot
+     * forward carried to the live spot -- F/S is steady over minutes because it is e^((r-q)T) -- while a
+     * leg that did not tick keeps its snapshot premium, which stays consistent with the snapshot forward.
+     */
+    const legForward = snapshotForward !== undefined && isLegTick
+      && snapshotSpot !== null && snapshotSpot > 0 && currentSpot > 0
+      ? snapshotForward * (currentSpot / snapshotSpot)
+      : snapshotForward;
     const pricingSpot = legForward !== undefined && timeToExpiryYears !== null && timeToExpiryYears > 0
       ? effectiveSpotForForward(legForward, RISK_FREE_RATE, timeToExpiryYears)
       : currentSpot;
@@ -237,6 +264,7 @@ export function applyChainTick(prevChain: ChainResponse | null, tick: ChainTick)
     return {
       ...prevChain,
       underlyingValue: currentSpot,
+      snapshotUnderlyingValue: snapshotSpot,
       strikes: newStrikes,
     };
   }
