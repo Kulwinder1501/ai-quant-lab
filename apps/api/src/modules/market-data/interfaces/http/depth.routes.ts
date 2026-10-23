@@ -269,9 +269,10 @@ export function registerDepthRoutes(
         if (frames.length === 0) continue;
 
         const history = buildDepthHistory(frames, { bucketSeconds });
-        // A past session is append-only history and cannot change, and reading one costs about two seconds, so a
-        // repeat selection may be served from the browser. Today's session is still being written: never cached.
-        if (sessionDate < today) response.set("Cache-Control", "private, max-age=600");
+        // A finished session is append-only history and cannot change, and reading one costs about two seconds, so
+        // a repeat selection may be served from the browser. A session still being written is never cached.
+        const inProgress = now.getTime() >= window.from.getTime() && now.getTime() < window.to.getTime();
+        if (now.getTime() >= window.to.getTime()) response.set("Cache-Control", "private, max-age=600");
         const expiryDate = expiryBySymbol.get(providerSymbol)
           ?? upcomingIndexFutures(sessionDate, 2).find((contract) => contract.providerInstrumentId === providerSymbol)?.expiryDate
           ?? null;
@@ -283,7 +284,8 @@ export function registerDepthRoutes(
             sessionDate,
             sessionTimezone: "Asia/Kolkata",
             window: { from: window.from.toISOString(), to: window.to.toISOString() },
-            isToday: sessionDate === today,
+            /** True from 09:00 to 15:30 IST on the session's own day: the book is still being written. */
+            inProgress,
             ...history,
             availableSessions,
             definitions: { ...DEPTH_HISTORY_DEFINITIONS, ...IMBALANCE_DEFINITIONS },

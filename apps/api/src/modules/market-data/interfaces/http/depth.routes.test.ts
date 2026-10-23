@@ -63,11 +63,14 @@ function fakeRepository(data: FakeData, calls: Call[], windowCalls: WindowCall[]
 
 let server: Server | null = null;
 
-async function startWith(data: FakeData): Promise<{ base: string; calls: Call[]; windowCalls: WindowCall[] }> {
+async function startWith(
+  data: FakeData,
+  clockNow: Date = NOW,
+): Promise<{ base: string; calls: Call[]; windowCalls: WindowCall[] }> {
   const calls: Call[] = [];
   const windowCalls: WindowCall[] = [];
   const app: Express = express();
-  registerDepthRoutes(app, { depthFrameRepository: fakeRepository(data, calls, windowCalls) } as never, { now: () => NOW });
+  registerDepthRoutes(app, { depthFrameRepository: fakeRepository(data, calls, windowCalls) } as never, { now: () => clockNow });
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   return { base: `http://127.0.0.1:${(server!.address() as AddressInfo).port}`, calls, windowCalls };
 }
@@ -253,7 +256,7 @@ describe("GET /api/v1/depth/history", () => {
       contract: { providerSymbol: SYMBOL, expiryDate: "2026-10-27" },
       sessionDate: "2026-10-12",
       sessionTimezone: "Asia/Kolkata",
-      isToday: true,
+      inProgress: true,
       bucketSeconds: 60,
     });
     expect(data.buckets.map((b: { t: string; frames: number }) => [b.t, b.frames])).toEqual([
@@ -277,15 +280,34 @@ describe("GET /api/v1/depth/history", () => {
     expect(data.availableSessions[0]).toMatchObject({ providerSymbol: SYMBOL, framesCapped: 1000 });
   });
 
-  it("lets the browser keep a past session for ten minutes, and never caches today's, which is still being written", async () => {
-    const { base } = await startWith({
-      windowFrames: { [SYMBOL]: frames },
-      days: { [SYMBOL]: [day("2026-10-12"), day("2026-10-09")] },
-    });
-    const past = await fetch(`${base}/api/v1/depth/history?date=2026-10-09`);
+  it("lets the browser keep a finished session for ten minutes, and never caches one still being written", async () => {
+    const live = await startWith({ windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12"), day("2026-10-09")] } });
+    const past = await fetch(`${live.base}/api/v1/depth/history?date=2026-10-09`);
     expect(past.headers.get("cache-control")).toBe("private, max-age=600");
-    const today = await fetch(`${base}/api/v1/depth/history?date=2026-10-12`);
+    const today = await fetch(`${live.base}/api/v1/depth/history?date=2026-10-12`);
     expect(today.headers.get("cache-control")).toBeNull();
+    expect((await today.json()).data.inProgress).toBe(true);
+  });
+
+  it("calls today's session finished once the 15:30 IST close has passed: it stops refreshing and may be cached", async () => {
+    // 2026-10-12 16:00 IST = 10:30Z, after the 10:00Z close.
+    const closed = await startWith(
+      { windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } },
+      new Date("2026-10-12T10:30:00.000Z"),
+    );
+    const response = await fetch(`${closed.base}/api/v1/depth/history?date=2026-10-12`);
+    expect(response.headers.get("cache-control")).toBe("private, max-age=600");
+    expect((await response.json()).data.inProgress).toBe(false);
+  });
+
+  it("does not call a session in progress before the 09:00 IST open", async () => {
+    // 2026-10-12 08:00 IST = 02:30Z.
+    const early = await startWith(
+      { windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } },
+      new Date("2026-10-12T02:30:00.000Z"),
+    );
+    const { data } = await (await fetch(`${early.base}/api/v1/depth/history?date=2026-10-12`)).json();
+    expect(data.inProgress).toBe(false);
   });
 
   it("reads the date it is asked for, with the bucket size it is asked for", async () => {
@@ -296,7 +318,7 @@ describe("GET /api/v1/depth/history", () => {
     const { data } = await (await fetch(`${base}/api/v1/depth/history?date=2026-10-09&bucketSeconds=300`)).json();
     expect(windowCalls[0]!.from.toISOString()).toBe("2026-10-09T03:30:00.000Z");
     expect(data.sessionDate).toBe("2026-10-09");
-    expect(data.isToday).toBe(false);
+    expect(data.inProgress).toBe(false);
     expect(data.bucketSeconds).toBe(300);
   });
 
