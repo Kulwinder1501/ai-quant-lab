@@ -16,6 +16,7 @@ import {
   type ChainResponse,
   type Leg,
 } from "../live-chain";
+import { ivRefusalLabel } from "../iv-refusal-label";
 
 /**
  * This page reads the API base URL from the same store as every other feature.
@@ -56,15 +57,7 @@ function compact(value: number | null): string {
 function ivLabel(leg: Leg | null): string {
   if (!leg) return "—";
   if (leg.impliedVolatility !== null) return `${(leg.impliedVolatility * 100).toFixed(1)}%`;
-  switch (leg.impliedVolatilityRefusal) {
-    case "EXPIRED_OR_ZERO_TIME": return "expired";
-    case "NO_TWO_SIDED_QUOTE": return "no quote";
-    case "BELOW_INTRINSIC": return "sub-intr.";
-    case "ABOVE_UPPER_BOUND": return "over cap";
-    case "EXTRINSIC_BELOW_PRICE_RESOLUTION": return "no extr.";
-    case "NO_UNDERLYING": return "no spot";
-    default: return "—";
-  }
+  return ivRefusalLabel(leg.impliedVolatilityRefusal);
 }
 
 /** Fixed decimals, or an em dash when the greek could not be computed. */
@@ -82,6 +75,16 @@ export function OptionChainDashboard() {
   const [expiry, setExpiry] = useState<string>("");
   const [view, setView] = useState<ChainView>("quotes");
   const [chain, setChain] = useState<ChainResponse | null>(null);
+  /**
+   * The server response exactly as fetched, never touched by `applyChainTick`.
+   *
+   * The charts read this, not `chain`. A tick re-solves any leg that ticked from its live mid, but
+   * leaves the implied forward at its snapshot value, so the tick-merged chain mixes clocks: streamed
+   * strikes near ATM on live mids, the rest on snapshot mids, all at a stale forward. Charted, that
+   * shows up as a step at the edge of the streamed band that reads as real structure. One clock per
+   * chart is what the "snapshot" label on it promises.
+   */
+  const [snapshotChain, setSnapshotChain] = useState<ChainResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [tradeModalConfig, setTradeModalConfig] = useState<{
@@ -127,6 +130,7 @@ export function OptionChainDashboard() {
       if (result.status === "aborted") return;
       if (result.status === "loaded") {
         setChain(result.chain);
+        setSnapshotChain(result.chain);
         setError(null);
       } else {
         setError(result.message);
@@ -159,7 +163,7 @@ export function OptionChainDashboard() {
    */
   const oiChartStrikes = useMemo(
     () =>
-      (chain?.strikes ?? []).map((row) => ({
+      (snapshotChain?.strikes ?? []).map((row) => ({
         strikePrice: row.strikePrice,
         call: row.call
           ? {
@@ -174,12 +178,12 @@ export function OptionChainDashboard() {
             }
           : null,
       })),
-    [chain?.strikes],
+    [snapshotChain?.strikes],
   );
 
   const greeksChartStrikes = useMemo(
     () =>
-      (chain?.strikes ?? []).map((row) => ({
+      (snapshotChain?.strikes ?? []).map((row) => ({
         strikePrice: row.strikePrice,
         call: row.call
           ? {
@@ -202,7 +206,7 @@ export function OptionChainDashboard() {
             }
           : null,
       })),
-    [chain?.strikes],
+    [snapshotChain?.strikes],
   );
 
   const chartExpiryLabel = useMemo(() => {
@@ -375,10 +379,10 @@ export function OptionChainDashboard() {
               <div className="px-4 py-4">
                 <OiByStrikeChart
                   strikes={oiChartStrikes}
-                  atmStrike={chain.atmStrike ?? null}
-                  underlyingValue={chain.underlyingValue ?? null}
-                  observedAt={chain.observedAt}
-                  provider={chain.provider}
+                  atmStrike={snapshotChain?.atmStrike ?? null}
+                  underlyingValue={snapshotChain?.underlyingValue ?? null}
+                  observedAt={snapshotChain?.observedAt}
+                  provider={snapshotChain?.provider}
                   expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
@@ -387,10 +391,10 @@ export function OptionChainDashboard() {
               <div className="px-4 py-4">
                 <GreeksByStrikeChart
                   strikes={greeksChartStrikes}
-                  atmStrike={chain.atmStrike ?? null}
-                  underlyingValue={chain.underlyingValue ?? null}
-                  observedAt={chain.observedAt}
-                  provider={chain.provider}
+                  atmStrike={snapshotChain?.atmStrike ?? null}
+                  underlyingValue={snapshotChain?.underlyingValue ?? null}
+                  observedAt={snapshotChain?.observedAt}
+                  provider={snapshotChain?.provider}
                   expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
