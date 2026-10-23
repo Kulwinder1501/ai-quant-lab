@@ -14,12 +14,14 @@ import {
   type DepthAvailable,
   type DepthPayload,
 } from "../depth-ladder-view";
-import { formatIstTime } from "../oi-format";
+import { formatIstClock } from "../depth-history-view";
 
 /** The API is read-only and the query is an index walk (about 0.2 ms), so a two second poll is cheap. */
 const POLL_MS = 2_000;
 
 interface Fetched {
+  /** What the payload was fetched for ("live", or the requested instant), so a slow answer is never shown for another. */
+  key: string | null;
   payload: DepthPayload | null;
   fetchedAtMs: number | null;
   /** The last refresh failure, kept beside the last good payload so a silent API never reads as a live book. */
@@ -77,10 +79,15 @@ function LadderBook({ data, nowMs, fetchedAtMs }: { data: DepthAvailable; nowMs:
         <span className="font-semibold text-white">{contract.providerSymbol.replace("NSE:", "")}</span>
         <span className="text-slate-400">expiry {contract.expiryDate} · lot {contract.lotSize}</span>
         <span className="text-slate-300">
-          book received <span className="font-mono text-slate-100">{formatIstTime(Date.parse(ladder.receivedAt))}</span> IST
-          <span className={status.tone === "warn" ? "ml-2 font-bold text-amber-200" : "ml-2 text-slate-400"}>
-            ({age < 60 ? `${age.toFixed(0)}s` : `${(age / 60).toFixed(1)}m`} old)
-          </span>
+          book received <span className="font-mono text-slate-100">{formatIstClock(Date.parse(ladder.receivedAt))}</span> IST
+          {data.requestedAsOf !== null ? (
+            // A past instant: an age measured from now would only say how long ago the day was.
+            <span className="ml-2 text-slate-400">(last book at or before {formatIstClock(Date.parse(data.requestedAsOf))})</span>
+          ) : (
+            <span className={status.tone === "warn" ? "ml-2 font-bold text-amber-200" : "ml-2 text-slate-400"}>
+              ({age < 60 ? `${age.toFixed(0)}s` : `${(age / 60).toFixed(1)}m`} old)
+            </span>
+          )}
         </span>
       </div>
       <p className="mb-3 text-[11px] text-slate-500">{status.detail}</p>
@@ -199,9 +206,10 @@ function LadderBook({ data, nowMs, fetchedAtMs }: { data: DepthAvailable; nowMs:
  * tick-by-tick slot, so this reads what it wrote. Shows how old the book is, counting the time since the last
  * successful refresh, so a stalled collector or an unreachable API cannot pass for a live market.
  */
-export function DepthLadderPanel({ underlying, nowMs }: { underlying: string; nowMs: number }) {
+export function DepthLadderPanel({ underlying, nowMs, asOf }: { underlying: string; nowMs: number; asOf?: string }) {
   const supported = DEPTH_UNDERLYINGS.includes(underlying);
-  const [fetched, setFetched] = useState<Fetched>({ payload: null, fetchedAtMs: null, error: null });
+  const key = asOf ?? "live";
+  const [fetched, setFetched] = useState<Fetched>({ key: null, payload: null, fetchedAtMs: null, error: null });
 
   useEffect(() => {
     if (!supported) return;
@@ -212,7 +220,8 @@ export function DepthLadderPanel({ underlying, nowMs }: { underlying: string; no
       if (inFlight) return;
       inFlight = true;
       try {
-        const response = await fetch(`${getApiV1Url()}/depth/ladder?underlying=${encodeURIComponent(underlying)}`, {
+        const asOfParam = asOf ? `&asOf=${encodeURIComponent(asOf)}` : "";
+        const response = await fetch(`${getApiV1Url()}/depth/ladder?underlying=${encodeURIComponent(underlying)}${asOfParam}`, {
           signal: controller.signal,
           cache: "no-store",
         });
@@ -221,22 +230,26 @@ export function DepthLadderPanel({ underlying, nowMs }: { underlying: string; no
           throw new Error(body?.error ?? `Depth request failed (${response.status}).`);
         }
         const body = await response.json() as { data: DepthPayload };
-        setFetched({ payload: body.data, fetchedAtMs: Date.now(), error: null });
+        setFetched({ key, payload: body.data, fetchedAtMs: Date.now(), error: null });
       } catch (caught) {
         if (isAbortError(caught)) return;
-        setFetched((previous) => ({ ...previous, error: errorMessage(caught, "The depth ladder could not be refreshed.") }));
+        setFetched((previous) => ({
+          ...(previous.key === key ? previous : { key, payload: null, fetchedAtMs: null }),
+          error: errorMessage(caught, "The depth ladder could not be refreshed."),
+        }));
       } finally {
         inFlight = false;
       }
     };
 
     void load();
-    const timer = window.setInterval(() => void load(), POLL_MS);
+    // A past instant cannot change: fetch it once. Only the live book is polled.
+    const timer = asOf ? null : window.setInterval(() => void load(), POLL_MS);
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      if (timer !== null) window.clearInterval(timer);
     };
-  }, [underlying, supported]);
+  }, [underlying, supported, asOf, key]);
 
   if (!supported) {
     return (
@@ -246,7 +259,11 @@ export function DepthLadderPanel({ underlying, nowMs }: { underlying: string; no
     );
   }
 
-  const { payload, fetchedAtMs, error } = fetched;
+  // An answer fetched for another instant (a slow reply after the page moved on) is never shown for this one.
+  const current = fetched.key === key;
+  const payload = current ? fetched.payload : null;
+  const fetchedAtMs = current ? fetched.fetchedAtMs : null;
+  const error = current ? fetched.error : null;
   return (
     <div className="w-full" aria-live="off">
       {error && (
