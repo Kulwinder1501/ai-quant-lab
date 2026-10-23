@@ -91,6 +91,25 @@ describe("buildDepthLadder: imbalance, defined exactly", () => {
     expect(imbalance.rankWeighted).toBeCloseTo((85 - 65) / (85 + 65), 10);
   });
 
+  it("weights only the first ten levels, so the figure means the same on a 10-level and a 50-level day", () => {
+    // Twelve levels a side on a one-point tick. Levels 11 and 12 carry enormous ask quantity: if they counted, the
+    // result would swing hard to the ask.
+    const prices = (start: number, step: number) => Array.from({ length: 12 }, (_, i) => start + step * i);
+    const twelve = frame({
+      levelsStored: 12,
+      bidPrice: prices(54_200, -1), bidQty: Array.from({ length: 12 }, () => 30), bidOrders: Array.from({ length: 12 }, () => 1),
+      askPrice: prices(54_220, 1), askQty: [...Array.from({ length: 10 }, () => 30), 9_999_999, 9_999_999], askOrders: Array.from({ length: 12 }, () => 1),
+    });
+    expect(buildDepthLadder(twelve, { now: at(1) }).imbalance.rankWeighted).toBe(0);
+    // And the cap is what makes it equal to the same book stored at ten levels.
+    const ten = frame({
+      levelsStored: 10,
+      bidPrice: prices(54_200, -1).slice(0, 10), bidQty: Array.from({ length: 10 }, () => 30), bidOrders: Array.from({ length: 10 }, () => 1),
+      askPrice: prices(54_220, 1).slice(0, 10), askQty: Array.from({ length: 10 }, () => 30), askOrders: Array.from({ length: 10 }, () => 1),
+    });
+    expect(buildDepthLadder(ten, { now: at(1) }).imbalance.rankWeighted).toBe(0);
+  });
+
   it("whole-book comes from the feed's own totals, which cover levels that are not stored", () => {
     const { imbalance } = buildDepthLadder(frame(), { now: at(1) });
     expect(imbalance.wholeBook).toBeCloseTo((28_080 - 60_270) / (28_080 + 60_270), 10);

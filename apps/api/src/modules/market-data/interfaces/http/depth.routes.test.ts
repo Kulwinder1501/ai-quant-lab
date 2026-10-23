@@ -33,7 +33,7 @@ function frame(providerSymbol: string, receivedAt = new Date("2026-10-12T04:30:0
 }
 
 interface Call { providerSymbol: string; asOf?: Date }
-interface WindowCall { providerSymbol: string; from: Date; to: Date }
+interface WindowCall { providerSymbol: string; from: Date; to: Date; maxLevels?: number }
 interface SessionDay { date: string; firstAt: Date; lastAt: Date; framesCapped: number }
 
 interface FakeData {
@@ -139,7 +139,7 @@ describe("GET /api/v1/depth/ladder", () => {
     expect(data.ladder.bestBid).toBe(54_200);
     expect(data.ladder.bids).toHaveLength(2);
     expect(data.definitions.wholeBook).toContain("whole-book totals");
-    expect(data.source).toContain("top 10 of 50 levels");
+    expect(data.source).toContain("2 of 50 levels stored"); // the frame says how many it holds, not a fixed number
   });
 
   it("falls through to the next month when the front month has no stored frame", async () => {
@@ -278,6 +278,12 @@ describe("GET /api/v1/depth/history", () => {
       ["2026-10-12", false], ["2026-10-09", false], ["2026-10-08", true],
     ]);
     expect(data.availableSessions[0]).toMatchObject({ providerSymbol: SYMBOL, framesCapped: 1000 });
+  });
+
+  it("reads only the first ten levels for the history, so a figure means the same on a 10-level and a 50-level day", async () => {
+    const { base, windowCalls } = await startWith({ windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } });
+    await fetch(`${base}/api/v1/depth/history`);
+    expect(windowCalls[0]!.maxLevels).toBe(10);
   });
 
   it("lets the browser keep a finished session for ten minutes, and never caches one still being written", async () => {
@@ -424,6 +430,22 @@ describe("GET /api/v1/depth/heatmap", () => {
     expect(data.rowRange.low).toBeLessThanOrEqual(data.rowRange.high);
     expect(data.definitions.empty).toContain("unknown");
     expect(data.counts).toMatchObject({ framesInSession: 3, framesUsed: 3 });
+  });
+
+  it("reads every stored level for the grid, and says how many levels each frame holds", async () => {
+    const { base, windowCalls } = await startWith({ windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } });
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap`)).json();
+    expect(windowCalls[0]!.maxLevels).toBe(50);
+    expect(data.storedLevels).toEqual({ min: 2, max: 2 });
+    expect(data.source).toContain("levels stored per frame: 2");
+  });
+
+  it("reports a range when days stored different numbers of levels, instead of one number for all", async () => {
+    const mixed = [frame(SYMBOL, new Date("2026-10-12T04:30:00.000Z")), { ...frame(SYMBOL, new Date("2026-10-12T04:30:05.000Z")), levelsStored: 50 }];
+    const { base } = await startWith({ windowFrames: { [SYMBOL]: mixed }, days: { [SYMBOL]: [day("2026-10-12")] } });
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap`)).json();
+    expect(data.storedLevels).toEqual({ min: 2, max: 50 });
+    expect(data.source).toContain("2 to 50");
   });
 
   it("carries the same holes, capture sessions and doubled-stream report as the history", async () => {

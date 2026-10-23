@@ -4,6 +4,9 @@ import type { ClassifiedFrame } from "../../../modules/market-data/domain/depth-
 import { SESSION_DAY_COUNT_CAP } from "../../../modules/market-data/domain/depth-history.js";
 import type { StoredDepthFrame } from "../../../modules/market-data/domain/depth-ladder.js";
 
+/** The feed's book depth, and so the most levels a frame can hold. */
+export const MAX_STORED_LEVELS = 50;
+
 const STORED_FRAME_COLUMNS = `provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
               levels_available, bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
               total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id`;
@@ -287,16 +290,33 @@ export class PostgresDepthFrameRepository {
    * decision, because two collectors writing at once would interleave two streams of the same contract.
    * Frames are read exactly as stored; `is_regression` and `is_duplicate` are not filtered on (see `latestFrame`).
    */
-  async framesInWindow(input: { providerSymbol: string; from: Date; to: Date }): Promise<StoredDepthFrame[]> {
+  async framesInWindow(input: {
+    providerSymbol: string;
+    from: Date;
+    to: Date;
+    /** Read only the first N levels of each side. Default: every stored level. */
+    maxLevels?: number;
+  }): Promise<StoredDepthFrame[]> {
+    const maxLevels = Math.max(1, Math.floor(input.maxLevels ?? MAX_STORED_LEVELS));
+    // The arrays are sliced in the database and the order counts are not read: a session is ~43,000 rows, and at 50
+    // levels the full rows are about five times the size of the 10-level ones. A slice past the end of a shorter
+    // array returns what is there, so a day stored at 10 levels reads the same under any `maxLevels`.
     const result = await this.database.query<StoredFrameRow>(
-      `SELECT ${STORED_FRAME_COLUMNS}
+      `SELECT provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
+              levels_available,
+              bid_price[1:$4] AS bid_price, bid_qty[1:$4] AS bid_qty, ARRAY[]::integer[] AS bid_orders,
+              ask_price[1:$4] AS ask_price, ask_qty[1:$4] AS ask_qty, ARRAY[]::integer[] AS ask_orders,
+              total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id
          FROM depth_frames
         WHERE provider_symbol = $1
           AND received_at >= $2 AND received_at < $3
         ORDER BY received_at ASC, sequence_no ASC`,
-      [input.providerSymbol.toUpperCase(), input.from, input.to],
+      [input.providerSymbol.toUpperCase(), input.from, input.to, maxLevels],
     );
-    return result.rows.map(toStoredFrame);
+    return result.rows.map((row) => {
+      const frame = toStoredFrame(row);
+      return { ...frame, levelsStored: Math.min(frame.levelsStored, maxLevels) };
+    });
   }
 
   /**

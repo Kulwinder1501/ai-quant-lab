@@ -21,6 +21,7 @@ import {
   type DepthHistoryBucketSeconds,
 } from "../../domain/depth-history.js";
 import { buildDepthLadder, IMBALANCE_DEFINITIONS, type StoredDepthFrame } from "../../domain/depth-ladder.js";
+import { MAX_STORED_LEVELS } from "../../../../infrastructure/database/repositories/postgres-depth-frame-repository.js";
 import { upcomingIndexFutures } from "../../domain/index-futures-contracts.js";
 
 /** Index futures the app knows the contract of. Whether depth is stored for one is a separate question. */
@@ -69,6 +70,9 @@ export function parseDepthLadderQuery(
 function istDate(instant: Date): string {
   return new Date(instant.getTime() + 330 * 60_000).toISOString().slice(0, 10);
 }
+
+/** Levels the history reads: its figures use the touch and the first five, and ten keeps every day comparable. */
+const HISTORY_LEVELS = 10;
 
 /** How far back the session drop-down looks. The table starts in September 2026; older days are asked for by date. */
 const SESSION_LOOKBACK_DAYS = 60;
@@ -174,6 +178,8 @@ type SessionDayRead =
     providerSymbol: string;
     expiryDate: string | null;
     frames: StoredDepthFrame[];
+    /** Fewest and most levels per frame among the frames read (after any `maxLevels` cut). */
+    storedLevels: { min: number; max: number };
     window: { from: Date; to: Date };
     /** The session's own day, 09:00 to 15:30 IST: the book is still being written. */
     inProgress: boolean;
@@ -190,6 +196,7 @@ async function readSessionDay(
   repository: HttpDependencies["depthFrameRepository"],
   query: { underlying: DepthUnderlying; date: string | null },
   now: Date,
+  maxLevels: number,
 ): Promise<SessionDayRead> {
   const { underlying, date: requestedDate } = query;
   const today = istDate(now);
@@ -245,7 +252,7 @@ async function readSessionDay(
   ].filter((symbol, index, all): symbol is string => symbol !== undefined && all.indexOf(symbol) === index);
 
   for (const providerSymbol of candidates) {
-    const frames = await repository.framesInWindow({ providerSymbol, ...window });
+    const frames = await repository.framesInWindow({ providerSymbol, ...window, maxLevels });
     if (frames.length === 0) continue;
     const expiryDate = expiryBySymbol.get(providerSymbol)
       ?? upcomingIndexFutures(sessionDate, 2).find((contract) => contract.providerInstrumentId === providerSymbol)?.expiryDate
@@ -256,6 +263,10 @@ async function readSessionDay(
       providerSymbol,
       expiryDate,
       frames,
+      storedLevels: {
+        min: Math.min(...frames.map((frame) => frame.levelsStored)),
+        max: Math.max(...frames.map((frame) => frame.levelsStored)),
+      },
       window,
       inProgress: now.getTime() >= window.from.getTime() && now.getTime() < window.to.getTime(),
       complete: now.getTime() >= window.to.getTime(),
@@ -330,7 +341,7 @@ export function registerDepthRoutes(
             requestedAsOf: asOf ? asOf.toISOString() : null,
             ladder: buildDepthLadder(frame, { now, historical: asOf !== null }),
             definitions: IMBALANCE_DEFINITIONS,
-            source: "depth_frames: stored feed frames, received-time stamped, top 10 of 50 levels",
+            source: `depth_frames: stored feed frame, received-time stamped, ${frame.levelsStored} of ${frame.levelsAvailable} levels stored`,
           },
         });
         return;
@@ -356,7 +367,8 @@ export function registerDepthRoutes(
    *
    * Observed frames summarised into buckets by the same rules as the ladder (see `buildDepthHistory`): nothing is
    * interpolated, a bucket with no usable frame has no value, and holes, concurrent writers and withheld frames are
-   * reported rather than smoothed over. Top ten levels only: the imbalance describes the top of the book.
+   * reported rather than smoothed over. Reads the first ten stored levels of every frame, whatever was stored, so
+   * a figure means the same on every day; the imbalance describes the top of the book.
    */
   app.get("/api/v1/depth/history", async (request, response, next) => {
     try {
@@ -375,7 +387,7 @@ export function registerDepthRoutes(
       }
       const { underlying, bucketSeconds } = parsed.value;
 
-      const read = await readSessionDay(dependencies.depthFrameRepository, parsed.value, now);
+      const read = await readSessionDay(dependencies.depthFrameRepository, parsed.value, now, HISTORY_LEVELS);
       if (read.kind === "unavailable") {
         response.status(200).json({ data: read.body });
         return;
@@ -398,7 +410,7 @@ export function registerDepthRoutes(
           ...history,
           availableSessions: read.availableSessions,
           definitions: { ...DEPTH_HISTORY_DEFINITIONS, ...IMBALANCE_DEFINITIONS },
-          source: "depth_frames: stored feed frames, received-time stamped, top 10 of 50 levels",
+          source: `depth_frames: stored feed frames, received-time stamped; this view reads the first ${HISTORY_LEVELS} stored levels of each frame`,
         },
       });
     } catch (error) {
@@ -410,7 +422,7 @@ export function registerDepthRoutes(
    * One IST trading day of the stored book as a price-by-time grid of resting quantity (see `buildDepthHeatmap`).
    *
    * A price the stored levels did not reach is unknown, not zero, and is absent from `cells`; a covered price with
-   * nothing resting is a real zero. Only the top ten levels a side are stored, so this is the top of the book.
+   * nothing resting is a real zero. Reads every stored level (10 before the collector was raised, 50 after).
    * `gaps`, `captureSessions` and `concurrentWriters` come from the same frames as the history so a hole or a doubled
    * stream is shown the same way on both.
    */
@@ -432,7 +444,7 @@ export function registerDepthRoutes(
       }
       const { underlying, bucketSeconds, rowPoints } = parsed.value;
 
-      const read = await readSessionDay(dependencies.depthFrameRepository, parsed.value, now);
+      const read = await readSessionDay(dependencies.depthFrameRepository, parsed.value, now, MAX_STORED_LEVELS);
       if (read.kind === "unavailable") {
         response.status(200).json({ data: read.body });
         return;
@@ -451,12 +463,13 @@ export function registerDepthRoutes(
           window: { from: read.window.from.toISOString(), to: read.window.to.toISOString() },
           inProgress: read.inProgress,
           ...heatmap,
+          storedLevels: read.storedLevels,
           gaps,
           captureSessions,
           concurrentWriters,
           availableSessions: read.availableSessions,
           definitions: HEATMAP_DEFINITIONS,
-          source: "depth_frames: stored feed frames, received-time stamped, top 10 of 50 levels",
+          source: `depth_frames: stored feed frames, received-time stamped; levels stored per frame: ${read.storedLevels.min === read.storedLevels.max ? read.storedLevels.min : `${read.storedLevels.min} to ${read.storedLevels.max}`}`,
         },
       });
     } catch (error) {

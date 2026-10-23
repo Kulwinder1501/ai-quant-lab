@@ -7,7 +7,8 @@
  *
  * The one thing a heatmap of a truncated book must get right is the difference between *empty* and *not seen*:
  *
- * - Only the best ten levels a side are stored, and they reach a few points (median 5.4, see `depth-ladder.ts`). A
+ * - Only the best N levels a side are stored (10, then 50 from the day the collector was raised), and ten reach a few points
+ *   (median 5.4, see `depth-ladder.ts`). A
  *   price inside the span from the deepest stored bid to the deepest stored ask is fully described: it either holds
  *   a stored level or holds nothing (the spread, or a gap between levels). A price outside that span is **unknown**:
  *   it may hold a great deal.
@@ -194,5 +195,5 @@ export const HEATMAP_DEFINITIONS = {
   cell: "Resting quantity at a price bin (rowPoints index points tall), averaged over the frames in the time bucket that saw the whole bin. Underlying units, not lots; resting, not traded.",
   empty: "A bin inside the span the stored levels describe (deepest stored bid to deepest stored ask) that holds nothing is a real zero and is drawn as an empty cell. A bin outside it is unknown and is not drawn at all.",
   scale: "Colour saturates at the 95th percentile of the day's non-empty cells (bid + ask), so a single very large order does not wash out the rest. Intensity is linear below that cap.",
-  coverage: "Only the best ten levels a side are stored and they reach a few points, so the heatmap shows the top of the book, not its depth.",
+  coverage: "Only the best N levels a side are stored (N is in the header: 10 before the collector was raised to 50, 50 after), so the heatmap shows the part of the book those levels reach. A price beyond them is not seen.",
 } as const;

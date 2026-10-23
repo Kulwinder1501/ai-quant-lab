@@ -262,6 +262,6 @@ export const DEPTH_HISTORY_DEFINITIONS = {
   bucket: "Frames received in [t, t + bucket) by our own clock. Means are over frames, not over time: the feed's frames are not evenly spaced.",
   spread: "Best ask minus best bid, in index points. The bucket's median, and its maximum so a brief widening is not averaged away.",
   imbalance: "(bid - ask) / (bid + ask), averaged over the frames in the bucket. Level 1 is the touch; level 5 is the first five stored levels of each side. Resting quantity, not traded volume.",
-  wholeBook: "The same ratio from the feed's whole-book totals (all 50 levels). A frame with a zero total is a feed dropout and is left out.",
+  wholeBook: "The same ratio from the feed's whole-book totals, which cover more of the book than the stored levels do. A frame with a zero total is a feed dropout and is left out.",
   gap: "More than 30 seconds between two consecutive in-session frames. Lines are cut there; nothing is interpolated.",
 } as const;

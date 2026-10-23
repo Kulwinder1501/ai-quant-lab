@@ -8,7 +8,8 @@
  *
  * Four measured facts about `depth_frames` shape the rules below (BANKNIFTY futures, 2026-10-22 session):
  *
- * 1. **Only the top 10 of the feed's 50 levels are stored, and they are shallow.** They reach a median 5.4
+ * 1. **Only the top 10 of the feed's 50 levels were stored, and they are shallow** (measured while 10 were stored; the
+ *    collector now stores all 50, so a day's `levelsStored` says which it is).** They reach a median 5.4
  *    points from the touch (95th percentile 24) and hold about 2.4% of the whole book's resting quantity.
  *    A "book imbalance" over them is a top-of-book measure, so it is never called the book's imbalance.
  *    The feed's own `total_buy_qty` / `total_sell_qty` cover the whole book and are order-independent, so the
@@ -24,6 +25,9 @@
  *
  * Quantities are underlying units (contracts x lot size), not lots; a level of 60 on BANKNIFTY is two lots.
  */
+
+/** The feed's book depth, and so the most levels a frame can hold. */
+export const MAX_STORED_LEVELS = 50;
 
 /** First instant of the capture regime whose stored levels are keyed by each level's own number. */
 export const DEPTH_REGIME_B_START = new Date("2026-09-07T04:29:11.000Z");
@@ -76,7 +80,8 @@ export interface DepthImbalance {
   rankWeighted: number | null;
   /**
    * (total bid - total ask) / (total bid + total ask) from the feed's own whole-book totals, which cover all
-   * levels the feed carries (50), not only the stored ten. Null when the feed gave no totals.
+   * more of the book than the stored levels do (whether they stop at the feed's 50 levels is not established).
+   * Null when the feed gave no usable totals.
    */
   wholeBook: number | null;
 }
@@ -176,12 +181,18 @@ function topOfBook(bids: readonly LadderLevel[], asks: readonly LadderLevel[], k
   return ratio(bids[k - 1]!.cumulativeQty, asks[k - 1]!.cumulativeQty);
 }
 
+/**
+ * The imbalance weighted 1/rank over the first `RANK_WEIGHTED_LEVELS` levels. Capped on purpose: storage was raised from
+ * 10 to 50 levels, and a figure over "all stored levels" would be a different quantity before and after that day.
+ */
+export const RANK_WEIGHTED_LEVELS = 10;
+
 function rankWeighted(bids: readonly LadderLevel[], asks: readonly LadderLevel[]): number | null {
   if (bids.length === 0 || asks.length === 0) return null;
   let bid = 0;
   let ask = 0;
-  bids.forEach((level, index) => { bid += level.qty / (index + 1); });
-  asks.forEach((level, index) => { ask += level.qty / (index + 1); });
+  bids.slice(0, RANK_WEIGHTED_LEVELS).forEach((level, index) => { bid += level.qty / (index + 1); });
+  asks.slice(0, RANK_WEIGHTED_LEVELS).forEach((level, index) => { ask += level.qty / (index + 1); });
   return ratio(bid, ask);
 }
 
@@ -306,6 +317,6 @@ export function buildDepthLadder(
 
 export const IMBALANCE_DEFINITIONS = {
   topOfBook: "(bid - ask) / (bid + ask) over the first k stored levels of each side, at one instant. Top of the book only.",
-  rankWeighted: "The same ratio with level i weighted 1/i over the stored levels (at most 10), so the touch counts most.",
-  wholeBook: "(total bid - total ask) / (total bid + total ask) from the feed's own whole-book totals, covering all levels the feed carries (50), not only the ten stored.",
+  rankWeighted: "The same ratio with level i weighted 1/i over the first ten levels, so the touch counts most. Capped at ten so it means the same on every day, whatever number of levels was stored.",
+  wholeBook: "(total bid - total ask) / (total bid + total ask) from the feed's own whole-book totals, which cover more of the book than the stored levels do. Whether they stop at the feed's 50 levels is not established.",
 } as const;

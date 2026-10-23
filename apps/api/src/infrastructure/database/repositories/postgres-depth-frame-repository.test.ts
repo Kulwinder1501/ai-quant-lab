@@ -120,7 +120,41 @@ describe("PostgresDepthFrameRepository.framesInWindow", () => {
     expect(sql).not.toMatch(/LIKE/i);
     expect(sql).not.toContain("is_regression");
     expect(sql).not.toContain("is_duplicate =");
-    expect(values).toEqual(["NSE:BANKNIFTY26OCTFUT", from, to]);
+    expect(values).toEqual(["NSE:BANKNIFTY26OCTFUT", from, to, 50]);
+  });
+
+  it("slices the level arrays in the database and does not read the order counts", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await new PostgresDepthFrameRepository({ query } as unknown as DatabasePool)
+      .framesInWindow({ providerSymbol: "NSE:BANKNIFTY26OCTFUT", from, to, maxLevels: 10 });
+
+    const [sql, values] = query.mock.calls[0] as unknown as [string, unknown[]];
+    for (const column of ["bid_price", "bid_qty", "ask_price", "ask_qty"]) expect(sql).toContain(`${column}[1:$4] AS ${column}`);
+    expect(sql).toContain("ARRAY[]::integer[] AS bid_orders");
+    // The only mention is the empty alias: the stored order-count arrays are not selected.
+    expect(sql.match(/bid_orders/g)).toHaveLength(1);
+    expect(sql.match(/ask_orders/g)).toHaveLength(1);
+    expect(values[3]).toBe(10);
+  });
+
+  it("never asks for fewer than one level, and rounds a fractional request down", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const repository = new PostgresDepthFrameRepository({ query } as unknown as DatabasePool);
+    await repository.framesInWindow({ providerSymbol: "X", from, to, maxLevels: 0 });
+    await repository.framesInWindow({ providerSymbol: "X", from, to, maxLevels: 7.9 });
+    expect((query.mock.calls[0] as unknown as [string, unknown[]])[1][3]).toBe(1);
+    expect((query.mock.calls[1] as unknown as [string, unknown[]])[1][3]).toBe(7);
+  });
+
+  it("reports the levels actually read, not the levels the row was stored with", async () => {
+    const query = vi.fn(async () => ({ rows: [storedRow({ levels_stored: 50 })] }));
+    const repository = new PostgresDepthFrameRepository({ query } as unknown as DatabasePool);
+    expect((await repository.framesInWindow({ providerSymbol: "X", from, to, maxLevels: 10 }))[0]!.levelsStored).toBe(10);
+    // A day stored at fewer levels than asked for keeps its own number: nothing is invented.
+    const small = vi.fn(async () => ({ rows: [storedRow({ levels_stored: 10 })] }));
+    const frames = await new PostgresDepthFrameRepository({ query: small } as unknown as DatabasePool)
+      .framesInWindow({ providerSymbol: "X", from, to, maxLevels: 50 });
+    expect(frames[0]!.levelsStored).toBe(10);
   });
 
   it("maps every row the way the single-frame read does, and keeps each row's capture session", async () => {
