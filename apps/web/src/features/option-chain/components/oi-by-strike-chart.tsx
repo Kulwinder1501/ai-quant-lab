@@ -168,6 +168,13 @@ function SnapshotFreshnessBar(props: {
           {copy.detail}
         </p>
       )}
+      {assessment.preOpenOiCarryover && (
+        <p className="mt-1 text-[11px] text-amber-200/90">
+          Pre-open carryover: this snapshot was observed before 09:15 IST. Open interest is the
+          previous session&apos;s close echoed before the exchange publishes a fresh book — change
+          will read as zero until the next intraday collect.
+        </p>
+      )}
     </div>
   );
 }
