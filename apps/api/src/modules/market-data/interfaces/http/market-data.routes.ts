@@ -553,6 +553,11 @@ export function registerMarketDataRoutes(
           intrinsicValue: greeks?.intrinsicValue ?? null,
           timeValue: greeks?.timeValue ?? null,
           daysToExpiry: quoteTime > 0 ? quoteTime * 365 : 0,
+          // What Fyers itself reported for this contract (`greeks=1`), as sent and in its units: IV in
+          // percent, and one value per strike shared by call and put. Observed, and kept apart from the
+          // model values above so the two can be compared rather than one silently replacing the other.
+          // Null when none was stored (older snapshots, or none sent).
+          vendorGreeks: quote.vendorGreeks ?? null,
         };
         row[quote.optionType === "CE" ? "call" : "put"] = leg;
       }

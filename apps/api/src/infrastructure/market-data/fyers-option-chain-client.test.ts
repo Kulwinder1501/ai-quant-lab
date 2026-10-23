@@ -372,3 +372,87 @@ describe("FyersOptionChainClient", () => {
     expect(authorization).toBe("APPID-100:access-token");
   });
 });
+
+describe("FyersOptionChainClient provider greeks (greeks=1)", () => {
+  /**
+   * Rows copied verbatim from the live endpoint 2026-10-23 14:36 IST (NSE:SBIN-EQ, strikecount 3, greeks=1),
+   * trimmed to the underlying row and the 960 strike; no field was edited. Real values rather than invented ones: the docs' own sample repeats one set on every row,
+   * and what the endpoint really sends (IV in percent, one value per strike shared by call and put, gamma to four
+   * decimals) is the thing under test.
+   */
+  const RECORDED = new Response(JSON.stringify({
+    s: "ok",
+    code: 200,
+    data: {
+      expiryData: [{ date: "27-10-2026", expiry: "1793095800", expiry_flag: "M" }],
+      optionsChain: [
+        {
+          ask: 956.25, bid: 956, description: "STATE BANK OF INDIA", ex_symbol: "SBIN", exchange: "NSE", fp: 957.7, fpch: -12.3,
+          fpchp: -1.27, fyToken: "10100000003045", ltp: 956.3, ltpch: -13.7, ltpchp: -1.41, option_type: "", strike_price: -1,
+          symbol: "NSE:SBIN-EQ",
+        },
+        {
+          ask: 6.4, bid: 6.35, fyToken: "1011261027108597", ltp: 6.45, ltpch: -7.7, ltpchp: -54.42, oi: 3_834_750, oich: -293_250,
+          oichp: -7.1, prev_oi: 4_128_000, option_type: "CE", strike_price: 960, symbol: "NSE:SBIN26OCT960CE", volume: 12_689_250,
+          greeks: { delta: 0.46, gamma: 0.021, iv: 18.74, theta: -0.93, vega: 0.4 },
+        },
+        {
+          ask: 9.65, bid: 9.55, fyToken: "1011261027108598", ltp: 9.3, ltpch: 4.65, ltpchp: 100, oi: 2_220_750, oich: -593_250,
+          oichp: -21.08, prev_oi: 2_814_000, option_type: "PE", strike_price: 960, symbol: "NSE:SBIN26OCT960PE", volume: 12_396_000,
+          greeks: { delta: -0.54, gamma: 0.021, iv: 18.74, theta: -0.93, vega: 0.4 },
+        },
+      ],
+    },
+  }), { status: 200 });
+
+  it("asks for the greeks on the same request, so it costs no extra call", async () => {
+    let requested = "";
+    const client = build(async (input) => {
+      requested = String(input);
+      return chainBody();
+    });
+    await client.fetchChain({ underlyingSymbol: "NIFTY50" });
+    expect(new URL(requested).searchParams.get("greeks")).toBe("1");
+  });
+
+  it("stores the provider's values as sent, keeping IV in percent and the shared per-strike values", async () => {
+    const snapshot = await build(async () => RECORDED.clone()).fetchChain({ underlyingSymbol: "SBIN" });
+    const call = snapshot.quotes.find((q) => q.optionType === "CE")!;
+    const put = snapshot.quotes.find((q) => q.optionType === "PE")!;
+    expect(call.vendorGreeks).toEqual({ delta: 0.46, gamma: 0.021, theta: -0.93, vega: 0.4, impliedVolatilityPercent: 18.74 });
+    // The provider's own structure: one IV, gamma, theta and vega per strike, put delta = call delta - 1.
+    expect(put.vendorGreeks!.impliedVolatilityPercent).toBe(call.vendorGreeks!.impliedVolatilityPercent);
+    expect(put.vendorGreeks!.theta).toBe(call.vendorGreeks!.theta);
+    expect(call.vendorGreeks!.delta! - 1).toBeCloseTo(put.vendorGreeks!.delta!, 10);
+  });
+
+  it("records null when the provider sent no greeks, and still stores the quote", async () => {
+    const snapshot = await build(async () => chainBody()).fetchChain({ underlyingSymbol: "NIFTY50" });
+    expect(snapshot.quotes.length).toBeGreaterThan(0);
+    expect(snapshot.quotes.every((quote) => quote.vendorGreeks === null)).toBe(true);
+  });
+
+  it("drops malformed greeks without losing the observation they sit beside", async () => {
+    const body = new Response(JSON.stringify({
+      s: "ok",
+      code: 200,
+      data: {
+        expiryData: [{ date: "27-10-2026", expiry: "1793095800", expiry_flag: "M" }],
+        optionsChain: [
+          { strike_price: -1, ltp: 22_543 },
+          {
+            option_type: "CE", strike_price: 22_500, symbol: "NSE:NIFTY26OCT22500CE", ltp: 195, bid: 194, ask: 196,
+            oi: 6_500, prev_oi: 6_000, oich: 500, volume: 10,
+            greeks: { delta: 9, gamma: -1, theta: "x", vega: -2, iv: 0 },
+          },
+        ],
+      },
+    }), { status: 200 });
+    const snapshot = await build(async () => body).fetchChain({ underlyingSymbol: "NIFTY50" });
+    const quote = snapshot.quotes[0]!;
+    expect(quote.vendorGreeks).toBeNull();
+    // The open interest and quotes the table exists to record are untouched.
+    expect(quote.openInterest).toBe(6_500);
+    expect(quote.bid).toBe(194);
+  });
+});

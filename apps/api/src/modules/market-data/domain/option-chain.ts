@@ -28,6 +28,7 @@ export type ExpiryKind = "WEEKLY" | "MONTHLY";
 export type Moneyness = "ITM" | "ATM" | "OTM";
 
 import { impliedVolatilityFromPremium, midPriceForIv, yearsToExpiry, RISK_FREE_RATE } from "@ai-quant-lab/pricing";
+import type { VendorGreeks } from "./vendor-greeks.js";
 
 /** One contract as the provider quoted it. Prices are nullable: an illiquid strike
  * genuinely has no bid, and a zero would claim someone bid nothing. */
@@ -45,6 +46,12 @@ export interface OptionChainQuote {
   openInterest: number | null;
   previousOpenInterest: number | null;
   openInterestChange: number | null;
+  /**
+   * The provider's own Greeks for this contract, when it sent them (`greeks=1`), as sent and in its
+   * units. `null`/absent means "not observed", never zero. Optional so a quote built by a collector or
+   * a test that predates this field stays valid. Not the Greeks the pages show: those are computed.
+   */
+  vendorGreeks?: VendorGreeks | null;
 }
 
 export interface OptionChainSnapshot {

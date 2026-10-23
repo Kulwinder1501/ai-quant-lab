@@ -7,6 +7,7 @@ import type {
   OptionChainSnapshot,
   OptionType,
 } from "../../modules/market-data/domain/option-chain.js";
+import { parseVendorGreeks } from "../../modules/market-data/domain/vendor-greeks.js";
 import { FYERS_PROVIDER_ID, type FyersTokenService } from "./fyers-token-service.js";
 
 type FetchFunction = typeof fetch;
@@ -23,6 +24,8 @@ interface FyersChainRow {
   oi?: number;
   prev_oi?: number;
   oich?: number;
+  /** Present when the request set `greeks=1`. Untyped on purpose: it is parsed field by field. */
+  greeks?: unknown;
 }
 
 interface FyersChainResponse {
@@ -93,6 +96,11 @@ export class FyersOptionChainClient {
     const endpoint = new URL("/data/options-chain-v3", this.baseUrl);
     endpoint.searchParams.set("symbol", providerSymbol);
     endpoint.searchParams.set("strikecount", String(strikeCount));
+    // The provider's own Greeks ride on the same request, so this costs nothing against the 5,000 a day.
+    // Tested 2026-10-23 on NIFTY50, BANKNIFTY and SBIN: present on every option row and varying by strike
+    // (the docs' sample repeats one set on every row, which made it look like a placeholder). They are
+    // kept beside the chain as a raw observation; the Greeks the pages display are still computed here.
+    endpoint.searchParams.set("greeks", "1");
     // Absent, the provider returns whichever expiry it considers current -- in practice the front
     // one. Naming the expiry is the only way to reach any other listed contract's book.
     if (input.expiryToken) endpoint.searchParams.set("timestamp", input.expiryToken);
@@ -188,6 +196,7 @@ export class FyersOptionChainClient {
         openInterest: nonNegativeIntegerOrNull(row.oi),
         previousOpenInterest: nonNegativeIntegerOrNull(row.prev_oi),
         openInterestChange: integerOrNull(row.oich),
+        vendorGreeks: parseVendorGreeks(row.greeks),
       });
     }
 

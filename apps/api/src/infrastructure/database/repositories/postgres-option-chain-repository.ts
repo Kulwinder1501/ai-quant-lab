@@ -9,6 +9,7 @@ import type {
   OptionChainSnapshot,
   OptionType,
 } from "../../../modules/market-data/domain/option-chain.js";
+import type { VendorGreeks } from "../../../modules/market-data/domain/vendor-greeks.js";
 import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 
 /**
@@ -34,6 +35,24 @@ function toNumberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * The provider's stored Greeks for one row, or null when none were observed.
+ *
+ * All five NULL (a row from before migration 142, an underlying the provider sends no Greeks for) reads
+ * as `null`, "not observed", rather than as an object of nulls: callers branch on the one, and an
+ * object of nulls would invite treating absence as data. Exported for the test.
+ */
+export function vendorGreeksFromRow(row: Record<string, unknown>): VendorGreeks | null {
+  const greeks: VendorGreeks = {
+    delta: toNumberOrNull(row.vendor_delta),
+    gamma: toNumberOrNull(row.vendor_gamma),
+    theta: toNumberOrNull(row.vendor_theta),
+    vega: toNumberOrNull(row.vendor_vega),
+    impliedVolatilityPercent: toNumberOrNull(row.vendor_iv_percent),
+  };
+  return Object.values(greeks).some((value) => value !== null) ? greeks : null;
+}
+
 
 export class PostgresOptionChainRepository {
   constructor(private readonly pool: DatabasePool) {}
@@ -57,8 +76,9 @@ export class PostgresOptionChainRepository {
             underlying_symbol, provider, observed_at, expiry_date, expiry_kind,
             strike_price, option_type, provider_symbol, provider_token,
             last_price, bid, ask, volume, open_interest, previous_open_interest,
-            open_interest_change, underlying_value
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            open_interest_change, underlying_value,
+            vendor_delta, vendor_gamma, vendor_theta, vendor_vega, vendor_iv_percent
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
           ON CONFLICT (underlying_symbol, observed_at, expiry_date, strike_price, option_type)
           DO NOTHING
         `, [
@@ -79,6 +99,13 @@ export class PostgresOptionChainRepository {
           quote.previousOpenInterest,
           quote.openInterestChange,
           snapshot.underlyingValue,
+          // NULL when the provider sent none (older rows, an underlying without Greeks, a value that
+          // failed the range check): "not observed", never zero.
+          quote.vendorGreeks?.delta ?? null,
+          quote.vendorGreeks?.gamma ?? null,
+          quote.vendorGreeks?.theta ?? null,
+          quote.vendorGreeks?.vega ?? null,
+          quote.vendorGreeks?.impliedVolatilityPercent ?? null,
         ]);
         inserted += result.rowCount ?? 0;
       }
@@ -370,7 +397,8 @@ export class PostgresOptionChainRepository {
     const result = await this.pool.query(`
       SELECT provider, expiry_date, expiry_kind, strike_price, option_type, provider_symbol,
              provider_token, last_price, bid, ask, volume, open_interest,
-             previous_open_interest, open_interest_change, underlying_value
+             previous_open_interest, open_interest_change, underlying_value,
+             vendor_delta, vendor_gamma, vendor_theta, vendor_vega, vendor_iv_percent
       FROM option_chain_snapshots
       WHERE underlying_symbol = $1 AND observed_at = $2
         AND ($3::date IS NULL OR expiry_date = $3::date)
@@ -392,6 +420,7 @@ export class PostgresOptionChainRepository {
       openInterest: toNumberOrNull(row.open_interest),
       previousOpenInterest: toNumberOrNull(row.previous_open_interest),
       openInterestChange: toNumberOrNull(row.open_interest_change),
+      vendorGreeks: vendorGreeksFromRow(row),
     }));
 
     // The calendar written by the same collection, matched on the same instant. Empty for
