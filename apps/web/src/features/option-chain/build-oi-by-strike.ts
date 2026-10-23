@@ -5,9 +5,13 @@
  *
  * Units: Fyers `oi` is stored as underlying units (not lots/contracts). Over 30 days of
  * `option_chain_snapshots`, BANKNIFTY OI was a whole multiple of its lot (30) on 100% of rows and
- * NIFTY50 OI of 65 on 98.0%; the residue is mostly the 09:11 pre-open slot, which repeats the previous
- * close. The registry once held 75 for NIFTY50 (corrected to the exchange's 65 by migration 141).
- * Axis label must say units. Do not claim "always" beyond the measured window.
+ * NIFTY50 OI of 65 on 98.0%. The residue is explained, and none of it is a lot-size problem: 60% is
+ * the 09:11 pre-open slot (it repeats the previous close), and of the intraday remainder (0.7% of
+ * rows, 17 contracts) about half is the 10-20 holiday echoing the previous close and the rest is two
+ * expiry-week September puts whose OI is off-lot early in a day and aligned later, while their
+ * neighbours at the same instant were not. Do not divide OI by the lot to get lots; the unit is
+ * underlying units. The registry once held 75 for NIFTY50 (corrected to the exchange's 65 by
+ * migration 141). Axis label must say units. Do not claim "always" beyond the measured window.
  */
 
 export const OI_AXIS_UNIT_LABEL = "units (Fyers oi; not lots)";
