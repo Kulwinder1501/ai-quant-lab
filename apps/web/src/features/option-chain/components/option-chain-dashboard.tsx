@@ -10,7 +10,7 @@ import { OptionTradeModal } from "./option-trade-modal";
 import { GreeksByStrikeChart } from "./greeks-by-strike-chart";
 import { OiByStrikeChart } from "./oi-by-strike-chart";
 import { OiHistoryPanel } from "./oi-history-panel";
-import { DepthLadderPanel } from "./depth-ladder-panel";
+import { DepthView } from "./depth-view";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -393,8 +393,8 @@ export function OptionChainDashboard() {
               </div>
             ) : view === "depth" ? (
               <div className="px-4 py-4">
-                {/* Reads the collector's stored frames, not the broker; keyed so a switch resets its poll. */}
-                <DepthLadderPanel key={underlying} underlying={underlying} nowMs={now} />
+                {/* Reads the collector's stored frames, not the broker; keyed so a switch resets its poll and its session. */}
+                <DepthView key={underlying} underlying={underlying} nowMs={now} />
               </div>
             ) : view === "history" ? (
               <div className="px-4 py-4">
