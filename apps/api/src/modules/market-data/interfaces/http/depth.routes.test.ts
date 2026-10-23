@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import type { StoredDepthFrame } from "../../domain/depth-ladder.js";
-import { parseDepthHistoryQuery, parseDepthLadderQuery, registerDepthRoutes } from "./depth.routes.js";
+import { parseDepthHeatmapQuery, parseDepthHistoryQuery, parseDepthLadderQuery, registerDepthRoutes } from "./depth.routes.js";
 
 /** 2026-10-12 is a Monday; 10:00 IST = 04:30Z. */
 const NOW = new Date("2026-10-12T04:30:01.000Z");
@@ -354,5 +354,111 @@ describe("GET /api/v1/depth/history", () => {
     const { data } = await (await fetch(`${base}/api/v1/depth/history`)).json();
     expect(data.captureSessions).toHaveLength(2);
     expect(data.concurrentWriters).toHaveLength(1);
+  });
+});
+
+describe("parseDepthHeatmapQuery", () => {
+  const parse = (input: { underlying?: string; date?: string; bucketSeconds?: string; rowPoints?: string }) =>
+    parseDepthHeatmapQuery({ underlying: input.underlying, date: input.date, bucketSeconds: input.bucketSeconds, rowPoints: input.rowPoints }, NOW);
+
+  it("defaults to BANKNIFTY, the latest session, one-minute columns and two-point rows", () => {
+    expect(parse({})).toEqual({ ok: true, value: { underlying: "BANKNIFTY", date: null, bucketSeconds: 60, rowPoints: 2 } });
+  });
+
+  it("accepts the offered column and row sizes", () => {
+    expect(parse({ bucketSeconds: "300", rowPoints: "5", date: "2026-10-09" })).toEqual({
+      ok: true, value: { underlying: "BANKNIFTY", date: "2026-10-09", bucketSeconds: 300, rowPoints: 5 },
+    });
+  });
+
+  it("refuses a size that is not offered, including 10-second columns the history allows but the grid does not", () => {
+    for (const input of [{ bucketSeconds: "10" }, { bucketSeconds: "45" }, { rowPoints: "3" }, { rowPoints: "0.5" }, { rowPoints: "2px" }]) {
+      expect(parse(input).ok, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it("shares the underlying and date rules with the history", () => {
+    expect(parse({ underlying: "SBIN" }).ok).toBe(false);
+    expect(parse({ date: "2026-02-30" }).ok).toBe(false);
+    expect(parse({ date: "2026-10-13" })).toEqual({ ok: false, error: "`date` is in the future." });
+  });
+});
+
+describe("GET /api/v1/depth/heatmap", () => {
+  const SYMBOL = "NSE:BANKNIFTY26OCTFUT";
+  const day = (date: string, framesCapped = 1000): SessionDay => ({
+    date, firstAt: new Date(`${date}T03:39:00.000Z`), lastAt: new Date(`${date}T09:59:59.000Z`), framesCapped,
+  });
+  const frames = [
+    frame(SYMBOL, new Date("2026-10-12T04:30:00.000Z")),
+    frame(SYMBOL, new Date("2026-10-12T04:30:30.000Z")),
+    frame(SYMBOL, new Date("2026-10-12T04:31:10.000Z")),
+  ];
+
+  it("rejects a bad query with 400 before any read", async () => {
+    const { base, windowCalls } = await startWith({});
+    for (const query of ["rowPoints=3", "bucketSeconds=10", "date=2026-02-30", "underlying=SBIN"]) {
+      expect((await fetch(`${base}/api/v1/depth/heatmap?${query}`)).status, query).toBe(400);
+    }
+    expect(windowCalls).toHaveLength(0);
+  });
+
+  it("reads the latest stored session and returns a sparse grid, its colour scale, and the buckets it is indexed by", async () => {
+    const { base, windowCalls } = await startWith({
+      windowFrames: { [SYMBOL]: frames },
+      days: { [SYMBOL]: [day("2026-10-12"), day("2026-10-09")] },
+    });
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap`)).json();
+
+    expect(windowCalls[0]!.from.toISOString()).toBe("2026-10-12T03:30:00.000Z");
+    expect(data).toMatchObject({
+      available: true, underlying: "BANKNIFTY", sessionDate: "2026-10-12", inProgress: true, bucketSeconds: 60, rowPoints: 2,
+      contract: { providerSymbol: SYMBOL, expiryDate: "2026-10-27" },
+    });
+    expect(data.buckets.map((b: { t: string }) => b.t)).toEqual(["2026-10-12T04:30:00.000Z", "2026-10-12T04:31:00.000Z"]);
+    expect(data.cellFields).toEqual(["bucketIndex", "row", "bidQty", "askQty", "framesCovering"]);
+    expect(data.cells.length).toBeGreaterThan(0);
+    for (const cell of data.cells) expect(cell[0] === 0 || cell[0] === 1).toBe(true);
+    expect(data.scale.capQty).toBeGreaterThan(0);
+    expect(data.scale.capPercentile).toBe(95);
+    expect(data.rowRange.low).toBeLessThanOrEqual(data.rowRange.high);
+    expect(data.definitions.empty).toContain("unknown");
+    expect(data.counts).toMatchObject({ framesInSession: 3, framesUsed: 3 });
+  });
+
+  it("carries the same holes, capture sessions and doubled-stream report as the history", async () => {
+    const spaced = [...frames, frame(SYMBOL, new Date("2026-10-12T04:40:00.000Z"))];
+    const { base } = await startWith({ windowFrames: { [SYMBOL]: spaced }, days: { [SYMBOL]: [day("2026-10-12")] } });
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap`)).json();
+    // 04:30:30 -> 04:31:10 is 40 s and 04:31:10 -> 04:40:00 is 530 s: both exceed the 30 s threshold.
+    expect(data.gaps.map((g: { seconds: number }) => g.seconds)).toEqual([40, 530]);
+    expect(data.captureSessions).toHaveLength(1);
+    expect(data.concurrentWriters).toEqual([]);
+  });
+
+  it("honours the requested date, column and row sizes", async () => {
+    const { base, windowCalls } = await startWith({
+      windowFrames: { [SYMBOL]: frames },
+      days: { [SYMBOL]: [day("2026-10-12"), day("2026-10-09")] },
+    });
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap?date=2026-10-09&bucketSeconds=300&rowPoints=5`)).json();
+    expect(windowCalls[0]!.from.toISOString()).toBe("2026-10-09T03:30:00.000Z");
+    expect(data).toMatchObject({ sessionDate: "2026-10-09", inProgress: false, bucketSeconds: 300, rowPoints: 5 });
+  });
+
+  it("caches a finished session for ten minutes and never one still being written", async () => {
+    const live = await startWith({ windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } });
+    expect((await fetch(`${live.base}/api/v1/depth/heatmap?date=2026-10-12`)).headers.get("cache-control")).toBeNull();
+    const closed = await startWith(
+      { windowFrames: { [SYMBOL]: frames }, days: { [SYMBOL]: [day("2026-10-12")] } },
+      new Date("2026-10-12T10:30:00.000Z"),
+    );
+    expect((await fetch(`${closed.base}/api/v1/depth/heatmap?date=2026-10-12`)).headers.get("cache-control")).toBe("private, max-age=600");
+  });
+
+  it("says nothing is stored, and why, rather than returning an empty grid", async () => {
+    const { base } = await startWith({});
+    const { data } = await (await fetch(`${base}/api/v1/depth/heatmap?date=2026-10-10`)).json();
+    expect(data).toMatchObject({ available: false, sessionDate: "2026-10-10", contractsTried: [SYMBOL, "NSE:BANKNIFTY26NOVFUT"] });
   });
 });
