@@ -25,6 +25,31 @@ describe("black-scholes-engine", () => {
     expect(Math.abs(parity - forwardDiff)).toBeLessThan(1);
   });
 
+  it("gives call and put the same gamma and vega at identical inputs, and put delta = call delta - 1", () => {
+    // Gamma and vega do not depend on option type in Black-Scholes. The option-chain charts rely on
+    // this as a sanity check: overlaid, the call and put gamma lines should sit on top of each other
+    // wherever both IVs solved to the same value.
+    const call = priceEuropeanOption({ ...base, optionType: "CE" });
+    const put = priceEuropeanOption({ ...base, optionType: "PE" });
+    expect(put.gamma).toBeCloseTo(call.gamma, 6);
+    expect(put.vega).toBeCloseTo(call.vega, 6);
+    expect(put.delta).toBeCloseTo(call.delta - 1, 5);
+  });
+
+  it("keeps ATM index-option gamma at the 1e-3 scale, which fixed 3-decimal formatting cannot display", () => {
+    // NIFTY-like inputs: ~5 days to expiry. The chart axis needs about five decimals at this scale.
+    const call = priceEuropeanOption({
+      spot: 22500,
+      strike: 22500,
+      timeToExpiryYears: 5 / 365,
+      riskFreeRate: RISK_FREE_RATE,
+      volatility: 0.14,
+      optionType: "CE",
+    });
+    expect(call.gamma).toBeGreaterThan(0.0005);
+    expect(call.gamma).toBeLessThan(0.002);
+  });
+
   it("gives deep ITM call delta near 1 and deep OTM call delta near 0", () => {
     const itm = priceEuropeanOption({
       ...base,
