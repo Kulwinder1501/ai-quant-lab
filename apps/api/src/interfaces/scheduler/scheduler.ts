@@ -1124,17 +1124,18 @@ async function main(): Promise<void> {
         const indicatorsFrom = new Date(to.getTime() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
         /*
-         * Spaced to stay under Twelve Data's per-minute credit cap. This loop plus the DXY
-         * component loop below fire 7 `data:collect:historical` calls in total (XAU_USD's own 1m
-         * plus 6 FX pairs) and, with no spacing, all of them landed inside the same rolling minute
-         * -- measured 2026-10-07 as repeated HTTP 429s ("14 API credits were used, with the
-         * current limit being 8"), which left XAU_USD's own candle stale past
-         * `momentum-scalp-gold`'s 300-second freshness window and blocked every direct-entry idea
-         * with NO_FRESH_QUOTE. Indicator calculation and the local 5m/15m derivation both read
-         * already-stored candles rather than calling Twelve Data, so neither is throttled here.
+         * The seven `data:collect:historical` calls below (XAU_USD's own 1m plus six FX pairs) were spaced 8 s
+         * apart for Twelve Data's per-minute credit cap (HTTP 429 on 2026-10-07). Every one of them passes
+         * `--provider oanda` now, and OANDA's REST limit is far above seven requests, so the spacing only added
+         * about 56 s to every tick and delayed the bot's read of the newest bar by that much.
+         *
+         * The 1m indicator calculations read the whole 1m history each time (about 88 s each for XAU_USD and DXY on
+         * 2026-10-23) and nothing the gold bot evaluates reads them: it scans 5m and 15m, and the DXY gate reads
+         * 15m candles. The only reader found is the dashboard chart's 1m view, which was refreshed every fifteen
+         * minutes until the tick went to five, so they keep that cadence: the first tick of each quarter hour.
          */
-        const TWELVEDATA_CALL_SPACING_MS = 8_000;
-        const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+        const includeOneMinuteIndicators = to.getUTCMinutes() % 15 < 5;
+        const indicatorTimeframes = includeOneMinuteIndicators ? ["1m", "5m", "15m"] : ["5m", "15m"];
 
         await runCommand("npm", [
           "run", "data:collect:historical", "--",
@@ -1146,10 +1147,6 @@ async function main(): Promise<void> {
           "--to", to.toISOString(),
           "--skip-existing",
         ]);
-        // Guaranteed spacing before the next Twelve Data call (the FX component loop below),
-        // rather than relying on however long the Twelve-Data-free derive/indicator steps in
-        // between happen to take.
-        await sleep(TWELVEDATA_CALL_SPACING_MS);
         await runCommand("npm", [
           "run", "data:derive:higher-timeframes", "--",
           "--exchange", "OANDA",
@@ -1158,7 +1155,7 @@ async function main(): Promise<void> {
           "--from", from.toISOString(),
           "--to", to.toISOString(),
         ]);
-        for (const timeframe of ["1m", "5m", "15m"]) {
+        for (const timeframe of indicatorTimeframes) {
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
             "--exchange", "OANDA",
@@ -1182,14 +1179,13 @@ async function main(): Promise<void> {
             "--to", to.toISOString(),
             "--skip-existing",
           ]);
-          await sleep(TWELVEDATA_CALL_SPACING_MS);
         }
         await runCommand("npm", [
           "run", "data:compute:synthetic-dxy", "--",
           "--from", from.toISOString(),
           "--to", to.toISOString(),
         ]);
-        for (const timeframe of ["1m", "5m", "15m"]) {
+        for (const timeframe of indicatorTimeframes) {
           await runCommand("npm", [
             "run", "analysis:calculate-indicators", "--",
             "--exchange", "OANDA",
@@ -1204,17 +1200,18 @@ async function main(): Promise<void> {
   };
 
   /*
-   * Every five minutes only while the Asian-sweep strategy's London window can fire, every fifteen otherwise.
+   * Every five minutes across the gold bot's own operating window (09:00-20:55 IST, see `isUserOperatingWindow`),
+   * every fifteen minutes outside it.
    *
-   * The tick was every fifteen minutes until 2026-10-22, when it went to every five round the clock so the 5m
-   * sweep bar is never skipped (the generator evaluates only the newest bar of a run). Measured the same night:
-   * one tick takes 235-270 s -- XAU_USD indicators over about 2.4 million 1m candles, six FX legs spaced for the
-   * Twelve Data credit cap, DXY -- against a 300 s interval, so it ran about 85% of the clock with no slack
-   * before the next tick overlapped. The sweep window is 06:30-11:30 UTC (12:00-17:00 IST) and the bot itself
-   * only runs 09:00-21:00 IST, so the fast cadence covers 11:00-17:55 IST and the rest stays at fifteen.
+   * The bot reads only the newest 5m bar of each run, and it evaluates ICT on 5m as well as the Asian-sweep
+   * strategy, so every 5m bar in its window has to be collected in time to be the newest one. The tick was every
+   * fifteen minutes until 2026-10-22 and took 235-295 s, which is why a plain five-minute cadence left no slack;
+   * with the Twelve Data spacing and the two 1m indicator runs gone from most ticks it takes about 75 s (about
+   * 295 s on the first tick of each quarter hour, which still finishes before the next one). `XAU_GAP_HEAL` runs at
+   * :07, which falls between the heavy tick's end and the next tick's start.
    */
-  cronSchedule("*/5 11-17 * * *", xauCollectionTick);
-  cronSchedule("*/15 0-10,18-23 * * *", xauCollectionTick);
+  cronSchedule("*/5 9-20 * * *", xauCollectionTick);
+  cronSchedule("*/15 0-8,21-23 * * *", xauCollectionTick);
 
   /**
    * Hourly backfill of OANDA 1m holes: XAU_USD, the six FX pairs DXY is rebuilt from, and DXY.
