@@ -154,14 +154,13 @@ const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
  * Series excluded from idea generation outright, even though both their symbol and timeframe are
  * otherwise scanned.
  *
- * `NIFTY50 1m`: no bot has ever owned this cell (`momentum-scalp`, the only 1m-capable strategy, is
- * scoped to `BANKNIFTY 1m`/`BANKNIFTY 5m`/`NIFTY50 5m` via `AutoBot-Scalp1m`'s `allowedSeries` --
- * see bot-sandboxes.ts), so every idea this cell raised was pure noise on the Strategy & Ideas
- * proposals grid: a signal nothing could ever act on, indistinguishable there from one a bot would
- * take. Removed on request rather than left to accumulate the way `trend-breakout` and
- * (pre-2026-09-03) `momentum-scalp` did.
+ * `BANKNIFTY 1m` (from 2026-10-23): `AutoBot-Scalp1m` moved its 1m scalp to NIFTY50 at fixed 8/12 point geometry
+ * (see bot-sandboxes.ts and `momentumScalpStrategyVersion` 8), so no bot owns this cell any more and every idea it
+ * raised would be a signal nothing can act on, indistinguishable on the Strategy & Ideas proposals grid from one a
+ * bot would take. It had the same treatment on `NIFTY50 1m` until then, for the same reason, when that cell had no
+ * owner (`trend-breakout` and, before 2026-09-03, `momentum-scalp` accumulated such ideas).
  */
-const DISABLED_SERIES = new Set(["NIFTY50:1m"]);
+const DISABLED_SERIES = new Set(["BANKNIFTY:1m"]);
 const MAX_CONCURRENT_POSITIONS = defaultRiskPolicy.maxConcurrentPositions;
 const MARKET_OPEN_MINUTES = 9 * 60 + 15;
 const MARKET_CLOSE_MINUTES = 15 * 60 + 30;

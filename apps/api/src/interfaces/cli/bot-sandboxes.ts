@@ -146,8 +146,12 @@ export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
   {
     name: "AutoBot-Scalp1m",
     allowedStrategies: ["momentum-scalp"],
+    // 1m moved from BANKNIFTY to NIFTY50 on 2026-10-23 (strategy version 8, fixed 8-point stop and 12-point
+    // target). A 10-15 point bracket sits inside BANKNIFTY's 24-point median 1m bar and its option round trip
+    // costs about 6.6 index points; NIFTY50's are 7.9 and about 1.9. BANKNIFTY 1m's record up to that date stays
+    // in the database, and the series can be restored here and in DISABLED_SERIES.
     allowedSeries: [
-      { symbol: "BANKNIFTY", timeframe: "1m" },
+      { symbol: "NIFTY50", timeframe: "1m" },
       { symbol: "BANKNIFTY", timeframe: "5m" },
       { symbol: "NIFTY50", timeframe: "5m" },
     ],

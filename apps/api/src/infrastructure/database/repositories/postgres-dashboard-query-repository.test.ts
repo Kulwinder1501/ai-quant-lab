@@ -77,9 +77,9 @@ describe("PostgresDashboardQueryRepository.listTradeIdeas strategy filter", () =
     // filter at all. Binding an empty array instead would return zero rows for a caller that asked
     // for no particular strategy.
     // `s.strategy_key` still appears in the SELECT list, so the assertion is that no *strategy*
-    // predicate was built: with includeExpired and no date, an omitted strategy leaves only the
-    // permanent NIFTY50-1m exclusion (see listTradeIdeas), which binds no parameter of its own.
-    expect(text).toContain("WHERE NOT (i.symbol = 'NIFTY50' AND c.timeframe = '1m')");
+    // predicate was built. The NIFTY50-1m exclusion that used to remain here is gone: AutoBot-Scalp1m owns
+    // that series from 2026-10-23, so with includeExpired and no date nothing is left to filter on.
+    expect(text).not.toContain("NIFTY50");
     expect(text).not.toContain("ANY(");
     expect(params).toEqual([100]);
   });

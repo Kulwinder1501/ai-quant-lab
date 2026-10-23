@@ -141,6 +141,61 @@ describe("MomentumScalpStrategy configuration", () => {
   });
 });
 
+describe("MomentumScalpStrategy fixed point geometry", () => {
+  const nifty1m = { "NIFTY50:1m": { stopPoints: 8, targetPoints: 12 } };
+  const withSymbol = (context: StrategyMarketContext, symbol: string): StrategyMarketContext => ({
+    ...context,
+    candle: { ...context.candle, symbol },
+  });
+
+  it("registers NIFTY50 1m at 8 points of stop and 12 of target, and keeps it out of the shared default", () => {
+    expect(momentumScalpStrategyRegistration.version).toBe(8);
+    expect(momentumScalpStrategyRegistration.configuration.fixedGeometryBySeries).toEqual(nifty1m);
+    expect(parseMomentumScalpStrategyConfiguration(momentumScalpStrategyRegistration.configuration).fixedGeometryBySeries).toEqual(nifty1m);
+    // The frozen research cohorts spread the default; a key here would move their definition hashes.
+    expect("fixedGeometryBySeries" in defaultMomentumScalpStrategyConfiguration).toBe(false);
+  });
+
+  it("uses the fixed points for a configured series regardless of ATR (long)", () => {
+    const [proposal] = new MomentumScalpStrategy().evaluate(withSymbol(qualifyingLongContext(), "NIFTY50"), configuration({ fixedGeometryBySeries: nifty1m }));
+    expect(proposal.entryPrice).toBe(1006);
+    expect(proposal.stopLoss).toBe(998);
+    expect(proposal.targetPrice).toBe(1018);
+    expect(proposal.riskReward).toBe(1.5);
+  });
+
+  it("mirrors the geometry for a short", () => {
+    const context = withSymbol(qualifyingShortContext(), "NIFTY50");
+    const [proposal] = new MomentumScalpStrategy().evaluate(context, configuration({ fixedGeometryBySeries: nifty1m }));
+    expect(proposal.side).toBe("SHORT");
+    expect(proposal.stopLoss - proposal.entryPrice).toBeCloseTo(8, 5);
+    expect(proposal.entryPrice - proposal.targetPrice).toBeCloseTo(12, 5);
+  });
+
+  it("keeps the ATR geometry for a series that is not configured", () => {
+    const base = new MomentumScalpStrategy().evaluate(qualifyingLongContext(), configuration())[0]!;
+    for (const [symbol, timeframe] of [["BANKNIFTY", "1m"], ["NIFTY50", "5m"]] as const) {
+      const context = withSymbol(qualifyingLongContext({ timeframe }), symbol);
+      const [proposal] = new MomentumScalpStrategy().evaluate(context, configuration({ fixedGeometryBySeries: nifty1m }));
+      expect(proposal.stopLoss).toBe(base.stopLoss);
+      expect(proposal.targetPrice).toBe(base.targetPrice);
+    }
+  });
+
+  it("falls back to the ATR geometry when the context carries no symbol", () => {
+    const [proposal] = new MomentumScalpStrategy().evaluate(qualifyingLongContext(), configuration({ fixedGeometryBySeries: nifty1m }));
+    expect(proposal.stopLoss).toBe(996);
+    expect(proposal.targetPrice).toBe(1021);
+  });
+
+  it("rejects malformed fixed geometry", () => {
+    expect(() => parseMomentumScalpStrategyConfiguration(configuration({ fixedGeometryBySeries: { NIFTY50: { stopPoints: 8, targetPoints: 12 } } }))).toThrow(/SYMBOL:timeframe/);
+    expect(() => parseMomentumScalpStrategyConfiguration(configuration({ fixedGeometryBySeries: { "NIFTY50:1m": { stopPoints: 0, targetPoints: 12 } } }))).toThrow(/positive/);
+    expect(() => parseMomentumScalpStrategyConfiguration(configuration({ fixedGeometryBySeries: { "NIFTY50:1m": { stopPoints: 8 } } }))).toThrow(/positive/);
+    expect(() => parseMomentumScalpStrategyConfiguration(configuration({ fixedGeometryBySeries: [] }))).toThrow(/object/);
+  });
+});
+
 describe("MomentumScalpStrategy evaluation", () => {
   it("proposes a long when EMA separation, VWAP displacement, and RSI all agree", () => {
     const [proposal] = new MomentumScalpStrategy().evaluate(qualifyingLongContext(), configuration());

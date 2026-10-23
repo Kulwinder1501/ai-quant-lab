@@ -113,7 +113,22 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * explicit `candlestickAlgorithmVersion: "candlestick-v1"` pin in the same change, so they keep
  * measuring exactly what they always have and are unaffected by this.
  */
-export const momentumScalpStrategyVersion = 7;
+/**
+ * Bumped 2026-10-23 (7 -> 8): fixed point geometry for NIFTY50 1m, 8 points of stop and 12 of target (1:1.5).
+ *
+ * Requested for AutoBot-Scalp1m, which traded BANKNIFTY 1m on ATR geometry: about 40 points of stop and 60 of
+ * target (44 ideas on version 7). A 10-15 point bracket cannot work on BANKNIFTY -- its median 1m bar is 24
+ * points high, so the bracket sits inside one bar, and the option round trip costs about 6.6 index points
+ * (spread plus fees) against a 12-point target. NIFTY50's median 1m bar is 7.9 points and its round trip about
+ * 1.9 points, so the same bracket is the strategy's own ATR geometry in effect (ATR is about 8) at a cost of
+ * about 16% of the target. A replay of the bot's 181 NIFTY50 signals on the underlying gave 44% target hits
+ * against 38% for random entries (about 1.6 standard errors) and roughly break-even net of estimated costs.
+ * That is a reason to measure it, not a finding that it works.
+ *
+ * 1:1.5 and not 1:2 on purpose: `evaluate-open-paper-trades.ts` only applies the MOMENTUM_STALL time stop at
+ * reward/risk <= 1.6, and a 2R bracket would exempt every trade from it.
+ */
+export const momentumScalpStrategyVersion = 8;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",
@@ -152,7 +167,10 @@ export const momentumScalpStrategyRegistration = {
   name: "Momentum Scalp",
   description: "Fast EMA separation confirmed by VWAP displacement and a bounded RSI momentum band.",
   version: momentumScalpStrategyVersion,
-  configuration: { ...defaultMomentumScalpStrategyConfiguration } as Record<string, unknown>,
+  configuration: {
+    ...defaultMomentumScalpStrategyConfiguration,
+    fixedGeometryBySeries: { "NIFTY50:1m": { stopPoints: 8, targetPoints: 12 } },
+  } as Record<string, unknown>,
 };
 
 export interface MomentumScalpStrategyConfiguration {
@@ -168,6 +186,18 @@ export interface MomentumScalpStrategyConfiguration {
   rewardRiskMultiple: number;
   minimumConfidence: number;
   expiryCandles: number;
+  /**
+   * Fixed stop and target distances in index points for specific `SYMBOL:timeframe` series, used instead of the
+   * ATR-multiple geometry for those series only.
+   *
+   * Optional and deliberately absent from `defaultMomentumScalpStrategyConfiguration`: the frozen research cohorts
+   * spread that default, so adding a key to it would move their definition hashes. Only a registered version
+   * that wants it carries it (see `momentumScalpStrategyRegistration`).
+   *
+   * Needs `context.candle.symbol`, which the live context repository supplies; a context without one falls back
+   * to the ATR geometry.
+   */
+  fixedGeometryBySeries?: Record<string, { stopPoints: number; targetPoints: number }>;
   /**
    * When true, a trade requires a *measured* volatility regime. It deliberately
    * does not say which regime: v1 required LOW_VOL to go long and HIGH_VOL to go
@@ -264,8 +294,33 @@ function requiredIndicatorParameters(raw: Record<string, unknown>): Record<strin
   return result;
 }
 
+function parseFixedGeometryBySeries(raw: Record<string, unknown>): MomentumScalpStrategyConfiguration["fixedGeometryBySeries"] {
+  const value = raw.fixedGeometryBySeries;
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Momentum scalp configuration requires fixedGeometryBySeries to be an object keyed by SYMBOL:timeframe.");
+  }
+  const result: Record<string, { stopPoints: number; targetPoints: number }> = {};
+  for (const [series, geometry] of Object.entries(value as Record<string, unknown>)) {
+    if (!/^[A-Z0-9_]+:\d+[mhd]$/.test(series)) {
+      throw new Error(`Momentum scalp fixedGeometryBySeries key "${series}" is not SYMBOL:timeframe (for example NIFTY50:1m).`);
+    }
+    const entry = geometry as Record<string, unknown> | null;
+    const stopPoints = entry?.stopPoints;
+    const targetPoints = entry?.targetPoints;
+    if (typeof stopPoints !== "number" || !Number.isFinite(stopPoints) || stopPoints <= 0
+      || typeof targetPoints !== "number" || !Number.isFinite(targetPoints) || targetPoints <= 0) {
+      throw new Error(`Momentum scalp fixedGeometryBySeries "${series}" requires positive numeric stopPoints and targetPoints.`);
+    }
+    result[series] = { stopPoints, targetPoints };
+  }
+  return result;
+}
+
 export function parseMomentumScalpStrategyConfiguration(raw: Record<string, unknown>): MomentumScalpStrategyConfiguration {
+  const fixedGeometryBySeries = parseFixedGeometryBySeries(raw);
   const configuration: MomentumScalpStrategyConfiguration = {
+    ...(fixedGeometryBySeries ? { fixedGeometryBySeries } : {}),
     indicatorAlgorithmVersion: requiredString(raw, "indicatorAlgorithmVersion"),
     indicatorParameters: requiredIndicatorParameters(raw),
     candlestickAlgorithmVersion: requiredString(raw, "candlestickAlgorithmVersion"),
@@ -522,16 +577,22 @@ function buildProposal(
   if (scores.confidence < configuration.minimumConfidence) return null;
 
   const entryPrice = roundNearestToTick(context.candle.close, tickSize);
-  const rawStopDistance = Math.max(tickSize, indicators.atrValue * configuration.atrStopMultiple);
+  const fixedGeometry = context.candle.symbol
+    ? configuration.fixedGeometryBySeries?.[`${context.candle.symbol}:${context.candle.timeframe}`]
+    : undefined;
+  const rawStopDistance = fixedGeometry
+    ? Math.max(tickSize, fixedGeometry.stopPoints)
+    : Math.max(tickSize, indicators.atrValue * configuration.atrStopMultiple);
   const stopLoss = side === "LONG"
     ? roundDownToTick(entryPrice - rawStopDistance, tickSize)
     : roundUpToTick(entryPrice + rawStopDistance, tickSize);
   if (stopLoss <= 0 || (side === "LONG" && stopLoss >= entryPrice) || (side === "SHORT" && stopLoss <= entryPrice)) return null;
 
   const risk = Math.abs(entryPrice - stopLoss);
+  const targetDistance = fixedGeometry ? fixedGeometry.targetPoints : risk * configuration.rewardRiskMultiple;
   const targetPrice = side === "LONG"
-    ? roundUpToTick(entryPrice + risk * configuration.rewardRiskMultiple, tickSize)
-    : roundDownToTick(entryPrice - risk * configuration.rewardRiskMultiple, tickSize);
+    ? roundUpToTick(entryPrice + targetDistance, tickSize)
+    : roundDownToTick(entryPrice - targetDistance, tickSize);
   if (targetPrice <= 0 || (side === "LONG" && targetPrice <= entryPrice) || (side === "SHORT" && targetPrice >= entryPrice)) return null;
 
   const riskReward = rounded(Math.abs(targetPrice - entryPrice) / risk);

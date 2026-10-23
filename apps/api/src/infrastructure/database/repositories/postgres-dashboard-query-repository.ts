@@ -284,10 +284,8 @@ export class PostgresDashboardQueryRepository {
     
     const params: any[] = [limit];
     const conditions: string[] = [];
-    // No bot has ever owned this cell -- see DISABLED_SERIES in run-paper-trading-bot.ts, which
-    // stops generating these going forward. Filtered here too so the proposals grid also stops
-    // showing the ones already written before that took effect.
-    conditions.push(`NOT (i.symbol = 'NIFTY50' AND c.timeframe = '1m')`);
+    // NIFTY50 1m was filtered here while no bot owned it. AutoBot-Scalp1m owns it from 2026-10-23, so the
+    // filter is gone; its old, expired ideas only appear when expired ideas are requested.
     if (!includeExpired) {
       // NULL expiry is treated as still live (agent/manual rows without a clock).
       conditions.push(`(ti.expires_at IS NULL OR ti.expires_at > CURRENT_TIMESTAMP)`);
