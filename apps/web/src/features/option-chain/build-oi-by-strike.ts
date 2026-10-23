@@ -3,10 +3,11 @@
  *
  * No React. Null open interest stays null so a missing quote never plots as zero.
  *
- * Units: Fyers `oi` is stored as underlying units (not lots/contracts). Task 1.0 sampled
- * 14 days of `option_chain_snapshots`: BANKNIFTY OI was a multiple of instruments.lot_size (30)
- * in that window; NIFTY50 OI mostly tracked ~65 (exchange option lot), not the registry index
- * lot_size (75). Axis label must say units. Do not claim "always" beyond the measured window.
+ * Units: Fyers `oi` is stored as underlying units (not lots/contracts). Over 30 days of
+ * `option_chain_snapshots`, BANKNIFTY OI was a whole multiple of its lot (30) on 100% of rows and
+ * NIFTY50 OI of 65 on 98.0%; the residue is mostly the 09:11 pre-open slot, which repeats the previous
+ * close. The registry once held 75 for NIFTY50 (corrected to the exchange's 65 by migration 141).
+ * Axis label must say units. Do not claim "always" beyond the measured window.
  */
 
 export const OI_AXIS_UNIT_LABEL = "units (Fyers oi; not lots)";
