@@ -7,6 +7,7 @@ import {
   DEPTH_STALE_AFTER_SECONDS,
   isDepthSession,
   type StoredDepthFrame,
+  usableTotal,
 } from "./depth-ladder.js";
 
 /** 2026-10-12 is a Monday; IST = UTC + 5:30, so 10:00 IST = 04:30Z. */
@@ -100,6 +101,22 @@ describe("buildDepthLadder: imbalance, defined exactly", () => {
     expect(buildDepthLadder(frame({ totalBuyQty: 0, totalSellQty: 0 }), { now: at(1) }).imbalance.wholeBook).toBeNull();
     expect(buildDepthLadder(frame({ totalBuyQty: 100, totalSellQty: null }), { now: at(1) }).imbalance.wholeBook).toBeNull();
   });
+
+  it("treats a one-sided zero total as a feed dropout, not as an empty side (it would read exactly -1 or +1)", () => {
+    // Recorded pattern, BANKNIFTY 2026-10-22 05:00:57.5Z: total_buy_qty 0 between readings of ~42,000.
+    const dropout = buildDepthLadder(frame({ totalBuyQty: 0, totalSellQty: 47_400 }), { now: at(1) });
+    expect(dropout.imbalance.wholeBook).toBeNull();
+    expect(dropout.coverage.wholeBookTotals).toEqual({ bid: null, ask: 47_400 });
+    expect(dropout.coverage.storedShareOfWholeBook.bid).toBeNull();
+    const other = buildDepthLadder(frame({ totalBuyQty: 27_180, totalSellQty: 0 }), { now: at(1) });
+    expect(other.imbalance.wholeBook).toBeNull();
+  });
+
+  it("reads a negative total as missing too", () => {
+    expect(usableTotal(-5)).toBeNull();
+    expect(usableTotal(Number.NaN)).toBeNull();
+    expect(usableTotal(42_000)).toBe(42_000);
+  });
 });
 
 describe("buildDepthLadder: coverage, so a top-of-book figure is not read as the book's", () => {
@@ -118,6 +135,7 @@ describe("buildDepthLadder: coverage, so a top-of-book figure is not read as the
   it("leaves the share null when the feed gave no total to divide by", () => {
     const { coverage } = buildDepthLadder(frame({ totalBuyQty: null, totalSellQty: 0 }), { now: at(1) });
     expect(coverage.storedShareOfWholeBook).toEqual({ bid: null, ask: null });
+    expect(coverage.wholeBookTotals).toEqual({ bid: null, ask: null });
   });
 });
 

@@ -205,8 +205,15 @@ function roundPoints(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
 
-function finiteOrNull(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+/**
+ * A whole-book total, or null when the feed did not give a usable one.
+ *
+ * Zero counts as missing, not as an empty side: a 50-level book cannot be empty on one side in session, and the
+ * feed does drop a total to zero for a single frame between readings of ~42,000 (567 of 42,943 BANKNIFTY frames
+ * on 2026-10-22, 1.3%). Read as a measurement, one such frame gives a whole-book imbalance of exactly -1 or +1.
+ */
+export function usableTotal(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function buildDepthLadder(
@@ -237,8 +244,8 @@ export function buildDepthLadder(
   // too, and a best bid that is not the best bid is worse than none.
   const levelMetricsAllowed = coherent && regime === "KEYED_BY_LEVEL_NUMBER";
 
-  const totalBuy = finiteOrNull(frame.totalBuyQty);
-  const totalSell = finiteOrNull(frame.totalSellQty);
+  const totalBuy = usableTotal(frame.totalBuyQty);
+  const totalSell = usableTotal(frame.totalSellQty);
   const wholeBook = totalBuy !== null && totalSell !== null ? ratio(totalBuy, totalSell) : null;
 
   const bestBid = levelMetricsAllowed ? bids[0]?.price ?? null : null;
