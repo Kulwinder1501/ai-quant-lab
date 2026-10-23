@@ -16,6 +16,14 @@ export const OI_IN_SESSION_STALE_AFTER_MS = 20 * 60_000;
 const SESSION_START_MINUTE_OF_DAY = 9 * 60 + 11; // 09:11
 const SESSION_END_MINUTE_OF_DAY = 15 * 60 + 53; // 15:53
 
+/**
+ * Snapshots observed strictly before this IST clock are treated as pre-open OI carryover.
+ * Measured 2026-10: at 09:11, OI equals previous-day OI on 100% of NIFTY/BANKNIFTY rows
+ * (change 0 everywhere); from 09:23 the match rate collapses. 09:15 is the cut so the
+ * 09:11 slot is flagged and the 09:23 slot is not.
+ */
+export const PRE_OPEN_OI_CARRYOVER_BEFORE_MINUTE_OF_DAY = 9 * 60 + 15; // 09:15
+
 export type OiFreshnessState =
   | "in_session_fresh"
   | "in_session_stale"
@@ -26,6 +34,11 @@ export interface OiFreshnessAssessment {
   ageMs: number | null;
   /** True when `now` falls inside Mon–Fri 09:11–15:53 Asia/Kolkata. */
   nowInCollectionHours: boolean;
+  /**
+   * True when the snapshot's own IST clock is before 09:15 — OI is previous close echoed
+   * before the exchange publishes a fresh book (not a new observation).
+   */
+  preOpenOiCarryover: boolean;
 }
 
 function istParts(ms: number): { weekday: number; minuteOfDay: number } {
@@ -75,6 +88,16 @@ export function isOiCollectionHours(nowMs: number): boolean {
 }
 
 /**
+ * Whether this snapshot's observation time is the pre-open carryover slot (OI = prior close).
+ * Uses the snapshot clock, not wall "now".
+ */
+export function isPreOpenOiCarryover(observedAtMs: number | null): boolean {
+  if (observedAtMs === null || !Number.isFinite(observedAtMs)) return false;
+  const { minuteOfDay } = istParts(observedAtMs);
+  return minuteOfDay < PRE_OPEN_OI_CARRYOVER_BEFORE_MINUTE_OF_DAY;
+}
+
+/**
  * Classify snapshot age for the OI freshness bar.
  *
  * Outside collection hours never uses the "stale / delayed until next collect" copy — overnight
@@ -87,16 +110,17 @@ export function assessOiSnapshotFreshness(input: {
 }): OiFreshnessAssessment {
   const staleAfterMs = input.staleAfterMs ?? OI_IN_SESSION_STALE_AFTER_MS;
   const nowInCollectionHours = isOiCollectionHours(input.nowMs);
+  const preOpenOiCarryover = isPreOpenOiCarryover(input.observedAtMs);
   const ageMs =
     input.observedAtMs !== null && Number.isFinite(input.observedAtMs)
       ? Math.max(0, input.nowMs - input.observedAtMs)
       : null;
 
   if (!nowInCollectionHours) {
-    return { state: "outside_collection_hours", ageMs, nowInCollectionHours };
+    return { state: "outside_collection_hours", ageMs, nowInCollectionHours, preOpenOiCarryover };
   }
   if (ageMs === null || ageMs > staleAfterMs) {
-    return { state: "in_session_stale", ageMs, nowInCollectionHours };
+    return { state: "in_session_stale", ageMs, nowInCollectionHours, preOpenOiCarryover };
   }
-  return { state: "in_session_fresh", ageMs, nowInCollectionHours };
+  return { state: "in_session_fresh", ageMs, nowInCollectionHours, preOpenOiCarryover };
 }
