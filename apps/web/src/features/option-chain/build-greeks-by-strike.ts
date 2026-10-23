@@ -37,6 +37,19 @@ export const GREEKS_MODEL_DERIVED_LABEL =
 export const GREEKS_PER_UNIT_NOTE =
   "Theta and vega are per 1 unit of the underlying, not per lot: multiply by the contract's lot size for rupees per lot.";
 
+/**
+ * What Fyers itself reported for a contract (`greeks=1`), as sent. IV is in PERCENT, where the model's
+ * `impliedVolatility` is a fraction. Independent of the model values: it is an observation, so it is kept
+ * when the model could not solve an IV and is never nulled by that.
+ */
+export interface VendorGreeksInput {
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  impliedVolatilityPercent: number | null;
+}
+
 export interface GreeksStrikeLegInput {
   impliedVolatility: number | null;
   impliedVolatilityRefusal: string | null;
@@ -44,6 +57,7 @@ export interface GreeksStrikeLegInput {
   gamma: number | null;
   theta: number | null;
   vega: number | null;
+  vendorGreeks?: VendorGreeksInput | null;
 }
 
 export interface GreeksStrikeInput {
@@ -72,6 +86,12 @@ export interface GreeksByStrikePoint {
   /** Selected metric in display units (IV in percent), natural sign. Null = gap, never zero. */
   callMetricPlot: number | null;
   putMetricPlot: number | null;
+  /**
+   * Fyers' own value of the selected metric for each side, in the same display units. IV, gamma, theta and
+   * vega are one value per strike so the two sides coincide; delta differs (put = call - 1). Null = not stored.
+   */
+  callVendorPlot: number | null;
+  putVendorPlot: number | null;
 }
 
 export interface UnsolvedSideSummary {
@@ -107,7 +127,31 @@ export interface BuildGreeksByStrikeResult {
   maxAbsPlot: number;
   /** Decimal places that keep this metric readable at this magnitude (axis and tooltip). */
   axisDecimals: number;
+  vendor: VendorComparison;
 }
+
+export interface VendorComparison {
+  /** Strikes in the window where Fyers' value for this metric is stored, on at least one side. */
+  strikesWithVendor: number;
+  strikesInWindow: number;
+  /** Side-by-side pairs where both our value and Fyers' exist. */
+  pairsCompared: number;
+  /** Mean and largest |Fyers - ours| over those pairs, in display units. Null when nothing compared. */
+  meanAbsGap: number | null;
+  maxAbsGap: number | null;
+  maxGapStrike: number | null;
+  /** What to know about Fyers' convention for this metric. */
+  note: string;
+}
+
+/** Fyers' conventions, measured 2026-10-23 on NIFTY50, BANKNIFTY and SBIN. One note per metric. */
+export const VENDOR_METRIC_NOTE: Record<GreeksMetric, string> = {
+  iv: "Fyers IV is one value per strike, shared by call and put, in percent.",
+  delta: "Fyers delta: put = call - 1 exactly. It prices off the market forward, as the model values do.",
+  gamma: "Fyers gamma is reported to four decimals only, too coarse for index options (BANKNIFTY showed two distinct values across seven strikes). Use the model gamma.",
+  theta: "Fyers theta is one value per strike, with no call/put rate-carry term, so it sits between the model's call and put theta.",
+  vega: "Fyers vega is one value per strike, per 1 vol point per unit.",
+};
 
 /** Drop Greeks when IV is missing so a stale/partial leg cannot invent values. */
 function sanitizeLeg(leg: GreeksStrikeLegInput | null): GreeksStrikeLegInput | null {
@@ -142,6 +186,24 @@ function metricValue(leg: GreeksStrikeLegInput | null, metric: GreeksMetric): nu
   }
 }
 
+/** Fyers' value of one metric for one leg, in the same display units as `metricValue`. */
+function vendorMetricValue(leg: GreeksStrikeLegInput | null, metric: GreeksMetric): number | null {
+  const vendor = leg?.vendorGreeks;
+  if (!vendor) return null;
+  switch (metric) {
+    case "iv":
+      return vendor.impliedVolatilityPercent;
+    case "delta":
+      return vendor.delta;
+    case "gamma":
+      return vendor.gamma;
+    case "theta":
+      return vendor.theta;
+    case "vega":
+      return vendor.vega;
+  }
+}
+
 function toPoint(row: GreeksStrikeInput, metric: GreeksMetric): GreeksByStrikePoint {
   const call = sanitizeLeg(row.call);
   const put = sanitizeLeg(row.put);
@@ -163,6 +225,9 @@ function toPoint(row: GreeksStrikeInput, metric: GreeksMetric): GreeksByStrikePo
     putVega: put?.vega ?? null,
     callMetricPlot: metricValue(call, metric),
     putMetricPlot: metricValue(put, metric),
+    // Read from the raw rows, not the sanitised legs: an observation does not depend on our solver.
+    callVendorPlot: vendorMetricValue(row.call, metric),
+    putVendorPlot: vendorMetricValue(row.put, metric),
   };
 }
 
@@ -196,6 +261,37 @@ function summariseSide(
     }
   }
   return summary;
+}
+
+function compareWithVendor(points: readonly GreeksByStrikePoint[], metric: GreeksMetric): VendorComparison {
+  let strikesWithVendor = 0;
+  let pairs = 0;
+  let sum = 0;
+  let max: { gap: number; strike: number } | null = null;
+
+  for (const point of points) {
+    if (point.callVendorPlot !== null || point.putVendorPlot !== null) strikesWithVendor += 1;
+    for (const [ours, theirs] of [
+      [point.callMetricPlot, point.callVendorPlot],
+      [point.putMetricPlot, point.putVendorPlot],
+    ] as const) {
+      if (ours === null || theirs === null) continue;
+      const gap = Math.abs(theirs - ours);
+      pairs += 1;
+      sum += gap;
+      if (max === null || gap > max.gap) max = { gap, strike: point.strike };
+    }
+  }
+
+  return {
+    strikesWithVendor,
+    strikesInWindow: points.length,
+    pairsCompared: pairs,
+    meanAbsGap: pairs > 0 ? sum / pairs : null,
+    maxAbsGap: max?.gap ?? null,
+    maxGapStrike: max?.strike ?? null,
+    note: VENDOR_METRIC_NOTE[metric],
+  };
 }
 
 /**
@@ -275,5 +371,6 @@ export function buildGreeksByStrike(
     },
     maxAbsPlot,
     axisDecimals: greeksAxisDecimals(options.metric, maxAbsPlot),
+    vendor: compareWithVendor(points, options.metric),
   };
 }

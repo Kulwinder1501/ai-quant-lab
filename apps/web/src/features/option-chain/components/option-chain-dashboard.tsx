@@ -194,6 +194,7 @@ export function OptionChainDashboard() {
               gamma: row.call.gamma,
               theta: row.call.theta,
               vega: row.call.vega,
+              vendorGreeks: row.call.vendorGreeks ?? null,
             }
           : null,
         put: row.put
@@ -204,6 +205,7 @@ export function OptionChainDashboard() {
               gamma: row.put.gamma,
               theta: row.put.theta,
               vega: row.put.vega,
+              vendorGreeks: row.put.vendorGreeks ?? null,
             }
           : null,
       })),

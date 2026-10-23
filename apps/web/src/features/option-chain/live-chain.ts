@@ -41,6 +41,21 @@ export interface Leg {
   /** Per one absolute percentage point of IV. Positive for calls and puts alike. */
   vega: number | null;
   daysToExpiry: number | null;
+  /**
+   * What Fyers itself reported for this contract (`greeks=1`), as sent and in its units: IV in PERCENT,
+   * one value per strike shared by call and put (delta aside: put = call - 1). Observed, never computed
+   * here, and not touched by `applyChainTick`, which only re-solves the model values above. Null or
+   * absent when none was stored.
+   */
+  vendorGreeks?: VendorGreeks | null;
+}
+
+export interface VendorGreeks {
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
+  impliedVolatilityPercent: number | null;
 }
 
 export interface StrikeRow {

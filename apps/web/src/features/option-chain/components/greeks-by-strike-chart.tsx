@@ -21,6 +21,7 @@ import {
   type GreeksMetric,
   type GreeksStrikeInput,
   type UnsolvedSummary,
+  type VendorComparison,
 } from "../build-greeks-by-strike";
 import { ivRefusalLabel } from "../iv-refusal-label";
 import { DEFAULT_STRIKE_WINDOW, nearestStrikeOnAxis } from "../strike-axis";
@@ -56,6 +57,53 @@ export interface GreeksByStrikeChartProps {
 
 const CallDot = markerRenderer("circle", CALL_COLOR);
 const PutDot = markerRenderer("square", PUT_COLOR);
+
+/** The provider's own values: grey and hollow, so they read as a second source and not a third series of ours. */
+const VENDOR_COLOR = "#94a3b8";
+const VendorCallDot = markerRenderer("circle", VENDOR_COLOR, true);
+const VendorPutDot = markerRenderer("square", VENDOR_COLOR, true);
+
+/** A gap to the provider in the metric's own terms: IV differences are vol points, the rest share the axis precision. */
+function gapText(value: number | null, metric: GreeksMetric, decimals: number): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return metric === "iv" ? `${value.toFixed(2)} vol pts` : value.toFixed(decimals);
+}
+
+/**
+ * Says what the comparison with the provider's own values found, or why there is none. A snapshot stored
+ * before the collector began requesting them has no values, which must read as "not observed", never as a match.
+ */
+function VendorSummaryLine({
+  vendor,
+  metric,
+  decimals,
+}: {
+  vendor: VendorComparison;
+  metric: GreeksMetric;
+  decimals: number;
+}) {
+  if (vendor.strikesWithVendor === 0) {
+    return (
+      <p className="mb-2 text-[11px] text-amber-200/90">
+        Fyers&apos; own values are not stored for this snapshot. The collector only began requesting them recently,
+        so older snapshots have none.
+      </p>
+    );
+  }
+  return (
+    <div className="mb-2 text-[11px] text-slate-400">
+      <p>
+        Fyers values (grey, hollow) on {vendor.strikesWithVendor} of {vendor.strikesInWindow} strikes
+        {vendor.pairsCompared > 0
+          ? ` · compared on ${vendor.pairsCompared} side-by-side points: mean gap ${gapText(vendor.meanAbsGap, metric, decimals)}, `
+            + `largest ${gapText(vendor.maxAbsGap, metric, decimals)} at strike ${vendor.maxGapStrike}`
+          : " · none overlap with a solved model value"}
+        .
+      </p>
+      <p className="text-slate-500">{vendor.note}</p>
+    </div>
+  );
+}
 
 function describeSide(label: string, side: UnsolvedSummary["calls"]): string {
   if (side.legs === 0) return `${label}: none in window`;
@@ -99,12 +147,14 @@ function GreeksTooltip({
   metric,
   unitLabel,
   decimals,
+  showVendor,
 }: {
   active?: boolean;
   payload?: Array<{ payload: GreeksByStrikePoint }>;
   metric: GreeksMetric;
   unitLabel: string;
   decimals: number;
+  showVendor: boolean;
 }) {
   if (!active || !payload?.length) return null;
   const point = payload[0]!.payload;
@@ -119,6 +169,14 @@ function GreeksTooltip({
         <span>{sideText(point.callPresent, point.callMetricPlot, point.callIvRefusal, metric, decimals)}</span>
         <span className="text-fuchsia-300">Put ■</span>
         <span>{sideText(point.putPresent, point.putMetricPlot, point.putIvRefusal, metric, decimals)}</span>
+        {showVendor && (
+          <>
+            <span className="text-slate-400">Fyers call ○</span>
+            <span>{formatGreekValue(point.callVendorPlot, metric, decimals)}</span>
+            <span className="text-slate-400">Fyers put □</span>
+            <span>{formatGreekValue(point.putVendorPlot, metric, decimals)}</span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -135,6 +193,7 @@ export function GreeksByStrikeChart({
   nowMs,
 }: GreeksByStrikeChartProps) {
   const [metric, setMetric] = useState<GreeksMetric>("iv");
+  const [showVendor, setShowVendor] = useState(false);
   const built = useMemo(
     () => buildGreeksByStrike(strikes, { metric, atmStrike, window }),
     [strikes, metric, atmStrike, window],
@@ -186,8 +245,15 @@ export function GreeksByStrikeChart({
             </button>
           ))}
         </div>
-        <p className="text-[11px] text-slate-500">Y-axis: {built.unitLabel}</p>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-slate-400">
+            <input type="checkbox" checked={showVendor} onChange={(event) => setShowVendor(event.target.checked)} />
+            Compare with Fyers&apos; values
+          </label>
+          <p className="text-[11px] text-slate-500">Y-axis: {built.unitLabel}</p>
+        </div>
       </div>
+      {showVendor && <VendorSummaryLine vendor={built.vendor} metric={metric} decimals={built.axisDecimals} />}
       {(metric === "theta" || metric === "vega") && (
         <p className="mb-2 text-[11px] text-slate-500">{GREEKS_PER_UNIT_NOTE}</p>
       )}
@@ -225,13 +291,24 @@ export function GreeksByStrikeChart({
             <Tooltip
               cursor={{ stroke: "rgba(255,255,255,0.15)" }}
               content={
-                <GreeksTooltip metric={metric} unitLabel={built.unitLabel} decimals={built.axisDecimals} />
+                <GreeksTooltip
+                  metric={metric}
+                  unitLabel={built.unitLabel}
+                  decimals={built.axisDecimals}
+                  showVendor={showVendor}
+                />
               }
             />
             <Legend
               formatter={(value: string) => (
                 <span className="text-xs text-slate-300">
-                  {value === "callMetricPlot" ? "Call (solid, circles)" : "Put (dashed, squares)"}
+                  {value === "callMetricPlot"
+                    ? "Call (solid, circles)"
+                    : value === "putMetricPlot"
+                      ? "Put (dashed, squares)"
+                      : value === "callVendorPlot"
+                        ? "Fyers call (grey, hollow circles)"
+                        : "Fyers put (grey, hollow squares)"}
                 </span>
               )}
             />
@@ -282,6 +359,34 @@ export function GreeksByStrikeChart({
               connectNulls={false}
               isAnimationActive={false}
             />
+            {showVendor && (
+              <Line
+                type="monotone"
+                dataKey="callVendorPlot"
+                name="callVendorPlot"
+                stroke={VENDOR_COLOR}
+                strokeWidth={1}
+                strokeDasharray="1 3"
+                dot={<VendorCallDot />}
+                activeDot={{ r: 5 }}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            )}
+            {showVendor && (
+              <Line
+                type="monotone"
+                dataKey="putVendorPlot"
+                name="putVendorPlot"
+                stroke={VENDOR_COLOR}
+                strokeWidth={1}
+                strokeDasharray="1 3"
+                dot={<VendorPutDot />}
+                activeDot={{ r: 5 }}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>

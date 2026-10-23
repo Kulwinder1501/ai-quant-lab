@@ -6,6 +6,8 @@ import {
   greeksAxisDecimals,
   type GreeksStrikeInput,
   type GreeksStrikeLegInput,
+  VENDOR_METRIC_NOTE,
+  type VendorGreeksInput,
 } from "./build-greeks-by-strike";
 
 function leg(
@@ -18,6 +20,7 @@ function leg(
     theta: partial.theta ?? null,
     vega: partial.vega ?? null,
     impliedVolatility: partial.impliedVolatility,
+    vendorGreeks: partial.vendorGreeks ?? null,
   };
 }
 
@@ -218,5 +221,91 @@ describe("formatGreekValue", () => {
     expect(formatGreekValue(15.5, "iv", 1)).toBe("15.5%");
     expect(formatGreekValue(-11.2, "theta", 2)).toBe("-11.20");
     expect(formatGreekValue(0.00108, "gamma", 5)).toBe("0.00108");
+  });
+});
+
+describe("buildGreeksByStrike: Fyers' own values beside the model's", () => {
+  const vendor = (overrides: Partial<VendorGreeksInput> = {}): VendorGreeksInput => ({
+    delta: 0.5, gamma: 0.0011, theta: -17, vega: 9.1, impliedVolatilityPercent: 15.2, ...overrides,
+  });
+
+  it("carries Fyers' IV in the same percent units as the plotted model IV", () => {
+    const point = buildGreeksByStrike(
+      [row(100, leg({ impliedVolatility: 0.15, vendorGreeks: vendor() }), leg({ impliedVolatility: 0.154, vendorGreeks: vendor() }))],
+      { metric: "iv" },
+    ).points[0]!;
+    // Model IV is a fraction (0.15) plotted as percent (15); Fyers sends percent already.
+    expect(point.callMetricPlot).toBeCloseTo(15, 8);
+    expect(point.callVendorPlot).toBe(15.2);
+    expect(point.putVendorPlot).toBe(15.2);
+  });
+
+  it("keeps delta per side, since Fyers' put delta is the call's minus one", () => {
+    const point = buildGreeksByStrike(
+      [row(100,
+        leg({ impliedVolatility: 0.15, delta: 0.5, vendorGreeks: vendor({ delta: 0.46 }) }),
+        leg({ impliedVolatility: 0.15, delta: -0.5, vendorGreeks: vendor({ delta: -0.54 }) }))],
+      { metric: "delta" },
+    ).points[0]!;
+    expect(point.callVendorPlot).toBe(0.46);
+    expect(point.putVendorPlot).toBe(-0.54);
+  });
+
+  it("keeps Fyers' value where the model could not solve an IV, because it is an independent observation", () => {
+    const result = buildGreeksByStrike(
+      [row(100, leg({ impliedVolatility: null, impliedVolatilityRefusal: "NO_TWO_SIDED_QUOTE", vendorGreeks: vendor() }), null)],
+      { metric: "iv" },
+    );
+    const point = result.points[0]!;
+    expect(point.callMetricPlot).toBeNull(); // the model still refuses
+    expect(point.callVendorPlot).toBe(15.2); // Fyers still reported one
+    expect(result.vendor.strikesWithVendor).toBe(1);
+    expect(result.vendor.pairsCompared).toBe(0); // nothing to compare against
+    expect(result.vendor.meanAbsGap).toBeNull();
+  });
+
+  it("reports not stored as null, never zero, and compares nothing", () => {
+    const result = buildGreeksByStrike(
+      [row(100, leg({ impliedVolatility: 0.15 }), leg({ impliedVolatility: 0.15 }))],
+      { metric: "gamma" },
+    );
+    expect(result.points[0]!.callVendorPlot).toBeNull();
+    expect(result.points[0]!.putVendorPlot).toBeNull();
+    expect(result.vendor).toMatchObject({ strikesWithVendor: 0, strikesInWindow: 1, pairsCompared: 0, meanAbsGap: null, maxAbsGap: null });
+  });
+
+  it("treats a stored zero from Fyers as a value", () => {
+    const point = buildGreeksByStrike(
+      [row(100, leg({ impliedVolatility: 0.15, vendorGreeks: vendor({ theta: 0 }) }), null)],
+      { metric: "theta" },
+    ).points[0]!;
+    expect(point.callVendorPlot).toBe(0);
+  });
+
+  it("measures the gap to Fyers in display units across both sides and names the worst strike", () => {
+    const result = buildGreeksByStrike(
+      [
+        // 15.0 vs 15.2 (gap 0.2) and 15.4 vs 15.2 (gap 0.2)
+        row(100, leg({ impliedVolatility: 0.15, vendorGreeks: vendor({ impliedVolatilityPercent: 15.2 }) }),
+          leg({ impliedVolatility: 0.154, vendorGreeks: vendor({ impliedVolatilityPercent: 15.2 }) })),
+        // 14.0 vs 14.6 (gap 0.6); the put has no Fyers value so it is not compared
+        row(110, leg({ impliedVolatility: 0.14, vendorGreeks: vendor({ impliedVolatilityPercent: 14.6 }) }),
+          leg({ impliedVolatility: 0.141 })),
+      ],
+      { metric: "iv" },
+    );
+    expect(result.vendor.pairsCompared).toBe(3);
+    expect(result.vendor.meanAbsGap).toBeCloseTo((0.2 + 0.2 + 0.6) / 3, 8);
+    expect(result.vendor.maxAbsGap).toBeCloseTo(0.6, 8);
+    expect(result.vendor.maxGapStrike).toBe(110);
+  });
+
+  it("states Fyers' convention for each metric, including that its gamma is too coarse", () => {
+    for (const metric of ["iv", "delta", "gamma", "theta", "vega"] as const) {
+      expect(buildGreeksByStrike([row(100, leg({ impliedVolatility: 0.15 }), null)], { metric }).vendor.note)
+        .toBe(VENDOR_METRIC_NOTE[metric]);
+    }
+    expect(VENDOR_METRIC_NOTE.gamma).toContain("four decimals");
+    expect(VENDOR_METRIC_NOTE.theta).toContain("one value per strike");
   });
 });
