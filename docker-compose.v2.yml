@@ -300,7 +300,16 @@ services:
       # container restart rather than someone remembering the date. Use --symbols to pin an exact
       # expiry for a one-off capture; passing both is refused.
       - "--underlying=BANKNIFTY"
-      - "--levels=10"
+      # 50 is every level the feed delivers. It was 10, which reached a median 5.4 points from the touch and held ~2.4% of
+      # the whole book (measured 2026-10-22), too shallow for a liquidity map. Stored levels cannot be backfilled, so the
+      # decision is only ever "from now on". Cost, measured on the 10-level table: ~0.84 KB a row, ~55 MB a day, 2 GB total
+      # against 817 GB free; at 50 levels expect ~3 KB a row and ~130 MB a day, ~3 GB a month. `prune-depth-frames` is the
+      # release valve. Each row records `levels_stored`, so a consumer can tell a 10-level day from a 50-level one; level-
+      # indexed features must not pool across them. The live orderbook gate reads only the whole-book totals, so its
+      # decision is unchanged (its recorded `decaying_di` diagnostic does change, since it sums over every stored level).
+      # After the first 50-level session, check the share of frames the ladder withholds as incoherent: if deep levels
+      # turn out to carry stale prices it will be visible there, and 20 is the fallback.
+      - "--levels=50"
       - "--flush-seconds=2"
       - "--progress-seconds=300"
       - "--stale-after-seconds=300"
