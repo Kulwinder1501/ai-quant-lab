@@ -1,3 +1,5 @@
+import { istDateKey } from "./oi-format";
+
 /**
  * Option-chain snapshot freshness relative to the collector cron.
  *
@@ -24,9 +26,21 @@ const SESSION_END_MINUTE_OF_DAY = 15 * 60 + 53; // 15:53
  */
 export const PRE_OPEN_OI_CARRYOVER_BEFORE_MINUTE_OF_DAY = 9 * 60 + 15; // 09:15
 
+/**
+ * How long after the first cron slot (09:11) yesterday's snapshot is still expected rather than late.
+ *
+ * The collector runs at 09:11 and again at 09:23, and a run takes about a minute to land. Until then the
+ * newest stored snapshot is the previous session's, and reporting it as "in-session stale" is a false
+ * alarm that fires every morning. Twenty minutes covers both slots, so a collector that missed *both*
+ * is still flagged stale from 09:31.
+ */
+export const FIRST_COLLECTION_GRACE_MINUTES = 20;
+
 export type OiFreshnessState =
   | "in_session_fresh"
   | "in_session_stale"
+  /** Collection has started today and nothing from today has landed yet; the snapshot is yesterday's. */
+  | "awaiting_first_collection"
   | "outside_collection_hours";
 
 export interface OiFreshnessAssessment {
@@ -119,6 +133,17 @@ export function assessOiSnapshotFreshness(input: {
   if (!nowInCollectionHours) {
     return { state: "outside_collection_hours", ageMs, nowInCollectionHours, preOpenOiCarryover };
   }
+
+  const observedBeforeToday = input.observedAtMs !== null
+    && Number.isFinite(input.observedAtMs)
+    && istDateKey(input.observedAtMs) < istDateKey(input.nowMs);
+  if (
+    observedBeforeToday
+    && istParts(input.nowMs).minuteOfDay < SESSION_START_MINUTE_OF_DAY + FIRST_COLLECTION_GRACE_MINUTES
+  ) {
+    return { state: "awaiting_first_collection", ageMs, nowInCollectionHours, preOpenOiCarryover };
+  }
+
   if (ageMs === null || ageMs > staleAfterMs) {
     return { state: "in_session_stale", ageMs, nowInCollectionHours, preOpenOiCarryover };
   }

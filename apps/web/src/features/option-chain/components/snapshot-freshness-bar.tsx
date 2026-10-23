@@ -36,6 +36,12 @@ function freshnessCopy(state: OiFreshnessState): { tone: "ok" | "warn" | "idle";
         detail:
           "In-session snapshot older than 20 minutes (collector gaps alternate 12/18 minutes Mon–Fri 09:11–15:53 IST). Treat levels as delayed until the next successful collect.",
       };
+    case "awaiting_first_collection":
+      return {
+        tone: "idle",
+        detail:
+          "Waiting for today's first collection (it runs at 09:11 and again at 09:23 IST). This is the previous session's snapshot, not a delay yet.",
+      };
     case "outside_collection_hours":
       return {
         tone: "idle",
@@ -105,6 +111,7 @@ export function SnapshotFreshnessBar(props: {
             <span className={copy.tone === "warn" ? "ml-2 font-bold text-amber-200" : "ml-2 text-slate-400"}>
               ({formatAge(assessment.ageMs)}
               {assessment.state === "in_session_stale" ? " · in-session stale" : ""}
+              {assessment.state === "awaiting_first_collection" ? " · awaiting first collection" : ""}
               {assessment.state === "outside_collection_hours" ? " · outside hours" : ""})
             </span>
           )}

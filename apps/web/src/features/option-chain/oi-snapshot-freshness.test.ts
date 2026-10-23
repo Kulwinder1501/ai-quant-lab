@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assessOiSnapshotFreshness,
+  FIRST_COLLECTION_GRACE_MINUTES,
   isOiCollectionHours,
   isPreOpenOiCarryover,
   OI_IN_SESSION_STALE_AFTER_MS,
@@ -98,5 +99,50 @@ describe("isPreOpenOiCarryover", () => {
     expect(isPreOpenOiCarryover(MON_0915_IST)).toBe(false);
     expect(isPreOpenOiCarryover(MON_0923_IST)).toBe(false);
     expect(isPreOpenOiCarryover(MON_1200_IST)).toBe(false);
+  });
+});
+
+describe("assessOiSnapshotFreshness: the first minutes of a session", () => {
+  /** The Friday *before* the fixture Monday (2026-10-12): FRI_1553_IST above is the Friday after it. */
+  const PREV_FRI_1553_IST = Date.parse("2026-10-09T10:23:00.000Z");
+  const MON_0912_IST = Date.parse("2026-10-12T03:42:00.000Z");
+  const MON_0925_IST = Date.parse("2026-10-12T03:55:00.000Z");
+  const MON_0930_IST = Date.parse("2026-10-12T04:00:00.000Z");
+  const MON_0931_IST = Date.parse("2026-10-12T04:01:00.000Z");
+
+  it("does not call yesterday's snapshot stale before today's first collection can have landed", () => {
+    // Friday's last snapshot, Monday 09:12: the 09:11 run has not finished. A false alarm every morning.
+    const result = assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_0912_IST });
+    expect(result.state).toBe("awaiting_first_collection");
+    expect(result.nowInCollectionHours).toBe(true);
+    expect(result.ageMs).toBeGreaterThan(OI_IN_SESSION_STALE_AFTER_MS);
+  });
+
+  it("covers both of the opening slots (09:11 and 09:23) and ends the grace at 09:31", () => {
+    expect(FIRST_COLLECTION_GRACE_MINUTES).toBe(20);
+    expect(assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_0925_IST }).state)
+      .toBe("awaiting_first_collection");
+    expect(assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_0930_IST }).state)
+      .toBe("awaiting_first_collection");
+    // A collector that missed both opening runs is late, and says so from 09:31.
+    expect(assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_0931_IST }).state)
+      .toBe("in_session_stale");
+  });
+
+  it("still reports a previous-day snapshot as stale later in the session", () => {
+    expect(assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_1200_IST }).state)
+      .toBe("in_session_stale");
+  });
+
+  it("treats today's own pre-open snapshot as fresh, not as awaiting", () => {
+    const result = assessOiSnapshotFreshness({ observedAtMs: MON_0911_IST, nowMs: MON_0912_IST });
+    expect(result.state).toBe("in_session_fresh");
+    expect(result.preOpenOiCarryover).toBe(true);
+  });
+
+  it("does not excuse a snapshot of unknown time, and leaves the outside-hours rule alone", () => {
+    expect(assessOiSnapshotFreshness({ observedAtMs: null, nowMs: MON_0912_IST }).state).toBe("in_session_stale");
+    expect(assessOiSnapshotFreshness({ observedAtMs: PREV_FRI_1553_IST, nowMs: MON_0910_IST }).state)
+      .toBe("outside_collection_hours");
   });
 });
