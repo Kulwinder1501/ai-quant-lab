@@ -7,6 +7,7 @@ import { errorMessage, isAbortError } from "../../../lib/errors";
 import { getApiV1Url } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
+import { OiByStrikeChart } from "./oi-by-strike-chart";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -33,7 +34,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks";
+type ChainView = "quotes" | "greeks" | "oi";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -151,6 +152,37 @@ export function OptionChainDashboard() {
     });
   }, [chain?.available, underlying]);
 
+  /**
+   * Stable strike rows for the OI chart. Inline mapping on every 2s `now` tick would defeat
+   * the chart's useMemo and re-animate bars; keep the reference while the chain snapshot is unchanged.
+   */
+  const oiChartStrikes = useMemo(
+    () =>
+      (chain?.strikes ?? []).map((row) => ({
+        strikePrice: row.strikePrice,
+        call: row.call
+          ? {
+              openInterest: row.call.openInterest,
+              openInterestChange: row.call.openInterestChange,
+            }
+          : null,
+        put: row.put
+          ? {
+              openInterest: row.put.openInterest,
+              openInterestChange: row.put.openInterestChange,
+            }
+          : null,
+      })),
+    [chain?.strikes],
+  );
+
+  const oiExpiryLabel = useMemo(() => {
+    const selected = expiry
+      ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
+      : (chain?.expiries ?? [])[0];
+    return selected ? `${selected.expiryDate} ${selected.expiryKind}` : "—";
+  }, [chain?.expiries, expiry]);
+
   const spreadTone = useCallback((leg: Leg | null) => {
     // A one-sided quote is unknown, not cheap. Rendering it as good would make the most
     // illiquid strikes look the most tradeable, which is the inversion that matters.
@@ -196,7 +228,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks"] as const).map((option) => (
+          {(["quotes", "greeks", "oi"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -205,7 +237,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option}
+              {option === "oi" ? "OI chart" : option}
             </button>
           ))}
         </div>
@@ -310,6 +342,20 @@ export function OptionChainDashboard() {
           </div>
 
           <GlassPanel className="p-0">
+            {view === "oi" ? (
+              <div className="px-4 py-4">
+                <OiByStrikeChart
+                  strikes={oiChartStrikes}
+                  atmStrike={chain.atmStrike ?? null}
+                  underlyingValue={chain.underlyingValue ?? null}
+                  observedAt={chain.observedAt}
+                  provider={chain.provider}
+                  expiryLabel={oiExpiryLabel}
+                  nowMs={now}
+                />
+              </div>
+            ) : (
+              <>
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 px-4 py-3">
               <p className="text-sm font-bold text-white">
                 {chain.underlyingSymbol}
@@ -531,6 +577,8 @@ export function OptionChainDashboard() {
               which a measured volatility edge of +0.117% of spot is consumed by four option legs. A
               dash means one side was unquoted, which is an unknown spread rather than a cheap one.
             </p>
+              </>
+            )}
           </GlassPanel>
         </>
       )}
