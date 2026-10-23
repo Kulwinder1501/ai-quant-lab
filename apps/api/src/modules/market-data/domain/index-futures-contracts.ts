@@ -32,7 +32,8 @@ const MONTH_NAMES = [
 ] as const;
 
 const INDICES: ReadonlyArray<{ underlyingSymbol: IndexFutureContract["underlyingSymbol"]; prefix: string; label: string; lotSize: number }> = [
-  { underlyingSymbol: "NIFTY50", prefix: "NIFTY", label: "NIFTY", lotSize: 75 },
+  // 65: the exchange's current NIFTY lot (see migration 141). 75 is the pre-revision figure.
+  { underlyingSymbol: "NIFTY50", prefix: "NIFTY", label: "NIFTY", lotSize: 65 },
   { underlyingSymbol: "BANKNIFTY", prefix: "BANKNIFTY", label: "BANKNIFTY", lotSize: 30 },
 ];
 

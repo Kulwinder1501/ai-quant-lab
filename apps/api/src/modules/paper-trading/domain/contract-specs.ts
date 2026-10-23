@@ -14,6 +14,19 @@
 
 export const MINIMUM_CONTRACT_VALUE_INR = 1_500_000;
 /**
+ * Lower bound for the *staleness* check, deliberately under the regulatory minimum.
+ *
+ * ₹15 lakh is the value exchanges size a lot to when they set or revise it. Between revisions the
+ * contract's value follows the index, so a correct lot sits below ₹15 lakh whenever the index has
+ * fallen since the last review: NIFTY's exchange-listed lot of 65 is about ₹14.6 lakh at 22,500.
+ * Treating the revision-time minimum as a continuous floor graded that correct lot "stale", and
+ * `selectInstrument` rejects any non-PLAUSIBLE verdict, so correcting NIFTY's lot from 75 would have
+ * stopped every NIFTY entry. The upper bound already tolerated upward drift for the same reason; this
+ * is the symmetric allowance, 20% under the minimum. It still catches a lot a whole revision behind:
+ * BANKNIFTY's stale 15 was ₹8.6 lakh, 57% of the minimum.
+ */
+export const STALE_LOT_FLOOR_INR = 1_200_000;
+/**
  * Upper bound for the plausibility check only. Exchanges revise lots as an index
  * drifts, so a contract can legitimately exceed ₹20 lakh between revisions; this is
  * generous enough not to cry wolf while still catching a lot size that is a whole
@@ -46,15 +59,16 @@ export function assessContractSize(lotSize: number, underlyingPrice: number): Co
   const notional = contractNotional(lotSize, underlyingPrice);
   const minimumViableLotSize = Math.ceil(MINIMUM_CONTRACT_VALUE_INR / underlyingPrice);
 
-  if (notional < MINIMUM_CONTRACT_VALUE_INR) {
+  if (notional < STALE_LOT_FLOOR_INR) {
     return {
       verdict: "BELOW_REGULATORY_MINIMUM",
       notional,
       minimumViableLotSize,
       explanation:
         `Lot size ${lotSize} at ${underlyingPrice.toFixed(2)} implies a ${Math.round(notional).toLocaleString("en-IN")} `
-        + `contract, below the ${MINIMUM_CONTRACT_VALUE_INR.toLocaleString("en-IN")} minimum. `
-        + `At least ${minimumViableLotSize} units are needed, so this lot size is very likely stale.`,
+        + `contract, below the ${STALE_LOT_FLOOR_INR.toLocaleString("en-IN")} staleness floor (the `
+        + `${MINIMUM_CONTRACT_VALUE_INR.toLocaleString("en-IN")} minimum less 20% for index drift between revisions). `
+        + `At least ${minimumViableLotSize} units reach the minimum, so this lot size is very likely stale.`,
     };
   }
   if (notional > MAXIMUM_PLAUSIBLE_CONTRACT_VALUE_INR) {
@@ -67,11 +81,15 @@ export function assessContractSize(lotSize: number, underlyingPrice: number): Co
         + "contract, larger than exchanges normally size lots to. Verify against the current contract note.",
     };
   }
+  const drifted = notional < MINIMUM_CONTRACT_VALUE_INR;
   return {
     verdict: "PLAUSIBLE",
     notional,
     minimumViableLotSize,
-    explanation:
-      `Lot size ${lotSize} implies a ${Math.round(notional).toLocaleString("en-IN")} contract, inside the expected band.`,
+    explanation: drifted
+      ? `Lot size ${lotSize} implies a ${Math.round(notional).toLocaleString("en-IN")} contract: under the `
+        + `${MINIMUM_CONTRACT_VALUE_INR.toLocaleString("en-IN")} revision-time minimum, but within the allowance `
+        + "for the index having fallen since the lot was last revised."
+      : `Lot size ${lotSize} implies a ${Math.round(notional).toLocaleString("en-IN")} contract, inside the expected band.`,
   };
 }

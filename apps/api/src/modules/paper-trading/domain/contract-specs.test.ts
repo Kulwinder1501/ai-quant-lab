@@ -3,6 +3,7 @@ import {
   assessContractSize,
   contractNotional,
   MINIMUM_CONTRACT_VALUE_INR,
+  STALE_LOT_FLOOR_INR,
 } from "./contract-specs.js";
 
 describe("assessContractSize", () => {
@@ -20,6 +21,30 @@ describe("assessContractSize", () => {
   it("accepts the revised BANKNIFTY and NIFTY lot sizes", () => {
     expect(assessContractSize(30, 57_189.4).verdict).toBe("PLAUSIBLE");
     expect(assessContractSize(75, 24_371).verdict).toBe("PLAUSIBLE");
+  });
+
+  it("accepts the exchange's NIFTY lot of 65 when the index has fallen under the revision-time minimum", () => {
+    // 65 x 22,500 = 14.6 lakh: under the 15 lakh sizing target, yet exactly what the exchange lists
+    // (Fyers symbol master, 2026-10-23). The index falling is not a stale lot, and `selectInstrument`
+    // rejects any verdict but PLAUSIBLE, so grading this BELOW would stop every NIFTY entry.
+    const assessment = assessContractSize(65, 22_500);
+    expect(assessment.verdict).toBe("PLAUSIBLE");
+    expect(Math.round(assessment.notional)).toBe(1_462_500);
+    expect(assessment.explanation).toContain("index having fallen");
+  });
+
+  it("still flags a lot that is a whole revision behind once drift is allowed for", () => {
+    // 65 would have to fall to 18,461 (a 18% drop) to leave the 12 lakh staleness floor.
+    expect(assessContractSize(65, 18_000).verdict).toBe("BELOW_REGULATORY_MINIMUM");
+    expect(assessContractSize(65, 18_600).verdict).toBe("PLAUSIBLE");
+    // BANKNIFTY's stale 15 was 57% of the minimum, far past the allowance at any plausible level.
+    expect(assessContractSize(15, 52_000).verdict).toBe("BELOW_REGULATORY_MINIMUM");
+  });
+
+  it("states the staleness floor and the minimum separately in its explanation", () => {
+    const explanation = assessContractSize(15, 57_189.4).explanation;
+    expect(explanation).toContain(STALE_LOT_FLOOR_INR.toLocaleString("en-IN"));
+    expect(explanation).toContain(MINIMUM_CONTRACT_VALUE_INR.toLocaleString("en-IN"));
   });
 
   it("flags a lot size a whole revision too large", () => {

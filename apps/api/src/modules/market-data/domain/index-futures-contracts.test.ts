@@ -22,7 +22,7 @@ describe("upcomingIndexFutures", () => {
       "NIFTY26OCTFUT", "NIFTY26NOVFUT", "BANKNIFTY26OCTFUT", "BANKNIFTY26NOVFUT",
     ]);
     expect(contracts[0]).toMatchObject({
-      providerInstrumentId: "NSE:NIFTY26OCTFUT", underlyingSymbol: "NIFTY50", expiryDate: "2026-10-27", lotSize: 75,
+      providerInstrumentId: "NSE:NIFTY26OCTFUT", underlyingSymbol: "NIFTY50", expiryDate: "2026-10-27", lotSize: 65,
     });
     expect(contracts[3]).toMatchObject({ underlyingSymbol: "BANKNIFTY", expiryDate: "2026-11-24", lotSize: 30 });
   });

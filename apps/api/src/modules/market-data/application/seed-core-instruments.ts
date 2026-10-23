@@ -6,7 +6,11 @@ const coreInstruments = [
     symbol: "NIFTY50",
     displayName: "NIFTY 50",
     instrumentType: "INDEX" as const,
-    lotSize: 75,
+    // 65, matching migration 141. 75 is the pre-revision lot. The Fyers F&O symbol master lists every
+    // NIFTY contract at 65, and stored OI is 98% whole multiples of 65. The upsert preserves lot_size
+    // on conflict, so this constant only matters for a fresh database -- but it must agree with the
+    // migration or a rebuild would reintroduce the stale value.
+    lotSize: 65,
     metadata: { market: "India", canonicalName: "NIFTY 50", kiteQuoteSymbol: "NSE:NIFTY 50" },
   },
   {

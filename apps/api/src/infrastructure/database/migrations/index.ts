@@ -138,6 +138,7 @@ import { fyersDailyRequestLedgerMigration } from "./137-fyers-daily-request-ledg
 import { equityResearchSchemaMigration } from "./138-equity-research-schema.js";
 import { equitySeriesVersioningMigration } from "./139-equity-series-versioning.js";
 import { equityAlertsAndEventsMigration } from "./140-equity-alerts-and-events.js";
+import { correctNiftyLotSizeMigration } from "./141-correct-nifty-lot-size.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -280,4 +281,5 @@ export const migrations = [
   equityResearchSchemaMigration,
   equitySeriesVersioningMigration,
   equityAlertsAndEventsMigration,
+  correctNiftyLotSizeMigration,
 ];
