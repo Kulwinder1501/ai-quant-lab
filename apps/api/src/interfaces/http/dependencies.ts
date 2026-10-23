@@ -22,6 +22,7 @@ import { PostgresModelPredictionQueryRepository } from "../../infrastructure/dat
 import { PostgresNewsRepository } from "../../infrastructure/database/repositories/postgres-news-repository.js";
 import { PostgresOffshoreDerivativeRepository } from "../../infrastructure/database/repositories/postgres-offshore-derivative-repository.js";
 import { PostgresOptionChainRepository } from "../../infrastructure/database/repositories/postgres-option-chain-repository.js";
+import { PostgresDepthFrameRepository } from "../../infrastructure/database/repositories/postgres-depth-frame-repository.js";
 import { PostgresOptionPremiumTickRepository } from "../../infrastructure/database/repositories/postgres-option-premium-tick-repository.js";
 import { PostgresPaperAccountRepository } from "../../infrastructure/database/repositories/postgres-paper-account-repository.js";
 import { PostgresPaperTradeHistoryQueryRepository } from "../../infrastructure/database/repositories/postgres-paper-trade-history-query-repository.js";
@@ -236,6 +237,7 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
       new PostgresMarketContextReader(pool),
     ),
     optionChainRepository: new PostgresOptionChainRepository(pool),
+    depthFrameRepository: new PostgresDepthFrameRepository(pool),
     fyersLiveStreamer,
     liveQuoteCache,
     aiAutonomousAgent,

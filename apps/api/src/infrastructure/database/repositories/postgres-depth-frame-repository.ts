@@ -1,6 +1,7 @@
 import type { DatabasePool } from "../database.js";
 import type { DepthFrameRow } from "../../../modules/market-data/application/capture-depth-frames.js";
 import type { ClassifiedFrame } from "../../../modules/market-data/domain/depth-frame-sequencing.js";
+import type { StoredDepthFrame } from "../../../modules/market-data/domain/depth-ladder.js";
 
 /**
  * Writes and reads the append-only `depth_frames` event log.
@@ -197,6 +198,76 @@ export class PostgresDepthFrameRepository {
       askQty: row.ask_qty.map(Number),
       captureSessionId: row.capture_session_id,
     }));
+  }
+
+  /**
+   * The newest stored frame for one exact symbol, optionally as of an earlier instant -- the read behind the
+   * depth ladder.
+   *
+   * Exact-symbol on purpose: `(provider_symbol, received_at DESC)` serves it as an index walk, where a prefix
+   * match on the symbol would scan the table (1.8M rows, 2 GB at the time of writing). The caller resolves
+   * the contract. `asOf` is inclusive and is the only way to read a past book; there is no "latest before now"
+   * ambiguity because the stored `received_at` is our own millisecond clock.
+   *
+   * Reads the book exactly as stored. It does not repair a frame or filter on `is_regression`, which flagged
+   * 42% of frames against a 0.3% true rate and is not a usable signal.
+   */
+  async latestFrame(input: { providerSymbol: string; asOf?: Date }): Promise<StoredDepthFrame | null> {
+    const result = await this.database.query<{
+      provider_symbol: string;
+      sequence_no: string | null;
+      exchange_feed_time: string | null;
+      received_at: Date;
+      is_snapshot: boolean;
+      levels_stored: number;
+      levels_available: number;
+      bid_price: string[];
+      bid_qty: string[];
+      bid_orders: Array<number | string>;
+      ask_price: string[];
+      ask_qty: string[];
+      ask_orders: Array<number | string>;
+      total_buy_qty: string | null;
+      total_sell_qty: string | null;
+      gap_before: number | null;
+      is_duplicate: boolean;
+      capture_session_id: string | null;
+    }>(
+      `SELECT provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
+              levels_available, bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
+              total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id
+         FROM depth_frames
+        WHERE provider_symbol = $1
+          AND ($2::timestamptz IS NULL OR received_at <= $2::timestamptz)
+        ORDER BY received_at DESC, sequence_no DESC
+        LIMIT 1`,
+      [input.providerSymbol.toUpperCase(), input.asOf ?? null],
+    );
+
+    const row = result.rows[0];
+    if (!row) return null;
+    const numberOrNull = (value: string | null): number | null => (value === null ? null : Number(value));
+    return {
+      providerSymbol: row.provider_symbol,
+      sequenceNo: numberOrNull(row.sequence_no),
+      exchangeFeedTime: numberOrNull(row.exchange_feed_time),
+      receivedAt: row.received_at,
+      isSnapshot: row.is_snapshot,
+      levelsStored: row.levels_stored,
+      levelsAvailable: row.levels_available,
+      // NUMERIC[] and BIGINT[] both arrive as string arrays from node-postgres.
+      bidPrice: row.bid_price.map(Number),
+      bidQty: row.bid_qty.map(Number),
+      bidOrders: row.bid_orders.map(Number),
+      askPrice: row.ask_price.map(Number),
+      askQty: row.ask_qty.map(Number),
+      askOrders: row.ask_orders.map(Number),
+      totalBuyQty: numberOrNull(row.total_buy_qty),
+      totalSellQty: numberOrNull(row.total_sell_qty),
+      gapBefore: row.gap_before,
+      isDuplicate: row.is_duplicate,
+      captureSessionId: row.capture_session_id,
+    };
   }
 
   /**
