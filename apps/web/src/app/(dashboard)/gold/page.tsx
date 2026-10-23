@@ -88,7 +88,8 @@ export default function GoldShadowLedgerPage() {
             className="bg-slate-800 text-white border border-slate-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-400/50"
           >
             <option value="ict-structure-v1">ICT Structure (ict-structure-v1)</option>
-            <option value="momentum-scalp-gold">Momentum Scalp (momentum-scalp-gold)</option>
+            <option value="gold-asian-sweep-v1">Asian Session Sweep (gold-asian-sweep-v1)</option>
+            <option value="momentum-scalp-gold">Momentum Scalp (momentum-scalp-gold) - retired 22 Oct, history only</option>
           </select>
         </div>
       </div>
