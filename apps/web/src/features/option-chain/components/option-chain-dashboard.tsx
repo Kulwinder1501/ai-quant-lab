@@ -11,6 +11,7 @@ import { GreeksByStrikeChart } from "./greeks-by-strike-chart";
 import { OiByStrikeChart } from "./oi-by-strike-chart";
 import { OiHistoryPanel } from "./oi-history-panel";
 import { DepthView } from "./depth-view";
+import { VolumeProfilePanel } from "./volume-profile-panel";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -38,7 +39,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth";
+type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth" | "profile";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -265,7 +266,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks", "oi", "history", "model", "depth"] as const).map((option) => (
+          {(["quotes", "greeks", "oi", "history", "model", "depth", "profile"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -274,7 +275,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option}
+              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option === "profile" ? "Volume profile" : option}
             </button>
           ))}
         </div>
@@ -390,6 +391,11 @@ export function OptionChainDashboard() {
                   expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
+              </div>
+            ) : view === "profile" ? (
+              <div className="px-4 py-4">
+                {/* Futures bars from the database, not the broker; keyed so a switch drops the session and row choice. */}
+                <VolumeProfilePanel key={underlying} underlying={underlying} nowMs={now} />
               </div>
             ) : view === "depth" ? (
               <div className="px-4 py-4">
