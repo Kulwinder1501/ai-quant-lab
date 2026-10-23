@@ -20,6 +20,7 @@ import {
   type OiChangeSign,
   type OiStrikeInput,
 } from "../build-oi-by-strike";
+import { compactUnits, signedCompact } from "../oi-format";
 import { DEFAULT_STRIKE_WINDOW, nearestStrikeOnAxis } from "../strike-axis";
 import { SnapshotFreshnessBar } from "./snapshot-freshness-bar";
 
@@ -34,20 +35,6 @@ export interface OiByStrikeChartProps {
   window?: number;
   /** Clock for age/stale — pass from a parent timer so render stays pure. */
   nowMs: number;
-}
-
-function compactUnits(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "—";
-  const abs = Math.abs(value);
-  if (abs >= 1e7) return `${(value / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${(value / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${(value / 1e3).toFixed(1)}k`;
-  return String(Math.round(value));
-}
-
-function signedCompact(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "—";
-  return `${value > 0 ? "+" : ""}${compactUnits(value)}`;
 }
 
 function pctLabel(value: number | null): string {

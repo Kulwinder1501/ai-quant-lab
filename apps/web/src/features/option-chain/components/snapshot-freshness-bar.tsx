@@ -64,14 +64,25 @@ export function SnapshotFreshnessBar(props: {
   nowMs: number;
   /** Tab-specific wording shown when the snapshot is a pre-open one. Defaults to the open-interest note. */
   preOpenNote?: string;
+  /**
+   * True when the data is a past session picked from history. Snapshot age only means "delay" for the
+   * live session; a week-old stored day reported as "in-session stale" would be a false alarm, so the
+   * assessment is skipped and the bar says what it is showing.
+   */
+  historical?: boolean;
 }) {
-  const { observedAt, provider, expiryLabel, nowMs, preOpenNote = PRE_OPEN_NOTE_OPEN_INTEREST } = props;
+  const { observedAt, provider, expiryLabel, nowMs, preOpenNote = PRE_OPEN_NOTE_OPEN_INTEREST, historical = false } = props;
   const observedMs = observedAt ? Date.parse(observedAt) : Number.NaN;
   const assessment = assessOiSnapshotFreshness({
     observedAtMs: Number.isFinite(observedMs) ? observedMs : null,
     nowMs,
   });
-  const copy = freshnessCopy(assessment.state);
+  const copy: { tone: "ok" | "warn" | "idle"; detail: string | null } = historical
+    ? {
+      tone: "idle",
+      detail: "Historical session: these are stored snapshots from a past day, so their age is not a delay.",
+    }
+    : freshnessCopy(assessment.state);
   const toneClass =
     copy.tone === "warn"
       ? "border-amber-400/40 bg-amber-500/10 text-amber-100"
@@ -83,14 +94,14 @@ export function SnapshotFreshnessBar(props: {
     <div className={`mb-3 rounded-xl border px-3 py-2 text-xs ${toneClass}`} role="status">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="font-semibold uppercase tracking-wider text-[10px] text-slate-400">
-          Snapshot, not live
+          {historical ? "Stored session" : "Snapshot, not live"}
         </span>
         <span>
-          Observed{" "}
+          {historical ? "Last observed" : "Observed"}{" "}
           <span className="font-mono text-slate-100">
             {Number.isFinite(observedMs) ? `${formatClock(observedAt!)} IST` : "—"}
           </span>
-          {assessment.ageMs !== null && (
+          {!historical && assessment.ageMs !== null && (
             <span className={copy.tone === "warn" ? "ml-2 font-bold text-amber-200" : "ml-2 text-slate-400"}>
               ({formatAge(assessment.ageMs)}
               {assessment.state === "in_session_stale" ? " · in-session stale" : ""}
@@ -98,8 +109,12 @@ export function SnapshotFreshnessBar(props: {
             </span>
           )}
         </span>
-        <span className="text-slate-500">·</span>
-        <span>Provider {provider ?? "—"}</span>
+        {provider !== undefined && (
+          <>
+            <span className="text-slate-500">·</span>
+            <span>Provider {provider ?? "—"}</span>
+          </>
+        )}
         <span className="text-slate-500">·</span>
         <span>Expiry {expiryLabel?.trim() ? expiryLabel : "—"}</span>
       </div>
