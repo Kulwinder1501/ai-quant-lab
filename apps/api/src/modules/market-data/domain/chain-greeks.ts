@@ -11,10 +11,15 @@ import { RISK_FREE_RATE } from "@ai-quant-lab/pricing";
 /**
  * Greeks for one contract, solved from the observed chain.
  *
- * The provider returns no greeks, so a delta only exists after inverting an IV out of the
- * quoted mid. This exists so a caller that needs one number -- an entry gate screening for
- * far-OTM contracts, say -- does not reimplement the inversion and end up with a delta that
- * disagrees with the one the chain endpoint shows for the same strike.
+ * These are computed here, not read from the provider. This comment used to say "the provider
+ * returns no greeks"; that was never tested with the flag. Fyers' `greeks=1` does return them
+ * (tested 2026-10-23) and they are stored raw beside the chain as `vendorGreeks`, but they are one
+ * value per strike shared by call and put, gamma is to four decimals only, and they exist only for
+ * snapshots collected since migration 142. So a delta for any contract, any past snapshot, and any
+ * gate decision still comes from inverting an IV out of the quoted mid, as below. This exists so a
+ * caller that needs one number -- an entry gate screening for far-OTM contracts, say -- does not
+ * reimplement the inversion and end up with a delta that disagrees with the one the chain endpoint
+ * shows for the same strike. On the measured NIFTY chain the two agree to 0.002 in delta.
  *
  * Returns null whenever the chain cannot support the solve: no two-sided quote, no spot, an
  * expired contract, or a mid that will not invert. A null delta means *unknown*, and callers
