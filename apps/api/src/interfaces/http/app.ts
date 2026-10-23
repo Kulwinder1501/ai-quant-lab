@@ -5,6 +5,7 @@ import type { DatabaseQueryable } from "../../infrastructure/database/database.j
 import { registerBacktestingRoutes } from "../../modules/backtesting/interfaces/http/backtesting.routes.js";
 import { registerMarketDataRoutes } from "../../modules/market-data/interfaces/http/market-data.routes.js";
 import { registerDepthRoutes } from "../../modules/market-data/interfaces/http/depth.routes.js";
+import { registerVolumeProfileRoutes } from "../../modules/market-data/interfaces/http/volume-profile.routes.js";
 import { registerMarketScannerRoutes } from "../../modules/market-scanner/interfaces/http/market-scanner.routes.js";
 import { registerModelPerformanceRoutes } from "../../modules/model-performance/interfaces/http/model-performance.routes.js";
 import { registerModelPredictionRoutes } from "../../modules/model-predictions/interfaces/http/model-prediction.routes.js";
@@ -76,6 +77,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   registerBacktestingRoutes(app, dependencies);
   registerMarketDataRoutes(app, dependencies);
   registerDepthRoutes(app, dependencies);
+  registerVolumeProfileRoutes(app, dependencies);
   registerNewsRoutes(app, dependencies);
   registerEquityRoutes(app, database);
 
