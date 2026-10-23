@@ -1,6 +1,5 @@
 import type { DatabasePool } from "../../../infrastructure/database/database.js";
 import {
-  defaultMomentumScalpStrategyConfiguration,
   momentumScalpStrategyRegistration,
   momentumScalpStrategyVersion,
 } from "../../strategy-engine/domain/momentum-scalp-strategy.js";
@@ -63,12 +62,17 @@ export async function seedScalpData(database: DatabasePool): Promise<void> {
     }
 
     // Register the declared version itself. Safe now that nothing else holds the active slot.
+    //
+    // The configuration is the registration's, not the shared default: a version can carry keys the default
+    // deliberately omits (version 9's `fixedGeometryBySeries`), and `ensure` compares jsonb equality against
+    // the registration. Writing the default here registered version 8 without that key on 2026-10-23 and the
+    // generator would have failed on it every pass.
     const verRes = await client.query<{ id: string }>(`
       INSERT INTO strategy_versions (strategy_id, version, configuration, is_active)
       VALUES ($1, $2, $3::jsonb, TRUE)
       ON CONFLICT (strategy_id, version) DO UPDATE SET is_active = TRUE
       RETURNING id
-    `, [strategyId, momentumScalpStrategyVersion, JSON.stringify(defaultMomentumScalpStrategyConfiguration)]);
+    `, [strategyId, momentumScalpStrategyVersion, JSON.stringify(momentumScalpStrategyRegistration.configuration)]);
     if (!verRes.rows[0]?.id) throw new Error("Failed to insert/resolve strategy version");
 
     // No seeded candles, indicator snapshots, or trade_ideas rows.

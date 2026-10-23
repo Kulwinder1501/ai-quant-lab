@@ -114,7 +114,14 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * measuring exactly what they always have and are unaffected by this.
  */
 /**
- * Bumped 2026-10-23 (7 -> 8): fixed point geometry for NIFTY50 1m, 8 points of stop and 12 of target (1:1.5).
+ * Bumped 2026-10-23 (7 -> 9): fixed point geometry for NIFTY50 1m, 8 points of stop and 12 of target (1:1.5).
+ *
+ * Version 8 was skipped. It was registered in the database at 11:18 IST the same day with the configuration
+ * *without* `fixedGeometryBySeries`, because the API's boot seed (`seed-scalp-data.ts`) wrote
+ * `defaultMomentumScalpStrategyConfiguration` instead of the registration's configuration. The generator's
+ * `ensure` then found 8 already existing with a different immutable configuration and would have returned
+ * STRATEGY_FAILED on every pass. A registered version cannot be edited, so the corrected seed registers 9.
+ * The stray 8 has no ideas or trades attached and is deactivated by the next registration.
  *
  * Requested for AutoBot-Scalp1m, which traded BANKNIFTY 1m on ATR geometry: about 40 points of stop and 60 of
  * target (44 ideas on version 7). A 10-15 point bracket cannot work on BANKNIFTY -- its median 1m bar is 24
@@ -128,7 +135,7 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  * 1:1.5 and not 1:2 on purpose: `evaluate-open-paper-trades.ts` only applies the MOMENTUM_STALL time stop at
  * reward/risk <= 1.6, and a 2R bracket would exempt every trade from it.
  */
-export const momentumScalpStrategyVersion = 8;
+export const momentumScalpStrategyVersion = 9;
 
 export const defaultMomentumScalpStrategyConfiguration: MomentumScalpStrategyConfiguration = {
   indicatorAlgorithmVersion: "ta-v1",

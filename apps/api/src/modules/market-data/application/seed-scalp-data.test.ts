@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { seedScalpData } from "./seed-scalp-data.js";
-import { momentumScalpStrategyVersion } from "../../strategy-engine/domain/momentum-scalp-strategy.js";
+import {
+  momentumScalpStrategyRegistration,
+  momentumScalpStrategyVersion,
+} from "../../strategy-engine/domain/momentum-scalp-strategy.js";
 
 /**
  * A fake client that records the statements the seed issues, so the ordering can be asserted.
@@ -38,6 +41,29 @@ describe("seedScalpData", () => {
     expect(standDown).toBeLessThan(activate);
     expect(db.statements[0]).toBe("BEGIN");
     expect(db.statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("registers the registration's own configuration, so the generator's ensure sees the same jsonb", async () => {
+    // The seed once wrote the shared default, which omits keys a version carries on purpose. Version 8 was
+    // registered without fixedGeometryBySeries and ensure() refused it as a changed immutable configuration.
+    let inserted: { version: unknown; configuration: unknown } | null = null;
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql.includes("INSERT INTO strategies")) return { rows: [{ id: "strategy-1" }] };
+        if (sql.includes("INSERT INTO strategy_versions")) {
+          inserted = { version: params?.[1], configuration: JSON.parse(String(params?.[2])) };
+          return { rows: [{ id: "version-1" }] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    await seedScalpData({ connect: async () => client } as never);
+
+    expect(inserted).not.toBeNull();
+    expect(inserted!.version).toBe(momentumScalpStrategyVersion);
+    expect(inserted!.configuration).toEqual(JSON.parse(JSON.stringify(momentumScalpStrategyRegistration.configuration)));
+    expect(inserted!.configuration).toHaveProperty("fixedGeometryBySeries");
   });
 
   it("excludes the declared version from the stand-down, so a re-run is idempotent", async () => {

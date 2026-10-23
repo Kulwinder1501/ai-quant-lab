@@ -69,10 +69,10 @@ export const frozenSourceContentDigests = Object.freeze({
   // default (momentum-v9/v10/v11-research) were given their own explicit
   // candlestickAlgorithmVersion: "candlestick-v1" override first, so their registered behaviour and
   // researchStrategySourceChecksums entry are both unchanged -- only this drift-detector pin moves.
-  // Re-pinned 2026-10-23: momentumScalpStrategyVersion 7 -> 8 added optional `fixedGeometryBySeries` (NIFTY50 1m,
+  // Re-pinned 2026-10-23: momentumScalpStrategyVersion 7 -> 9 added optional `fixedGeometryBySeries` (NIFTY50 1m,
   // 8/12 points). It is absent from the default the research definitions below spread, so their configuration,
   // definition hashes and researchStrategySourceChecksums entries are unchanged -- only this drift pin moves.
-  "momentum-scalp-strategy.ts": "8d7af65a21b2201c2108143755e27e14db5c5d77c4fa83805e7f55e76ef6feb9",
+  "momentum-scalp-strategy.ts": "f8e1d61810c6c80f650403f1dc103d8d9fd9f472091ead98900e871c69e3729a",
   // Re-pinned 2026-10-10, same reason and same shape as above (momentumScalpIndexStrategyVersion
   // bumped 1->2). index-v3-research was given its own explicit candlestick-v1 override first.
   "momentum-scalp-index-strategy.ts": "08379a18e493d57e664adb24095bb410af686972420ea89dc903e466f7145e86",

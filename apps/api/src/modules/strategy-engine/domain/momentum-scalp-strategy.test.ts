@@ -149,7 +149,7 @@ describe("MomentumScalpStrategy fixed point geometry", () => {
   });
 
   it("registers NIFTY50 1m at 8 points of stop and 12 of target, and keeps it out of the shared default", () => {
-    expect(momentumScalpStrategyRegistration.version).toBe(8);
+    expect(momentumScalpStrategyRegistration.version).toBe(9);
     expect(momentumScalpStrategyRegistration.configuration.fixedGeometryBySeries).toEqual(nifty1m);
     expect(parseMomentumScalpStrategyConfiguration(momentumScalpStrategyRegistration.configuration).fixedGeometryBySeries).toEqual(nifty1m);
     // The frozen research cohorts spread the default; a key here would move their definition hashes.

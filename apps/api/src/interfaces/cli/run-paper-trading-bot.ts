@@ -155,7 +155,7 @@ const SCAN_TIMEFRAMES = ["1m", "5m", "15m"] as const;
  * otherwise scanned.
  *
  * `BANKNIFTY 1m` (from 2026-10-23): `AutoBot-Scalp1m` moved its 1m scalp to NIFTY50 at fixed 8/12 point geometry
- * (see bot-sandboxes.ts and `momentumScalpStrategyVersion` 8), so no bot owns this cell any more and every idea it
+ * (see bot-sandboxes.ts and `momentumScalpStrategyVersion` 9), so no bot owns this cell any more and every idea it
  * raised would be a signal nothing can act on, indistinguishable on the Strategy & Ideas proposals grid from one a
  * bot would take. It had the same treatment on `NIFTY50 1m` until then, for the same reason, when that cell had no
  * owner (`trend-breakout` and, before 2026-09-03, `momentum-scalp` accumulated such ideas).
