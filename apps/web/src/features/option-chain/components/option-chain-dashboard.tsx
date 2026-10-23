@@ -7,6 +7,7 @@ import { errorMessage, isAbortError } from "../../../lib/errors";
 import { getApiV1Url } from "../../research/api";
 import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
+import { GreeksByStrikeChart } from "./greeks-by-strike-chart";
 import { OiByStrikeChart } from "./oi-by-strike-chart";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
@@ -34,7 +35,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks" | "oi";
+type ChainView = "quotes" | "greeks" | "oi" | "model";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -153,7 +154,7 @@ export function OptionChainDashboard() {
   }, [chain?.available, underlying]);
 
   /**
-   * Stable strike rows for the OI chart. Inline mapping on every 2s `now` tick would defeat
+   * Stable strike rows for charts. Inline mapping on every 2s `now` tick would defeat
    * the chart's useMemo and re-animate bars; keep the reference while the chain snapshot is unchanged.
    */
   const oiChartStrikes = useMemo(
@@ -176,7 +177,35 @@ export function OptionChainDashboard() {
     [chain?.strikes],
   );
 
-  const oiExpiryLabel = useMemo(() => {
+  const greeksChartStrikes = useMemo(
+    () =>
+      (chain?.strikes ?? []).map((row) => ({
+        strikePrice: row.strikePrice,
+        call: row.call
+          ? {
+              impliedVolatility: row.call.impliedVolatility,
+              impliedVolatilityRefusal: row.call.impliedVolatilityRefusal,
+              delta: row.call.delta,
+              gamma: row.call.gamma,
+              theta: row.call.theta,
+              vega: row.call.vega,
+            }
+          : null,
+        put: row.put
+          ? {
+              impliedVolatility: row.put.impliedVolatility,
+              impliedVolatilityRefusal: row.put.impliedVolatilityRefusal,
+              delta: row.put.delta,
+              gamma: row.put.gamma,
+              theta: row.put.theta,
+              vega: row.put.vega,
+            }
+          : null,
+      })),
+    [chain?.strikes],
+  );
+
+  const chartExpiryLabel = useMemo(() => {
     const selected = expiry
       ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
       : (chain?.expiries ?? [])[0];
@@ -228,7 +257,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks", "oi"] as const).map((option) => (
+          {(["quotes", "greeks", "oi", "model"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -237,7 +266,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option === "oi" ? "OI chart" : option}
+              {option === "oi" ? "OI chart" : option === "model" ? "Model greeks" : option}
             </button>
           ))}
         </div>
@@ -350,7 +379,19 @@ export function OptionChainDashboard() {
                   underlyingValue={chain.underlyingValue ?? null}
                   observedAt={chain.observedAt}
                   provider={chain.provider}
-                  expiryLabel={oiExpiryLabel}
+                  expiryLabel={chartExpiryLabel}
+                  nowMs={now}
+                />
+              </div>
+            ) : view === "model" ? (
+              <div className="px-4 py-4">
+                <GreeksByStrikeChart
+                  strikes={greeksChartStrikes}
+                  atmStrike={chain.atmStrike ?? null}
+                  underlyingValue={chain.underlyingValue ?? null}
+                  observedAt={chain.observedAt}
+                  provider={chain.provider}
+                  expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
               </div>
