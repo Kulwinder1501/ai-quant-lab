@@ -9,6 +9,7 @@ import { formatNumber } from "../../research/presentation";
 import { OptionTradeModal } from "./option-trade-modal";
 import { GreeksByStrikeChart } from "./greeks-by-strike-chart";
 import { OiByStrikeChart } from "./oi-by-strike-chart";
+import { OiHistoryPanel } from "./oi-history-panel";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -36,7 +37,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks" | "oi" | "model";
+type ChainView = "quotes" | "greeks" | "oi" | "model" | "history";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -261,7 +262,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks", "oi", "model"] as const).map((option) => (
+          {(["quotes", "greeks", "oi", "history", "model"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -270,7 +271,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option === "oi" ? "OI chart" : option === "model" ? "Model greeks" : option}
+              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option}
             </button>
           ))}
         </div>
@@ -386,6 +387,11 @@ export function OptionChainDashboard() {
                   expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
+              </div>
+            ) : view === "history" ? (
+              <div className="px-4 py-4">
+                {/* Keyed by underlying so a switch drops the session and contract selection. */}
+                <OiHistoryPanel key={underlying} underlying={underlying} expiry={expiry} nowMs={now} />
               </div>
             ) : view === "model" ? (
               <div className="px-4 py-4">
