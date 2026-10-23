@@ -1,7 +1,58 @@
 import type { DatabasePool } from "../database.js";
 import type { DepthFrameRow } from "../../../modules/market-data/application/capture-depth-frames.js";
 import type { ClassifiedFrame } from "../../../modules/market-data/domain/depth-frame-sequencing.js";
+import { SESSION_DAY_COUNT_CAP } from "../../../modules/market-data/domain/depth-history.js";
 import type { StoredDepthFrame } from "../../../modules/market-data/domain/depth-ladder.js";
+
+const STORED_FRAME_COLUMNS = `provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
+              levels_available, bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
+              total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id`;
+
+interface StoredFrameRow {
+  provider_symbol: string;
+  sequence_no: string | null;
+  exchange_feed_time: string | null;
+  received_at: Date;
+  is_snapshot: boolean;
+  levels_stored: number;
+  levels_available: number;
+  bid_price: string[];
+  bid_qty: string[];
+  bid_orders: Array<number | string>;
+  ask_price: string[];
+  ask_qty: string[];
+  ask_orders: Array<number | string>;
+  total_buy_qty: string | null;
+  total_sell_qty: string | null;
+  gap_before: number | null;
+  is_duplicate: boolean;
+  capture_session_id: string | null;
+}
+
+function toStoredFrame(row: StoredFrameRow): StoredDepthFrame {
+  const numberOrNull = (value: string | null): number | null => (value === null ? null : Number(value));
+  return {
+    providerSymbol: row.provider_symbol,
+    sequenceNo: numberOrNull(row.sequence_no),
+    exchangeFeedTime: numberOrNull(row.exchange_feed_time),
+    receivedAt: row.received_at,
+    isSnapshot: row.is_snapshot,
+    levelsStored: row.levels_stored,
+    levelsAvailable: row.levels_available,
+    // NUMERIC[] and BIGINT[] both arrive as string arrays from node-postgres.
+    bidPrice: row.bid_price.map(Number),
+    bidQty: row.bid_qty.map(Number),
+    bidOrders: row.bid_orders.map(Number),
+    askPrice: row.ask_price.map(Number),
+    askQty: row.ask_qty.map(Number),
+    askOrders: row.ask_orders.map(Number),
+    totalBuyQty: numberOrNull(row.total_buy_qty),
+    totalSellQty: numberOrNull(row.total_sell_qty),
+    gapBefore: row.gap_before,
+    isDuplicate: row.is_duplicate,
+    captureSessionId: row.capture_session_id,
+  };
+}
 
 /**
  * Writes and reads the append-only `depth_frames` event log.
@@ -213,29 +264,8 @@ export class PostgresDepthFrameRepository {
    * 42% of frames against a 0.3% true rate and is not a usable signal.
    */
   async latestFrame(input: { providerSymbol: string; asOf?: Date }): Promise<StoredDepthFrame | null> {
-    const result = await this.database.query<{
-      provider_symbol: string;
-      sequence_no: string | null;
-      exchange_feed_time: string | null;
-      received_at: Date;
-      is_snapshot: boolean;
-      levels_stored: number;
-      levels_available: number;
-      bid_price: string[];
-      bid_qty: string[];
-      bid_orders: Array<number | string>;
-      ask_price: string[];
-      ask_qty: string[];
-      ask_orders: Array<number | string>;
-      total_buy_qty: string | null;
-      total_sell_qty: string | null;
-      gap_before: number | null;
-      is_duplicate: boolean;
-      capture_session_id: string | null;
-    }>(
-      `SELECT provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
-              levels_available, bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
-              total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id
+    const result = await this.database.query<StoredFrameRow>(
+      `SELECT ${STORED_FRAME_COLUMNS}
          FROM depth_frames
         WHERE provider_symbol = $1
           AND ($2::timestamptz IS NULL OR received_at <= $2::timestamptz)
@@ -245,29 +275,74 @@ export class PostgresDepthFrameRepository {
     );
 
     const row = result.rows[0];
-    if (!row) return null;
-    const numberOrNull = (value: string | null): number | null => (value === null ? null : Number(value));
-    return {
-      providerSymbol: row.provider_symbol,
-      sequenceNo: numberOrNull(row.sequence_no),
-      exchangeFeedTime: numberOrNull(row.exchange_feed_time),
-      receivedAt: row.received_at,
-      isSnapshot: row.is_snapshot,
-      levelsStored: row.levels_stored,
-      levelsAvailable: row.levels_available,
-      // NUMERIC[] and BIGINT[] both arrive as string arrays from node-postgres.
-      bidPrice: row.bid_price.map(Number),
-      bidQty: row.bid_qty.map(Number),
-      bidOrders: row.bid_orders.map(Number),
-      askPrice: row.ask_price.map(Number),
-      askQty: row.ask_qty.map(Number),
-      askOrders: row.ask_orders.map(Number),
-      totalBuyQty: numberOrNull(row.total_buy_qty),
-      totalSellQty: numberOrNull(row.total_sell_qty),
-      gapBefore: row.gap_before,
-      isDuplicate: row.is_duplicate,
-      captureSessionId: row.capture_session_id,
-    };
+    return row ? toStoredFrame(row) : null;
+  }
+
+  /**
+   * Every stored frame for one exact symbol in `[from, to)`, oldest first -- the read behind the depth history.
+   *
+   * Half-open, so adjacent windows never share a frame. Exact-symbol, so the `(provider_symbol, received_at)`
+   * index serves it as a range walk (about 43,000 rows for a BANKNIFTY session, 90 ms measured). Rows from
+   * every capture session are returned and each carries its `captureSessionId`: pooling is the caller's
+   * decision, because two collectors writing at once would interleave two streams of the same contract.
+   * Frames are read exactly as stored; `is_regression` and `is_duplicate` are not filtered on (see `latestFrame`).
+   */
+  async framesInWindow(input: { providerSymbol: string; from: Date; to: Date }): Promise<StoredDepthFrame[]> {
+    const result = await this.database.query<StoredFrameRow>(
+      `SELECT ${STORED_FRAME_COLUMNS}
+         FROM depth_frames
+        WHERE provider_symbol = $1
+          AND received_at >= $2 AND received_at < $3
+        ORDER BY received_at ASC, sequence_no ASC`,
+      [input.providerSymbol.toUpperCase(), input.from, input.to],
+    );
+    return result.rows.map(toStoredFrame);
+  }
+
+  /**
+   * The weekdays, from `fromDate` to `toDate` inclusive (IST calendar dates, `YYYY-MM-DD`), on which this exact
+   * symbol has a frame inside 09:00-15:30 IST, newest first, with when its first and last in-session frame
+   * arrived and a frame count capped at `SESSION_DAY_COUNT_CAP`.
+   *
+   * Two index probes and one capped walk per day (about 20 ms for 80 days, measured), where counting every
+   * frame is 3 s: a list that feeds a drop-down must not cost a table scan. The count is capped on purpose; it
+   * tells a full day (cap reached) from a sparse one (a weekday with 4 frames spans most of the session and is
+   * almost empty), and the exact figure comes with the session itself.
+   */
+  async sessionDays(input: { providerSymbol: string; fromDate: string; toDate: string }): Promise<Array<{
+    date: string;
+    firstAt: Date;
+    lastAt: Date;
+    framesCapped: number;
+  }>> {
+    const dayStart = "(d AT TIME ZONE 'Asia/Kolkata') + interval '9 hours'";
+    const dayEnd = "(d AT TIME ZONE 'Asia/Kolkata') + interval '15 hours 30 minutes'";
+    const result = await this.database.query<{ day: string; first_at: Date; last_at: Date; frames_capped: string }>(
+      `SELECT to_char(d, 'YYYY-MM-DD') AS day, f.first_at, l.last_at, c.frames_capped
+         FROM generate_series($2::timestamp, $3::timestamp, interval '1 day') AS d
+        CROSS JOIN LATERAL (
+              SELECT received_at AS first_at FROM depth_frames
+               WHERE provider_symbol = $1 AND received_at >= ${dayStart} AND received_at < ${dayEnd}
+               ORDER BY received_at ASC LIMIT 1) f
+        CROSS JOIN LATERAL (
+              SELECT received_at AS last_at FROM depth_frames
+               WHERE provider_symbol = $1 AND received_at >= ${dayStart} AND received_at < ${dayEnd}
+               ORDER BY received_at DESC LIMIT 1) l
+        CROSS JOIN LATERAL (
+              SELECT COUNT(*) AS frames_capped FROM (
+                SELECT 1 FROM depth_frames
+                 WHERE provider_symbol = $1 AND received_at >= ${dayStart} AND received_at < ${dayEnd}
+                 LIMIT ${SESSION_DAY_COUNT_CAP}) capped) c
+        WHERE EXTRACT(ISODOW FROM d) < 6
+        ORDER BY d DESC`,
+      [input.providerSymbol.toUpperCase(), input.fromDate, input.toDate],
+    );
+    return result.rows.map((row) => ({
+      date: row.day,
+      firstAt: row.first_at,
+      lastAt: row.last_at,
+      framesCapped: Number(row.frames_capped),
+    }));
   }
 
   /**

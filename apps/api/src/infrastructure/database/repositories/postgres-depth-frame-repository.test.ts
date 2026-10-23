@@ -103,3 +103,62 @@ describe("PostgresDepthFrameRepository.latestFrame", () => {
     expect(sql).not.toContain("is_regression");
   });
 });
+
+describe("PostgresDepthFrameRepository.framesInWindow", () => {
+  const from = new Date("2026-10-22T03:30:00.000Z");
+  const to = new Date("2026-10-22T10:00:00.000Z");
+
+  it("reads one exact symbol over a half-open window, oldest first, without filtering on the unreliable flags", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await new PostgresDepthFrameRepository({ query } as unknown as DatabasePool)
+      .framesInWindow({ providerSymbol: "nse:banknifty26octfut", from, to });
+
+    const [sql, values] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain("provider_symbol = $1");
+    expect(sql).toContain("received_at >= $2 AND received_at < $3");
+    expect(sql).toMatch(/ORDER BY received_at ASC, sequence_no ASC/);
+    expect(sql).not.toMatch(/LIKE/i);
+    expect(sql).not.toContain("is_regression");
+    expect(sql).not.toContain("is_duplicate =");
+    expect(values).toEqual(["NSE:BANKNIFTY26OCTFUT", from, to]);
+  });
+
+  it("maps every row the way the single-frame read does, and keeps each row's capture session", async () => {
+    const query = vi.fn(async () => ({
+      rows: [storedRow(), storedRow({ capture_session_id: "session-2", total_buy_qty: null })],
+    }));
+    const frames = await new PostgresDepthFrameRepository({ query } as unknown as DatabasePool)
+      .framesInWindow({ providerSymbol: "NSE:BANKNIFTY26OCTFUT", from, to });
+
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toMatchObject({ bidPrice: [54_200, 54_199.8], totalBuyQty: 28_080, captureSessionId: "session-1" });
+    expect(frames[1]).toMatchObject({ totalBuyQty: null, captureSessionId: "session-2" });
+  });
+});
+
+describe("PostgresDepthFrameRepository.sessionDays", () => {
+  it("probes by exact symbol inside the 09:00-15:30 IST window of each weekday, and caps the count", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await new PostgresDepthFrameRepository({ query } as unknown as DatabasePool)
+      .sessionDays({ providerSymbol: "nse:banknifty26octfut", fromDate: "2026-08-24", toDate: "2026-10-23" });
+
+    const [sql, values] = query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain("provider_symbol = $1");
+    expect(sql).toContain("Asia/Kolkata");
+    expect(sql).toContain("interval '9 hours'");
+    expect(sql).toContain("interval '15 hours 30 minutes'");
+    expect(sql).toMatch(/ISODOW FROM d\) < 6/);
+    expect(sql).toMatch(/LIMIT 1000\)/);
+    expect(sql).not.toMatch(/LIKE/i);
+    expect(values).toEqual(["NSE:BANKNIFTY26OCTFUT", "2026-08-24", "2026-10-23"]);
+  });
+
+  it("returns days as IST date strings with the first and last in-session frame and the capped count as a number", async () => {
+    const firstAt = new Date("2026-10-22T03:38:50.522Z");
+    const lastAt = new Date("2026-10-22T09:59:59.703Z");
+    const query = vi.fn(async () => ({ rows: [{ day: "2026-10-22", first_at: firstAt, last_at: lastAt, frames_capped: "1000" }] }));
+    const days = await new PostgresDepthFrameRepository({ query } as unknown as DatabasePool)
+      .sessionDays({ providerSymbol: "NSE:BANKNIFTY26OCTFUT", fromDate: "2026-10-22", toDate: "2026-10-22" });
+    expect(days).toEqual([{ date: "2026-10-22", firstAt, lastAt, framesCapped: 1000 }]);
+  });
+});
