@@ -276,7 +276,10 @@ export function DepthHeatmapPanel({ underlying, nowMs }: { underlying: string; n
             {available.underlying} futures {available.contract.providerSymbol}
             {available.contract.expiryDate ? ` (expiry ${available.contract.expiryDate})` : ""} · session {available.sessionDate} IST ·{" "}
             {available.counts.framesUsed.toLocaleString("en-IN")} of {available.counts.framesInSession.toLocaleString("en-IN")} frames used ·{" "}
-            {available.buckets.length} columns of {available.bucketSeconds} s, rows of {available.rowPoints} pt{available.rowPoints > 1 ? "s" : ""}
+            {available.buckets.length} columns of {available.bucketSeconds} s, rows of {available.rowPoints} pt{available.rowPoints > 1 ? "s" : ""} ·{" "}
+            {available.storedLevels.min === available.storedLevels.max
+              ? `${available.storedLevels.min} levels stored per frame`
+              : `${available.storedLevels.min} to ${available.storedLevels.max} levels stored per frame (the collector was raised part-way, so depth differs across the day)`}
             {available.inProgress && ageSeconds !== null ? ` · session in progress, fetched ${ageSeconds} s ago, refreshed every minute` : ""}
           </p>
           {available.gaps.length > 0 && (

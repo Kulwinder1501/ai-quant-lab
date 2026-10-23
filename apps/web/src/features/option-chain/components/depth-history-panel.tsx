@@ -368,7 +368,7 @@ export function DepthHistoryPanel({ underlying, nowMs }: { underlying: string; n
           {levelPlot === false && (show.l5 || show.l1) && wholePlot && <p className="mt-1 text-[11px] text-slate-500">Levels 1–5 and touch: {model.emptyReason.imbalance}</p>}
           {wholePlot === false && show.whole && levelPlot && <p className="mt-1 text-[11px] text-slate-500">Whole book: {model.emptyReason.wholeBook}</p>}
           <p className="mt-1 text-[11px] text-slate-500">
-            Above zero is more resting quantity on the bid, below zero more on the ask. Levels 1–5 and the touch are the top of the book only: the ten stored levels reach a few points and hold about 2% of the whole book. The whole-book line uses the feed&apos;s own totals (all 50 levels). They can disagree, and none of them is a forecast.
+            Above zero is more resting quantity on the bid, below zero more on the ask. Levels 1–5 and the touch are the top of the book only: on the days checked the first ten levels reached a few points and held about 2% of the whole book. The whole-book line uses the feed&apos;s own totals, which cover more of the book. They can disagree, and none of them is a forecast.
           </p>
 
           <h4 className="mt-4 text-xs font-bold text-slate-200">Spread, index points</h4>

@@ -4,11 +4,13 @@ import {
   bookAgeSeconds,
   buildLadderRows,
   coverageSentence,
+  DEFAULT_VISIBLE_LEVELS,
   DEPTH_UNDERLYINGS,
   DEPTH_STALE_AFTER_SECONDS,
   describeImbalance,
   effectiveStatus,
   presentStatus,
+  topLevels,
   type DepthLevelView,
 } from "./depth-ladder-view";
 
@@ -104,6 +106,20 @@ describe("coverageSentence", () => {
     );
   });
 
+  it("says all the levels are stored when the frame holds every level the feed carried, not that it is the top", () => {
+    const sentence = coverageSentence({
+      levelsStored: 50,
+      levelsAvailable: 50,
+      reachPoints: { bid: 41.2, ask: 63.8 },
+      storedShareOfWholeBook: { bid: 0.31, ask: 0.27 },
+      wholeBookTotals: { bid: 44_850, ask: 66_000 },
+    });
+    expect(sentence).toBe(
+      "All 50 levels the feed carried are stored: they reach 41.2 pts on the bid and 63.8 pts on the ask, and hold 31.0% of the whole book's resting bid quantity and 27.0% of its ask.",
+    );
+    expect(sentence).not.toContain("only");
+  });
+
   it("says n/a where a figure is unknown rather than printing a zero", () => {
     const sentence = coverageSentence({
       levelsStored: 10, levelsAvailable: 50,
@@ -113,6 +129,32 @@ describe("coverageSentence", () => {
     });
     expect(sentence).toContain("n/a");
     expect(sentence).not.toContain("0.0%");
+  });
+});
+
+describe("topLevels", () => {
+  const side = (count: number) => Array.from({ length: count }, (_, i) => lvl(i + 1, 100 + i, 10 * (i + 1), 0));
+
+  it("keeps the first levels of each side and leaves the original untouched", () => {
+    const ladder = { bids: side(50), asks: side(30) };
+    const shown = topLevels(ladder, DEFAULT_VISIBLE_LEVELS);
+    expect(shown.bids).toHaveLength(10);
+    expect(shown.asks).toHaveLength(10);
+    expect(shown.bids[9]!.level).toBe(10);
+    expect(ladder.bids).toHaveLength(50);
+  });
+
+  it("scales the bars against what is shown, so a huge deep level does not flatten the visible ones", () => {
+    const deep = side(12);
+    deep[11] = lvl(12, 111, 9_999_999, 0);
+    const all = buildLadderRows({ bids: deep, asks: side(12) }, 30);
+    const shown = buildLadderRows(topLevels({ bids: deep, asks: side(12) }, 10), 30);
+    expect(Math.max(...all.filter((r) => r.level <= 10).map((r) => r.barFraction))).toBeLessThan(0.001);
+    expect(Math.max(...shown.map((r) => r.barFraction))).toBe(1);
+  });
+
+  it("returns what exists when a side is shorter than the count", () => {
+    expect(topLevels({ bids: side(3), asks: side(0) }, 10)).toEqual({ bids: side(3), asks: [] });
   });
 });
 

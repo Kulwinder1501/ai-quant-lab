@@ -7,10 +7,12 @@ import {
   bookAgeSeconds,
   buildLadderRows,
   coverageSentence,
+  DEFAULT_VISIBLE_LEVELS,
   DEPTH_UNDERLYINGS,
   describeImbalance,
   effectiveStatus,
   presentStatus,
+  topLevels,
   type DepthAvailable,
   type DepthPayload,
 } from "../depth-ladder-view";
@@ -68,7 +70,12 @@ function LadderBook({ data, nowMs, fetchedAtMs }: { data: DepthAvailable; nowMs:
   const { ladder, contract } = data;
   const age = bookAgeSeconds(ladder.ageSeconds, fetchedAtMs, nowMs);
   const status = presentStatus(effectiveStatus(ladder.status, age));
-  const rows = useMemo(() => buildLadderRows(ladder, contract.lotSize), [ladder, contract.lotSize]);
+  const [showAll, setShowAll] = useState(false);
+  const deeperThanDefault = ladder.bids.length > DEFAULT_VISIBLE_LEVELS || ladder.asks.length > DEFAULT_VISIBLE_LEVELS;
+  const rows = useMemo(
+    () => buildLadderRows(showAll ? ladder : topLevels(ladder, DEFAULT_VISIBLE_LEVELS), contract.lotSize),
+    [ladder, contract.lotSize, showAll],
+  );
 
   return (
     <>
@@ -136,7 +143,7 @@ function LadderBook({ data, nowMs, fetchedAtMs }: { data: DepthAvailable; nowMs:
             The first five rows describe only the stored top of the book. &quot;Whole book&quot; comes from the feed&apos;s own
             totals ({ladder.coverage.wholeBookTotals.bid === null ? "n/a" : formatQty(ladder.coverage.wholeBookTotals.bid)} bid vs{" "}
             {ladder.coverage.wholeBookTotals.ask === null ? "n/a" : formatQty(ladder.coverage.wholeBookTotals.ask)} ask units)
-            and covers every level the feed carries. A positive value describes resting liquidity; it does not predict price.
+            and covers more of the book than the stored levels do. A positive value describes resting liquidity; it does not predict price.
           </p>
         </div>
 
@@ -178,6 +185,18 @@ function LadderBook({ data, nowMs, fetchedAtMs }: { data: DepthAvailable; nowMs:
             Bars compare levels within this one book; the number beside each is the quantity. Units are contracts
             × lot size, not lots (lots shown after the dot).
           </p>
+          {deeperThanDefault && (
+            <button
+              type="button"
+              onClick={() => setShowAll((current) => !current)}
+              aria-pressed={showAll}
+              className="mt-2 rounded-lg border border-white/10 bg-slate-950/60 px-2 py-1 text-xs font-bold text-slate-200"
+            >
+              {showAll
+                ? `Show the top ${DEFAULT_VISIBLE_LEVELS} levels`
+                : `Show all ${Math.max(ladder.bids.length, ladder.asks.length)} stored levels`}
+            </button>
+          )}
         </div>
       </div>
 

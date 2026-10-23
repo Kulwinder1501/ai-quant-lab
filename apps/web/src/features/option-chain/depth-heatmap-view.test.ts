@@ -46,6 +46,7 @@ function payload(overrides: Partial<DepthHeatmapAvailable> = {}): DepthHeatmapAv
     scale: { capQty: 200, capPercentile: 95, maxQty: 400, cellsWithLiquidity: 3 },
     rowRange: { low: 27_000, high: 27_004 },
     counts: { framesInSession: 300, framesUsed: 300, framesWithoutLevelMetrics: 0 },
+    storedLevels: { min: 10, max: 10 },
     gaps: [{ from: iso(120), to: iso(600), seconds: 480 }],
     captureSessions: [],
     concurrentWriters: [],

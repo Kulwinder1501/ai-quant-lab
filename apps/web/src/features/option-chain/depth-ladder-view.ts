@@ -156,12 +156,26 @@ function points(value: number | null): string {
   return value === null ? "n/a" : `${value.toFixed(1)} pts`;
 }
 
-/** The sentence that stops a top-of-book figure being read as the book's. */
+/**
+ * The sentence that stops a top-of-book figure being read as the book's. A frame stored at every level the feed carried
+ * says so; one stored at ten of fifty says it holds only the top.
+ */
 export function coverageSentence(coverage: DepthCoverageView): string {
-  return `Top ${coverage.levelsStored} of ${coverage.levelsAvailable} levels only: they reach `
+  const scope = coverage.levelsStored >= coverage.levelsAvailable
+    ? `All ${coverage.levelsStored} levels the feed carried are stored: they reach `
+    : `Top ${coverage.levelsStored} of ${coverage.levelsAvailable} levels only: they reach `;
+  return `${scope}`
     + `${points(coverage.reachPoints.bid)} on the bid and ${points(coverage.reachPoints.ask)} on the ask, and hold `
     + `${percent(coverage.storedShareOfWholeBook.bid)} of the whole book's resting bid quantity and `
     + `${percent(coverage.storedShareOfWholeBook.ask)} of its ask.`;
+}
+
+/** Levels shown a side before "show all": the book the day's first screens were designed around, and a readable height. */
+export const DEFAULT_VISIBLE_LEVELS = 10;
+
+/** The first `count` levels of each side. Bars are then scaled against what is shown, not against a far deeper level. */
+export function topLevels<T extends Pick<DepthLadderView, "bids" | "asks">>(ladder: T, count: number): Pick<DepthLadderView, "bids" | "asks"> {
+  return { bids: ladder.bids.slice(0, count), asks: ladder.asks.slice(0, count) };
 }
 
 /** The same ten seconds the API uses to call an in-session frame stale (`DEPTH_STALE_AFTER_SECONDS`). */

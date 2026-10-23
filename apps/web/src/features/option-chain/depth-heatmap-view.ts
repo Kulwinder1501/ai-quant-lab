@@ -40,6 +40,8 @@ export interface DepthHeatmapAvailable {
   scale: { capQty: number | null; capPercentile: number; maxQty: number | null; cellsWithLiquidity: number };
   rowRange: { low: number; high: number } | null;
   counts: { framesInSession: number; framesUsed: number; framesWithoutLevelMetrics: number };
+  /** Fewest and most levels per frame in the session: 10 before the collector was raised to 50, 50 after. */
+  storedLevels: { min: number; max: number };
   gaps: Array<{ from: string; to: string; seconds: number }>;
   captureSessions: Array<{ captureSessionId: string; frames: number; firstAt: string; lastAt: string }>;
   concurrentWriters: Array<{ a: string; b: string; overlapFrom: string; overlapTo: string; overlapSeconds: number }>;
