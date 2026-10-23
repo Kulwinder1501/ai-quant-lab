@@ -10,6 +10,13 @@
  * - gamma: ∂²V/∂S² = change in delta per 1 point of underlying (`pdf(d1)/(S·σ·√T)`)
  * - theta: currency (premium) per calendar day; negative for a long option
  * - vega: premium per 1 absolute percentage point of IV
+ * Theta and vega are per 1 unit of the underlying, not per lot.
+ *
+ * ## Signs
+ * Plot values are the raw Greeks with their natural signs, call and put on the *same* axis. An
+ * earlier version mirrored the put side by negating it, which is right for open interest (a
+ * magnitude) and wrong here: put theta (negative) plotted upward, put delta (negative) plotted on
+ * the call side, and put IV/gamma/vega plotted as negative numbers that cannot exist.
  *
  * When IV is null, every Greek on that leg is forced null — never invent at a house vol.
  */
@@ -17,15 +24,18 @@
 export type GreeksMetric = "iv" | "delta" | "gamma" | "theta" | "vega";
 
 export const GREEKS_METRIC_UNIT_LABEL: Record<GreeksMetric, string> = {
-  iv: "IV (absolute; chart as %)",
+  iv: "IV (%, annualised)",
   delta: "delta (per 1 pt underlying)",
   gamma: "gamma (Δ delta per 1 pt underlying)",
-  theta: "theta (premium per calendar day)",
-  vega: "vega (premium per 1 IV point)",
+  theta: "theta (premium per calendar day, per unit)",
+  vega: "vega (premium per 1 IV point, per unit)",
 };
 
 export const GREEKS_MODEL_DERIVED_LABEL =
   "Model-derived (Black–Scholes from mid-price), not exchange data";
+
+export const GREEKS_PER_UNIT_NOTE =
+  "Theta and vega are per 1 unit of the underlying, not per lot: multiply by the contract's lot size for rupees per lot.";
 
 export interface GreeksStrikeLegInput {
   impliedVolatility: number | null;
@@ -44,6 +54,9 @@ export interface GreeksStrikeInput {
 
 export interface GreeksByStrikePoint {
   strike: number;
+  /** Whether a contract exists on this side at all, as distinct from one that could not be solved. */
+  callPresent: boolean;
+  putPresent: boolean;
   callIv: number | null;
   putIv: number | null;
   callIvRefusal: string | null;
@@ -56,9 +69,23 @@ export interface GreeksByStrikePoint {
   putTheta: number | null;
   callVega: number | null;
   putVega: number | null;
-  /** Plot values for the selected metric; put side is negated for a mirrored axis. Null = gap. */
+  /** Selected metric in display units (IV in percent), natural sign. Null = gap, never zero. */
   callMetricPlot: number | null;
   putMetricPlot: number | null;
+}
+
+export interface UnsolvedSideSummary {
+  /** Contracts present on this side within the window. */
+  legs: number;
+  /** Of those, how many had no solvable IV and therefore carry no Greeks. */
+  unsolved: number;
+  /** Refusal reason → count. A missing reason is keyed `UNKNOWN`. */
+  reasons: Record<string, number>;
+}
+
+export interface UnsolvedSummary {
+  calls: UnsolvedSideSummary;
+  puts: UnsolvedSideSummary;
 }
 
 export interface BuildGreeksByStrikeOptions {
@@ -75,6 +102,11 @@ export interface BuildGreeksByStrikeResult {
   windowApplied: number | null;
   atmStrike: number | null;
   windowCenter: "atm" | "median" | "none";
+  unsolved: UnsolvedSummary;
+  /** Largest absolute plotted value across both sides; 0 when nothing plotted. */
+  maxAbsPlot: number;
+  /** Decimal places that keep this metric readable at this magnitude (axis and tooltip). */
+  axisDecimals: number;
 }
 
 /** Drop Greeks when IV is missing so a stale/partial leg cannot invent values. */
@@ -110,19 +142,13 @@ function metricValue(leg: GreeksStrikeLegInput | null, metric: GreeksMetric): nu
   }
 }
 
-function mirroredPut(value: number | null): number | null {
-  if (value === null) return null;
-  if (value === 0) return 0;
-  return -value;
-}
-
 function toPoint(row: GreeksStrikeInput, metric: GreeksMetric): GreeksByStrikePoint {
   const call = sanitizeLeg(row.call);
   const put = sanitizeLeg(row.put);
-  const callMetric = metricValue(call, metric);
-  const putMetric = metricValue(put, metric);
   return {
     strike: row.strikePrice,
+    callPresent: call !== null,
+    putPresent: put !== null,
     callIv: call?.impliedVolatility ?? null,
     putIv: put?.impliedVolatility ?? null,
     callIvRefusal: call?.impliedVolatilityRefusal ?? null,
@@ -135,8 +161,8 @@ function toPoint(row: GreeksStrikeInput, metric: GreeksMetric): GreeksByStrikePo
     putTheta: put?.theta ?? null,
     callVega: call?.vega ?? null,
     putVega: put?.vega ?? null,
-    callMetricPlot: callMetric,
-    putMetricPlot: mirroredPut(putMetric),
+    callMetricPlot: metricValue(call, metric),
+    putMetricPlot: metricValue(put, metric),
   };
 }
 
@@ -151,6 +177,56 @@ function indexClosestTo(sorted: readonly GreeksStrikeInput[], target: number): n
     }
   }
   return bestIndex;
+}
+
+function summariseSide(
+  points: readonly GreeksByStrikePoint[],
+  present: (p: GreeksByStrikePoint) => boolean,
+  iv: (p: GreeksByStrikePoint) => number | null,
+  refusal: (p: GreeksByStrikePoint) => string | null,
+): UnsolvedSideSummary {
+  const summary: UnsolvedSideSummary = { legs: 0, unsolved: 0, reasons: {} };
+  for (const point of points) {
+    if (!present(point)) continue;
+    summary.legs += 1;
+    if (iv(point) === null) {
+      summary.unsolved += 1;
+      const key = refusal(point) ?? "UNKNOWN";
+      summary.reasons[key] = (summary.reasons[key] ?? 0) + 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * How many decimals keep a Greek readable at the magnitude actually on screen.
+ *
+ * Fixed precision fails for gamma: an ATM index option's gamma is of order 1e-3, so three decimals
+ * would label every axis tick 0.000 or 0.001. Gamma therefore takes enough decimals for about three
+ * significant figures at the largest plotted value; the others have a stable natural range.
+ */
+export function greeksAxisDecimals(metric: GreeksMetric, maxAbs: number): number {
+  switch (metric) {
+    case "iv":
+      return 1;
+    case "delta":
+      return 2;
+    case "theta":
+    case "vega":
+      return maxAbs >= 100 ? 0 : maxAbs >= 10 ? 1 : 2;
+    case "gamma": {
+      if (!Number.isFinite(maxAbs) || maxAbs <= 0) return 4;
+      const decimals = 2 - Math.floor(Math.log10(maxAbs));
+      return Math.min(8, Math.max(3, decimals));
+    }
+  }
+}
+
+/** A Greek as text at `decimals` places, with an em dash for a gap. IV carries its percent sign. */
+export function formatGreekValue(value: number | null, metric: GreeksMetric, decimals: number): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const text = value.toFixed(decimals);
+  return metric === "iv" ? `${text}%` : text;
 }
 
 export function buildGreeksByStrike(
@@ -177,13 +253,27 @@ export function buildGreeksByStrike(
     windowApplied = window;
   }
 
+  const points = selected.map((row) => toPoint(row, options.metric));
+  let maxAbsPlot = 0;
+  for (const point of points) {
+    for (const value of [point.callMetricPlot, point.putMetricPlot]) {
+      if (value !== null && Number.isFinite(value)) maxAbsPlot = Math.max(maxAbsPlot, Math.abs(value));
+    }
+  }
+
   return {
-    points: selected.map((row) => toPoint(row, options.metric)),
+    points,
     metric: options.metric,
     unitLabel: GREEKS_METRIC_UNIT_LABEL[options.metric],
     modelDerivedLabel: GREEKS_MODEL_DERIVED_LABEL,
     windowApplied,
     atmStrike,
     windowCenter,
+    unsolved: {
+      calls: summariseSide(points, (p) => p.callPresent, (p) => p.callIv, (p) => p.callIvRefusal),
+      puts: summariseSide(points, (p) => p.putPresent, (p) => p.putIv, (p) => p.putIvRefusal),
+    },
+    maxAbsPlot,
+    axisDecimals: greeksAxisDecimals(options.metric, maxAbsPlot),
   };
 }

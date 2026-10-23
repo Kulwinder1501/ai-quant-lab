@@ -2,10 +2,10 @@
 
 import React, { useMemo, useState } from "react";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
   Legend,
+  Line,
+  LineChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -14,12 +14,17 @@ import {
 } from "recharts";
 import {
   buildGreeksByStrike,
+  formatGreekValue,
   GREEKS_MODEL_DERIVED_LABEL,
+  GREEKS_PER_UNIT_NOTE,
   type GreeksByStrikePoint,
   type GreeksMetric,
   type GreeksStrikeInput,
+  type UnsolvedSummary,
 } from "../build-greeks-by-strike";
-import { SnapshotFreshnessBar } from "./snapshot-freshness-bar";
+import { ivRefusalLabel } from "../iv-refusal-label";
+import { DEFAULT_STRIKE_WINDOW, nearestStrikeOnAxis } from "../strike-axis";
+import { PRE_OPEN_NOTE_QUOTES, SnapshotFreshnessBar } from "./snapshot-freshness-bar";
 
 const METRICS: readonly { id: GreeksMetric; label: string }[] = [
   { id: "iv", label: "IV" },
@@ -29,9 +34,17 @@ const METRICS: readonly { id: GreeksMetric; label: string }[] = [
   { id: "vega", label: "Vega" },
 ];
 
+/** Metrics whose sign carries meaning, so zero deserves a reference line. */
+const SIGNED_METRICS: ReadonlySet<GreeksMetric> = new Set<GreeksMetric>(["theta", "delta"]);
+
+const CALL_COLOR = "#34d399";
+const PUT_COLOR = "#f472b6";
+
 export interface GreeksByStrikeChartProps {
+  /** Strikes priced from the stored snapshot only — never the tick-merged chain. */
   strikes: readonly GreeksStrikeInput[];
   atmStrike: number | null;
+  /** Spot as of the snapshot, so the marker shares the clock of the Greeks. */
   underlyingValue: number | null;
   observedAt: string | null | undefined;
   provider?: string | null;
@@ -40,11 +53,66 @@ export interface GreeksByStrikeChartProps {
   nowMs: number;
 }
 
-function formatMetric(value: number | null, metric: GreeksMetric): string {
-  if (value === null || !Number.isFinite(value)) return "—";
-  if (metric === "iv") return `${value.toFixed(2)}%`;
-  if (metric === "delta" || metric === "gamma") return value.toFixed(4);
-  return value.toFixed(2);
+interface DotProps {
+  cx?: number;
+  cy?: number;
+}
+
+/**
+ * Call = circle, put = square, so the two sides stay distinguishable without relying on colour.
+ * A gap (null value) arrives without coordinates and renders nothing.
+ */
+function dotRenderer(shape: "circle" | "square", color: string) {
+  function Dot({ cx, cy }: DotProps): React.ReactElement {
+    if (typeof cx !== "number" || typeof cy !== "number" || !Number.isFinite(cx) || !Number.isFinite(cy)) {
+      return <g />;
+    }
+    return shape === "circle" ? (
+      <circle cx={cx} cy={cy} r={3.5} fill={color} stroke="#0f172a" strokeWidth={1} />
+    ) : (
+      <rect x={cx - 3.5} y={cy - 3.5} width={7} height={7} fill={color} stroke="#0f172a" strokeWidth={1} />
+    );
+  }
+  return Dot;
+}
+
+const CallDot = dotRenderer("circle", CALL_COLOR);
+const PutDot = dotRenderer("square", PUT_COLOR);
+
+function describeSide(label: string, side: UnsolvedSummary["calls"]): string {
+  if (side.legs === 0) return `${label}: none in window`;
+  if (side.unsolved === 0) return `${label}: all ${side.legs} solved`;
+  const reasons = Object.entries(side.reasons)
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, count]) => `${reason === "UNKNOWN" ? "unspecified" : ivRefusalLabel(reason)} ×${count}`)
+    .join(", ");
+  return `${label}: ${side.unsolved} of ${side.legs} unsolved (${reasons})`;
+}
+
+/**
+ * Says how many contracts carry no Greeks and why. A line chart just breaks at an unsolved strike,
+ * which a reader can mistake for a thin market; the count makes the thinning explicit.
+ */
+function UnsolvedSummaryLine({ summary }: { summary: UnsolvedSummary }) {
+  const anyUnsolved = summary.calls.unsolved > 0 || summary.puts.unsolved > 0;
+  return (
+    <p className={`mb-2 text-[11px] ${anyUnsolved ? "text-amber-200/90" : "text-slate-500"}`}>
+      IV solved from the mid, so unsolved contracts show no Greeks (a gap, not zero) — {describeSide("calls", summary.calls)} ·{" "}
+      {describeSide("puts", summary.puts)}
+    </p>
+  );
+}
+
+function sideText(
+  present: boolean,
+  value: number | null,
+  refusal: string | null,
+  metric: GreeksMetric,
+  decimals: number,
+): string {
+  if (!present) return "no contract";
+  if (value !== null) return formatGreekValue(value, metric, decimals);
+  return `— (${ivRefusalLabel(refusal)})`;
 }
 
 function GreeksTooltip({
@@ -52,38 +120,16 @@ function GreeksTooltip({
   payload,
   metric,
   unitLabel,
+  decimals,
 }: {
   active?: boolean;
   payload?: Array<{ payload: GreeksByStrikePoint }>;
   metric: GreeksMetric;
   unitLabel: string;
+  decimals: number;
 }) {
   if (!active || !payload?.length) return null;
   const point = payload[0]!.payload;
-  const callRaw =
-    metric === "iv"
-      ? point.callIv === null
-        ? null
-        : point.callIv * 100
-      : metric === "delta"
-        ? point.callDelta
-        : metric === "gamma"
-          ? point.callGamma
-          : metric === "theta"
-            ? point.callTheta
-            : point.callVega;
-  const putRaw =
-    metric === "iv"
-      ? point.putIv === null
-        ? null
-        : point.putIv * 100
-      : metric === "delta"
-        ? point.putDelta
-        : metric === "gamma"
-          ? point.putGamma
-          : metric === "theta"
-            ? point.putTheta
-            : point.putVega;
 
   return (
     <div className="rounded-lg border border-white/10 bg-slate-950/95 px-3 py-2 text-xs text-slate-100 shadow-xl">
@@ -91,18 +137,10 @@ function GreeksTooltip({
       <p className="mt-1 text-slate-400">{unitLabel}</p>
       <p className="text-amber-200/90">{GREEKS_MODEL_DERIVED_LABEL}</p>
       <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-        <span className="text-emerald-300">Call</span>
-        <span>
-          {formatMetric(callRaw, metric)}
-          {point.callIv === null && point.callIvRefusal
-            ? ` · ${point.callIvRefusal}`
-            : ""}
-        </span>
-        <span className="text-fuchsia-300">Put</span>
-        <span>
-          {formatMetric(putRaw, metric)}
-          {point.putIv === null && point.putIvRefusal ? ` · ${point.putIvRefusal}` : ""}
-        </span>
+        <span className="text-emerald-300">Call ●</span>
+        <span>{sideText(point.callPresent, point.callMetricPlot, point.callIvRefusal, metric, decimals)}</span>
+        <span className="text-fuchsia-300">Put ■</span>
+        <span>{sideText(point.putPresent, point.putMetricPlot, point.putIvRefusal, metric, decimals)}</span>
       </div>
     </div>
   );
@@ -115,7 +153,7 @@ export function GreeksByStrikeChart({
   observedAt,
   provider,
   expiryLabel,
-  window = 12,
+  window = DEFAULT_STRIKE_WINDOW,
   nowMs,
 }: GreeksByStrikeChartProps) {
   const [metric, setMetric] = useState<GreeksMetric>("iv");
@@ -132,6 +170,10 @@ export function GreeksByStrikeChart({
     );
   }
 
+  const axisStrikes = built.points.map((point) => point.strike);
+  const atmMark = nearestStrikeOnAxis(axisStrikes, atmStrike);
+  const spotMark = nearestStrikeOnAxis(axisStrikes, underlyingValue);
+
   return (
     <div className="w-full">
       <SnapshotFreshnessBar
@@ -139,13 +181,14 @@ export function GreeksByStrikeChart({
         provider={provider}
         expiryLabel={expiryLabel}
         nowMs={nowMs}
+        preOpenNote={PRE_OPEN_NOTE_QUOTES}
       />
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-100">
           {GREEKS_MODEL_DERIVED_LABEL}
         </span>
         <p className="text-[11px] text-slate-500">
-          A Greek built from a stale mid is still stale — same snapshot clock as the OI tab.
+          Priced from the stored snapshot only. Live ticks are not merged, so every strike shares one clock.
         </p>
       </div>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -167,6 +210,10 @@ export function GreeksByStrikeChart({
         </div>
         <p className="text-[11px] text-slate-500">Y-axis: {built.unitLabel}</p>
       </div>
+      {(metric === "theta" || metric === "vega") && (
+        <p className="mb-2 text-[11px] text-slate-500">{GREEKS_PER_UNIT_NOTE}</p>
+      )}
+      <UnsolvedSummaryLine summary={built.unsolved} />
       {built.windowCenter === "median" && (
         <p className="mb-2 text-[11px] text-amber-200/90">
           ATM strike missing — window ±{built.windowApplied} centred on the median strike of this chain.
@@ -174,11 +221,7 @@ export function GreeksByStrikeChart({
       )}
       <div className="h-[360px] w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart
-            data={built.points}
-            stackOffset="sign"
-            margin={{ top: 12, right: 16, left: 8, bottom: 8 }}
-          >
+          <LineChart data={built.points} margin={{ top: 12, right: 16, left: 8, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" vertical={false} />
             <XAxis
               dataKey="strike"
@@ -187,12 +230,13 @@ export function GreeksByStrikeChart({
               axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
             />
             <YAxis
+              // IV lives in a narrow band (a smile); anchoring it at zero would flatten the shape.
+              domain={metric === "iv" ? ["auto", "auto"] : undefined}
               tick={{ fill: "rgba(148,163,184,0.9)", fontSize: 11 }}
               tickLine={false}
               axisLine={false}
-              tickFormatter={(value: number) =>
-                metric === "iv" ? `${value.toFixed(0)}%` : value.toFixed(metric === "gamma" || metric === "delta" ? 3 : 1)
-              }
+              tickFormatter={(value: number) => formatGreekValue(value, metric, built.axisDecimals)}
+              width={72}
               label={{
                 value: built.unitLabel,
                 angle: -90,
@@ -201,75 +245,66 @@ export function GreeksByStrikeChart({
               }}
             />
             <Tooltip
-              cursor={{ fill: "rgba(255,255,255,0.04)" }}
-              content={<GreeksTooltip metric={metric} unitLabel={built.unitLabel} />}
+              cursor={{ stroke: "rgba(255,255,255,0.15)" }}
+              content={
+                <GreeksTooltip metric={metric} unitLabel={built.unitLabel} decimals={built.axisDecimals} />
+              }
             />
             <Legend
               formatter={(value: string) => (
                 <span className="text-xs text-slate-300">
-                  {value === "callMetricPlot" ? `Call ${metric}` : `Put ${metric} (mirrored)`}
+                  {value === "callMetricPlot" ? "Call (solid, circles)" : "Put (dashed, squares)"}
                 </span>
               )}
             />
-            {(() => {
-              const nearest = (target: number | null): number | null => {
-                if (target === null || !Number.isFinite(target) || built.points.length === 0) return null;
-                let best = built.points[0]!.strike;
-                let bestDistance = Math.abs(best - target);
-                for (const point of built.points) {
-                  const distance = Math.abs(point.strike - target);
-                  if (distance < bestDistance) {
-                    best = point.strike;
-                    bestDistance = distance;
-                  }
-                }
-                return best;
-              };
-              const atmMark = nearest(atmStrike);
-              const spotMark = nearest(underlyingValue);
-              return (
-                <>
-                  {atmMark !== null && (
-                    <ReferenceLine
-                      x={atmMark}
-                      stroke="#fbbf24"
-                      strokeDasharray="4 4"
-                      label={{ value: "ATM", fill: "#fbbf24", fontSize: 10, position: "insideTopLeft" }}
-                    />
-                  )}
-                  {spotMark !== null && spotMark !== atmMark && (
-                    <ReferenceLine
-                      x={spotMark}
-                      stroke="#67e8f9"
-                      strokeDasharray="2 3"
-                      label={{
-                        value: underlyingValue === null ? "Spot" : `Spot ${underlyingValue.toFixed(0)}`,
-                        fill: "#67e8f9",
-                        fontSize: 10,
-                        position: "insideTopRight",
-                      }}
-                    />
-                  )}
-                </>
-              );
-            })()}
-            <Bar
+            {SIGNED_METRICS.has(metric) && (
+              <ReferenceLine y={0} stroke="rgba(255,255,255,0.35)" />
+            )}
+            {atmMark !== null && (
+              <ReferenceLine
+                x={atmMark}
+                stroke="#fbbf24"
+                strokeDasharray="4 4"
+                label={{ value: "ATM", fill: "#fbbf24", fontSize: 10, position: "insideTopLeft" }}
+              />
+            )}
+            {spotMark !== null && spotMark !== atmMark && (
+              <ReferenceLine
+                x={spotMark}
+                stroke="#67e8f9"
+                strokeDasharray="2 3"
+                label={{
+                  value: underlyingValue === null ? "Spot" : `Spot ${underlyingValue.toFixed(0)} (snapshot)`,
+                  fill: "#67e8f9",
+                  fontSize: 10,
+                  position: "insideTopRight",
+                }}
+              />
+            )}
+            <Line
+              type="monotone"
               dataKey="callMetricPlot"
               name="callMetricPlot"
-              stackId="greeks"
-              fill="#34d399"
-              maxBarSize={28}
+              stroke={CALL_COLOR}
+              strokeWidth={2}
+              dot={<CallDot />}
+              activeDot={{ r: 5 }}
+              connectNulls={false}
               isAnimationActive={false}
             />
-            <Bar
+            <Line
+              type="monotone"
               dataKey="putMetricPlot"
               name="putMetricPlot"
-              stackId="greeks"
-              fill="#f472b6"
-              maxBarSize={28}
+              stroke={PUT_COLOR}
+              strokeWidth={2}
+              strokeDasharray="6 3"
+              dot={<PutDot />}
+              activeDot={{ r: 5 }}
+              connectNulls={false}
               isAnimationActive={false}
             />
-          </BarChart>
+          </LineChart>
         </ResponsiveContainer>
       </div>
     </div>
