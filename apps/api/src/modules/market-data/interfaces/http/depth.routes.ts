@@ -23,10 +23,18 @@ import {
 import { buildDepthLadder, IMBALANCE_DEFINITIONS, type StoredDepthFrame } from "../../domain/depth-ladder.js";
 import { MAX_STORED_LEVELS } from "../../../../infrastructure/database/repositories/postgres-depth-frame-repository.js";
 import { upcomingIndexFutures } from "../../domain/index-futures-contracts.js";
+import {
+  addDays,
+  INDEX_UNDERLYINGS,
+  istDate,
+  parseChoice,
+  parseUnderlyingAndDate,
+  SESSION_LOOKBACK_DAYS,
+  type IndexUnderlying,
+} from "./session-query.js";
 
-/** Index futures the app knows the contract of. Whether depth is stored for one is a separate question. */
-const DEPTH_UNDERLYINGS = ["NIFTY50", "BANKNIFTY"] as const;
-export type DepthUnderlying = (typeof DEPTH_UNDERLYINGS)[number];
+const DEPTH_UNDERLYINGS = INDEX_UNDERLYINGS;
+export type DepthUnderlying = IndexUnderlying;
 
 /** How far ahead of the server clock an `asOf` may be before it is refused as a mistake, not a past instant. */
 const AS_OF_FUTURE_TOLERANCE_MS = 5_000;
@@ -67,67 +75,14 @@ export function parseDepthLadderQuery(
   return { ok: true, value: { underlying: underlying as DepthUnderlying, asOf } };
 }
 
-function istDate(instant: Date): string {
-  return new Date(instant.getTime() + 330 * 60_000).toISOString().slice(0, 10);
-}
-
 /** Levels the history reads: its figures use the touch and the first five, and ten keeps every day comparable. */
 const HISTORY_LEVELS = 10;
-
-/** How far back the session drop-down looks. The table starts in September 2026; older days are asked for by date. */
-const SESSION_LOOKBACK_DAYS = 60;
-
-function addDays(date: string, days: number): string {
-  const [year, month, day] = date.split("-").map(Number);
-  return new Date(Date.UTC(year!, month! - 1, day! + days)).toISOString().slice(0, 10);
-}
 
 export type DepthHistoryQueryParse =
   | { ok: true; value: { underlying: DepthUnderlying; date: string | null; bucketSeconds: DepthHistoryBucketSeconds } }
   | { ok: false; error: string };
 
-/**
- * Validates `underlying`, `date` and `bucketSeconds`. Pure, so the rules are tested without a server.
- *
- * `date` is an IST calendar date (`2026-10-22`), the exchange's trading day. It is a date, not an instant, so the
- * "no bare date" rule of `asOf` does not apply: the route reads it in IST and says so. A date that is not a real
- * calendar day, or is after today in IST, is refused.
- */
-function parseUnderlyingAndDate(
-  input: { underlying: string | undefined; date: string | undefined },
-  now: Date,
-): { ok: true; underlying: DepthUnderlying; date: string | null } | { ok: false; error: string } {
-  const underlying = (input.underlying?.trim() || "BANKNIFTY").toUpperCase();
-  if (!(DEPTH_UNDERLYINGS as readonly string[]).includes(underlying)) {
-    return { ok: false, error: `\`underlying\` must be one of ${DEPTH_UNDERLYINGS.join(", ")}.` };
-  }
-  const rawDate = input.date?.trim();
-  if (!rawDate) return { ok: true, underlying: underlying as DepthUnderlying, date: null };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate) || addDays(rawDate, 0) !== rawDate) {
-    return { ok: false, error: "`date` must be a real calendar date, YYYY-MM-DD (IST trading day)." };
-  }
-  if (rawDate > istDate(now)) {
-    return { ok: false, error: "`date` is in the future." };
-  }
-  return { ok: true, underlying: underlying as DepthUnderlying, date: rawDate };
-}
-
-/** A whole-number choice from a fixed list, or the default when absent. Text that merely starts with a number is refused. */
-function parseChoice<T extends number>(
-  raw: string | undefined,
-  allowed: readonly T[],
-  fallback: T,
-  name: string,
-): { ok: true; value: T } | { ok: false; error: string } {
-  const text = raw?.trim();
-  if (!text) return { ok: true, value: fallback };
-  const parsed = Number(text);
-  if (!/^\d+$/.test(text) || !(allowed as readonly number[]).includes(parsed)) {
-    return { ok: false, error: `\`${name}\` must be one of ${allowed.join(", ")}.` };
-  }
-  return { ok: true, value: parsed as T };
-}
-
+/** Validates `underlying`, `date` and `bucketSeconds` (see `parseUnderlyingAndDate` for the date rules). */
 export function parseDepthHistoryQuery(
   input: { underlying: string | undefined; date: string | undefined; bucketSeconds: string | undefined },
   now: Date,
