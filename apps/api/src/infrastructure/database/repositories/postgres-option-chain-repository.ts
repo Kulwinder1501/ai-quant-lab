@@ -417,4 +417,109 @@ export class PostgresOptionChainRepository {
       })),
     };
   }
+
+  /**
+   * Every stored contract row for one underlying and one expiry inside one IST session day, in time
+   * order, for rebuilding open interest over the session (`oi-history.ts`).
+   *
+   * The session is bounded as a half-open range on `observed_at` rather than by casting each row to an
+   * IST date: the range can use the `(underlying_symbol, expiry_date, observed_at)` index, the cast
+   * cannot. `$2::date::timestamp AT TIME ZONE 'Asia/Kolkata'` is IST midnight as a `timestamptz`.
+   *
+   * With no `expiryDate` the nearest expiry on or after the session day that has rows in it is used,
+   * and the one chosen is returned so the caller never has to guess which expiry it is looking at.
+   * Dates cross the driver as `DATE` columns, so they go through `fromDateColumn`: node-pg reads a
+   * `DATE` as local midnight and a bare `toISOString()` is a day early on an IST host.
+   *
+   * Bounded by construction: one underlying, one expiry, one day -- roughly 30 snapshots of 62 rows.
+   */
+  async oiHistoryRows(input: {
+    underlyingSymbol: string;
+    sessionDate: string;
+    expiryDate?: string | null;
+  }): Promise<{
+    expiryDate: string | null;
+    rows: Array<{
+      observedAt: Date;
+      strikePrice: number;
+      optionType: OptionType;
+      openInterest: number | null;
+      previousOpenInterest: number | null;
+      underlyingValue: number | null;
+    }>;
+  }> {
+    const result = await this.pool.query(`
+      WITH bounds AS (
+        SELECT ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') AS lo
+      ),
+      chosen AS (
+        SELECT COALESCE(
+          $3::date,
+          (SELECT min(s.expiry_date)
+             FROM option_chain_snapshots s, bounds b
+            WHERE s.underlying_symbol = $1
+              AND s.observed_at >= b.lo AND s.observed_at < b.lo + interval '1 day'
+              AND s.expiry_date >= $2::date)
+        ) AS expiry_date
+      )
+      SELECT s.observed_at, s.expiry_date, s.strike_price, s.option_type,
+             s.open_interest, s.previous_open_interest, s.underlying_value
+        FROM option_chain_snapshots s, bounds b, chosen c
+       WHERE s.underlying_symbol = $1
+         AND s.expiry_date = c.expiry_date
+         AND s.observed_at >= b.lo AND s.observed_at < b.lo + interval '1 day'
+       ORDER BY s.observed_at, s.strike_price, s.option_type
+    `, [input.underlyingSymbol, input.sessionDate, input.expiryDate ?? null]);
+
+    return {
+      expiryDate: result.rows.length === 0
+        ? (input.expiryDate ?? null)
+        : toDateKey(fromDateColumn(result.rows[0].expiry_date)),
+      rows: result.rows.map((row) => ({
+        observedAt: row.observed_at as Date,
+        strikePrice: Number(row.strike_price),
+        optionType: String(row.option_type) as OptionType,
+        openInterest: toNumberOrNull(row.open_interest),
+        previousOpenInterest: toNumberOrNull(row.previous_open_interest),
+        underlyingValue: toNumberOrNull(row.underlying_value),
+      })),
+    };
+  }
+
+  /**
+   * IST session days that have stored snapshots, newest first, with how many collection runs each
+   * holds -- the date picker's source. The count is the honest signal that a session is partial or ran
+   * on a holiday (the collection cron has no holiday calendar), so the caller shows it instead of
+   * hiding thin sessions.
+   *
+   * Counted per distinct *minute*, not per distinct `observed_at`: when two expiries are live, one
+   * run stamps each expiry's rows about 0.35s apart, so counting timestamps reported 56 "snapshots"
+   * for a day of 28 runs. The cron fires at most once a minute, so a minute is one run.
+   */
+  async oiHistorySessions(input: { underlyingSymbol: string; limit?: number }): Promise<Array<{
+    sessionDate: string;
+    snapshotCount: number;
+    firstObservedAt: Date;
+    lastObservedAt: Date;
+  }>> {
+    const limit = Math.min(60, Math.max(1, Math.floor(input.limit ?? 30)));
+    const result = await this.pool.query(`
+      SELECT (observed_at AT TIME ZONE 'Asia/Kolkata')::date AS session_date,
+             count(DISTINCT date_trunc('minute', observed_at)) AS snapshot_count,
+             min(observed_at) AS first_observed_at,
+             max(observed_at) AS last_observed_at
+        FROM option_chain_snapshots
+       WHERE underlying_symbol = $1
+         AND observed_at > now() - interval '120 days'
+       GROUP BY 1
+       ORDER BY 1 DESC
+       LIMIT $2
+    `, [input.underlyingSymbol, limit]);
+    return result.rows.map((row) => ({
+      sessionDate: toDateKey(fromDateColumn(row.session_date)),
+      snapshotCount: Number(row.snapshot_count),
+      firstObservedAt: row.first_observed_at as Date,
+      lastObservedAt: row.last_observed_at as Date,
+    }));
+  }
 }

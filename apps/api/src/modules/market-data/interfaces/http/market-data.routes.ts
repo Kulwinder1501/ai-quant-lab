@@ -32,6 +32,12 @@ import {
 import { resolveFyersSymbol } from "../../domain/fyers-symbol-resolver.js";
 import { SubscriptionRefCounter } from "../../../../infrastructure/market-data/subscription-ref-counter.js";
 import { chainStreamSymbols, parseChainStreamStrikes } from "../../domain/chain-stream-window.js";
+import {
+  buildOiHistory,
+  OI_UNIT_LABEL,
+  parseOiHistoryQuery,
+  selectDefaultContracts,
+} from "../../domain/oi-history.js";
 
 export type ChartSwingLabel = "HH" | "HL" | "LL" | "LH";
 
@@ -640,6 +646,101 @@ export function registerMarketDataRoutes(
           strikes: [...byStrike.values()].sort(
             (left, right) => (left.strikePrice as number) - (right.strikePrice as number),
           ),
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Open interest over one IST session, rebuilt from stored chain snapshots.
+   *
+   * Inputs: `underlying` (default NIFTY50), `date` (IST session day, default the latest stored),
+   * `expiry` (default the nearest expiry on or after that day with rows), `contracts` (comma list of
+   * `<strike><CE|PE>`, at most 8; default ATM and heaviest-OI call and put).
+   *
+   * Observed, not derived: every figure is a stored provider `oi`, in underlying units rather than
+   * lots, stamped with the instant it was received (the payload carries no exchange clock). The totals
+   * are derived, over a fixed strike set whose rule is returned alongside them. Nothing is
+   * interpolated: a snapshot the collector missed is reported in `collectionGaps`, and a contract that
+   * left the sliding strike window is `present: false`, not zero. The 09:11 IST pre-open snapshot is
+   * previous-close carryover and is returned as `preOpen`, never inside a series.
+   */
+  app.get("/api/v1/option-chain/oi-history", async (request, response, next) => {
+    try {
+      const parsed = parseOiHistoryQuery({
+        underlying: queryString(request, "underlying"),
+        expiry: queryString(request, "expiry"),
+        date: queryString(request, "date"),
+        contracts: queryString(request, "contracts"),
+      });
+      if (!parsed.ok) {
+        response.status(400).json({ error: parsed.error });
+        return;
+      }
+      const { underlyingSymbol, expiryDate, contracts: requestedContracts } = parsed.value;
+
+      const sessions = await dependencies.optionChainRepository.oiHistorySessions({ underlyingSymbol });
+      if (sessions.length === 0) {
+        response.status(200).json({
+          data: {
+            available: false,
+            underlyingSymbol,
+            reason: "No option-chain snapshot has been collected for this underlying yet.",
+          },
+        });
+        return;
+      }
+      const availableSessions = sessions.map((session) => ({
+        sessionDate: session.sessionDate,
+        snapshotCount: session.snapshotCount,
+        firstObservedAt: session.firstObservedAt.toISOString(),
+        lastObservedAt: session.lastObservedAt.toISOString(),
+      }));
+
+      const sessionDate = parsed.value.sessionDate ?? sessions[0]!.sessionDate;
+      const { expiryDate: resolvedExpiry, rows } = await dependencies.optionChainRepository.oiHistoryRows({
+        underlyingSymbol,
+        sessionDate,
+        expiryDate,
+      });
+      if (rows.length === 0) {
+        response.status(200).json({
+          data: {
+            available: false,
+            underlyingSymbol,
+            sessionDate,
+            expiryDate: resolvedExpiry,
+            reason: `No stored snapshots for ${underlyingSymbol} on ${sessionDate}`
+              + `${expiryDate ? ` for expiry ${expiryDate}` : ""}.`,
+            availableSessions,
+          },
+        });
+        return;
+      }
+
+      const contracts = requestedContracts.length > 0 ? requestedContracts : selectDefaultContracts(rows);
+      const history = buildOiHistory(rows, { contracts });
+
+      response.status(200).json({
+        data: {
+          available: true,
+          underlyingSymbol,
+          sessionDate,
+          sessionTimezone: "Asia/Kolkata",
+          expiryDate: resolvedExpiry,
+          oiUnit: OI_UNIT_LABEL,
+          source: "option_chain_snapshots: stored, forward-accumulating, receipt-time stamped",
+          contractSelection: requestedContracts.length > 0 ? "REQUESTED" : "DEFAULT",
+          notes: {
+            preOpen: "The pre-open (before 09:15 IST) snapshot repeats the previous close and is not an observation.",
+            changeVsPreviousClose: "Open interest minus the exchange's previous-session close OI. Not an intraday change.",
+            changeVsPreviousSnapshot: "Open interest minus the immediately preceding snapshot; null if that snapshot lacked the contract.",
+            totals: "Derived over a fixed strike set; see totals.rule.",
+          },
+          availableSessions,
+          ...history,
         },
       });
     } catch (error) {
