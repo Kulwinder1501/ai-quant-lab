@@ -20,6 +20,7 @@ import {
   type OiChangeSign,
   type OiStrikeInput,
 } from "../build-oi-by-strike";
+import { DEFAULT_STRIKE_WINDOW, nearestStrikeOnAxis } from "../strike-axis";
 import { SnapshotFreshnessBar } from "./snapshot-freshness-bar";
 
 export interface OiByStrikeChartProps {
@@ -120,7 +121,7 @@ export function OiByStrikeChart({
   observedAt,
   provider,
   expiryLabel,
-  window = 12,
+  window = DEFAULT_STRIKE_WINDOW,
   nowMs,
 }: OiByStrikeChartProps) {
   const built = useMemo(
@@ -220,22 +221,10 @@ export function OiByStrikeChart({
               )}
             />
             {(() => {
-              // Categorical X only accepts values present in the series — snap markers to nearest strike.
-              const nearest = (target: number | null): number | null => {
-                if (target === null || !Number.isFinite(target) || built.points.length === 0) return null;
-                let best = built.points[0]!.strike;
-                let bestDistance = Math.abs(best - target);
-                for (const point of built.points) {
-                  const distance = Math.abs(point.strike - target);
-                  if (distance < bestDistance) {
-                    best = point.strike;
-                    bestDistance = distance;
-                  }
-                }
-                return best;
-              };
-              const atmMark = nearest(atmStrike);
-              const spotMark = nearest(underlyingValue);
+              // Categorical X only accepts values present in the series — snap markers to the nearest strike.
+              const axisStrikes = built.points.map((point) => point.strike);
+              const atmMark = nearestStrikeOnAxis(axisStrikes, atmStrike);
+              const spotMark = nearestStrikeOnAxis(axisStrikes, underlyingValue);
               return (
                 <>
                   {atmMark !== null && (
@@ -252,7 +241,7 @@ export function OiByStrikeChart({
                       stroke="#67e8f9"
                       strokeDasharray="2 3"
                       label={{
-                        value: underlyingValue === null ? "Spot" : `Spot ${underlyingValue.toFixed(0)}`,
+                        value: underlyingValue === null ? "Spot" : `Spot ${underlyingValue.toFixed(0)} (snapshot)`,
                         fill: "#67e8f9",
                         fontSize: 10,
                         position: "insideTopRight",

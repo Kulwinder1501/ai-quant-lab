@@ -45,13 +45,27 @@ function freshnessCopy(state: OiFreshnessState): { tone: "ok" | "warn" | "idle";
   }
 }
 
+/**
+ * What a pre-open (before 09:15 IST) snapshot means *for a given tab*. The caveat differs: for open
+ * interest the 09:11 row is yesterday's close echoed back (measured: OI equals previous OI on 100%
+ * of NIFTY/BANKNIFTY rows); for quotes the contracts are quoted but wide, so anything solved from a
+ * mid is noisier. One shared sentence would be wrong on one of the two tabs.
+ */
+export const PRE_OPEN_NOTE_OPEN_INTEREST =
+  "Pre-open carryover: this snapshot was observed before 09:15 IST. Open interest is the previous session's close echoed before the exchange publishes a fresh book — change will read as zero until the next intraday collect.";
+
+export const PRE_OPEN_NOTE_QUOTES =
+  "Pre-open snapshot: observed before 09:15 IST. Option quotes are two-sided but wide (measured on NIFTY over 30 days: median spread about 1.3% of mid at 09:11 versus 0.4% intraday), so IV and Greeks solved from these mids are noisier than later in the session.";
+
 export function SnapshotFreshnessBar(props: {
   observedAt: string | null | undefined;
   provider?: string | null;
   expiryLabel?: string | null;
   nowMs: number;
+  /** Tab-specific wording shown when the snapshot is a pre-open one. Defaults to the open-interest note. */
+  preOpenNote?: string;
 }) {
-  const { observedAt, provider, expiryLabel, nowMs } = props;
+  const { observedAt, provider, expiryLabel, nowMs, preOpenNote = PRE_OPEN_NOTE_OPEN_INTEREST } = props;
   const observedMs = observedAt ? Date.parse(observedAt) : Number.NaN;
   const assessment = assessOiSnapshotFreshness({
     observedAtMs: Number.isFinite(observedMs) ? observedMs : null,
@@ -98,11 +112,7 @@ export function SnapshotFreshnessBar(props: {
         </p>
       )}
       {assessment.preOpenOiCarryover && (
-        <p className="mt-1 text-[11px] text-amber-200/90">
-          Pre-open carryover: this snapshot was observed before 09:15 IST. Open interest is the
-          previous session&apos;s close echoed before the exchange publishes a fresh book — change
-          will read as zero until the next intraday collect.
-        </p>
+        <p className="mt-1 text-[11px] text-amber-200/90">{preOpenNote}</p>
       )}
     </div>
   );
