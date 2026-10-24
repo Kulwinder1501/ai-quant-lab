@@ -16,6 +16,7 @@ import { VolumeProfilePanel } from "./volume-profile-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
 import { DevelopingValuePanel } from "./developing-value-panel";
 import { DataCoveragePanel } from "./data-coverage-panel";
+import { ContractCostPanel, type CostStrike } from "./contract-cost-panel";
 import { ImpliedMovePanel } from "./implied-move-panel";
 import type { ImpliedMoveInput } from "../implied-move";
 import {
@@ -259,6 +260,21 @@ export function OptionChainDashboard() {
     };
   }, [snapshotChain]);
 
+  /** Each leg's quote, solved IV and Greeks for the contract cost card, from the same untouched snapshot. */
+  const contractCostStrikes = useMemo<CostStrike[]>(
+    () =>
+      (snapshotChain?.strikes ?? []).map((row) => ({
+        strikePrice: row.strikePrice,
+        call: row.call
+          ? { bid: row.call.bid, ask: row.call.ask, impliedVolatility: row.call.impliedVolatility, delta: row.call.delta, gamma: row.call.gamma, theta: row.call.theta, daysToExpiry: row.call.daysToExpiry }
+          : null,
+        put: row.put
+          ? { bid: row.put.bid, ask: row.put.ask, impliedVolatility: row.put.impliedVolatility, delta: row.put.delta, gamma: row.put.gamma, theta: row.put.theta, daysToExpiry: row.put.daysToExpiry }
+          : null,
+      })),
+    [snapshotChain?.strikes],
+  );
+
   const chartExpiryLabel = useMemo(() => {
     const selected = expiry
       ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
@@ -487,6 +503,8 @@ export function OptionChainDashboard() {
                 />
                 {/* Observed option prices and the model IV beside observed futures moves; separate request, keyed with the page. */}
                 <ImpliedMovePanel key={`implied-${underlying}`} underlying={underlying} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
+                {/* What one contract costs and needs; the selection is local, so it is keyed with the underlying. */}
+                <ContractCostPanel key={`contract-cost-${underlying}`} strikes={contractCostStrikes} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
               </div>
             ) : (
               <>
