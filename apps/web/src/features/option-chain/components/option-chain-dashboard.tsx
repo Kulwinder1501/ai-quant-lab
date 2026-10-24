@@ -14,6 +14,7 @@ import { DepthView } from "./depth-view";
 import { ExposurePanel } from "./exposure-panel";
 import { VolumeProfilePanel } from "./volume-profile-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
+import { DevelopingValuePanel } from "./developing-value-panel";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -435,9 +436,11 @@ export function OptionChainDashboard() {
             ) : view === "profile" ? (
               <div className="px-4 py-4">
                 {/* Futures bars from the database, not the broker; keyed so a switch drops the session and row choice. */}
-                <VolumeProfilePanel key={underlying} underlying={underlying} nowMs={now} />
+                <VolumeProfilePanel key={`profile-${underlying}`} underlying={underlying} nowMs={now} />
+                {/* The same profile as it formed through the day; keyed so a switch drops its own selections. */}
+                <DevelopingValuePanel key={`developing-${underlying}`} underlying={underlying} nowMs={now} />
                 {/* Observed volume by time of day, same futures bars; keyed so a switch drops its own selections. */}
-                <VolumeByTimePanel key={underlying} underlying={underlying} nowMs={now} />
+                <VolumeByTimePanel key={`by-time-${underlying}`} underlying={underlying} nowMs={now} />
               </div>
             ) : view === "depth" ? (
               <div className="px-4 py-4">
