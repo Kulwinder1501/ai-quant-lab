@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  blackScholesGreeksExact,
   nearestStrike,
   priceEuropeanOption,
   yearsToExpiry,
@@ -118,5 +119,56 @@ describe("black-scholes-engine", () => {
     expect(yearsToExpiry(now, expiry)).toBeCloseTo(7 / 365, 6);
     expect(yearsToExpiry(expiry, now)).toBe(0);
     expect(nearestStrike(24123, 50)).toBe(24100);
+  });
+});
+
+describe("blackScholesGreeksExact", () => {
+  const rounded6 = (value: number) => Math.round((value + Number.EPSILON) * 1e6) / 1e6;
+
+  it("is the unrounded value of exactly what priceEuropeanOption rounds, over a grid of inputs", () => {
+    let compared = 0;
+    for (const optionType of ["CE", "PE"] as const) {
+      for (const spot of [1_000, 22_574.3, 54_300.55]) {
+        for (const moneyness of [0.8, 0.95, 1, 1.02, 1.2]) {
+          for (const days of [0.5, 1, 7, 30, 180]) {
+            for (const sigma of [0.05, 0.15, 0.4]) {
+              const input = { spot, strike: Math.round(spot * moneyness * 20) / 20, timeToExpiryYears: days / 365, riskFreeRate: RISK_FREE_RATE, volatility: sigma, optionType };
+              const exact = blackScholesGreeksExact(input);
+              const priced = priceEuropeanOption(input);
+              expect(rounded6(exact.delta)).toBe(priced.delta);
+              expect(rounded6(exact.gamma)).toBe(priced.gamma);
+              expect(rounded6(exact.theta)).toBe(priced.theta);
+              expect(rounded6(exact.vega)).toBe(priced.vega);
+              compared += 1;
+            }
+          }
+        }
+      }
+    }
+    expect(compared).toBe(2 * 3 * 5 * 5 * 3);
+  });
+
+  it("keeps the precision the rounded value loses, where gamma is small", () => {
+    // A BANKNIFTY-like strike 3% out of the money, one week out: gamma is about 1e-5, so six decimals keep one or two digits.
+    const input = { spot: 54_000, strike: 55_600, timeToExpiryYears: 7 / 365, riskFreeRate: RISK_FREE_RATE, volatility: 0.15, optionType: "CE" as const };
+    const exact = blackScholesGreeksExact(input).gamma;
+    const rounded = priceEuropeanOption(input).gamma;
+    expect(exact).toBeGreaterThan(0);
+    expect(Math.abs(rounded - exact) / exact).toBeGreaterThan(0.001);
+    expect(rounded6(exact)).toBe(rounded);
+  });
+
+  it("is all zero when the closed form does not apply, as priceEuropeanOption is", () => {
+    const expired = { spot: 100, strike: 100, timeToExpiryYears: 0, riskFreeRate: RISK_FREE_RATE, volatility: 0.2, optionType: "CE" as const };
+    expect(blackScholesGreeksExact(expired)).toEqual({ delta: 0, gamma: 0, theta: 0, vega: 0 });
+    expect(blackScholesGreeksExact({ ...expired, timeToExpiryYears: 1, volatility: 0 })).toEqual({ delta: 0, gamma: 0, theta: 0, vega: 0 });
+  });
+
+  it("refuses the same invalid input", () => {
+    const base = { spot: 100, strike: 100, timeToExpiryYears: 1, riskFreeRate: 0.06, volatility: 0.2, optionType: "CE" as const };
+    expect(() => blackScholesGreeksExact({ ...base, spot: 0 })).toThrow("Spot must be a positive finite number.");
+    expect(() => blackScholesGreeksExact({ ...base, strike: -1 })).toThrow("Strike must be a positive finite number.");
+    expect(() => blackScholesGreeksExact({ ...base, riskFreeRate: Number.NaN })).toThrow("Risk-free rate must be finite.");
+    expect(() => blackScholesGreeksExact({ ...base, optionType: "XX" as never })).toThrow("Option type must be CE or PE.");
   });
 });

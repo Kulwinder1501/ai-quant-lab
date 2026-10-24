@@ -100,11 +100,7 @@ function assertPositiveFinite(value: number, field: string): void {
   }
 }
 
-/**
- * Prices a European call/put and returns premium + Greeks.
- * When `T ≤ 0` or `σ ≤ 0`, returns intrinsic value only with zero Greeks.
- */
-export function priceEuropeanOption(input: BlackScholesInput): OptionGreeks {
+function validateBlackScholesInput(input: BlackScholesInput): void {
   assertPositiveFinite(input.spot, "Spot");
   assertPositiveFinite(input.strike, "Strike");
   if (!Number.isFinite(input.riskFreeRate)) {
@@ -113,25 +109,30 @@ export function priceEuropeanOption(input: BlackScholesInput): OptionGreeks {
   if (input.optionType !== "CE" && input.optionType !== "PE") {
     throw new Error("Option type must be CE or PE.");
   }
+}
 
-  const intrinsic = intrinsicValue(input.spot, input.strike, input.optionType);
+/** True when the closed form does not apply (expired, or no volatility): premium is intrinsic and the Greeks are zero. */
+function isDegenerate(input: BlackScholesInput): boolean {
   const T = input.timeToExpiryYears;
   const sigma = input.volatility;
+  return !Number.isFinite(T) || T <= 0 || !Number.isFinite(sigma) || sigma <= 0;
+}
 
-  if (!Number.isFinite(T) || T <= 0 || !Number.isFinite(sigma) || sigma <= 0) {
-    return {
-      premium: roundMoney(intrinsic),
-      delta: 0,
-      gamma: 0,
-      theta: 0,
-      vega: 0,
-      intrinsicValue: roundMoney(intrinsic),
-      timeValue: 0,
-    };
-  }
+interface UnroundedBlackScholes {
+  premium: number;
+  delta: number;
+  gamma: number;
+  /** Per calendar day. */
+  thetaPerDay: number;
+  /** Per 1% absolute IV move. */
+  vegaPerPercent: number;
+}
 
+/** The closed form, with nothing rounded. Callers have already validated the input and ruled out the degenerate case. */
+function blackScholesUnrounded(input: BlackScholesInput): UnroundedBlackScholes {
+  const sigma = input.volatility;
   // Numerical floor: sub-minute expiries blow up 1/√T; treat as near-expiry limit.
-  const time = Math.max(T, 1 / (DAYS_PER_YEAR * 24 * 60));
+  const time = Math.max(input.timeToExpiryYears, 1 / (DAYS_PER_YEAR * 24 * 60));
   const sqrtT = Math.sqrt(time);
   const { spot: S, strike: K, riskFreeRate: r } = input;
 
@@ -159,21 +160,73 @@ export function priceEuropeanOption(input: BlackScholesInput): OptionGreeks {
     thetaAnnual = -(S * pdfD1 * sigma) / (2 * sqrtT) + r * K * discount * nMinusD2;
   }
 
-  const gamma = pdfD1 / (S * sigma * sqrtT);
-  const vegaPerPercent = (S * pdfD1 * sqrtT) / 100;
-  const thetaPerDay = thetaAnnual / DAYS_PER_YEAR;
-  const roundedPremium = roundMoney(Math.max(0, premium));
+  return {
+    premium,
+    delta,
+    gamma: pdfD1 / (S * sigma * sqrtT),
+    thetaPerDay: thetaAnnual / DAYS_PER_YEAR,
+    vegaPerPercent: (S * pdfD1 * sqrtT) / 100,
+  };
+}
+
+/**
+ * Prices a European call/put and returns premium + Greeks.
+ * When `T ≤ 0` or `σ ≤ 0`, returns intrinsic value only with zero Greeks.
+ */
+export function priceEuropeanOption(input: BlackScholesInput): OptionGreeks {
+  validateBlackScholesInput(input);
+
+  const intrinsic = intrinsicValue(input.spot, input.strike, input.optionType);
+
+  if (isDegenerate(input)) {
+    return {
+      premium: roundMoney(intrinsic),
+      delta: 0,
+      gamma: 0,
+      theta: 0,
+      vega: 0,
+      intrinsicValue: roundMoney(intrinsic),
+      timeValue: 0,
+    };
+  }
+
+  const exact = blackScholesUnrounded(input);
+  const roundedPremium = roundMoney(Math.max(0, exact.premium));
   const roundedIntrinsic = roundMoney(intrinsic);
 
   return {
     premium: roundedPremium,
-    delta: roundGreek(delta),
-    gamma: roundGreek(gamma),
-    theta: roundGreek(thetaPerDay),
-    vega: roundGreek(vegaPerPercent),
+    delta: roundGreek(exact.delta),
+    gamma: roundGreek(exact.gamma),
+    theta: roundGreek(exact.thetaPerDay),
+    vega: roundGreek(exact.vegaPerPercent),
     intrinsicValue: roundedIntrinsic,
     timeValue: roundMoney(Math.max(0, roundedPremium - roundedIntrinsic)),
   };
+}
+
+export interface ExactGreeks {
+  delta: number;
+  gamma: number;
+  /** Calendar-day theta in currency units. */
+  theta: number;
+  /** Vega per 1% absolute IV move. */
+  vega: number;
+}
+
+/**
+ * The same Greeks as `priceEuropeanOption`, with nothing rounded.
+ *
+ * `priceEuropeanOption` rounds every Greek to six decimals, which is invisible for display but not for arithmetic: BANKNIFTY
+ * gamma is about 8e-4 at the money and about 1e-5 a few strikes out, so a six-decimal gamma carries a 5% error there, and
+ * out-of-the-money strikes are where most open interest sits. Anything that multiplies a Greek by a large quantity (open
+ * interest, exposure) should use this one. Rounding this to six decimals gives exactly the `priceEuropeanOption` value.
+ */
+export function blackScholesGreeksExact(input: BlackScholesInput): ExactGreeks {
+  validateBlackScholesInput(input);
+  if (isDegenerate(input)) return { delta: 0, gamma: 0, theta: 0, vega: 0 };
+  const exact = blackScholesUnrounded(input);
+  return { delta: exact.delta, gamma: exact.gamma, theta: exact.thetaPerDay, vega: exact.vegaPerPercent };
 }
 
 /** Years between two timestamps (calendar, 365-day year). Negative → 0. */
