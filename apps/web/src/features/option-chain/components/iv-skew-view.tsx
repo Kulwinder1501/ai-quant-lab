@@ -5,6 +5,8 @@ import type { GreeksStrikeInput } from "../build-greeks-by-strike";
 import {
   IV_SKEW_DEFINITIONS,
   buildSkew,
+  daysToExpiryOf,
+  formatDays,
   formatIv,
   formatPoints,
   historySentence,
@@ -76,6 +78,8 @@ export function IvSkewHistoryView({ sessions }: { sessions: readonly SessionChai
   const rows = useMemo<SessionSkew[]>(() => sessions.map((session) => ({
     sessionDate: session.sessionDate,
     observedAt: session.observedAt,
+    expiryDate: session.chain?.expiries?.[0]?.expiryDate ?? null,
+    daysToExpiry: session.chain?.strikes ? daysToExpiryOf(session.chain.strikes) : null,
     skew: session.chain?.strikes ? buildSkew(toGreeksStrikes(session.chain.strikes)) : null,
     error: session.error,
   })), [sessions]);
@@ -89,10 +93,12 @@ export function IvSkewHistoryView({ sessions }: { sessions: readonly SessionChai
         <>
           <p className="mt-2 text-[11px] text-slate-200">{historySentence(rows)}</p>
           <div className="mt-2 overflow-x-auto rounded-xl border border-white/10">
-            <table className="w-full min-w-[480px] text-left text-[11px] text-slate-300">
+            <table className="w-full min-w-[600px] text-left text-[11px] text-slate-300">
               <thead className="bg-slate-950 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-2 py-1.5 font-normal">Session</th>
+                  <th className="px-2 py-1.5 font-normal">Expiry</th>
+                  <th className="px-2 py-1.5 text-right font-normal">Days</th>
                   <th className="px-2 py-1.5 text-right font-normal">25Δ put IV</th>
                   <th className="px-2 py-1.5 text-right font-normal">25Δ call IV</th>
                   <th className="px-2 py-1.5 text-right font-normal">Risk reversal</th>
@@ -103,6 +109,8 @@ export function IvSkewHistoryView({ sessions }: { sessions: readonly SessionChai
                 {rows.map((row) => (
                   <tr key={row.sessionDate} className="border-t border-white/5">
                     <td className="px-2 py-1 font-bold text-white">{row.sessionDate}</td>
+                    <td className="px-2 py-1">{row.expiryDate ?? "–"}</td>
+                    <td className="px-2 py-1 text-right">{formatDays(row.daysToExpiry)}</td>
                     {row.skew === null ? (
                       <td className="px-2 py-1 text-slate-400" colSpan={4}>chain could not be read</td>
                     ) : (
@@ -118,7 +126,7 @@ export function IvSkewHistoryView({ sessions }: { sessions: readonly SessionChai
               </tbody>
             </table>
           </div>
-          <p className="mt-1 text-[10px] text-slate-500">A dash means the value could not be found for that session (the 25-delta contracts were not bracketed by solved contracts).</p>
+          <p className="mt-1 text-[10px] text-slate-500">A dash means the value could not be found for that session (the 25-delta contracts were not bracketed by solved contracts). Skew depends on tenor: read the rows against their days to expiry, not as one series.</p>
         </>
       )}
     </section>

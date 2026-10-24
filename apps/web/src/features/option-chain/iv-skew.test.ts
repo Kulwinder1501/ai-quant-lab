@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { GreeksStrikeInput } from "./build-greeks-by-strike";
+import type { StrikeRow } from "./live-chain";
 import {
   buildSkew,
+  daysToExpiryOf,
   formatPoints,
   historySentence,
   ivAtDelta,
@@ -117,30 +119,59 @@ describe("formatting and sentences", () => {
   });
 });
 
+describe("daysToExpiryOf", () => {
+  const legWith = (daysToExpiry: number | null) => ({ daysToExpiry }) as unknown as NonNullable<StrikeRow["call"]>;
+  it("reads the first leg that carries it, and is null when none does", () => {
+    const rows: StrikeRow[] = [
+      { strikePrice: 100, isAtm: false, call: null, put: legWith(null) },
+      { strikePrice: 110, isAtm: true, call: legWith(null), put: legWith(4.05) },
+    ];
+    expect(daysToExpiryOf(rows)).toBe(4.05);
+    expect(daysToExpiryOf([{ strikePrice: 100, isAtm: false, call: legWith(null), put: null }])).toBeNull();
+    expect(daysToExpiryOf([])).toBeNull();
+  });
+});
+
 describe("historySentence", () => {
   const skewWith = (riskReversal: number | null): Skew => ({
     put25: { iv: null, between: null, refusal: null }, call25: { iv: null, between: null, refusal: null }, middle: { iv: null, between: null, refusal: null },
     riskReversal, butterfly: null,
   });
-  const sessions = (values: Array<number | null>): SessionSkew[] => values.map((value, index) => ({
-    sessionDate: `2026-10-${String(30 - index).padStart(2, "0")}`, observedAt: "x", skew: skewWith(value), error: null,
+  /** Newest first. `tenors` are the days to expiry of each session, in the same order. */
+  const sessions = (values: Array<number | null>, tenors: Array<number | null>): SessionSkew[] => values.map((value, index) => ({
+    sessionDate: `2026-10-${String(30 - index).padStart(2, "0")}`, observedAt: "x", expiryDate: "2026-11-03", daysToExpiry: tenors[index] ?? null, skew: skewWith(value), error: null,
   }));
 
-  it("flags a newest risk reversal outside the earlier range, and says it is not a test", () => {
-    expect(historySentence(sessions([-3, -5.5, -5.4, -5.7]))).toBe(
-      "The newest session's risk reversal (-3.00 volatility points) is outside the range of the 3 earlier sessions (-5.70 to -5.40). This flags a change, it does not test one: 4 sessions are not a distribution.",
+  it("compares the newest session only with earlier ones within two days of its tenor, and says it is not a test", () => {
+    // Newest -3.00 at 4.0 days. Within two days: 5 (1 away), 3 (1 away), 6 (2 away, inclusive). The 12-day session is left out.
+    const sentence = historySentence(sessions([-3, -5.5, -5.4, -5.7, -1], [4, 5, 3, 6, 12]));
+    expect(sentence).toBe(
+      "The newest session's risk reversal (-3.00 volatility points, 4.00 days to expiry) is outside the range of the 3 earlier sessions within 2 days of that tenor (-5.70 to -5.40). This flags a change, it does not test one: 4 sessions are not a distribution.",
     );
-    expect(historySentence(sessions([-5.5, -5.5, -5.4, -5.7]))).toContain("is inside the range of the 3 earlier sessions");
+    expect(historySentence(sessions([-5.5, -5.5, -5.4, -5.7, -1], [4, 5, 3, 6, 12]))).toContain("is inside the range of the 3 earlier sessions within 2 days");
+  });
+
+  it("says there are too few at a similar tenor rather than comparing across tenors", () => {
+    // 6.5 days is 2.5 from 4.0, outside the window: only the 5- and 3-day sessions are comparable.
+    expect(historySentence(sessions([-3, -5.5, -5.4, -5.7, -5.6], [4, 5, 3, 6.5, 6.5]))).toBe(
+      "Only 2 of the 4 earlier sessions with a risk reversal are within 2 days of the newest session's 4.00 days to expiry; at least 3 are needed before it can be said whether the skew moves. Skew depends on tenor, so sessions at other tenors are not compared.",
+    );
+    // A monthly expiry counting down: 4, 5, 6.05, 8.05, 11.19 days. Only the 5-day session is within two days of 4.
+    expect(historySentence(sessions([-0.24, -1.25, -0.93, -1.24, -1.81], [4, 5, 6.05, 8.05, 11.19]))).toContain("Only 1 of the 4 earlier sessions with a risk reversal is within 2 days");
+  });
+
+  it("does not compare when the newest session does not carry its tenor, and ignores earlier ones that do not", () => {
+    expect(historySentence(sessions([-3, -5.5, -5.4, -5.7], [null, 5, 3, 6]))).toBe("The newest session does not carry its days to expiry, so it cannot be matched to earlier sessions on tenor and is not compared.");
+    expect(historySentence(sessions([-3, -5.5, -5.4, -5.7, -5.6], [4, null, 3, 6, 5]))).toContain("of the 3 earlier sessions within 2 days");
   });
 
   it("skips sessions without a risk reversal and needs four with one", () => {
-    expect(historySentence(sessions([-3, null, -5.4, -5.7]))).toBe("3 of the 4 sessions have a risk reversal; at least 4 are needed before it can be said whether the skew moves.");
-    expect(historySentence(sessions([-5.5, null, -5.5, -5.4, -5.7]))).toContain("of the 3 earlier sessions");
+    expect(historySentence(sessions([-3, null, -5.4, -5.7], [4, 5, 3, 6]))).toBe("3 of the 4 sessions have a risk reversal; at least 4 are needed before it can be said whether the skew moves.");
     expect(historySentence([])).toContain("0 of the 0 sessions");
   });
 
   it("does not count a session whose chain could not be read", () => {
-    const failed: SessionSkew = { sessionDate: "2026-10-29", observedAt: "x", skew: null, error: "HTTP 500" };
-    expect(historySentence([failed, ...sessions([-5, -5, -5])])).toContain("3 of the 4 sessions");
+    const failed: SessionSkew = { sessionDate: "2026-10-29", observedAt: "x", expiryDate: null, daysToExpiry: null, skew: null, error: "HTTP 500" };
+    expect(historySentence([failed, ...sessions([-5, -5, -5], [4, 5, 3])])).toContain("3 of the 4 sessions");
   });
 });

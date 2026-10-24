@@ -20,17 +20,23 @@
  * - or the two contracts are more than 0.20 of delta apart (the interpolation would cover too wide a stretch).
  * A contract with no solved IV or delta is not a point; it is never filled in.
  *
- * ## The history rule
- * With four or more sessions that have a risk reversal, the newest is called outside when it is below the smallest or above the largest
- * of the earlier ones. That flags a change; four points are not a distribution, and the sentence says so.
+ * ## The history rule, and why it is matched on tenor
+ * Skew depends on time to expiry: the same market reads a different risk reversal at 4 days than at 18. Sessions are not at the same
+ * tenor (a weekly expiry rolls, a monthly one counts down), so a risk reversal that drifts across sessions may only be the expiry
+ * approaching. The newest session is therefore compared only with earlier sessions whose days to expiry are within two days of its own.
+ * With at least three such sessions, the newest is called outside when it is below the smallest or above the largest of them. That
+ * flags a change; four points are not a distribution, and the sentence says so. With fewer, it says there are too few at that tenor.
  */
 import type { GreeksStrikeInput } from "./build-greeks-by-strike";
+import type { StrikeRow } from "./live-chain";
 
 export const WING_DELTA = 0.25;
 export const MIDDLE_DELTA = 0.5;
 /** The widest stretch of delta one interpolation may cover. */
 export const MAX_DELTA_SPAN = 0.2;
 export const HISTORY_MIN_SESSIONS = 4;
+/** An earlier session is at "a similar tenor" when its days to expiry are within this many days of the newest session's. */
+export const TENOR_WINDOW_DAYS = 2;
 
 export type Side = "call" | "put";
 
@@ -147,28 +153,52 @@ export function skewSentence(skew: Skew): string {
   return `The 25-delta call is priced at ${callIv} volatility points, ${relation} the 25-delta put at ${putIv}: a risk reversal of ${formatPoints(skew.riskReversal)}.`;
 }
 
+/** The days to expiry of the stored chain (one expiry is stored per snapshot, so every leg shares it); null when no leg carries it. */
+export function daysToExpiryOf(strikes: readonly StrikeRow[]): number | null {
+  for (const row of strikes) {
+    for (const leg of [row.call, row.put]) {
+      if (leg && leg.daysToExpiry !== null && Number.isFinite(leg.daysToExpiry)) return leg.daysToExpiry;
+    }
+  }
+  return null;
+}
+
+export const formatDays = (value: number | null): string => (value === null ? "–" : value.toFixed(2));
+
 export interface SessionSkew {
   sessionDate: string;
   observedAt: string;
+  /** The expiry the stored chain was for, and its days to expiry at that snapshot. Null when not carried. */
+  expiryDate: string | null;
+  daysToExpiry: number | null;
   /** Null when the chain for that session could not be read. */
   skew: Skew | null;
   error: string | null;
 }
 
-/** The newest session's risk reversal against the range of the earlier ones, or why that cannot be said. */
+/** The newest session's risk reversal against the earlier sessions at a similar tenor, or why that cannot be said. */
 export function historySentence(sessions: readonly SessionSkew[]): string {
   const withValue = sessions.filter((session) => session.skew?.riskReversal != null);
   if (withValue.length < HISTORY_MIN_SESSIONS) {
     return `${withValue.length} of the ${sessions.length} sessions have a risk reversal; at least ${HISTORY_MIN_SESSIONS} are needed before it can be said whether the skew moves.`;
   }
   const [newest, ...earlier] = withValue;
-  const values = earlier.map((session) => session.skew!.riskReversal!);
+  if (newest!.daysToExpiry === null) {
+    return "The newest session does not carry its days to expiry, so it cannot be matched to earlier sessions on tenor and is not compared.";
+  }
+  const tenor = newest!.daysToExpiry;
+  const comparable = earlier.filter((session) => session.daysToExpiry !== null && Math.abs(session.daysToExpiry - tenor) <= TENOR_WINDOW_DAYS);
+  const needed = HISTORY_MIN_SESSIONS - 1;
+  if (comparable.length < needed) {
+    return `Only ${comparable.length} of the ${earlier.length} earlier sessions with a risk reversal ${comparable.length === 1 ? "is" : "are"} within ${TENOR_WINDOW_DAYS} days of the newest session's ${formatDays(tenor)} days to expiry; at least ${needed} are needed before it can be said whether the skew moves. Skew depends on tenor, so sessions at other tenors are not compared.`;
+  }
+  const values = comparable.map((session) => session.skew!.riskReversal!);
   const low = Math.min(...values);
   const high = Math.max(...values);
   const latest = newest!.skew!.riskReversal!;
   const range = `${formatPoints(low)} to ${formatPoints(high)}`;
   const where = latest < low || latest > high ? "outside" : "inside";
-  return `The newest session's risk reversal (${formatPoints(latest)} volatility points) is ${where} the range of the ${earlier.length} earlier sessions (${range}). This flags a change, it does not test one: ${earlier.length + 1} sessions are not a distribution.`;
+  return `The newest session's risk reversal (${formatPoints(latest)} volatility points, ${formatDays(tenor)} days to expiry) is ${where} the range of the ${comparable.length} earlier sessions within ${TENOR_WINDOW_DAYS} days of that tenor (${range}). This flags a change, it does not test one: ${comparable.length + 1} sessions are not a distribution.`;
 }
 
 export const IV_SKEW_DEFINITIONS = {
@@ -176,5 +206,5 @@ export const IV_SKEW_DEFINITIONS = {
   butterfly: "The mean of the 25-delta call and put IVs minus the 50-delta IV: how far the wings sit above the middle of the smile.",
   delta: "The model's delta (Black-Scholes at each contract's solved IV, on the parity forward), not an exchange figure. The strike that is 25-delta depends on the smile being measured.",
   refusal: "Each IV is interpolated linearly in delta between the two solved contracts, adjacent in strike, that straddle the target. It is refused, never extrapolated, when none does, when more than one pair does, or when the pair is more than 0.20 of delta apart. A contract with no solved IV is not a point.",
-  history: "Each row is the last in-session chain of a trading session. With four or more sessions that have a risk reversal, the newest is called outside when it is below the smallest or above the largest of the earlier ones. That flags a change; it is not a significance test.",
+  history: "Each row is the last in-session chain of a trading session, with the expiry it was for and its days to expiry. Skew depends on tenor, so the newest session is compared only with earlier ones within two days of its own days to expiry: with at least three of them it is called outside when below the smallest or above the largest. That flags a change; it is not a significance test.",
 } as const;
