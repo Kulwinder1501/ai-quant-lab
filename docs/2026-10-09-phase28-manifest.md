@@ -34,5 +34,18 @@ Before commencing the `30-session` prospective evaluation window or unfreezing `
 - `[ ]` Run a capture-only qualification session and publish an immutable data-quality report before permitting hypothesis evaluation.
 - `[ ]` Freeze the collection configuration and prohibit interim alpha-based rule changes during the confirmatory window.
 
+## 4. Correction Notice (added 2026-10-24; sections 1-3 above are unchanged)
+
+This is an annotation, not a re-run. The sealed report, its checksum and the evaluator were not modified.
+
+**Affected: `H_OFI_REPLENISHMENT` (Dynamic recovery state). Its "EVIDENCE (Stat)" result should not be read as evidence of a depth-recovery effect.**
+
+- **Cause.** `depth_frames.total_buy_qty` / `total_sell_qty` drop to 0 on one side for a single frame (a feed dropout, not an empty book side: a 50-level book cannot be empty on one side in session). The cost-stack evaluator uses these totals as a depth-depletion series: a shock fires when `(d_pre - d_min) / d_pre >= X`, and its BANKNIFTY threshold is `X = 1.0`. That expression reaches 1.0 only when `d_min == 0`, so a BANKNIFTY shock can only fire on a zero-total frame. (The NIFTY threshold is 0.0, which the code treats as "no episodes".)
+- **Measurement.** Re-running the evaluator's own `extract_episodes` read-only over the sealed pre-OOS window (2026-09-19 to 2026-09-26, `NSE:BANKNIFTY26SEPFUT`, 121,781 frames, 2,477 of them (2.03%) with a zero or missing total) gives 674 buy-side and 592 sell-side episodes; after excluding the unusable-total frames it gives 0 and 0. Every episode in that window is a dropout, so the `Q1`-`Q4` recovery states built from them describe dropout timing, not book resiliency.
+- **Scope of the check.** It used the current `apps/ml/run_cost_stack_validation.py` (post-audit-fix), because the evaluator named in section 1 (`apps/ml/scratch/run_cost_stack_validation.py`) is not in the repository. The OOS window (2026-09-26 to 2026-10-08) uses the same code and thresholds and has zero-total frames on every day, but its episodes were not separately recounted.
+- **Unchanged conclusion.** `H_OFI_REPLENISHMENT` was already not promoted (it failed the modeled cost stack, -1.27 net bps). The correction removes its statistical support too; the "+8.42 gross bps" `Q1` edge is a heterogeneity across dropout-derived states.
+- **Not checked.** Whether `H_RESILIENCY_MEASUREMENT_V1` (PASS above) depends on the same totals series was not investigated; treat that PASS as unconfirmed until it is.
+- **Related fixes (separate commits, 2026-10-24).** The live gate and the Python research mirrors that derive an imbalance from these totals now treat a one-sided zero as unavailable. `run_cost_stack_validation.py` itself was deliberately left as sealed.
+
 ---
 *The live trading pathway remains CLOSED. The next milestone is reliable prospective evidence from synchronized data, followed by independent economic validation.*
