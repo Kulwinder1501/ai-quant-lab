@@ -8,6 +8,7 @@ import { registerDepthRoutes } from "../../modules/market-data/interfaces/http/d
 import { registerVolumeProfileRoutes } from "../../modules/market-data/interfaces/http/volume-profile.routes.js";
 import { registerRealizedMovesRoutes } from "../../modules/market-data/interfaces/http/realized-moves.routes.js";
 import { registerDataCoverageRoutes } from "../../modules/market-data/interfaces/http/data-coverage.routes.js";
+import { registerSessionSnapshotsRoutes } from "../../modules/market-data/interfaces/http/session-snapshots.routes.js";
 import { registerQuoteStalenessRoutes } from "../../modules/market-data/interfaces/http/quote-staleness.routes.js";
 import { registerDevelopingValueRoutes } from "../../modules/market-data/interfaces/http/developing-value.routes.js";
 import { registerVolumeByTimeRoutes } from "../../modules/market-data/interfaces/http/volume-by-time.routes.js";
@@ -87,6 +88,7 @@ export function createApp({ database, environment }: ApplicationDependencies): E
   registerDevelopingValueRoutes(app, dependencies);
   registerDataCoverageRoutes(app, dependencies);
   registerQuoteStalenessRoutes(app, dependencies);
+  registerSessionSnapshotsRoutes(app, dependencies);
   registerRealizedMovesRoutes(app, dependencies);
   registerNewsRoutes(app, dependencies);
   registerEquityRoutes(app, database);

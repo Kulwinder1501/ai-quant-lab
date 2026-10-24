@@ -18,6 +18,7 @@ import { DevelopingValuePanel } from "./developing-value-panel";
 import { DataCoveragePanel } from "./data-coverage-panel";
 import { ChainBasisView } from "./chain-basis-view";
 import { VendorGreeksCheckView } from "./vendor-greeks-check-view";
+import { VendorGreeksHistoryView } from "./vendor-greeks-history-view";
 import { ContractCostPanel, type CostStrike } from "./contract-cost-panel";
 import { ImpliedMovePanel } from "./implied-move-panel";
 import type { ImpliedMoveInput } from "../implied-move";
@@ -513,6 +514,7 @@ export function OptionChainDashboard() {
                 />
                 {/* The model Greeks against Fyers' own, for the contracts that have both. */}
                 <VendorGreeksCheckView strikes={greeksChartStrikes} />
+                <VendorGreeksHistoryView key={`vendor-history-${underlying}`} underlying={underlying} />
                 {/* Observed option prices and the model IV beside observed futures moves; separate request, keyed with the page. */}
                 <ImpliedMovePanel key={`implied-${underlying}`} underlying={underlying} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
                 {/* What one contract costs and needs; the selection is local, so it is keyed with the underlying. */}

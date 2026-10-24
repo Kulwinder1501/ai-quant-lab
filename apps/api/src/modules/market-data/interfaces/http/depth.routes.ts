@@ -1,3 +1,4 @@
+import { parseAsOf } from "./as-of.js";
 import type { Express } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { queryString } from "../../../../interfaces/http/common/query.js";
@@ -36,9 +37,6 @@ import {
 const DEPTH_UNDERLYINGS = INDEX_UNDERLYINGS;
 export type DepthUnderlying = IndexUnderlying;
 
-/** How far ahead of the server clock an `asOf` may be before it is refused as a mistake, not a past instant. */
-const AS_OF_FUTURE_TOLERANCE_MS = 5_000;
-
 export type DepthLadderQueryParse =
   | { ok: true; value: { underlying: DepthUnderlying; asOf: Date | null } }
   | { ok: false; error: string };
@@ -59,19 +57,10 @@ export function parseDepthLadderQuery(
     return { ok: false, error: `\`underlying\` must be one of ${DEPTH_UNDERLYINGS.join(", ")}.` };
   }
 
-  const rawAsOf = input.asOf?.trim();
-  if (!rawAsOf) return { ok: true, value: { underlying: underlying as DepthUnderlying, asOf: null } };
-
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(rawAsOf)) {
-    return { ok: false, error: "`asOf` must be an ISO-8601 instant with an offset, e.g. 2026-10-22T04:30:00Z." };
-  }
-  const asOf = new Date(rawAsOf);
-  if (Number.isNaN(asOf.getTime())) {
-    return { ok: false, error: "`asOf` is not a real date and time." };
-  }
-  if (asOf.getTime() > now.getTime() + AS_OF_FUTURE_TOLERANCE_MS) {
-    return { ok: false, error: "`asOf` is in the future." };
-  }
+  const parsedAsOf = parseAsOf(input.asOf, now);
+  if (!parsedAsOf.ok) return parsedAsOf;
+  const asOf = parsedAsOf.value;
+  if (asOf === null) return { ok: true, value: { underlying: underlying as DepthUnderlying, asOf: null } };
   return { ok: true, value: { underlying: underlying as DepthUnderlying, asOf } };
 }
 

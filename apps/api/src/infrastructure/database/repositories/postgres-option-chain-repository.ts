@@ -665,4 +665,34 @@ export class PostgresOptionChainRepository {
       snapshots: observed.map((observedAt) => ({ observedAt, quotes: byTime.get(observedAt.getTime()) ?? [] })),
     };
   }
+
+  /**
+   * For each of the newest `days` trading sessions that have a chain snapshot, the last snapshot taken inside the session
+   * (09:15 up to 15:30 IST), for views that compare one session with another. The pre-open snapshot (previous-close carryover) and
+   * the post-close ones are not a session's last observation and are left out; so is a weekday listed in `nse_holidays`, whose
+   * stray rows repeat the last close. Newest session first.
+   */
+  async lastInSessionSnapshots(input: { underlyingSymbol: string; days: number }): Promise<Array<{ sessionDate: string; observedAt: Date }>> {
+    const limit = Math.min(60, Math.max(1, Math.floor(input.days)));
+    const result = await this.pool.query(`
+      SELECT session_date, observed_at
+        FROM (
+          SELECT DISTINCT ON (d) d AS session_date, observed_at
+            FROM (
+              SELECT (observed_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
+                     (observed_at AT TIME ZONE 'Asia/Kolkata')::time AS t,
+                     observed_at
+                FROM option_chain_snapshots
+               WHERE underlying_symbol = $1 AND observed_at > now() - interval '120 days'
+            ) local
+           WHERE t >= TIME '09:15' AND t < TIME '15:30'
+             AND extract(isodow FROM d) < 6
+             AND NOT EXISTS (SELECT 1 FROM nse_holidays h WHERE h.holiday_date = local.d)
+           ORDER BY d DESC, observed_at DESC
+        ) newest
+       ORDER BY session_date DESC
+       LIMIT $2
+    `, [input.underlyingSymbol, limit]);
+    return result.rows.map((row) => ({ sessionDate: toDateKey(fromDateColumn(row.session_date)), observedAt: row.observed_at as Date }));
+  }
 }

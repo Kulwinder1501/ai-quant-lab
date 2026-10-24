@@ -1,3 +1,4 @@
+import { parseAsOf } from "./as-of.js";
 import type { Express, NextFunction, Response } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { InvalidHttpQueryError, parseLimit, queryString } from "../../../../interfaces/http/common/query.js";
@@ -407,9 +408,16 @@ export function registerMarketDataRoutes(
         return;
       }
 
+      // `asOf` reads the chain as it stood at a past instant (the newest snapshot at or before it), for the views that compare sessions.
+      const parsedAsOf = parseAsOf(queryString(request, "asOf"), new Date());
+      if (!parsedAsOf.ok) {
+        response.status(400).json({ error: parsedAsOf.error });
+        return;
+      }
       const snapshot = await dependencies.optionChainRepository.latestSnapshot({
         underlyingSymbol,
         expiryDate,
+        ...(parsedAsOf.value ? { asOf: parsedAsOf.value } : {}),
       });
       if (snapshot === null) {
         // Explicitly "nothing collected yet" rather than an empty chain, because the
