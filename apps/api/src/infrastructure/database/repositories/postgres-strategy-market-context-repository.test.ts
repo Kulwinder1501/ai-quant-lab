@@ -564,3 +564,89 @@ describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository.optionCha
     expect(context?.optionChainSignal?.pcr).toBeNull();
   });
 });
+
+/**
+ * `loadPriorMinuteDi`'s SQL filter, against a real database. The fake-database tests cannot run the
+ * filter (they return whatever rows they are given), so this is the only test that proves a
+ * one-sided-zero dropout frame cannot become a minute's "last frame".
+ *
+ * Rows use a far-future date and a synthetic contract symbol so they cannot collide with captured
+ * depth, and every test is rolled back.
+ */
+describe.skipIf(!databaseUrl)("PostgresStrategyMarketContextRepository.loadPriorMinuteDi (live DB)", () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  let client: PoolClient;
+
+  beforeEach(async () => {
+    client = await pool.connect();
+    await client.query("BEGIN");
+  });
+
+  afterEach(async () => {
+    await client.query("ROLLBACK");
+    client.release();
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  const SYMBOL = "TEST:DI-DROPOUT-FUT";
+  // 2099-01-05 05:30:30 UTC = 11:00:30 IST, so the 10:59 minute is the last complete one.
+  const asOf = new Date("2099-01-05T05:30:30.000Z");
+  const minuteStart = Math.floor(asOf.getTime() / 60_000) * 60_000;
+
+  async function seedFrame(secondsIntoMinute: number, minutesBefore: number, buy: number | null, sell: number | null): Promise<void> {
+    await client.query(
+      `INSERT INTO depth_frames (
+         provider, provider_symbol, sequence_no, received_at, is_snapshot, levels_stored, levels_available,
+         bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders, total_buy_qty, total_sell_qty, payload_digest
+       ) VALUES ('test', $1, $2, $3, false, 1, 1, '{100}', '{500}', '{1}', '{100.05}', '{100}', '{1}', $4, $5, $6)`,
+      [
+        SYMBOL,
+        minutesBefore * 100 + secondsIntoMinute,
+        new Date(minuteStart - minutesBefore * 60_000 + secondsIntoMinute * 1_000),
+        buy,
+        sell,
+        `digest-${minutesBefore}-${secondsIntoMinute}`,
+      ],
+    );
+  }
+
+  const loadPriorMinuteDi = (): Promise<number[]> =>
+    (new PostgresStrategyMarketContextRepository(client as unknown as DatabasePool) as unknown as {
+      loadPriorMinuteDi(symbol: string, at: Date): Promise<number[]>;
+    }).loadPriorMinuteDi(SYMBOL, asOf);
+
+  it("a one-sided-zero last frame of a minute does not displace the earlier good frame", async () => {
+    await seedFrame(10, 1, 650, 1350); // good: raw DI -0.35
+    await seedFrame(50, 1, 0, 47400); // later frame of the same minute: buy total dropped to 0
+
+    const history = await loadPriorMinuteDi();
+
+    expect(history).toHaveLength(1);
+    expect(history[0]).toBeCloseTo(-0.35, 12);
+  });
+
+  it("covers the sell-side dropout mirror the same way", async () => {
+    await seedFrame(10, 1, 1350, 650); // good: raw DI +0.35
+    await seedFrame(50, 1, 47400, 0); // sell total dropped to 0
+
+    const history = await loadPriorMinuteDi();
+
+    expect(history).toHaveLength(1);
+    expect(history[0]).toBeCloseTo(0.35, 12);
+  });
+
+  it("a minute whose only frames are dropouts or NULL totals contributes no sample", async () => {
+    await seedFrame(10, 2, 0, 47400);
+    await seedFrame(20, 2, 47400, 0);
+    await seedFrame(30, 2, null, 47400);
+    await seedFrame(40, 3, 650, 1350); // a different, good minute
+
+    const history = await loadPriorMinuteDi();
+
+    expect(history).toHaveLength(1);
+    expect(history[0]).toBeCloseTo(-0.35, 12);
+  });
+});

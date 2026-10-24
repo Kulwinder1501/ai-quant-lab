@@ -48,6 +48,18 @@ def get_connection_string() -> str:
     return "postgresql://ai_quant_lab:ai_quant_lab@ai-quant-lab-db-v2:5432/ai_quant_lab"
 
 
+def usable_total_mask(total_buy: pd.Series, total_sell: pd.Series) -> pd.Series:
+    """True where BOTH whole-book totals are finite and > 0.
+
+    A single zero side is a feed dropout, not a measurement (a 50-level book cannot be empty on one
+    side in session; 1.3% of BANKNIFTY futures frames on 2026-10-22): read as data it gives an
+    imbalance of exactly -1/+1 and halves the apparent book size.
+    """
+    buy = total_buy.astype(float)
+    sell = total_sell.astype(float)
+    return np.isfinite(buy) & np.isfinite(sell) & (buy > 0) & (sell > 0)
+
+
 def load_microstructure_dataset(horizon_seconds: int = 300) -> pd.DataFrame:
     conn_str = get_connection_string()
     query = f"""
@@ -102,7 +114,14 @@ def load_microstructure_dataset(horizon_seconds: int = 300) -> pd.DataFrame:
     """
     with psycopg.connect(conn_str) as conn:
         df = pd.read_sql_query(query, conn)
-    return df
+
+    # A frame whose whole-book total dropped to 0 on one side (or is NULL) has no usable imbalance:
+    # skip the sample rather than zero-fill it into a "balanced" or one-sided book.
+    usable = usable_total_mask(df["total_buy_qty"], df["total_sell_qty"])
+    n_dropped = int((~usable).sum())
+    if n_dropped:
+        print(f"Excluded {n_dropped} of {len(df)} samples whose depth frame had an unusable (dropout/NULL) total.")
+    return df.loc[usable].reset_index(drop=True)
 
 
 def engineer_microstructure_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
@@ -154,8 +173,11 @@ def engineer_microstructure_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 
     total_buy = df["total_buy_qty"].astype(float)
     total_sell = df["total_sell_qty"].astype(float)
-    total_book_qi = ((total_buy - total_sell) / (total_buy + total_sell).replace(0, np.nan)).fillna(0.0)
-    total_depth_log = np.log1p(total_buy + total_sell)
+    # NaN (not 0.0) where a total is unusable: a fabricated 0 reads as a perfectly balanced book.
+    # `load_microstructure_dataset` already excludes such samples; this keeps the function honest.
+    usable_totals = usable_total_mask(total_buy, total_sell)
+    total_book_qi = ((total_buy - total_sell) / (total_buy + total_sell)).where(usable_totals)
+    total_depth_log = np.log1p(total_buy + total_sell).where(usable_totals)
 
     # Alignment with pool side:
     # If pool is UP (overhead), positive ask imbalance opposes movement, negative helps
@@ -215,6 +237,9 @@ def run_phase4_experiment(horizon_seconds: int = 300) -> None:
         return
 
     feats, y = engineer_microstructure_features(df)
+    if feats[["total_book_qi", "total_depth_log"]].isna().any().any():
+        # The l2 columns below are fillna(0.0)'d, which would turn this into a "balanced book".
+        raise ValueError("Samples with unusable depth totals reached the model; exclude them first.")
 
     # Chronological Split within the L2 archive:
     # 70% Train, 30% Test

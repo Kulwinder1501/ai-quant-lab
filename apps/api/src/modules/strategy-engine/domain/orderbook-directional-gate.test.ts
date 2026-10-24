@@ -220,6 +220,66 @@ describe("DI availability: unavailable is null, never 0", () => {
     expect(calculateDecayingDepthImbalance(depth(500, 500)).rawDi).toBe(0);
   });
 
+  // The feed's whole-book totals drop to 0 on ONE side for a single frame (1.3% of BANKNIFTY
+  // futures frames on 2026-10-22). A 50-level book cannot be empty on one side in session, so that
+  // is a dropout; as data it gave a rawDi of exactly -1 / +1.
+  it("a one-sided zero total is a feed dropout: rawDi is null, never -1 or +1", () => {
+    expect(calculateDecayingDepthImbalance(depth(0, 47400)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(47400, 0)).rawDi).toBeNull();
+  });
+
+  it("any non-positive or non-finite total on either side is unavailable", () => {
+    expect(calculateDecayingDepthImbalance(depth(-5, 47400)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(47400, -5)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(Number.NaN, 47400)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(47400, Number.POSITIVE_INFINITY)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(null, 47400)).rawDi).toBeNull();
+    expect(calculateDecayingDepthImbalance(depth(47400, undefined)).rawDi).toBeNull();
+  });
+
+  it("a one-sided zero frame is di_tilde=null / UNAVAILABLE_DEPTH / NO_ACTION even with full history", () => {
+    // Before the fix this read as rawDi -1 against a -0.3 baseline => di_tilde +0.7 => BUY_PUT_OR_SHORT.
+    const signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "SESSION_HIGH",
+      nearestLevelPrice: 100,
+      distanceBps: 2,
+      depth: depth(0, 47400),
+      priorMinuteDi: flatHistory(-0.3),
+    });
+    expect(signal.raw_di).toBeNull();
+    expect(signal.di_tilde).toBeNull();
+    expect(signal.di_status).toBe("UNAVAILABLE_DEPTH");
+    expect(signal.gate_action).toBe("NO_ACTION");
+    expect(signal.directional_bias).toBe("NONE");
+  });
+
+  it("the buy-heavy mirror (sell total dropped to 0) is unavailable too, not a +1 reading", () => {
+    const signal = resolveConfluenceSignalFromDepth({
+      nearestLevelType: "SESSION_LOW",
+      nearestLevelPrice: 100,
+      distanceBps: 2,
+      depth: depth(47400, 0),
+      priorMinuteDi: flatHistory(-0.3),
+    });
+    expect(signal.raw_di).toBeNull();
+    expect(signal.di_tilde).toBeNull();
+    expect(signal.di_status).toBe("UNAVAILABLE_DEPTH");
+    expect(signal.gate_action).toBe("NO_ACTION");
+  });
+
+  it("a dropout frame is skipped, not zero-filled, when building the causal history", () => {
+    const asOf = new Date(Date.parse("2026-10-22T05:30:30Z"));
+    const minuteStart = Math.floor(asOf.getTime() / 60_000) * 60_000;
+    const frames = [
+      { receivedAt: new Date(minuteStart - 60_000 + 10_000), rawDi: calculateDecayingDepthImbalance(depth(650, 1350)).rawDi },
+      // Later frame of the SAME minute: the dropout. It must not displace the good one above.
+      { receivedAt: new Date(minuteStart - 60_000 + 50_000), rawDi: calculateDecayingDepthImbalance(depth(0, 47400)).rawDi },
+    ];
+    const history = trailingMinuteDiSamples(frames, asOf);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toBeCloseTo(-0.35, 12);
+  });
+
   it("returns di_tilde=null / NO_ACTION when the depth frame is missing", () => {
     const signal = resolveConfluenceSignalFromDepth({
       nearestLevelType: "SESSION_HIGH",
