@@ -125,6 +125,11 @@ export interface ExposureTotals {
   callGex: number;
   putGex: number;
   netGex: number;
+  /**
+   * |net| over (call + put) exposure: how much of the gross the net is. A small share means the net is a small difference of two
+   * large, similar numbers, so its sign (and the sign change nearby) is within the noise of the model. Null when there is no exposure.
+   */
+  netShareOfGross: number | null;
   callDecay: number;
   putDecay: number;
   strikesInChain: number;
@@ -309,6 +314,7 @@ export function buildExposure(strikes: readonly ExposureStrikeInput[], options: 
     totals: {
       ...totals,
       netGex: s * (totals.callGex - totals.putGex),
+      netShareOfGross: totals.callGex + totals.putGex > 0 ? Math.abs(totals.callGex - totals.putGex) / (totals.callGex + totals.putGex) : null,
       strikesInChain: ordered.length,
       lowestStrike: strikePrices.length > 0 ? strikePrices[0]! : null,
       highestStrike: strikePrices.length > 0 ? strikePrices[strikePrices.length - 1]! : null,
@@ -327,8 +333,9 @@ export function formatRupees(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
-  if (abs >= 1e7) return `${sign}₹${(abs / 1e7).toFixed(2)} Cr`;
-  if (abs >= 1e5) return `${sign}₹${(abs / 1e5).toFixed(2)} L`;
+  const grouped = (n: number) => n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (abs >= 1e7) return `${sign}₹${grouped(abs / 1e7)} Cr`;
+  if (abs >= 1e5) return `${sign}₹${grouped(abs / 1e5)} L`;
   return `${sign}₹${abs.toFixed(0)}`;
 }
 
@@ -340,4 +347,50 @@ export function formatDeltaUnits(value: number | null): string {
   if (abs >= 1e5) return `${sign}${(abs / 1e5).toFixed(2)} L`;
   if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)} k`;
   return `${sign}${abs.toFixed(1)}`;
+}
+
+/** How far a sign change sits from the real spot, in percent. Within five hundredths of a percent it is "at spot", not "-0.0%". */
+export function formatFlipOffset(percent: number): string {
+  if (!Number.isFinite(percent)) return "—";
+  if (Math.abs(percent) < 0.05) return "at spot";
+  return `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`;
+}
+
+/** The net share of gross below which the net's sign is called within the model's noise. */
+export const NET_NOISE_SHARE = 0.05;
+
+/** The smallest 1, 2, 2.5, 5 or 10 times a power of ten that is at least `value`: a round number to end an axis on. */
+export function niceCeil(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  const exponent = Math.floor(Math.log10(value));
+  const base = 10 ** exponent;
+  for (const step of [1, 2, 2.5, 5, 10]) {
+    if (step * base >= value * (1 - 1e-12)) return step * base;
+  }
+  return 10 * base;
+}
+
+/** Five evenly spaced ticks, symmetric about zero and ending on a round number at or beyond `maxAbs`. */
+export function symmetricTicks(maxAbs: number): number[] {
+  const top = niceCeil(maxAbs);
+  return [-top, -top / 2, 0, top / 2, top];
+}
+
+/**
+ * A tick formatter that writes every tick of an axis in ONE rupee unit, chosen from the largest magnitude on it, and zero as a
+ * bare "0". Writing each tick in its own unit put 2.69 Cr beside 19.35 L on one axis, which reads as uneven spacing.
+ */
+export function rupeeAxisFormatter(maxAbs: number): (value: number) => string {
+  const [divisor, suffix] = maxAbs >= 1e7 ? [1e7, " Cr"] : maxAbs >= 1e5 ? [1e5, " L"] : [1, ""];
+  const scaled = maxAbs / divisor;
+  const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return (value: number) => (value === 0 ? "0" : `${value < 0 ? "-" : ""}₹${Math.abs(value / divisor).toFixed(decimals)}${suffix}`);
+}
+
+/** The same for gamma-weighted OI, in delta-units per index point: one unit per axis, zero as "0". */
+export function deltaUnitsAxisFormatter(maxAbs: number): (value: number) => string {
+  const [divisor, suffix] = maxAbs >= 1e5 ? [1e5, " L"] : maxAbs >= 1e3 ? [1e3, " k"] : [1, ""];
+  const scaled = maxAbs / divisor;
+  const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return (value: number) => (value === 0 ? "0" : `${value < 0 ? "-" : ""}${Math.abs(value / divisor).toFixed(decimals)}${suffix}`);
 }

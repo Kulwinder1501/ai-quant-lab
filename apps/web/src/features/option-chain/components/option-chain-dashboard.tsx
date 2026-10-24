@@ -11,6 +11,7 @@ import { GreeksByStrikeChart } from "./greeks-by-strike-chart";
 import { OiByStrikeChart } from "./oi-by-strike-chart";
 import { OiHistoryPanel } from "./oi-history-panel";
 import { DepthView } from "./depth-view";
+import { ExposurePanel } from "./exposure-panel";
 import { VolumeProfilePanel } from "./volume-profile-panel";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
@@ -39,7 +40,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth" | "profile";
+type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth" | "profile" | "exposure";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -214,6 +215,31 @@ export function OptionChainDashboard() {
     [snapshotChain?.strikes],
   );
 
+  /** Exposure reads OI, the solved IV and time to expiry from the same untouched snapshot as the other charts. */
+  const exposureChartStrikes = useMemo(
+    () =>
+      (snapshotChain?.strikes ?? []).map((row) => ({
+        strikePrice: row.strikePrice,
+        call: row.call
+          ? {
+              openInterest: row.call.openInterest,
+              impliedVolatility: row.call.impliedVolatility,
+              daysToExpiry: row.call.daysToExpiry,
+              vendorGamma: row.call.vendorGreeks?.gamma ?? null,
+            }
+          : null,
+        put: row.put
+          ? {
+              openInterest: row.put.openInterest,
+              impliedVolatility: row.put.impliedVolatility,
+              daysToExpiry: row.put.daysToExpiry,
+              vendorGamma: row.put.vendorGreeks?.gamma ?? null,
+            }
+          : null,
+      })),
+    [snapshotChain?.strikes],
+  );
+
   const chartExpiryLabel = useMemo(() => {
     const selected = expiry
       ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
@@ -266,7 +292,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks", "oi", "history", "model", "depth", "profile"] as const).map((option) => (
+          {(["quotes", "greeks", "oi", "history", "model", "exposure", "depth", "profile"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -275,7 +301,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option === "profile" ? "Volume profile" : option}
+              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option === "profile" ? "Volume profile" : option === "exposure" ? "Exposure" : option}
             </button>
           ))}
         </div>
@@ -386,6 +412,19 @@ export function OptionChainDashboard() {
                   strikes={oiChartStrikes}
                   atmStrike={snapshotChain?.atmStrike ?? null}
                   underlyingValue={snapshotChain?.underlyingValue ?? null}
+                  observedAt={snapshotChain?.observedAt}
+                  provider={snapshotChain?.provider}
+                  expiryLabel={chartExpiryLabel}
+                  nowMs={now}
+                />
+              </div>
+            ) : view === "exposure" ? (
+              <div className="px-4 py-4">
+                <ExposurePanel
+                  strikes={exposureChartStrikes}
+                  atmStrike={snapshotChain?.atmStrike ?? null}
+                  underlyingValue={snapshotChain?.underlyingValue ?? null}
+                  forward={Object.values(snapshotChain?.impliedForwardByExpiry ?? {})[0] ?? null}
                   observedAt={snapshotChain?.observedAt}
                   provider={snapshotChain?.provider}
                   expiryLabel={chartExpiryLabel}

@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   buildExposure,
+  deltaUnitsAxisFormatter,
   formatDeltaUnits,
+  formatFlipOffset,
   formatRupees,
+  NET_NOISE_SHARE,
   legExposure,
   netGexAtSpot,
+  niceCeil,
+  rupeeAxisFormatter,
   SWEEP_RANGE_PERCENT,
+  symmetricTicks,
   type ExposureLegInput,
   type ExposureStrikeInput,
 } from "./build-exposure";
@@ -259,9 +265,46 @@ describe("buildExposure: the comparison with Fyers' gamma", () => {
   });
 });
 
+describe("net share of gross", () => {
+  it("is |net| over call + put exposure, and small when the two sides nearly balance", () => {
+    const balanced = buildExposure(chain([{ strike: 22_600, call: { openInterest: 101_000 }, put: { openInterest: 100_000 } }]), { spot: SPOT, forward: FORWARD, atmStrike: 22_600 });
+    expect(balanced.totals.netShareOfGross).toBeCloseTo(1_000 / 201_000, 6);
+    expect(balanced.totals.netShareOfGross!).toBeLessThan(NET_NOISE_SHARE);
+    const lopsided = buildExposure(chain([{ strike: 22_600, call: { openInterest: 300_000 }, put: { openInterest: 100_000 } }]), { spot: SPOT, forward: FORWARD, atmStrike: 22_600 });
+    expect(lopsided.totals.netShareOfGross).toBeCloseTo(0.5, 6);
+  });
+
+  it("does not depend on the assumed convention", () => {
+    const rows = chain([{ strike: 22_600, call: { openInterest: 300_000 }, put: { openInterest: 100_000 } }]);
+    const a = buildExposure(rows, { spot: SPOT, forward: FORWARD, atmStrike: 22_600, convention: "calls-long" });
+    const b = buildExposure(rows, { spot: SPOT, forward: FORWARD, atmStrike: 22_600, convention: "puts-long" });
+    expect(a.totals.netShareOfGross).toBeCloseTo(b.totals.netShareOfGross!, 12);
+  });
+
+  it("is null when there is no exposure at all", () => {
+    expect(buildExposure([], { spot: SPOT, forward: FORWARD, atmStrike: null }).totals.netShareOfGross).toBeNull();
+    expect(buildExposure(chain([{ strike: 22_600, call: { openInterest: 0 }, put: { openInterest: 0 } }]), { spot: SPOT, forward: FORWARD, atmStrike: 22_600 }).totals.netShareOfGross).toBeNull();
+  });
+});
+
+describe("formatFlipOffset", () => {
+  it("says a sign change within five hundredths of a percent is at spot, never -0.0%", () => {
+    expect(formatFlipOffset(-0.0003)).toBe("at spot");
+    expect(formatFlipOffset(0.049)).toBe("at spot");
+    expect(formatFlipOffset(-0.05)).toBe("-0.1%");
+  });
+
+  it("writes the sign and one decimal otherwise", () => {
+    expect(formatFlipOffset(1.234)).toBe("+1.2%");
+    expect(formatFlipOffset(-2.5)).toBe("-2.5%");
+    expect(formatFlipOffset(Number.NaN)).toBe("—");
+  });
+});
+
 describe("formatting", () => {
   it("writes rupees in lakh and crore with the sign kept", () => {
     expect(formatRupees(2.5e7)).toBe("₹2.50 Cr");
+    expect(formatRupees(7_045.07e7)).toBe("₹7,045.07 Cr");
     expect(formatRupees(-1.25e5)).toBe("-₹1.25 L");
     expect(formatRupees(999)).toBe("₹999");
     expect(formatRupees(null)).toBe("—");
@@ -273,5 +316,57 @@ describe("formatting", () => {
     expect(formatDeltaUnits(-4_500)).toBe("-4.5 k");
     expect(formatDeltaUnits(12.34)).toBe("12.3");
     expect(formatDeltaUnits(null)).toBe("—");
+  });
+});
+
+describe("axis helpers", () => {
+  it("rounds an axis end up to 1, 2, 2.5, 5 or 10 times a power of ten", () => {
+    expect(niceCeil(449.2)).toBe(500);
+    expect(niceCeil(4.81e7)).toBe(5e7);
+    expect(niceCeil(500)).toBe(500);
+    expect(niceCeil(501)).toBe(1000);
+    expect(niceCeil(1.2)).toBe(2);
+    expect(niceCeil(2.2)).toBe(2.5);
+    expect(niceCeil(0.0003)).toBeCloseTo(0.0005, 12);
+  });
+
+  it("falls back to 1 for nothing to scale, instead of a zero-height axis", () => {
+    expect(niceCeil(0)).toBe(1);
+    expect(niceCeil(Number.NaN)).toBe(1);
+    expect(niceCeil(-5)).toBe(1);
+  });
+
+  it("gives five evenly spaced ticks symmetric about zero, with zero among them", () => {
+    expect(symmetricTicks(449.2)).toEqual([-500, -250, 0, 250, 500]);
+    expect(symmetricTicks(4.81e7)).toEqual([-5e7, -2.5e7, 0, 2.5e7, 5e7]);
+    for (const max of [3, 449.2, 1.7e6]) {
+      const ticks = symmetricTicks(max);
+      expect(ticks).toHaveLength(5);
+      expect(ticks[2]).toBe(0);
+      expect(ticks[4]).toBeGreaterThanOrEqual(max);
+      expect(ticks[0]).toBe(-ticks[4]!);
+    }
+  });
+
+  it("writes every rupee tick in one unit chosen from the axis maximum, and zero as 0", () => {
+    const crore = rupeeAxisFormatter(5e7);
+    expect([-5e7, -2.5e7, 0, 2.5e7, 5e7].map(crore)).toEqual(["-₹5.00 Cr", "-₹2.50 Cr", "0", "₹2.50 Cr", "₹5.00 Cr"]);
+    const lakh = rupeeAxisFormatter(4e5);
+    expect([0, 1e5, 4e5].map(lakh)).toEqual(["0", "₹1.00 L", "₹4.00 L"]);
+    expect(rupeeAxisFormatter(800)(400)).toBe("₹400");
+  });
+
+  it("uses fewer decimals for larger scaled values, so ticks stay short", () => {
+    expect(rupeeAxisFormatter(5e7)(2.5e7)).toBe("₹2.50 Cr");   // axis max 5 Cr: two decimals
+    expect(rupeeAxisFormatter(5e8)(2.5e8)).toBe("₹25.0 Cr");   // 50 Cr: one decimal
+    expect(rupeeAxisFormatter(1.2e9)(6e8)).toBe("₹60 Cr");     // 120 Cr: none
+  });
+
+  it("does the same for delta-units: one unit, zero as 0", () => {
+    const k = deltaUnitsAxisFormatter(500);
+    expect([-500, -250, 0, 250, 500].map(k)).toEqual(["-500", "-250", "0", "250", "500"]);
+    const thousands = deltaUnitsAxisFormatter(5000);
+    expect([0, 2500, 5000].map(thousands)).toEqual(["0", "2.50 k", "5.00 k"]);
+    expect(deltaUnitsAxisFormatter(2e5)(1e5)).toBe("1.00 L");
   });
 });
