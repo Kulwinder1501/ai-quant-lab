@@ -17,8 +17,9 @@ One implementation used by ``run_orderbook01_oos.py``, ``run_orderbook01_experim
   ``None`` -- never 0 -- when there is not enough past data. The window is an a-priori documented
   choice, not tuned against outcomes. Mirrors ``causalStandardiseDi`` /
   ``trailingMinuteDiSamples`` in the TypeScript gate.
-* MISSING DATA IS MISSING -- a frame without total_buy_qty / total_sell_qty (or with both zero) has
-  no DI and is skipped; it is never turned into DI = 0.
+* MISSING DATA IS MISSING -- a frame without total_buy_qty / total_sell_qty, or with EITHER total
+  zero (a feed dropout, not an empty book side), has no DI and is skipped; it is never turned into
+  DI = 0 or -1/+1.
 * ONE POPULATION -- depth comes only from the front-month BANKNIFTY futures contract for the day
   (``contract_for_date``); option-book frames and other contracts are excluded.
 * INDEPENDENCE -- events are collapsed to one per level-day before testing
@@ -28,6 +29,7 @@ One implementation used by ``run_orderbook01_oos.py``, ``run_orderbook01_experim
 
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -54,13 +56,18 @@ TIER2_HORIZON_SECONDS_BY_LABELING_VERSION = {
 
 
 def raw_depth_imbalance(total_buy: Optional[float], total_sell: Optional[float]) -> Optional[float]:
-    """(buy - sell) / (buy + sell); None when either total is missing or both are zero."""
+    """(buy - sell) / (buy + sell); None unless BOTH totals are finite and positive.
+
+    A single zero side is a feed dropout, not a measurement -- a 50-level book cannot be empty on one
+    side in session (1.3% of BANKNIFTY futures frames on 2026-10-22) -- and read as data it gives a DI
+    of exactly -1 or +1. Mirrors ``calculateDecayingDepthImbalance`` in the TypeScript gate.
+    """
     if total_buy is None or total_sell is None:
         return None
-    total = float(total_buy) + float(total_sell)
-    if total <= 0:
+    buy, sell = float(total_buy), float(total_sell)
+    if not (math.isfinite(buy) and math.isfinite(sell)) or buy <= 0 or sell <= 0:
         return None
-    return (float(total_buy) - float(total_sell)) / total
+    return (buy - sell) / (buy + sell)
 
 
 def causal_detrend_di(

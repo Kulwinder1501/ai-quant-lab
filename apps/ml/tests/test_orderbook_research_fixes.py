@@ -131,6 +131,28 @@ def test_missing_di_is_skipped_and_not_zero_filled():
     assert raw_depth_imbalance(30.0, 10.0) == pytest.approx(0.5)
 
 
+def test_one_sided_zero_total_is_a_dropout_not_a_di_of_plus_minus_one():
+    # Whole-book totals drop to 0 on ONE side for a single frame (1.3% of BANKNIFTY futures frames
+    # on 2026-10-22); read as data that is a DI of exactly -1 / +1.
+    assert raw_depth_imbalance(0.0, 47400.0) is None
+    assert raw_depth_imbalance(47400.0, 0.0) is None
+    assert raw_depth_imbalance(-5.0, 47400.0) is None
+    assert raw_depth_imbalance(47400.0, float("nan")) is None
+    assert raw_depth_imbalance(float("inf"), 47400.0) is None
+    # A genuinely balanced book is still a real 0, distinct from unavailable.
+    assert raw_depth_imbalance(500.0, 500.0) == 0.0
+
+
+def test_dropout_frame_is_skipped_by_the_causal_detrend_not_zero_filled():
+    times = _minutes(30)
+    dis = [raw_depth_imbalance(650.0, 1350.0)] * len(times)  # -0.35 every minute
+    dis[20] = raw_depth_imbalance(0.0, 47400.0)  # dropout: must be None, not -1
+    assert dis[20] is None
+    out = causal_detrend_di(times, dis)
+    assert out[20] is None
+    assert out[25] == pytest.approx(0.0, abs=1e-12)  # baseline untouched by the dropout
+
+
 def test_latest_value_is_past_only_even_when_a_future_frame_is_nearer():
     times = [T0, T0 + timedelta(seconds=4)]
     values = [0.1, 0.9]
