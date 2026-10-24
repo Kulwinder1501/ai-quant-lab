@@ -77,6 +77,7 @@
     "ops:collector-health": "tsx src/interfaces/cli/check-collector-health.ts",
     "ops:depth-staleness": "tsx src/interfaces/cli/check-depth-frame-staleness.ts",
     "ops:session-coverage": "tsx src/interfaces/cli/check-session-coverage.ts",
+    "ops:session-readiness": "tsx src/interfaces/cli/report-session-readiness.ts",
     "ops:depth-prune": "tsx src/interfaces/cli/prune-depth-frames.ts",
     "research:parity:live-backfill": "tsx src/interfaces/cli/verify-live-backfill-parity.ts",
     "analysis:calculate-indicators": "tsx src/interfaces/cli/calculate-technical-indicators.ts",

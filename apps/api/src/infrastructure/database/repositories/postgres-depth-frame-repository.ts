@@ -7,11 +7,11 @@ import type { StoredDepthFrame } from "../../../modules/market-data/domain/depth
 /** The feed's book depth, and so the most levels a frame can hold. */
 export const MAX_STORED_LEVELS = 50;
 
-const STORED_FRAME_COLUMNS = `provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
+export const STORED_FRAME_COLUMNS = `provider_symbol, sequence_no, exchange_feed_time, received_at, is_snapshot, levels_stored,
               levels_available, bid_price, bid_qty, bid_orders, ask_price, ask_qty, ask_orders,
               total_buy_qty, total_sell_qty, gap_before, is_duplicate, capture_session_id`;
 
-interface StoredFrameRow {
+export interface StoredFrameRow {
   provider_symbol: string;
   sequence_no: string | null;
   exchange_feed_time: string | null;
@@ -32,7 +32,7 @@ interface StoredFrameRow {
   capture_session_id: string | null;
 }
 
-function toStoredFrame(row: StoredFrameRow): StoredDepthFrame {
+export function toStoredFrame(row: StoredFrameRow): StoredDepthFrame {
   const numberOrNull = (value: string | null): number | null => (value === null ? null : Number(value));
   return {
     providerSymbol: row.provider_symbol,
