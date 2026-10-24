@@ -219,8 +219,11 @@ export interface DepthFrameLevelData {
  * Computes Distance-Weighted Decaying Depth Imbalance (DI_decay) across L2 orderbook levels.
  * Uses exponential distance decay lambda = 0.05 per basis point from mid-price.
  *
- * `rawDi` is `null` (not 0) when the frame carries no usable totals: a missing/zero-total frame
- * is "unavailable", and a fabricated 0 would read as a perfectly balanced book.
+ * `rawDi` is `null` (not 0) when the frame does not carry a positive total on BOTH sides: a
+ * missing/zero-total frame is "unavailable", and a fabricated 0 would read as a perfectly balanced
+ * book. A single zero side is a feed dropout, not a measurement -- a 50-level book cannot be empty
+ * on one side in session -- and read as data it would give a rawDi of exactly -1 or +1 (about 1
+ * frame in 75 on BANKNIFTY futures), so it is unavailable too.
  */
 export function calculateDecayingDepthImbalance(
   depth: DepthFrameLevelData,
@@ -229,9 +232,8 @@ export function calculateDecayingDepthImbalance(
   const totalBuy = depth.totalBuyQty;
   const totalSell = depth.totalSellQty;
   const hasTotals =
-    totalBuy !== null && totalBuy !== undefined && Number.isFinite(totalBuy) &&
-    totalSell !== null && totalSell !== undefined && Number.isFinite(totalSell) &&
-    totalBuy + totalSell > 0;
+    totalBuy !== null && totalBuy !== undefined && Number.isFinite(totalBuy) && totalBuy > 0 &&
+    totalSell !== null && totalSell !== undefined && Number.isFinite(totalSell) && totalSell > 0;
   const rawDi = hasTotals ? (totalBuy! - totalSell!) / (totalBuy! + totalSell!) : null;
 
   const bidsP = depth.bidPrice ?? [];

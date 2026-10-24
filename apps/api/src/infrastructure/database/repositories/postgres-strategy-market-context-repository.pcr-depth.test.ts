@@ -303,8 +303,11 @@ describe("resolveConfluenceSignal: di_tilde is causally detrended from same-sess
     expect(until.getTime()).toBeLessThanOrEqual(closeTime.getTime());
     expect(from.getTime()).toBe(until.getTime() - 30 * minute);
     expect(from.getTime()).toBeGreaterThanOrEqual(sessionStartUtc.getTime());
-    // Missing totals are filtered in SQL, never turned into DI = 0.
-    expect(historyQuery.sql).toContain("total_buy_qty IS NOT NULL");
+    // Missing and one-sided-zero (feed dropout) totals are filtered in SQL, never turned into DI = 0
+    // or -1/+1. The fake database cannot run the filter; the live-DB test does.
+    expect(historyQuery.sql).toContain("total_buy_qty > 0");
+    expect(historyQuery.sql).toContain("total_sell_qty > 0");
+    expect(historyQuery.sql).not.toContain("total_buy_qty + total_sell_qty");
   });
 
   it("does not reach back across midnight at the start of the day", async () => {
