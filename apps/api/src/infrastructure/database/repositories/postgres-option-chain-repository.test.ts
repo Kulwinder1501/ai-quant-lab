@@ -119,3 +119,49 @@ describe("vendorGreeksFromRow", () => {
     expect(vendorGreeksFromRow({ vendor_theta: "0.0000" })).toMatchObject({ theta: 0, delta: null });
   });
 });
+
+describe("PostgresOptionChainRepository coverage reads", () => {
+  it("counts in-session minutes on IST weekdays, setting the pre-open and post-close snapshots apart", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await new PostgresOptionChainRepository({ query } as unknown as DatabasePool)
+      .snapshotCoverageDays({ underlyingSymbol: "BANKNIFTY", fromDate: "2026-10-01", toDate: "2026-10-23" });
+
+    const [sql, values] = query.mock.calls[0] as unknown as [string, unknown[]];
+    // Per distinct minute, so two expiries stamped a moment apart are one run.
+    expect(sql).toContain("count(DISTINCT date_trunc('minute', observed_at))");
+    expect(sql).toContain("Asia/Kolkata");
+    expect(sql).toContain("TIME '09:15'");
+    expect(sql).toContain("TIME '15:30'");
+    expect(sql).toMatch(/ISODOW FROM .* < 6/);
+    // The end date is inclusive: the window runs to the start of the next IST day.
+    expect(sql).toMatch(/\(\$3::date \+ 1\)::timestamp AT TIME ZONE 'Asia\/Kolkata'/);
+    expect(values).toEqual(["BANKNIFTY", "2026-10-01", "2026-10-23"]);
+  });
+
+  it("returns each day with the counts as numbers and the in-session first and last times, null when there are none", async () => {
+    const firstAt = new Date("2026-10-22T03:53:00.000Z");
+    const lastAt = new Date("2026-10-22T09:53:00.000Z");
+    const query = vi.fn(async () => ({
+      rows: [
+        { day: "2026-10-22", in_session: "25", pre_open: "1", post_close: "2", first_at: firstAt, last_at: lastAt, expiries: "1" },
+        { day: "2026-10-21", in_session: "0", pre_open: "1", post_close: "0", first_at: null, last_at: null, expiries: "1" },
+      ],
+    }));
+    const days = await new PostgresOptionChainRepository({ query } as unknown as DatabasePool)
+      .snapshotCoverageDays({ underlyingSymbol: "BANKNIFTY", fromDate: "2026-10-21", toDate: "2026-10-22" });
+    expect(days).toEqual([
+      { date: "2026-10-22", inSessionMinutes: 25, preOpenMinutes: 1, postCloseMinutes: 2, firstAt, lastAt, expiries: 1 },
+      { date: "2026-10-21", inSessionMinutes: 0, preOpenMinutes: 1, postCloseMinutes: 0, firstAt: null, lastAt: null, expiries: 1 },
+    ]);
+  });
+
+  it("reads the newest snapshot time of one underlying, or null when none is stored", async () => {
+    const observedAt = new Date("2026-10-23T10:23:00.000Z");
+    const query = vi.fn(async () => ({ rows: [{ observed_at: observedAt }] }));
+    const repository = new PostgresOptionChainRepository({ query } as unknown as DatabasePool);
+    expect(await repository.latestObservedAt("BANKNIFTY")).toBe(observedAt);
+    expect((query.mock.calls[0] as unknown as [string, unknown[]])[1]).toEqual(["BANKNIFTY"]);
+    const none = new PostgresOptionChainRepository({ query: vi.fn(async () => ({ rows: [{ observed_at: null }] })) } as unknown as DatabasePool);
+    expect(await none.latestObservedAt("BANKNIFTY")).toBeNull();
+  });
+});

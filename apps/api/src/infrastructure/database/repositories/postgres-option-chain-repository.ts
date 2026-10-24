@@ -551,4 +551,58 @@ export class PostgresOptionChainRepository {
       lastObservedAt: row.last_observed_at as Date,
     }));
   }
+
+  /**
+   * Per IST weekday, how much of the regular session (09:15-15:30 IST) the stored snapshots cover, for the data-coverage view.
+   *
+   * Counted per distinct *minute*, as `oiHistorySessions` does, so two expiries stamped 0.35 s apart are one run. The
+   * pre-open (09:11, previous-close carryover) and post-close snapshots are not in `inSessionMinutes`; they are counted apart so
+   * the view can say they exist and were set aside. `firstAt` and `lastAt` are of the in-session snapshots.
+   */
+  async snapshotCoverageDays(input: { underlyingSymbol: string; fromDate: string; toDate: string }): Promise<Array<{
+    date: string;
+    inSessionMinutes: number;
+    preOpenMinutes: number;
+    postCloseMinutes: number;
+    firstAt: Date | null;
+    lastAt: Date | null;
+    expiries: number;
+  }>> {
+    const local = "(observed_at AT TIME ZONE 'Asia/Kolkata')";
+    const result = await this.pool.query(`
+      SELECT to_char(${local}::date, 'YYYY-MM-DD') AS day,
+             count(DISTINCT date_trunc('minute', observed_at))
+               FILTER (WHERE ${local}::time >= TIME '09:15' AND ${local}::time < TIME '15:30') AS in_session,
+             count(DISTINCT date_trunc('minute', observed_at)) FILTER (WHERE ${local}::time < TIME '09:15') AS pre_open,
+             count(DISTINCT date_trunc('minute', observed_at)) FILTER (WHERE ${local}::time >= TIME '15:30') AS post_close,
+             min(observed_at) FILTER (WHERE ${local}::time >= TIME '09:15' AND ${local}::time < TIME '15:30') AS first_at,
+             max(observed_at) FILTER (WHERE ${local}::time >= TIME '09:15' AND ${local}::time < TIME '15:30') AS last_at,
+             count(DISTINCT expiry_date) AS expiries
+        FROM option_chain_snapshots
+       WHERE underlying_symbol = $1
+         AND observed_at >= ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+         AND observed_at <  (($3::date + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+         AND EXTRACT(ISODOW FROM ${local}) < 6
+       GROUP BY 1
+       ORDER BY 1 DESC
+    `, [input.underlyingSymbol, input.fromDate, input.toDate]);
+    return result.rows.map((row) => ({
+      date: String(row.day),
+      inSessionMinutes: Number(row.in_session),
+      preOpenMinutes: Number(row.pre_open),
+      postCloseMinutes: Number(row.post_close),
+      firstAt: (row.first_at as Date | null) ?? null,
+      lastAt: (row.last_at as Date | null) ?? null,
+      expiries: Number(row.expiries),
+    }));
+  }
+
+  /** When the newest snapshot of an underlying was received, or null when none is stored. One index probe. */
+  async latestObservedAt(underlyingSymbol: string): Promise<Date | null> {
+    const result = await this.pool.query(
+      "SELECT max(observed_at) AS observed_at FROM option_chain_snapshots WHERE underlying_symbol = $1",
+      [underlyingSymbol],
+    );
+    return (result.rows[0]?.observed_at as Date | null | undefined) ?? null;
+  }
 }

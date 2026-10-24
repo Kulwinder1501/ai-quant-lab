@@ -15,6 +15,7 @@ import { ExposurePanel } from "./exposure-panel";
 import { VolumeProfilePanel } from "./volume-profile-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
 import { DevelopingValuePanel } from "./developing-value-panel";
+import { DataCoveragePanel } from "./data-coverage-panel";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -42,7 +43,7 @@ const UNDERLYINGS = ["NIFTY50", "BANKNIFTY", "SBIN", "RELIANCE"] as const;
  * Both sides of the ladder need seven columns each; showing greeks alongside would be
  * twenty-two columns, which is unreadable at any width.
  */
-type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth" | "profile" | "exposure";
+type ChainView = "quotes" | "greeks" | "oi" | "model" | "history" | "depth" | "profile" | "exposure" | "coverage";
 
 /** Compact Indian-numbering for OI and volume, which run to crores. */
 function compact(value: number | null): string {
@@ -294,7 +295,7 @@ export function OptionChainDashboard() {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/10 bg-slate-950/60 p-1">
-          {(["quotes", "greeks", "oi", "history", "model", "exposure", "depth", "profile"] as const).map((option) => (
+          {(["quotes", "greeks", "oi", "history", "model", "exposure", "depth", "profile", "coverage"] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -303,7 +304,7 @@ export function OptionChainDashboard() {
                 view === option ? "bg-violet-500/20 text-violet-200" : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option === "profile" ? "Volume profile" : option === "exposure" ? "Exposure" : option}
+              {option === "oi" ? "OI chart" : option === "history" ? "OI history" : option === "model" ? "Model greeks" : option === "depth" ? "Depth" : option === "profile" ? "Volume profile" : option === "exposure" ? "Exposure" : option === "coverage" ? "Data coverage" : option}
             </button>
           ))}
         </div>
@@ -441,6 +442,11 @@ export function OptionChainDashboard() {
                 <DevelopingValuePanel key={`developing-${underlying}`} underlying={underlying} nowMs={now} />
                 {/* Observed volume by time of day, same futures bars; keyed so a switch drops its own selections. */}
                 <VolumeByTimePanel key={`by-time-${underlying}`} underlying={underlying} nowMs={now} />
+              </div>
+            ) : view === "coverage" ? (
+              <div className="px-4 py-4">
+                {/* Counts of what is stored from each source; keyed so a switch drops its look-back choice. */}
+                <DataCoveragePanel key={`coverage-${underlying}`} underlying={underlying} nowMs={now} />
               </div>
             ) : view === "depth" ? (
               <div className="px-4 py-4">
