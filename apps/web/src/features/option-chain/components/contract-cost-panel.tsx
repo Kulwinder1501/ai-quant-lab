@@ -2,6 +2,8 @@
 
 import React, { useMemo, useState } from "react";
 import { bandText, buildImpliedMove, type ImpliedMoveInput } from "../implied-move";
+import { buildPayoff } from "../contract-payoff";
+import { ContractPayoffView } from "./contract-payoff-view";
 import {
   CONTRACT_COST_DEFINITIONS,
   buildContractCost,
@@ -65,6 +67,10 @@ export function ContractCostPanel({
   const cost = useMemo(
     () => (strike === null ? null : buildContractCost({ optionType: side, strike, spot: input.spot, leg }, implied)),
     [side, strike, input.spot, leg, implied],
+  );
+  const payoff = useMemo(
+    () => (strike === null ? null : buildPayoff({ optionType: side, strike, ask: cost?.quote?.ask ?? null, spot: input.spot, oneSigmaToExpiryPoints: implied.oneSigmaToExpiryPoints })),
+    [side, strike, cost, input.spot, implied.oneSigmaToExpiryPoints],
   );
   const sentence = cost && strike !== null ? hurdleSentence(cost, side, strike) : null;
   const notes = cost ? contractCostNotes(cost, leg) : [];
@@ -176,6 +182,7 @@ export function ContractCostPanel({
           {notes.map((note) => (
             <p key={note.text} className={`mt-1 text-[11px] ${note.tone === "warn" ? "text-amber-200" : "text-slate-500"}`}>{note.text}</p>
           ))}
+          {payoff && strike !== null && <ContractPayoffView payoff={payoff} side={side} strike={strike} />}
         </>
       )}
 
