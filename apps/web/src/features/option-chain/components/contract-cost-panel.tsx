@@ -4,6 +4,8 @@ import React, { useMemo, useState } from "react";
 import { bandText, buildImpliedMove, type ImpliedMoveInput } from "../implied-move";
 import { buildPayoff } from "../contract-payoff";
 import { ContractPayoffView } from "./contract-payoff-view";
+import { StrikeLadderView } from "./strike-ladder-view";
+import { buildStrikeLadder } from "../strike-ladder";
 import {
   CONTRACT_COST_DEFINITIONS,
   buildContractCost,
@@ -71,6 +73,10 @@ export function ContractCostPanel({
   const payoff = useMemo(
     () => (strike === null ? null : buildPayoff({ optionType: side, strike, ask: cost?.quote?.ask ?? null, spot: input.spot, oneSigmaToExpiryPoints: implied.oneSigmaToExpiryPoints })),
     [side, strike, cost, input.spot, implied.oneSigmaToExpiryPoints],
+  );
+  const ladderRows = useMemo(
+    () => buildStrikeLadder({ side, strikes, spot: input.spot, atmStrike: input.atmStrike }, implied),
+    [side, strikes, input.spot, input.atmStrike, implied],
   );
   const sentence = cost && strike !== null ? hurdleSentence(cost, side, strike) : null;
   const notes = cost ? contractCostNotes(cost, leg) : [];
@@ -185,6 +191,8 @@ export function ContractCostPanel({
           {payoff && strike !== null && <ContractPayoffView payoff={payoff} side={side} strike={strike} />}
         </>
       )}
+
+      {ladderRows.length > 0 && <StrikeLadderView rows={ladderRows} side={side} selectedStrike={strike} onSelect={setPicked} />}
 
       <details className="mt-3 text-[11px] text-slate-400">
         <summary className="cursor-pointer text-slate-300">Definitions and what this cannot say</summary>
