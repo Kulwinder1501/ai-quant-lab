@@ -16,6 +16,7 @@ import { VolumeProfilePanel } from "./volume-profile-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
 import { DevelopingValuePanel } from "./developing-value-panel";
 import { DataCoveragePanel } from "./data-coverage-panel";
+import { ChainBasisView } from "./chain-basis-view";
 import { ContractCostPanel, type CostStrike } from "./contract-cost-panel";
 import { ImpliedMovePanel } from "./implied-move-panel";
 import type { ImpliedMoveInput } from "../implied-move";
@@ -275,6 +276,13 @@ export function OptionChainDashboard() {
     [snapshotChain?.strikes],
   );
 
+  /** The stored snapshot's strikes, ATM and ATM volatility, which the Model greeks panels all read, counted for the basis line. */
+  const chainBasisInput = useMemo(() => ({
+    strikes: snapshotChain?.strikes ?? [],
+    atmStrike: snapshotChain?.atmStrike ?? null,
+    atmImpliedVolatility: snapshotChain?.atmImpliedVolatility ?? null,
+  }), [snapshotChain?.strikes, snapshotChain?.atmStrike, snapshotChain?.atmImpliedVolatility]);
+
   const chartExpiryLabel = useMemo(() => {
     const selected = expiry
       ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
@@ -492,6 +500,7 @@ export function OptionChainDashboard() {
               </div>
             ) : view === "model" ? (
               <div className="px-4 py-4">
+                <ChainBasisView input={chainBasisInput} />
                 <GreeksByStrikeChart
                   strikes={greeksChartStrikes}
                   atmStrike={snapshotChain?.atmStrike ?? null}
