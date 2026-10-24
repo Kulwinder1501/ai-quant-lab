@@ -1,15 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   ageText,
+  causePhrase,
   cellTone,
+  collectorSentences,
   coverageNotes,
   dataCoverageQuery,
   depthFramesText,
   istClock,
   istSpan,
+  requestCapNote,
   snapshotCountText,
+  type CollectorView,
   type CoverageRowView,
   type CoverageStatus,
+  type FailureCause,
+  type FyersRequestDayView,
+  type JobDayView,
   type DepthCoverageView,
   type SnapshotCoverageView,
 } from "./data-coverage-view";
@@ -25,6 +32,7 @@ function row(date: string, futures: CoverageStatus, snapshots: CoverageStatus, d
     inProgress: false,
     probableHoliday: holiday,
     gapInSource: !holiday && [futures, snapshots, depth].includes("none"),
+    collector: { optionChain: null, fyersRequests: null, partialFailureHidden: false },
     ...overrides,
   };
 }
@@ -142,5 +150,85 @@ describe("coverageNotes: a source that is not collected", () => {
     const rows = [row("2026-10-19", "complete", "none", "none", { gapInSource: true })];
     const gap = coverageNotes({ rows, sourcesNotCollected: ["depth"] }).find((note) => note.tone === "warn")!;
     expect(gap.text).toBe("2026-10-19: no chain snapshots stored on a day the market traded.");
+  });
+});
+
+const NO_CAUSES: Record<FailureCause, number> = { "fyers-daily-limit": 0, "fyers-rate-limited": 0, "fyers-auth": 0, network: 0, other: 0 };
+
+function job(overrides: Partial<JobDayView> = {}): JobDayView {
+  return {
+    runs: 19, completed: 8, failed: 11, running: 0, completedInSession: 7, failedInSession: 9,
+    causes: { ...NO_CAUSES, "fyers-daily-limit": 10, other: 1 },
+    firstFailureAt: "2026-10-16T05:41:00.000Z", lastFailureAt: "2026-10-16T10:11:00.000Z", ...overrides,
+  };
+}
+
+function requests(overrides: Partial<FyersRequestDayView> = {}): FyersRequestDayView {
+  return {
+    total: 5655, byEndpoint: [{ endpoint: "quotes:api", count: 2431 }, { endpoint: "history", count: 1734 }],
+    cap: 5000, guard: 3500, overCap: true, overGuard: true, ...overrides,
+  };
+}
+
+const collector = (overrides: Partial<CollectorView> = {}): CollectorView => ({ optionChain: null, fyersRequests: null, partialFailureHidden: false, ...overrides });
+
+describe("causePhrase", () => {
+  it("lists the causes largest first, in plain words", () => {
+    expect(causePhrase({ ...NO_CAUSES, "fyers-daily-limit": 10, other: 1 })).toBe("10 on the Fyers daily request limit, 1 on other causes");
+    expect(causePhrase({ ...NO_CAUSES, "fyers-auth": 6, network: 2 })).toBe("6 on Fyers authentication, 2 on a network error");
+    expect(causePhrase({ ...NO_CAUSES, "fyers-rate-limited": 1 })).toBe("1 on the Fyers rate limit (HTTP 429)");
+  });
+
+  it("is empty when nothing failed", () => {
+    expect(causePhrase(NO_CAUSES)).toBe("");
+  });
+});
+
+describe("collectorSentences", () => {
+  it("says how many runs failed, why, and when the failures began and ended", () => {
+    const [sentence] = collectorSentences({ date: "2026-10-16", collector: collector({ optionChain: job() }) });
+    expect(sentence).toBe("11 of 19 option-chain runs failed (10 on the Fyers daily request limit, 1 on other causes), the first at 11:11 and the last at 15:41 IST.");
+  });
+
+  it("says nothing about a day with no failed run", () => {
+    expect(collectorSentences({ date: "2026-10-22", collector: collector({ optionChain: job({ failed: 0, failedInSession: 0, causes: NO_CAUSES, firstFailureAt: null, lastFailureAt: null }) }) })).toEqual([]);
+    expect(collectorSentences({ date: "2026-10-22", collector: collector() })).toEqual([]);
+  });
+
+  it("puts the Fyers request total against the cap, the budget guard, or neither, and names the biggest user", () => {
+    const over = collectorSentences({ date: "2026-10-21", collector: collector({ fyersRequests: requests() }) });
+    expect(over).toEqual(["5,655 Fyers requests counted, at or over the plan's 5,000 a day; most from quotes:api (2,431)."]);
+    const guard = collectorSentences({ date: "2026-10-22", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false }) }) });
+    expect(guard[0]).toContain("over the scheduler's 3,500 budget guard, which skips optional jobs such as the futures-bar fetch");
+    const under = collectorSentences({ date: "2026-10-23", collector: collector({ fyersRequests: requests({ total: 2000, overCap: false, overGuard: false }) }) });
+    expect(under[0]).toBe("2,000 Fyers requests counted, under the budget guard; most from quotes:api (2,431).");
+  });
+
+  it("calls a partial failure the job status hides by name", () => {
+    const sentences = collectorSentences({ date: "2026-10-05", collector: collector({ optionChain: job({ failed: 0, causes: NO_CAUSES, completedInSession: 26 }), partialFailureHidden: true }) });
+    expect(sentences).toEqual(["26 in-session runs completed, yet this index has far fewer snapshots: a partial failure the job status does not show."]);
+  });
+});
+
+describe("requestCapNote", () => {
+  it("names each recorded day that reached the cap with its total and biggest user", () => {
+    const note = requestCapNote([
+      { date: "2026-10-21", collector: collector({ fyersRequests: requests() }) },
+      { date: "2026-10-20", collector: collector({ fyersRequests: requests({ total: 5415, byEndpoint: [{ endpoint: "quotes:api", count: 4794 }] }) }) },
+      { date: "2026-10-23", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false }) }) },
+    ])!;
+    expect(note.tone).toBe("warn");
+    expect(note.text).toContain("on 2 recorded days: 2026-10-21 (5,655, mostly quotes:api); 2026-10-20 (5,415, mostly quotes:api)");
+    expect(note.text).toContain("The ledger starts on 2026-10-17");
+  });
+
+  it("is null when no recorded day reached the cap, or nothing is recorded", () => {
+    expect(requestCapNote([{ date: "2026-10-23", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false }) }) }])).toBeNull();
+    expect(requestCapNote([{ date: "2026-10-16", collector: collector() }])).toBeNull();
+  });
+
+  it("is included in the coverage notes", () => {
+    const rows = [row("2026-10-21", "partial", "complete", "complete", { collector: collector({ fyersRequests: requests() }) })];
+    expect(coverageNotes({ rows }).some((note) => note.text.includes("reached the plan's daily limit"))).toBe(true);
   });
 });

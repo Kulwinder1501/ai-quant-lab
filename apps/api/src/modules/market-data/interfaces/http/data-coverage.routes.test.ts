@@ -20,10 +20,25 @@ interface FakeData {
   depth?: Record<string, { frames: number; first: string; last: string }>;
   latestDepthAt?: Date | null;
   latestSnapshotAt?: Date | null;
+  /** The scheduler's OPTION_CHAIN runs, by IST date and `HH:MM`. */
+  jobRuns?: Array<{ date: string; at: string; status: "COMPLETED" | "FAILED" | "RUNNING"; error?: string }>;
+  /** The Fyers request ledger rows. */
+  ledger?: Array<{ date: string; endpoint: string; count: number }>;
 }
 
 function fakes(data: FakeData) {
   return {
+    database: {
+      async query(sql: string) {
+        if (sql.includes("scheduled_job_runs")) {
+          return { rows: (data.jobRuns ?? []).map((run) => ({ scheduled_for: ist(run.date, run.at), status: run.status, error_details: run.error ?? null })) };
+        }
+        if (sql.includes("fyers_daily_request_ledger")) {
+          return { rows: (data.ledger ?? []).map((row) => ({ date_key: row.date, endpoint: row.endpoint, request_count: row.count })) };
+        }
+        throw new Error(`unexpected query: ${sql.slice(0, 60)}`);
+      },
+    },
     futuresBarRepository: {
       async sessionDays(input: { symbol: string }) {
         if (input.symbol !== OCT_FUT) return [];
@@ -198,6 +213,71 @@ describe("GET /api/v1/data-coverage", () => {
     const base = await start(data);
     const { data: body } = await (await fetch(`${base}/api/v1/data-coverage?days=10`)).json();
     expect(body.sourcesNotCollected).toEqual([]);
+  });
+
+  describe("why a day is thin", () => {
+    const limit = "failed with HTTP 429, code -360. You have reached the Standard plan limit of 5,000 requests/day.";
+    const runs = (date: string, times: string[], status: "COMPLETED" | "FAILED", error?: string) => times.map((at) => ({ date, at, status, error }));
+    const twelve = ["09:23", "09:41", "09:53", "10:11", "10:23", "10:41", "10:53", "11:11", "11:23", "11:41", "11:53", "12:11"];
+    const withCollectors: FakeData = {
+      ...data,
+      jobRuns: [
+        // 10-21: 12 runs completed in session, then two failed on the daily limit (14:41 in session, 15:41 after the close).
+        ...runs("2026-10-21", twelve, "COMPLETED"),
+        ...runs("2026-10-21", ["14:41", "15:41"], "FAILED", limit),
+        // 10-22: 8 runs completed in session.
+        ...runs("2026-10-22", twelve.slice(0, 8), "COMPLETED"),
+        // 10-20 (the holiday): a pre-open failure and an in-session one, both on the limit.
+        ...runs("2026-10-20", ["09:11", "13:41"], "FAILED", limit),
+      ],
+      ledger: [
+        { date: "2026-10-21", endpoint: "history", count: 1734 },
+        { date: "2026-10-21", endpoint: "quotes:api", count: 2431 },
+        { date: "2026-10-21", endpoint: "optionchain", count: 110 },
+        { date: "2026-10-20", endpoint: "quotes:api", count: 4794 },
+      ],
+    };
+    const rowsOf = async (d: FakeData) => {
+      const base = await start(d);
+      const { data: body } = await (await fetch(`${base}/api/v1/data-coverage?days=10`)).json();
+      return Object.fromEntries(body.rows.map((row: { date: string }) => [row.date, row])) as Record<string, { collector: { optionChain: Record<string, unknown> | null; fyersRequests: Record<string, unknown> | null; partialFailureHidden: boolean } }>;
+    };
+
+    it("attaches each day's option-chain runs, counted and classified, with when the failures began and ended", async () => {
+      const byDate = await rowsOf(withCollectors);
+      expect(byDate["2026-10-21"]!.collector.optionChain).toMatchObject({
+        runs: 14, completed: 12, failed: 2, completedInSession: 12, failedInSession: 1,
+        causes: { "fyers-daily-limit": 2, "fyers-rate-limited": 0, "fyers-auth": 0, network: 0, other: 0 },
+        firstFailureAt: ist("2026-10-21", "14:41").toISOString(),
+        lastFailureAt: ist("2026-10-21", "15:41").toISOString(),
+      });
+      expect(byDate["2026-10-20"]!.collector.optionChain).toMatchObject({ runs: 2, failed: 2, failedInSession: 1, causes: { "fyers-daily-limit": 2 } });
+    });
+
+    it("attaches the Fyers request total of the day against the cap and the scheduler's guard, largest endpoint first", async () => {
+      const byDate = await rowsOf(withCollectors);
+      expect(byDate["2026-10-21"]!.collector.fyersRequests).toMatchObject({
+        total: 4275, cap: 5000, guard: 3500, overCap: false, overGuard: true,
+        byEndpoint: [{ endpoint: "quotes:api", count: 2431 }, { endpoint: "history", count: 1734 }, { endpoint: "optionchain", count: 110 }],
+      });
+      // The holiday: nearly all of it the API's own live-quote polling.
+      expect(byDate["2026-10-20"]!.collector.fyersRequests).toMatchObject({ total: 4794, byEndpoint: [{ endpoint: "quotes:api", count: 4794 }] });
+    });
+
+    it("says nothing was recorded, not zero, for a day with no runs and no ledger row", async () => {
+      const byDate = await rowsOf(withCollectors);
+      expect(byDate["2026-10-23"]!.collector).toEqual({ optionChain: null, fyersRequests: null, partialFailureHidden: false });
+    });
+
+    it("flags a day on which the job completed many runs but the index has far fewer snapshots (a partial failure the status hides)", async () => {
+      const byDate = await rowsOf(withCollectors);
+      // 10-21: 12 completed in-session runs against 5 in-session snapshot minutes (5 < 6).
+      expect(byDate["2026-10-21"]!.collector.partialFailureHidden).toBe(true);
+      // 10-22: 8 completed runs against 26 snapshot minutes.
+      expect(byDate["2026-10-22"]!.collector.partialFailureHidden).toBe(false);
+      // 10-20 has no completed run at all.
+      expect(byDate["2026-10-20"]!.collector.partialFailureHidden).toBe(false);
+    });
   });
 
   it("rejects a bad query with 400", async () => {

@@ -7,6 +7,7 @@ import { DEPTH_UNDERLYINGS } from "../depth-ladder-view";
 import {
   ageText,
   cellTone,
+  collectorSentences,
   coverageNotes,
   dataCoverageQuery,
   depthFramesText,
@@ -143,7 +144,7 @@ export function DataCoveragePanel({ underlying, nowMs }: { underlying: string; n
                   <th className="pr-3 font-normal">Futures bars (of 375)</th>
                   <th className="pr-3 font-normal">Chain snapshots</th>
                   <th className="pr-3 font-normal">Depth frames</th>
-                  <th className="font-normal">Note</th>
+                  <th className="font-normal">Note and why</th>
                 </tr>
               </thead>
               <tbody>
@@ -168,8 +169,11 @@ export function DataCoveragePanel({ underlying, nowMs }: { underlying: string; n
                       <span className="ml-2">{depthFramesText(row.depth)}</span>
                       <span className="block text-[10px] text-slate-500">{istSpan(row.depth.firstAt, row.depth.lastAt)} IST{row.depth.symbol ? ` · ${row.depth.symbol.replace("NSE:", "").replace(/FUT$/, " fut")}` : ""}</span>
                     </td>
-                    <td className="align-top">
+                    <td className="max-w-[360px] align-top">
                       {row.probableHoliday ? "probable holiday" : row.gapInSource && !row.inProgress ? <span className="text-amber-200">gap in a source</span> : ""}
+                      {collectorSentences(row).map((sentence) => (
+                        <span key={sentence} className="mt-0.5 block text-[10px] text-slate-500">{sentence}</span>
+                      ))}
                     </td>
                   </tr>
                 ))}
@@ -180,7 +184,7 @@ export function DataCoveragePanel({ underlying, nowMs }: { underlying: string; n
           <details className="mt-3 text-[11px] text-slate-400">
             <summary className="cursor-pointer text-slate-300">Definitions and thresholds</summary>
             <dl className="mt-2 space-y-1">
-              {Object.entries(data.definitions).map(([name, text]) => (
+              {Object.entries({ ...data.definitions, ...data.collectorDefinitions }).map(([name, text]) => (
                 <div key={name}><dt className="inline font-bold text-slate-300">{name}: </dt><dd className="inline">{text}</dd></div>
               ))}
             </dl>

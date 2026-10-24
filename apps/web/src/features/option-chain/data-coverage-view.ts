@@ -41,6 +41,37 @@ export interface DepthCoverageView {
   status: CoverageStatus;
 }
 
+export type FailureCause = "fyers-daily-limit" | "fyers-rate-limited" | "fyers-auth" | "network" | "other";
+
+export interface JobDayView {
+  runs: number;
+  completed: number;
+  failed: number;
+  running: number;
+  completedInSession: number;
+  failedInSession: number;
+  causes: Record<FailureCause, number>;
+  firstFailureAt: string | null;
+  lastFailureAt: string | null;
+}
+
+export interface FyersRequestDayView {
+  total: number;
+  byEndpoint: Array<{ endpoint: string; count: number }>;
+  cap: number;
+  guard: number;
+  overCap: boolean;
+  overGuard: boolean;
+}
+
+export interface CollectorView {
+  optionChain: JobDayView | null;
+  /** Null when the request ledger has no row for the day: not recorded, not zero. */
+  fyersRequests: FyersRequestDayView | null;
+  /** The job completed many in-session runs but this index has far fewer snapshots. */
+  partialFailureHidden: boolean;
+}
+
 export interface CoverageRowView {
   date: string;
   futures: FuturesCoverageView;
@@ -49,6 +80,7 @@ export interface CoverageRowView {
   inProgress: boolean;
   probableHoliday: boolean;
   gapInSource: boolean;
+  collector: CollectorView;
 }
 
 export interface DataCoverageAvailable {
@@ -69,6 +101,7 @@ export interface DataCoverageAvailable {
   };
   typicalSnapshotMinutes: number | null;
   definitions: Record<string, string>;
+  collectorDefinitions: Record<string, string>;
   source: string;
 }
 
@@ -165,10 +198,75 @@ export function coverageNotes(data: Pick<DataCoverageAvailable, "rows"> & { sour
       text: `${holidays.length === 1 ? "1 weekday is" : `${holidays.length} weekdays are`} a probable exchange holiday (${dayList(holidays)}): no futures bars and no whole collector day. This is an inference; the holiday calendar is not stored here, and the collectors may still have written stray rows.`,
     });
   }
+  const capNote = requestCapNote(data.rows as ReadonlyArray<Pick<CoverageRowView, "date" | "collector">>);
+  if (capNote) notes.push(capNote);
   const sparse = data.rows.filter((row) => !row.gapInSource && !row.probableHoliday && !row.inProgress
     && [row.futures.status, row.snapshots.status, row.depth.status].includes("partial"));
   if (sparse.length > 0) {
     notes.push({ tone: "info", text: `${sparse.length} traded day${sparse.length === 1 ? " has" : "s have"} a partial source (amber): ${dayList(sparse)}.` });
   }
   return notes;
+}
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+const CAUSE_PHRASE: Record<FailureCause, string> = {
+  "fyers-daily-limit": "the Fyers daily request limit",
+  "fyers-rate-limited": "the Fyers rate limit (HTTP 429)",
+  "fyers-auth": "Fyers authentication",
+  network: "a network error",
+  other: "other causes",
+};
+
+const CAUSE_ORDER: readonly FailureCause[] = ["fyers-daily-limit", "fyers-rate-limited", "fyers-auth", "network", "other"];
+
+/** The failure causes of a day as a phrase, largest first: `10 on the Fyers daily request limit, 1 on a network error`. */
+export function causePhrase(causes: Record<FailureCause, number>): string {
+  return CAUSE_ORDER
+    .filter((cause) => causes[cause] > 0)
+    .sort((x, y) => causes[y] - causes[x])
+    .map((cause) => `${causes[cause]} on ${CAUSE_PHRASE[cause]}`)
+    .join(", ");
+}
+
+/** What the collectors recorded about a day, in sentences: the option-chain runs, the Fyers requests, a hidden partial failure. */
+export function collectorSentences(row: Pick<CoverageRowView, "collector"> & { date: string }): string[] {
+  const sentences: string[] = [];
+  const { optionChain, fyersRequests, partialFailureHidden } = row.collector;
+  if (optionChain !== null && optionChain.failed > 0) {
+    sentences.push(
+      `${optionChain.failed} of ${plural(optionChain.runs, "option-chain run")} failed (${causePhrase(optionChain.causes)}), the first at ${istClock(optionChain.firstFailureAt)} and the last at ${istClock(optionChain.lastFailureAt)} IST.`,
+    );
+  }
+  if (fyersRequests !== null) {
+    const top = fyersRequests.byEndpoint[0];
+    const standing = fyersRequests.overCap
+      ? `at or over the plan's ${fyersRequests.cap.toLocaleString("en-IN")} a day`
+      : fyersRequests.overGuard
+        ? `over the scheduler's ${fyersRequests.guard.toLocaleString("en-IN")} budget guard, which skips optional jobs such as the futures-bar fetch`
+        : "under the budget guard";
+    sentences.push(
+      `${fyersRequests.total.toLocaleString("en-IN")} Fyers requests counted, ${standing}${top ? `; most from ${top.endpoint} (${top.count.toLocaleString("en-IN")})` : ""}.`,
+    );
+  }
+  if (partialFailureHidden && optionChain !== null) {
+    sentences.push(`${plural(optionChain.completedInSession, "in-session run")} completed, yet this index has far fewer snapshots: a partial failure the job status does not show.`);
+  }
+  return sentences;
+}
+
+/** Across the window: the days the request count reached the plan's cap and what used it, or null when none did. */
+export function requestCapNote(rows: ReadonlyArray<Pick<CoverageRowView, "date" | "collector">>): CoverageNote | null {
+  const over = rows.filter((row) => row.collector.fyersRequests?.overCap);
+  if (over.length === 0) return null;
+  const parts = over.map((row) => {
+    const top = row.collector.fyersRequests!.byEndpoint[0]!;
+    return `${row.date} (${row.collector.fyersRequests!.total.toLocaleString("en-IN")}, mostly ${top.endpoint})`;
+  });
+  return {
+    tone: "warn",
+    text: `The Fyers request count reached the plan's daily limit on ${plural(over.length, "recorded day")}: ${parts.join("; ")}. The broker refuses further requests once it is reached, so the collector runs after that point fail. The ledger starts on 2026-10-17; earlier days are not recorded.`,
+  };
 }

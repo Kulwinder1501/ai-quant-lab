@@ -2,6 +2,16 @@ import type { Express } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { queryString } from "../../../../interfaces/http/common/query.js";
 import {
+  COLLECTOR_CAUSE_DEFINITIONS,
+  completedRunsExceedSnapshots,
+  summariseFyersRequests,
+  summariseJobRuns,
+} from "../../domain/collector-causes.js";
+import {
+  findFyersRequestLedger,
+  findScheduledJobRuns,
+} from "../../../../infrastructure/database/repositories/postgres-collector-run-history-repository.js";
+import {
   COVERAGE_DAY_CHOICES,
   DATA_COVERAGE_DEFINITIONS,
   classifyDay,
@@ -53,7 +63,7 @@ const iso = (value: Date | null): string | null => (value === null ? null : valu
  */
 export function registerDataCoverageRoutes(
   app: Express,
-  dependencies: Pick<HttpDependencies, "futuresBarRepository" | "optionChainRepository" | "depthFrameRepository">,
+  dependencies: Pick<HttpDependencies, "futuresBarRepository" | "optionChainRepository" | "depthFrameRepository" | "database">,
   options: { now?: () => Date } = {},
 ): void {
   const clock = options.now ?? (() => new Date());
@@ -150,7 +160,24 @@ export function registerDataCoverageRoutes(
       });
       // A source with nothing anywhere in the window was not collected for this index: said once, and out of the gap logic.
       const notCollected = sourcesNotCollected(unclassified);
-      const rows: CoverageDay[] = unclassified.map((day) => classifyDay(day, notCollected));
+      const classified: CoverageDay[] = unclassified.map((day) => classifyDay(day, notCollected));
+
+      // Why the thin days are thin: the scheduler's own run history and the Fyers request ledger. Both are other processes' records.
+      const jobDays = summariseJobRuns(await findScheduledJobRuns(dependencies.database, { jobType: "OPTION_CHAIN", fromDate, toDate: today }));
+      const requestDays = summariseFyersRequests(await findFyersRequestLedger(dependencies.database, { fromDate, toDate: today }));
+      const rows = classified.map((row) => {
+        const optionChain = jobDays.get(row.date) ?? null;
+        return {
+          ...row,
+          collector: {
+            optionChain,
+            fyersRequests: requestDays.get(row.date) ?? null,
+            // One run covers several indices and can complete with one of them failed: fewer snapshots than completed runs says so.
+            partialFailureHidden: optionChain !== null
+              && completedRunsExceedSnapshots(optionChain.completedInSession, row.snapshots.inSessionMinutes),
+          },
+        };
+      });
 
       // Freshness: when each source last wrote, whatever the hour.
       const latestFutures = rows.find((row) => row.futures.lastAt !== null)?.futures.lastAt ?? null;
@@ -187,7 +214,8 @@ export function registerDataCoverageRoutes(
           },
           typicalSnapshotMinutes: typical,
           definitions: DATA_COVERAGE_DEFINITIONS,
-          source: "candles (1m futures), option_chain_snapshots, depth_frames: counts and times only",
+          collectorDefinitions: COLLECTOR_CAUSE_DEFINITIONS,
+          source: "candles (1m futures), option_chain_snapshots, depth_frames: counts and times only; scheduled_job_runs and fyers_daily_request_ledger for the collectors' own records",
         },
       });
     } catch (error) {
