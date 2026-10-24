@@ -72,12 +72,13 @@ afterEach(async () => {
 });
 
 describe("parseVolumeProfileQuery", () => {
-  const parse = (input: { underlying?: string; date?: string; rowPoints?: string }) =>
-    parseVolumeProfileQuery({ underlying: input.underlying, date: input.date, rowPoints: input.rowPoints }, DURING);
+  const parse = (input: { underlying?: string; date?: string; rowPoints?: string; from?: string; to?: string }) =>
+    parseVolumeProfileQuery({ underlying: input.underlying, date: input.date, rowPoints: input.rowPoints, from: input.from, to: input.to }, DURING);
 
   it("defaults each index to a row height that makes a typical session 30-90 rows tall", () => {
-    expect(parse({})).toEqual({ ok: true, value: { underlying: "BANKNIFTY", date: null, rowPoints: 10 } });
-    expect(parse({ underlying: "nifty50" })).toEqual({ ok: true, value: { underlying: "NIFTY50", date: null, rowPoints: 5 } });
+    const whole = { fromMinute: 9 * 60 + 15, toMinute: 15 * 60 + 30 };
+    expect(parse({})).toEqual({ ok: true, value: { underlying: "BANKNIFTY", date: null, rowPoints: 10, range: whole } });
+    expect(parse({ underlying: "nifty50" })).toEqual({ ok: true, value: { underlying: "NIFTY50", date: null, rowPoints: 5, range: whole } });
   });
 
   it("offers different row heights for each index, and refuses another index's choice", () => {
@@ -96,6 +97,31 @@ describe("parseVolumeProfileQuery", () => {
     expect(parse({ date: "2026-02-30" }).ok).toBe(false);
     expect(parse({ date: "2026-10-23" })).toEqual({ ok: false, error: "`date` is in the future." });
     expect(parse({ date: "2026-10-22" }).ok).toBe(true);
+  });
+});
+
+describe("parseVolumeProfileQuery: range", () => {
+  const parse = (from?: string, to?: string) => parseVolumeProfileQuery({ underlying: undefined, date: undefined, rowPoints: undefined, from, to }, DURING);
+  const rangeOf = (from?: string, to?: string) => {
+    const result = parse(from, to);
+    return result.ok ? result.value.range : result.error;
+  };
+
+  it("reads from and to as IST clock times, and a missing edge is the session edge", () => {
+    expect(rangeOf("09:30", "10:45")).toEqual({ fromMinute: 570, toMinute: 645 });
+    expect(rangeOf("14:30", undefined)).toEqual({ fromMinute: 870, toMinute: 930 });
+    expect(rangeOf(undefined, "10:15")).toEqual({ fromMinute: 555, toMinute: 615 });
+    expect(rangeOf("", "")).toEqual({ fromMinute: 555, toMinute: 930 });
+  });
+
+  it("refuses a malformed, out-of-session, off-mark, backwards or too-short window with a reason", () => {
+    expect(rangeOf("9.30", "10:00")).toContain("`from` must be a clock time");
+    expect(rangeOf("10:00", "ten")).toContain("`to` must be a clock time");
+    expect(rangeOf("09:00", "10:00")).toContain("within the regular session");
+    expect(rangeOf("10:00", "15:45")).toContain("within the regular session");
+    expect(rangeOf("09:17", "10:00")).toContain("multiples of 5");
+    expect(rangeOf("12:00", "11:00")).toContain("at least 15 minutes");
+    expect(rangeOf("12:00", "12:10")).toContain("at least 15 minutes");
   });
 });
 
@@ -134,6 +160,47 @@ describe("GET /api/v1/volume-profile", () => {
     expect(data.closes).toHaveLength(375);
     expect(data.sensitivity).toMatchObject({ comparedWithBarMinutes: 5 });
     expect(data.definitions.estimate).toContain("Estimated");
+  });
+
+  it("builds the profile from only the requested window, and reports its own clock, summary and quality", async () => {
+    const { base } = await start({ [OCT]: { "2026-10-21": dayBars("2026-10-21"), "2026-10-22": dayBars("2026-10-22") } }, AFTER);
+    const whole = (await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22`)).json()).data;
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22&from=09:15&to=10:15`)).json();
+
+    expect(data.range).toMatchObject({ fromLabel: "09:15", toLabel: "10:15", isFullSession: false, stepMinutes: 5, minMinutes: 15 });
+    expect(whole.range).toMatchObject({ fromLabel: "09:15", toLabel: "15:30", isFullSession: true });
+    // 60 bars: minutes 0..59, volume 30 x (1 + minute % 5), so each group of five sums to 30 x 15.
+    expect(data.profile.totalVolume).toBe(12 * 30 * 15);
+    expect(data.profile.totalVolume).toBeLessThan(whole.profile.totalVolume);
+    expect(data.closes).toHaveLength(60);
+    expect(data.quality).toMatchObject({ expectedMinutes: 60, barsUsed: 60, missingMinutes: 0, complete: true });
+    expect(data.range.summary).toMatchObject({ firstBarAt: "2026-10-22T03:45:00.000Z", lastBarAt: "2026-10-22T04:44:00.000Z" });
+    // The whole session summary is still the whole session.
+    expect(data.session.lastBarAt).toBe(whole.session.lastBarAt);
+    // Previous-session levels stay the whole previous session, whatever the window.
+    expect(data.previousSession).toEqual(whole.previousSession);
+  });
+
+  it("calls a window that has not finished yet partial, against the window length", async () => {
+    // 10:30 IST: bars exist only to 10:29, i.e. 75 minutes into the session.
+    const { base } = await start({ [OCT]: { "2026-10-22": dayBars("2026-10-22", { count: 75, postClose: false }) } }, DURING);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?from=10:00&to=12:00`)).json();
+    expect(data.quality).toMatchObject({ expectedMinutes: 120, barsUsed: 30, missingMinutes: 90, complete: false });
+  });
+
+  it("says nothing was traded in a window that is empty, naming the window", async () => {
+    const { base } = await start({ [OCT]: { "2026-10-22": dayBars("2026-10-22", { count: 75, postClose: false }) } }, DURING);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?from=13:00&to=14:00`)).json();
+    expect(data.available).toBe(false);
+    expect(data.reason).toContain("13:00-14:00 IST");
+  });
+
+  it("rejects a bad window with 400 before any read", async () => {
+    const { base, calls } = await start({});
+    for (const query of ["from=09:00", "to=15:45", "from=12:00&to=11:00", "from=10:00&to=10:10", "from=10:02", "from=noon"]) {
+      expect((await fetch(`${base}/api/v1/volume-profile?${query}`)).status, query).toBe(400);
+    }
+    expect(calls).toHaveLength(0);
   });
 
   it("never substitutes the next month for a front month whose bars are not stored", async () => {

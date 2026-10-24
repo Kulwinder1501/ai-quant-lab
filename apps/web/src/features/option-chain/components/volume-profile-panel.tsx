@@ -8,12 +8,16 @@ import { dataAgeSeconds } from "../depth-history-view";
 import { formatIstTime } from "../oi-format";
 import {
   buildProfileGeometry,
+  describeRange,
   describeResolution,
   describeRow,
+  edgeAllowed,
   previousSessionSentence,
   priceFraction,
   profileSessionLabel,
   qualityNotes,
+  RANGE_EDGES,
+  RANGE_PRESETS,
   rowAtFraction,
   volumeProfileQuery,
   type ProfileSessionListing,
@@ -59,6 +63,9 @@ function number(value: number): string {
 export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; nowMs: number }) {
   const [sessionDate, setSessionDate] = useState("");
   const [rowPoints, setRowPoints] = useState<number | null>(null);
+  /** The window of the session, `HH:MM` IST; empty is the session's own edge. */
+  const [rangeFrom, setRangeFrom] = useState("");
+  const [rangeTo, setRangeTo] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [sessions, setSessions] = useState<ProfileSessionListing[]>([]);
@@ -66,7 +73,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const supported = DEPTH_UNDERLYINGS.includes(underlying);
-  const query = volumeProfileQuery({ underlying, sessionDate, rowPoints });
+  const query = volumeProfileQuery({ underlying, sessionDate, rowPoints, from: rangeFrom, to: rangeTo });
 
   useEffect(() => {
     if (!supported) return undefined;
@@ -133,6 +140,8 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
     const py = ((event.clientY - rect.top) / rect.height) * svgHeight;
     return rowAtFraction(geometry.rows, (py - MARGIN.top) / plotH);
   };
+  const setWindow = (from: string, to: string) => { setRangeFrom(from); setRangeTo(to); };
+  const presetActive = (preset: { from: string; to: string }) => preset.from === rangeFrom && preset.to === rangeTo;
 
   /** A horizontal level across both panels, with its label on the left axis side. */
   const levels = available && geometry
@@ -194,6 +203,47 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
           ESTIMATED from 1-minute bars
         </span>
       </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Window of the session">
+        <span className="text-xs text-slate-400">Window</span>
+        {RANGE_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={() => setWindow(preset.from, preset.to)}
+            aria-pressed={presetActive(preset)}
+            className={`rounded-lg border px-2 py-0.5 text-[11px] ${presetActive(preset) ? "border-violet-400/60 bg-violet-500/20 text-violet-100" : "border-white/10 bg-slate-950/60 text-slate-300 hover:bg-white/5"}`}
+          >
+            {preset.label}
+          </button>
+        ))}
+        <label className="flex items-center gap-1 text-[11px] text-slate-400">
+          from
+          <select
+            value={rangeFrom}
+            onChange={(event) => setRangeFrom(event.target.value)}
+            className="rounded-lg border border-white/10 bg-slate-950/60 px-1.5 py-0.5 text-[11px] text-slate-200"
+          >
+            <option value="">09:15</option>
+            {RANGE_EDGES.filter((edge) => edge !== "09:15").map((edge) => (
+              <option key={edge} value={edge} disabled={!edgeAllowed("from", edge, rangeTo)}>{edge}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1 text-[11px] text-slate-400">
+          to
+          <select
+            value={rangeTo}
+            onChange={(event) => setRangeTo(event.target.value)}
+            className="rounded-lg border border-white/10 bg-slate-950/60 px-1.5 py-0.5 text-[11px] text-slate-200"
+          >
+            {RANGE_EDGES.filter((edge) => edge !== "15:30").map((edge) => (
+              <option key={edge} value={edge} disabled={!edgeAllowed("to", edge, rangeFrom)}>{edge}</option>
+            ))}
+            <option value="">15:30</option>
+          </select>
+        </label>
+        <span className="text-[11px] text-slate-500">IST, start included, end excluded</span>
+      </div>
 
       {loading && <p className="mb-2 text-xs text-slate-400">Loading…</p>}
       {failure && (
@@ -209,8 +259,9 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
         <>
           <p className="mb-1 text-[11px] text-slate-400">
             {available.underlying} futures {available.contract.symbol} (expiry {available.contract.expiryDate}) · session {available.sessionDate} IST ·{" "}
+            {available.range.isFullSession ? "whole session" : `window ${describeRange(available.range)}`} ·{" "}
             {number(available.profile.totalVolume)} units · rows of {available.profile.rowPoints} pts
-            {available.session ? ` · open ${number(available.session.open)}, high ${number(available.session.high)}, low ${number(available.session.low)}, close ${number(available.session.close)}` : ""}
+            {available.range.summary ? ` · open ${number(available.range.summary.open)}, high ${number(available.range.summary.high)}, low ${number(available.range.summary.low)}, close ${number(available.range.summary.close)}` : ""}
             {available.inProgress && ageSeconds !== null ? ` · session in progress, fetched ${ageSeconds} s ago, refreshed every minute` : ""}
           </p>
           {notes.map((note) => (
@@ -240,7 +291,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
             aria-label="Estimated volume by price for the session: closes over the day on the left, estimated volume at each price row on the right."
             onMouseMove={(event) => {
               const row = pointerRow(event);
-              setHover({ query, text: row ? describeRow(row) : null });
+              setHover({ query, text: row ? describeRow(row, available.range.isFullSession) : null });
             }}
             onMouseLeave={() => setHover(null)}
           >
@@ -259,6 +310,19 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
                 />
               );
             })()}
+            {/* The part of the session clock outside the chosen window, dimmed: nothing there is in the profile. */}
+            {!available.range.isFullSession && (
+              <>
+                <rect x={MARGIN.left} y={MARGIN.top} width={geometry.rangeX.from * PRICE_PANEL_W} height={plotH} fill="rgba(2,6,23,0.7)" />
+                <rect
+                  x={MARGIN.left + geometry.rangeX.to * PRICE_PANEL_W}
+                  y={MARGIN.top}
+                  width={(1 - geometry.rangeX.to) * PRICE_PANEL_W}
+                  height={plotH}
+                  fill="rgba(2,6,23,0.7)"
+                />
+              </>
+            )}
             <rect x={MARGIN.left} y={MARGIN.top} width={PRICE_PANEL_W} height={plotH} fill="none" stroke="rgba(255,255,255,0.08)" />
             <rect x={HIST_LEFT} y={MARGIN.top} width={HIST_PANEL_W} height={plotH} fill="none" stroke="rgba(255,255,255,0.08)" />
 
@@ -307,7 +371,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
             {hoverText ?? "Hover over the bars for the estimated volume in a row."}
           </p>
           {hiddenLevels.length > 0 && (
-            <p className="mt-1 text-[11px] text-slate-500">Not drawn, outside this session&apos;s price range: {hiddenLevels.join(", ")}.</p>
+            <p className="mt-1 text-[11px] text-slate-500">Not drawn, outside the price range of the profile above: {hiddenLevels.join(", ")}.</p>
           )}
 
           {resolution && (
@@ -315,8 +379,8 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
               <span className="font-bold">Resolution check. </span>{resolution.text}
             </p>
           )}
-          {previousSessionSentence(available.previousSession) && (
-            <p className="mt-2 text-[11px] text-slate-400">{previousSessionSentence(available.previousSession)}</p>
+          {previousSessionSentence(available.previousSession, !available.range.isFullSession) && (
+            <p className="mt-2 text-[11px] text-slate-400">{previousSessionSentence(available.previousSession, !available.range.isFullSession)}</p>
           )}
 
           <details className="mt-3 text-[11px] text-slate-400">

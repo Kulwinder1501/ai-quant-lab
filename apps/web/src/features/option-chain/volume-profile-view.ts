@@ -66,6 +66,19 @@ export interface ProfileSessionListing {
   complete: boolean;
 }
 
+export interface RangeView {
+  fromMinute: number;
+  toMinute: number;
+  fromLabel: string;
+  toLabel: string;
+  /** The window is the whole 09:15-15:30 session. */
+  isFullSession: boolean;
+  stepMinutes: number;
+  minMinutes: number;
+  /** The window's own open, high, low, close and first/last bar. */
+  summary: { open: number; high: number; low: number; close: number; firstBarAt: string; lastBarAt: string } | null;
+}
+
 export interface VolumeProfileAvailable {
   available: true;
   underlying: string;
@@ -77,6 +90,7 @@ export interface VolumeProfileAvailable {
   estimated: true;
   volumeUnit: string;
   session: { open: number; high: number; low: number; close: number; firstBarAt: string; lastBarAt: string } | null;
+  range: RangeView;
   profile: ProfileLevels & {
     rowPoints: number;
     rows: ProfileRowView[];
@@ -105,11 +119,75 @@ export interface VolumeProfileUnavailable {
 
 export type VolumeProfilePayload = VolumeProfileAvailable | VolumeProfileUnavailable;
 
-export function volumeProfileQuery(input: { underlying: string; sessionDate: string; rowPoints: number | null }): string {
+export function volumeProfileQuery(input: {
+  underlying: string;
+  sessionDate: string;
+  rowPoints: number | null;
+  /** `HH:MM` IST edges of a window of the session; empty is the session's own edge. */
+  from?: string;
+  to?: string;
+}): string {
   const params = new URLSearchParams({ underlying: input.underlying });
   if (input.sessionDate) params.set("date", input.sessionDate);
   if (input.rowPoints !== null) params.set("rowPoints", String(input.rowPoints));
+  if (input.from) params.set("from", input.from);
+  if (input.to) params.set("to", input.to);
   return params.toString();
+}
+
+const SESSION_OPEN_MINUTE = 9 * 60 + 15;
+const SESSION_CLOSE_MINUTE = 15 * 60 + 30;
+/** Edges offered in the window drop-downs: every quarter hour from the open to the close, all on 5-minute marks. */
+export const RANGE_EDGE_STEP_MINUTES = 15;
+const MIN_WINDOW_MINUTES = 15;
+
+export function clockLabel(minute: number): string {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+/** Every offered edge, 09:15, 09:30 ... 15:30, as `HH:MM`. */
+export const RANGE_EDGES: readonly string[] = Array.from(
+  { length: Math.floor((SESSION_CLOSE_MINUTE - SESSION_OPEN_MINUTE) / RANGE_EDGE_STEP_MINUTES) + 1 },
+  (_, index) => clockLabel(SESSION_OPEN_MINUTE + index * RANGE_EDGE_STEP_MINUTES),
+);
+
+function edgeMinute(label: string): number {
+  const [hours, minutes] = label.split(":").map(Number);
+  return hours! * 60 + minutes!;
+}
+
+/**
+ * Whether an edge may be chosen given the other: a window must be at least 15 minutes long. `""` (the session's own
+ * edge) is always allowed as a value, but the edge it stands for is checked too.
+ */
+export function edgeAllowed(side: "from" | "to", edge: string, other: string): boolean {
+  const minute = edgeMinute(edge);
+  if (side === "from") {
+    const to = other ? edgeMinute(other) : SESSION_CLOSE_MINUTE;
+    return minute <= to - MIN_WINDOW_MINUTES;
+  }
+  const from = other ? edgeMinute(other) : SESSION_OPEN_MINUTE;
+  return minute >= from + MIN_WINDOW_MINUTES;
+}
+
+export interface RangePreset {
+  label: string;
+  from: string;
+  to: string;
+}
+
+/** Common windows. An empty edge is the session's own. */
+export const RANGE_PRESETS: readonly RangePreset[] = [
+  { label: "Whole session", from: "", to: "" },
+  { label: "First hour", from: "", to: "10:15" },
+  { label: "Morning", from: "", to: "12:00" },
+  { label: "Afternoon", from: "12:00", to: "" },
+  { label: "Last hour", from: "14:30", to: "" },
+];
+
+/** The window as a phrase for the page: "the whole session" or "09:15–10:15 IST". */
+export function describeRange(range: RangeView): string {
+  return range.isFullSession ? "the whole session" : `${range.fromLabel}–${range.toLabel} IST`;
 }
 
 export interface DrawnRow {
@@ -133,6 +211,8 @@ export interface ProfileGeometry {
   rows: DrawnRow[];
   /** The closes as a line: x is the fraction of the 09:15-15:30 session, y the fraction of the price range. */
   closeLine: Array<{ x: number; y: number }>;
+  /** The window on the session clock, as fractions 0-1. Spans the whole session unless a window was chosen. */
+  rangeX: { from: number; to: number };
 }
 
 const SESSION_START_MINUTE_IST = 9 * 60 + 15;
@@ -142,7 +222,11 @@ const IST_OFFSET_MS = 330 * 60_000;
 /** The price span and the rows' bars, and the closes as a line over the session clock. Empty when there are no rows. */
 export function buildProfileGeometry(payload: VolumeProfileAvailable): ProfileGeometry {
   const rows = payload.profile.rows;
-  if (rows.length === 0) return { priceLow: 0, priceHigh: 0, rows: [], closeLine: [] };
+  const rangeX = {
+    from: (payload.range.fromMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES,
+    to: (payload.range.toMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES,
+  };
+  if (rows.length === 0) return { priceLow: 0, priceHigh: 0, rows: [], closeLine: [], rangeX };
   const priceLow = rows[0]!.low;
   const priceHigh = rows[rows.length - 1]!.high;
   const span = priceHigh - priceLow;
@@ -168,7 +252,7 @@ export function buildProfileGeometry(payload: VolumeProfileAvailable): ProfileGe
       y: (priceHigh - close) / span,
     };
   });
-  return { priceLow, priceHigh, rows: drawn, closeLine };
+  return { priceLow, priceHigh, rows: drawn, closeLine, rangeX };
 }
 
 /** Vertical position (fraction of the range, 0 at the top) of a price, or null when it falls outside the drawing. */
@@ -188,9 +272,9 @@ function units(value: number): string {
   return Math.round(value).toLocaleString("en-IN");
 }
 
-export function describeRow(row: DrawnRow): string {
+export function describeRow(row: DrawnRow, isFullSession = true): string {
   const tags = [row.isPoc ? "point of control" : null, row.inValueArea ? "inside the value area" : null].filter(Boolean);
-  return `${row.low}–${row.high}: ${units(row.volume)} units, ${(row.share * 100).toFixed(1)}% of the session (estimated)`
+  return `${row.low}–${row.high}: ${units(row.volume)} units, ${(row.share * 100).toFixed(1)}% of ${isFullSession ? "the session" : "the window"} (estimated)`
     + `${tags.length > 0 ? `, ${tags.join(", ")}` : ""}.`;
 }
 
@@ -234,12 +318,14 @@ function clock(iso: string): string {
 
 /** What the picture stands on, in words. Quiet for a clean, complete session. */
 export function qualityNotes(payload: VolumeProfileAvailable): ProfileNote[] {
-  const { quality, session } = payload;
+  const { quality, range } = payload;
+  const session = range.summary;
   const notes: ProfileNote[] = [];
+  const whole = range.isFullSession;
   if (!quality.complete) {
     notes.push({
       tone: "warn",
-      text: `Partial session: ${quality.barsUsed} of ${quality.expectedMinutes} regular minutes are stored`
+      text: `${whole ? "Partial session" : `Partial window (${range.fromLabel}–${range.toLabel} IST)`}: ${quality.barsUsed} of ${quality.expectedMinutes} ${whole ? "regular " : ""}minutes are stored`
         + `${session ? ` (last bar ${clock(session.lastBarAt)} IST)` : ""}. The profile covers only those minutes`
         + `${payload.inProgress ? " and will change as the session continues" : ""}.`,
     });
@@ -247,8 +333,8 @@ export function qualityNotes(payload: VolumeProfileAvailable): ProfileNote[] {
     notes.push({
       tone: "info",
       text: quality.missingMinutes === 1
-        ? "1 regular minute has no bar and adds nothing to the profile."
-        : `${quality.missingMinutes} regular minutes have no bar and add nothing to the profile.`,
+        ? `1 ${whole ? "regular " : ""}minute has no bar and adds nothing to the profile.`
+        : `${quality.missingMinutes} ${whole ? "regular " : ""}minutes have no bar and add nothing to the profile.`,
     });
   }
   if (quality.zeroVolumeBars > 0) {
@@ -266,12 +352,13 @@ export function qualityNotes(payload: VolumeProfileAvailable): ProfileNote[] {
 }
 
 /** The previous session's levels as a sentence, or null. Says whether that day was complete. */
-export function previousSessionSentence(previous: PreviousSessionView | null): string | null {
+export function previousSessionSentence(previous: PreviousSessionView | null, windowChosen = false): string | null {
   if (previous === null) return null;
   return `Previous session ${previous.sessionDate} (${previous.symbol.replace(/FUT$/, " future")}): POC ${previous.poc.toLocaleString("en-IN")}, `
     + `value area ${previous.val.toLocaleString("en-IN")}–${previous.vah.toLocaleString("en-IN")}, `
     + `range ${previous.low.toLocaleString("en-IN")}–${previous.high.toLocaleString("en-IN")}`
-    + `${previous.complete ? "" : " (partial day)"}. Same row height; also estimated.`;
+    + `${previous.complete ? "" : " (partial day)"}. Same row height; also estimated.`
+    + `${windowChosen ? " These are the whole previous session, not the chosen window." : ""}`;
 }
 
 export function profileSessionLabel(session: ProfileSessionListing): string {

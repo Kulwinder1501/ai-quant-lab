@@ -7,12 +7,21 @@ import {
   buildSessionProfile,
   COMPLETE_SESSION_MIN_BAR_SHARE,
   EXPECTED_SESSION_MINUTES,
+  formatClockMinute,
+  FULL_SESSION_RANGE,
+  isFullSession,
+  MIN_RANGE_MINUTES,
+  parseClockMinute,
   profileSensitivity,
+  RANGE_STEP_MINUTES,
+  rangeProblem,
+  selectBarsInRange,
   selectRegularSessionBars,
   SESSION_PROFILE_DEFINITIONS,
   summariseSession,
   type FuturesBar,
   type SessionProfile,
+  type SessionRange,
 } from "../../domain/session-volume-profile.js";
 import {
   addDays,
@@ -30,12 +39,21 @@ export const PROFILE_ROW_CHOICES: Record<IndexUnderlying, { choices: readonly nu
 };
 
 export type VolumeProfileQueryParse =
-  | { ok: true; value: { underlying: IndexUnderlying; date: string | null; rowPoints: number } }
+  | { ok: true; value: { underlying: IndexUnderlying; date: string | null; rowPoints: number; range: SessionRange } }
   | { ok: false; error: string };
 
-/** Validates `underlying`, `date` and `rowPoints` (the choices depend on the index). Pure, so it is tested without a server. */
+/**
+ * Validates `underlying`, `date`, `rowPoints` (the choices depend on the index) and the optional `from` / `to` window of
+ * the session (`HH:MM`, IST). A missing edge is the session's own edge. Pure, so it is tested without a server.
+ */
 export function parseVolumeProfileQuery(
-  input: { underlying: string | undefined; date: string | undefined; rowPoints: string | undefined },
+  input: {
+    underlying: string | undefined;
+    date: string | undefined;
+    rowPoints: string | undefined;
+    from?: string | undefined;
+    to?: string | undefined;
+  },
   now: Date,
 ): VolumeProfileQueryParse {
   const base = parseUnderlyingAndDate(input, now);
@@ -43,7 +61,21 @@ export function parseVolumeProfileQuery(
   const rows = PROFILE_ROW_CHOICES[base.underlying];
   const rowPoints = parseChoice<number>(input.rowPoints, rows.choices, rows.fallback, "rowPoints");
   if (!rowPoints.ok) return rowPoints;
-  return { ok: true, value: { underlying: base.underlying, date: base.date, rowPoints: rowPoints.value } };
+
+  const edge = (raw: string | undefined, name: "from" | "to", fallback: number): number | string => {
+    const text = raw?.trim();
+    if (!text) return fallback;
+    const minute = parseClockMinute(text);
+    return minute === null ? `\`${name}\` must be a clock time, HH:MM (24-hour, IST).` : minute;
+  };
+  const from = edge(input.from, "from", FULL_SESSION_RANGE.fromMinute);
+  const to = edge(input.to, "to", FULL_SESSION_RANGE.toMinute);
+  if (typeof from === "string") return { ok: false, error: from };
+  if (typeof to === "string") return { ok: false, error: to };
+  const range = { fromMinute: from, toMinute: to };
+  const problem = rangeProblem(range);
+  if (problem) return { ok: false, error: problem };
+  return { ok: true, value: { underlying: base.underlying, date: base.date, rowPoints: rowPoints.value, range } };
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -115,6 +147,8 @@ export function registerVolumeProfileRoutes(
           underlying: queryString(request, "underlying"),
           date: queryString(request, "date"),
           rowPoints: queryString(request, "rowPoints"),
+          from: queryString(request, "from"),
+          to: queryString(request, "to"),
         },
         now,
       );
@@ -122,7 +156,7 @@ export function registerVolumeProfileRoutes(
         response.status(400).json({ error: parsed.error });
         return;
       }
-      const { underlying, date: requestedDate, rowPoints } = parsed.value;
+      const { underlying, date: requestedDate, rowPoints, range } = parsed.value;
       const repository = dependencies.futuresBarRepository;
       const today = istDate(now);
 
@@ -174,7 +208,10 @@ export function registerVolumeProfileRoutes(
 
       // 09:00-16:00 IST: wide enough to see the pre-open and post-close bars, which are counted and set aside.
       const bars = await repository.bars({ symbol: contract.symbol, from: istInstant(sessionDate, 9), to: istInstant(sessionDate, 16) });
-      const { regular, excluded, profile } = barsToProfile(bars, rowPoints);
+      const { regular, excluded } = selectRegularSessionBars(bars);
+      const rangeBars = selectBarsInRange(regular, range);
+      const profile = buildSessionProfile(rangeBars, rowPoints);
+      const rangeLabel = `${formatClockMinute(range.fromMinute)}-${formatClockMinute(range.toMinute)}`;
       if (profile === null) {
         response.status(200).json({
           data: {
@@ -182,7 +219,7 @@ export function registerVolumeProfileRoutes(
             underlying,
             sessionDate,
             frontMonth: contract.symbol,
-            reason: `No traded volume is stored for ${contract.symbol} on ${sessionDate} (09:15-15:30 IST). `
+            reason: `No traded volume is stored for ${contract.symbol} on ${sessionDate} (${rangeLabel} IST). `
               + "The front month's bars are needed: the next month is a different, thinner market and is not used in its place.",
             availableSessions: sessions,
           },
@@ -241,12 +278,24 @@ export function registerVolumeProfileRoutes(
           rowPointsChoices: PROFILE_ROW_CHOICES[underlying].choices,
           estimated: true,
           volumeUnit: "units (contracts x lot size), as reported on the bar; not lots",
+          // The whole regular session's own summary (first and last bar); the range's is under `range`.
           session: summariseSession(regular),
+          range: {
+            fromMinute: range.fromMinute,
+            toMinute: range.toMinute,
+            fromLabel: formatClockMinute(range.fromMinute),
+            toLabel: formatClockMinute(range.toMinute),
+            isFullSession: isFullSession(range),
+            stepMinutes: RANGE_STEP_MINUTES,
+            minMinutes: MIN_RANGE_MINUTES,
+            summary: summariseSession(rangeBars),
+          },
           profile,
-          quality: assessBarQuality(regular, excluded),
-          sensitivity: profileSensitivity(regular, profile),
+          // Quality is judged against the range's own length, so a window that has not finished yet reads as partial.
+          quality: assessBarQuality(rangeBars, excluded, range.toMinute - range.fromMinute),
+          sensitivity: profileSensitivity(rangeBars, profile),
           previousSession,
-          closes: regular.map((bar) => [bar.openTime.getTime(), bar.close]),
+          closes: rangeBars.map((bar) => [bar.openTime.getTime(), bar.close]),
           availableSessions: sessions,
           definitions: SESSION_PROFILE_DEFINITIONS,
           source: "candles: Fyers 1-minute futures bars (cont_flag=0, raw per-contract)",

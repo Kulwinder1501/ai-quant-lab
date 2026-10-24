@@ -117,17 +117,76 @@ export function selectRegularSessionBars(bars: readonly FuturesBar[]): { regular
   return { regular, excluded: bars.length - regular.length };
 }
 
-export function assessBarQuality(regular: readonly FuturesBar[], outsideExcluded: number): SessionBarQuality {
+/** `expectedMinutes` is the length of what the bars should cover: the whole session, or the chosen range of it. */
+/**
+ * A window of the regular session, in minutes since midnight IST: `fromMinute` inclusive, `toMinute` exclusive. Its edges lie
+ * on 5-minute marks so that the 5-minute bars the resolution check rebuilds the profile from never straddle an edge.
+ */
+export interface SessionRange {
+  fromMinute: number;
+  toMinute: number;
+}
+
+export const RANGE_STEP_MINUTES = 5;
+/** Shorter than this a profile is a handful of bars; it is refused rather than drawn. */
+export const MIN_RANGE_MINUTES = 15;
+
+export const FULL_SESSION_RANGE: SessionRange = { fromMinute: SESSION_OPEN_MINUTE_IST, toMinute: SESSION_CLOSE_MINUTE_IST };
+
+export function isFullSession(range: SessionRange): boolean {
+  return range.fromMinute === SESSION_OPEN_MINUTE_IST && range.toMinute === SESSION_CLOSE_MINUTE_IST;
+}
+
+/** `HH:MM` (24-hour, IST) as minutes since midnight, or null when it is not a real clock time. */
+export function parseClockMinute(text: string): number | null {
+  const match = /^(\d{2}):(\d{2})$/.exec(text.trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  return hours < 24 && minutes < 60 ? hours * 60 + minutes : null;
+}
+
+export function formatClockMinute(minute: number): string {
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+/** Why a range cannot be used, or null when it can. */
+export function rangeProblem(range: SessionRange): string | null {
+  if (range.fromMinute < SESSION_OPEN_MINUTE_IST || range.toMinute > SESSION_CLOSE_MINUTE_IST) {
+    return `The range must lie within the regular session, ${formatClockMinute(SESSION_OPEN_MINUTE_IST)}-${formatClockMinute(SESSION_CLOSE_MINUTE_IST)} IST.`;
+  }
+  if (range.fromMinute % RANGE_STEP_MINUTES !== 0 || range.toMinute % RANGE_STEP_MINUTES !== 0) {
+    return `The range edges must be multiples of ${RANGE_STEP_MINUTES} minutes.`;
+  }
+  if (range.toMinute - range.fromMinute < MIN_RANGE_MINUTES) {
+    return `The range must be at least ${MIN_RANGE_MINUTES} minutes long.`;
+  }
+  return null;
+}
+
+/** The bars that opened in the range: from inclusive, to exclusive. Expects regular-session bars. */
+export function selectBarsInRange(regular: readonly FuturesBar[], range: SessionRange): FuturesBar[] {
+  return regular.filter((bar) => {
+    const minute = istMinuteOfDay(bar.openTime);
+    return minute >= range.fromMinute && minute < range.toMinute;
+  });
+}
+
+export function assessBarQuality(
+  regular: readonly FuturesBar[],
+  outsideExcluded: number,
+  expectedMinutes = EXPECTED_SESSION_MINUTES,
+): SessionBarQuality {
   const distinctMinutes = new Set(regular.map((bar) => Math.floor(bar.openTime.getTime() / 60_000)));
   const zeroVolumeBars = regular.filter((bar) => !(bar.volume > 0)).length;
   return {
-    expectedMinutes: EXPECTED_SESSION_MINUTES,
+    expectedMinutes,
     barsUsed: regular.length,
     barsWithVolume: regular.length - zeroVolumeBars,
     zeroVolumeBars,
-    missingMinutes: Math.max(0, EXPECTED_SESSION_MINUTES - distinctMinutes.size),
+    missingMinutes: Math.max(0, expectedMinutes - distinctMinutes.size),
     outsideSessionBarsExcluded: outsideExcluded,
-    complete: distinctMinutes.size >= EXPECTED_SESSION_MINUTES * COMPLETE_SESSION_MIN_BAR_SHARE,
+    complete: distinctMinutes.size >= expectedMinutes * COMPLETE_SESSION_MIN_BAR_SHARE,
   };
 }
 
@@ -295,5 +354,6 @@ export const SESSION_PROFILE_DEFINITIONS = {
   resolution: "The same session rebuilt from 5-minute bars: agreement is the share of volume landing in the same rows under both, and the shifts are how far the POC, VAH and VAL move. A level that moves a lot is not resolved by the data.",
   volume: "The bar volume Fyers reports, in units (contracts x lot size). Every bar volume checked was an exact multiple of the lot size.",
   session: "Regular session, 09:15 up to 15:30 IST. The post-close minutes (15:30 onwards) are not used.",
+  range: "An optional window of the session, from inclusive to exclusive, on 5-minute marks and at least 15 minutes long. The profile, VWAP, value area and resolution check use only the bars that opened in the window; the previous-session levels are always the whole previous session.",
   notSignal: "A profile describes where volume was estimated to trade; a POC or value-area edge is not a level price must respect.",
 } as const;

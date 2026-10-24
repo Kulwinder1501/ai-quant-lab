@@ -1,20 +1,35 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProfileGeometry,
+  clockLabel,
+  describeRange,
   describeResolution,
   describeRow,
+  edgeAllowed,
   previousSessionSentence,
   priceFraction,
   profileSessionLabel,
   qualityNotes,
+  RANGE_EDGES,
+  RANGE_PRESETS,
   rowAtFraction,
   volumeProfileQuery,
   type PreviousSessionView,
+  type RangeView,
   type VolumeProfileAvailable,
 } from "./volume-profile-view";
 
 /** Synthetic payloads, hand-built for the rules below (not recorded from the API). 2026-10-22; 09:15 IST = 03:45Z. */
 const OPEN = Date.parse("2026-10-22T03:45:00.000Z");
+
+const WHOLE_SESSION_SUMMARY = { open: 100, high: 130, low: 100, close: 120, firstBarAt: new Date(OPEN).toISOString(), lastBarAt: new Date(OPEN + 374 * 60_000).toISOString() };
+
+function rangeView(overrides: Partial<RangeView> = {}): RangeView {
+  return {
+    fromMinute: 9 * 60 + 15, toMinute: 15 * 60 + 30, fromLabel: "09:15", toLabel: "15:30", isFullSession: true,
+    stepMinutes: 5, minMinutes: 15, summary: WHOLE_SESSION_SUMMARY, ...overrides,
+  };
+}
 
 function payload(overrides: Partial<VolumeProfileAvailable> = {}): VolumeProfileAvailable {
   return {
@@ -27,7 +42,8 @@ function payload(overrides: Partial<VolumeProfileAvailable> = {}): VolumeProfile
     rowPointsChoices: [5, 10, 20],
     estimated: true,
     volumeUnit: "units",
-    session: { open: 100, high: 130, low: 100, close: 120, firstBarAt: new Date(OPEN).toISOString(), lastBarAt: new Date(OPEN + 374 * 60_000).toISOString() },
+    session: WHOLE_SESSION_SUMMARY,
+    range: rangeView(),
     profile: {
       rowPoints: 10,
       totalVolume: 1000,
@@ -58,6 +74,49 @@ describe("volumeProfileQuery", () => {
   it("sends only what was chosen, so the server picks the latest session and its own default row height", () => {
     expect(volumeProfileQuery({ underlying: "BANKNIFTY", sessionDate: "", rowPoints: null })).toBe("underlying=BANKNIFTY");
     expect(volumeProfileQuery({ underlying: "NIFTY50", sessionDate: "2026-10-22", rowPoints: 5 })).toBe("underlying=NIFTY50&date=2026-10-22&rowPoints=5");
+  });
+
+  it("sends a window edge only when one was chosen", () => {
+    const base = { underlying: "BANKNIFTY", sessionDate: "", rowPoints: null };
+    expect(volumeProfileQuery({ ...base, from: "", to: "" })).toBe("underlying=BANKNIFTY");
+    expect(volumeProfileQuery({ ...base, from: "", to: "10:15" })).toBe("underlying=BANKNIFTY&to=10%3A15");
+    expect(volumeProfileQuery({ ...base, from: "14:30", to: "" })).toBe("underlying=BANKNIFTY&from=14%3A30");
+  });
+});
+
+describe("window choices", () => {
+  it("offers every quarter hour from the open to the close, all on 5-minute marks", () => {
+    expect(RANGE_EDGES[0]).toBe("09:15");
+    expect(RANGE_EDGES[RANGE_EDGES.length - 1]).toBe("15:30");
+    expect(RANGE_EDGES).toHaveLength(26);
+    for (const edge of RANGE_EDGES) expect(Number(edge.slice(3)) % 5, edge).toBe(0);
+    expect(clockLabel(9 * 60 + 5)).toBe("09:05");
+  });
+
+  it("keeps a window at least 15 minutes long, against the other edge or the session's own", () => {
+    expect(edgeAllowed("to", "09:30", "")).toBe(true);        // from defaults to 09:15: exactly 15 minutes
+    expect(edgeAllowed("to", "09:15", "")).toBe(false);
+    expect(edgeAllowed("from", "15:15", "")).toBe(true);      // to defaults to 15:30
+    expect(edgeAllowed("from", "15:30", "")).toBe(false);
+    expect(edgeAllowed("from", "11:00", "11:15")).toBe(true);
+    expect(edgeAllowed("from", "11:15", "11:15")).toBe(false);
+    expect(edgeAllowed("to", "10:45", "11:00")).toBe(false);
+    expect(edgeAllowed("to", "11:15", "11:00")).toBe(true);
+  });
+
+  it("only offers presets whose edges are acceptable choices", () => {
+    for (const preset of RANGE_PRESETS) {
+      expect(preset.from === "" || RANGE_EDGES.includes(preset.from), preset.label).toBe(true);
+      expect(preset.to === "" || RANGE_EDGES.includes(preset.to), preset.label).toBe(true);
+      if (preset.from !== "") expect(edgeAllowed("from", preset.from, preset.to), preset.label).toBe(true);
+      if (preset.to !== "") expect(edgeAllowed("to", preset.to, preset.from), preset.label).toBe(true);
+    }
+    expect(RANGE_PRESETS[0]).toMatchObject({ from: "", to: "" });
+  });
+
+  it("names the window", () => {
+    expect(describeRange(rangeView())).toBe("the whole session");
+    expect(describeRange(rangeView({ isFullSession: false, fromLabel: "09:15", toLabel: "10:15" }))).toBe("09:15–10:15 IST");
   });
 });
 
@@ -90,7 +149,13 @@ describe("buildProfileGeometry", () => {
 
   it("draws nothing for a profile with no rows instead of dividing by zero", () => {
     const geometry = buildProfileGeometry(payload({ profile: { ...payload().profile, rows: [], totalVolume: 0 } }));
-    expect(geometry).toEqual({ priceLow: 0, priceHigh: 0, rows: [], closeLine: [] });
+    expect(geometry).toEqual({ priceLow: 0, priceHigh: 0, rows: [], closeLine: [], rangeX: { from: 0, to: 1 } });
+  });
+
+  it("puts the chosen window on the session clock, whole when none was chosen", () => {
+    expect(buildProfileGeometry(payload()).rangeX).toEqual({ from: 0, to: 1 });
+    const window = payload({ range: rangeView({ fromMinute: 9 * 60 + 15 + 75, toMinute: 9 * 60 + 15 + 150, isFullSession: false }) });
+    expect(buildProfileGeometry(window).rangeX).toEqual({ from: 75 / 375, to: 150 / 375 });
   });
 });
 
@@ -119,6 +184,10 @@ describe("describeRow", () => {
 
   it("calls its volume estimated and tags the point of control and the value area", () => {
     expect(describeRow(rows.find((r) => r.isPoc)!)).toBe("110–120: 500 units, 50.0% of the session (estimated), point of control, inside the value area.");
+  });
+
+  it("says of the window, not the session, when a window was chosen", () => {
+    expect(describeRow(rows.find((r) => r.low === 130)!, false)).toBe("130–140: 200 units, 20.0% of the window (estimated).");
   });
 
   it("says nothing extra for a row outside the value area", () => {
@@ -177,13 +246,31 @@ describe("qualityNotes", () => {
     const partial = payload({
       inProgress: true,
       quality: { expectedMinutes: 375, barsUsed: 329, barsWithVolume: 329, zeroVolumeBars: 0, missingMinutes: 46, outsideSessionBarsExcluded: 0, complete: false },
-      session: { open: 1, high: 2, low: 1, close: 2, firstBarAt: new Date(OPEN).toISOString(), lastBarAt: "2026-10-23T09:13:00.000Z" },
+      range: rangeView({ summary: { open: 1, high: 2, low: 1, close: 2, firstBarAt: new Date(OPEN).toISOString(), lastBarAt: "2026-10-23T09:13:00.000Z" } }),
     });
     const [note] = qualityNotes(partial);
     expect(note!.tone).toBe("warn");
     expect(note!.text).toContain("329 of 375");
     expect(note!.text).toContain("last bar 14:43 IST");
     expect(note!.text).toContain("will change as the session continues");
+  });
+
+  it("says window, and judges against the window's length, when a window was chosen", () => {
+    const window = payload({
+      inProgress: true,
+      range: rangeView({ fromMinute: 10 * 60, toMinute: 12 * 60, fromLabel: "10:00", toLabel: "12:00", isFullSession: false, summary: { ...WHOLE_SESSION_SUMMARY, lastBarAt: "2026-10-23T05:00:00.000Z" } }),
+      quality: { expectedMinutes: 120, barsUsed: 30, barsWithVolume: 30, zeroVolumeBars: 0, missingMinutes: 90, outsideSessionBarsExcluded: 0, complete: false },
+    });
+    const [note] = qualityNotes(window);
+    expect(note!.text).toBe("Partial window (10:00–12:00 IST): 30 of 120 minutes are stored (last bar 10:30 IST). The profile covers only those minutes and will change as the session continues.");
+  });
+
+  it("counts missing minutes inside a complete window without calling them regular", () => {
+    const window = payload({
+      range: rangeView({ isFullSession: false, fromLabel: "09:15", toLabel: "10:15" }),
+      quality: { expectedMinutes: 60, barsUsed: 59, barsWithVolume: 59, zeroVolumeBars: 0, missingMinutes: 1, outsideSessionBarsExcluded: 0, complete: true },
+    });
+    expect(qualityNotes(window).map((n) => n.text)).toEqual(["1 minute has no bar and adds nothing to the profile."]);
   });
 
   it("does not claim a finished partial day will change", () => {
@@ -223,6 +310,11 @@ describe("previousSessionSentence and session labels", () => {
     expect(previousSessionSentence(previous)).toBe(
       "Previous session 2026-10-21 (BANKNIFTY26OCT future): POC 54,895, value area 54,810–55,500, range 54,810.2–55,948. Same row height; also estimated.",
     );
+  });
+
+  it("says the previous levels are the whole previous session when a window is chosen", () => {
+    expect(previousSessionSentence(previous, true)).toContain("These are the whole previous session, not the chosen window.");
+    expect(previousSessionSentence(previous, false)).not.toContain("chosen window");
   });
 
   it("flags a partial previous day", () => {

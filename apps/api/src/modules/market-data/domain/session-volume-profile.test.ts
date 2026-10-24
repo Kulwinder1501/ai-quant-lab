@@ -4,7 +4,13 @@ import {
   assessBarQuality,
   buildSessionProfile,
   EXPECTED_SESSION_MINUTES,
+  formatClockMinute,
+  FULL_SESSION_RANGE,
+  isFullSession,
+  parseClockMinute,
   profileSensitivity,
+  rangeProblem,
+  selectBarsInRange,
   selectRegularSessionBars,
   summariseSession,
   VALUE_AREA_FRACTION,
@@ -204,5 +210,53 @@ describe("profileSensitivity", () => {
   it("is null when the coarser profile cannot be built", () => {
     const profile = buildSessionProfile([point(0, 100, 10)], 10)!;
     expect(profileSensitivity([point(0, 100, 0)], profile)).toBeNull();
+  });
+});
+
+describe("session ranges", () => {
+  it("reads HH:MM clock times and refuses anything else", () => {
+    expect(parseClockMinute("09:15")).toBe(9 * 60 + 15);
+    expect(parseClockMinute(" 15:30 ")).toBe(15 * 60 + 30);
+    for (const bad of ["9:15", "09:60", "24:00", "0915", "09:15:00", "", "ab:cd"]) expect(parseClockMinute(bad), bad).toBeNull();
+    expect(formatClockMinute(9 * 60 + 5)).toBe("09:05");
+  });
+
+  it("accepts a window inside the session on 5-minute marks, at least 15 minutes long", () => {
+    expect(rangeProblem({ fromMinute: 9 * 60 + 15, toMinute: 10 * 60 + 15 })).toBeNull();
+    expect(rangeProblem({ fromMinute: 14 * 60 + 15, toMinute: 14 * 60 + 30 })).toBeNull();
+    expect(isFullSession(FULL_SESSION_RANGE)).toBe(true);
+    expect(rangeProblem(FULL_SESSION_RANGE)).toBeNull();
+  });
+
+  it("refuses a window outside the session, off the 5-minute marks, too short, or backwards", () => {
+    expect(rangeProblem({ fromMinute: 9 * 60, toMinute: 10 * 60 })).toContain("within the regular session");
+    expect(rangeProblem({ fromMinute: 9 * 60 + 15, toMinute: 15 * 60 + 35 })).toContain("within the regular session");
+    expect(rangeProblem({ fromMinute: 9 * 60 + 17, toMinute: 10 * 60 })).toContain("multiples of 5");
+    expect(rangeProblem({ fromMinute: 10 * 60, toMinute: 10 * 60 + 10 })).toContain("at least 15 minutes");
+    expect(rangeProblem({ fromMinute: 11 * 60, toMinute: 10 * 60 })).toContain("at least 15 minutes");
+  });
+
+  it("keeps the bars that opened from the start inclusive up to the end exclusive", () => {
+    // 09:15 is minute 0 of OPEN; the range 09:30-09:45 holds minutes 15..29.
+    const bars = Array.from({ length: 60 }, (_, minute) => point(minute, 100 + minute, 30));
+    const kept = selectBarsInRange(bars, { fromMinute: 9 * 60 + 30, toMinute: 9 * 60 + 45 });
+    expect(kept.map((b) => b.close)).toEqual(Array.from({ length: 15 }, (_, i) => 115 + i));
+    expect(selectBarsInRange(bars, FULL_SESSION_RANGE)).toHaveLength(60);
+  });
+
+  it("builds a profile from the range alone: volume outside it is not in it", () => {
+    const bars = [point(0, 100, 300), point(20, 200, 30), point(40, 300, 600)];
+    const inside = selectBarsInRange(bars, { fromMinute: 9 * 60 + 30, toMinute: 9 * 60 + 45 });
+    const profile = buildSessionProfile(inside, 10)!;
+    expect(profile.totalVolume).toBe(30);
+    expect(profile.poc).toBe(205);
+    expect(profile.vwap).toBe(200);
+  });
+
+  it("judges quality against the length of the range, so an unfinished window reads as partial", () => {
+    const bars = Array.from({ length: 30 }, (_, minute) => point(minute, 100, 30));
+    expect(assessBarQuality(bars, 0, 60)).toMatchObject({ expectedMinutes: 60, barsUsed: 30, missingMinutes: 30, complete: false });
+    expect(assessBarQuality(bars, 0, 30)).toMatchObject({ expectedMinutes: 30, missingMinutes: 0, complete: true });
+    expect(assessBarQuality(bars, 0)).toMatchObject({ expectedMinutes: EXPECTED_SESSION_MINUTES });
   });
 });
