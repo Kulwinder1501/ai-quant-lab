@@ -159,14 +159,15 @@ function job(overrides: Partial<JobDayView> = {}): JobDayView {
   return {
     runs: 19, completed: 8, failed: 11, running: 0, completedInSession: 7, failedInSession: 9,
     causes: { ...NO_CAUSES, "fyers-daily-limit": 10, other: 1 },
-    firstFailureAt: "2026-10-16T05:41:00.000Z", lastFailureAt: "2026-10-16T10:11:00.000Z", ...overrides,
+    firstFailureAt: "2026-10-16T05:41:00.000Z", lastFailureAt: "2026-10-16T10:11:00.000Z",
+    partialRuns: 0, partialByUnderlying: {}, ...overrides,
   };
 }
 
 function requests(overrides: Partial<FyersRequestDayView> = {}): FyersRequestDayView {
   return {
     total: 5655, byEndpoint: [{ endpoint: "quotes:api", count: 2431 }, { endpoint: "history", count: 1734 }],
-    cap: 5000, guard: 3500, overCap: true, overGuard: true, ...overrides,
+    cap: 5000, guard: 4200, overCap: true, overGuard: true, ...overrides,
   };
 }
 
@@ -198,10 +199,23 @@ describe("collectorSentences", () => {
   it("puts the Fyers request total against the cap, the budget guard, or neither, and names the biggest user", () => {
     const over = collectorSentences({ date: "2026-10-21", collector: collector({ fyersRequests: requests() }) });
     expect(over).toEqual(["5,655 Fyers requests counted, at or over the plan's 5,000 a day; most from quotes:api (2,431)."]);
-    const guard = collectorSentences({ date: "2026-10-22", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false }) }) });
-    expect(guard[0]).toContain("over the scheduler's 3,500 budget guard, which skips optional jobs such as the futures-bar fetch");
+    // A day before the guard moved is read against the 3,500 rule that was in force then, whatever today's guard is.
+    const before = collectorSentences({ date: "2026-10-22", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false, overGuard: false }) }) });
+    expect(before[0]).toContain("over the scheduler's 3,500 budget guard of the time, which paused the futures-bar fetch");
+    const after = collectorSentences({ date: "2026-10-26", collector: collector({ fyersRequests: requests({ total: 4300, overCap: false }) }) });
+    expect(after[0]).toContain("over the scheduler's 4,200 budget guard, which pauses its optional polling jobs (not the futures-bar fetch)");
+    // 4,001 on a day after the change is under the new guard.
+    const under4001 = collectorSentences({ date: "2026-10-26", collector: collector({ fyersRequests: requests({ total: 4001, overCap: false, overGuard: false }) }) });
+    expect(under4001[0]).toContain("under the budget guard");
     const under = collectorSentences({ date: "2026-10-23", collector: collector({ fyersRequests: requests({ total: 2000, overCap: false, overGuard: false }) }) });
     expect(under[0]).toBe("2,000 Fyers requests counted, under the budget guard; most from quotes:api (2,431).");
+  });
+
+  it("says which underlyings completed runs reported they could not collect, most often first", () => {
+    const sentences = collectorSentences({ date: "2026-10-26", collector: collector({ optionChain: job({ failed: 0, causes: NO_CAUSES, partialRuns: 5, partialByUnderlying: { SBIN: 1, NIFTY50: 5 } }) }) });
+    expect(sentences).toEqual(["5 completed option-chain runs reported it could not collect NIFTY50 (5 runs), SBIN (1 run)."]);
+    expect(collectorSentences({ date: "2026-10-26", collector: collector({ optionChain: job({ failed: 0, causes: NO_CAUSES, partialRuns: 1, partialByUnderlying: { NIFTY50: 1 } }) }) })[0])
+      .toBe("1 completed option-chain run reported it could not collect NIFTY50 (1 run).");
   });
 
   it("calls a partial failure the job status hides by name", () => {

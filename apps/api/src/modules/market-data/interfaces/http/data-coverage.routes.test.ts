@@ -257,7 +257,7 @@ describe("GET /api/v1/data-coverage", () => {
     it("attaches the Fyers request total of the day against the cap and the scheduler's guard, largest endpoint first", async () => {
       const byDate = await rowsOf(withCollectors);
       expect(byDate["2026-10-21"]!.collector.fyersRequests).toMatchObject({
-        total: 4275, cap: 5000, guard: 3500, overCap: false, overGuard: true,
+        total: 4275, cap: 5000, guard: 4200, overCap: false, overGuard: true,
         byEndpoint: [{ endpoint: "quotes:api", count: 2431 }, { endpoint: "history", count: 1734 }, { endpoint: "optionchain", count: 110 }],
       });
       // The holiday: nearly all of it the API's own live-quote polling.
@@ -267,6 +267,21 @@ describe("GET /api/v1/data-coverage", () => {
     it("says nothing was recorded, not zero, for a day with no runs and no ledger row", async () => {
       const byDate = await rowsOf(withCollectors);
       expect(byDate["2026-10-23"]!.collector).toEqual({ optionChain: null, fyersRequests: null, partialFailureHidden: false });
+    });
+
+    it("reads back the note a completed run kept: which underlying it could not collect, counted once per run", async () => {
+      const note = `PARTIAL ${JSON.stringify({ failures: [{ underlyingSymbol: "NIFTY50", reason: "Fyers option chain request failed (HTTP 429)" }] })}`;
+      const noted: FakeData = {
+        ...data,
+        jobRuns: [
+          ...runs("2026-10-22", twelve.slice(0, 5), "COMPLETED"),
+          ...runs("2026-10-22", twelve.slice(5, 8), "COMPLETED", note),
+          // A FAILED run's error text is not a completion note, whatever it looks like.
+          ...runs("2026-10-22", ["14:41"], "FAILED", note),
+        ],
+      };
+      const byDate = await rowsOf(noted);
+      expect(byDate["2026-10-22"]!.collector.optionChain).toMatchObject({ completed: 8, failed: 1, partialRuns: 3, partialByUnderlying: { NIFTY50: 3 } });
     });
 
     it("flags a day on which the job completed many runs but the index has far fewer snapshots (a partial failure the status hides)", async () => {

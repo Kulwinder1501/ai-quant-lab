@@ -18,6 +18,7 @@
  */
 import { FYERS_DAILY_BUDGET_WARNING_THRESHOLD, FYERS_DAILY_REQUEST_CAP } from "./fyers-rate-limit.js";
 import { istMinuteOfDay } from "./data-coverage.js";
+import { baseUnderlying, parsePartialNote } from "./partial-run-note.js";
 
 export type FailureCause = "fyers-daily-limit" | "fyers-rate-limited" | "fyers-auth" | "network" | "other";
 
@@ -47,6 +48,8 @@ export interface JobRun {
   scheduledFor: Date;
   status: "RUNNING" | "COMPLETED" | "FAILED";
   errorDetails: string | null;
+  /** The note kept against a completed run, when it has one. Absent on runs recorded before the note existed. */
+  completionNote?: string | null;
 }
 
 export interface JobDaySummary {
@@ -60,6 +63,13 @@ export interface JobDaySummary {
   causes: Record<FailureCause, number>;
   firstFailureAt: string | null;
   lastFailureAt: string | null;
+  /**
+   * Completed runs that said, in their own note, that an underlying was not collected, and how many such runs named each underlying
+   * (a tradable-expiry failure counts for its underlying). Runs from before the note existed carry no note and are not counted here:
+   * that is "not recorded", which `partialFailureHidden` still covers by comparing runs with snapshots.
+   */
+  partialRuns: number;
+  partialByUnderlying: Record<string, number>;
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -82,11 +92,19 @@ export function summariseJobRuns(runs: readonly JobRun[]): Map<string, JobDaySum
     const day = byDate.get(date) ?? {
       runs: 0, completed: 0, failed: 0, running: 0, completedInSession: 0, failedInSession: 0,
       causes: { "fyers-daily-limit": 0, "fyers-rate-limited": 0, "fyers-auth": 0, network: 0, other: 0 }, firstFailureAt: null, lastFailureAt: null,
+      partialRuns: 0, partialByUnderlying: {},
     };
     day.runs += 1;
     if (run.status === "COMPLETED") {
       day.completed += 1;
       if (inSession(run.scheduledFor)) day.completedInSession += 1;
+      const partial = parsePartialNote(run.completionNote ?? null);
+      if (partial !== null && partial.length > 0) {
+        day.partialRuns += 1;
+        for (const underlying of new Set(partial.map((failure) => baseUnderlying(failure.underlyingSymbol)))) {
+          day.partialByUnderlying[underlying] = (day.partialByUnderlying[underlying] ?? 0) + 1;
+        }
+      }
     } else if (run.status === "FAILED") {
       day.failed += 1;
       if (inSession(run.scheduledFor)) day.failedInSession += 1;
@@ -109,7 +127,7 @@ export interface FyersRequestDay {
   guard: number;
   /** The counted total is at or above the plan's daily limit (requests the broker refused are counted too). */
   overCap: boolean;
-  /** At or above the scheduler's own budget guard, past which it skips the futures-bar and other optional jobs. */
+  /** At or above the scheduler's own budget guard, past which it skips its optional polling jobs (the AI agent tick). */
   overGuard: boolean;
 }
 
@@ -147,6 +165,6 @@ export const COLLECTOR_CAUSE_DEFINITIONS = {
   runs: "The option-chain job's runs for the day, from the scheduler's own history. A run the scheduler skipped (for example the Fyers budget guard) is not recorded, so it shows as fewer runs, not as a failure.",
   causes: "A failed run's cause is read from its stored text by pattern, in this order: HTTP 429 with Fyers code -360 or 'requests/day' is the daily limit; HTTP 401, a token error code or an expired/invalid token is authentication; any other HTTP 429 is rate-limited (the text does not prove it was the daily limit); 'fetch failed' or a reset or timed-out connection is network; anything else is other.",
   requests: "Fyers REST requests counted for the day by the request ledger, against the plan's 5,000. Requests are counted when made, including ones the broker refused, so a total can pass the cap. The ledger starts on 2026-10-17: earlier days are not recorded, not zero.",
-  guard: "The scheduler skips optional Fyers jobs, including the futures-bar fetch, once the day's count reaches its budget guard (3,500). A day over the guard can have truncated futures bars without any failed run.",
+  guard: "The scheduler skips its optional Fyers polling jobs (the AI agent tick) once the day's count reaches its budget guard (4,200). The futures-bar fetch is not among them since 2026-10-24; before that it was paused at 3,500, so an earlier day over that figure can have truncated futures bars without any failed run.",
   partial: "A run covers several underlyings and can complete with one of them failed. When an index has fewer than half as many in-session snapshot minutes as completed in-session runs (and there are at least 5 runs), the job status is hiding a partial failure for that index.",
 } as const;

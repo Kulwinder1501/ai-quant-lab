@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendTail, describeExitFailure, runCommand } from "./run-command.js";
+import { appendTail, describeExitFailure, runCommand, runCommandWithOutput } from "./run-command.js";
 
 describe("appendTail", () => {
   it("keeps the newest characters, because the error is at the end", () => {
@@ -203,3 +203,23 @@ describe("createStdoutLineBuffer", () => {
   });
 });
 
+describe("runCommandWithOutput", () => {
+  const cwd = process.cwd();
+
+  it("resolves with the tail of what the command wrote to stdout, and still forwards it", async () => {
+    const forwarded: string[] = [];
+    const { stdoutTail } = await runCommandWithOutput(process.execPath, ['-e', '"console.log(\'first\'); console.log(\'last line\')"'], {
+      cwd, onStdout: (chunk) => forwarded.push(chunk), onStderr: () => undefined,
+    });
+    expect(stdoutTail.replace(/\r/g, "")).toBe("first\nlast line\n");
+    expect(forwarded.join("")).toBe(stdoutTail);
+  });
+
+  it("rejects exactly as runCommand does when the command fails", async () => {
+    await expect(runCommandWithOutput(
+      process.execPath,
+      ['-e', '"console.error(\'boom\'); process.exit(1)"'],
+      { cwd, onStdout: () => undefined, onStderr: () => undefined },
+    )).rejects.toThrow(/boom/);
+  });
+});

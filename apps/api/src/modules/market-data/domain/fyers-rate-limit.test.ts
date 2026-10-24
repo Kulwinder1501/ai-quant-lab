@@ -97,11 +97,14 @@ describe("FYERS_REST_JOB_TYPES", () => {
 });
 
 describe("Daily Budget Guard Constants", () => {
-  it("defines standard cap at 5,000 and warning at 70% (3,500)", async () => {
+  it("defines standard cap at 5,000 and the budget guard at 4,200", async () => {
     const { FYERS_DAILY_REQUEST_CAP, FYERS_DAILY_BUDGET_WARNING_THRESHOLD, LOW_PRIORITY_FYERS_JOBS } = await import("./fyers-rate-limit.js");
     expect(FYERS_DAILY_REQUEST_CAP).toBe(5_000);
-    expect(FYERS_DAILY_BUDGET_WARNING_THRESHOLD).toBe(3_500);
+    expect(FYERS_DAILY_BUDGET_WARNING_THRESHOLD).toBe(4_200);
     expect(LOW_PRIORITY_FYERS_JOBS.has("AI_AGENT_TICK")).toBe(true);
+    // The futures bars are the only volume source for the profile views: paused past the guard, a session is permanently partial.
+    expect(LOW_PRIORITY_FYERS_JOBS.has("INDEX_FUTURES_INTRADAY")).toBe(false);
+    expect([...LOW_PRIORITY_FYERS_JOBS]).toEqual(["AI_AGENT_TICK"]);
     expect(LOW_PRIORITY_FYERS_JOBS.has("OPTION_CHAIN")).toBe(false);
     expect(LOW_PRIORITY_FYERS_JOBS.has("INDIA_VIX_INTRADAY")).toBe(false);
     // Crucial: high-value trading bot and exit sweep must NOT be in low priority

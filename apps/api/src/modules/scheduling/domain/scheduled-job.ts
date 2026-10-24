@@ -14,7 +14,11 @@ export interface ScheduledJobClaim {
 export interface ScheduledJobClaimRepository {
   /** True when this process won the claim; false when a peer already holds it. */
   claim(claim: ScheduledJobClaim): Promise<boolean>;
-  complete(claim: Omit<ScheduledJobClaim, "claimedBy">): Promise<void>;
+  /**
+   * Marks the run COMPLETED. `note`, when given, is kept with it: a completed run is not a failed one, but it may have something
+   * worth reading back (one underlying out of four not collected).
+   */
+  complete(claim: Omit<ScheduledJobClaim, "claimedBy">, note?: string): Promise<void>;
   fail(claim: Omit<ScheduledJobClaim, "claimedBy">, errorDetails: string): Promise<void>;
   /**
    * Marks runs still RUNNING that were claimed before `abandonedBefore` as FAILED, and
@@ -91,7 +95,7 @@ export const DEFAULT_ABANDONED_AFTER_MS = 15 * 60 * 1000;
 export async function runExclusively(
   repository: ScheduledJobClaimRepository,
   claim: ScheduledJobClaim,
-  task: () => Promise<void>,
+  task: () => Promise<string | void>,
   options: RunExclusivelyOptions = {},
 ): Promise<RunExclusivelyResult> {
   let abandonedRuns = 0;
@@ -112,14 +116,15 @@ export async function runExclusively(
   const won = await repository.claim(claim);
   if (!won) return { ran: false, failed: false, skippedReason: "CLAIMED_BY_PEER", abandonedRuns };
 
+  let note: string | undefined;
   try {
-    await task();
+    note = (await task()) || undefined;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await repository.fail({ jobType: claim.jobType, scheduledFor: claim.scheduledFor }, message);
     throw error;
   }
 
-  await repository.complete({ jobType: claim.jobType, scheduledFor: claim.scheduledFor });
+  await repository.complete({ jobType: claim.jobType, scheduledFor: claim.scheduledFor }, note);
   return { ran: true, failed: false, abandonedRuns };
 }

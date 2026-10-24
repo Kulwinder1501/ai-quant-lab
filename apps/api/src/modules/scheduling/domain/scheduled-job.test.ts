@@ -44,7 +44,7 @@ function sharedClaimStore(): ScheduledJobClaimRepository & {
       runs.push({ jobType: input.jobType, scheduledFor: input.scheduledFor, claimedAt: input.scheduledFor, status: "RUNNING" });
       return true;
     },
-    complete: async (input) => { completed.push(key(input)); finish(input); },
+    complete: async (input, note) => { completed.push(note === undefined ? key(input) : `${key(input)}:${note}`); finish(input); },
     fail: async (input, errorDetails) => { failed.push(`${key(input)}:${errorDetails}`); finish(input); },
     abandonStaleRuns: async (jobType, abandonedBefore) => {
       const stale = runs.filter((run) =>
@@ -254,5 +254,22 @@ describe("runExclusively", () => {
 
     expect(eod).toHaveBeenCalledTimes(1);
     expect(flows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runExclusively keeps a completed run's note", () => {
+  it("passes the string a task resolves with to complete(), and the run is still completed, not failed", async () => {
+    const store = sharedClaimStore();
+    const result = await runExclusively(store, claim({ jobType: "OPTION_CHAIN" }), async () => "PARTIAL {}");
+    expect(result).toMatchObject({ ran: true, failed: false });
+    expect(store.completed).toEqual(["OPTION_CHAIN@2026-07-31T10:35:00.000Z:PARTIAL {}"]);
+    expect(store.failed).toEqual([]);
+  });
+
+  it("completes with no note when the task resolves with nothing or an empty string", async () => {
+    const store = sharedClaimStore();
+    await runExclusively(store, claim({ scheduledFor: new Date("2026-07-31T10:36:00.000Z") }), async () => undefined);
+    await runExclusively(store, claim({ scheduledFor: new Date("2026-07-31T10:37:00.000Z") }), async () => "");
+    expect(store.completed).toEqual(["EOD_PIPELINE@2026-07-31T10:36:00.000Z", "EOD_PIPELINE@2026-07-31T10:37:00.000Z"]);
   });
 });

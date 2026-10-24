@@ -24,12 +24,13 @@ export class PostgresScheduledJobClaimRepository implements ScheduledJobClaimRep
     return result.rows.length === 1;
   }
 
-  async complete(claim: Omit<ScheduledJobClaim, "claimedBy">): Promise<void> {
+  async complete(claim: Omit<ScheduledJobClaim, "claimedBy">, note?: string): Promise<void> {
+    // `error_details` holds the failure text of a FAILED run; on a COMPLETED run it holds the run's note, when it has one.
     await this.database.query(`
       UPDATE scheduled_job_runs
-      SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
+      SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP, error_details = $3
       WHERE job_type = $1 AND scheduled_for = $2 AND status = 'RUNNING'
-    `, [claim.jobType, claim.scheduledFor]);
+    `, [claim.jobType, claim.scheduledFor, note ?? null]);
   }
 
   async fail(claim: Omit<ScheduledJobClaim, "claimedBy">, errorDetails: string): Promise<void> {

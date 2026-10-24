@@ -15,18 +15,22 @@ describe("findScheduledJobRuns", () => {
     expect(values).toEqual(["OPTION_CHAIN", "2026-10-01", "2026-10-23"]);
   });
 
-  it("returns the failure text only for a failed run", async () => {
+  it("returns the failure text only for a failed run, and the stored text of a completed run only as its note", async () => {
     const scheduledFor = new Date("2026-10-16T05:41:00.000Z");
     const query = vi.fn(async () => ({
       rows: [
         { scheduled_for: scheduledFor, status: "FAILED", error_details: "HTTP 429, code -360" },
-        { scheduled_for: scheduledFor, status: "COMPLETED", error_details: "stale text that must not be returned" },
+        { scheduled_for: scheduledFor, status: "COMPLETED", error_details: "PARTIAL {}" },
+        { scheduled_for: scheduledFor, status: "COMPLETED", error_details: null },
+        { scheduled_for: scheduledFor, status: "RUNNING", error_details: "text that must not be returned" },
       ],
     }));
     const runs = await findScheduledJobRuns({ query } as unknown as DatabaseQueryable, { jobType: "OPTION_CHAIN", fromDate: "2026-10-16", toDate: "2026-10-16" });
     expect(runs).toEqual([
-      { scheduledFor, status: "FAILED", errorDetails: "HTTP 429, code -360" },
-      { scheduledFor, status: "COMPLETED", errorDetails: null },
+      { scheduledFor, status: "FAILED", errorDetails: "HTTP 429, code -360", completionNote: null },
+      { scheduledFor, status: "COMPLETED", errorDetails: null, completionNote: "PARTIAL {}" },
+      { scheduledFor, status: "COMPLETED", errorDetails: null, completionNote: null },
+      { scheduledFor, status: "RUNNING", errorDetails: null, completionNote: null },
     ]);
   });
 });

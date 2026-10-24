@@ -102,11 +102,17 @@ export interface RunCommandOptions {
   onStderr?: (chunk: string) => void;
 }
 
-export function runCommand(
+export interface RunCommandOutput {
+  /** The newest characters the command wrote to stdout (bounded, like the failure text). */
+  stdoutTail: string;
+}
+
+/** Runs a command like `runCommand` and hands back the tail of its stdout, for a job that reports something on a successful exit. */
+export function runCommandWithOutput(
   command: string,
   args: readonly string[],
   options: RunCommandOptions,
-): Promise<void> {
+): Promise<RunCommandOutput> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], {
       // Piped rather than inherited so the output can be both forwarded and kept.
@@ -138,7 +144,7 @@ export function runCommand(
       // `close` rather than `exit`, so the stdio streams have flushed and the captured tail
       // is complete when the message is built.
       if (code === 0) {
-        resolve();
+        resolve({ stdoutTail });
         return;
       }
       reject(new Error(describeExitFailure({
@@ -146,4 +152,12 @@ export function runCommand(
       })));
     });
   });
+}
+
+export async function runCommand(
+  command: string,
+  args: readonly string[],
+  options: RunCommandOptions,
+): Promise<void> {
+  await runCommandWithOutput(command, args, options);
 }

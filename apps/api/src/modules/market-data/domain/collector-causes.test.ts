@@ -106,6 +106,36 @@ describe("summariseJobRuns", () => {
   });
 });
 
+describe("summariseJobRuns: completed runs with a partial-failure note", () => {
+  const note = (...symbols: string[]) => `PARTIAL ${JSON.stringify({ failures: symbols.map((underlyingSymbol) => ({ underlyingSymbol, reason: "HTTP 429" })) })}`;
+  const done = (hhmm: string, completionNote: string | null): JobRun => ({ scheduledFor: ist("2026-10-26", hhmm), status: "COMPLETED", errorDetails: null, completionNote });
+
+  it("counts the completed runs that named an underlying they could not collect, and how many named each", () => {
+    const day = summariseJobRuns([
+      done("09:23", null),
+      done("09:41", note("NIFTY50")),
+      done("09:53", note("NIFTY50", "SBIN")),
+      done("10:11", note("NIFTY50 (tradable expiry 2026-10-27)")),     // the same underlying's second book
+    ]).get("2026-10-26")!;
+    expect(day).toMatchObject({ completed: 4, failed: 0, partialRuns: 3 });
+    expect(day.partialByUnderlying).toEqual({ NIFTY50: 3, SBIN: 1 });
+  });
+
+  it("counts an underlying once per run, however many of its entries a run names", () => {
+    const day = summariseJobRuns([done("09:23", note("NIFTY50", "NIFTY50 (tradable expiry 2026-10-27)"))]).get("2026-10-26")!;
+    expect(day.partialByUnderlying).toEqual({ NIFTY50: 1 });
+  });
+
+  it("leaves runs with no note, an older run without the field, or a note that is not a partial-run note out of the count", () => {
+    const day = summariseJobRuns([
+      done("09:23", null),
+      { scheduledFor: ist("2026-10-26", "09:41"), status: "COMPLETED", errorDetails: null },
+      done("09:53", "something else entirely"),
+    ]).get("2026-10-26")!;
+    expect(day).toMatchObject({ completed: 3, partialRuns: 0, partialByUnderlying: {} });
+  });
+});
+
 describe("summariseFyersRequests", () => {
   const row = (dateKey: string, endpoint: string, requestCount: number) => ({ dateKey, endpoint, requestCount });
 
@@ -114,14 +144,14 @@ describe("summariseFyersRequests", () => {
     const day = days.get("2026-10-22")!;
     expect(day.total).toBe(4988);
     expect(day.byEndpoint.map((entry) => entry.endpoint)).toEqual(["quotes:api", "history", "quotes:collector", "optionchain", "quotes:premium"]);
-    expect(day).toMatchObject({ cap: 5000, guard: 3500, overCap: false, overGuard: true });
+    expect(day).toMatchObject({ cap: 5000, guard: 4200, overCap: false, overGuard: true });
   });
 
   it("is over the cap at the cap itself, and over the guard at the guard itself, and not a request below", () => {
     expect(summariseFyersRequests([row("d", "x", 5000)]).get("d")).toMatchObject({ overCap: true, overGuard: true });
     expect(summariseFyersRequests([row("d", "x", 4999)]).get("d")).toMatchObject({ overCap: false, overGuard: true });
-    expect(summariseFyersRequests([row("d", "x", 3500)]).get("d")).toMatchObject({ overCap: false, overGuard: true });
-    expect(summariseFyersRequests([row("d", "x", 3499)]).get("d")).toMatchObject({ overCap: false, overGuard: false });
+    expect(summariseFyersRequests([row("d", "x", 4200)]).get("d")).toMatchObject({ overCap: false, overGuard: true });
+    expect(summariseFyersRequests([row("d", "x", 4199)]).get("d")).toMatchObject({ overCap: false, overGuard: false });
   });
 
   it("adds the same endpoint on one day across rows, and leaves a day with no row out as not recorded", () => {

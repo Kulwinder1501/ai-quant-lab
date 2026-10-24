@@ -5,6 +5,7 @@ import { PostgresOptionChainRepository } from "../../infrastructure/database/rep
 import { FyersOptionChainClient } from "../../infrastructure/market-data/fyers-option-chain-client.js";
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { IngestOptionChain } from "../../modules/market-data/application/ingest-option-chain.js";
+import { partialRunLine } from "../../modules/market-data/domain/partial-run-note.js";
 import { getOption } from "./arguments.js";
 
 /**
@@ -60,6 +61,10 @@ async function main(): Promise<void> {
     }));
     // A run where nothing at all was collected is a failure, not a quiet no-op.
     if (result.chains.length === 0) process.exitCode = 1;
+    // A run that stored some chains and not others still exits 0 (it is not a failed run), so it says so on a short last line of
+    // its own, which the scheduler keeps against the completed run. The line above can be too long for the scheduler's capture.
+    const partial = partialRunLine(result);
+    if (partial !== null) console.info(partial);
   } finally {
     await database.end();
   }

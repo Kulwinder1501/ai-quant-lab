@@ -53,6 +53,9 @@ export interface JobDayView {
   causes: Record<FailureCause, number>;
   firstFailureAt: string | null;
   lastFailureAt: string | null;
+  /** Completed runs whose own note named an underlying they could not collect, and how many named each. */
+  partialRuns: number;
+  partialByUnderlying: Record<string, number>;
 }
 
 export interface FyersRequestDayView {
@@ -231,6 +234,10 @@ export function causePhrase(causes: Record<FailureCause, number>): string {
     .join(", ");
 }
 
+/** The day the scheduler's budget guard moved from 3,500 (pausing the futures-bar fetch) to 4,200 (no longer pausing it). */
+const BUDGET_GUARD_CHANGED_ON = "2026-10-24";
+const LEGACY_BUDGET_GUARD = 3_500;
+
 /** What the collectors recorded about a day, in sentences: the option-chain runs, the Fyers requests, a hidden partial failure. */
 export function collectorSentences(row: Pick<CoverageRowView, "collector"> & { date: string }): string[] {
   const sentences: string[] = [];
@@ -240,12 +247,26 @@ export function collectorSentences(row: Pick<CoverageRowView, "collector"> & { d
       `${optionChain.failed} of ${plural(optionChain.runs, "option-chain run")} failed (${causePhrase(optionChain.causes)}), the first at ${istClock(optionChain.firstFailureAt)} and the last at ${istClock(optionChain.lastFailureAt)} IST.`,
     );
   }
+  if (optionChain !== null && optionChain.partialRuns > 0) {
+    const named = Object.entries(optionChain.partialByUnderlying)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([underlying, count]) => `${underlying} (${plural(count, "run")})`)
+      .join(", ");
+    sentences.push(`${plural(optionChain.partialRuns, "completed option-chain run")} reported it could not collect ${named}.`);
+  }
   if (fyersRequests !== null) {
     const top = fyersRequests.byEndpoint[0];
+    // Until 2026-10-24 the guard was 3,500 and paused the futures-bar fetch; it is now 4,200 and does not. A day is read against the
+    // rule that was in force on it, not today's.
+    const legacy = row.date < BUDGET_GUARD_CHANGED_ON;
+    const overGuard = legacy ? fyersRequests.total >= LEGACY_BUDGET_GUARD : fyersRequests.overGuard;
+    const guardText = legacy
+      ? `over the scheduler's ${LEGACY_BUDGET_GUARD.toLocaleString("en-IN")} budget guard of the time, which paused the futures-bar fetch`
+      : `over the scheduler's ${fyersRequests.guard.toLocaleString("en-IN")} budget guard, which pauses its optional polling jobs (not the futures-bar fetch)`;
     const standing = fyersRequests.overCap
       ? `at or over the plan's ${fyersRequests.cap.toLocaleString("en-IN")} a day`
-      : fyersRequests.overGuard
-        ? `over the scheduler's ${fyersRequests.guard.toLocaleString("en-IN")} budget guard, which skips optional jobs such as the futures-bar fetch`
+      : overGuard
+        ? guardText
         : "under the budget guard";
     sentences.push(
       `${fyersRequests.total.toLocaleString("en-IN")} Fyers requests counted, ${standing}${top ? `; most from ${top.endpoint} (${top.count.toLocaleString("en-IN")})` : ""}.`,

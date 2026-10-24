@@ -137,22 +137,30 @@ export const FYERS_REST_JOB_TYPES: ReadonlySet<string> = new Set([
 export const FYERS_DAILY_REQUEST_CAP = 5_000;
 
 /**
- * 70% budget threshold. When daily usage exceeds this, low-priority polling jobs are paused to
- * protect trading bot execution and exit sweeps until the next session.
+ * Daily budget guard: 84% of the cap (4,200). When the day's count reaches it, the low-priority polling jobs below are paused so
+ * what is left of the quota goes to execution and the exit sweep.
+ *
+ * It was 70% (3,500) until 2026-10-24. On 2026-10-23 the day's total was 4,001 with the UI quote cap already in force, so a
+ * 3,500 guard paused the futures-bar fetch at about 14:43 with a thousand requests of headroom left; the volume profile, the
+ * developing value and the volume-by-time views all read those bars and were cut short. 4,200 leaves 800 requests below the cap
+ * for the jobs that are never paused.
  */
-export const FYERS_DAILY_BUDGET_WARNING_THRESHOLD = 3_500;
+export const FYERS_DAILY_BUDGET_WARNING_THRESHOLD = 4_200;
 
 /**
- * Non-critical jobs that pause when daily usage passes the 70% threshold (3,500).
- * Execution (PAPER_TRADING_BOT, PAPER_TRADE_EXIT_SWEEP, INDICES_INTRADAY) stays active.
+ * Non-critical jobs that pause once the day's count reaches the guard. Execution (PAPER_TRADING_BOT, PAPER_TRADE_EXIT_SWEEP,
+ * INDICES_INTRADAY) stays active.
  *
  * OPTION_CHAIN and INDIA_VIX_INTRADAY are deliberately not here. The chain costs about five requests every twelve
  * minutes, and the premium tick collector selects its contracts from a snapshot no more than forty minutes old, so
  * pausing it stops the whole option series: on 2026-10-19 the guard paused it at 11:54, the last snapshot was
  * 11:41, and ticks and the chain page degraded from there. The VIX feeds the implied volatility behind option marks.
+ *
+ * INDEX_FUTURES_INTRADAY is deliberately not here either (changed 2026-10-24). Its bars are the only volume source for the
+ * index profile views, and a day's bars cannot be fetched again cheaply: the history endpoint is limited separately and a
+ * truncated session is permanently a partial one. The cost of keeping it running past the guard is small next to the 800
+ * requests of headroom the guard leaves.
  */
 export const LOW_PRIORITY_FYERS_JOBS: ReadonlySet<string> = new Set([
   "AI_AGENT_TICK",
-  "INDEX_FUTURES_INTRADAY",
 ]);
-

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import cron from "node-cron";
-import { runCommand as runChildCommand } from "./run-command.js";
+import { runCommandWithOutput as runChildCommand, type RunCommandOutput } from "./run-command.js";
+import { partialFailureNote } from "../../modules/market-data/domain/partial-run-note.js";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadEnvironment } from "../../config/environment.js";
@@ -122,7 +123,7 @@ export function createStdoutLineBuffer(
  * Child output is captured as well as forwarded, so a FAILED row in `scheduled_job_runs`
  * carries the reason rather than only an exit code. See `run-command.ts`.
  */
-function runCommand(command: string, args: string[]): Promise<void> {
+function runCommandWithOutput(command: string, args: string[]): Promise<RunCommandOutput> {
   const lineBuffer = createStdoutLineBuffer((line) => {
     if (line.includes("Fyers REST request counts")) {
       try {
@@ -143,6 +144,10 @@ function runCommand(command: string, args: string[]): Promise<void> {
   }).finally(() => {
     lineBuffer.flush();
   });
+}
+
+function runCommand(command: string, args: string[]): Promise<void> {
+  return runCommandWithOutput(command, args).then(() => undefined);
 }
 
 /**
@@ -391,7 +396,11 @@ async function main(): Promise<void> {
   /** When each gated job last logged a skip, so a cooldown does not write a line per job per minute. */
   const gateSkipLoggedAt = new Map<string, number>();
 
-  async function schedule(jobType: string, task: () => Promise<void>): Promise<void> {
+  /**
+   * `task` may resolve with a short note, which is kept against the run when it completes (the run is not failed by it): the
+   * option-chain job uses it to say which underlyings it could not collect.
+   */
+  async function schedule(jobType: string, task: () => Promise<string | void>): Promise<void> {
     const scheduledFor = toDueMinute(new Date());
     const runKey = `${jobType}@${scheduledFor.toISOString()}`;
     /*
@@ -458,7 +467,7 @@ async function main(): Promise<void> {
         async () => {
           inFlightRuns.set(runKey, { jobType, scheduledFor });
           try {
-            await task();
+            return await task();
           } finally {
             inFlightRuns.delete(runKey);
           }
@@ -1592,11 +1601,15 @@ async function main(): Promise<void> {
   // forty-minute guard, so a single missed run cannot starve the tick collector the way a
   // failed `*/15` run could once the next one was 30 minutes out.
   cronSchedule("11,23,41,53 9-15 * * 1-5", () => {
-    void schedule("OPTION_CHAIN", () => runCommand("npm", [
-      "run", "data:collect:option-chain", "--",
-      "--underlyings", "NIFTY50,BANKNIFTY,SBIN,RELIANCE",
-      "--strike-count", "15",
-    ]));
+    void schedule("OPTION_CHAIN", async () => {
+      const { stdoutTail } = await runCommandWithOutput("npm", [
+        "run", "data:collect:option-chain", "--",
+        "--underlyings", "NIFTY50,BANKNIFTY,SBIN,RELIANCE",
+        "--strike-count", "15",
+      ]);
+      // The job exits 0 when any underlying was stored, so one that was not is kept as a note on the completed run.
+      return partialFailureNote(stdoutTail) ?? undefined;
+    });
   });
 
   /**

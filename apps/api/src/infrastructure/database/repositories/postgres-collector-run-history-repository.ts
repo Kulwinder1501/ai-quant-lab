@@ -10,6 +10,8 @@ export interface ScheduledJobRunRow {
   status: "RUNNING" | "COMPLETED" | "FAILED";
   /** The failure text as stored (a job's last stdout, which can be long). Null unless the run failed. */
   errorDetails: string | null;
+  /** The note kept against a COMPLETED run (a `PARTIAL ...` note when an underlying was not collected). Null for any other status. */
+  completionNote: string | null;
 }
 
 /**
@@ -33,6 +35,7 @@ export async function findScheduledJobRuns(
     scheduledFor: row.scheduled_for,
     status: row.status as ScheduledJobRunRow["status"],
     errorDetails: row.status === "FAILED" ? row.error_details : null,
+    completionNote: row.status === "COMPLETED" ? row.error_details : null,
   }));
 }
 
