@@ -72,13 +72,13 @@ afterEach(async () => {
 });
 
 describe("parseVolumeProfileQuery", () => {
-  const parse = (input: { underlying?: string; date?: string; rowPoints?: string; from?: string; to?: string }) =>
-    parseVolumeProfileQuery({ underlying: input.underlying, date: input.date, rowPoints: input.rowPoints, from: input.from, to: input.to }, DURING);
+  const parse = (input: { underlying?: string; date?: string; rowPoints?: string; from?: string; to?: string; days?: string }) =>
+    parseVolumeProfileQuery({ underlying: input.underlying, date: input.date, rowPoints: input.rowPoints, from: input.from, to: input.to, days: input.days }, DURING);
 
   it("defaults each index to a row height that makes a typical session 30-90 rows tall", () => {
     const whole = { fromMinute: 9 * 60 + 15, toMinute: 15 * 60 + 30 };
-    expect(parse({})).toEqual({ ok: true, value: { underlying: "BANKNIFTY", date: null, rowPoints: 10, range: whole } });
-    expect(parse({ underlying: "nifty50" })).toEqual({ ok: true, value: { underlying: "NIFTY50", date: null, rowPoints: 5, range: whole } });
+    expect(parse({})).toEqual({ ok: true, value: { underlying: "BANKNIFTY", date: null, rowPoints: 10, range: whole, days: 1 } });
+    expect(parse({ underlying: "nifty50" })).toEqual({ ok: true, value: { underlying: "NIFTY50", date: null, rowPoints: 5, range: whole, days: 1 } });
   });
 
   it("offers different row heights for each index, and refuses another index's choice", () => {
@@ -86,6 +86,14 @@ describe("parseVolumeProfileQuery", () => {
     expect(parse({ rowPoints: "2" }).ok).toBe(false);
     expect(parse({ underlying: "NIFTY50", rowPoints: "2" }).ok).toBe(true);
     expect(parse({ underlying: "NIFTY50", rowPoints: "20" }).ok).toBe(false);
+  });
+
+  it("offers 1, 3, 5 or 10 sessions, one by default, and refuses anything else", () => {
+    const days = (text: string | undefined) => { const result = parse({ days: text }); return result.ok ? result.value.days : result.error; };
+    expect(days(undefined)).toBe(1);
+    expect(days("3")).toBe(3);
+    expect(days("10")).toBe(10);
+    for (const bad of ["0", "2", "11", "5.0", "five", "-3"]) expect(days(bad), bad).toContain("`days` must be one of 1, 3, 5, 10");
   });
 
   it("refuses a row height that is not a whole listed number", () => {
@@ -201,6 +209,74 @@ describe("GET /api/v1/volume-profile", () => {
       expect((await fetch(`${base}/api/v1/volume-profile?${query}`)).status, query).toBe(400);
     }
     expect(calls).toHaveLength(0);
+  });
+
+  it("adds the last N sessions of the contract into one profile, and lists each session under it", async () => {
+    const stored = { [OCT]: {
+      "2026-10-22": dayBars("2026-10-22", { base: 54_000 }),
+      "2026-10-21": dayBars("2026-10-21", { base: 53_700 }),
+      "2026-10-20": dayBars("2026-10-20", { base: 53_400 }),
+      "2026-10-19": dayBars("2026-10-19", { base: 53_100 }),
+    } };
+    const { base, calls } = await start(stored, AFTER);
+    const one = (await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22`)).json()).data;
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22&days=3`)).json();
+
+    expect(data.composite).toMatchObject({ requestedDays: 3, usedDays: 3, dates: ["2026-10-20", "2026-10-21", "2026-10-22"], stoppedAtRoll: false });
+    expect(data.composite.perSession.map((s: { sessionDate: string }) => s.sessionDate)).toEqual(["2026-10-20", "2026-10-21", "2026-10-22"]);
+    // Volume is conserved: the composite is the sum of its sessions, and every session has the same synthetic volume.
+    const perDay = dayBars("2026-10-22", { postClose: false }).reduce((sum, bar) => sum + bar.volume, 0);
+    expect(one.profile.totalVolume).toBe(perDay);
+    expect(data.profile.totalVolume).toBe(3 * perDay);
+    expect(data.composite.perSession.reduce((sum: number, s: { totalVolume: number }) => sum + s.totalVolume, 0)).toBe(3 * perDay);
+    expect(data.profile.rows.reduce((sum: number, row: { volume: number }) => sum + row.volume, 0)).toBeCloseTo(3 * perDay, 1);
+    // The profile spans the three days' price ranges; the single day does not.
+    expect(data.profile.rows[0].low).toBeLessThan(one.profile.rows[0].low);
+    expect(data.closes).toHaveLength(3 * 375);
+    expect(data.quality).toMatchObject({ expectedMinutes: 3 * 375, barsUsed: 3 * 375, missingMinutes: 0, complete: true, outsideSessionBarsExcluded: 6 });
+    // A composite already contains the days before it, so there is no separate previous session.
+    expect(data.previousSession).toBeNull();
+    expect(one.previousSession).not.toBeNull();
+    // One read per session, all of the one contract.
+    expect(calls.filter((c) => c.from.toISOString() === "2026-10-20T03:30:00.000Z").map((c) => c.symbol)).toEqual([OCT]);
+  });
+
+  it("applies the window to every session of a composite", async () => {
+    const stored = { [OCT]: { "2026-10-22": dayBars("2026-10-22"), "2026-10-21": dayBars("2026-10-21") } };
+    const { base } = await start(stored, AFTER);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22&days=3&from=09:15&to=10:15`)).json();
+    expect(data.composite).toMatchObject({ requestedDays: 3, usedDays: 2 });
+    expect(data.profile.totalVolume).toBe(2 * 12 * 30 * 15);
+    expect(data.quality).toMatchObject({ expectedMinutes: 120, barsUsed: 120, complete: true });
+    expect(data.closes).toHaveLength(120);
+  });
+
+  it("stops a composite at a contract roll and says so, never mixing the contracts", async () => {
+    // 2026-09-29 is the September expiry day (September is still front month); 09-30 and 10-01 are October's.
+    const { base, calls } = await start({
+      [OCT]: { "2026-10-01": dayBars("2026-10-01"), "2026-09-30": dayBars("2026-09-30") },
+      [SEP]: { "2026-09-29": dayBars("2026-09-29"), "2026-09-28": dayBars("2026-09-28") },
+    }, AFTER);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-01&days=5`)).json();
+    expect(data.composite).toMatchObject({ requestedDays: 5, usedDays: 2, dates: ["2026-09-30", "2026-10-01"], stoppedAtRoll: true });
+    expect(data.profile.totalVolume).toBe(2 * dayBars("2026-10-01", { postClose: false }).reduce((sum, bar) => sum + bar.volume, 0));
+    expect(calls.every((c) => c.symbol === OCT)).toBe(true);
+  });
+
+  it("reports fewer sessions than asked for when fewer are stored, without calling it a roll", async () => {
+    const { base } = await start({ [OCT]: { "2026-10-22": dayBars("2026-10-22") } }, AFTER);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22&days=10`)).json();
+    expect(data.composite).toMatchObject({ requestedDays: 10, usedDays: 1, stoppedAtRoll: false });
+  });
+
+  it("marks a session of the composite that does not cover the window, and the composite partial", async () => {
+    const stored = { [OCT]: { "2026-10-22": dayBars("2026-10-22"), "2026-10-21": dayBars("2026-10-21", { count: 100, postClose: false }) } };
+    const { base } = await start(stored, AFTER);
+    const { data } = await (await fetch(`${base}/api/v1/volume-profile?date=2026-10-22&days=3&from=09:15&to=12:15`)).json();
+    const byDate = Object.fromEntries(data.composite.perSession.map((s: { sessionDate: string; complete: boolean; barsUsed: number }) => [s.sessionDate, s]));
+    expect(byDate["2026-10-22"]).toMatchObject({ complete: true, barsUsed: 180 });
+    expect(byDate["2026-10-21"]).toMatchObject({ complete: false, barsUsed: 100 });
+    expect(data.quality).toMatchObject({ expectedMinutes: 360, barsUsed: 280, missingMinutes: 80, complete: false });
   });
 
   it("never substitutes the next month for a front month whose bars are not stored", async () => {

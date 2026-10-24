@@ -345,6 +345,43 @@ export function profileSensitivity(
   };
 }
 
+/** How many sessions a composite profile may span. */
+export const COMPOSITE_DAY_CHOICES = [1, 3, 5, 10] as const;
+
+export interface CompositeSelection {
+  /** The sessions used, oldest first; the last is the requested date. */
+  dates: string[];
+  /** The next older stored session belongs to a different contract, so the composite stopped there. */
+  stoppedAtRoll: boolean;
+}
+
+/**
+ * The sessions a composite of `days` sessions ending at `date` is built from, all of the same contract.
+ *
+ * `listings` are the stored sessions (any order), each under the contract that was front month on it. Going back from the
+ * requested date, sessions are taken one after another while they belong to `symbol`; the first one that belongs to another
+ * contract ends the walk, because a roll changes which market the volume is from and its prices carry a basis. A day with no
+ * stored bar is simply not in `listings`: the composite uses the stored days, and the caller reports how many it got.
+ */
+export function chooseCompositeSessions(
+  listings: ReadonlyArray<{ sessionDate: string; symbol: string }>,
+  date: string,
+  symbol: string,
+  days: number,
+): CompositeSelection {
+  const older = listings
+    .filter((listing) => listing.sessionDate < date)
+    .sort((a, b) => b.sessionDate.localeCompare(a.sessionDate));
+  const dates = [date];
+  let stoppedAtRoll = false;
+  for (const listing of older) {
+    if (dates.length >= days) break;
+    if (listing.symbol !== symbol) { stoppedAtRoll = true; break; }
+    dates.push(listing.sessionDate);
+  }
+  return { dates: dates.reverse(), stoppedAtRoll };
+}
+
 export const SESSION_PROFILE_DEFINITIONS = {
   estimate: "Estimated, not observed. Each 1-minute bar's volume is spread evenly across the bar's high-low range; where inside a bar the volume traded is not known. Volume is conserved exactly.",
   rows: "Rows are rowPoints index points tall and aligned to multiples of rowPoints. A bar with no range puts its volume in the row holding its price.",
@@ -354,6 +391,7 @@ export const SESSION_PROFILE_DEFINITIONS = {
   resolution: "The same session rebuilt from 5-minute bars: agreement is the share of volume landing in the same rows under both, and the shifts are how far the POC, VAH and VAL move. A level that moves a lot is not resolved by the data.",
   volume: "The bar volume Fyers reports, in units (contracts x lot size). Every bar volume checked was an exact multiple of the lot size.",
   session: "Regular session, 09:15 up to 15:30 IST. The post-close minutes (15:30 onwards) are not used.",
+  composite: "With days above 1 the profile adds up the bars of the last N stored sessions of the same contract (the same window of each), as one profile. It stops at a contract roll, and a day with no stored bar is not in it: the page says how many sessions it got. VWAP is over all of them. Prices are the contract's own, so a trend across the days widens the profile, and a profile of several days is not the same thing as one day's.",
   range: "An optional window of the session, from inclusive to exclusive, on 5-minute marks and at least 15 minutes long. The profile, VWAP, value area and resolution check use only the bars that opened in the window; the previous-session levels are always the whole previous session.",
   notSignal: "A profile describes where volume was estimated to trade; a POC or value-area edge is not a level price must respect.",
 } as const;

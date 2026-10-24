@@ -79,6 +79,30 @@ export interface RangeView {
   summary: { open: number; high: number; low: number; close: number; firstBarAt: string; lastBarAt: string } | null;
 }
 
+export interface CompositeSessionView {
+  sessionDate: string;
+  barsUsed: number;
+  totalVolume: number;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  /** The session's own bars cover the window. */
+  complete: boolean;
+}
+
+export interface CompositeView {
+  requestedDays: number;
+  usedDays: number;
+  /** The sessions used, oldest first. */
+  dates: string[];
+  /** The next older stored session is another contract, so the composite stopped there. */
+  stoppedAtRoll: boolean;
+  perSession: CompositeSessionView[];
+}
+
 export interface VolumeProfileAvailable {
   available: true;
   underlying: string;
@@ -91,6 +115,7 @@ export interface VolumeProfileAvailable {
   volumeUnit: string;
   session: { open: number; high: number; low: number; close: number; firstBarAt: string; lastBarAt: string } | null;
   range: RangeView;
+  composite: CompositeView;
   profile: ProfileLevels & {
     rowPoints: number;
     rows: ProfileRowView[];
@@ -126,14 +151,20 @@ export function volumeProfileQuery(input: {
   /** `HH:MM` IST edges of a window of the session; empty is the session's own edge. */
   from?: string;
   to?: string;
+  /** Sessions to add up; 1 (or absent) is a single session. */
+  days?: number;
 }): string {
   const params = new URLSearchParams({ underlying: input.underlying });
   if (input.sessionDate) params.set("date", input.sessionDate);
   if (input.rowPoints !== null) params.set("rowPoints", String(input.rowPoints));
   if (input.from) params.set("from", input.from);
   if (input.to) params.set("to", input.to);
+  if (input.days && input.days > 1) params.set("days", String(input.days));
   return params.toString();
 }
+
+/** Composite lengths the API accepts. */
+export const COMPOSITE_DAY_CHOICES: readonly number[] = [1, 3, 5, 10];
 
 const SESSION_OPEN_MINUTE = 9 * 60 + 15;
 const SESSION_CLOSE_MINUTE = 15 * 60 + 30;
@@ -185,6 +216,12 @@ export const RANGE_PRESETS: readonly RangePreset[] = [
   { label: "Last hour", from: "14:30", to: "" },
 ];
 
+/** What the profile is of, in a phrase: "the session", "the window", "the composite". */
+export function profileScope(payload: Pick<VolumeProfileAvailable, "range" | "composite">): string {
+  if (payload.composite.usedDays > 1) return "the composite";
+  return payload.range.isFullSession ? "the session" : "the window";
+}
+
 /** The window as a phrase for the page: "the whole session" or "09:15–10:15 IST". */
 export function describeRange(range: RangeView): string {
   return range.isFullSession ? "the whole session" : `${range.fromLabel}–${range.toLabel} IST`;
@@ -211,8 +248,13 @@ export interface ProfileGeometry {
   rows: DrawnRow[];
   /** The closes as a line: x is the fraction of the 09:15-15:30 session, y the fraction of the price range. */
   closeLine: Array<{ x: number; y: number }>;
-  /** The window on the session clock, as fractions 0-1. Spans the whole session unless a window was chosen. */
-  rangeX: { from: number; to: number };
+  /**
+   * The window of each session on the time axis, as fractions 0-1, oldest session first. One entry per session; each spans its
+   * whole session unless a window was chosen. The axis is the sessions laid end to end, 09:15-15:30 each.
+   */
+  windowBands: Array<{ from: number; to: number }>;
+  /** Where each session starts on the axis (fraction 0-1) and its date, for the day ticks of a composite. */
+  sessionStarts: Array<{ x: number; date: string }>;
 }
 
 const SESSION_START_MINUTE_IST = 9 * 60 + 15;
@@ -222,11 +264,14 @@ const IST_OFFSET_MS = 330 * 60_000;
 /** The price span and the rows' bars, and the closes as a line over the session clock. Empty when there are no rows. */
 export function buildProfileGeometry(payload: VolumeProfileAvailable): ProfileGeometry {
   const rows = payload.profile.rows;
-  const rangeX = {
-    from: (payload.range.fromMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES,
-    to: (payload.range.toMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES,
-  };
-  if (rows.length === 0) return { priceLow: 0, priceHigh: 0, rows: [], closeLine: [], rangeX };
+  const dates = payload.composite.dates;
+  const count = Math.max(1, dates.length);
+  const windowBands = Array.from({ length: count }, (_, index) => ({
+    from: (index + (payload.range.fromMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES) / count,
+    to: (index + (payload.range.toMinute - SESSION_START_MINUTE_IST) / SESSION_MINUTES) / count,
+  }));
+  const sessionStarts = dates.map((date, index) => ({ x: index / count, date }));
+  if (rows.length === 0) return { priceLow: 0, priceHigh: 0, rows: [], closeLine: [], windowBands, sessionStarts };
   const priceLow = rows[0]!.low;
   const priceHigh = rows[rows.length - 1]!.high;
   const span = priceHigh - priceLow;
@@ -246,13 +291,14 @@ export function buildProfileGeometry(payload: VolumeProfileAvailable): ProfileGe
   }));
 
   const closeLine = payload.closes.map(([at, close]) => {
-    const minuteOfDay = Math.floor((at + IST_OFFSET_MS) / 60_000) % (24 * 60);
-    return {
-      x: Math.min(1, Math.max(0, (minuteOfDay - SESSION_START_MINUTE_IST) / SESSION_MINUTES)),
-      y: (priceHigh - close) / span,
-    };
+    const shifted = at + IST_OFFSET_MS;
+    const minuteOfDay = Math.floor(shifted / 60_000) % (24 * 60);
+    const date = new Date(shifted).toISOString().slice(0, 10);
+    const dayIndex = Math.max(0, dates.indexOf(date));
+    const withinDay = Math.min(1, Math.max(0, (minuteOfDay - SESSION_START_MINUTE_IST) / SESSION_MINUTES));
+    return { x: (dayIndex + withinDay) / count, y: (priceHigh - close) / span };
   });
-  return { priceLow, priceHigh, rows: drawn, closeLine, rangeX };
+  return { priceLow, priceHigh, rows: drawn, closeLine, windowBands, sessionStarts };
 }
 
 /** Vertical position (fraction of the range, 0 at the top) of a price, or null when it falls outside the drawing. */
@@ -272,9 +318,10 @@ function units(value: number): string {
   return Math.round(value).toLocaleString("en-IN");
 }
 
-export function describeRow(row: DrawnRow, isFullSession = true): string {
+/** `scope` finishes "% of ...": "the session", "the window", or "the composite". */
+export function describeRow(row: DrawnRow, scope = "the session"): string {
   const tags = [row.isPoc ? "point of control" : null, row.inValueArea ? "inside the value area" : null].filter(Boolean);
-  return `${row.low}–${row.high}: ${units(row.volume)} units, ${(row.share * 100).toFixed(1)}% of ${isFullSession ? "the session" : "the window"} (estimated)`
+  return `${row.low}–${row.high}: ${units(row.volume)} units, ${(row.share * 100).toFixed(1)}% of ${scope} (estimated)`
     + `${tags.length > 0 ? `, ${tags.join(", ")}` : ""}.`;
 }
 
@@ -325,7 +372,7 @@ export function qualityNotes(payload: VolumeProfileAvailable): ProfileNote[] {
   if (!quality.complete) {
     notes.push({
       tone: "warn",
-      text: `${whole ? "Partial session" : `Partial window (${range.fromLabel}–${range.toLabel} IST)`}: ${quality.barsUsed} of ${quality.expectedMinutes} ${whole ? "regular " : ""}minutes are stored`
+      text: `${payload.composite.usedDays > 1 ? `Partial composite of ${payload.composite.usedDays} sessions` : whole ? "Partial session" : `Partial window (${range.fromLabel}–${range.toLabel} IST)`}: ${quality.barsUsed} of ${quality.expectedMinutes} ${whole ? "regular " : ""}minutes are stored`
         + `${session ? ` (last bar ${clock(session.lastBarAt)} IST)` : ""}. The profile covers only those minutes`
         + `${payload.inProgress ? " and will change as the session continues" : ""}.`,
     });
@@ -347,6 +394,31 @@ export function qualityNotes(payload: VolumeProfileAvailable): ProfileNote[] {
   }
   if (quality.outsideSessionBarsExcluded > 0) {
     notes.push({ tone: "info", text: `${quality.outsideSessionBarsExcluded} bars outside 09:15–15:30 IST (the post-close minutes) were set aside.` });
+  }
+  notes.push(...compositeNotes(payload));
+  return notes;
+}
+
+/** What a composite stands on, in words: how many sessions it got, why it stopped, which sessions are patchy. Empty for one session. */
+export function compositeNotes(payload: Pick<VolumeProfileAvailable, "composite" | "range">): ProfileNote[] {
+  const { composite } = payload;
+  if (composite.requestedDays <= 1 && composite.usedDays <= 1) return [];
+  const notes: ProfileNote[] = [];
+  if (composite.usedDays < composite.requestedDays) {
+    notes.push({
+      tone: "warn",
+      text: composite.stoppedAtRoll
+        ? `Only ${composite.usedDays} of the ${composite.requestedDays} sessions asked for: the next older stored session is another contract, and a roll is not crossed (its prices carry a different basis and its volume is a different market).`
+        : `Only ${composite.usedDays} of the ${composite.requestedDays} sessions asked for are stored for this contract.`,
+    });
+  }
+  const patchy = composite.perSession.filter((session) => !session.complete);
+  if (patchy.length > 0) {
+    notes.push({
+      tone: "warn",
+      text: `${patchy.length === 1 ? "1 session does" : `${patchy.length} sessions do`} not cover the whole ${payload.range.isFullSession ? "session" : "window"}: `
+        + `${patchy.map((session) => session.sessionDate).join(", ")}. Their missing minutes add nothing, so they weigh less than a full day.`,
+    });
   }
   return notes;
 }

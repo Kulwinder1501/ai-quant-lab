@@ -3,6 +3,7 @@ import {
   aggregateBars,
   assessBarQuality,
   buildSessionProfile,
+  chooseCompositeSessions,
   EXPECTED_SESSION_MINUTES,
   formatClockMinute,
   FULL_SESSION_RANGE,
@@ -258,5 +259,34 @@ describe("session ranges", () => {
     expect(assessBarQuality(bars, 0, 60)).toMatchObject({ expectedMinutes: 60, barsUsed: 30, missingMinutes: 30, complete: false });
     expect(assessBarQuality(bars, 0, 30)).toMatchObject({ expectedMinutes: 30, missingMinutes: 0, complete: true });
     expect(assessBarQuality(bars, 0)).toMatchObject({ expectedMinutes: EXPECTED_SESSION_MINUTES });
+  });
+});
+
+describe("chooseCompositeSessions", () => {
+  const front = (symbol: string, ...dates: string[]) => dates.map((sessionDate) => ({ sessionDate, symbol }));
+
+  it("takes the requested date and the older stored sessions of the same contract, oldest first", () => {
+    const listings = front("OCT", "2026-10-22", "2026-10-21", "2026-10-20", "2026-10-19", "2026-10-16");
+    expect(chooseCompositeSessions(listings, "2026-10-22", "OCT", 3)).toEqual({ dates: ["2026-10-20", "2026-10-21", "2026-10-22"], stoppedAtRoll: false });
+    expect(chooseCompositeSessions(listings, "2026-10-22", "OCT", 1)).toEqual({ dates: ["2026-10-22"], stoppedAtRoll: false });
+  });
+
+  it("ignores sessions newer than the requested date and does not care what order the listings come in", () => {
+    const listings = front("OCT", "2026-10-19", "2026-10-22", "2026-10-21", "2026-10-20");
+    expect(chooseCompositeSessions(listings, "2026-10-21", "OCT", 5).dates).toEqual(["2026-10-19", "2026-10-20", "2026-10-21"]);
+  });
+
+  it("stops at the first older session of another contract, and says so", () => {
+    const listings = [...front("OCT", "2026-10-01", "2026-09-30"), ...front("SEP", "2026-09-29", "2026-09-28")];
+    expect(chooseCompositeSessions(listings, "2026-10-01", "OCT", 5)).toEqual({ dates: ["2026-09-30", "2026-10-01"], stoppedAtRoll: true });
+  });
+
+  it("is quiet about a roll when it already has the days it was asked for", () => {
+    const listings = [...front("OCT", "2026-10-01", "2026-09-30"), ...front("SEP", "2026-09-29")];
+    expect(chooseCompositeSessions(listings, "2026-10-01", "OCT", 2)).toEqual({ dates: ["2026-09-30", "2026-10-01"], stoppedAtRoll: false });
+  });
+
+  it("returns what is stored when fewer sessions exist than were asked for, without claiming a roll", () => {
+    expect(chooseCompositeSessions(front("OCT", "2026-10-22", "2026-10-21"), "2026-10-22", "OCT", 10)).toEqual({ dates: ["2026-10-21", "2026-10-22"], stoppedAtRoll: false });
   });
 });

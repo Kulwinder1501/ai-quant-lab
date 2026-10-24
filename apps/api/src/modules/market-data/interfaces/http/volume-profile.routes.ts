@@ -5,6 +5,8 @@ import { upcomingIndexFutures, type IndexFutureContract } from "../../domain/ind
 import {
   assessBarQuality,
   buildSessionProfile,
+  chooseCompositeSessions,
+  COMPOSITE_DAY_CHOICES,
   COMPLETE_SESSION_MIN_BAR_SHARE,
   EXPECTED_SESSION_MINUTES,
   formatClockMinute,
@@ -39,7 +41,7 @@ export const PROFILE_ROW_CHOICES: Record<IndexUnderlying, { choices: readonly nu
 };
 
 export type VolumeProfileQueryParse =
-  | { ok: true; value: { underlying: IndexUnderlying; date: string | null; rowPoints: number; range: SessionRange } }
+  | { ok: true; value: { underlying: IndexUnderlying; date: string | null; rowPoints: number; range: SessionRange; days: number } }
   | { ok: false; error: string };
 
 /**
@@ -53,6 +55,7 @@ export function parseVolumeProfileQuery(
     rowPoints: string | undefined;
     from?: string | undefined;
     to?: string | undefined;
+    days?: string | undefined;
   },
   now: Date,
 ): VolumeProfileQueryParse {
@@ -61,6 +64,9 @@ export function parseVolumeProfileQuery(
   const rows = PROFILE_ROW_CHOICES[base.underlying];
   const rowPoints = parseChoice<number>(input.rowPoints, rows.choices, rows.fallback, "rowPoints");
   if (!rowPoints.ok) return rowPoints;
+
+  const days = parseChoice<number>(input.days, COMPOSITE_DAY_CHOICES, 1, "days");
+  if (!days.ok) return days;
 
   const edge = (raw: string | undefined, name: "from" | "to", fallback: number): number | string => {
     const text = raw?.trim();
@@ -75,7 +81,7 @@ export function parseVolumeProfileQuery(
   const range = { fromMinute: from, toMinute: to };
   const problem = rangeProblem(range);
   if (problem) return { ok: false, error: problem };
-  return { ok: true, value: { underlying: base.underlying, date: base.date, rowPoints: rowPoints.value, range } };
+  return { ok: true, value: { underlying: base.underlying, date: base.date, rowPoints: rowPoints.value, range, days: days.value } };
 }
 
 const IST_OFFSET_MS = 330 * 60_000;
@@ -102,6 +108,20 @@ interface SessionListing {
   firstAt: string;
   lastAt: string;
   /** Enough of the 375 regular minutes are present to treat the profile as the day's. */
+  complete: boolean;
+}
+
+interface CompositeSession {
+  sessionDate: string;
+  barsUsed: number;
+  totalVolume: number;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  /** The session's own bars cover the window. */
   complete: boolean;
 }
 
@@ -149,6 +169,7 @@ export function registerVolumeProfileRoutes(
           rowPoints: queryString(request, "rowPoints"),
           from: queryString(request, "from"),
           to: queryString(request, "to"),
+          days: queryString(request, "days"),
         },
         now,
       );
@@ -156,7 +177,7 @@ export function registerVolumeProfileRoutes(
         response.status(400).json({ error: parsed.error });
         return;
       }
-      const { underlying, date: requestedDate, rowPoints, range } = parsed.value;
+      const { underlying, date: requestedDate, rowPoints, range, days } = parsed.value;
       const repository = dependencies.futuresBarRepository;
       const today = istDate(now);
 
@@ -206,10 +227,40 @@ export function registerVolumeProfileRoutes(
         return;
       }
 
-      // 09:00-16:00 IST: wide enough to see the pre-open and post-close bars, which are counted and set aside.
-      const bars = await repository.bars({ symbol: contract.symbol, from: istInstant(sessionDate, 9), to: istInstant(sessionDate, 16) });
-      const { regular, excluded } = selectRegularSessionBars(bars);
-      const rangeBars = selectBarsInRange(regular, range);
+      // The sessions the profile is built from: just the date, or the last `days` stored sessions of this same contract.
+      const selection = days === 1
+        ? { dates: [sessionDate], stoppedAtRoll: false }
+        : chooseCompositeSessions(sessions, sessionDate, contract.symbol, days);
+      const windowMinutes = range.toMinute - range.fromMinute;
+      const perSession: CompositeSession[] = [];
+      const allRangeBars: FuturesBar[] = [];
+      let excluded = 0;
+      let lastRegular: FuturesBar[] = [];
+      for (const date of selection.dates) {
+        // 09:00-16:00 IST: wide enough to see the pre-open and post-close bars, which are counted and set aside.
+        const bars = await repository.bars({ symbol: contract.symbol, from: istInstant(date, 9), to: istInstant(date, 16) });
+        const day = selectRegularSessionBars(bars);
+        const dayBars = selectBarsInRange(day.regular, range);
+        const dayProfile = buildSessionProfile(dayBars, rowPoints);
+        const daySummary = summariseSession(dayBars);
+        excluded += day.excluded;
+        allRangeBars.push(...dayBars);
+        lastRegular = day.regular;
+        perSession.push({
+          sessionDate: date,
+          barsUsed: dayBars.length,
+          totalVolume: dayProfile?.totalVolume ?? 0,
+          poc: dayProfile?.poc ?? null,
+          vah: dayProfile?.vah ?? null,
+          val: dayProfile?.val ?? null,
+          high: daySummary?.high ?? null,
+          low: daySummary?.low ?? null,
+          close: daySummary?.close ?? null,
+          complete: assessBarQuality(dayBars, 0, windowMinutes).complete,
+        });
+      }
+      const regular = lastRegular;
+      const rangeBars = allRangeBars;
       const profile = buildSessionProfile(rangeBars, rowPoints);
       const rangeLabel = `${formatClockMinute(range.fromMinute)}-${formatClockMinute(range.toMinute)}`;
       if (profile === null) {
@@ -227,9 +278,12 @@ export function registerVolumeProfileRoutes(
         return;
       }
 
-      // The previous stored session, for reference levels. It uses the same row height and its own front month.
+      // The previous stored session, for reference levels, only for a single session (a composite already contains the
+      // days before). It uses the same row height and its own front month.
       const later = sessions.findIndex((session) => session.sessionDate === sessionDate);
-      const previousListing = sessions.slice(later === -1 ? 0 : later + 1).find((session) => session.sessionDate < sessionDate);
+      const previousListing = days !== 1
+        ? undefined
+        : sessions.slice(later === -1 ? 0 : later + 1).find((session) => session.sessionDate < sessionDate);
       let previousSession: PreviousSession | null = null;
       if (previousListing) {
         const previousBars = await repository.bars({
@@ -278,8 +332,15 @@ export function registerVolumeProfileRoutes(
           rowPointsChoices: PROFILE_ROW_CHOICES[underlying].choices,
           estimated: true,
           volumeUnit: "units (contracts x lot size), as reported on the bar; not lots",
-          // The whole regular session's own summary (first and last bar); the range's is under `range`.
+          // The last session's own regular-session summary (first and last bar); the window's is under `range`.
           session: summariseSession(regular),
+          composite: {
+            requestedDays: days,
+            usedDays: selection.dates.length,
+            dates: selection.dates,
+            stoppedAtRoll: selection.stoppedAtRoll,
+            perSession,
+          },
           range: {
             fromMinute: range.fromMinute,
             toMinute: range.toMinute,
@@ -292,7 +353,7 @@ export function registerVolumeProfileRoutes(
           },
           profile,
           // Quality is judged against the range's own length, so a window that has not finished yet reads as partial.
-          quality: assessBarQuality(rangeBars, excluded, range.toMinute - range.fromMinute),
+          quality: assessBarQuality(rangeBars, excluded, windowMinutes * selection.dates.length),
           sensitivity: profileSensitivity(rangeBars, profile),
           previousSession,
           closes: rangeBars.map((bar) => [bar.openTime.getTime(), bar.close]),

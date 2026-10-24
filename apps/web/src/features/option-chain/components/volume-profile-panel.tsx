@@ -8,12 +8,14 @@ import { dataAgeSeconds } from "../depth-history-view";
 import { formatIstTime } from "../oi-format";
 import {
   buildProfileGeometry,
+  COMPOSITE_DAY_CHOICES,
   describeRange,
   describeResolution,
   describeRow,
   edgeAllowed,
   previousSessionSentence,
   priceFraction,
+  profileScope,
   profileSessionLabel,
   qualityNotes,
   RANGE_EDGES,
@@ -66,6 +68,8 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
   /** The window of the session, `HH:MM` IST; empty is the session's own edge. */
   const [rangeFrom, setRangeFrom] = useState("");
   const [rangeTo, setRangeTo] = useState("");
+  /** How many sessions are added up, ending at the chosen one. */
+  const [days, setDays] = useState(1);
   const [refreshTick, setRefreshTick] = useState(0);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [sessions, setSessions] = useState<ProfileSessionListing[]>([]);
@@ -73,7 +77,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const supported = DEPTH_UNDERLYINGS.includes(underlying);
-  const query = volumeProfileQuery({ underlying, sessionDate, rowPoints, from: rangeFrom, to: rangeTo });
+  const query = volumeProfileQuery({ underlying, sessionDate, rowPoints, from: rangeFrom, to: rangeTo, days });
 
   useEffect(() => {
     if (!supported) return undefined;
@@ -178,7 +182,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
     <div className="w-full" aria-busy={loading}>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-2 text-xs text-slate-400">
-          Session
+          {days > 1 ? "Ending" : "Session"}
           <select
             value={sessionDate}
             onChange={(event) => setSessionDate(event.target.value)}
@@ -197,6 +201,16 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
             className="rounded-lg border border-white/10 bg-slate-950/60 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
           >
             {(available?.rowPointsChoices ?? []).map((points) => <option key={points} value={points}>{points} pts</option>)}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          Sessions
+          <select
+            value={days}
+            onChange={(event) => setDays(Number(event.target.value))}
+            className="rounded-lg border border-white/10 bg-slate-950/60 px-2 py-1 text-xs text-slate-200"
+          >
+            {COMPOSITE_DAY_CHOICES.map((count) => <option key={count} value={count}>{count === 1 ? "1 (single)" : `${count} (composite)`}</option>)}
           </select>
         </label>
         <span className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-100" title={available?.definitions.estimate}>
@@ -258,8 +272,12 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
       {available && geometry && (
         <>
           <p className="mb-1 text-[11px] text-slate-400">
-            {available.underlying} futures {available.contract.symbol} (expiry {available.contract.expiryDate}) · session {available.sessionDate} IST ·{" "}
-            {available.range.isFullSession ? "whole session" : `window ${describeRange(available.range)}`} ·{" "}
+            {available.underlying} futures {available.contract.symbol} (expiry {available.contract.expiryDate}) ·{" "}
+            {available.composite.usedDays > 1
+              ? `${available.composite.usedDays} sessions ${available.composite.dates[0]} to ${available.sessionDate}`
+              : `session ${available.sessionDate}`} IST ·{" "}
+            {available.range.isFullSession ? "whole session" : `window ${describeRange(available.range)}`}
+            {available.composite.usedDays > 1 && !available.range.isFullSession ? " of each" : ""} ·{" "}
             {number(available.profile.totalVolume)} units · rows of {available.profile.rowPoints} pts
             {available.range.summary ? ` · open ${number(available.range.summary.open)}, high ${number(available.range.summary.high)}, low ${number(available.range.summary.low)}, close ${number(available.range.summary.close)}` : ""}
             {available.inProgress && ageSeconds !== null ? ` · session in progress, fetched ${ageSeconds} s ago, refreshed every minute` : ""}
@@ -291,7 +309,7 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
             aria-label="Estimated volume by price for the session: closes over the day on the left, estimated volume at each price row on the right."
             onMouseMove={(event) => {
               const row = pointerRow(event);
-              setHover({ query, text: row ? describeRow(row, available.range.isFullSession) : null });
+              setHover({ query, text: row ? describeRow(row, profileScope(available)) : null });
             }}
             onMouseLeave={() => setHover(null)}
           >
@@ -310,19 +328,25 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
                 />
               );
             })()}
-            {/* The part of the session clock outside the chosen window, dimmed: nothing there is in the profile. */}
-            {!available.range.isFullSession && (
-              <>
-                <rect x={MARGIN.left} y={MARGIN.top} width={geometry.rangeX.from * PRICE_PANEL_W} height={plotH} fill="rgba(2,6,23,0.7)" />
-                <rect
-                  x={MARGIN.left + geometry.rangeX.to * PRICE_PANEL_W}
-                  y={MARGIN.top}
-                  width={(1 - geometry.rangeX.to) * PRICE_PANEL_W}
-                  height={plotH}
-                  fill="rgba(2,6,23,0.7)"
-                />
-              </>
-            )}
+            {/* The parts of the clock outside the chosen window (of each session), dimmed: nothing there is in the profile. */}
+            {!available.range.isFullSession && [
+              { from: 0, to: geometry.windowBands[0]!.from },
+              ...geometry.windowBands.slice(1).map((band, index) => ({ from: geometry.windowBands[index]!.to, to: band.from })),
+              { from: geometry.windowBands[geometry.windowBands.length - 1]!.to, to: 1 },
+            ].map((gap) => (
+              <rect
+                key={`dim-${gap.from}`}
+                x={MARGIN.left + gap.from * PRICE_PANEL_W}
+                y={MARGIN.top}
+                width={Math.max(0, (gap.to - gap.from) * PRICE_PANEL_W)}
+                height={plotH}
+                fill="rgba(2,6,23,0.7)"
+              />
+            ))}
+            {/* Session boundaries of a composite. */}
+            {geometry.sessionStarts.length > 1 && geometry.sessionStarts.slice(1).map((start) => (
+              <line key={`sep-${start.date}`} x1={MARGIN.left + start.x * PRICE_PANEL_W} x2={MARGIN.left + start.x * PRICE_PANEL_W} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="rgba(148,163,184,0.35)" strokeDasharray="2 3" />
+            ))}
             <rect x={MARGIN.left} y={MARGIN.top} width={PRICE_PANEL_W} height={plotH} fill="none" stroke="rgba(255,255,255,0.08)" />
             <rect x={HIST_LEFT} y={MARGIN.top} width={HIST_PANEL_W} height={plotH} fill="none" stroke="rgba(255,255,255,0.08)" />
 
@@ -357,7 +381,12 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
                 <text x={MARGIN.left - 7} y={tick.y + 3} textAnchor="end" fontSize={10} fill="rgba(148,163,184,0.9)">{tick.label}</text>
               </g>
             ))}
-            {hourTicks.map((tick) => (
+            {(geometry.sessionStarts.length > 1
+              ? geometry.sessionStarts.map((start, index, all) => ({
+                x: MARGIN.left + (start.x + 0.5 / all.length) * PRICE_PANEL_W,
+                label: start.date.slice(5),
+              }))
+              : hourTicks).map((tick) => (
               <g key={`h-${tick.label}`}>
                 <line x1={tick.x} x2={tick.x} y1={MARGIN.top + plotH} y2={MARGIN.top + plotH + 4} stroke="rgba(148,163,184,0.6)" />
                 <text x={tick.x} y={MARGIN.top + plotH + 16} textAnchor="middle" fontSize={10} fill="rgba(148,163,184,0.9)">{tick.label}</text>
@@ -378,6 +407,28 @@ export function VolumeProfilePanel({ underlying, nowMs }: { underlying: string; 
             <p className={`mt-2 rounded-lg border px-3 py-2 text-[11px] ${resolution.tone === "warn" ? "border-amber-400/40 bg-amber-500/10 text-amber-100" : "border-white/10 bg-slate-950/40 text-slate-300"}`}>
               <span className="font-bold">Resolution check. </span>{resolution.text}
             </p>
+          )}
+          {available.composite.usedDays > 1 && (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-left text-[11px] text-slate-300">
+                <caption className="mb-1 text-left text-slate-400">Each session on its own, same rows and window (estimated).</caption>
+                <thead className="text-slate-500">
+                  <tr><th className="pr-3 font-normal">Session</th><th className="pr-3 font-normal">POC</th><th className="pr-3 font-normal">Value area</th><th className="pr-3 font-normal">Range</th><th className="pr-3 font-normal">Close</th><th className="font-normal">Units</th></tr>
+                </thead>
+                <tbody>
+                  {[...available.composite.perSession].reverse().map((session) => (
+                    <tr key={session.sessionDate} className="border-t border-white/5">
+                      <td className="pr-3">{session.sessionDate}{session.complete ? "" : " · partial"}</td>
+                      <td className="pr-3">{session.poc === null ? "–" : number(session.poc)}</td>
+                      <td className="pr-3">{session.val === null || session.vah === null ? "–" : `${number(session.val)}–${number(session.vah)}`}</td>
+                      <td className="pr-3">{session.low === null || session.high === null ? "–" : `${number(session.low)}–${number(session.high)}`}</td>
+                      <td className="pr-3">{session.close === null ? "–" : number(session.close)}</td>
+                      <td>{number(session.totalVolume)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
           {previousSessionSentence(available.previousSession, !available.range.isFullSession) && (
             <p className="mt-2 text-[11px] text-slate-400">{previousSessionSentence(available.previousSession, !available.range.isFullSession)}</p>

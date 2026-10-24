@@ -2,18 +2,23 @@ import { describe, expect, it } from "vitest";
 import {
   buildProfileGeometry,
   clockLabel,
+  COMPOSITE_DAY_CHOICES,
+  compositeNotes,
   describeRange,
   describeResolution,
   describeRow,
   edgeAllowed,
   previousSessionSentence,
   priceFraction,
+  profileScope,
   profileSessionLabel,
   qualityNotes,
   RANGE_EDGES,
   RANGE_PRESETS,
   rowAtFraction,
   volumeProfileQuery,
+  type CompositeSessionView,
+  type CompositeView,
   type PreviousSessionView,
   type RangeView,
   type VolumeProfileAvailable,
@@ -31,6 +36,13 @@ function rangeView(overrides: Partial<RangeView> = {}): RangeView {
   };
 }
 
+function compositeView(dates: string[] = ["2026-10-22"], overrides: Partial<CompositeView> = {}): CompositeView {
+  const perSession: CompositeSessionView[] = dates.map((sessionDate) => ({
+    sessionDate, barsUsed: 375, totalVolume: 1000, poc: 115, vah: 130, val: 100, high: 130, low: 100, close: 120, complete: true,
+  }));
+  return { requestedDays: dates.length, usedDays: dates.length, dates, stoppedAtRoll: false, perSession, ...overrides };
+}
+
 function payload(overrides: Partial<VolumeProfileAvailable> = {}): VolumeProfileAvailable {
   return {
     available: true,
@@ -44,6 +56,7 @@ function payload(overrides: Partial<VolumeProfileAvailable> = {}): VolumeProfile
     volumeUnit: "units",
     session: WHOLE_SESSION_SUMMARY,
     range: rangeView(),
+    composite: compositeView(),
     profile: {
       rowPoints: 10,
       totalVolume: 1000,
@@ -74,6 +87,13 @@ describe("volumeProfileQuery", () => {
   it("sends only what was chosen, so the server picks the latest session and its own default row height", () => {
     expect(volumeProfileQuery({ underlying: "BANKNIFTY", sessionDate: "", rowPoints: null })).toBe("underlying=BANKNIFTY");
     expect(volumeProfileQuery({ underlying: "NIFTY50", sessionDate: "2026-10-22", rowPoints: 5 })).toBe("underlying=NIFTY50&date=2026-10-22&rowPoints=5");
+  });
+
+  it("sends the session count only for a composite", () => {
+    const base = { underlying: "BANKNIFTY", sessionDate: "", rowPoints: null };
+    expect(volumeProfileQuery({ ...base, days: 1 })).toBe("underlying=BANKNIFTY");
+    expect(volumeProfileQuery({ ...base, days: 5 })).toBe("underlying=BANKNIFTY&days=5");
+    expect(COMPOSITE_DAY_CHOICES).toEqual([1, 3, 5, 10]);
   });
 
   it("sends a window edge only when one was chosen", () => {
@@ -149,13 +169,37 @@ describe("buildProfileGeometry", () => {
 
   it("draws nothing for a profile with no rows instead of dividing by zero", () => {
     const geometry = buildProfileGeometry(payload({ profile: { ...payload().profile, rows: [], totalVolume: 0 } }));
-    expect(geometry).toEqual({ priceLow: 0, priceHigh: 0, rows: [], closeLine: [], rangeX: { from: 0, to: 1 } });
+    expect(geometry).toEqual({
+      priceLow: 0, priceHigh: 0, rows: [], closeLine: [],
+      windowBands: [{ from: 0, to: 1 }], sessionStarts: [{ x: 0, date: "2026-10-22" }],
+    });
   });
 
   it("puts the chosen window on the session clock, whole when none was chosen", () => {
-    expect(buildProfileGeometry(payload()).rangeX).toEqual({ from: 0, to: 1 });
+    expect(buildProfileGeometry(payload()).windowBands).toEqual([{ from: 0, to: 1 }]);
     const window = payload({ range: rangeView({ fromMinute: 9 * 60 + 15 + 75, toMinute: 9 * 60 + 15 + 150, isFullSession: false }) });
-    expect(buildProfileGeometry(window).rangeX).toEqual({ from: 75 / 375, to: 150 / 375 });
+    expect(buildProfileGeometry(window).windowBands).toEqual([{ from: 75 / 375, to: 150 / 375 }]);
+  });
+
+  it("lays composite sessions end to end: each close at its day and minute, each session with its own window", () => {
+    // Two sessions, 2026-10-21 and 2026-10-22; 09:15 IST of the 21st is 03:45Z, of the 22nd one day later.
+    const day1 = Date.parse("2026-10-21T03:45:00.000Z");
+    const day2 = Date.parse("2026-10-22T03:45:00.000Z");
+    const composite = payload({
+      composite: compositeView(["2026-10-21", "2026-10-22"]),
+      closes: [[day1, 120], [day1 + 187 * 60_000, 110], [day2, 130], [day2 + 374 * 60_000, 100]],
+      range: rangeView({ fromMinute: 9 * 60 + 15 + 75, toMinute: 9 * 60 + 15 + 150, isFullSession: false }),
+    });
+    const geometry = buildProfileGeometry(composite);
+    expect(geometry.sessionStarts).toEqual([{ x: 0, date: "2026-10-21" }, { x: 0.5, date: "2026-10-22" }]);
+    expect(geometry.closeLine[0]!.x).toBe(0);
+    expect(geometry.closeLine[1]!.x).toBeCloseTo(187 / 375 / 2, 10);
+    expect(geometry.closeLine[2]!.x).toBe(0.5);
+    expect(geometry.closeLine[3]!.x).toBeCloseTo(0.5 + 374 / 375 / 2, 10);
+    expect(geometry.windowBands).toEqual([
+      { from: 75 / 375 / 2, to: 150 / 375 / 2 },
+      { from: (1 + 75 / 375) / 2, to: (1 + 150 / 375) / 2 },
+    ]);
   });
 });
 
@@ -186,8 +230,15 @@ describe("describeRow", () => {
     expect(describeRow(rows.find((r) => r.isPoc)!)).toBe("110–120: 500 units, 50.0% of the session (estimated), point of control, inside the value area.");
   });
 
-  it("says of the window, not the session, when a window was chosen", () => {
-    expect(describeRow(rows.find((r) => r.low === 130)!, false)).toBe("130–140: 200 units, 20.0% of the window (estimated).");
+  it("says of the window, or of the composite, rather than the session, when it is one", () => {
+    expect(describeRow(rows.find((r) => r.low === 130)!, "the window")).toBe("130–140: 200 units, 20.0% of the window (estimated).");
+    expect(describeRow(rows.find((r) => r.low === 130)!, "the composite")).toBe("130–140: 200 units, 20.0% of the composite (estimated).");
+  });
+
+  it("names what the profile is of", () => {
+    expect(profileScope(payload())).toBe("the session");
+    expect(profileScope(payload({ range: rangeView({ isFullSession: false }) }))).toBe("the window");
+    expect(profileScope(payload({ composite: compositeView(["2026-10-21", "2026-10-22"]) }))).toBe("the composite");
   });
 
   it("says nothing extra for a row outside the value area", () => {
@@ -293,6 +344,45 @@ describe("qualityNotes", () => {
       "1 regular minute has no bar and adds nothing to the profile.",
       "1 minute traded nothing (flat, zero volume) and adds nothing.",
     ]);
+  });
+});
+
+describe("compositeNotes", () => {
+  const dates = ["2026-10-20", "2026-10-21", "2026-10-22"];
+
+  it("is silent for a single session and for a composite that got every session it asked for", () => {
+    expect(compositeNotes(payload())).toEqual([]);
+    expect(compositeNotes(payload({ composite: compositeView(dates) }))).toEqual([]);
+    expect(qualityNotes(payload({ composite: compositeView(dates) }))).toEqual([]);
+  });
+
+  it("says a composite stopped at a roll, and why a roll is not crossed", () => {
+    const [note] = compositeNotes(payload({ composite: compositeView(dates.slice(1), { requestedDays: 5, stoppedAtRoll: true }) }));
+    expect(note!.tone).toBe("warn");
+    expect(note!.text).toContain("Only 2 of the 5 sessions asked for");
+    expect(note!.text).toContain("another contract");
+  });
+
+  it("says when fewer sessions are stored than were asked for, without blaming a roll", () => {
+    const [note] = compositeNotes(payload({ composite: compositeView(dates.slice(2), { requestedDays: 10 }) }));
+    expect(note!.text).toBe("Only 1 of the 10 sessions asked for are stored for this contract.");
+  });
+
+  it("names the sessions that do not cover the window, and says they weigh less", () => {
+    const composite = compositeView(dates);
+    composite.perSession[0] = { ...composite.perSession[0]!, complete: false, barsUsed: 100 };
+    const [note] = compositeNotes(payload({ composite }));
+    expect(note!.text).toBe("1 session does not cover the whole session: 2026-10-20. Their missing minutes add nothing, so they weigh less than a full day.");
+    const window = payload({ composite, range: rangeView({ isFullSession: false }) });
+    expect(compositeNotes(window)[0]!.text).toContain("not cover the whole window");
+  });
+
+  it("calls a composite that is short of minutes a partial composite", () => {
+    const partial = payload({
+      composite: compositeView(dates),
+      quality: { expectedMinutes: 1125, barsUsed: 1000, barsWithVolume: 1000, zeroVolumeBars: 0, missingMinutes: 125, outsideSessionBarsExcluded: 0, complete: false },
+    });
+    expect(qualityNotes(partial)[0]!.text).toContain("Partial composite of 3 sessions: 1000 of 1125 regular minutes are stored");
   });
 });
 
