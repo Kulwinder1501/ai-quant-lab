@@ -1,6 +1,9 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { errorMessage, isAbortError } from "../../../lib/errors";
+import { getApiV1Url } from "../../research/api";
+import { ageNow, ageSentence, ageStateWord, contractFlag, indexContracts, type StalenessPayload } from "../quote-staleness";
 import { bandText, buildImpliedMove, type ImpliedMoveInput } from "../implied-move";
 import { buildPayoff } from "../contract-payoff";
 import { ContractPayoffView } from "./contract-payoff-view";
@@ -51,13 +54,51 @@ export function ContractCostPanel({
   strikes,
   input,
   expiryLabel,
+  underlying,
+  expiry,
+  observedAt,
+  nowMs,
 }: {
   strikes: CostStrike[];
   input: ImpliedMoveInput;
   expiryLabel: string;
+  underlying: string;
+  /** The expiry the chain is showing (ISO date), or empty for the page default, which the staleness read resolves the same way. */
+  expiry: string;
+  /** When the chain on screen was observed; a new snapshot re-reads the staleness. */
+  observedAt: string | undefined;
+  nowMs: number;
 }) {
   const [side, setSide] = useState<OptionSide>("CE");
   const [picked, setPicked] = useState<number | null>(null);
+
+  // How old the stored chain is and which contracts have repeated their quote: a separate read, refreshed when a new snapshot lands.
+  const stalenessQuery = new URLSearchParams({ underlying, ...(expiry ? { expiry } : {}) }).toString();
+  const stalenessKeyText = `${stalenessQuery}@${observedAt ?? ""}`;
+  const [staleness, setStaleness] = useState<{ key: string; payload: StalenessPayload | null; error: string | null } | null>(null);
+  useEffect(() => {
+    if (!observedAt) return undefined;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(`${getApiV1Url()}/option-chain/quote-staleness?${stalenessQuery}`, { signal: controller.signal });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { error?: string } | null;
+          throw new Error(body?.error ?? `Quote staleness request failed (${response.status}).`);
+        }
+        const body = await response.json() as { data: StalenessPayload };
+        setStaleness({ key: stalenessKeyText, payload: body.data, error: null });
+      } catch (caught) {
+        if (isAbortError(caught)) return;
+        setStaleness({ key: stalenessKeyText, payload: null, error: errorMessage(caught, "Quote staleness could not be loaded.") });
+      }
+    })();
+    return () => controller.abort();
+  }, [stalenessQuery, stalenessKeyText, observedAt]);
+  const stalenessPayload = staleness?.key === stalenessKeyText ? staleness.payload : null;
+  const stalenessError = staleness?.key === stalenessKeyText ? staleness.error : null;
+  const contractIndex = useMemo(() => indexContracts(stalenessPayload?.contracts ?? []), [stalenessPayload]);
+  const ageView = stalenessPayload ? ageNow(stalenessPayload.age, nowMs) : null;
 
   const strikePrices = useMemo(() => strikes.map((row) => row.strikePrice).sort((a, b) => a - b), [strikes]);
   // A picked strike that is no longer in the snapshot falls back to the money rather than showing a stale selection.
@@ -78,6 +119,9 @@ export function ContractCostPanel({
     () => buildStrikeLadder({ side, strikes, spot: input.spot, atmStrike: input.atmStrike }, implied),
     [side, strikes, input.spot, input.atmStrike, implied],
   );
+  const flagSentence = strike !== null && stalenessPayload
+    ? contractFlag(contractIndex.get(`${strike}|${side}`), stalenessPayload.marketOpen).sentence
+    : null;
   const sentence = cost && strike !== null ? hurdleSentence(cost, side, strike) : null;
   const notes = cost ? contractCostNotes(cost, leg) : [];
 
@@ -87,6 +131,12 @@ export function ContractCostPanel({
       <p className="mt-1 text-[11px] text-slate-400">
         Long one option of {expiryLabel}, bought at the ask. Per unit of the underlying: multiply by the lot size for rupees per lot.
       </p>
+      {stalenessPayload && ageView && (
+        <p className={`mt-1 text-[11px] ${ageView.state === "overdue" ? "text-rose-200" : ageView.state === "aging" ? "text-amber-200" : "text-slate-400"}`}>
+          <span className="font-bold">Quotes {ageStateWord(ageView.state)}.</span> {ageSentence(stalenessPayload, nowMs)}
+        </p>
+      )}
+      {stalenessError && <p className="mt-1 text-[11px] text-slate-500">{stalenessError}</p>}
 
       <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
         <span className="inline-flex overflow-hidden rounded-lg border border-white/10" role="group" aria-label="Option side">
@@ -188,11 +238,12 @@ export function ContractCostPanel({
           {notes.map((note) => (
             <p key={note.text} className={`mt-1 text-[11px] ${note.tone === "warn" ? "text-amber-200" : "text-slate-500"}`}>{note.text}</p>
           ))}
+          {flagSentence && <p className="mt-1 text-[11px] text-amber-200">{flagSentence}</p>}
           {payoff && strike !== null && <ContractPayoffView payoff={payoff} side={side} strike={strike} />}
         </>
       )}
 
-      {ladderRows.length > 0 && <StrikeLadderView rows={ladderRows} side={side} selectedStrike={strike} onSelect={setPicked} />}
+      {ladderRows.length > 0 && <StrikeLadderView rows={ladderRows} side={side} selectedStrike={strike} onSelect={setPicked} staleness={stalenessPayload ? { index: contractIndex, marketOpen: stalenessPayload.marketOpen } : null} />}
 
       <details className="mt-3 text-[11px] text-slate-400">
         <summary className="cursor-pointer text-slate-300">Definitions and what this cannot say</summary>

@@ -3,6 +3,7 @@
 import React, { useMemo } from "react";
 import { bandText } from "../implied-move";
 import { STRIKE_LADDER_DEFINITIONS, ladderNotes, type LadderRow } from "../strike-ladder";
+import { contractFlag, stalenessKey, type ContractStalenessView } from "../quote-staleness";
 
 function points(value: number): string {
   return Math.round(value).toLocaleString("en-IN");
@@ -21,19 +22,23 @@ export function StrikeLadderView({
   side,
   selectedStrike,
   onSelect,
+  staleness,
 }: {
   rows: LadderRow[];
   side: "CE" | "PE";
   selectedStrike: number | null;
   onSelect: (strike: number) => void;
+  /** Which contracts have repeated their quote across recent snapshots; null until that read has answered. */
+  staleness: { index: Map<string, ContractStalenessView>; marketOpen: boolean } | null;
 }) {
   const notes = useMemo(() => ladderNotes(rows), [rows]);
+  const flagOf = (row: LadderRow) => (staleness ? contractFlag(staleness.index.get(stalenessKey(row.strike, side)), staleness.marketOpen) : null);
 
   return (
     <div className="mt-6">
       <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-300">Every {side === "CE" ? "call" : "put"} strike, bought at the ask</p>
       <div className="max-h-96 overflow-auto rounded-xl border border-white/10">
-        <table className="w-full min-w-[640px] text-left text-[11px] text-slate-300">
+        <table className="w-full min-w-[700px] text-left text-[11px] text-slate-300">
           <thead className="sticky top-0 bg-slate-950 text-[10px] uppercase tracking-wide text-slate-500">
             <tr>
               <th className="px-2 py-1.5 font-normal">Strike</th>
@@ -43,6 +48,7 @@ export function StrikeLadderView({
               <th className="px-2 py-1.5 text-right font-normal">Index has to move</th>
               <th className="px-2 py-1.5 text-right font-normal">× a typical day</th>
               <th className="px-2 py-1.5 text-right font-normal">Theta / day</th>
+              <th className="px-2 py-1.5 text-right font-normal" title="Whether the bid and ask repeated across the newest snapshots">Quote</th>
             </tr>
           </thead>
           <tbody>
@@ -61,7 +67,7 @@ export function StrikeLadderView({
                     <span className="ml-1 text-slate-500">{row.moneyness}</span>
                   </td>
                   {cost.quote === null ? (
-                    <td colSpan={6} className="px-2 py-1 text-right text-slate-500">no two-sided quote</td>
+                    <td colSpan={7} className="px-2 py-1 text-right text-slate-500">no two-sided quote</td>
                   ) : (
                     <>
                       <td className="px-2 py-1 text-right">{two(cost.quote.bid)} / {two(cost.quote.ask)}</td>
@@ -72,6 +78,7 @@ export function StrikeLadderView({
                       </td>
                       <td className="px-2 py-1 text-right">{cost.neededOverDaily ? bandText(cost.neededOverDaily, (v) => `${v.toFixed(2)}×`) : "–"}</td>
                       <td className="px-2 py-1 text-right">{cost.thetaLossPercentOfAsk !== null ? `${cost.thetaLossPercentOfAsk.toFixed(1)}%` : "–"}</td>
+                      <td className={`px-2 py-1 text-right ${flagOf(row)?.flagged ? "text-amber-200" : "text-slate-500"}`}>{flagOf(row)?.cell ?? "–"}</td>
                     </>
                   )}
                 </tr>

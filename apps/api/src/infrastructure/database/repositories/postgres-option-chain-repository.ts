@@ -605,4 +605,64 @@ export class PostgresOptionChainRepository {
     );
     return (result.rows[0]?.observed_at as Date | null | undefined) ?? null;
   }
+
+  /**
+   * The newest `count` stored snapshots of one expiry (each a whole chain at one `observed_at`), for the quote-staleness view.
+   *
+   * With no `expiryDate` the nearest expiry present in the newest snapshot is used, which is the one the chain page opens on, and
+   * the one chosen is returned. Read as two small statements, the distinct times first and then only their rows, so the
+   * `(underlying_symbol, expiry_date, observed_at)` index serves both. Bounded: `count` snapshots of about 62 rows.
+   */
+  async recentQuoteSnapshots(input: {
+    underlyingSymbol: string;
+    expiryDate?: string | null;
+    asOf: Date;
+    count: number;
+  }): Promise<{
+    expiryDate: string | null;
+    snapshots: Array<{ observedAt: Date; quotes: Array<{ strike: number; side: "CE" | "PE"; bid: number | null; ask: number | null }> }>;
+  }> {
+    let expiry = input.expiryDate ?? null;
+    if (expiry === null) {
+      const nearest = await this.pool.query(`
+        SELECT expiry_date::text AS expiry_date
+          FROM option_chain_snapshots
+         WHERE underlying_symbol = $1
+           AND observed_at = (SELECT max(observed_at) FROM option_chain_snapshots WHERE underlying_symbol = $1 AND observed_at <= $2)
+         ORDER BY expiry_date
+         LIMIT 1
+      `, [input.underlyingSymbol, input.asOf]);
+      expiry = (nearest.rows[0]?.expiry_date as string | undefined) ?? null;
+    }
+    if (expiry === null) return { expiryDate: null, snapshots: [] };
+
+    const times = await this.pool.query(`
+      SELECT DISTINCT observed_at
+        FROM option_chain_snapshots
+       WHERE underlying_symbol = $1 AND expiry_date = $2::date AND observed_at <= $3
+       ORDER BY observed_at DESC
+       LIMIT $4
+    `, [input.underlyingSymbol, expiry, input.asOf, input.count]);
+    const observed = times.rows.map((row) => row.observed_at as Date);
+    if (observed.length === 0) return { expiryDate: expiry, snapshots: [] };
+
+    const rows = await this.pool.query(`
+      SELECT observed_at, strike_price, option_type, bid, ask
+        FROM option_chain_snapshots
+       WHERE underlying_symbol = $1 AND expiry_date = $2::date AND observed_at = ANY($3::timestamptz[])
+       ORDER BY observed_at DESC, strike_price, option_type
+    `, [input.underlyingSymbol, expiry, observed]);
+
+    const byTime = new Map<number, Array<{ strike: number; side: "CE" | "PE"; bid: number | null; ask: number | null }>>();
+    for (const row of rows.rows) {
+      const key = (row.observed_at as Date).getTime();
+      const list = byTime.get(key) ?? [];
+      list.push({ strike: Number(row.strike_price), side: String(row.option_type) as "CE" | "PE", bid: toNumberOrNull(row.bid), ask: toNumberOrNull(row.ask) });
+      byTime.set(key, list);
+    }
+    return {
+      expiryDate: expiry,
+      snapshots: observed.map((observedAt) => ({ observedAt, quotes: byTime.get(observedAt.getTime()) ?? [] })),
+    };
+  }
 }

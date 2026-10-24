@@ -504,7 +504,7 @@ export function OptionChainDashboard() {
                 {/* Observed option prices and the model IV beside observed futures moves; separate request, keyed with the page. */}
                 <ImpliedMovePanel key={`implied-${underlying}`} underlying={underlying} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
                 {/* What one contract costs and needs; the selection is local, so it is keyed with the underlying. */}
-                <ContractCostPanel key={`contract-cost-${underlying}`} strikes={contractCostStrikes} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
+                <ContractCostPanel key={`contract-cost-${underlying}`} strikes={contractCostStrikes} input={impliedMoveInput} expiryLabel={chartExpiryLabel} underlying={underlying} expiry={expiry} observedAt={snapshotChain?.observedAt} nowMs={now} />
               </div>
             ) : (
               <>
