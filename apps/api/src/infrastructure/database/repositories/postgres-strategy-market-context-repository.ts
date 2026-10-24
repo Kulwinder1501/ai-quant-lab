@@ -843,7 +843,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
    * `trailingSessionMinuteDiSamples`). `asOf` is the received time of the frame being standardised,
    * which is itself at or before the decision cutoff, so no frame after the decision is ever read.
    *
-   * Frames without usable totals are filtered in SQL (missing is missing, never DI = 0) BEFORE the
+   * Frames without a positive total on BOTH sides are filtered in SQL (missing is missing, never
+   * DI = 0; a one-sided zero is a feed dropout that would read as DI of exactly -1/+1) BEFORE the
    * per-minute pick, so a bad last frame does not hide an earlier good one in the same minute.
    * The result may be shorter than the minimum history; `causalStandardiseDi` then yields null.
    */
@@ -861,9 +862,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
       WHERE provider_symbol = $1
         AND received_at >= $2
         AND received_at < $3
-        AND total_buy_qty IS NOT NULL
-        AND total_sell_qty IS NOT NULL
-        AND total_buy_qty + total_sell_qty > 0
+        AND total_buy_qty > 0
+        AND total_sell_qty > 0
       ORDER BY date_trunc('minute', received_at) ASC, received_at DESC, sequence_no DESC
     `, [depthSymbol, from, currentMinuteStart]);
 
