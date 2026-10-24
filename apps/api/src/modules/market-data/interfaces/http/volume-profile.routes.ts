@@ -1,7 +1,6 @@
 import type { Express } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { queryString } from "../../../../interfaces/http/common/query.js";
-import { upcomingIndexFutures, type IndexFutureContract } from "../../domain/index-futures-contracts.js";
 import {
   assessBarQuality,
   buildSessionProfile,
@@ -25,12 +24,12 @@ import {
   type SessionProfile,
   type SessionRange,
 } from "../../domain/session-volume-profile.js";
+import { frontContractOn, istInstant, listStoredSessions } from "./session-listing.js";
 import {
-  addDays,
+  SESSION_LOOKBACK_DAYS,
   istDate,
   parseChoice,
   parseUnderlyingAndDate,
-  SESSION_LOOKBACK_DAYS,
   type IndexUnderlying,
 } from "./session-query.js";
 
@@ -82,33 +81,6 @@ export function parseVolumeProfileQuery(
   const problem = rangeProblem(range);
   if (problem) return { ok: false, error: problem };
   return { ok: true, value: { underlying: base.underlying, date: base.date, rowPoints: rowPoints.value, range, days: days.value } };
-}
-
-const IST_OFFSET_MS = 330 * 60_000;
-
-/** UTC instant of a wall-clock time on an IST calendar date. */
-function istInstant(date: string, hour: number, minute = 0): Date {
-  const [year, month, day] = date.split("-").map(Number);
-  return new Date(Date.UTC(year!, month! - 1, day!, hour, minute) - IST_OFFSET_MS);
-}
-
-/**
- * The contract that was the front month on a date, or undefined. Never the next month: that is a different, thinner
- * market, and a profile of it would pass for the day's volume.
- */
-function frontContractOn(underlying: IndexUnderlying, date: string): IndexFutureContract | undefined {
-  return upcomingIndexFutures(date, 1).find((contract) => contract.underlyingSymbol === underlying);
-}
-
-interface SessionListing {
-  sessionDate: string;
-  symbol: string;
-  bars: number;
-  barsWithVolume: number;
-  firstAt: string;
-  lastAt: string;
-  /** Enough of the 375 regular minutes are present to treat the profile as the day's. */
-  complete: boolean;
 }
 
 interface CompositeSession {
@@ -182,29 +154,7 @@ export function registerVolumeProfileRoutes(
       const today = istDate(now);
 
       // The sessions on offer: each stored day, counted only under the contract that was front month on it.
-      const lookbackStart = addDays(today, -SESSION_LOOKBACK_DAYS);
-      const frontSymbols = new Set<string>();
-      for (let offset = 0; offset <= SESSION_LOOKBACK_DAYS; offset += 1) {
-        const contract = frontContractOn(underlying, addDays(lookbackStart, offset));
-        if (contract) frontSymbols.add(contract.symbol);
-      }
-      const sessions: SessionListing[] = [];
-      for (const symbol of frontSymbols) {
-        const days = await repository.sessionDays({ symbol, fromDate: lookbackStart, toDate: today });
-        for (const day of days) {
-          if (frontContractOn(underlying, day.date)?.symbol !== symbol || day.barsWithVolume === 0) continue;
-          sessions.push({
-            sessionDate: day.date,
-            symbol,
-            bars: day.bars,
-            barsWithVolume: day.barsWithVolume,
-            firstAt: day.firstAt.toISOString(),
-            lastAt: day.lastAt.toISOString(),
-            complete: day.bars >= EXPECTED_SESSION_MINUTES * COMPLETE_SESSION_MIN_BAR_SHARE,
-          });
-        }
-      }
-      sessions.sort((a, b) => b.sessionDate.localeCompare(a.sessionDate));
+      const sessions = await listStoredSessions(repository, underlying, today);
 
       const sessionDate = requestedDate ?? sessions[0]?.sessionDate ?? null;
       if (sessionDate === null) {
