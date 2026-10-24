@@ -16,6 +16,8 @@ import { VolumeProfilePanel } from "./volume-profile-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
 import { DevelopingValuePanel } from "./developing-value-panel";
 import { DataCoveragePanel } from "./data-coverage-panel";
+import { ImpliedMovePanel } from "./implied-move-panel";
+import type { ImpliedMoveInput } from "../implied-move";
 import {
   DEFAULT_COST_BUDGET_PERCENT,
   applyChainTick,
@@ -243,6 +245,20 @@ export function OptionChainDashboard() {
     [snapshotChain?.strikes],
   );
 
+  /** The ATM legs' quotes, the solved ATM IV and the days to expiry, from the same untouched snapshot as the other charts. */
+  const impliedMoveInput = useMemo<ImpliedMoveInput>(() => {
+    const atmStrike = snapshotChain?.atmStrike ?? null;
+    const row = atmStrike === null ? undefined : (snapshotChain?.strikes ?? []).find((entry) => entry.strikePrice === atmStrike);
+    return {
+      spot: snapshotChain?.underlyingValue ?? null,
+      atmStrike,
+      atmCall: row?.call ? { bid: row.call.bid, ask: row.call.ask } : null,
+      atmPut: row?.put ? { bid: row.put.bid, ask: row.put.ask } : null,
+      atmIv: snapshotChain?.atmImpliedVolatility ?? null,
+      daysToExpiry: row?.call?.daysToExpiry ?? row?.put?.daysToExpiry ?? null,
+    };
+  }, [snapshotChain]);
+
   const chartExpiryLabel = useMemo(() => {
     const selected = expiry
       ? (chain?.expiries ?? []).find((entry) => entry.expiryDate === expiry)
@@ -469,6 +485,8 @@ export function OptionChainDashboard() {
                   expiryLabel={chartExpiryLabel}
                   nowMs={now}
                 />
+                {/* Observed option prices and the model IV beside observed futures moves; separate request, keyed with the page. */}
+                <ImpliedMovePanel key={`implied-${underlying}`} underlying={underlying} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
               </div>
             ) : (
               <>
