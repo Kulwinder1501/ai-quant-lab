@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, date
 import zoneinfo
 import psycopg
 
+from ai_quant_lab_ml.orderbook_di import raw_depth_imbalance
+
 INDIA_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
 TIER1_REVERSAL_LEVELS = {"SWING_HIGH", "SWING_LOW", "ITH", "ITL", "SESSION_HIGH", "SESSION_LOW"}
@@ -184,11 +186,12 @@ def fetch_latest_depth_di(conn: psycopg.Connection, as_of_time: datetime) -> tup
     if not row:
         return None, None
 
-    tb, ts = float(row[0]), float(row[1])
-    if tb + ts == 0:
+    # None unless BOTH totals are finite and positive: a NULL total, or one side dropping to 0 for a
+    # frame (a feed dropout, not an empty book side), is unavailable -- never a DI of 0 or -1/+1.
+    raw_di = raw_depth_imbalance(row[0], row[1])
+    if raw_di is None:
         return None, None
 
-    raw_di = (tb - ts) / (tb + ts)
     di_tilde = -raw_di
     return raw_di, di_tilde
 
