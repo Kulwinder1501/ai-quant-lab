@@ -62,6 +62,40 @@ async function main(): Promise<void> {
 
     const result = await alertsService.evaluateAll(targetDate, { symbol, exchange });
 
+    // Only record completion if evaluating a past date, or today after 17:05 IST
+    const now = new Date();
+    const istMs = now.getTime() + 5.5 * 60 * 60_000;
+    const istDate = new Date(istMs);
+    const todayIst = istDate.toISOString().slice(0, 10);
+    const minuteOfDay = istDate.getUTCHours() * 60 + istDate.getUTCMinutes();
+    const isPastDate = targetDate < todayIst;
+    const isTodayAfterCutoff = targetDate === todayIst && minuteOfDay >= 17 * 60 + 5;
+
+    if (isPastDate || isTodayAfterCutoff) {
+      try {
+        await database.query(
+          `INSERT INTO scheduled_job_runs (
+            id, job_type, scheduled_for, status, claimed_by, claimed_at, completed_at
+          ) VALUES (
+            gen_random_uuid(),
+            'EQUITY_ALERTS_EVAL',
+            ($1 || ' 17:00:00+05:30')::timestamptz,
+            'COMPLETED',
+            'eval-equity-alerts',
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          )
+          ON CONFLICT (job_type, scheduled_for)
+          DO UPDATE SET
+            status = 'COMPLETED',
+            completed_at = CURRENT_TIMESTAMP`,
+          [targetDate],
+        );
+      } catch {
+        // Non-critical tracking error
+      }
+    }
+
     console.info(
       JSON.stringify({
         level: "info",

@@ -28,6 +28,7 @@
     "research:ict-shadow:resolve": "npm run research:ict-shadow:resolve --workspace @ai-quant-lab/api --",
     "research:ict-shadow:report": "npm run research:ict-shadow:report --workspace @ai-quant-lab/api --",
     "equity:collect:eod": "npm run equity:collect:eod --workspace @ai-quant-lab/api --",
+    "equity:alerts:eval": "npm run equity:alerts:eval --workspace @ai-quant-lab/api --",
     "research:ict-gates:report": "npm run research:ict-gates:report --workspace @ai-quant-lab/api --",
     "data:collect:option-chain": "npm run data:collect:option-chain --workspace @ai-quant-lab/api --",
     "data:collect:option-premium-ticks": "npm run data:collect:option-premium-ticks --workspace @ai-quant-lab/api --",
