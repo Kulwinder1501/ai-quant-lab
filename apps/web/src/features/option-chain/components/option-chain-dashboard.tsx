@@ -279,6 +279,12 @@ export function OptionChainDashboard() {
     [snapshotChain?.strikes],
   );
 
+  /** Open interest per strike for the checklist's wall check, from the same snapshot (reference kept while the snapshot is unchanged). */
+  const oiWallStrikes = useMemo(
+    () => (snapshotChain?.strikes ?? []).map((row) => ({ strike: row.strikePrice, callOi: row.call?.openInterest ?? null, putOi: row.put?.openInterest ?? null })),
+    [snapshotChain?.strikes],
+  );
+
   /** The stored snapshot's strikes, ATM and ATM volatility, which the Model greeks panels all read, counted for the basis line. */
   const chainBasisInput = useMemo(() => ({
     strikes: snapshotChain?.strikes ?? [],
@@ -522,7 +528,7 @@ export function OptionChainDashboard() {
                 {/* Observed option prices and the model IV beside observed futures moves; separate request, keyed with the page. */}
                 <ImpliedMovePanel key={`implied-${underlying}`} underlying={underlying} input={impliedMoveInput} expiryLabel={chartExpiryLabel} />
                 {/* What one contract costs and needs; the selection is local, so it is keyed with the underlying. */}
-                <ContractCostPanel key={`contract-cost-${underlying}`} strikes={contractCostStrikes} input={impliedMoveInput} expiryLabel={chartExpiryLabel} underlying={underlying} expiry={expiry} observedAt={snapshotChain?.observedAt} nowMs={now} />
+                <ContractCostPanel key={`contract-cost-${underlying}`} strikes={contractCostStrikes} input={impliedMoveInput} expiryLabel={chartExpiryLabel} underlying={underlying} expiry={expiry} observedAt={snapshotChain?.observedAt} nowMs={now} oiStrikes={oiWallStrikes} />
               </div>
             ) : (
               <>

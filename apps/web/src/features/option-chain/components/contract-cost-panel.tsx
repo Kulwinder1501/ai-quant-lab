@@ -8,6 +8,8 @@ import { bandText, buildImpliedMove, type ImpliedMoveInput } from "../implied-mo
 import { buildPayoff } from "../contract-payoff";
 import { ContractPayoffView } from "./contract-payoff-view";
 import { StrikeLadderView } from "./strike-ladder-view";
+import { PreTradeChecklistPanel } from "./pre-trade-checklist-panel";
+import type { OiWallStrike } from "../pre-trade-checklist";
 import { buildStrikeLadder } from "../strike-ladder";
 import {
   CONTRACT_COST_DEFINITIONS,
@@ -58,8 +60,11 @@ export function ContractCostPanel({
   expiry,
   observedAt,
   nowMs,
+  oiStrikes,
 }: {
   strikes: CostStrike[];
+  /** Open interest per strike from the same snapshot, for the checklist's wall check; without it that check reads "unknown". */
+  oiStrikes?: OiWallStrike[];
   input: ImpliedMoveInput;
   expiryLabel: string;
   underlying: string;
@@ -241,6 +246,20 @@ export function ContractCostPanel({
           {flagSentence && <p className="mt-1 text-[11px] text-amber-200">{flagSentence}</p>}
           {payoff && strike !== null && <ContractPayoffView payoff={payoff} side={side} strike={strike} />}
         </>
+      )}
+
+      {/* The checklist is keyed to the contract so that a different strike or side starts from a clean plan, not the last one's stop and target. */}
+      {strike !== null && cost !== null && (
+        <PreTradeChecklistPanel
+          key={`checklist-${underlying}-${side}-${strike}`}
+          underlying={underlying}
+          side={side}
+          cost={cost}
+          quoteWarning={flagSentence}
+          oiStrikes={oiStrikes ?? []}
+          spot={input.spot}
+          typicalDay={implied.expectedAbsDailyPoints}
+        />
       )}
 
       {ladderRows.length > 0 && <StrikeLadderView rows={ladderRows} side={side} selectedStrike={strike} onSelect={setPicked} staleness={stalenessPayload ? { index: contractIndex, marketOpen: stalenessPayload.marketOpen } : null} />}
