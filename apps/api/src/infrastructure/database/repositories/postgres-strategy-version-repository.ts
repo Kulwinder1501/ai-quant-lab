@@ -132,6 +132,7 @@ export class PostgresStrategyVersionRepository implements StrategyVersionReposit
       FROM strategy_versions
       WHERE strategy_id = $1 AND is_active AND version <> $2
     `, [strategyId, input.version]);
+    let isActive = existing.is_active;
     if (Number(drift.rows[0]?.stale ?? "0") > 0 || !existing.is_active) {
       await this.database.query(`
         UPDATE strategy_versions SET is_active = FALSE
@@ -141,9 +142,17 @@ export class PostgresStrategyVersionRepository implements StrategyVersionReposit
         UPDATE strategy_versions SET is_active = TRUE
         WHERE strategy_id = $1 AND version = $2 AND NOT is_active
       `, [strategyId, input.version]);
+      /*
+       * `existing` was read before the cutover, so on the pass that activates a version it still says
+       * inactive. The generator skips an inactive strategy (STRATEGY_INACTIVE), so every version bump cost
+       * its first scan: harmless, but a missed bar on a bot that acts on the newest bar only. The row is
+       * active once this block has run, whether this pass flipped it or a concurrent one already had
+       * (the activating UPDATE is a no-op for an already-active row), so report that rather than the
+       * stale read.
+       */
+      isActive = true;
     }
 
-
-    return toStrategyVersion(existing);
+    return toStrategyVersion({ ...existing, is_active: isActive });
   }
 }

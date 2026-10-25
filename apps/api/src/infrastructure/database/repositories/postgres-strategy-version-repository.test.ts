@@ -91,6 +91,32 @@ describe("PostgresStrategyVersionRepository.ensure", () => {
     expect(rows.find((row) => row.version === 1)!.isActive).toBe(false);
   });
 
+  it("reports the version as active on the pass that activates it, so that pass is not skipped as STRATEGY_INACTIVE", async () => {
+    // Version bump: version 2 is inserted inactive and activated inside this call. The returned row used to be the
+    // pre-activation read (isActive false), which made the generator skip the first scan of every new version.
+    const bump = fakeDatabase([stored(1)]);
+    const afterBump = await new PostgresStrategyVersionRepository(bump.database as never).ensure(registration(2));
+    expect(afterBump.isActive).toBe(true);
+    expect(bump.rows.find((row) => row.version === 2)!.isActive).toBe(true);
+
+    // First registration of a strategy.
+    const first = fakeDatabase([]);
+    expect((await new PostgresStrategyVersionRepository(first.database as never).ensure(registration(1))).isActive).toBe(true);
+
+    // An existing but inactive version being re-declared (e.g. a rollback to version 1 while version 2 is active).
+    const rollback = fakeDatabase([{ ...stored(1), isActive: false }, stored(2)]);
+    const rolledBack = await new PostgresStrategyVersionRepository(rollback.database as never).ensure(registration(1));
+    expect(rolledBack.isActive).toBe(true);
+    expect(rollback.rows.filter((row) => row.isActive).map((row) => row.version)).toEqual([1]);
+  });
+
+  it("returns an already-active version as active without writing", async () => {
+    const { database, calls } = fakeDatabase([stored(3)]);
+    const result = await new PostgresStrategyVersionRepository(database as never).ensure(registration(3));
+    expect(result.isActive).toBe(true);
+    expect(calls.some((sql) => sql.startsWith("UPDATE"))).toBe(false);
+  });
+
   it("registers the first version of a strategy that has none", async () => {
     const { database, rows } = fakeDatabase([]);
     await new PostgresStrategyVersionRepository(database as never).ensure(registration(1));
