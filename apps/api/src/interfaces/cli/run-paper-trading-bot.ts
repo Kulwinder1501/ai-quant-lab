@@ -285,6 +285,7 @@ async function main(): Promise<void> {
 
   const environment = loadEnvironment();
   const database = createDatabasePool(environment.DATABASE_URL);
+  const pendingShadowPromises: Promise<void>[] = [];
 
   try {
     const { isNseHoliday } = await import("../../modules/market-data/domain/nse-session-calendar.js");
@@ -711,11 +712,19 @@ async function main(): Promise<void> {
           decisionsRecorded += 1;
 
           if (decisionId) {
-            void aedlsShadowConsumer.processCandidateDecision({
+            const shadowPromise = aedlsShadowConsumer.processCandidateDecision({
               candidateDecisionId: decisionId,
               tradeIdeaId: decision.tradeIdeaId,
               decidedAt: decision.decidedAt,
+            }).catch((shadowError) => {
+              console.error(JSON.stringify({
+                level: "warn",
+                message: "AEDLS shadow processing error; trade is unaffected",
+                tradeIdeaId: decision.tradeIdeaId,
+                error: shadowError instanceof Error ? shadowError.message : String(shadowError),
+              }));
             });
+            pendingShadowPromises.push(shadowPromise);
           }
         } catch (error) {
           console.error(JSON.stringify({
@@ -763,6 +772,9 @@ async function main(): Promise<void> {
       );
     }
   } finally {
+    if (pendingShadowPromises.length > 0) {
+      await Promise.allSettled(pendingShadowPromises);
+    }
     await database.end();
   }
 }
