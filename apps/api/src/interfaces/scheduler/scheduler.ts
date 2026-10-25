@@ -52,6 +52,7 @@ import { setFyersRequestPersister, fyersRequestCounter } from "../../modules/mar
 import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
+import { EquityMissedRunGuard } from "../../modules/equity-research/application/equity-missed-run-guard.js";
 
 /** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
@@ -296,6 +297,7 @@ async function main(): Promise<void> {
     ICT_GATE_REPORT: 5 * 60 * 1000,
     // Equity research EOD collector (Slice 0): 50 stocks at 1 req/s takes ~2.5 mins; 15 min horizon.
     EQUITY_EOD_COLLECT: 15 * 60 * 1000,
+    EQUITY_MISSED_RUN_GUARD: 15 * 60 * 1000,
     // Three indexed reads and a comparison; nothing is fetched or computed.
     PREMARKET_RUN_CHECK: 2 * 60 * 1000,
     // Four history fetches and four indicator passes for the two ETFs: about a minute.
@@ -1902,6 +1904,7 @@ async function main(): Promise<void> {
       "ICT_SHADOW_RESOLVE",
       "ICT_GATE_REPORT",
       "EQUITY_EOD_COLLECT",
+      "EQUITY_MISSED_RUN_GUARD",
       "PREMARKET_RUN_CHECK",
       "ETF_INTRADAY_HEAL",
       "SESSION_COVERAGE_CHECK",
@@ -2115,6 +2118,29 @@ async function main(): Promise<void> {
       await runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]);
     });
   }, 60_000);
+
+  /**
+   * Equity EOD Missed-Run Guard:
+   * Plain wall-clock interval (not a cron) that checks for any non-holiday weekdays
+   * after the last evaluated date that lack price bars or alert evaluation.
+   * Runs equity:collect:eod once, then evaluates missing dates in chronological order (oldest first).
+   */
+  const equityMissedRunGuard = new EquityMissedRunGuard(database, {
+    commandRunner: (cmd, args) => runCommand(cmd, args),
+  });
+
+  const EQUITY_MISSED_RUN_GUARD_INTERVAL_MS = 60_000;
+  setInterval(() => {
+    void schedule("EQUITY_MISSED_RUN_GUARD", async () => {
+      const result = await equityMissedRunGuard.checkAndCatchup();
+      if (result.missingDates.length > 0) {
+        log("Equity missed-run guard caught up missing dates", {
+          missingDates: result.missingDates,
+          evaluatedDates: result.evaluatedDates,
+        });
+      }
+    });
+  }, EQUITY_MISSED_RUN_GUARD_INTERVAL_MS);
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
