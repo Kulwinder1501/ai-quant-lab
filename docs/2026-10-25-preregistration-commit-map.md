@@ -9,6 +9,7 @@ The pre-registration documents of 2026-10-25 were first committed locally, befor
 | `2026-10-25-gold-compression-breakout-preregistration.md` | `def55b61` | `0f9dab14` |
 | `2026-10-25-hard-gate-closed-trades-preregistration.md` | `ccc10b9e` | `5b569549` |
 | `2026-10-25-hard-gate-amendment-1.md` and `research-scripts/2026-10-25-hard-gate-forward-rerun.py` | `691669e0` | `66d326d2` |
+| `2026-10-25-scalp1m-v9-stopping-rule.md` (approved by the operator on 2026-10-25; not a research test but fixed before any v9 trade) | `d2d03304` | `55e9668c` |
 
 To check that a document is unchanged since it was frozen, compare it with its version in the commit listed in the last column; any later edit shows in `git log -- <path>`.
 
