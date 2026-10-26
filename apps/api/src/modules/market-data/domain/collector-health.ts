@@ -256,7 +256,9 @@ export function evaluateCollectorHealth(input: {
     reconnectCount: receipt.gaps.length,
     receipt,
     exchangeFeed,
-    persistenceLagMs: lags.length === 0 ? null : { median: median(lags), max: Math.max(...lags) },
+    // A loop, not `Math.max(...lags)`: spreading puts every row on the call stack, and a busy session stores
+    // far more rows than the engine allows as arguments ("Maximum call stack size exceeded" from 13:43 on 2026-10-26).
+    persistenceLagMs: lags.length === 0 ? null : { median: median(lags), max: lags.reduce((largest, lag) => (lag > largest ? lag : largest), lags[0] ?? 0) },
     findings,
     status,
   };
