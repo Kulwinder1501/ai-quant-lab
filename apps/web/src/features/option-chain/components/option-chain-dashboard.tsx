@@ -19,6 +19,7 @@ import { DataCoveragePanel } from "./data-coverage-panel";
 import { ChainBasisView } from "./chain-basis-view";
 import { VendorGreeksCheckView } from "./vendor-greeks-check-view";
 import { SessionHistorySection } from "./session-history-section";
+import { chooseExpiry } from "../expiry-choice";
 import { IvSkewView } from "./iv-skew-view";
 import { ContractCostPanel, type CostStrike } from "./contract-cost-panel";
 import { ImpliedMovePanel } from "./implied-move-panel";
@@ -101,6 +102,8 @@ export function OptionChainDashboard() {
   const [snapshotChain, setSnapshotChain] = useState<ChainResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** What the expiry selector offers and shows, read from the untouched snapshot (a tick never changes its expiries). See `expiry-choice.ts`. */
+  const expiryChoice = useMemo(() => chooseExpiry(snapshotChain, expiry), [snapshotChain, expiry]);
   const [tradeModalConfig, setTradeModalConfig] = useState<{
     leg: Leg;
     strike: number;
@@ -165,11 +168,12 @@ export function OptionChainDashboard() {
   // Live streaming via SSE
   useEffect(() => {
     if (!chain?.available) return;
+    // The stream follows the expiry the user chose; with none it follows the newest book, which is what the chain read returns.
     return subscribeToChainTicks(underlying, (tick) => {
       setLastTickAt(Date.now());
       setChain((prev) => applyChainTick(prev, tick));
-    });
-  }, [chain?.available, underlying]);
+    }, expiry || undefined);
+  }, [chain?.available, underlying, expiry]);
 
   /**
    * Stable strike rows for charts. Inline mapping on every 2s `now` tick would defeat
@@ -357,19 +361,23 @@ export function OptionChainDashboard() {
             </button>
           ))}
         </div>
-        {(chain?.expiries ?? []).length > 1 && (
-          <select
-            value={expiry}
-            onChange={(event) => setExpiry(event.target.value)}
-            className="rounded-xl border border-white/10 bg-slate-950 px-3 py-1.5 text-xs font-bold text-slate-200"
-          >
-            <option value="">All expiries</option>
-            {(chain?.expiries ?? []).map((entry) => (
-              <option key={entry.expiryDate} value={entry.expiryDate}>
-                {entry.expiryDate} · {entry.expiryKind}
-              </option>
-            ))}
-          </select>
+        {expiryChoice.showSelector && (
+          <div className="flex max-w-sm flex-col items-end gap-1">
+            <select
+              aria-label="Expiry"
+              value={expiryChoice.selectedValue}
+              onChange={(event) => setExpiry(event.target.value)}
+              className="rounded-xl border border-white/10 bg-slate-950 px-3 py-1.5 text-xs font-bold text-slate-200"
+            >
+              {expiryChoice.allowAll && <option value="">All expiries</option>}
+              {expiryChoice.options.map((entry) => (
+                <option key={entry.expiryDate} value={entry.expiryDate}>
+                  {entry.expiryDate} · {entry.expiryKind}
+                </option>
+              ))}
+            </select>
+            {expiryChoice.note && <p className="text-right text-[10px] leading-4 text-slate-500">{expiryChoice.note}</p>}
+          </div>
         )}
       </div>
 

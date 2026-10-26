@@ -83,6 +83,11 @@ export interface ChainResponse {
   atmImpliedVolatility?: number | null;
   impliedForwardByExpiry?: Record<string, number>;
   expiries?: Array<{ expiryDate: string; expiryKind: string }>;
+  /**
+   * Every expiry the collection run stored, whichever one this response is for. Around an expiry the run stores two books, and a
+   * read with no expiry returns only the one written last; these are the `expiry` values that return the others.
+   */
+  storedExpiries?: Array<{ expiryDate: string; expiryKind: string }>;
   putCall?: {
     openInterestRatio: number | null;
     volumeRatio: number | null;
@@ -291,10 +296,12 @@ export function applyChainTick(prevChain: ChainResponse | null, tick: ChainTick)
  * closes it. A stream error closes it for good, as the Option Chain page has always done; a caller that needs
  * to know the feed is still alive should watch for ticks rather than assume the stream is open.
  */
-export function subscribeToChainTicks(underlying: string, onTick: (tick: ChainTick) => void): () => void {
+export function subscribeToChainTicks(underlying: string, onTick: (tick: ChainTick) => void, expiry?: string): () => void {
   let eventSource: EventSource | null = null;
   try {
-    eventSource = new EventSource(`${getApiV1Url()}/option-chain/stream?underlying=${encodeURIComponent(underlying)}`);
+    // With an expiry the stream follows that expiry's contracts; without one it follows the newest book, as the chain read does.
+    const expiryQuery = expiry ? `&expiry=${encodeURIComponent(expiry)}` : "";
+    eventSource = new EventSource(`${getApiV1Url()}/option-chain/stream?underlying=${encodeURIComponent(underlying)}${expiryQuery}`);
     eventSource.onmessage = (event) => {
       try {
         onTick(JSON.parse(event.data) as ChainTick);

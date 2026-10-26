@@ -433,6 +433,15 @@ export function registerMarketDataRoutes(
         return;
       }
 
+      // Every expiry the run that wrote this book stored, so a client can offer the others. The default book is unchanged: the
+      // newest one written, which is the tradable expiry the decision pipeline reads. An enrichment, so losing it costs only the menu.
+      let storedExpiries: Array<{ expiryDate: Date; expiryKind: string }> = [];
+      try {
+        storedExpiries = await dependencies.optionChainRepository.storedExpiriesAround(underlyingSymbol, snapshot.observedAt);
+      } catch {
+        storedExpiries = [];
+      }
+
       const atmStrike = snapshot.underlyingValue === null
         ? null
         : atmStrikeOf(snapshot.quotes, snapshot.underlyingValue);
@@ -632,6 +641,11 @@ export function registerMarketDataRoutes(
             expiryDate: entry.expiryDate.toISOString().slice(0, 10),
             expiryKind: entry.expiryKind,
           })),
+          // The expiries stored in the same run, whichever one this response is for: the menu of `?expiry=` values.
+          storedExpiries: storedExpiries.map((entry) => ({
+            expiryDate: entry.expiryDate.toISOString().slice(0, 10),
+            expiryKind: entry.expiryKind,
+          })),
           putCall: ratios,
           liquidity,
           // Named for what it is. A heavy-OI strike is where positions sit, not a level
@@ -768,9 +782,16 @@ export function registerMarketDataRoutes(
         return;
       }
       const underlyingSymbol = (queryString(request, "underlying") || "NIFTY50").toUpperCase();
-      
+      // The page streams the expiry it is showing: without one this is the newest book written, as the chain route's default is.
+      const expiryDate = queryString(request, "expiry") || undefined;
+      if (expiryDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(expiryDate)) {
+        response.status(400).json({ error: "`expiry` must be an ISO date (YYYY-MM-DD)." });
+        return;
+      }
+
       const snapshot = await dependencies.optionChainRepository.latestSnapshot({
         underlyingSymbol,
+        expiryDate,
       });
 
       if (!snapshot || snapshot.quotes.length === 0) {
