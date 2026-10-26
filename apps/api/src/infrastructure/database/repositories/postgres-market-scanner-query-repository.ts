@@ -198,6 +198,10 @@ function asIndicatorParameters(value: unknown): Record<string, string | number |
   return record as Record<string, string | number | boolean>;
 }
 
+/**
+ * Indicator values are scalars: `IndicatorValues` allows number, string, boolean and null, and the FVG indicator stores `active` as a
+ * boolean. A value that is not a scalar (an object or an array) is still refused rather than projected.
+ */
 function asIndicatorValues(value: unknown): IndicatorValues {
   const record = asRecord(value, "indicator values");
   for (const indicatorValue of Object.values(record)) {
@@ -205,6 +209,7 @@ function asIndicatorValues(value: unknown): IndicatorValues {
       indicatorValue !== null
       && typeof indicatorValue !== "string"
       && typeof indicatorValue !== "number"
+      && typeof indicatorValue !== "boolean"
     ) {
       throw new Error("Database returned an invalid indicator values.");
     }
@@ -466,6 +471,9 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           AND c.received_at <= CURRENT_TIMESTAMP
           AND c.timeframe = $1
           AND i.is_active = TRUE
+          -- The same exchanges as the registry listing: an active instrument on another exchange (the OANDA forex, DXY and gold
+          -- research series) has candles but cannot be projected, and one such row used to fail the whole page.
+          AND i.exchange IN (${scannerExchanges.map((exchange) => `'${exchange}'`).join(", ")})
           AND ($2::text IS NULL OR i.symbol = $2)
           AND ($3::text IS NULL OR i.exchange = $3)
         ORDER BY c.instrument_id ASC, c.close_time DESC, c.id DESC

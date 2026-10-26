@@ -285,6 +285,42 @@ describe("PostgresMarketScannerQueryRepository", () => {
     expect(calls[0]?.text).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/);
   });
 
+  it("projects an indicator whose values include a boolean, as the FVG indicator's active flag does", async () => {
+    const { database } = fakeDatabase([scannerRow({
+      indicators: [{
+        code: "FVG",
+        algorithmVersion: "smc-v2",
+        parameters: {},
+        values: { active: true, top: 25100.5, bottom: 25050.25 },
+      }],
+    })]);
+    const rows = await new PostgresMarketScannerQueryRepository(database).listScannerRows({ timeframe: "1d", limit: 1 });
+    expect(rows[0]?.indicators).toEqual([{
+      code: "FVG",
+      algorithmVersion: "smc-v2",
+      parameters: {},
+      values: { active: true, top: 25100.5, bottom: 25050.25 },
+    }]);
+  });
+
+  it("reads scanner rows only for the exchanges the scanner can project, as the registry listing does", async () => {
+    const { database, calls } = fakeDatabase([scannerRow()]);
+    await new PostgresMarketScannerQueryRepository(database).listScannerRows({ timeframe: "5m", limit: 1 });
+    expect(calls[0]?.text).toContain("AND i.exchange IN ('NSE', 'NFO', 'BSE')");
+  });
+
+  it("still refuses indicator values that are not scalars", async () => {
+    for (const values of [{ value: { nested: 1 } }, { value: [1, 2] }]) {
+      const { database } = fakeDatabase([scannerRow({
+        indicators: [{ code: "RSI", algorithmVersion: "ta-v1", parameters: { period: 14 }, values }],
+      })]);
+      await expect(new PostgresMarketScannerQueryRepository(database).listScannerRows({
+        timeframe: "1d",
+        limit: 1,
+      })).rejects.toThrow("invalid indicator values");
+    }
+  });
+
   it("rejects malformed persisted scanner evidence instead of projecting it", async () => {
     const invalidPattern = fakeDatabase([scannerRow({
       patterns: [{ code: "HAMMER", algorithmVersion: "patterns-v1", direction: "BULLISH", confidence: 1.1 }],
