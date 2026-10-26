@@ -29,6 +29,9 @@ function toExpiryInstant(value: unknown): Date {
   return new Date(day.getTime() + 10 * 60 * 60 * 1000);
 }
 
+/** How far either side of a snapshot's instant the books of the same collection run are looked for. Runs are at least 12 minutes apart. */
+export const RUN_WINDOW_SECONDS = 60;
+
 function toNumberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = Number(value);
@@ -445,6 +448,30 @@ export class PostgresOptionChainRepository {
         expiryKind: String(row.expiry_kind) as ExpiryKind,
       })),
     };
+  }
+
+  /**
+   * The expiries stored by the collection run that wrote `observedAt`.
+   *
+   * One run writes one book per expiry it covers, each under its own `observed_at` a fraction of a second apart: the nearest expiry and,
+   * in the days before and on an expiry, the tradable one as well. `latestSnapshot` without an expiry returns only the book written
+   * last, so a reader that does not know to ask would never learn the other exists. Runs are at least 12 minutes apart, so
+   * `RUN_WINDOW_SECONDS` either side holds one run's books and nothing from the runs next to it.
+   */
+  async storedExpiriesAround(underlyingSymbol: string, observedAt: Date): Promise<Array<{ expiryDate: Date; expiryKind: ExpiryKind }>> {
+    const result = await this.pool.query(`
+      SELECT expiry_date, min(expiry_kind) AS expiry_kind
+      FROM option_chain_snapshots
+      WHERE underlying_symbol = $1
+        AND observed_at BETWEEN $2::timestamptz - make_interval(secs => $3::double precision)
+                            AND $2::timestamptz + make_interval(secs => $3::double precision)
+      GROUP BY expiry_date
+      ORDER BY expiry_date
+    `, [underlyingSymbol, observedAt, RUN_WINDOW_SECONDS]);
+    return result.rows.map((row) => ({
+      expiryDate: toExpiryInstant(row.expiry_date),
+      expiryKind: String(row.expiry_kind) as ExpiryKind,
+    }));
   }
 
   /**
