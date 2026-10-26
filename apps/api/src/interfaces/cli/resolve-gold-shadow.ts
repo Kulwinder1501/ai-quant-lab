@@ -34,7 +34,7 @@ import { getOption } from "./arguments.js";
  */
 
 const MINUTE_MS = 60_000;
-const DEFAULT_STRATEGIES = ["momentum-scalp-gold", "ict-structure-v1"];
+const DEFAULT_STRATEGIES = ["momentum-scalp-gold", "ict-structure-v1", "gold-asian-sweep-v1"];
 
 interface IdeaRow {
   id: string;
