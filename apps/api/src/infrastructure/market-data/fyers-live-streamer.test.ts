@@ -447,3 +447,112 @@ describe("FyersLiveStreamer socket slot recycling", () => {
     expect(sockets[1]!.connected).toBe(false);
   });
 });
+
+/**
+ * The vendor's data socket is a process-wide singleton that keeps the token it was created with, so after the daily token rotation a
+ * process can only authenticate with the new token by restarting. On 2026-10-26 the API reconnected for hours and was refused with
+ * code -15 each time. The streamer reports the rotation instead of looping; the host restarts itself.
+ */
+describe("FyersLiveStreamer and a rotated access token", () => {
+  /** A token service that returns the given tokens in order and then repeats the last one. */
+  function tokens(...values: string[]) {
+    let index = 0;
+    return { getAccessToken: vi.fn(async () => values[Math.min(index++, values.length - 1)]!) };
+  }
+
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  function rotating(options: { tokenValues: string[]; onTokenRotated?: () => void; socketKeepsFirstToken?: boolean }) {
+    const created: string[] = [];
+    const sockets: Array<ReturnType<typeof fakeSocket>> = [];
+    const sched = scheduler();
+    const streamer = new FyersLiveStreamer({
+      appId: "APPID-100",
+      tokenService: tokens(...options.tokenValues),
+      createSocket: (authHeader) => { created.push(authHeader); const socket = fakeSocket(); sockets.push(socket); return socket; },
+      ...(options.socketKeepsFirstToken === undefined ? {} : { socketKeepsFirstToken: options.socketKeepsFirstToken }),
+      ...(options.onTokenRotated === undefined ? {} : { onTokenRotated: options.onTokenRotated }),
+      subscribeSpacingMs: 0,
+      setTimeoutFn: (handler, ms) => {
+        sched.delays.push(ms);
+        sched.run = async () => { handler(); await settle(); };
+        return 0;
+      },
+    });
+    return { streamer, created, sockets, sched };
+  }
+
+  it("tells the host when the stored token is no longer the one the socket was created with, and does not reconnect with the stale one", async () => {
+    const onTokenRotated = vi.fn();
+    const { streamer, created, sockets, sched } = rotating({ tokenValues: ["token-1", "token-2"], onTokenRotated, socketKeepsFirstToken: true });
+
+    await streamer.connect();
+    expect(created).toEqual(["APPID-100:token-1"]);
+    expect(onTokenRotated).not.toHaveBeenCalled();
+
+    // The socket drops (the old token lapsed) and the retry finds a new token in the store.
+    sockets[0]!.fire("close");
+    await sched.run();
+
+    expect(onTokenRotated).toHaveBeenCalledTimes(1);
+    expect(created).toEqual(["APPID-100:token-1"]);                   // no second socket: it would only be refused
+    // It keeps trying to reconnect meanwhile (with the usual backoff), so a host that is not ready to restart yet is asked again later.
+    expect(sched.delays).toEqual([5_000, 10_000]);
+  });
+
+  it("asks the host again on every later attempt, so a host that declined (just started) can accept later", async () => {
+    const onTokenRotated = vi.fn();
+    const { streamer, sockets, sched } = rotating({ tokenValues: ["token-1", "token-2"], onTokenRotated, socketKeepsFirstToken: true });
+    await streamer.connect();
+    sockets[0]!.fire("close");
+    await sched.run();
+    await sched.run();
+    await sched.run();
+    expect(onTokenRotated).toHaveBeenCalledTimes(3);
+  });
+
+  it("does nothing special while the token is unchanged, and reconnects as before", async () => {
+    const onTokenRotated = vi.fn();
+    const { streamer, created, sockets, sched } = rotating({ tokenValues: ["token-1"], onTokenRotated, socketKeepsFirstToken: true });
+    await streamer.connect();
+    sockets[0]!.fire("close");
+    await sched.run();
+    expect(onTokenRotated).not.toHaveBeenCalled();
+    expect(created).toEqual(["APPID-100:token-1", "APPID-100:token-1"]);
+  });
+
+  it("keeps the old behaviour when no host handler is given: it connects with whatever token the store returns", async () => {
+    const { streamer, created, sockets, sched } = rotating({ tokenValues: ["token-1", "token-2"], socketKeepsFirstToken: true });
+    await streamer.connect();
+    sockets[0]!.fire("close");
+    await sched.run();
+    expect(created).toEqual(["APPID-100:token-1", "APPID-100:token-2"]);
+  });
+
+  it("does not apply to an injected socket unless a test says the socket keeps its first token", async () => {
+    const onTokenRotated = vi.fn();
+    const { streamer, created, sockets, sched } = rotating({ tokenValues: ["token-1", "token-2"], onTokenRotated });
+    await streamer.connect();
+    sockets[0]!.fire("close");
+    await sched.run();
+    expect(onTokenRotated).not.toHaveBeenCalled();
+    expect(created).toEqual(["APPID-100:token-1", "APPID-100:token-2"]);
+  });
+
+  it("never passes or logs the token", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "info").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    const onTokenRotated = vi.fn();
+    try {
+      const { streamer, sockets, sched } = rotating({ tokenValues: ["secret-token-1", "secret-token-2"], onTokenRotated, socketKeepsFirstToken: true });
+      await streamer.connect();
+      sockets[0]!.fire("close");
+      await sched.run();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(onTokenRotated).toHaveBeenCalledWith();
+    expect(lines.some((line) => line.includes("access token changed"))).toBe(true);
+    expect(lines.join("\n")).not.toMatch(/secret-token/);
+  });
+});

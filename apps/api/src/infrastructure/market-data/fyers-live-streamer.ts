@@ -48,6 +48,18 @@ export interface FyersLiveStreamerOptions {
   appId: string;
   /** Injectable so tests can drive connect, message, error and close without a network. */
   createSocket?: (authHeader: string) => FyersDataSocket;
+  /**
+   * Whether the socket this streamer gets keeps the first token it was created with. True for the vendor's own socket (a
+   * process-wide singleton, see fyers-token-rotation.ts), which is the default when `createSocket` is not injected; false for an
+   * injected one unless a test says otherwise.
+   */
+  socketKeepsFirstToken?: boolean;
+  /**
+   * Called when the stored access token is no longer the one the socket was created with, so this process can never
+   * authenticate with the new one and must be replaced. The host restarts itself. Without it the streamer keeps retrying with
+   * the stale token, as it always did. The token is never passed or logged.
+   */
+  onTokenRotated?: () => void;
   /** Injectable so a reconnect test does not have to wait in real time. */
   setTimeoutFn?: (handler: () => void, ms: number) => unknown;
   /**
@@ -218,9 +230,33 @@ export class FyersLiveStreamer extends EventEmitter {
    * any host that waits for a clean exit would hang.
    */
   private closed = false;
+  /** The token the socket was created with, once it exists, when the socket keeps it (see `socketKeepsFirstToken`). */
+  private firstSocketToken: string | null = null;
+  private rotationLogged = false;
 
   constructor(private readonly options: FyersLiveStreamerOptions) {
     super();
+  }
+
+  private socketKeepsFirstToken(): boolean {
+    return this.options.socketKeepsFirstToken ?? this.options.createSocket === undefined;
+  }
+
+  /**
+   * True when the stored token differs from the one this process's socket was created with and the host has been told.
+   * Compared by value, never logged. With no host handler it returns false and the caller connects as before.
+   */
+  private reportedStaleSocketToken(accessToken: string): boolean {
+    if (!this.socketKeepsFirstToken() || this.firstSocketToken === null || this.firstSocketToken === accessToken) return false;
+    if (!this.rotationLogged) {
+      this.rotationLogged = true;
+      log("info", "The Fyers access token changed after this socket was created; the vendor socket keeps its first token, so this process has to restart to use the new one", {
+        hostWillRestart: this.options.onTokenRotated !== undefined,
+      });
+    }
+    if (this.options.onTokenRotated === undefined) return false;
+    this.options.onTokenRotated();
+    return true;
   }
 
   async connect(): Promise<void> {
@@ -228,10 +264,16 @@ export class FyersLiveStreamer extends EventEmitter {
 
     try {
       const accessToken = await this.options.tokenService.getAccessToken();
+      if (this.reportedStaleSocketToken(accessToken)) {
+        // The host decides when to restart (it may refuse a restart this soon after start); keep trying to reconnect meanwhile.
+        this.scheduleReconnect();
+        return;
+      }
       const authHeader = `${this.options.appId}:${accessToken}`;
       const socket = this.options.createSocket
         ? this.options.createSocket(authHeader)
         : (fyersApi.fyersDataSocket.getInstance(authHeader, "./fyers-logs", false) as FyersDataSocket);
+      if (this.socketKeepsFirstToken() && this.firstSocketToken === null) this.firstSocketToken = accessToken;
       this.socket = socket;
 
       socket.on("connect", () => {

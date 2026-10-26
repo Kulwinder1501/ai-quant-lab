@@ -40,6 +40,8 @@ export interface ApplicationDependencies {
    * schema's own defaults are used, which is the same answer the inline parsing produced.
    */
   environment?: HttpConfiguration;
+  /** Called when Fyers issues a new access token that this process's live socket can never use; the server restarts itself. */
+  onFyersTokenRotated?: () => void;
 }
 
 /**
@@ -49,9 +51,12 @@ export interface ApplicationDependencies {
  * creates shared dependencies, installs middleware in order, registers the
  * modules, and terminates the pipeline with the common 404/error handlers.
  */
-export function createApp({ database, environment }: ApplicationDependencies): Express {
+export function createApp({ database, environment, onFyersTokenRotated }: ApplicationDependencies): Express {
   const app = express();
-  const dependencies = buildHttpDependencies(database, { streamQuotes: true });
+  const dependencies = buildHttpDependencies(database, {
+    streamQuotes: true,
+    ...(onFyersTokenRotated === undefined ? {} : { onFyersTokenRotated }),
+  });
   // Origins and the mutation limit are parsed and defaulted by the schema in `config/`, not
   // here. This function used to split the raw string and coerce the number itself, so the
   // effective default and the documented one in `.env.example` could drift with nothing to

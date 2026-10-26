@@ -33,6 +33,7 @@ import { PostgresIndiaVixImpliedVolatilitySource } from "../../modules/paper-tra
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { SweepOpenPaperTradeExits } from "../../modules/paper-trading/application/sweep-open-paper-trade-exits.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
+import { mayRestartForTokenRotation } from "../../infrastructure/market-data/fyers-token-rotation.js";
 import { OptionPremiumTickStreamer } from "../../infrastructure/market-data/option-premium-tick-streamer.js";
 import { assessFyersAuthHealth } from "../../modules/market-data/domain/fyers-auth-health.js";
 import { IngestRssNewsService } from "../../modules/news-sentiment/application/ingest-rss-news.js";
@@ -1641,6 +1642,7 @@ async function main(): Promise<void> {
   );
 
   let premiumTickStreamer: OptionPremiumTickStreamer | null = null;
+  let restartingForNewFyersToken = false;
   // Held outside the block so shutdown can close the socket. The tick streamer stops its own
   // timers but does not own the connection, so without this reference nothing ever closes it.
   let premiumTickSocket: FyersLiveStreamer | null = null;
@@ -1648,6 +1650,15 @@ async function main(): Promise<void> {
     const liveStreamer = new FyersLiveStreamer({
       appId: fyersAppId,
       tokenService: fyersTokenService,
+      // The vendor socket keeps the token it was created with, so after the daily rotation this process can only be fed by
+      // starting again (docker restarts it). See fyers-token-rotation.ts; the scheduler sat in a code -15 loop until its 09:10
+      // restart on 2026-10-26. Not acted on within two minutes of start, and requested once.
+      onTokenRotated: () => {
+        if (!mayRestartForTokenRotation({ uptimeSeconds: process.uptime(), alreadyRestarting: restartingForNewFyersToken })) return;
+        restartingForNewFyersToken = true;
+        log("Fyers access token rotated; restarting the scheduler so its live socket can use the new one", { uptimeSeconds: Math.round(process.uptime()) });
+        void shutdown("FYERS_TOKEN_ROTATED", 0);
+      },
     });
     premiumTickSocket = liveStreamer;
     premiumTickStreamer = new OptionPremiumTickStreamer({

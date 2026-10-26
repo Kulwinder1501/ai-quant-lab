@@ -65,6 +65,8 @@ export interface HttpDependencyOptions {
    * quote back to REST.
    */
   streamQuotes?: boolean;
+  /** Passed to the live socket: called when the stored Fyers token is no longer the one the socket was created with (see fyers-token-rotation.ts). */
+  onFyersTokenRotated?: () => void;
 }
 
 export function buildHttpDependencies(database: DatabaseQueryable, options: HttpDependencyOptions = {}) {
@@ -109,6 +111,7 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
     fyersLiveStreamer = new FyersLiveStreamer({
       tokenService: fyersTokenService,
       appId,
+      ...(options.onFyersTokenRotated === undefined ? {} : { onTokenRotated: options.onFyersTokenRotated }),
     });
   }
 
