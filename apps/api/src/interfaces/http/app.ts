@@ -6,6 +6,7 @@ import { registerBacktestingRoutes } from "../../modules/backtesting/interfaces/
 import { registerMarketDataRoutes } from "../../modules/market-data/interfaces/http/market-data.routes.js";
 import { registerDepthRoutes } from "../../modules/market-data/interfaces/http/depth.routes.js";
 import { registerVolumeProfileRoutes } from "../../modules/market-data/interfaces/http/volume-profile.routes.js";
+import { registerLiveSideSplitRoutes } from "../../modules/market-data/interfaces/http/live-side-split.routes.js";
 import { registerRealizedMovesRoutes } from "../../modules/market-data/interfaces/http/realized-moves.routes.js";
 import { registerDataCoverageRoutes } from "../../modules/market-data/interfaces/http/data-coverage.routes.js";
 import { registerSessionSnapshotsRoutes } from "../../modules/market-data/interfaces/http/session-snapshots.routes.js";
@@ -89,6 +90,7 @@ export function createApp({ database, environment, onFyersTokenRotated }: Applic
   registerMarketDataRoutes(app, dependencies);
   registerDepthRoutes(app, dependencies);
   registerVolumeProfileRoutes(app, dependencies);
+  registerLiveSideSplitRoutes(app, dependencies);
   registerVolumeByTimeRoutes(app, dependencies);
   registerDevelopingValueRoutes(app, dependencies);
   registerDataCoverageRoutes(app, dependencies);
