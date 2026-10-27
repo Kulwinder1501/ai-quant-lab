@@ -11,14 +11,14 @@ const NIFTY_OCT = "NSE:NIFTY26OCTFUT";
 
 let server: Server | null = null;
 
-async function start(options: { split?: LiveSideSplit; streamer?: { subscribe(symbols: string[]): void } | null } = {}) {
+async function start(options: { split?: LiveSideSplit; streamer?: { subscribe(symbols: string[]): void } | null; now?: Date } = {}) {
   const subscribed: string[][] = [];
   const streamer = options.streamer === undefined ? { subscribe: (symbols: string[]) => { subscribed.push(symbols); } } : options.streamer;
   const app = express();
   registerLiveSideSplitRoutes(
     app,
     { liveSideSplit: options.split ?? new LiveSideSplit(), fyersLiveStreamer: streamer as never },
-    { now: () => NOW },
+    { now: () => options.now ?? NOW },
   );
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   return { base: `http://127.0.0.1:${(server!.address() as AddressInfo).port}`, subscribed };
@@ -59,6 +59,13 @@ describe("GET /api/v1/volume-profile/live-side-split", () => {
     const { base, subscribed } = await start();
     await get(base, "?underlying=NIFTY50");
     expect(subscribed).toEqual([[NIFTY_OCT]]);
+  });
+
+  it("does not touch the socket outside the session window, so a night-time request opens nothing", async () => {
+    const { base, subscribed } = await start({ now: new Date("2026-10-27T13:00:00.000Z") }); // 18:30 IST
+    const { data } = await (await get(base, "?underlying=NIFTY50")).json();
+    expect(subscribed).toEqual([]);
+    expect(data.available).toBe(false);
   });
 
   it("returns the estimated split with its unknown share, the since time and the wording to show", async () => {

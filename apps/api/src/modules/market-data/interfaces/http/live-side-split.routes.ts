@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import type { HttpDependencies } from "../../../../interfaces/http/dependencies.js";
 import { queryString } from "../../../../interfaces/http/common/query.js";
+import { isSideSplitWatchWindow } from "../../../../infrastructure/market-data/live-side-split-feed.js";
 import { LIVE_SIDE_SPLIT_DEFINITIONS } from "../../domain/live-side-split.js";
 import { frontContractOn } from "./session-listing.js";
 import { istDate } from "./session-query.js";
@@ -46,8 +47,10 @@ export function registerLiveSideSplitRoutes(
         });
         return;
       }
-      // Asking is what starts the count if the scheduled subscription has not yet (idempotent, one symbol).
-      dependencies.fyersLiveStreamer.subscribe([contract.providerInstrumentId]);
+      // Asking is what starts the count if the scheduled subscription has not yet (idempotent, one symbol). Only inside the
+      // session window: a subscription made at night would open a Fyers socket for nobody, and with the day's token
+      // expired it would retry in a loop.
+      if (isSideSplitWatchWindow(now)) dependencies.fyersLiveStreamer.subscribe([contract.providerInstrumentId]);
 
       const snapshot = dependencies.liveSideSplit.snapshot(contract.providerInstrumentId, rowPoints, now.getTime());
       if (snapshot === null || snapshot.totals.total === 0) {
