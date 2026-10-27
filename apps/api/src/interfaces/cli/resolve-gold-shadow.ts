@@ -3,7 +3,7 @@ import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresCandidateLedgerRepository } from "../../infrastructure/database/repositories/postgres-candidate-ledger-repository.js";
 import { isHealSessionActive } from "../../modules/market-data/application/scan-oanda-gaps.js";
-import { followThrough } from "../../modules/paper-trading/domain/gold-follow-through.js";
+import { followThrough, reanchorBracket } from "../../modules/paper-trading/domain/gold-follow-through.js";
 import type { CompletedPriceCandle } from "../../modules/paper-trading/domain/paper-trade-exit-policy.js";
 import type { TradeSide } from "../../modules/strategy-engine/domain/strategy.js";
 import { getOption } from "./arguments.js";
@@ -107,14 +107,13 @@ async function main(): Promise<void> {
         continue;
       }
       const fill = bars[fillIndex]!.close;
-      const risk = Math.abs(Number(idea.entry_price) - Number(idea.stop_loss));
-      const reward = Math.abs(Number(idea.target_price) - Number(idea.entry_price));
-      const long = idea.side === "LONG";
+      const levels = reanchorBracket(
+        { side: idea.side, entryPrice: Number(idea.entry_price), stopLoss: Number(idea.stop_loss), targetPrice: Number(idea.target_price) },
+        fill,
+      );
       const result = followThrough({
         side: idea.side,
-        entryPrice: fill,
-        stopLoss: long ? fill - risk : fill + risk,
-        targetPrice: long ? fill + reward : fill - reward,
+        ...levels,
         forwardCandles: bars.slice(fillIndex + 1).filter((bar) => bar.openTime.getTime() >= firstExpectedOpen.getTime()),
         firstExpectedOpen,
         isSessionActive: isHealSessionActive,

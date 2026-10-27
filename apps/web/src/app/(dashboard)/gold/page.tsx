@@ -23,6 +23,24 @@ interface ShadowTrade {
   outcome: string;
   r_multiple: string | null;
   settled_at: string | null;
+  /** What the verdict was judged on. Null when it was re-anchored but the fill bar can no longer be read. */
+  settled: { basis: "REANCHORED" | "AS_SHOWN"; entryPrice: number; stopLoss: number; targetPrice: number } | null;
+}
+
+/**
+ * A printed level with the level the verdict was actually judged on beneath it. The follow-through
+ * resolver re-anchors the bracket to the fill, so the two can differ; showing only the printed one made a
+ * STOP look like it happened without the stop being touched.
+ */
+function LevelCell({ shown, settled, tone, unavailable }: { shown: number; settled: number | null; tone: string; unavailable: boolean }) {
+  const differs = settled !== null && Math.abs(settled - shown) >= 0.005;
+  return (
+    <td className={`px-4 py-3 text-right font-mono ${tone}`}>
+      <div>{formatNumber(shown, 2)}</div>
+      {differs && <div className="text-xs text-slate-400" title="Level the verdict was judged on">settled {formatNumber(settled, 2)}</div>}
+      {unavailable && <div className="text-xs text-slate-500" title="The fill bar is no longer readable">settled n/a</div>}
+    </td>
+  );
 }
 
 export default function GoldShadowLedgerPage() {
@@ -128,6 +146,11 @@ export default function GoldShadowLedgerPage() {
         <GlassPanel className="flex flex-col flex-1 overflow-hidden">
           <div className="border-b border-white/5 bg-white/5 px-4 py-3">
             <h2 className="text-sm font-semibold text-white tracking-wide">SHADOW TRADE LOG (LAST 200)</h2>
+            <p className="mt-1 text-xs text-slate-400">
+              Levels are the idea&apos;s own. Where a second &quot;settled&quot; line appears, the verdict was judged on that level:
+              the entry is the 1m close in the minute the idea was generated, and the stop and target keep the idea&apos;s
+              distances from it. Prices are mid; spread is not charged.
+            </p>
           </div>
           <div className="overflow-auto flex-1 max-h-[500px] custom-scrollbar">
             <table className="w-full text-left text-sm text-slate-300">
@@ -156,9 +179,9 @@ export default function GoldShadowLedgerPage() {
                         {t.side}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right font-mono">{formatNumber(parseFloat(t.entry_price), 2)}</td>
-                    <td className="px-4 py-3 text-right font-mono text-emerald-400/80">{formatNumber(parseFloat(t.target_price), 2)}</td>
-                    <td className="px-4 py-3 text-right font-mono text-rose-400/80">{formatNumber(parseFloat(t.stop_loss), 2)}</td>
+                    <LevelCell shown={parseFloat(t.entry_price)} settled={t.settled?.entryPrice ?? null} tone="" unavailable={t.settled === null} />
+                    <LevelCell shown={parseFloat(t.target_price)} settled={t.settled?.targetPrice ?? null} tone="text-emerald-400/80" unavailable={false} />
+                    <LevelCell shown={parseFloat(t.stop_loss)} settled={t.settled?.stopLoss ?? null} tone="text-rose-400/80" unavailable={false} />
                     <td className="px-4 py-3 text-right font-mono">{formatNumber(parseFloat(t.risk_reward), 2)}R</td>
                     <td className="px-4 py-3">
                       {t.outcome === "TARGET" && <span className="inline-flex items-center gap-1 text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded text-xs"><CheckCircle2 className="size-3" /> TARGET</span>}

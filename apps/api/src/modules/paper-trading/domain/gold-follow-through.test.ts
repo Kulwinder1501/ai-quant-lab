@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { followThrough, goldFollowThroughResolverVersion } from "./gold-follow-through.js";
+import { followThrough, goldFollowThroughResolverVersion, reanchorBracket, settledLevels } from "./gold-follow-through.js";
 import type { CompletedPriceCandle } from "./paper-trade-exit-policy.js";
 
 const T0 = new Date("2026-10-12T05:00:00.000Z"); // first minute after the signal bar closed
@@ -83,5 +83,43 @@ describe("followThrough", () => {
 
   it("is OPEN, not an error, with no bars yet and no way to know of a hole", () => {
     expect(followThrough({ ...base, forwardCandles: [] })).toEqual({ status: "OPEN", barsObserved: 0 });
+  });
+});
+
+describe("reanchorBracket", () => {
+  // The 2026-10-27 11:36 IST gold SHORT: shown 4006.95 / stop 4012.391822 / target 4000.06, filled at 4005.855.
+  const shown = { side: "SHORT" as const, entryPrice: 4006.95, stopLoss: 4012.391822, targetPrice: 4000.06 };
+
+  it("moves a short's stop and target with the fill, keeping risk and reward distances", () => {
+    const levels = reanchorBracket(shown, 4005.855);
+    expect(levels.entryPrice).toBe(4005.855);
+    expect(levels.stopLoss).toBeCloseTo(4011.296822, 6);
+    expect(levels.targetPrice).toBeCloseTo(3998.965, 6);
+  });
+
+  it("moves a long's stop below and target above the fill", () => {
+    expect(reanchorBracket({ side: "LONG", entryPrice: 100, stopLoss: 98, targetPrice: 103 }, 101))
+      .toEqual({ entryPrice: 101, stopLoss: 99, targetPrice: 104 });
+  });
+
+  it("settledLevels re-anchors a follow-through settlement and labels it", () => {
+    const levels = settledLevels(shown, goldFollowThroughResolverVersion, 4005.855);
+    expect(levels?.basis).toBe("REANCHORED");
+    expect(levels?.stopLoss).toBeCloseTo(4011.296822, 6);
+  });
+
+  it("settledLevels reports the printed levels for the older bracket resolver", () => {
+    expect(settledLevels(shown, "bracket-outcome-v1", null))
+      .toEqual({ basis: "AS_SHOWN", entryPrice: 4006.95, stopLoss: 4012.391822, targetPrice: 4000.06 });
+  });
+
+  it("settledLevels refuses to guess when a re-anchored settlement has no readable fill bar", () => {
+    expect(settledLevels(shown, goldFollowThroughResolverVersion, null)).toBeNull();
+  });
+
+  it("is the identity when the fill equals the idea's entry", () => {
+    const levels = reanchorBracket(shown, shown.entryPrice);
+    expect(levels.stopLoss).toBeCloseTo(shown.stopLoss, 9);
+    expect(levels.targetPrice).toBeCloseTo(shown.targetPrice, 9);
   });
 });
