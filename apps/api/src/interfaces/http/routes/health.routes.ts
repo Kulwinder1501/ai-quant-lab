@@ -18,7 +18,7 @@ const CRITICAL_JOB_TYPES = [
 const MAX_CRITICAL_SUCCESS_AGE_HOURS = 72;
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
 
-export function registerHealthRoutes(app: Express, { database }: Pick<HttpDependencies, "database">): void {
+export function registerHealthRoutes(app: Express, { database, fyersLiveStreamer }: Pick<HttpDependencies, "database" | "fyersLiveStreamer">): void {
   app.get("/api/v1/health", (_request, response) => {
     response.status(200).json({ status: "ok", service: "ai-quant-lab-api" });
   });
@@ -30,6 +30,19 @@ export function registerHealthRoutes(app: Express, { database }: Pick<HttpDepend
     } catch {
       response.status(503).json({ status: "not_ready", database: { ready: false } });
     }
+  });
+
+  /**
+   * The API's live socket as it is right now: what it is subscribed to, which symbols have not answered, and how often it has had
+   * to be replaced. Symbols and counts only, never a token. The state to read BEFORE restarting the API when option prices freeze
+   * (a chain that streams the index but none of its contracts), so the cause can be found instead of lost to the restart.
+   */
+  app.get("/api/v1/health/fyers-stream", (_request, response) => {
+    if (!fyersLiveStreamer) {
+      response.status(503).json({ error: "Live streaming is not configured." });
+      return;
+    }
+    response.status(200).json({ data: fyersLiveStreamer.diagnostics() });
   });
 
   /**

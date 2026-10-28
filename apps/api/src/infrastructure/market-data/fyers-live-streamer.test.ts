@@ -556,3 +556,288 @@ describe("FyersLiveStreamer and a rotated access token", () => {
     expect(lines.join("\n")).not.toMatch(/secret-token/);
   });
 });
+
+/**
+ * The API's socket stayed connected and delivered the index while a whole option chain never ticked, with no error, on 2026-10-22,
+ * 10-26 and 10-28 (cause not found; restarting the API cured each). The watchdog tests the outcome: symbols asked for, old enough to
+ * have answered, that never did, while other symbols are ticking.
+ */
+describe("FyersLiveStreamer silent-symbol watchdog", () => {
+  const INDEX = "NSE:NIFTYBANK-INDEX";
+
+  function setup(slotLimit?: number) {
+    const sockets: Array<ReturnType<typeof fakeSocket>> = [];
+    const timers: Array<() => void> = [];
+    let nowMs = 1_000_000;
+    const streamer = new FyersLiveStreamer({
+      appId: "APPID-100",
+      tokenService: { getAccessToken: vi.fn(async () => "access-token") },
+      createSocket: () => { const s = fakeSocket(); sockets.push(s); return s; },
+      subscribeSpacingMs: 0,
+      ...(slotLimit === undefined ? {} : { socketSlotLimit: slotLimit }),
+      nowFn: () => nowMs,
+      setTimeoutFn: (handler) => { timers.push(handler); return 0; },
+    });
+    const options = (prefix: string, count: number) => Array.from({ length: count }, (_, i) => `NSE:BANKNIFTY26NOV${prefix}${i}CE`);
+    const flush = async () => { while (timers.length > 0) { timers.shift()!(); await Promise.resolve(); await Promise.resolve(); } };
+    const advance = (ms: number) => { nowMs += ms; };
+    const tick = (socket: ReturnType<typeof fakeSocket>, ...symbols: string[]) => {
+      for (const symbol of symbols) socket.fire("message", { symbol, ltp: 100, bid_price: 99, ask_price: 101 });
+    };
+    /** Connect, and subscribe the index plus `count` option symbols, as a chain page does. */
+    async function chain(count: number, prefix = "A") {
+      await streamer.connect();
+      sockets[sockets.length - 1]!.fire("connect");
+      const wanted = options(prefix, count);
+      streamer.subscribe([INDEX, ...wanted]);
+      return wanted;
+    }
+    /** Closes the current socket the way the vendor does, lets the reconnect run and confirms the new connection. */
+    async function reconnect() {
+      sockets[sockets.length - 1]!.fire("close");
+      await flush();
+      sockets[sockets.length - 1]!.fire("connect");
+    }
+    return { streamer, sockets, options, flush, advance, tick, chain, reconnect };
+  }
+
+  it("does nothing while every symbol answers", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX, ...wanted);
+    advance(31_000);
+    tick(sockets[0]!, INDEX, ...wanted);
+    expect(streamer.checkForSilentSymbols()).toMatchObject({ action: "NONE", silent: [] });
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("replaces the socket when a whole chain never answers while the index keeps ticking", async () => {
+    const { streamer, sockets, tick, chain, advance, reconnect } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+
+    const result = streamer.checkForSilentSymbols();
+
+    expect(result.action).toBe("RECYCLED");
+    expect([...result.silent].sort()).toEqual([...wanted].sort());
+    expect(sockets[0]!.connected).toBe(false);
+    await reconnect();
+    expect(sockets).toHaveLength(2);
+    // Everything still wanted is asked for again on the new connection, the index and the chain.
+    expect(sockets[1]!.subscribed.flat().sort()).toEqual([INDEX, ...wanted].sort());
+    expect(streamer.diagnostics().socketReplacements.forSilentSymbols).toBe(1);
+  });
+
+  it("does not act when the whole feed is quiet, which is a closed market and not a failed subscription", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    await chain(10);
+    advance(60_000);
+    expect(streamer.checkForSilentSymbols().action).toBe("NONE"); // nothing has ever ticked
+    tick(sockets[0]!, INDEX);
+    advance(20_000); // the last tick is older than the ten seconds that count as alive
+    const result = streamer.checkForSilentSymbols();
+    expect(result.action).toBe("NONE");
+    expect(result.reason).toMatch(/whole feed is quiet/);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("does not act on a contract or two that never answer, which is what an expired future does", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(20);
+    tick(sockets[0]!, INDEX, ...wanted.slice(2));
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    const result = streamer.checkForSilentSymbols();
+    expect(result.action).toBe("NONE");
+    expect(result.silent).toHaveLength(2);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("gives a new subscription time to answer before calling it silent", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(10_000);
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols()).toMatchObject({ action: "NONE", silent: [] });
+  });
+
+  it("starts the clock again when a symbol is unsubscribed and asked for afresh", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    streamer.unsubscribe(wanted);
+    streamer.subscribe(wanted); // a page closed and opened again
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols()).toMatchObject({ action: "NONE", silent: [] });
+  });
+
+  it("does not restart the clock when the same symbols are simply asked for again, as a second page does", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(20_000);
+    streamer.subscribe([INDEX, ...wanted]); // another page for the same chain
+    advance(11_000);
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+  });
+
+  it("counts a symbol that answered and then went quiet for two minutes while others keep ticking", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX, ...wanted);
+    advance(121_000);
+    tick(sockets[0]!, INDEX);
+    const result = streamer.checkForSilentSymbols();
+    expect(result.action).toBe("RECYCLED");
+    expect(result.silent).toHaveLength(10);
+  });
+
+  it("gives up on symbols still silent after one replacement, so an expired contract cannot cause a loop", async () => {
+    const { streamer, sockets, tick, chain, advance, reconnect } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+    await reconnect();
+
+    // The new connection: the index answers, the chain still does not.
+    tick(sockets[1]!, INDEX);
+    advance(31_000);
+    tick(sockets[1]!, INDEX);
+    const second = streamer.checkForSilentSymbols();
+    expect(second.action).toBe("NONE");
+    expect(streamer.diagnostics().deadSymbols.sort()).toEqual([...wanted].sort());
+
+    advance(300_000);
+    tick(sockets[1]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+    expect(sockets).toHaveLength(2); // never replaced a second time for the same symbols
+  });
+
+  it("counts a given-up symbol again the moment it answers", async () => {
+    const { streamer, sockets, tick, chain, advance, reconnect } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    streamer.checkForSilentSymbols();
+    await reconnect();
+    tick(sockets[1]!, INDEX);
+    advance(31_000);
+    tick(sockets[1]!, INDEX);
+    streamer.checkForSilentSymbols();
+    expect(streamer.diagnostics().deadSymbols).toHaveLength(10);
+
+    tick(sockets[1]!, wanted[0]!);
+    expect(streamer.diagnostics().deadSymbols).toHaveLength(9);
+  });
+
+  it("forgets a given-up symbol when it is unsubscribed, so tomorrow's subscription starts clean", async () => {
+    const { streamer, sockets, tick, chain, advance, reconnect } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    streamer.checkForSilentSymbols();
+    await reconnect();
+    tick(sockets[1]!, INDEX);
+    advance(31_000);
+    tick(sockets[1]!, INDEX);
+    streamer.checkForSilentSymbols();
+    streamer.unsubscribe(wanted);
+    expect(streamer.diagnostics().deadSymbols).toEqual([]);
+  });
+
+  it("does not replace the socket twice within two minutes, even for a different silent chain", async () => {
+    const { streamer, sockets, options, tick, chain, advance, reconnect } = setup();
+    await chain(10, "A");
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+    await reconnect();
+
+    streamer.subscribe(options("B", 10));
+    tick(sockets[1]!, INDEX);
+    advance(31_000);
+    tick(sockets[1]!, INDEX);
+    const tooSoon = streamer.checkForSilentSymbols();
+    expect(tooSoon.action).toBe("REFUSED");
+    expect(tooSoon.reason).toMatch(/not again so soon/);
+
+    advance(100_000);
+    tick(sockets[1]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+  });
+
+  it("is silent while the socket is down or being replaced, because the reconnect asks for everything again", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+    expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+    // The vendor's close event has not fired yet: the replacement is in progress.
+    expect(streamer.checkForSilentSymbols()).toMatchObject({ action: "NONE", silent: [] });
+  });
+
+  it("reports what a person needs to see, without a restart", async () => {
+    const { streamer, sockets, tick, chain, advance } = setup();
+    const wanted = await chain(10);
+    tick(sockets[0]!, INDEX);
+    advance(31_000);
+    tick(sockets[0]!, INDEX);
+
+    const diagnostics = streamer.diagnostics();
+
+    expect(diagnostics).toMatchObject({
+      connected: true,
+      wantedSymbols: 11,
+      slotsUsedOnThisConnection: 11,
+      lastTickAgeMs: 0,
+      silentSymbolCount: 10,
+      deadSymbols: [],
+      socketReplacements: { forSlots: 0, forSilentSymbols: 0 },
+      lastReplacementAt: null,
+    });
+    expect(diagnostics.silentSymbols.sort()).toEqual([...wanted].sort());
+  });
+
+  it("says so, at most once in five minutes, when the slot recycle is refused and symbols are sent to a socket that is probably full", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const { streamer, sockets, flush, advance } = setup(60);
+      const symbols = (prefix: string, count: number) => Array.from({ length: count }, (_, i) => `NSE:${prefix}${i}`);
+      await streamer.connect();
+      sockets[0]!.fire("connect");
+      streamer.subscribe(symbols("A", 50));
+      streamer.unsubscribe(symbols("A", 50));
+      streamer.subscribe(symbols("B", 30)); // 80 > 60: the first recycle is allowed
+      sockets[0]!.fire("close");
+      await flush();
+      sockets[1]!.fire("connect");
+      streamer.unsubscribe(symbols("B", 30));
+      streamer.subscribe(symbols("C", 40));
+      streamer.unsubscribe(symbols("C", 40));
+      streamer.subscribe(symbols("D", 40)); // would pass 60 again, seconds after the last recycle: refused
+      streamer.unsubscribe(symbols("D", 40));
+      streamer.subscribe(symbols("E", 40)); // refused again, but not reported again
+      expect(lines.filter((line) => line.includes("could not be replaced"))).toHaveLength(1);
+      expect(lines.join("\n")).toContain("REPLACED_TOO_RECENTLY");
+
+      advance(6 * 60_000);
+      streamer.unsubscribe(symbols("E", 40));
+      streamer.subscribe(symbols("F", 40)); // a recycle is allowed again by now, so this one is not a refusal
+      expect(lines.filter((line) => line.includes("could not be replaced"))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

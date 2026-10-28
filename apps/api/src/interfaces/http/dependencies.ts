@@ -3,6 +3,7 @@ import { PostgresAiJournalRepository } from "../../infrastructure/database/repos
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { LiveQuoteCache } from "../../infrastructure/market-data/live-quote-cache.js";
+import { startFyersStreamerWatchdog } from "../../infrastructure/market-data/fyers-streamer-watchdog.js";
 import { startLiveSideSplitFeed } from "../../infrastructure/market-data/live-side-split-feed.js";
 import { LiveSideSplit } from "../../modules/market-data/domain/live-side-split.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
@@ -128,7 +129,12 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
   const liveSideSplit = new LiveSideSplit();
   if (fyersLiveStreamer) {
     liveSideSplit.attach(fyersLiveStreamer);
-    if (options.streamQuotes) startLiveSideSplitFeed({ streamer: fyersLiveStreamer });
+    if (options.streamQuotes) {
+      startLiveSideSplitFeed({ streamer: fyersLiveStreamer });
+      // The API's socket has stayed connected while a whole option chain never ticked (2026-10-22, 10-26, 10-28). During the session
+      // this replaces it when symbols asked for never answer while others do; see fyers-live-streamer.ts.
+      startFyersStreamerWatchdog({ streamer: fyersLiveStreamer });
+    }
   }
 
   // Spot prices come from the live socket's ticks when they are fresh, and Fyers REST only refreshes the base they are
