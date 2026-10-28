@@ -101,13 +101,13 @@ describe("selectBotSandboxes", () => {
   });
 
   it("keeps only the named bot, or drops it, and the two together partition the roster", () => {
-    expect(names(["--only-bots=AutoBot-Sniper"])).toEqual(["AutoBot-Sniper"]);
-    const rest = names(["--skip-bots=AutoBot-Sniper"]);
-    expect(rest).not.toContain("AutoBot-Sniper");
-    expect([...rest, "AutoBot-Sniper"].sort()).toEqual(DUAL_BOT_SANDBOX.map((bot) => bot.name).sort());
+    expect(names(["--only-bots=AutoBot-Scalp1m"])).toEqual(["AutoBot-Scalp1m"]);
+    const rest = names(["--skip-bots=AutoBot-Scalp1m"]);
+    expect(rest).not.toContain("AutoBot-Scalp1m");
+    expect([...rest, "AutoBot-Scalp1m"].sort()).toEqual(DUAL_BOT_SANDBOX.map((bot) => bot.name).sort());
   });
 
   it("refuses an unknown bot name instead of running nothing or everything", () => {
-    expect(() => names(["--only-bots=AutoBot-Sniperr"])).toThrow(/Unknown bot/);
+    expect(() => names(["--only-bots=AutoBot-Scalp1mm"])).toThrow(/Unknown bot/);
   });
 });

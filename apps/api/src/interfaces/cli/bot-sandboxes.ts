@@ -91,25 +91,17 @@ export interface BotSandboxSpec {
  * them, the same position `trend-breakout` has been in since 2026-08-17). Its 272 historical
  * trades and account row are untouched; only future trading stopped. If the comparison is wanted
  * again later, restore this spec rather than inventing a new name -- its account already exists.
+ *
+ * `AutoBot-Sniper` was decommissioned on request (2026-10-28) following a definitive autopsy of its
+ * 276 closed trades (-Rs 64,152.93 net, 35.1% win rate, -Rs 22,337.84 across 14 consecutive losses on
+ * 2026-10-28 alone). Friction tax (Rs 24,809.68 in transaction costs, ~38.7% of total loss), negative
+ * expectancy on 5m candlestick patterns (Hammers/Engulfings on options), and excessive time stops/stalls
+ * falsified the premise of pattern-based option buying. Its account row in `paper_accounts` was deactivated
+ * (`is_active = false`), its historical trades and observations remain preserved, and its underlying
+ * strategies (`momentum-scalp-pattern`, `momentum-scalp-pattern-v2`) are now unowned. Future execution
+ * is stopped.
  */
 export const DUAL_BOT_SANDBOX: readonly BotSandboxSpec[] = [
-  {
-    name: "AutoBot-Sniper",
-    // Patterns only. `momentum-scalp-index` was here from 2026-08-17 to 2026-08-19 to make the arms
-    // nested; see above for why that could not be measured.
-    allowedStrategies: [
-      "momentum-scalp-pattern",
-      "momentum-scalp-pattern-v2",
-    ],
-    allowedSeries: [
-      { symbol: "BANKNIFTY", timeframe: "1m" },
-      { symbol: "BANKNIFTY", timeframe: "3m" },
-      { symbol: "BANKNIFTY", timeframe: "5m" },
-      { symbol: "NIFTY50", timeframe: "3m" },
-      { symbol: "NIFTY50", timeframe: "5m" },
-    ],
-    initialBalance: 1_000_000,
-  },
   /**
    * The 1m base scalp, which nothing traded until 2026-09-03.
    *
