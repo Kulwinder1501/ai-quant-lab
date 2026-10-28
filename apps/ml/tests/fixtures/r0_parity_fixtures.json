@@ -38271,14 +38271,34 @@
       ],
       "expected": {
         "as_of_date": "2026-10-16",
-        "state": "INSUFFICIENT_HISTORY",
+        "state": "OK",
         "atr14": 7.653568812779018,
         "atr_percent": 0.026681431584202487,
-        "nearest_support": null,
-        "nearest_resistance": null,
-        "risk_distance_atr": null,
-        "levels_count": 9,
+        "nearest_support": {
+          "price": 272.6000061035156,
+          "touches": 2,
+          "strength": 1.9036495209774964,
+          "state": "INTACT"
+        },
+        "nearest_resistance": {
+          "price": 295.3999938964844,
+          "touches": 2,
+          "strength": 1.3543875220429418,
+          "state": "FLIPPED"
+        },
+        "risk_distance_atr": 1.8618765112828208,
+        "levels_count": 17,
         "levels": [
+          {
+            "id": "swing-1-295.40",
+            "price": 295.3999938964844,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 2,
+            "strength": 1.3543875220429418,
+            "state": "FLIPPED"
+          },
           {
             "id": "ref-round-300.00",
             "price": 300.0,
@@ -38287,6 +38307,16 @@
             "side": "RESISTANCE",
             "touches": 1,
             "strength": 1.0,
+            "state": "INTACT"
+          },
+          {
+            "id": "swing-0-272.60",
+            "price": 272.6000061035156,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "SUPPORT",
+            "touches": 2,
+            "strength": 1.9036495209774964,
             "state": "INTACT"
           },
           {
@@ -38310,6 +38340,16 @@
             "state": "INTACT"
           },
           {
+            "id": "swing-2-319.20",
+            "price": 319.1999969482422,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 2,
+            "strength": 1.61283749572854,
+            "state": "INTACT"
+          },
+          {
             "id": "ref-vp-val-328.47",
             "price": 328.4733408610026,
             "kind": "VOLUME_PROFILE_VAL",
@@ -38317,6 +38357,16 @@
             "side": "RESISTANCE",
             "touches": 1,
             "strength": 1.0,
+            "state": "INTACT"
+          },
+          {
+            "id": "swing-3-334.89",
+            "price": 334.89000244140624,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 5,
+            "strength": 2.472828958745294,
             "state": "INTACT"
           },
           {
@@ -38340,6 +38390,16 @@
             "state": "INTACT"
           },
           {
+            "id": "swing-4-352.25",
+            "price": 352.25,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 3,
+            "strength": 1.8410287401005592,
+            "state": "INTACT"
+          },
+          {
             "id": "ref-vp-poc-359.06",
             "price": 359.0566716512044,
             "kind": "VOLUME_PROFILE_POC",
@@ -38350,6 +38410,26 @@
             "state": "INTACT"
           },
           {
+            "id": "swing-5-366.63",
+            "price": 366.6333414713542,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 3,
+            "strength": 1.3723578717318046,
+            "state": "INTACT"
+          },
+          {
+            "id": "swing-7-386.05",
+            "price": 386.0500030517578,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 2,
+            "strength": 0.7895373444450938,
+            "state": "INTACT"
+          },
+          {
             "id": "ref-vp-vah-399.43",
             "price": 399.4266682942708,
             "kind": "VOLUME_PROFILE_VAH",
@@ -38357,6 +38437,16 @@
             "side": "RESISTANCE",
             "touches": 1,
             "strength": 1.0,
+            "state": "INTACT"
+          },
+          {
+            "id": "swing-9-407.90",
+            "price": 407.8999938964844,
+            "kind": "SWING",
+            "source": "Swing Clusters",
+            "side": "RESISTANCE",
+            "touches": 2,
+            "strength": 1.2095494745979374,
             "state": "INTACT"
           },
           {

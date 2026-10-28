@@ -147,6 +147,15 @@ export function computeAtr14(
 }
 
 /**
+ * Fewest usable bars from which swing clusters are still built when the full lookback (lookbackBars + pivotHalfWindow + 1 = 258)
+ * is not yet available: a new listing, or a series restarted after a 40% corporate-action move. Below the full requirement the
+ * window is every usable bar rather than lookbackBars, and the result carries a warning saying so. Held in code, not in
+ * equity-rules-v1.json, so the pre-registered v1 rules and their pinned hash stay as they were. Mirrored in
+ * apps/ml/equity_stance_r0/levels.py (MIN_BARS_FOR_PARTIAL_SWING) -- the parity fixtures pin both.
+ */
+export const MIN_BARS_FOR_PARTIAL_SWING = 200;
+
+/**
  * Identifies swing pivots with half-window k (k bars before, k bars after).
  * Pivot at i is usable only from bar i + k.
  */
@@ -568,10 +577,20 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     };
   };
 
-  // Condition 3: Swing Clusters requires at least lookbackBars + pivotHalfWindow + 1 (258 bars)
+  // Condition 3: Swing Clusters use the full lookback from lookbackBars + pivotHalfWindow + 1 (258) bars. From
+  // MIN_BARS_FOR_PARTIAL_SWING (200) up to that they are built from every usable bar, with a warning; below it they are withheld.
   const requiredBarsForSwing = lookbackBars + pivotHalfWindow + 1;
-  if (usableCount >= requiredBarsForSwing) {
-    const pivots = findSwingPivots(usableBars, pivotHalfWindow, lookbackBars);
+  const minBarsForSwing = Math.min(requiredBarsForSwing, MIN_BARS_FOR_PARTIAL_SWING);
+  const hasFullSwingHistory = usableCount >= requiredBarsForSwing;
+  if (usableCount >= minBarsForSwing) {
+    if (!hasFullSwingHistory) {
+      globalWarnings.push(
+        `Swing levels are built from ${usableCount} trading bars, fewer than the ${requiredBarsForSwing} of the full lookback; they cover a shorter history than usual.`,
+      );
+    }
+    // Pivots start at index pivotHalfWindow, so a window of usableCount - pivotHalfWindow - 1 takes every bar there is.
+    const swingLookbackBars = hasFullSwingHistory ? lookbackBars : usableCount - pivotHalfWindow - 1;
+    const pivots = findSwingPivots(usableBars, pivotHalfWindow, swingLookbackBars);
     const clusters = clusterPivots(pivots, clusterGapPct);
 
     clusters.forEach((cluster, idx) => {
@@ -659,7 +678,7 @@ export function computeLevels(input: LevelsInput): LevelsResult {
     });
   } else {
     globalWarnings.push(
-      `Requires at least ${requiredBarsForSwing} trading bars to compute swing levels; ${usableCount} available.`,
+      `Requires at least ${minBarsForSwing} trading bars to compute swing levels; ${usableCount} available.`,
     );
   }
 
@@ -913,9 +932,9 @@ export function computeLevels(input: LevelsInput): LevelsResult {
       ? (currentClose - nearestSupport.price) / atr14
       : null;
 
-  // Condition 3: Determine overall state (OK only if swing levels could be produced with >= 258 bars)
+  // Condition 3: Determine overall state (OK only if swing levels could be produced, i.e. with >= minBarsForSwing bars)
   const state =
-    usableCount < requiredBarsForSwing
+    usableCount < minBarsForSwing
       ? "INSUFFICIENT_HISTORY"
       : "OK";
 

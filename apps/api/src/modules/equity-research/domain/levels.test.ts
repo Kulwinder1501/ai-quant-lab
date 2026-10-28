@@ -455,6 +455,66 @@ describe("Levels Engine Domain Logic (WP-B Step B1 - Reviewed Edition)", () => {
   });
 
   // =========================================================================
+  // Partial swing history: 200-257 bars (new listings, series restarted after a corporate action)
+  // =========================================================================
+  describe("Partial swing history (200 to 257 bars)", () => {
+    // A repeating wave, so swing pivots recur near the same prices and form clusters.
+    function waveBars(count: number) {
+      const bars: LevelsInput["bars"] = [];
+      const current = new Date(Date.UTC(2026, 0, 1));
+      for (let i = 0; i < count; i++) {
+        const close = 100 + 5 * Math.sin((i * 2 * Math.PI) / 20);
+        bars.push({
+          bar_date: current.toISOString().slice(0, 10),
+          open: close - 0.2,
+          high: close + 1.5,
+          low: close - 1.5,
+          close,
+          volume: 10_000,
+        });
+        current.setUTCDate(current.getUTCDate() + 1);
+      }
+      return bars;
+    }
+    const levelsFor = (count: number) => {
+      const bars = waveBars(count);
+      return computeLevels({ bars, rebackfillNeeded: false, asOfEvaluationDate: bars[count - 1].bar_date });
+    };
+    const swings = (res: ReturnType<typeof levelsFor>) => res.levels.filter((l) => l.kind === "SWING");
+
+    it("still withholds swing levels below 200 bars, and says what it needs", () => {
+      const res = levelsFor(199);
+      expect(res.state).toBe("INSUFFICIENT_HISTORY");
+      expect(swings(res).length).toBe(0);
+      expect(res.warnings.some((w) => w.includes("Requires at least 200 trading bars to compute swing levels; 199 available."))).toBe(true);
+    });
+
+    it("builds swing levels from exactly 200 bars, reports OK, and warns that the history is short", () => {
+      const res = levelsFor(200);
+      expect(res.state).toBe("OK");
+      expect(swings(res).length).toBeGreaterThan(0);
+      expect(res.levels.some((l) => l.kind === "52W_HIGH")).toBe(true);
+      expect(res.warnings.some((w) => w.includes("built from 200 trading bars, fewer than the 258"))).toBe(true);
+    });
+
+    it("keeps the warning up to 257 bars and drops it at 258, where the full lookback applies", () => {
+      expect(levelsFor(257).warnings.some((w) => w.includes("fewer than the 258"))).toBe(true);
+      const full = levelsFor(258);
+      expect(full.state).toBe("OK");
+      expect(full.warnings.some((w) => w.includes("fewer than the 258"))).toBe(false);
+      expect(swings(full).length).toBeGreaterThan(0);
+    });
+
+    it("takes every bar there is: the shortened window finds the same pivots as an unbounded one", () => {
+      const bars = waveBars(230);
+      const shortened = findSwingPivots(bars, 5, 230 - 5 - 1);
+      const unbounded = findSwingPivots(bars, 5, 10_000);
+      expect(shortened.length).toBeGreaterThan(0);
+      expect(shortened).toEqual(unbounded);
+    });
+  });
+
+  // =========================================================================
   // Gate L5: Edge Cases
   // =========================================================================
   describe("Gate L5: Edge Cases", () => {
@@ -713,6 +773,17 @@ describe("Levels Engine Domain Logic (WP-B Step B1 - Reviewed Edition)", () => {
         asOfEvaluationDate: bars[349].bar_date,
       });
       expect(() => scanObject(res, "res_ok")).not.toThrow();
+    });
+
+    it("verifies no banned terms in the partial-history state (200 to 257 bars)", () => {
+      const bars = generateBars(220, "2025-12-12", 100, 0.1);
+      const res = computeLevels({
+        bars,
+        rebackfillNeeded: false,
+        asOfEvaluationDate: bars[219].bar_date,
+      });
+      expect(res.warnings.some((w) => w.includes("fewer than the 258"))).toBe(true);
+      expect(() => scanObject(res, "res_partial")).not.toThrow();
     });
 
     it("verifies no banned terms in INSUFFICIENT_HISTORY state", () => {
