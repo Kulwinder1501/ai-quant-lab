@@ -29,6 +29,55 @@ export const goldFollowThroughResolverVersion = "gold-follow-through-v1";
 
 const MINUTE_MS = 60_000;
 
+export interface BracketLevels {
+  readonly entryPrice: number;
+  readonly stopLoss: number;
+  readonly targetPrice: number;
+}
+
+/**
+ * The bracket the resolver actually judges: entered at `fillPrice`, with the idea's own risk and reward
+ * DISTANCES kept from that fill. The idea's printed levels can sit minutes behind the market, so the
+ * stop and target move with the fill rather than staying where the idea put them. One function for the
+ * resolver and the ledger page, so the levels shown beside a verdict are the levels that produced it.
+ */
+export function reanchorBracket(
+  idea: BracketLevels & { readonly side: TradeSide },
+  fillPrice: number,
+): BracketLevels {
+  const risk = Math.abs(idea.entryPrice - idea.stopLoss);
+  const reward = Math.abs(idea.targetPrice - idea.entryPrice);
+  const long = idea.side === "LONG";
+  return {
+    entryPrice: fillPrice,
+    stopLoss: long ? fillPrice - risk : fillPrice + risk,
+    targetPrice: long ? fillPrice + reward : fillPrice - reward,
+  };
+}
+
+export interface SettledLevels extends BracketLevels {
+  /** REANCHORED: shifted to the fill. AS_SHOWN: the resolver used the idea's own printed levels. */
+  readonly basis: "REANCHORED" | "AS_SHOWN";
+}
+
+/**
+ * The levels a stored settlement was judged on, for display beside the idea's printed ones.
+ * Only the follow-through resolver re-anchors; the older bracket resolver judged the printed levels.
+ * Returns null when the settlement was re-anchored but the fill bar is no longer readable, because
+ * guessing would put a level on screen that nothing was ever judged against.
+ */
+export function settledLevels(
+  idea: BracketLevels & { readonly side: TradeSide },
+  resolverVersion: string,
+  fillPrice: number | null,
+): SettledLevels | null {
+  if (resolverVersion !== goldFollowThroughResolverVersion) {
+    return { basis: "AS_SHOWN", entryPrice: idea.entryPrice, stopLoss: idea.stopLoss, targetPrice: idea.targetPrice };
+  }
+  if (fillPrice === null || !Number.isFinite(fillPrice)) return null;
+  return { basis: "REANCHORED", ...reanchorBracket(idea, fillPrice) };
+}
+
 export type FollowThroughResult =
   | { readonly status: "RESOLVED"; readonly settlement: CandidateSettlement }
   | { readonly status: "OPEN"; readonly barsObserved: number }

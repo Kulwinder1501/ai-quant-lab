@@ -3,6 +3,9 @@ import { PostgresAiJournalRepository } from "../../infrastructure/database/repos
 import { FyersTokenService } from "../../infrastructure/market-data/fyers-token-service.js";
 import { FyersLiveStreamer } from "../../infrastructure/market-data/fyers-live-streamer.js";
 import { LiveQuoteCache } from "../../infrastructure/market-data/live-quote-cache.js";
+import { startFyersStreamerWatchdog } from "../../infrastructure/market-data/fyers-streamer-watchdog.js";
+import { startLiveSideSplitFeed } from "../../infrastructure/market-data/live-side-split-feed.js";
+import { LiveSideSplit } from "../../modules/market-data/domain/live-side-split.js";
 import { FyersQuoteClient } from "../../infrastructure/market-data/fyers-quote-client.js";
 import { QuoteSessionClock, UiQuoteBudget } from "../../infrastructure/market-data/quote-guards.js";
 import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
@@ -119,6 +122,20 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
   // the price the option-chain stream is showing -- for any strike, not only the ones the collector subscribes.
   const liveQuoteCache = new LiveQuoteCache();
   if (fyersLiveStreamer) liveQuoteCache.attach(fyersLiveStreamer);
+
+  // The live volume-at-price side split: an in-memory estimate from the ticks this process hears, never stored. Only the
+  // API (which serves the page) keeps the two front-month futures subscribed; other callers of this builder get an empty
+  // one and ask for nothing. See live-side-split.ts for what the numbers are and are not.
+  const liveSideSplit = new LiveSideSplit();
+  if (fyersLiveStreamer) {
+    liveSideSplit.attach(fyersLiveStreamer);
+    if (options.streamQuotes) {
+      startLiveSideSplitFeed({ streamer: fyersLiveStreamer });
+      // The API's socket has stayed connected while a whole option chain never ticked (2026-10-22, 10-26, 10-28). During the session
+      // this replaces it when symbols asked for never answer while others do; see fyers-live-streamer.ts.
+      startFyersStreamerWatchdog({ streamer: fyersLiveStreamer });
+    }
+  }
 
   // Spot prices come from the live socket's ticks when they are fresh, and Fyers REST only refreshes the base they are
   // laid over (previous close, open, volume). The market-watch and live-agent streams asked REST for the same few
@@ -245,6 +262,7 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
     futuresBarRepository: new PostgresFuturesBarRepository(pool),
     fyersLiveStreamer,
     liveQuoteCache,
+    liveSideSplit,
     aiAutonomousAgent,
   };
 }

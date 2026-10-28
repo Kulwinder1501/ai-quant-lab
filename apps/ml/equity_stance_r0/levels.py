@@ -110,6 +110,11 @@ def compute_atr14(bars: list[Bar], period: int = 14) -> Optional[float]:
     return sum(last_n) / period
 
 
+# Fewest usable bars from which swing clusters are still built when the full lookback (lookback_bars + pivot_half_window + 1 = 258)
+# is not yet available. Mirrors MIN_BARS_FOR_PARTIAL_SWING in apps/api/.../equity-research/domain/levels.ts; the parity fixtures pin both.
+MIN_BARS_FOR_PARTIAL_SWING = 200
+
+
 def find_swing_pivots(bars: list[Bar], k: int = 5, lookback_bars: int = 252) -> list[SwingPivot]:
     total_bars = len(bars)
     if total_bars < 2 * k + 1:
@@ -419,10 +424,17 @@ def compute_levels(
             volume=volume,
         )
 
-    # 1. Swing Clusters (requires >= 258 bars)
+    # 1. Swing Clusters: full lookback from 258 bars; from MIN_BARS_FOR_PARTIAL_SWING (200) up to that, every usable bar, with a warning
     required_bars_for_swing = lookback_bars + pivot_half_window + 1
-    if usable_count >= required_bars_for_swing:
-        pivots = find_swing_pivots(usable_bars, pivot_half_window, lookback_bars)
+    min_bars_for_swing = min(required_bars_for_swing, MIN_BARS_FOR_PARTIAL_SWING)
+    has_full_swing_history = usable_count >= required_bars_for_swing
+    if usable_count >= min_bars_for_swing:
+        if not has_full_swing_history:
+            warnings.append(
+                f"Swing levels are built from {usable_count} trading bars, fewer than the {required_bars_for_swing} of the full lookback; they cover a shorter history than usual."
+            )
+        swing_lookback_bars = lookback_bars if has_full_swing_history else usable_count - pivot_half_window - 1
+        pivots = find_swing_pivots(usable_bars, pivot_half_window, swing_lookback_bars)
         clusters = cluster_pivots(pivots, cluster_gap_pct)
 
         for idx, cluster in enumerate(clusters):
@@ -500,7 +512,7 @@ def compute_levels(
             )
     else:
         warnings.append(
-            f"Requires at least {required_bars_for_swing} trading bars to compute swing levels; {usable_count} available."
+            f"Requires at least {min_bars_for_swing} trading bars to compute swing levels; {usable_count} available."
         )
 
     # 2. Reference Level: 52-Week High & Low (trailing 365 calendar days)
@@ -723,7 +735,7 @@ def compute_levels(
         else None
     )
 
-    state = "INSUFFICIENT_HISTORY" if usable_count < required_bars_for_swing else "OK"
+    state = "INSUFFICIENT_HISTORY" if usable_count < min_bars_for_swing else "OK"
 
     return LevelsResult(
         as_of_date=as_of_date,

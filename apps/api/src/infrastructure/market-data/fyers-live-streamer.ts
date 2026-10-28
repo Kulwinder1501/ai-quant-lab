@@ -96,6 +96,48 @@ const DEFAULT_SOCKET_SLOT_LIMIT = 64;
 /** A socket is not replaced again within this long, so a wanted set that cannot fit does not reconnect in a loop. */
 const MIN_RECYCLE_INTERVAL_MS = 60_000;
 
+/*
+ * The silent-symbol watchdog. The API's socket has, three times in six days (2026-10-22, 10-26, 10-28), stayed connected and kept
+ * delivering the index while the option contracts of one chain never ticked, with no error anywhere. The cause was not found, so the
+ * watchdog tests the outcome instead: symbols that were asked for, had time to answer, and never did, while other symbols are ticking.
+ */
+/** A symbol asked for this long ago and not yet heard from counts as silent. The feed answers a new subscription within seconds. */
+const SILENT_GRACE_MS = 30_000;
+/** Some symbol must have ticked this recently, or the whole feed is quiet (market closed, or a failure no recycle of this kind addresses). */
+const FEED_ALIVE_WINDOW_MS = 10_000;
+/** A symbol that did tick and then said nothing for this long, while others tick, is silent too. Option contracts tick about twice a second. */
+const STALE_AFTER_MS = 120_000;
+/** Fewer silent symbols than this is a dead contract or two (an expired future delivers nothing), not a failed subscription. */
+const SILENT_MIN_SYMBOLS = 5;
+/** And they must be at least this share of the symbols old enough to judge. */
+const SILENT_MIN_SHARE = 0.2;
+/** Replacing the socket drops every symbol for several seconds, so this is deliberately slower than the slot recycle. */
+const MIN_SILENT_RECYCLE_INTERVAL_MS = 120_000;
+/** A refused recycle is reported at most this often, so a stuck condition cannot flood the log. */
+const REFUSAL_LOG_INTERVAL_MS = 5 * 60_000;
+
+export type SilentSymbolCheck =
+  | { action: "NONE"; reason: string; silent: string[] }
+  | { action: "RECYCLED" | "REFUSED"; reason: string; silent: string[] };
+
+/** What a person needs to see, without a restart, when the feed misbehaves. Symbols only: nothing secret. */
+export interface StreamerDiagnostics {
+  connected: boolean;
+  wantedSymbols: number;
+  slotsUsedOnThisConnection: number;
+  /** Milliseconds since any symbol last ticked on this process, or null if none has. */
+  lastTickAgeMs: number | null;
+  /** Wanted symbols old enough to judge that have not ticked (or stopped), at most forty named. */
+  silentSymbols: string[];
+  silentSymbolCount: number;
+  /** Symbols still silent after a replacement: given up on, so they cannot trigger another one. */
+  deadSymbols: string[];
+  reconnectAttempts: number;
+  droppedMessages: number;
+  socketReplacements: { forSlots: number; forSilentSymbols: number };
+  lastReplacementAt: string | null;
+}
+
 export function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -212,6 +254,19 @@ export class FyersLiveStreamer extends EventEmitter {
   private recycling = false;
   private lastRecycleAt = 0;
   private overCapacityLogged = false;
+  /** When each symbol was first asked for on this connection (since it was last unsubscribed). Cleared on every new connection. */
+  private readonly subscribedAt = new Map<string, number>();
+  /** When each symbol last ticked on this connection. Cleared on every new connection, and when a symbol is asked for afresh. */
+  private readonly lastTickAt = new Map<string, number>();
+  /** The last tick of any symbol, on any connection: whether the feed as a whole is alive. */
+  private lastAnyTickAt: number | null = null;
+  /** The symbols that were silent when the socket was last replaced for them; still silent afterwards means given up on. */
+  private readonly silentBeforeReplacement = new Set<string>();
+  private readonly deadSymbols = new Set<string>();
+  private replacementsForSlots = 0;
+  private replacementsForSilentSymbols = 0;
+  private lastReplacementAt: number | null = null;
+  private lastRefusalLoggedAt = 0;
   private reconnecting = false;
   private reconnectAttempts = 0;
   private droppedMessages = 0;
@@ -286,6 +341,9 @@ export class FyersLiveStreamer extends EventEmitter {
         // Whatever was queued for the previous connection is moot: everything wanted is sent again below.
         this.outbox.length = 0;
         this.socketSlots.clear();
+        // What a symbol has said, or when it was asked for, belongs to one connection: a new one starts every symbol afresh.
+        this.subscribedAt.clear();
+        this.lastTickAt.clear();
         if (this.currentSubscriptions.size > 0) {
           for (const symbol of this.currentSubscriptions) this.socketSlots.add(symbol);
           this.send("subscribe", [...this.currentSubscriptions]);
@@ -307,6 +365,10 @@ export class FyersLiveStreamer extends EventEmitter {
           }
           return;
         }
+        const receivedAt = this.now();
+        this.lastTickAt.set(tick.symbol, receivedAt);
+        this.lastAnyTickAt = receivedAt;
+        if (this.deadSymbols.size > 0) this.deadSymbols.delete(tick.symbol);
         this.emit("tick", tick);
       });
 
@@ -369,7 +431,13 @@ export class FyersLiveStreamer extends EventEmitter {
     if (this.isSocketConnected()) {
       const fresh = symbols.filter((symbol) => !this.socketSlots.has(symbol));
       const limit = this.options.socketSlotLimit ?? DEFAULT_SOCKET_SLOT_LIMIT;
-      if (fresh.length > 0 && this.socketSlots.size + fresh.length > limit && this.tryRecycleSocket(limit)) return;
+      if (fresh.length > 0 && this.socketSlots.size + fresh.length > limit) {
+        const attempt = this.tryRecycleSocket(limit);
+        if (attempt.recycled) return;
+        // Until now a refused recycle was silent: the symbols were sent to a socket that is probably full, which ignores them
+        // without a word. Say so, at most once in a while.
+        this.logRefusedRecycle(attempt.reason, { slotsUsed: this.socketSlots.size, wanted: this.currentSubscriptions.size, limit, newSymbols: fresh.length });
+      }
       for (const symbol of fresh) this.socketSlots.add(symbol);
       this.send("subscribe", symbols);
     } else if (isNew) {
@@ -377,12 +445,16 @@ export class FyersLiveStreamer extends EventEmitter {
     }
   }
 
+  private now(): number {
+    return (this.options.nowFn ?? Date.now)();
+  }
+
   /**
    * Replaces the connection so the slots used by symbols no longer wanted are freed. Only when what is wanted now fits
    * (otherwise a new connection would be just as full) and not more than once a minute. The vendor socket's own close
    * event then reconnects, after the usual short delay, and resubscribes the wanted set.
    */
-  private tryRecycleSocket(limit: number): boolean {
+  private tryRecycleSocket(limit: number): { recycled: true } | { recycled: false; reason: string } {
     if (this.currentSubscriptions.size > limit) {
       if (!this.overCapacityLogged) {
         this.overCapacityLogged = true;
@@ -391,18 +463,28 @@ export class FyersLiveStreamer extends EventEmitter {
           limit,
         });
       }
-      return false;
+      return { recycled: false, reason: "MORE_WANTED_THAN_ONE_SOCKET_HOLDS" };
     }
-    const now = (this.options.nowFn ?? Date.now)();
-    if (now - this.lastRecycleAt < MIN_RECYCLE_INTERVAL_MS || this.socket === null) return false;
-    this.lastRecycleAt = now;
-    this.recycling = true;
-    this.reconnectAttempts = 0;
-    log("info", "Replacing the Fyers data socket to free subscription slots", {
+    if (this.socket === null) return { recycled: false, reason: "NO_SOCKET" };
+    if (this.now() - this.lastRecycleAt < MIN_RECYCLE_INTERVAL_MS) return { recycled: false, reason: "REPLACED_TOO_RECENTLY" };
+    const replaced = this.replaceSocket("Replacing the Fyers data socket to free subscription slots", {
       slotsUsed: this.socketSlots.size,
       wanted: this.currentSubscriptions.size,
       limit,
     });
+    if (!replaced) return { recycled: false, reason: "CLOSE_FAILED" };
+    this.replacementsForSlots += 1;
+    return { recycled: true };
+  }
+
+  /** Closes the current socket on purpose; its own close event reconnects and resubscribes what is wanted. */
+  private replaceSocket(message: string, extra: Record<string, unknown>): boolean {
+    if (this.socket === null) return false;
+    this.lastRecycleAt = this.now();
+    this.lastReplacementAt = this.lastRecycleAt;
+    this.recycling = true;
+    this.reconnectAttempts = 0;
+    log("info", message, extra);
     try {
       this.socket.close();
     } catch (error) {
@@ -415,9 +497,134 @@ export class FyersLiveStreamer extends EventEmitter {
     return true;
   }
 
+  private logRefusedRecycle(reason: string, extra: Record<string, unknown>): void {
+    const now = this.now();
+    if (now - this.lastRefusalLoggedAt < REFUSAL_LOG_INTERVAL_MS) return;
+    this.lastRefusalLoggedAt = now;
+    log("error", "The Fyers socket could not be replaced; symbols sent to it now may not stream", { reason, ...extra });
+  }
+
+  /**
+   * Symbols that were asked for on this connection long enough ago to have answered, and have not (or stopped). `judged` is how many
+   * symbols were old enough to judge, the denominator for "a real share of them".
+   */
+  private findSilentSymbols(now: number): { silent: string[]; judged: number } {
+    const silent: string[] = [];
+    let judged = 0;
+    for (const symbol of this.currentSubscriptions) {
+      if (this.deadSymbols.has(symbol)) continue;
+      const askedAt = this.subscribedAt.get(symbol);
+      if (askedAt === undefined || now - askedAt < SILENT_GRACE_MS) continue;
+      judged += 1;
+      const lastTick = this.lastTickAt.get(symbol);
+      if (lastTick === undefined || now - lastTick > STALE_AFTER_MS) silent.push(symbol);
+    }
+    return { silent, judged };
+  }
+
+  /**
+   * Replaces the socket when the feed is alive but a real share of what was asked for never answered. Called by the host on a timer
+   * (during the session only); it never schedules anything itself, so a test can drive it with `nowFn`.
+   *
+   * It acts only when ticks are arriving for some symbols, because a feed that is quiet as a whole (market closed, holiday) is not
+   * this failure. A symbol still silent after one replacement is given up on, because an expired contract delivers nothing and would
+   * otherwise be replaced for forever; it counts again the moment it ticks or is unsubscribed.
+   */
+  checkForSilentSymbols(): SilentSymbolCheck {
+    if (this.closed) return { action: "NONE", reason: "The streamer is closed.", silent: [] };
+    if (this.recycling || !this.isSocketConnected()) {
+      return { action: "NONE", reason: "The socket is not connected; the reconnect asks again for everything wanted.", silent: [] };
+    }
+    const now = this.now();
+    const { silent: allSilent, judged } = this.findSilentSymbols(now);
+
+    // Second chance used: still silent on the new connection means dead. Ones that ticked since are cleared.
+    const stillSilent = allSilent.filter((symbol) => this.silentBeforeReplacement.has(symbol));
+    for (const symbol of [...this.silentBeforeReplacement]) {
+      if (this.lastTickAt.has(symbol) || !this.currentSubscriptions.has(symbol)) this.silentBeforeReplacement.delete(symbol);
+    }
+    if (stillSilent.length > 0) {
+      for (const symbol of stillSilent) {
+        this.deadSymbols.add(symbol);
+        this.silentBeforeReplacement.delete(symbol);
+      }
+      log("error", "Fyers symbols stayed silent after the socket was replaced; treating them as dead and no longer counting them", {
+        count: stillSilent.length,
+        sample: stillSilent.slice(0, 10),
+      });
+    }
+    const silent = allSilent.filter((symbol) => !this.deadSymbols.has(symbol));
+
+    if (this.lastAnyTickAt === null || now - this.lastAnyTickAt > FEED_ALIVE_WINDOW_MS) {
+      return { action: "NONE", reason: "No symbol has ticked in the last ten seconds, so the whole feed is quiet; that is not a failed subscription.", silent };
+    }
+    if (silent.length < SILENT_MIN_SYMBOLS || silent.length < SILENT_MIN_SHARE * judged) {
+      return { action: "NONE", reason: `${silent.length} silent of ${judged} old enough to judge: too few to call a failed subscription.`, silent };
+    }
+    const sinceLast = now - this.lastRecycleAt;
+    if (sinceLast < MIN_SILENT_RECYCLE_INTERVAL_MS) {
+      const reason = `The socket was replaced ${Math.round(sinceLast / 1000)} s ago; not again so soon.`;
+      this.logRefusedRecycle("REPLACED_TOO_RECENTLY", { silentSymbols: silent.length, judged });
+      return { action: "REFUSED", reason, silent };
+    }
+
+    for (const symbol of silent) this.silentBeforeReplacement.add(symbol);
+    const replaced = this.replaceSocket("The Fyers socket is connected and ticking, but symbols it was asked for never answered; replacing it", {
+      silentSymbols: silent.length,
+      judged,
+      sample: silent.slice(0, 8),
+      wanted: this.currentSubscriptions.size,
+      slotsUsed: this.socketSlots.size,
+      lastTickAgeMs: now - this.lastAnyTickAt,
+    });
+    if (!replaced) {
+      for (const symbol of silent) this.silentBeforeReplacement.delete(symbol);
+      return { action: "REFUSED", reason: "The socket could not be closed.", silent };
+    }
+    this.replacementsForSilentSymbols += 1;
+    return { action: "RECYCLED", reason: `${silent.length} of ${judged} symbols never answered; the socket was replaced.`, silent };
+  }
+
+  /** The state a person needs when the feed misbehaves, so the next occurrence is captured before anything is restarted. */
+  diagnostics(): StreamerDiagnostics {
+    const now = this.now();
+    const { silent } = this.findSilentSymbols(now);
+    return {
+      connected: this.isSocketConnected(),
+      wantedSymbols: this.currentSubscriptions.size,
+      slotsUsedOnThisConnection: this.socketSlots.size,
+      lastTickAgeMs: this.lastAnyTickAt === null ? null : now - this.lastAnyTickAt,
+      silentSymbols: silent.slice(0, 40),
+      silentSymbolCount: silent.length,
+      deadSymbols: [...this.deadSymbols].slice(0, 40),
+      reconnectAttempts: this.reconnectAttempts,
+      droppedMessages: this.droppedMessages,
+      socketReplacements: { forSlots: this.replacementsForSlots, forSilentSymbols: this.replacementsForSilentSymbols },
+      lastReplacementAt: this.lastReplacementAt === null ? null : new Date(this.lastReplacementAt).toISOString(),
+    };
+  }
+
+  /** When a symbol was first asked for on this connection; an unsubscribe wipes it, so a later subscribe starts afresh. */
+  private noteSent(operation: "subscribe" | "unsubscribe", symbols: string[]): void {
+    const now = this.now();
+    for (const symbol of symbols) {
+      if (operation === "unsubscribe") {
+        this.subscribedAt.delete(symbol);
+        this.lastTickAt.delete(symbol);
+      } else if (!this.subscribedAt.has(symbol)) {
+        this.subscribedAt.set(symbol, now);
+        this.lastTickAt.delete(symbol);
+      }
+    }
+  }
+
   unsubscribe(symbols: string[]): void {
     if (!symbols || symbols.length === 0) return;
     for (const symbol of symbols) this.currentSubscriptions.delete(symbol);
+    for (const symbol of symbols) {
+      this.deadSymbols.delete(symbol);
+      this.silentBeforeReplacement.delete(symbol);
+    }
     if (this.isSocketConnected() && !this.recycling) {
       this.send("unsubscribe", symbols);
     }
@@ -445,6 +652,7 @@ export class FyersLiveStreamer extends EventEmitter {
       if (this.socket !== null) {
         try {
           this.socket[next.operation](next.symbols);
+          this.noteSent(next.operation, next.symbols);
         } catch (error) {
           log("error", "Could not send a Fyers subscription packet", {
             operation: next.operation,

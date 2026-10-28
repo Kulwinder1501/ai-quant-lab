@@ -13,6 +13,7 @@ import { OiHistoryPanel } from "./oi-history-panel";
 import { DepthView } from "./depth-view";
 import { ExposurePanel } from "./exposure-panel";
 import { VolumeProfilePanel } from "./volume-profile-panel";
+import { LiveSideSplitPanel } from "./live-side-split-panel";
 import { VolumeByTimePanel } from "./volume-by-time-panel";
 import { DevelopingValuePanel } from "./developing-value-panel";
 import { DataCoveragePanel } from "./data-coverage-panel";
@@ -495,6 +496,8 @@ export function OptionChainDashboard() {
               <div className="px-4 py-4">
                 {/* Futures bars from the database, not the broker; keyed so a switch drops the session and row choice. */}
                 <VolumeProfilePanel key={`profile-${underlying}`} underlying={underlying} nowMs={now} />
+                {/* Today's buy/sell split at price, counted live in the server's memory (an estimate, never stored). */}
+                <LiveSideSplitPanel key={`live-split-${underlying}`} underlying={underlying} nowMs={now} />
                 {/* The same profile as it formed through the day; keyed so a switch drops its own selections. */}
                 <DevelopingValuePanel key={`developing-${underlying}`} underlying={underlying} nowMs={now} />
                 {/* Observed volume by time of day, same futures bars; keyed so a switch drops its own selections. */}

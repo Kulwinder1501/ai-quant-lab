@@ -139,6 +139,27 @@ describe("collector health", () => {
     expect(health.persistenceLagMs).toEqual({ median: 2_500, max: 2_500 });
   });
 
+  it("evaluates a session with hundreds of thousands of rows", () => {
+    // 230,000 rows is a busy real day; spreading that many into Math.max overflowed the stack.
+    const observations: CollectorObservation[] = [];
+    for (let ms = expectedOpenAt.getTime(); ms <= expectedCloseAt.getTime(); ms += 100) {
+      observations.push({
+        observedAt: new Date(ms),
+        exchangeFeedTime: new Date(ms - 1_000),
+        persistedAt: new Date(ms + 2_500),
+        collectorRegime: "STREAMER_V2_SOURCE_CLOCKS_AND_RETENTION",
+      });
+    }
+    const slow = observations[100_000]!;
+    observations[100_000] = { ...slow, persistedAt: new Date(slow.observedAt.getTime() + 9_000) };
+    expect(observations.length).toBeGreaterThan(200_000);
+
+    const health = evaluateCollectorHealth({ ...base, observations });
+
+    expect(health.persistenceLagMs).toEqual({ median: 2_500, max: 9_000 });
+    expect(health.status).toBe("HEALTHY");
+  });
+
   it("flags an unexpected regime change mid-session", () => {
     const health = evaluateCollectorHealth({
       ...base,

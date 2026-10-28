@@ -27,6 +27,7 @@ import {
   type PendingOrderMeta,
 } from "../../domain/manual-option-order.js";
 import { PrepareOptionEntry } from "../../application/prepare-option-entry.js";
+import { settledLevels } from "../../domain/gold-follow-through.js";
 import { isOptionBuyerTrade } from "../../domain/option-mark-to-market.js";
 import {
   MAXIMUM_ANCHORED_QUOTE_AGE_MS,
@@ -311,10 +312,20 @@ export function registerPaperTradingRoutes(
           ti.risk_reward,
           cs.outcome,
           cs.r_multiple,
-          cs.settled_at
+          cs.settled_at,
+          cs.resolver_version,
+          fill.close AS fill_close
         FROM candidate_settlements cs
         JOIN trade_ideas ti ON cs.trade_idea_id = ti.id
         JOIN instruments i ON i.id = ti.instrument_id
+        -- The 1m bar containing the generation minute: its close is the fill the follow-through resolver
+        -- re-anchored the bracket to (see resolve-gold-shadow.ts).
+        LEFT JOIN LATERAL (
+          SELECT c.close FROM candles c
+           WHERE c.instrument_id = ti.instrument_id AND c.timeframe = '1m' AND c.is_complete = TRUE
+             AND c.open_time = date_trunc('minute', ti.generated_at)
+           LIMIT 1
+        ) fill ON TRUE
         WHERE ti.evidence->>'strategy' = $1 AND i.symbol = 'XAU_USD'
         ORDER BY ti.generated_at DESC
         LIMIT 200;
@@ -322,9 +333,24 @@ export function registerPaperTradingRoutes(
 
       await client.end();
 
+      /*
+       * `entry_price`, `stop_loss` and `target_price` stay the idea's printed levels. `settled` is what the
+       * verdict was judged on: the follow-through resolver re-anchors the bracket to the 1m close at the
+       * generation minute, so a row can read STOP without ever touching its printed stop.
+       */
+      const trades = detailsResult.rows.map(({ fill_close: fillClose, resolver_version: resolverVersion, ...row }) => ({
+        ...row,
+        resolver_version: resolverVersion,
+        settled: settledLevels(
+          { side: row.side as TradeSide, entryPrice: Number(row.entry_price), stopLoss: Number(row.stop_loss), targetPrice: Number(row.target_price) },
+          String(resolverVersion),
+          fillClose === null ? null : Number(fillClose),
+        ),
+      }));
+
       response.status(200).json({
         summary: aggResult.rows,
-        trades: detailsResult.rows
+        trades,
       });
     } catch (error) {
       next(error);
