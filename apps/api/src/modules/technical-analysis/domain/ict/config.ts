@@ -1,3 +1,4 @@
+import type { IctGapGuard } from "./series-gaps.js";
 import { createHash } from "node:crypto";
 
 /*
@@ -95,13 +96,16 @@ export const defaultIctEngineConfig: IctEngineConfig = {
   invertedBlocksRemainPoi: false,
 };
 
-export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig): string {
+export function computeIctConfigHash(config: IctEngineConfig = defaultIctEngineConfig, gapGuard: IctGapGuard | null = null): string {
   const sortedKeys = Object.keys(config).sort() as (keyof IctEngineConfig)[];
   const normalized: Record<string, unknown> = {};
   for (const k of sortedKeys) {
     normalized[k] = config[k];
   }
-  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+  // Only an instrument that has a gap guard (gold) carries it in its cache identity, so every other instrument keeps the hash, and the
+  // stored snapshots, it always had. A guarded engine computes different snapshots from an unguarded one, so it must not share a key.
+  const identity = gapGuard === null ? normalized : { ...normalized, gapGuard };
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
 }
 
 /**
@@ -119,7 +123,12 @@ export interface DrawOnLiquidityObservation {
   readonly selectionRuleVersion: string;
 }
 
-export type PillarCoverageState = "COMPLETE" | "NOT_COVERED" | "UNKNOWN";
+/**
+ * COMPLETE: enough evidence. NOT_COVERED / UNKNOWN: absent or ambiguous evidence (warm-up, no target). INCOMPLETE: the evidence exists but
+ * was computed over a series with a hole in it (see `series-gaps.ts`), so it must not be used. Every gate compares against COMPLETE, so
+ * any other state is unavailable to it.
+ */
+export type PillarCoverageState = "COMPLETE" | "NOT_COVERED" | "UNKNOWN" | "INCOMPLETE";
 
 export interface PillarCoverage {
   readonly structure: PillarCoverageState;
@@ -190,6 +199,11 @@ export interface IctStateCompositeSnapshot {
    */
   readonly htfBias: import("./bias.js").IctBiasDirection | null;
   readonly coverage: PillarCoverage;
+  /**
+   * Present only on an instrument with a gap guard. The most recent data gap (a hole of an hour or more inside the instrument's open
+   * hours) that is still affecting this snapshot, or null when none is: the reason `coverage` says INCOMPLETE.
+   */
+  readonly dataGap?: { readonly endedAt: string; readonly missingMinutes: number } | null;
   /**
    * Shadow observation of `computeDrawOnLiquidity`'s own target selection, computed from the same
    * pool catalog `liquidity.primaryTarget` is drawn from (`buildIctLiquidityPools`) but entirely

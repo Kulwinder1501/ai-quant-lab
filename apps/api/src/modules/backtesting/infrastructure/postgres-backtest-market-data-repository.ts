@@ -1,3 +1,4 @@
+import { ictGapGuardFor } from "../../technical-analysis/domain/ict/series-gaps.js";
 import { experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { CandlestickPatternCode, PatternDirection, PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
@@ -22,6 +23,7 @@ interface CompletedCandleRow extends QueryResultRow {
   close: string;
   volume: string;
   tick_size: string;
+  symbol?: string;
 }
 
 interface IndicatorSnapshotRow extends QueryResultRow {
@@ -113,7 +115,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
         candles.low,
         candles.close,
         candles.volume,
-        instruments.tick_size
+        instruments.tick_size,
+        instruments.symbol
       FROM candles
       INNER JOIN instruments ON instruments.id = candles.instrument_id
       WHERE candles.instrument_id = $1
@@ -136,7 +139,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
     }
 
     const candleIds = candleResult.rows.map((row) => row.id);
-    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    // The same identity the live path writes under: gold's snapshots come from an engine with a data-gap guard.
+    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig, ictGapGuardFor(candleResult.rows[0]?.symbol, input.timeframe));
     const [indicatorResult, patternResult, priceActionResult, ictSnapshotResult] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`
         SELECT

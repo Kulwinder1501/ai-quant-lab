@@ -10,7 +10,8 @@ import {
 } from "./config.js";
 import { IctStructureTracker, type StructureEvent } from "./structure.js";
 import { IctZoneLedger } from "./zones.js";
-import { IctSessionLevelTracker } from "./session-levels.js";
+import { IctSessionLevelTracker, type SessionReferenceLevels } from "./session-levels.js";
+import { measureGap, type IctGapGuard } from "./series-gaps.js";
 import { IctBiasTracker, type IctBiasDirection } from "./bias.js";
 import { IctLiquidityResolver, buildIctLiquidityPools, computeDrawOnLiquidity } from "./liquidity.js";
 import { computeSwingHierarchySnapshot } from "./swing-hierarchy.js";
@@ -19,6 +20,13 @@ import { computeBalancedPriceRanges } from "./bpr.js";
 import { IctAtrTracker } from "./atr-tracker.js";
 import { MssTracker, defaultMssConfig } from "./mss.js";
 import { NSE_IST_PROFILE, type InstrumentProfile } from "../../../platform/calendar/instrument-profile.js";
+
+interface DataGap {
+  readonly endIndex: number;
+  readonly endTime: Date;
+  readonly missingMinutes: number;
+  readonly sessionDates: ReadonlySet<string>;
+}
 
 export class IctCompositeEngine {
   private readonly structTracker: IctStructureTracker;
@@ -38,6 +46,8 @@ export class IctCompositeEngine {
    * docstring for why that matters here specifically.
    */
   private readonly atrTracker: IctAtrTracker;
+  /** Holes found between consecutive bars so far, when there is a guard. See `series-gaps.ts`. */
+  private readonly dataGaps: DataGap[] = [];
 
   /**
    * `profile` resolves session-date bucketing for both the session-levels and bias pillars.
@@ -47,7 +57,12 @@ export class IctCompositeEngine {
    */
   constructor(
     private readonly config: IctEngineConfig = defaultIctEngineConfig,
-    private readonly profile: InstrumentProfile = NSE_IST_PROFILE
+    private readonly profile: InstrumentProfile = NSE_IST_PROFILE,
+    /**
+     * Null (the default) is the engine exactly as it always was. Gold passes one: the engine then notices a hole in the series, withholds
+     * the session levels and marks structure, zones and session levels INCOMPLETE while it matters. See `series-gaps.ts`.
+     */
+    private readonly gapGuard: IctGapGuard | null = null
   ) {
     this.structTracker = new IctStructureTracker(config.pivotLength);
     this.zoneLedger = new IctZoneLedger(
@@ -68,7 +83,21 @@ export class IctCompositeEngine {
     this.liquidityResolver = new IctLiquidityResolver();
     this.cisdTracker = new CisdTracker();
     this.atrTracker = new IctAtrTracker(14);
-    this.configHash = computeIctConfigHash(config);
+    this.configHash = computeIctConfigHash(config, gapGuard);
+  }
+
+  private recordDataGap(candles: readonly CausalCandle[], currentIndex: number): void {
+    if (this.gapGuard === null || currentIndex === 0) return;
+    if (this.dataGaps.at(-1)?.endIndex === currentIndex) return;
+    const measured = measureGap(candles[currentIndex - 1].openTime, candles[currentIndex].openTime, this.gapGuard.barMinutes, this.profile);
+    if (measured !== null && measured.missingMinutes >= this.gapGuard.minGapMinutes) {
+      this.dataGaps.push({ endIndex: currentIndex, endTime: candles[currentIndex].openTime, ...measured });
+    }
+  }
+
+  /** A gap is in the session the levels are for, or the prior one they are measured against. */
+  private gapTouchesSessionLevels(gap: DataGap, levels: SessionReferenceLevels | null): boolean {
+    return levels !== null && (gap.sessionDates.has(levels.sessionDate) || gap.sessionDates.has(levels.priorSessionDate));
   }
 
   processCandle(
@@ -85,7 +114,19 @@ export class IctCompositeEngine {
      * Gated on `barIndex === currentIndex`: the substitution applies to the swing formed at the
      * sweep, not to every bar for the rest of the session after one.
      */
-    const sessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
+    this.recordDataGap(candles, currentIndex);
+    const rawSessionLevels = this.sessionTracker.processCandle(candles, currentIndex);
+    /*
+     * With a gap guard, a hole in the current or the prior session makes the prior-day high, low and close (and the session so far)
+     * wrong, so they are withheld at the source: everything below that reads session levels (structure's sweep substitution, bias,
+     * liquidity pools) then sees them as unavailable, the same as on the first day of a series, instead of using a wrong number.
+     */
+    const sessionGap = this.dataGaps.some((gap) => this.gapTouchesSessionLevels(gap, rawSessionLevels.levels));
+    const sessionLevels = sessionGap ? { ...rawSessionLevels, levels: null, lastSweepEvent: null } : rawSessionLevels;
+    // Structure and zones are built from a sequence of bars. For a while after a hole their state is built across it and misses what
+    // happened inside it (pivots found with a wing on the far side, fair-value gaps between bars that were hours apart).
+    const recoveryBars = this.gapGuard?.recoveryBars ?? 0;
+    const inRecovery = this.dataGaps.some((gap) => currentIndex - gap.endIndex < recoveryBars);
     const sweep = sessionLevels.lastSweepEvent;
     const sweptPriorDayLevel = sweep && sweep.eventType === "SWEEP" && sweep.barIndex === currentIndex
       ? sweep.levelType
@@ -166,9 +207,9 @@ export class IctCompositeEngine {
     // gate; only absent/incomplete/ambiguous evidence is UNKNOWN/NOT_COVERED.
     const structureWarmed = struct.confirmedPivotCount > 0;
     const coverage: PillarCoverage = {
-      structure: structureWarmed ? "COMPLETE" : "UNKNOWN",
-      zones: currentIndex >= 2 ? "COMPLETE" : "UNKNOWN",
-      sessionLevels: sessionLevels.levels !== null ? "COMPLETE" : "NOT_COVERED",
+      structure: inRecovery ? "INCOMPLETE" : structureWarmed ? "COMPLETE" : "UNKNOWN",
+      zones: inRecovery ? "INCOMPLETE" : currentIndex >= 2 ? "COMPLETE" : "UNKNOWN",
+      sessionLevels: sessionGap ? "INCOMPLETE" : sessionLevels.levels !== null ? "COMPLETE" : "NOT_COVERED",
       bias: bias.bias !== "UNKNOWN" ? "COMPLETE" : "UNKNOWN",
       liquidity: liquidity.primaryTarget !== null ? "COMPLETE" : "NOT_COVERED",
       htf:
@@ -196,6 +237,15 @@ export class IctCompositeEngine {
       liquidity,
       htfBias: htfBias ?? null,
       coverage,
+      ...(this.gapGuard === null
+        ? {}
+        : {
+          dataGap: ((): { endedAt: string; missingMinutes: number } | null => {
+            const gap = [...this.dataGaps].reverse().find((candidate) => currentIndex - candidate.endIndex < recoveryBars
+              || this.gapTouchesSessionLevels(candidate, rawSessionLevels.levels));
+            return gap ? { endedAt: gap.endTime.toISOString(), missingMinutes: gap.missingMinutes } : null;
+          })(),
+        }),
       drawOnLiquidityState,
       atr14,
     };

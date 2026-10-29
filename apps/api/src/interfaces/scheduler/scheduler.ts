@@ -1,3 +1,4 @@
+import { goldCatchUpCooldownElapsed, goldCatchUpDue } from "../../modules/market-data/domain/gold-catch-up.js";
 import "dotenv/config";
 import cron from "node-cron";
 import { runCommandWithOutput as runChildCommand, type RunCommandOutput } from "./run-command.js";
@@ -366,6 +367,9 @@ async function main(): Promise<void> {
     // FX legs of DXY, and DXY itself); most runs only scan, but a real heal fetches up to seven series,
     // rebuilds DXY and recomputes indicators, so it gets far more room than a collection tick.
     XAU_GAP_HEAL: 30 * 60 * 1000,
+    // The same heal, run at the first collection tick after the host has been away instead of at the next :07 IST. It took 3 to 5.5
+    // minutes after an overnight hole, and it delays that one collection tick, so it gets the patience of the heal itself.
+    XAU_WAKE_CATCHUP: 10 * 60 * 1000,
     // Follows gold shadow brackets to a target or stop on 1m bars; reads one series and writes a handful of rows.
     GOLD_SHADOW_RESOLVE: 10 * 60 * 1000,
     // Once-a-day, after CANDLE_GAP_CHECK confirms the day's bars are final. Both scripts do a
@@ -1180,9 +1184,39 @@ async function main(): Promise<void> {
    * back to `true`, not rebuilding anything.
    */
   const XAU_BOT_ENABLED = true;
+
+  /**
+   * The heal, run now when gold's stored series is behind by more than the collection tick can reach, instead of at the next :07 IST.
+   *
+   * After the host has slept the tick only fetches the last 45 minutes, so the NY afternoon and evening stayed missing until the hourly
+   * heal: measured over nine mornings to 2026-10-29, the scheduler came back between 03:00 and 04:10 UTC and the first heal ran at :37
+   * UTC, up to an hour later and after the 03:30 UTC bot window had opened, so the first ICT snapshots and decisions of the day were
+   * computed over a series with the overnight hole in it. Asked at every tick (see `goldCatchUpDue`): a normal tick finds the newest bar
+   * a few minutes old and does nothing, so the cost outside a wake is one indexed query. The heal itself is append-only
+   * (`--skip-existing`), so running it alongside the hourly one is harmless.
+   */
+  let lastGoldCatchUpAttemptAt: Date | null = null;
+  const catchUpGoldIfBehind = async (): Promise<string | void> => {
+    const newest = await database.query<{ close_time: Date }>(`
+      SELECT candles.close_time
+      FROM candles
+      INNER JOIN instruments ON instruments.id = candles.instrument_id
+      WHERE instruments.symbol = 'XAU_USD' AND candles.timeframe = '1m' AND candles.is_complete = TRUE
+      ORDER BY candles.open_time DESC
+      LIMIT 1
+    `);
+    const now = new Date();
+    if (!goldCatchUpDue({ newestBarCloseTime: newest.rows[0]?.close_time ?? null, now })) return;
+    if (!goldCatchUpCooldownElapsed(lastGoldCatchUpAttemptAt, now)) return "behind, but a catch-up ran within the last hour";
+    lastGoldCatchUpAttemptAt = now;
+    await runCommand("npm", ["run", "data:heal-gold-gaps", "--", "--apply", "--lookback-days", "7"]);
+    return "healed the gap left while the host was away, before collecting";
+  };
+
   const xauCollectionTick = () => {
     if (!XAU_BOT_ENABLED || !process.env.OANDA_ACCESS_TOKEN) return;
     void (async () => {
+      await schedule("XAU_WAKE_CATCHUP", catchUpGoldIfBehind);
       await schedule("XAU_CANDLE_COLLECTION", async () => {
         const to = new Date();
         const from = new Date(to.getTime() - 45 * 60 * 1000);
@@ -2010,7 +2044,7 @@ async function main(): Promise<void> {
       // `XAU_BOT_ENABLED` flipped back to `true` here but this array was left saying "false" --
       // same class of silent lie the array's own header comment warns about.
       ...(XAU_BOT_ENABLED && process.env.OANDA_ACCESS_TOKEN
-        ? ["XAU_CANDLE_COLLECTION", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL", "GOLD_SHADOW_RESOLVE"]
+        ? ["XAU_CANDLE_COLLECTION", "XAU_WAKE_CATCHUP", "PAPER_TRADING_BOT_GOLD", "XAU_GAP_HEAL", "GOLD_SHADOW_RESOLVE"]
         : []),
     ],
     timezone: IST,

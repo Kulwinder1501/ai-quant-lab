@@ -1,3 +1,4 @@
+import { ictGapGuardFor } from "../../../modules/technical-analysis/domain/ict/series-gaps.js";
 import { experimentalPriceActionVersionsSql } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { IndicatorCode, IndicatorValues } from "../../../modules/technical-analysis/domain/technical-indicator.js";
@@ -327,7 +328,7 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
      * engine always had -- see that file's "matches istSessionDate" cases.
      */
     const profile = instrumentProfileForSymbol(targetCandle.symbol);
-    const engine = new IctCompositeEngine(defaultIctEngineConfig, profile);
+    const engine = new IctCompositeEngine(defaultIctEngineConfig, profile, ictGapGuardFor(targetCandle.symbol, input.timeframe));
     let snapshot: IctStateCompositeSnapshot | undefined;
 
     for (let i = 0; i < causalCandles.length; i++) {
@@ -491,7 +492,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
     input: { instrumentId: string; timeframe: string },
     candle: CompletedCandleRow,
   ): Promise<StrategyMarketContext> {
-    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig);
+    // Gold's snapshots come from an engine with a data-gap guard, which computes different snapshots, so they carry their own identity.
+    const ictConfigHash = computeIctConfigHash(defaultIctEngineConfig, ictGapGuardFor(candle.symbol, input.timeframe));
     const ictConsumed = ictContextConsumedAt(input.timeframe);
     const [indicators, patterns, priceActionEvents, ictSnapshotRows] = await Promise.all([
       this.database.query<IndicatorSnapshotRow>(`

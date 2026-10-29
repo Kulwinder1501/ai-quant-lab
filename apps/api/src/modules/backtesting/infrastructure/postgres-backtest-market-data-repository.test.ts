@@ -1,6 +1,8 @@
 import type { DatabaseQueryable } from "../../../infrastructure/database/database.js";
 import { describe, expect, it } from "vitest";
 import { PostgresBacktestMarketDataRepository } from "./postgres-backtest-market-data-repository.js";
+import { computeIctConfigHash, defaultIctEngineConfig } from "../../technical-analysis/domain/ict/config.js";
+import { ictGapGuardFor } from "../../technical-analysis/domain/ict/series-gaps.js";
 
 interface QueryCall {
   text: string;
@@ -238,6 +240,44 @@ describe("PostgresBacktestMarketDataRepository", () => {
     expect(indicatorQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);
     expect(patternQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);
     expect(priceActionQuery?.values).toEqual([["candle-1", "candle-2"], dataCutoffAt]);
+  });
+
+  describe("which ICT snapshots it reads", () => {
+    const candleRow = (symbol: string | undefined, timeframe: string) => ({
+      id: "candle-1",
+      instrument_id: "instrument-1",
+      timeframe,
+      open_time: new Date("2026-01-13T14:00:00.000Z"),
+      close_time: new Date("2026-01-13T14:05:00.000Z"),
+      open: "4000",
+      high: "4001",
+      low: "3999",
+      close: "4000.5",
+      volume: "0",
+      tick_size: "0.01",
+      ...(symbol === undefined ? {} : { symbol }),
+    });
+    const ictReadHash = async (symbol: string | undefined, timeframe: string): Promise<unknown> => {
+      const { database, calls } = fakeQueryable({ candles: [candleRow(symbol, timeframe)] });
+      await new PostgresBacktestMarketDataRepository(database).listContexts({
+        instrumentId: "instrument-1",
+        timeframe,
+        dataWindowStart: new Date("2026-01-01T00:00:00.000Z"),
+        dataWindowEnd: new Date("2026-02-01T00:00:00.000Z"),
+        dataCutoffAt: new Date("2026-02-01T00:00:00.000Z"),
+      });
+      return calls.find((call) => call.text.includes("FROM ict_state_snapshots") && call.text.includes("SELECT bar_time"))?.values?.[5];
+    };
+
+    it("reads gold's under the identity the live path writes them under (an engine with a data-gap guard)", async () => {
+      expect(await ictReadHash("XAU_USD", "5m")).toBe(computeIctConfigHash(defaultIctEngineConfig, ictGapGuardFor("XAU_USD", "5m")));
+      expect(await ictReadHash("XAU_USD", "5m")).not.toBe(computeIctConfigHash(defaultIctEngineConfig));
+    });
+
+    it("reads every other instrument's under the hash it always had", async () => {
+      expect(await ictReadHash("NIFTY50", "5m")).toBe(computeIctConfigHash(defaultIctEngineConfig));
+      expect(await ictReadHash(undefined, "5m")).toBe(computeIctConfigHash(defaultIctEngineConfig));
+    });
   });
 
   it("does not query derived evidence when the cutoff leaves no completed candles", async () => {
