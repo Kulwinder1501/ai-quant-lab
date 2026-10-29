@@ -333,6 +333,8 @@ async function main(): Promise<void> {
     PATTERN_INTELLIGENCE_INTRADAY: 20 * 60 * 1000,
     // price-action-v4 on 5m, beside v3: the same full-series rescan per instrument, so the same patience.
     PATTERN_DETECTION_V4_INTRADAY: 20 * 60 * 1000,
+    // 30m and 60m: the same full-history rescan, run on the 15-minute cadence of v3's higher-timeframe analysis.
+    PATTERN_DETECTION_V4_HTF: 20 * 60 * 1000,
     // Reads one session of ticks and classifies them; the shortest horizon here on purpose, because
     // a stalled health check is itself a loss of the signal it exists to provide.
     COLLECTOR_HEALTH: 5 * 60 * 1000,
@@ -993,34 +995,51 @@ async function main(): Promise<void> {
   });
 
   /**
-   * `price-action-v4` on 5m, run beside `price-action-v3` so the two can be compared on real sessions. Comparison only.
+   * `price-action-v4` on every intraday timeframe, run beside `price-action-v3` so the two can be compared on real sessions.
+   * Comparison only.
    *
-   * v4 corrects three things found on NIFTY 5m on 2026-10-29 (see `priceActionV4AlgorithmVersion`). It stores under its own version
-   * label and never over v3, and every loader a bot or a backtest reads excludes it (`experimentalPriceActionVersionsSql`), so running
-   * it changes what nothing decides on. It is not folded into `detectPatternsIntraday`: that tick feeds the shadow decisions and the
-   * pattern-gated bots, and a v4 failure or delay must not touch it. Two minutes after the v3 tick instead, 5m only (the timeframe
-   * the defects were found on), both indices. The first run writes the whole `INDICATOR_WRITE_LOOKBACK_DAYS` window, which is the
-   * history the comparison starts from.
+   * v4 corrects what was found on NIFTY 5m on 2026-10-29 and then confirmed on both indices and every timeframe (see
+   * `priceActionV4AlgorithmVersion`). The ATR restarted every session, so v3 found no swing before the 14th candle of the day: about
+   * 10:25 on 5m, about 12:45 on 15m, and never on 30m (13 candles a day) or 60m (7 a day), where v3 has stored nothing at all. It
+   * stores under its own version label and never over v3, and every loader a bot or a backtest reads excludes it
+   * (`experimentalPriceActionVersionsSql`), so running it changes what nothing decides on.
    *
-   * Making v4 the current version, or letting any reader see it, is a separate decision that needs a replay of what the bots would read.
+   * Not folded into `detectPatternsIntraday`: that tick feeds the shadow decisions and the pattern-gated bots, and a v4 failure or
+   * delay must not touch it. It follows the v3 cadence two minutes behind: 1m and 5m every five minutes, 15m on the quarter hour, and
+   * 30m and 60m every fifteen minutes behind v3's higher-timeframe analysis. Both indices. Daily is not run: it is one series in
+   * percent units, so the defects do not apply to it. The first run writes the whole `INDICATOR_WRITE_LOOKBACK_DAYS` window, which is
+   * the history the comparison starts from.
+   *
+   * Still not fixed by v4: trend and breakout rules look back 20 candles inside the session, so they start at 14:15 on 15m and never fire
+   * on 30m or 60m. Making v4 the current version, or letting any reader see it, is a separate decision that needs a replay of what the
+   * bots would read.
    */
-  const detectPatternsV4Intraday = async (): Promise<void> => {
+  const detectPatternsV4 = async (timeframes: readonly string[]): Promise<void> => {
     const writeFrom = istDateKey(
       new Date(Date.now() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
     );
     for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
-      await runCommand("npm", [
-        "run", "analysis:detect-patterns", "--",
-        "--instrument", instrument,
-        "--timeframe", "5m",
-        "--from", writeFrom,
-        "--engine", "v4",
-      ]);
+      for (const timeframe of timeframes) {
+        await runCommand("npm", [
+          "run", "analysis:detect-patterns", "--",
+          "--instrument", instrument,
+          "--timeframe", timeframe,
+          "--from", writeFrom,
+          "--engine", "v4",
+        ]);
+      }
     }
   };
 
   cronSchedule("2,7,12,17,22,27,32,37,42,47,52,57 9-15 * * 1-5", () => {
-    void schedule("PATTERN_DETECTION_V4_INTRADAY", detectPatternsV4Intraday);
+    // v3 adds 15m when the minute is a multiple of 15; v4 runs two minutes behind it
+    const onQuarterHour = new Date().getMinutes() % 15 === 2;
+    void schedule("PATTERN_DETECTION_V4_INTRADAY", () => detectPatternsV4(onQuarterHour ? ["1m", "5m", "15m"] : ["1m", "5m"]));
+  });
+
+  // v3's HIGHER_TIMEFRAME_ANALYSIS (30m and 60m) runs at :07 :22 :37 :52; v4 follows two minutes behind.
+  cronSchedule("9,24,39,54 9-15 * * 1-5", () => {
+    void schedule("PATTERN_DETECTION_V4_HTF", () => detectPatternsV4(["30m", "60m"]));
   });
 
   /*
@@ -1959,6 +1978,7 @@ async function main(): Promise<void> {
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
       "PATTERN_DETECTION_V4_INTRADAY",
+      "PATTERN_DETECTION_V4_HTF",
       // Hand-maintained for the startup log only -- it gates nothing, so an omission here does not
       // stop a job running, it just makes the inventory lie about what is scheduled.
       "PATTERN_INTELLIGENCE_INTRADAY",

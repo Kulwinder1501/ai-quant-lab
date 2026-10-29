@@ -351,8 +351,13 @@ describe("price-action-v4 corrections", () => {
   });
 
   it("builds the v4 configuration from the v3 units for the timeframe plus the retest rule, leaving v3 untouched", () => {
+    // a five-candle swing is minutes of price on 1m and 5m, so those ask for a retest; from 15m up it does not, or most real levels vanish
+    expect(priceActionConfigurationV4ForTimeframe("1m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
     expect(priceActionConfigurationV4ForTimeframe("5m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
-    expect(priceActionConfigurationV4ForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 2 });
+    for (const timeframe of ["15m", "30m", "60m"]) {
+      expect(priceActionConfigurationV4ForTimeframe(timeframe)).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 1 });
+    }
+    expect(priceActionConfigurationV4ForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 1 });
     expect(priceActionConfigurationForTimeframe("5m").levelMinTouches).toBeUndefined();
   });
 });

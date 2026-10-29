@@ -1,5 +1,5 @@
 import { atrSeries } from "./atr-series.js";
-import { isIntradayTimeframe } from "./session-segmentation.js";
+import { isIntradayTimeframe, timeframeMinutes } from "./session-segmentation.js";
 import type { DetectedPriceActionEvent, PatternCandle, PatternDirection, PriceActionEventCode } from "./market-pattern.js";
 
 /**
@@ -78,10 +78,17 @@ export function priceActionConfigurationForTimeframe(timeframe: string): PriceAc
 
 /**
  * The configuration `price-action-v4` uses: the v3 units for the timeframe, plus a retest before a swing is also called SUPPORT or
- * RESISTANCE (`levelMinTouches`). The other two v4 corrections live in the application layer, which is where the sessions are cut.
+ * RESISTANCE (`levelMinTouches`) on the timeframes where a five-candle swing is only minutes of price. The other two v4 corrections
+ * live in the application layer, which is where the sessions are cut.
+ *
+ * The retest is asked for below 15m only. On 1m and 5m a swing spans 5 to 25 minutes, so most are noise and a revisit is the cheapest
+ * evidence of a level. From 15m up a swing spans 75 minutes to 5 hours and there are few of them, so requiring a revisit hides most real
+ * levels (replayed on both indices over six sessions: 30m kept 5 support/resistance rows out of 15 swings, and daily lost about a fifth
+ * of its rows for nothing). The threshold is a judgment, not tuned on outcomes.
  */
 export function priceActionConfigurationV4ForTimeframe(timeframe: string): PriceActionConfiguration {
-  return { ...priceActionConfigurationForTimeframe(timeframe), levelMinTouches: 2 };
+  const minutes = timeframeMinutes(timeframe);
+  return { ...priceActionConfigurationForTimeframe(timeframe), levelMinTouches: minutes !== null && minutes < 15 ? 2 : 1 };
 }
 
 type Trend = "UPTREND" | "DOWNTREND" | "RANGE";
