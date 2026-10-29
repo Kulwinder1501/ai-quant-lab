@@ -91,6 +91,20 @@ export function priceActionConfigurationV4ForTimeframe(timeframe: string): Price
   return { ...priceActionConfigurationForTimeframe(timeframe), levelMinTouches: minutes !== null && minutes < 15 ? 2 : 1 };
 }
 
+/**
+ * Whether `price-action-v4` runs the price-action rules over the whole series instead of one session at a time: the intraday timeframes
+ * from 15m up.
+ *
+ * The trend, breakout and pullback rules look back 20 and 10 candles. A session holds 75 candles on 5m but only 25 on 15m, 13 on 30m and 7
+ * on 60m, so cut into sessions the rules cannot fire there before 14:15 on 15m and never on 30m or 60m, and a 20-candle window is 5 hours
+ * to about 3 days at those sizes, which is multi-session by nature (the daily timeframe is already one series). Candlestick and chart
+ * patterns stay per session: they were cut at the session so a 09:15 bar could not be read against yesterday's bars.
+ */
+export function priceActionSpansSessions(timeframe: string): boolean {
+  const minutes = timeframeMinutes(timeframe);
+  return minutes !== null && minutes >= 15 && isIntradayTimeframe(timeframe);
+}
+
 type Trend = "UPTREND" | "DOWNTREND" | "RANGE";
 
 function clamp(value: number): number {

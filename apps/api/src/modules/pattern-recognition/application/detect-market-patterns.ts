@@ -34,6 +34,12 @@ export interface DetectMarketPatternsInput {
   carryAtrAcrossSessions?: boolean;
   /** Move a swing event whose confirming candle is suppressed to the next candle that is not. See `reanchorSuppressedSwings`. */
   reanchorSuppressedSwings?: boolean;
+  /**
+   * Run the price-action engine once over the whole series and hand each session its own events, instead of one run per session. For the
+   * timeframes where a session cannot hold the engine's lookbacks (see `priceActionSpansSessions`). Candlestick and chart patterns stay
+   * per session either way, and a swing is only ever re-anchored inside its own session.
+   */
+  priceActionAcrossSessions?: boolean;
   since?: Date;
   /**
    * The instrument's tick size, for the DOJI minimum-range floor. Defaults to the NSE 0.05 tick:
@@ -138,6 +144,16 @@ export function reanchorSuppressedSwings(
   return result;
 }
 
+function groupByCandle(events: readonly DetectedPriceActionEvent[]): Map<string, DetectedPriceActionEvent[]> {
+  const grouped = new Map<string, DetectedPriceActionEvent[]>();
+  for (const event of events) {
+    const list = grouped.get(event.candleId);
+    if (list) list.push(event);
+    else grouped.set(event.candleId, [event]);
+  }
+  return grouped;
+}
+
 function assertChronological(candles: readonly PatternCandle[]): void {
   for (let index = 1; index < candles.length; index += 1) {
     if (candles[index].openTime.getTime() <= candles[index - 1].openTime.getTime()) {
@@ -201,6 +217,9 @@ export class DetectMarketPatterns {
       ? atrSeries(candles, priceActionEngine.atrPeriod)
       : null;
     const positionInSeries = carriedAtr ? new Map(candles.map((candle, index) => [candle.id, index] as const)) : null;
+    const eventsByCandle = input.priceActionAcrossSessions === true && intraday
+      ? groupByCandle(priceActionEngine.detect(candles))
+      : null;
     for (const segment of splitIntoSessions(candles, input.timeframe)) {
       const suppressed = findSuppressedCandleIds(segment);
       const usable = <T extends { candleId: string }>(detected: T, contextCandleIds: readonly string[] = []): boolean => (
@@ -209,10 +228,12 @@ export class DetectMarketPatterns {
       for (const pattern of this.candlestickEngine.detect(segment, candlestickOptions)) {
         if (usable(pattern, pattern.contextCandleIds)) patterns.push(pattern);
       }
-      const detectedPriceAction = priceActionEngine.detect(
-        segment,
-        carriedAtr && positionInSeries ? { atrValues: segment.map((candle) => carriedAtr[positionInSeries.get(candle.id)!] ?? null) } : {},
-      );
+      const detectedPriceAction = eventsByCandle
+        ? segment.flatMap((candle) => eventsByCandle.get(candle.id) ?? [])
+        : priceActionEngine.detect(
+          segment,
+          carriedAtr && positionInSeries ? { atrValues: segment.map((candle) => carriedAtr[positionInSeries.get(candle.id)!] ?? null) } : {},
+        );
       const priceActionEvents = input.reanchorSuppressedSwings === true
         ? reanchorSuppressedSwings(detectedPriceAction, segment, suppressed)
         : detectedPriceAction;

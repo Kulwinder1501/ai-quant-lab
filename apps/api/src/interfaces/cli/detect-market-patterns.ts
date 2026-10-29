@@ -12,6 +12,7 @@ import {
   atrPriceActionConfiguration,
   PriceActionEngine,
   priceActionConfigurationV4ForTimeframe,
+  priceActionSpansSessions,
 } from "../../modules/pattern-recognition/domain/price-action-engine.js";
 import { CandlestickPatternEngine } from "../../modules/pattern-recognition/domain/candlestick-pattern-engine.js";
 import {
@@ -99,7 +100,9 @@ async function main(): Promise<void> {
       instrumentId: instrument.id,
       timeframe,
       priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
-      ...(engineRevision === "v4" ? { carryAtrAcrossSessions: true, reanchorSuppressedSwings: true } : {}),
+      ...(engineRevision === "v4"
+        ? { carryAtrAcrossSessions: true, reanchorSuppressedSwings: true, priceActionAcrossSessions: priceActionSpansSessions(timeframe) }
+        : {}),
       since,
       tickSize: Number.isFinite(Number(instrument.tickSize)) && Number(instrument.tickSize) > 0
         ? Number(instrument.tickSize)

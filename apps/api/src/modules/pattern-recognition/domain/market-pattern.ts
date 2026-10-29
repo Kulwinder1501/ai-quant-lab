@@ -60,7 +60,8 @@ export const supersededPriceActionAlgorithmVersions = ["price-action-v2", "price
  * v4 = the v3 rules with three corrections found on NIFTY 5m on 2026-10-29: the ATR is carried across sessions (it restarted each
  * morning, so nothing was emitted before about 10:25); a swing whose confirming candle is a suppressed frozen-feed bar is re-anchored
  * to the next real candle instead of being lost (the session high at 15:10 never appeared); and a swing is called SUPPORT or
- * RESISTANCE only after a retest (`levelMinTouches: 2`), the raw SWING_HIGH / SWING_LOW being unchanged.
+ * RESISTANCE only after a retest (`levelMinTouches: 2`), the raw SWING_HIGH / SWING_LOW being unchanged. From 15m up the price-action rules also run across
+ * sessions, because their 20-candle lookbacks do not fit in one session there; the retest applies below 15m only.
  *
  * Opt-in only: `priceActionAlgorithmVersion` stays v3, so the scheduler, the shadow decisions and every pinned reader are unaffected.
  * Rows exist under this label only where `analysis:detect-patterns --engine v4` was run.

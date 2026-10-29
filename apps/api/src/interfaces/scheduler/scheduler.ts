@@ -1010,9 +1010,10 @@ async function main(): Promise<void> {
    * percent units, so the defects do not apply to it. The first run writes the whole `INDICATOR_WRITE_LOOKBACK_DAYS` window, which is
    * the history the comparison starts from.
    *
-   * Still not fixed by v4: trend and breakout rules look back 20 candles inside the session, so they start at 14:15 on 15m and never fire
-   * on 30m or 60m. Making v4 the current version, or letting any reader see it, is a separate decision that needs a replay of what the
-   * bots would read.
+   * From 15m up the price-action rules also run across sessions (`priceActionSpansSessions`): their 20-candle lookbacks are 5 hours to
+   * about 3 days there, and cut into sessions the trend and breakout rules started at 14:15 on 15m and never fired on 30m or 60m.
+   * Candlestick and chart patterns stay per session. Making v4 the current version, or letting any reader see it, is a separate decision
+   * that needs a replay of what the bots would read.
    */
   const detectPatternsV4 = async (timeframes: readonly string[]): Promise<void> => {
     const writeFrom = istDateKey(

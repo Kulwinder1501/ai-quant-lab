@@ -55,7 +55,7 @@ function engulfingSeries(timesMs: readonly number[], volumes: readonly number[] 
 
 async function runDetection(
   candles: PersistedCandle[],
-  input: { timeframe: string; tickSize?: number; carryAtrAcrossSessions?: boolean; reanchorSuppressedSwings?: boolean },
+  input: { timeframe: string; tickSize?: number; carryAtrAcrossSessions?: boolean; reanchorSuppressedSwings?: boolean; priceActionAcrossSessions?: boolean },
 ) {
   const detections: Array<{ candleId: string; contextCandleIds: readonly string[]; details: Record<string, unknown> }> = [];
   const events: Array<{ candleId: string; eventCode: string; details: Record<string, unknown> }> = [];
@@ -397,5 +397,66 @@ describe("reanchorSuppressedSwings", () => {
     const events = [swing("b")];
 
     expect(reanchorSuppressedSwings(events, segment, new Set())).toEqual(events);
+  });
+});
+
+describe("price-action across sessions (15m and up)", () => {
+  const step = 15 * 60 * 1000;
+  const day = (n: number) => Date.parse("2026-08-10T03:45:00Z") + n * 24 * 60 * 60 * 1000; // 09:15 IST on successive days
+
+  /** Candles for 15m sessions of the given lengths, one session per day; every candle is flat around 100 unless `shape` says otherwise. */
+  function sessions(lengths: readonly number[], shape: (globalIndex: number, indexInSession: number, session: number) => Partial<BarSpec> = () => ({})): PersistedCandle[] {
+    const candles: PersistedCandle[] = [];
+    lengths.forEach((length, session) => {
+      for (let i = 0; i < length; i += 1) {
+        const index = candles.length;
+        candles.push({
+          ...intradayCandle(index, { open: 100, high: 101, low: 99, close: 100, openTimeMs: day(session) + i * step, ...shape(index, i, session) }),
+          timeframe: "15m",
+        });
+      }
+    });
+    return candles;
+  }
+
+  it("finds a breakout that needs more candles than one session holds, only when the rules run across sessions", async () => {
+    // two sessions of 12: the 20-candle breakout lookback never fits in one, and the jump lands on candle 22
+    const candles = sessions([12, 12], (index) => (index === 22 ? { open: 100, high: 111, low: 100, close: 110 } : {}));
+
+    const perSession = await runDetection(candles, { timeframe: "15m", carryAtrAcrossSessions: true });
+    expect(perSession.events.filter((event) => event.eventCode === "BREAKOUT")).toHaveLength(0);
+
+    const across = await runDetection(candles, { timeframe: "15m", priceActionAcrossSessions: true });
+    const breakout = across.events.filter((event) => event.eventCode === "BREAKOUT");
+    expect(breakout).toHaveLength(1);
+    expect(breakout[0]).toMatchObject({ candleId: "bar-22" });
+  });
+
+  it("stays per session unless the option is set", async () => {
+    const candles = sessions([12, 12], (index) => (index === 22 ? { open: 100, high: 111, low: 100, close: 110 } : {}));
+
+    const off = await runDetection(candles, { timeframe: "15m", priceActionAcrossSessions: false });
+    expect(off.events.filter((event) => event.eventCode === "BREAKOUT")).toHaveLength(0);
+  });
+
+  it("never moves a re-anchored swing into the next session", async () => {
+    // a 20-candle warm-up session, then 12 candles whose swing high is confirmed on a flat zero-volume last bar, then a third session
+    const build = (flatLast: boolean) => sessions([20, 12, 6], (index, i, session) => {
+      if (session === 1 && i === 9) return { open: 100, high: 110, low: 99, close: 100 };
+      if (session === 1 && i === 11 && flatLast) return { open: 100, high: 100, low: 100, close: 100, volume: 0 };
+      return {};
+    });
+    const pivot = "bar-29"; // candle 9 of the second session
+    const swingOf = (events: ReadonlyArray<{ eventCode: string; candleId: string; details: Record<string, unknown> }>) =>
+      events.filter((event) => event.eventCode === "SWING_HIGH" && event.details.pivotCandleId === pivot);
+
+    // control: with a normal last bar the swing is confirmed on it and is found
+    const control = await runDetection(build(false), { timeframe: "15m", priceActionAcrossSessions: true, reanchorSuppressedSwings: true });
+    expect(swingOf(control.events)).toHaveLength(1);
+    expect(swingOf(control.events)[0]).toMatchObject({ candleId: "bar-31" });
+
+    // the confirming bar is suppressed and nothing later exists in the session: the swing is dropped, not carried onto the next day's first bar
+    const dropped = await runDetection(build(true), { timeframe: "15m", priceActionAcrossSessions: true, reanchorSuppressedSwings: true });
+    expect(swingOf(dropped.events)).toHaveLength(0);
   });
 });

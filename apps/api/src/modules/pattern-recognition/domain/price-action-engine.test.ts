@@ -3,6 +3,7 @@ import {
   PriceActionEngine,
   priceActionConfigurationForTimeframe,
   priceActionConfigurationV4ForTimeframe,
+  priceActionSpansSessions,
   type PriceActionConfiguration,
 } from "./price-action-engine.js";
 import type { DetectedPriceActionEvent, PatternCandle } from "./market-pattern.js";
@@ -359,5 +360,15 @@ describe("price-action-v4 corrections", () => {
     }
     expect(priceActionConfigurationV4ForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 1 });
     expect(priceActionConfigurationForTimeframe("5m").levelMinTouches).toBeUndefined();
+  });
+});
+
+describe("priceActionSpansSessions", () => {
+  it("is true for the intraday timeframes from 15m up, where a session cannot hold a 20-candle lookback", () => {
+    for (const timeframe of ["15m", "30m", "60m"]) expect(priceActionSpansSessions(timeframe)).toBe(true);
+  });
+
+  it("is false for 1m and 5m (a session holds the lookback), for daily (already one series) and for a label it cannot read", () => {
+    for (const timeframe of ["1m", "3m", "5m", "10m", "1d", "1440m", "garbage", ""]) expect(priceActionSpansSessions(timeframe)).toBe(false);
   });
 });
