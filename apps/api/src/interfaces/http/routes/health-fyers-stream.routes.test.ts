@@ -18,6 +18,7 @@ const DIAGNOSTICS: StreamerDiagnostics = {
   reconnectAttempts: 0,
   droppedMessages: 12,
   socketReplacements: { forSlots: 0, forSilentSymbols: 1 },
+  deadFeedRestartsRequested: 0,
   lastReplacementAt: "2026-10-28T06:30:00.000Z",
 };
 

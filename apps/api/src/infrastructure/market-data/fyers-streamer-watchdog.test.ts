@@ -43,6 +43,24 @@ describe("startFyersStreamerWatchdog", () => {
     expect(checkForSilentSymbols).not.toHaveBeenCalled();
   });
 
+  it("does not check on an exchange holiday inside the window, where a dead-looking feed is only a closed market", () => {
+    vi.useFakeTimers();
+    const checkForSilentSymbols = vi.fn(() => NONE);
+    startFyersStreamerWatchdog({ streamer: { checkForSilentSymbols }, now: () => at("2026-10-27T05:00:00Z"), isSessionOpen: () => false });
+    vi.advanceTimersByTime(120_000);
+    expect(checkForSilentSymbols).not.toHaveBeenCalled();
+  });
+
+  it("checks when the exchange is open, asked afresh each time", () => {
+    vi.useFakeTimers();
+    const checkForSilentSymbols = vi.fn(() => NONE);
+    const isSessionOpen = vi.fn(() => true);
+    startFyersStreamerWatchdog({ streamer: { checkForSilentSymbols }, now: () => at("2026-10-27T05:00:00Z"), isSessionOpen });
+    vi.advanceTimersByTime(30_000);
+    expect(checkForSilentSymbols).toHaveBeenCalledTimes(2);
+    expect(isSessionOpen).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a check that throws and keeps checking", () => {
     vi.useFakeTimers();
     const report = vi.fn();

@@ -16,3 +16,17 @@ export const MIN_UPTIME_BEFORE_ROTATION_RESTART_SECONDS = 120;
 export function mayRestartForTokenRotation(input: { uptimeSeconds: number; alreadyRestarting: boolean }): boolean {
   return !input.alreadyRestarting && input.uptimeSeconds >= MIN_UPTIME_BEFORE_ROTATION_RESTART_SECONDS;
 }
+
+/**
+ * When the process may restart because its live socket is connected but delivering nothing.
+ *
+ * Longer than the rotation guard, and for a different reason. A rotated token is cured by a new process, so a restart two minutes
+ * after the last one is safe. A dead feed that is still dead soon after a restart is not the fault this exists for (the one seen on
+ * 2026-10-29 was cured by a restart): it is probably Fyers being down, which another restart cannot fix, and every restart drops the
+ * stream of every open page. Ten minutes caps it at six an hour.
+ */
+export const MIN_UPTIME_BEFORE_DEAD_FEED_RESTART_SECONDS = 600;
+
+export function mayRestartForDeadFeed(input: { uptimeSeconds: number; alreadyRestarting: boolean }): boolean {
+  return !input.alreadyRestarting && input.uptimeSeconds >= MIN_UPTIME_BEFORE_DEAD_FEED_RESTART_SECONDS;
+}

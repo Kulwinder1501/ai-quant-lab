@@ -43,6 +43,8 @@ export interface ApplicationDependencies {
   environment?: HttpConfiguration;
   /** Called when Fyers issues a new access token that this process's live socket can never use; the server restarts itself. */
   onFyersTokenRotated?: () => void;
+  /** Called when the live socket is connected but delivers nothing for a minute in the session; the server restarts itself. */
+  onFyersFeedDead?: () => void;
 }
 
 /**
@@ -52,11 +54,12 @@ export interface ApplicationDependencies {
  * creates shared dependencies, installs middleware in order, registers the
  * modules, and terminates the pipeline with the common 404/error handlers.
  */
-export function createApp({ database, environment, onFyersTokenRotated }: ApplicationDependencies): Express {
+export function createApp({ database, environment, onFyersTokenRotated, onFyersFeedDead }: ApplicationDependencies): Express {
   const app = express();
   const dependencies = buildHttpDependencies(database, {
     streamQuotes: true,
     ...(onFyersTokenRotated === undefined ? {} : { onFyersTokenRotated }),
+    ...(onFyersFeedDead === undefined ? {} : { onFyersFeedDead }),
   });
   // Origins and the mutation limit are parsed and defaulted by the schema in `config/`, not
   // here. This function used to split the raw string and coerce the number itself, so the

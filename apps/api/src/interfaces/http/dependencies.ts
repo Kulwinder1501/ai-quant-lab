@@ -70,6 +70,8 @@ export interface HttpDependencyOptions {
   streamQuotes?: boolean;
   /** Passed to the live socket: called when the stored Fyers token is no longer the one the socket was created with (see fyers-token-rotation.ts). */
   onFyersTokenRotated?: () => void;
+  /** Passed to the live socket: called when it is connected but nothing has ticked on it for a minute (see `onFeedDead` in fyers-live-streamer.ts). */
+  onFyersFeedDead?: () => void;
 }
 
 export function buildHttpDependencies(database: DatabaseQueryable, options: HttpDependencyOptions = {}) {
@@ -115,6 +117,7 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
       tokenService: fyersTokenService,
       appId,
       ...(options.onFyersTokenRotated === undefined ? {} : { onTokenRotated: options.onFyersTokenRotated }),
+      ...(options.onFyersFeedDead === undefined ? {} : { onFeedDead: options.onFyersFeedDead }),
     });
   }
 
@@ -131,9 +134,6 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
     liveSideSplit.attach(fyersLiveStreamer);
     if (options.streamQuotes) {
       startLiveSideSplitFeed({ streamer: fyersLiveStreamer });
-      // The API's socket has stayed connected while a whole option chain never ticked (2026-10-22, 10-26, 10-28). During the session
-      // this replaces it when symbols asked for never answer while others do; see fyers-live-streamer.ts.
-      startFyersStreamerWatchdog({ streamer: fyersLiveStreamer });
     }
   }
 
@@ -148,6 +148,16 @@ export function buildHttpDependencies(database: DatabaseQueryable, options: Http
       return (result.rows as Array<{ holiday: string }>).map((row) => row.holiday);
     })
     : null;
+  // The API's socket has stayed connected while a whole option chain never ticked (2026-10-22, 10-26, 10-28), and on 2026-10-29 the
+  // replacement it was given delivered nothing at all. During the session this replaces the socket when symbols asked for never answer
+  // while others do, and asks the host to restart when nothing ticks; see fyers-live-streamer.ts. The calendar gates it, because a
+  // holiday is quiet all day and would otherwise look like a dead feed.
+  if (fyersLiveStreamer && options.streamQuotes) {
+    startFyersStreamerWatchdog({
+      streamer: fyersLiveStreamer,
+      ...(quoteSessionClock === null ? {} : { isSessionOpen: () => quoteSessionClock.isOpen() }),
+    });
+  }
   const requestLedger = new PostgresFyersRequestLedger(pool);
   const uiQuoteBudget = options.streamQuotes
     ? new UiQuoteBudget(() => requestLedger.getDailyEndpointTotal(

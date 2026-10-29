@@ -60,6 +60,13 @@ export interface FyersLiveStreamerOptions {
    * the stale token, as it always did. The token is never passed or logged.
    */
   onTokenRotated?: () => void;
+  /**
+   * Called when the socket is connected but nothing at all has ticked on it for a minute, while symbols asked for long ago are
+   * waiting: a dead connection, as on 2026-10-29, when the replacement the watchdog made stayed dead for over two minutes and
+   * restarting the process cured it. The host restarts itself and decides whether the market is open and how soon after a start
+   * (see fyers-token-rotation.ts). Without it the streamer leaves a feed that is quiet as a whole alone, as it always did.
+   */
+  onFeedDead?: () => void;
   /** Injectable so a reconnect test does not have to wait in real time. */
   setTimeoutFn?: (handler: () => void, ms: number) => unknown;
   /**
@@ -115,10 +122,16 @@ const SILENT_MIN_SHARE = 0.2;
 const MIN_SILENT_RECYCLE_INTERVAL_MS = 120_000;
 /** A refused recycle is reported at most this often, so a stuck condition cannot flood the log. */
 const REFUSAL_LOG_INTERVAL_MS = 5 * 60_000;
+/**
+ * A connection on which no symbol has ticked for this long, with symbols past their grace waiting, is dead. The indices and futures
+ * the API holds tick about once a second in the session, so a minute of nothing is not a quiet market. The host gates this by
+ * the calendar (a holiday is quiet all day) and the clock; see fyers-streamer-watchdog.ts.
+ */
+const DEAD_FEED_AFTER_MS = 60_000;
 
 export type SilentSymbolCheck =
   | { action: "NONE"; reason: string; silent: string[] }
-  | { action: "RECYCLED" | "REFUSED"; reason: string; silent: string[] };
+  | { action: "RECYCLED" | "REFUSED" | "RESTART_REQUESTED"; reason: string; silent: string[] };
 
 /** What a person needs to see, without a restart, when the feed misbehaves. Symbols only: nothing secret. */
 export interface StreamerDiagnostics {
@@ -135,6 +148,8 @@ export interface StreamerDiagnostics {
   reconnectAttempts: number;
   droppedMessages: number;
   socketReplacements: { forSlots: number; forSilentSymbols: number };
+  /** Times the host was asked to restart because the connection delivered nothing at all (see `onFeedDead`). */
+  deadFeedRestartsRequested: number;
   lastReplacementAt: string | null;
 }
 
@@ -266,6 +281,10 @@ export class FyersLiveStreamer extends EventEmitter {
   private replacementsForSlots = 0;
   private replacementsForSilentSymbols = 0;
   private lastReplacementAt: number | null = null;
+  /** When the current connection was confirmed, or null with no connection: what "nothing has ticked on this connection" is measured from. */
+  private connectedAt: number | null = null;
+  private deadFeedRestartsRequested = 0;
+  private deadFeedLoggedOnThisConnection = false;
   private lastRefusalLoggedAt = 0;
   private reconnecting = false;
   private reconnectAttempts = 0;
@@ -335,6 +354,8 @@ export class FyersLiveStreamer extends EventEmitter {
         // A successful connection is what clears the backoff; clearing it on *attempt* would
         // reset the delay every cycle and reproduce the fixed-interval retry.
         this.reconnectAttempts = 0;
+        this.connectedAt = this.now();
+        this.deadFeedLoggedOnThisConnection = false;
         log("info", "Connected to the Fyers data socket", {
           resubscribing: this.currentSubscriptions.size,
         });
@@ -381,6 +402,7 @@ export class FyersLiveStreamer extends EventEmitter {
       socket.on("close", () => {
         log("info", "Fyers data socket closed", { droppedMessages: this.droppedMessages });
         this.socket = null;
+        this.connectedAt = null;
         this.recycling = false;
         this.scheduleReconnect();
       });
@@ -536,10 +558,14 @@ export class FyersLiveStreamer extends EventEmitter {
       return { action: "NONE", reason: "The socket is not connected; the reconnect asks again for everything wanted.", silent: [] };
     }
     const now = this.now();
+    const deadFeed = this.checkDeadFeed(now);
+    if (deadFeed !== null) return deadFeed;
     const { silent: allSilent, judged } = this.findSilentSymbols(now);
 
     // Second chance used: still silent on the new connection means dead. Ones that ticked since are cleared.
-    const stillSilent = allSilent.filter((symbol) => this.silentBeforeReplacement.has(symbol));
+    // Not while nothing at all has ticked on this connection: that silence is the connection's, not the symbols', and giving up on
+    // every symbol because the socket is dead would leave nothing for the next connection to be judged on.
+    const stillSilent = this.lastTickAt.size === 0 ? [] : allSilent.filter((symbol) => this.silentBeforeReplacement.has(symbol));
     for (const symbol of [...this.silentBeforeReplacement]) {
       if (this.lastTickAt.has(symbol) || !this.currentSubscriptions.has(symbol)) this.silentBeforeReplacement.delete(symbol);
     }
@@ -585,6 +611,41 @@ export class FyersLiveStreamer extends EventEmitter {
     return { action: "RECYCLED", reason: `${silent.length} of ${judged} symbols never answered; the socket was replaced.`, silent };
   }
 
+  /**
+   * A connection that is up, has symbols asked for long enough ago to have answered, and has delivered nothing from any of them for a
+   * minute. Asks the host to restart (see `onFeedDead`) and returns that; null when the feed is not dead, or when there is no host
+   * handler, in which case the checks below apply as before. The host is asked on every check while this holds, because it may refuse
+   * (a process that has only just started); it is told once in the log per connection.
+   */
+  private checkDeadFeed(now: number): SilentSymbolCheck | null {
+    if (this.options.onFeedDead === undefined || this.connectedAt === null) return null;
+    let waiting = 0;
+    for (const symbol of this.currentSubscriptions) {
+      const askedAt = this.subscribedAt.get(symbol);
+      if (askedAt !== undefined && now - askedAt >= SILENT_GRACE_MS) waiting += 1;
+    }
+    if (waiting === 0) return null;
+    // A tick on an earlier connection says nothing about this one, so the clock never starts before this connection did.
+    const quietMs = now - Math.max(this.connectedAt, this.lastAnyTickAt ?? 0);
+    if (quietMs < DEAD_FEED_AFTER_MS) return null;
+    if (!this.deadFeedLoggedOnThisConnection) {
+      this.deadFeedLoggedOnThisConnection = true;
+      log("error", "The Fyers socket is connected but nothing has ticked on it; the host is asked to restart", {
+        quietSeconds: Math.round(quietMs / 1000),
+        waitingSymbols: waiting,
+        wanted: this.currentSubscriptions.size,
+        slotsUsed: this.socketSlots.size,
+      });
+    }
+    this.deadFeedRestartsRequested += 1;
+    this.options.onFeedDead();
+    return {
+      action: "RESTART_REQUESTED",
+      reason: `Nothing has ticked on this connection for ${Math.round(quietMs / 1000)} s with ${waiting} symbols waiting; the host was asked to restart.`,
+      silent: [...this.currentSubscriptions],
+    };
+  }
+
   /** The state a person needs when the feed misbehaves, so the next occurrence is captured before anything is restarted. */
   diagnostics(): StreamerDiagnostics {
     const now = this.now();
@@ -600,6 +661,7 @@ export class FyersLiveStreamer extends EventEmitter {
       reconnectAttempts: this.reconnectAttempts,
       droppedMessages: this.droppedMessages,
       socketReplacements: { forSlots: this.replacementsForSlots, forSilentSymbols: this.replacementsForSilentSymbols },
+      deadFeedRestartsRequested: this.deadFeedRestartsRequested,
       lastReplacementAt: this.lastReplacementAt === null ? null : new Date(this.lastReplacementAt).toISOString(),
     };
   }

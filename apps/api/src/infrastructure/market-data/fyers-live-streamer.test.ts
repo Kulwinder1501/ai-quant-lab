@@ -565,7 +565,7 @@ describe("FyersLiveStreamer and a rotated access token", () => {
 describe("FyersLiveStreamer silent-symbol watchdog", () => {
   const INDEX = "NSE:NIFTYBANK-INDEX";
 
-  function setup(slotLimit?: number) {
+  function setup(slotLimit?: number, onFeedDead?: () => void) {
     const sockets: Array<ReturnType<typeof fakeSocket>> = [];
     const timers: Array<() => void> = [];
     let nowMs = 1_000_000;
@@ -575,6 +575,7 @@ describe("FyersLiveStreamer silent-symbol watchdog", () => {
       createSocket: () => { const s = fakeSocket(); sockets.push(s); return s; },
       subscribeSpacingMs: 0,
       ...(slotLimit === undefined ? {} : { socketSlotLimit: slotLimit }),
+      ...(onFeedDead === undefined ? {} : { onFeedDead }),
       nowFn: () => nowMs,
       setTimeoutFn: (handler) => { timers.push(handler); return 0; },
     });
@@ -785,6 +786,134 @@ describe("FyersLiveStreamer silent-symbol watchdog", () => {
     expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
     // The vendor's close event has not fired yet: the replacement is in progress.
     expect(streamer.checkForSilentSymbols()).toMatchObject({ action: "NONE", silent: [] });
+  });
+
+  /*
+   * 2026-10-29 14:19 IST: the watchdog replaced the socket for 26 silent option contracts, the replacement connected and resubscribed
+   * all 32 symbols, and then delivered nothing at all (lastTickAgeMs past 124 s, every symbol silent) until the API was restarted by
+   * hand. Why the replacement was dead is not known; the vendor's socket being a process-wide singleton is one candidate.
+   */
+  describe("a connection that delivers nothing", () => {
+    it("asks the host to restart when nothing has ticked for a minute and symbols asked for long ago are waiting", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, chain, advance } = setup(undefined, onFeedDead);
+      await chain(10);
+      advance(61_000);
+
+      const result = streamer.checkForSilentSymbols();
+
+      expect(result.action).toBe("RESTART_REQUESTED");
+      expect(result.reason).toMatch(/Nothing has ticked on this connection/);
+      expect(onFeedDead).toHaveBeenCalledTimes(1);
+      expect(streamer.diagnostics().deadFeedRestartsRequested).toBe(1);
+    });
+
+    it("catches the 10-29 sequence: a replacement for silent symbols whose new connection is dead", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, sockets, tick, chain, advance, reconnect } = setup(undefined, onFeedDead);
+      await chain(10);
+      tick(sockets[0]!, INDEX);
+      advance(31_000);
+      tick(sockets[0]!, INDEX);
+      expect(streamer.checkForSilentSymbols().action).toBe("RECYCLED");
+      await reconnect();
+
+      // The new connection never ticks. Half a minute in, the symbols are old enough to judge but the connection is not yet called dead,
+      // and they must not be given up on one by one: the silence is the connection's.
+      advance(31_000);
+      expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+      expect(streamer.diagnostics().deadSymbols).toEqual([]);
+      expect(onFeedDead).not.toHaveBeenCalled();
+
+      advance(31_000);
+      expect(streamer.checkForSilentSymbols().action).toBe("RESTART_REQUESTED");
+      expect(onFeedDead).toHaveBeenCalledTimes(1);
+      expect(sockets).toHaveLength(2); // restart, not another socket
+    });
+
+    it("measures the silence from this connection, not from a tick on an earlier one", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, sockets, tick, chain, advance, reconnect } = setup(undefined, onFeedDead);
+      await chain(10);
+      tick(sockets[0]!, INDEX);
+      advance(300_000); // the last tick is five minutes old when the connection drops
+      await reconnect();
+      advance(40_000);
+
+      expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+      expect(onFeedDead).not.toHaveBeenCalled();
+    });
+
+    it("does nothing once a tick arrives, however long the quiet before it", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, sockets, tick, chain, advance } = setup(undefined, onFeedDead);
+      await chain(10);
+      advance(50_000);
+      tick(sockets[0]!, INDEX);
+      advance(30_000);
+
+      expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+      expect(onFeedDead).not.toHaveBeenCalled();
+    });
+
+    it("does not call a connection dead when nothing has been asked for, because there is nothing to wait for", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, sockets, advance } = setup(undefined, onFeedDead);
+      await streamer.connect();
+      sockets[0]!.fire("connect");
+      advance(120_000);
+
+      expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+      expect(onFeedDead).not.toHaveBeenCalled();
+    });
+
+    it("does not call a connection dead while the symbols asked for are still inside their thirty seconds", async () => {
+      const onFeedDead = vi.fn();
+      const { streamer, sockets, chain, advance } = setup(undefined, onFeedDead);
+      await chain(10);
+      advance(100_000); // a long quiet, but the symbols below are asked for only now
+      streamer.unsubscribe(streamer.diagnostics().silentSymbols);
+      streamer.unsubscribe([INDEX]);
+      streamer.subscribe([INDEX, "NSE:BANKNIFTY26NOVLATE0CE"]);
+      advance(10_000);
+
+      expect(streamer.checkForSilentSymbols().action).toBe("NONE");
+      expect(onFeedDead).not.toHaveBeenCalled();
+      expect(sockets).toHaveLength(1);
+    });
+
+    it("asks again on each later check while it holds, because the host may refuse, but says so in the log once", async () => {
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { lines.push(String(line)); });
+      try {
+        const onFeedDead = vi.fn();
+        const { streamer, chain, advance } = setup(undefined, onFeedDead);
+        await chain(10);
+        advance(61_000);
+        streamer.checkForSilentSymbols();
+        advance(15_000);
+        streamer.checkForSilentSymbols();
+        advance(15_000);
+        streamer.checkForSilentSymbols();
+
+        expect(onFeedDead).toHaveBeenCalledTimes(3);
+        expect(lines.filter((line) => line.includes("nothing has ticked on it"))).toHaveLength(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("leaves a feed that is quiet as a whole alone when the host cannot restart, as before", async () => {
+      const { streamer, chain, advance } = setup();
+      await chain(10);
+      advance(120_000);
+
+      const result = streamer.checkForSilentSymbols();
+
+      expect(result.action).toBe("NONE");
+      expect(result.reason).toMatch(/whole feed is quiet/);
+      expect(streamer.diagnostics().deadFeedRestartsRequested).toBe(0);
+    });
   });
 
   it("reports what a person needs to see, without a restart", async () => {

@@ -8,8 +8,8 @@ const CHECK_UNTIL_MINUTE_IST = 15 * 60 + 25;
 const CHECK_EVERY_MS = 15_000;
 
 /**
- * A weekday between 09:20 and 15:25 IST. A holiday inside the window is not consulted: a feed that is quiet as a whole is left
- * alone by the check itself, so the calendar adds nothing.
+ * A weekday between 09:20 and 15:25 IST. A holiday inside the window is not decided here: the caller passes `isSessionOpen`, which
+ * knows the exchange holidays. It matters now that a feed quiet as a whole can ask for a restart, because a holiday is quiet all day.
  */
 export function isSilentSymbolCheckWindow(now: Date): boolean {
   const local = new Date(now.getTime() + IST_OFFSET_MS);
@@ -27,12 +27,15 @@ export function isSilentSymbolCheckWindow(now: Date): boolean {
 export function startFyersStreamerWatchdog(options: {
   streamer: { checkForSilentSymbols(): SilentSymbolCheck };
   now?: () => Date;
+  /** Whether the exchange is open today (holidays). Without it the weekday window alone decides. */
+  isSessionOpen?: () => boolean;
   report?: (message: string, fields: Record<string, unknown>) => void;
 }): () => void {
   const clock = options.now ?? (() => new Date());
   const report = options.report ?? ((message, fields) => console.error(JSON.stringify({ level: "error", message, source: "FyersStreamerWatchdog", ...fields })));
   const check = (): void => {
     if (!isSilentSymbolCheckWindow(clock())) return;
+    if (options.isSessionOpen !== undefined && !options.isSessionOpen()) return;
     try {
       options.streamer.checkForSilentSymbols();
     } catch (error) {
