@@ -67,6 +67,29 @@ export const supersededPriceActionAlgorithmVersions = ["price-action-v2", "price
  */
 export const priceActionV4AlgorithmVersion = "price-action-v4";
 
+/**
+ * Labels written beside the current version for comparison and read by nothing that decides anything.
+ *
+ * The loaders that build the context strategies, backtests and the paper-trade market-context note read exclude these (see
+ * `experimentalPriceActionVersionsSql`), so adding rows under one of them cannot change what any bot or backtest sees. The
+ * scanner is the deliberate exception: it shows every version side by side. `experimental-price-action-versions.test.ts` fails if a
+ * new reader of `price_action_events` neither excludes them nor is listed there as an exception.
+ */
+export const experimentalPriceActionAlgorithmVersions: readonly string[] = [priceActionV4AlgorithmVersion];
+
+/**
+ * The quoted, comma-separated list for a `NOT IN (...)` clause. Built from the constants above, never from input; the check keeps a
+ * future edit from putting a quote or a space into a label that is spliced into SQL text.
+ */
+export function experimentalPriceActionVersionsSql(): string {
+  return experimentalPriceActionAlgorithmVersions
+    .map((version) => {
+      if (!/^[a-z0-9-]+$/.test(version)) throw new Error(`Unsafe price-action algorithm version label: ${version}`);
+      return `'${version}'`;
+    })
+    .join(", ");
+}
+
 export const priceActionEventCodes = [
   "BREAKOUT",
   "BREAKDOWN",

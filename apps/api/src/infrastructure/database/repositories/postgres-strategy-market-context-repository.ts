@@ -1,3 +1,4 @@
+import { experimentalPriceActionVersionsSql } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { IndicatorCode, IndicatorValues } from "../../../modules/technical-analysis/domain/technical-indicator.js";
 import type {
@@ -533,6 +534,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
           -- known_at, not detected_at: see the pattern_detections query above.
           AND known_at <= $2
+          -- Experimental versions (price-action-v4) are written beside the current one for comparison only; a strategy must not see them.
+          AND algorithm_version NOT IN (${experimentalPriceActionVersionsSql()})
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id, candle.close_time]),
       /*

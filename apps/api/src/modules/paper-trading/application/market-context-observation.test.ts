@@ -53,6 +53,7 @@ describe("observeMarketContext", () => {
   });
 
   it("builds a PASS stamp with session bars and shadow veto fields", async () => {
+    const swingQueries: string[] = [];
     const indexId = "11111111-1111-1111-1111-111111111111";
     // 09:15 IST = 03:45 UTC on 2026-10-13
     const bars = Array.from({ length: 40 }, (_, i) => {
@@ -78,7 +79,10 @@ describe("observeMarketContext", () => {
           return { rows: bars };
         }
         if (text.includes("instrument_type = 'FUTURE'")) return { rows: [] };
-        if (text.includes("price_action_events")) return { rows: [] };
+        if (text.includes("price_action_events")) {
+          swingQueries.push(text);
+          return { rows: [] };
+        }
         return null;
       },
     ]);
@@ -91,6 +95,9 @@ describe("observeMarketContext", () => {
       now: NOW,
     });
 
+    // swing levels come from the current version only: experimental labels (price-action-v4) are written beside it for comparison
+    expect(swingQueries).toHaveLength(1);
+    expect(swingQueries[0]).toContain("pae.algorithm_version NOT IN ('price-action-v4')");
     expect(note).toContain(MARKET_CONTEXT_OBSERVATION_CODE);
     expect(note).toContain('"dq":"PASS"');
     expect(note).toContain("wouldBlock");

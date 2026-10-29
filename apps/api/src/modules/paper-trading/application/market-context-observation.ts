@@ -7,6 +7,7 @@
  * unstamped) — unknown, not "no context".
  */
 
+import { experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
 import {
   buildFixedRowVolumeProfile,
   type ProfileBar,
@@ -223,6 +224,7 @@ export async function observeMarketContext(input: MarketContextObservationInput)
             AND pae.level IS NOT NULL
             AND pae.known_at >= $2
             AND pae.known_at <= $3
+            AND pae.algorithm_version NOT IN (${experimentalPriceActionVersionsSql()})
           ORDER BY pae.known_at DESC
           LIMIT 40`,
         [indexId, since, completedBefore],

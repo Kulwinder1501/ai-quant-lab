@@ -331,6 +331,8 @@ async function main(): Promise<void> {
     // Same shape of work as above -- a full-series rescan per instrument and timeframe -- so it
     // carries the same patience.
     PATTERN_INTELLIGENCE_INTRADAY: 20 * 60 * 1000,
+    // price-action-v4 on 5m, beside v3: the same full-series rescan per instrument, so the same patience.
+    PATTERN_DETECTION_V4_INTRADAY: 20 * 60 * 1000,
     // Reads one session of ticks and classifies them; the shortest horizon here on purpose, because
     // a stalled health check is itself a loss of the signal it exists to provide.
     COLLECTOR_HEALTH: 5 * 60 * 1000,
@@ -988,6 +990,37 @@ async function main(): Promise<void> {
 
   cronSchedule("7,22,37,52 9-15 * * 1-5", () => {
     void schedule("PATTERN_INTELLIGENCE_INTRADAY", () => detectPatternIntelligenceIntraday(["1m", "5m"]));
+  });
+
+  /**
+   * `price-action-v4` on 5m, run beside `price-action-v3` so the two can be compared on real sessions. Comparison only.
+   *
+   * v4 corrects three things found on NIFTY 5m on 2026-10-29 (see `priceActionV4AlgorithmVersion`). It stores under its own version
+   * label and never over v3, and every loader a bot or a backtest reads excludes it (`experimentalPriceActionVersionsSql`), so running
+   * it changes what nothing decides on. It is not folded into `detectPatternsIntraday`: that tick feeds the shadow decisions and the
+   * pattern-gated bots, and a v4 failure or delay must not touch it. Two minutes after the v3 tick instead, 5m only (the timeframe
+   * the defects were found on), both indices. The first run writes the whole `INDICATOR_WRITE_LOOKBACK_DAYS` window, which is the
+   * history the comparison starts from.
+   *
+   * Making v4 the current version, or letting any reader see it, is a separate decision that needs a replay of what the bots would read.
+   */
+  const detectPatternsV4Intraday = async (): Promise<void> => {
+    const writeFrom = istDateKey(
+      new Date(Date.now() - INDICATOR_WRITE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000),
+    );
+    for (const instrument of ["NIFTY50", "BANKNIFTY"]) {
+      await runCommand("npm", [
+        "run", "analysis:detect-patterns", "--",
+        "--instrument", instrument,
+        "--timeframe", "5m",
+        "--from", writeFrom,
+        "--engine", "v4",
+      ]);
+    }
+  };
+
+  cronSchedule("2,7,12,17,22,27,32,37,42,47,52,57 9-15 * * 1-5", () => {
+    void schedule("PATTERN_DETECTION_V4_INTRADAY", detectPatternsV4Intraday);
   });
 
   /*
@@ -1925,6 +1958,7 @@ async function main(): Promise<void> {
       "INDIA_VIX_INTRADAY",
       "AI_AGENT_TICK",
       "PATTERN_DETECTION_INTRADAY",
+      "PATTERN_DETECTION_V4_INTRADAY",
       // Hand-maintained for the startup log only -- it gates nothing, so an omission here does not
       // stop a job running, it just makes the inventory lie about what is scheduled.
       "PATTERN_INTELLIGENCE_INTRADAY",

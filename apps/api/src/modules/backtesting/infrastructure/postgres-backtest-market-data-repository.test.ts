@@ -230,6 +230,8 @@ describe("PostgresBacktestMarketDataRepository", () => {
     // detected_at predicate (alone or in addition) would silently erase history from every replay.
     expect(patternQuery?.text).toContain("pattern_detections.known_at <= $2");
     expect(priceActionQuery?.text).toContain("AND known_at <= $2");
+    // price-action-v4 is written beside v3 for comparison; a replay must read only what a bot could have read
+    expect(priceActionQuery?.text).toContain("algorithm_version NOT IN ('price-action-v4')");
     const withoutSqlComments = (sql: string | undefined): string => (sql ?? "").replace(/--.*$/gm, "");
     expect(withoutSqlComments(patternQuery?.text)).not.toContain("detected_at");
     expect(withoutSqlComments(priceActionQuery?.text)).not.toContain("detected_at");

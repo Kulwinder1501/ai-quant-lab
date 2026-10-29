@@ -1,3 +1,4 @@
+import { experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { CandlestickPatternCode, PatternDirection, PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
 import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/domain/technical-indicator.js";
@@ -190,6 +191,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
         WHERE candle_id = ANY($1::uuid[])
           -- known_at, not detected_at: see the pattern_detections query above.
           AND known_at <= $2
+          -- Experimental versions (price-action-v4) are written beside the current one for comparison only; a replay must not see them.
+          AND algorithm_version NOT IN (${experimentalPriceActionVersionsSql()})
         ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
       `, [candleIds, input.dataCutoffAt]),
       this.database.query<{ bar_time: Date; snapshot_payload: IctStateCompositeSnapshot }>(`
