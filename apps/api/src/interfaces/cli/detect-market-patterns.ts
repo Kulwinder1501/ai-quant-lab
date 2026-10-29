@@ -8,11 +8,16 @@ import { PostgresPatternDefinitionRepository } from "../../infrastructure/databa
 import { PostgresPatternDetectionRepository } from "../../infrastructure/database/repositories/postgres-pattern-detection-repository.js";
 import { PostgresPriceActionEventRepository } from "../../infrastructure/database/repositories/postgres-price-action-event-repository.js";
 import { DetectMarketPatterns } from "../../modules/pattern-recognition/application/detect-market-patterns.js";
-import { atrPriceActionConfiguration, PriceActionEngine } from "../../modules/pattern-recognition/domain/price-action-engine.js";
+import {
+  atrPriceActionConfiguration,
+  PriceActionEngine,
+  priceActionConfigurationV4ForTimeframe,
+} from "../../modules/pattern-recognition/domain/price-action-engine.js";
 import { CandlestickPatternEngine } from "../../modules/pattern-recognition/domain/candlestick-pattern-engine.js";
 import {
   priceActionAlgorithmVersion,
   priceActionAtrAlgorithmVersion,
+  priceActionV4AlgorithmVersion,
 } from "../../modules/pattern-recognition/domain/market-pattern.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
@@ -38,6 +43,19 @@ function parseThresholdMode(value: string | undefined): "default" | "atr" {
   return normalized === "atr" ? "atr" : "default";
 }
 
+/**
+ * `--engine v4` runs the `price-action-v4` rules and stores under that version, alongside v3, never over it. It carries the ATR
+ * across sessions, re-anchors swings whose confirming candle is a suppressed bar, and asks for a retest before calling a swing
+ * SUPPORT or RESISTANCE. Omitted, the normal v3 run is unchanged. It sets its own units, so it cannot be combined with
+ * `--threshold-mode`.
+ */
+function parseEngineRevision(value: string | undefined): "v3" | "v4" {
+  if (value === undefined) return "v3";
+  const normalized = value.trim().toLowerCase();
+  if (normalized !== "v3" && normalized !== "v4") throw new Error(`Unsupported --engine "${value}". Use: v3, v4.`);
+  return normalized;
+}
+
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
   const environment = loadEnvironment();
@@ -55,7 +73,13 @@ async function main(): Promise<void> {
     }
     const fromArg = getOption(argumentsList, "from");
     const since = fromArg ? parseDateOption(fromArg, false) : undefined;
-    const variant = thresholdMode === "atr" ? priceActionVariants.atr : null;
+    const engineRevision = parseEngineRevision(getOption(argumentsList, "engine"));
+    if (engineRevision === "v4" && requestedMode !== undefined) {
+      throw new Error("--engine v4 sets its own units; do not combine it with --threshold-mode.");
+    }
+    const variant = engineRevision === "v4"
+      ? { engine: () => new PriceActionEngine(priceActionConfigurationV4ForTimeframe(timeframe)), algorithmVersion: priceActionV4AlgorithmVersion }
+      : thresholdMode === "atr" ? priceActionVariants.atr : null;
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
       throw new Error(`NSE instrument "${symbol}" is not registered.`);
@@ -75,6 +99,7 @@ async function main(): Promise<void> {
       instrumentId: instrument.id,
       timeframe,
       priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
+      ...(engineRevision === "v4" ? { carryAtrAcrossSessions: true, reanchorSuppressedSwings: true } : {}),
       since,
       tickSize: Number.isFinite(Number(instrument.tickSize)) && Number(instrument.tickSize) > 0
         ? Number(instrument.tickSize)

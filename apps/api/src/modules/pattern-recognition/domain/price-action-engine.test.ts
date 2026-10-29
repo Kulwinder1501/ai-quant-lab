@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { PriceActionEngine, priceActionConfigurationForTimeframe, type PriceActionConfiguration } from "./price-action-engine.js";
+import {
+  PriceActionEngine,
+  priceActionConfigurationForTimeframe,
+  priceActionConfigurationV4ForTimeframe,
+  type PriceActionConfiguration,
+} from "./price-action-engine.js";
 import type { DetectedPriceActionEvent, PatternCandle } from "./market-pattern.js";
 
 const testConfiguration: PriceActionConfiguration = {
@@ -255,5 +260,99 @@ describe("priceActionConfigurationForTimeframe", () => {
     const { thresholdMode: _intradayMode, ...intraday } = priceActionConfigurationForTimeframe("5m");
     const { thresholdMode: _dailyMode, ...daily } = priceActionConfigurationForTimeframe("1d");
     expect(intraday).toEqual(daily);
+  });
+});
+
+describe("price-action-v4 corrections", () => {
+  const quiet = { trendLookback: 10, breakoutLookback: 10, pullbackLookback: 10 };
+  const atrConfiguration = { ...testConfiguration, ...quiet, thresholdMode: "ATR" as const, atrPeriod: 14 };
+  // one clear swing high (candle 3), confirmed by candle 5
+  const swingCandles = [
+    candle("1", 8, 10, 5),
+    candle("2", 9, 11, 6),
+    candle("3", 10, 15, 7),
+    candle("4", 9, 11, 6),
+    candle("5", 8, 10, 5),
+  ];
+
+  it("is silent on its own in ATR mode before the warm-up, and speaks once an ATR carried from earlier sessions is supplied", () => {
+    const engine = new PriceActionEngine(atrConfiguration);
+
+    expect(engine.detect(swingCandles).filter((detected) => detected.eventCode === "SWING_HIGH")).toHaveLength(0);
+
+    const carried = engine.detect(swingCandles, { atrValues: [2, 2, 2, 2, 2] });
+    expect(eventFor(carried, "SWING_HIGH", "5")).toMatchObject({ level: 15, details: { pivotCandleId: "3", thresholdMode: "ATR" } });
+  });
+
+  it("refuses an ATR that is not aligned with the candles", () => {
+    expect(() => new PriceActionEngine(atrConfiguration).detect(swingCandles, { atrValues: [1, 2] })).toThrow(/index-aligned/);
+  });
+
+  it("ignores supplied ATR values outside ATR mode, where the unit is a percentage of price", () => {
+    const engine = new PriceActionEngine({ ...testConfiguration, ...quiet });
+
+    expect(engine.detect(swingCandles, { atrValues: [999, 999, 999, 999, 999] })).toEqual(engine.detect(swingCandles));
+  });
+
+  it("calls a swing SUPPORT or RESISTANCE only after a retest when two touches are required, and still emits the raw swing", () => {
+    const strict = new PriceActionEngine({ ...testConfiguration, ...quiet, levelMinTouches: 2 });
+
+    const isolated = strict.detect(swingCandles);
+    expect(eventFor(isolated, "SWING_HIGH", "5")).toMatchObject({ details: { touches: 1 } });
+    expect(isolated.filter((detected) => detected.eventCode === "RESISTANCE")).toHaveLength(0);
+
+    // the same data as the consolidation test above: the high at candle 6 is visited again, so it has two touches
+    const retested = new PriceActionEngine({ ...testConfiguration, levelMinTouches: 2 }).detect([
+      candle("1", 108, 110, 106),
+      candle("2", 108, 110, 106),
+      candle("3", 108, 110, 106),
+      candle("4", 103, 105, 101),
+      candle("5", 104, 106, 102),
+      candle("6", 108, 110, 106),
+      candle("7", 103, 105, 101),
+      candle("8", 102, 104, 100),
+    ]);
+    expect(eventFor(retested, "SWING_HIGH", "8")).toMatchObject({ details: { touches: 2 } });
+    expect(eventFor(retested, "RESISTANCE", "8")).toMatchObject({ level: 110 });
+  });
+
+  it("applies the same retest rule to a swing low and its SUPPORT", () => {
+    const strict = new PriceActionEngine({ ...testConfiguration, levelMinTouches: 2 });
+
+    const isolated = strict.detect([
+      candle("1", 12, 15, 10),
+      candle("2", 11, 14, 9),
+      candle("3", 8, 13, 5),
+      candle("4", 11, 14, 9),
+      candle("5", 12, 15, 10),
+    ]);
+    expect(eventFor(isolated, "SWING_LOW", "5")).toMatchObject({ level: 5, details: { touches: 1 } });
+    expect(isolated.filter((detected) => detected.eventCode === "SUPPORT")).toHaveLength(0);
+
+    // the mirror image of the consolidation test: the low at candle 6 is a second visit to the band the first three candles made
+    const retested = strict.detect([
+      candle("1", 102, 104, 100),
+      candle("2", 102, 104, 100),
+      candle("3", 102, 104, 100),
+      candle("4", 107, 109, 105),
+      candle("5", 106, 108, 104),
+      candle("6", 102, 104, 100),
+      candle("7", 107, 109, 105),
+      candle("8", 108, 110, 106),
+    ]);
+    expect(eventFor(retested, "SWING_LOW", "8")).toMatchObject({ level: 100, details: { touches: 2 } });
+    expect(eventFor(retested, "SUPPORT", "8")).toMatchObject({ level: 100 });
+  });
+
+  it("keeps every swing a level when no minimum is set, which is the v3 behaviour", () => {
+    const events = new PriceActionEngine({ ...testConfiguration, ...quiet }).detect(swingCandles);
+
+    expect(eventFor(events, "RESISTANCE", "5")).toMatchObject({ level: 15 });
+  });
+
+  it("builds the v4 configuration from the v3 units for the timeframe plus the retest rule, leaving v3 untouched", () => {
+    expect(priceActionConfigurationV4ForTimeframe("5m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
+    expect(priceActionConfigurationV4ForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 2 });
+    expect(priceActionConfigurationForTimeframe("5m").levelMinTouches).toBeUndefined();
   });
 });

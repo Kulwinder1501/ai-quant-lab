@@ -34,6 +34,12 @@ export interface PriceActionConfiguration {
   trendThresholdUnits: number;
   pullbackUnits: number;
   levelToleranceUnits: number;
+  /**
+   * How many separate visits to a swing's price band (the pivot itself is the first) a swing needs before it is also reported as
+   * SUPPORT or RESISTANCE. The raw SWING_HIGH / SWING_LOW event is always emitted. Absent means 1, which is every swing: the
+   * `price-action-v3` behaviour. `price-action-v4` asks for 2, so an isolated five-candle swing is not called a level.
+   */
+  levelMinTouches?: number;
 }
 
 const defaultConfiguration: PriceActionConfiguration = {
@@ -68,6 +74,14 @@ export const atrPriceActionConfiguration: PriceActionConfiguration = {
  */
 export function priceActionConfigurationForTimeframe(timeframe: string): PriceActionConfiguration {
   return isIntradayTimeframe(timeframe) ? atrPriceActionConfiguration : defaultConfiguration;
+}
+
+/**
+ * The configuration `price-action-v4` uses: the v3 units for the timeframe, plus a retest before a swing is also called SUPPORT or
+ * RESISTANCE (`levelMinTouches`). The other two v4 corrections live in the application layer, which is where the sessions are cut.
+ */
+export function priceActionConfigurationV4ForTimeframe(timeframe: string): PriceActionConfiguration {
+  return { ...priceActionConfigurationForTimeframe(timeframe), levelMinTouches: 2 };
 }
 
 type Trend = "UPTREND" | "DOWNTREND" | "RANGE";
@@ -233,12 +247,31 @@ function levelTouches(candles: readonly PatternCandle[], level: number, kind: "H
 export class PriceActionEngine {
   constructor(private readonly configuration: PriceActionConfiguration = defaultConfiguration) {}
 
-  detect(candles: readonly PatternCandle[]): DetectedPriceActionEvent[] {
+  /** True when distances are measured in ATR units, so a caller may supply an ATR computed over a longer history than the candles it passes. */
+  get usesAtr(): boolean {
+    return this.configuration.thresholdMode === "ATR";
+  }
+
+  get atrPeriod(): number {
+    return this.configuration.atrPeriod;
+  }
+
+  /**
+   * `options.atrValues`, in ATR mode only, replaces the ATR the engine would compute from `candles` alone; it must be index-aligned
+   * with `candles`. The application uses it to carry the ATR across sessions: handed one session at a time, the engine's own ATR
+   * restarts every morning and stays empty for the first `atrPeriod - 1` candles, so the opening range produced no swing, level or
+   * breakout at all (measured on NIFTY 5m, 2026-10-29: nothing before 10:25).
+   */
+  detect(candles: readonly PatternCandle[], options: { atrValues?: readonly (number | null)[] } = {}): DetectedPriceActionEvent[] {
     const results: DetectedPriceActionEvent[] = [];
+    if (options.atrValues !== undefined && options.atrValues.length !== candles.length) {
+      throw new Error("atrValues must be index-aligned with the candles.");
+    }
     const atrValues = this.configuration.thresholdMode === "ATR"
-      ? atrSeries(candles, this.configuration.atrPeriod)
+      ? (options.atrValues ?? atrSeries(candles, this.configuration.atrPeriod))
       : [];
     const thresholdMode = this.configuration.thresholdMode;
+    const minTouches = this.configuration.levelMinTouches ?? 1;
     let previousTrend: Trend | null = null;
 
     for (let index = 0; index < candles.length; index += 1) {
@@ -326,7 +359,7 @@ export class PriceActionEngine {
           const detail = { pivotCandleId: pivot.id, confirmationCandleId: current.id, touches, swingWindow: this.configuration.swingWindow, thresholdMode };
           const score = 0.5 + Math.min(0.4, touches * 0.08);
           results.push(event(current, "SWING_HIGH", "BEARISH", pivot.high, score, detail));
-          results.push(event(current, "RESISTANCE", "BEARISH", pivot.high, score, detail));
+          if (touches >= minTouches) results.push(event(current, "RESISTANCE", "BEARISH", pivot.high, score, detail));
         }
       }
       if (isSwingLow(candles, pivotIndex, this.configuration.swingWindow)) {
@@ -338,7 +371,7 @@ export class PriceActionEngine {
           const detail = { pivotCandleId: pivot.id, confirmationCandleId: current.id, touches, swingWindow: this.configuration.swingWindow, thresholdMode };
           const score = 0.5 + Math.min(0.4, touches * 0.08);
           results.push(event(current, "SWING_LOW", "BULLISH", pivot.low, score, detail));
-          results.push(event(current, "SUPPORT", "BULLISH", pivot.low, score, detail));
+          if (touches >= minTouches) results.push(event(current, "SUPPORT", "BULLISH", pivot.low, score, detail));
         }
       }
     }

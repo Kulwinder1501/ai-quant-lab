@@ -16,6 +16,7 @@ import {
   type PriceActionEventRepository,
 } from "../domain/market-pattern.js";
 import { PriceActionEngine, priceActionConfigurationForTimeframe } from "../domain/price-action-engine.js";
+import { atrSeries } from "../domain/atr-series.js";
 import { findSuppressedCandleIds, isIntradayTimeframe, splitIntoSessions } from "../domain/session-segmentation.js";
 
 /** NSE default tick (INR 0.05), used for the DOJI range floor when the caller supplies no tick size. */
@@ -26,6 +27,13 @@ export interface DetectMarketPatternsInput {
   timeframe: string;
   candlestickAlgorithmVersion?: string;
   priceActionAlgorithmVersion?: string;
+  /**
+   * Compute the ATR over the whole series and hand each session its own slice, instead of letting the ATR restart every morning.
+   * Only matters for an engine measuring in ATR units. Structure (trend, breakout, swings) stays session-local either way.
+   */
+  carryAtrAcrossSessions?: boolean;
+  /** Move a swing event whose confirming candle is suppressed to the next candle that is not. See `reanchorSuppressedSwings`. */
+  reanchorSuppressedSwings?: boolean;
   since?: Date;
   /**
    * The instrument's tick size, for the DOJI minimum-range floor. Defaults to the NSE 0.05 tick:
@@ -90,6 +98,46 @@ function toPatternCandle(candle: PersistedCandle): PatternCandle {
   };
 }
 
+const swingEventCodes: ReadonlySet<string> = new Set(["SWING_HIGH", "SWING_LOW", "SUPPORT", "RESISTANCE"]);
+
+/**
+ * A swing is confirmed two candles after its pivot, on the confirming candle. When that candle is one the pipeline suppresses (a
+ * frozen-feed closing bar), the event is thrown away, and it is never found again: the next candle sees the pivot at a different
+ * distance. On 2026-10-29 the NIFTY 5m session high (15:10) was lost this way.
+ *
+ * Moves such an event to the next candle in the session that is not suppressed. That candle is later than the confirmation, so nothing
+ * is known earlier than it was. Dropped if no later candle exists, and if the destination already carries the same event code (the
+ * row key is candle, code and version), in which case the event already there wins.
+ */
+export function reanchorSuppressedSwings(
+  events: readonly DetectedPriceActionEvent[],
+  segment: readonly PatternCandle[],
+  suppressed: ReadonlySet<string>,
+): DetectedPriceActionEvent[] {
+  if (suppressed.size === 0) return [...events];
+  const positionById = new Map(segment.map((candle, index) => [candle.id, index] as const));
+  const taken = new Set(events.filter((event) => !suppressed.has(event.candleId)).map((event) => `${event.candleId}|${event.eventCode}`));
+  const result: DetectedPriceActionEvent[] = [];
+  for (const event of events) {
+    const position = positionById.get(event.candleId);
+    if (!swingEventCodes.has(event.eventCode) || !suppressed.has(event.candleId) || position === undefined) {
+      result.push(event);
+      continue;
+    }
+    const target = segment.slice(position + 1).find((candle) => !suppressed.has(candle.id));
+    if (!target) continue;
+    const key = `${target.id}|${event.eventCode}`;
+    if (taken.has(key)) continue;
+    taken.add(key);
+    result.push({
+      ...event,
+      candleId: target.id,
+      details: { ...event.details, confirmationCandleId: target.id, originalConfirmationCandleId: event.candleId, reanchored: true },
+    });
+  }
+  return result;
+}
+
 function assertChronological(candles: readonly PatternCandle[]): void {
   for (let index = 1; index < candles.length; index += 1) {
     if (candles[index].openTime.getTime() <= candles[index - 1].openTime.getTime()) {
@@ -149,6 +197,10 @@ export class DetectMarketPatterns {
     // reports volume) neither trigger nor take part in a pattern.
     const patterns: DetectedCandlestickPattern[] = [];
     const events: DetectedPriceActionEvent[] = [];
+    const carriedAtr = input.carryAtrAcrossSessions === true && priceActionEngine.usesAtr
+      ? atrSeries(candles, priceActionEngine.atrPeriod)
+      : null;
+    const positionInSeries = carriedAtr ? new Map(candles.map((candle, index) => [candle.id, index] as const)) : null;
     for (const segment of splitIntoSessions(candles, input.timeframe)) {
       const suppressed = findSuppressedCandleIds(segment);
       const usable = <T extends { candleId: string }>(detected: T, contextCandleIds: readonly string[] = []): boolean => (
@@ -157,7 +209,14 @@ export class DetectMarketPatterns {
       for (const pattern of this.candlestickEngine.detect(segment, candlestickOptions)) {
         if (usable(pattern, pattern.contextCandleIds)) patterns.push(pattern);
       }
-      for (const event of [...priceActionEngine.detect(segment), ...this.chartPatternEngine.detect(segment)]) {
+      const detectedPriceAction = priceActionEngine.detect(
+        segment,
+        carriedAtr && positionInSeries ? { atrValues: segment.map((candle) => carriedAtr[positionInSeries.get(candle.id)!] ?? null) } : {},
+      );
+      const priceActionEvents = input.reanchorSuppressedSwings === true
+        ? reanchorSuppressedSwings(detectedPriceAction, segment, suppressed)
+        : detectedPriceAction;
+      for (const event of [...priceActionEvents, ...this.chartPatternEngine.detect(segment)]) {
         if (usable(event)) events.push(event);
       }
     }

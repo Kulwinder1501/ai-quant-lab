@@ -6,7 +6,8 @@ import type {
   PatternDetectionRepository,
   PriceActionEventRepository,
 } from "../domain/market-pattern.js";
-import { DetectMarketPatterns } from "./detect-market-patterns.js";
+import type { DetectedPriceActionEvent, PatternCandle } from "../domain/market-pattern.js";
+import { DetectMarketPatterns, reanchorSuppressedSwings } from "./detect-market-patterns.js";
 
 const sessionOneStart = Date.parse("2026-08-10T09:30:00Z"); // 15:00 IST
 const sessionTwoStart = Date.parse("2026-08-11T03:45:00Z"); // 09:15 IST the next day
@@ -54,7 +55,7 @@ function engulfingSeries(timesMs: readonly number[], volumes: readonly number[] 
 
 async function runDetection(
   candles: PersistedCandle[],
-  input: { timeframe: string; tickSize?: number },
+  input: { timeframe: string; tickSize?: number; carryAtrAcrossSessions?: boolean; reanchorSuppressedSwings?: boolean },
 ) {
   const detections: Array<{ candleId: string; contextCandleIds: readonly string[]; details: Record<string, unknown> }> = [];
   const events: Array<{ candleId: string; eventCode: string; details: Record<string, unknown> }> = [];
@@ -296,5 +297,105 @@ describe("DetectMarketPatterns", () => {
     );
     expect(daily.events.length).toBeGreaterThan(0);
     expect(modes(daily.events)).toEqual(new Set(["PERCENT"]));
+  });
+});
+
+describe("price-action-v4 options", () => {
+  const dayOne = Date.parse("2026-08-10T03:45:00Z"); // 09:15 IST
+  const dayTwo = Date.parse("2026-08-11T03:45:00Z");
+
+  /** A 20-candle session that warms the ATR up, then a short one whose only feature is a swing high of 110 at its fourth candle. */
+  function twoSessions(options: { flatConfirmation?: boolean } = {}): PersistedCandle[] {
+    const candles: PersistedCandle[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const close = 100 + index * 0.1;
+      candles.push(intradayCandle(index, { open: close - 0.1, high: close + 1, low: close - 1, close, openTimeMs: dayOne + index * fiveMinutes }));
+    }
+    for (let index = 0; index < 10; index += 1) {
+      const isPivot = index === 3;
+      const isFlatConfirmation = options.flatConfirmation === true && index === 5;
+      candles.push(intradayCandle(20 + index, isFlatConfirmation
+        ? { open: 102, high: 102, low: 102, close: 102, volume: 0, openTimeMs: dayTwo + index * fiveMinutes }
+        : { open: 102, high: isPivot ? 110 : 103, low: 101, close: 102, openTimeMs: dayTwo + index * fiveMinutes }));
+    }
+    return candles;
+  }
+
+  it("leaves the opening of a session silent when the ATR restarts, and speaks when it is carried across sessions", async () => {
+    const withoutCarry = await runDetection(twoSessions(), { timeframe: "5m" });
+    expect(withoutCarry.events.filter((event) => event.eventCode === "SWING_HIGH")).toHaveLength(0);
+
+    const carried = await runDetection(twoSessions(), { timeframe: "5m", carryAtrAcrossSessions: true });
+    const swing = carried.events.filter((event) => event.eventCode === "SWING_HIGH");
+    expect(swing).toHaveLength(1);
+    expect(swing[0]).toMatchObject({ candleId: "bar-25", details: { pivotCandleId: "bar-23", confirmationCandleId: "bar-25" } });
+  });
+
+  it("loses a swing whose confirming candle is a suppressed bar, and keeps it on the next real candle when asked", async () => {
+    const carryOnly = await runDetection(twoSessions({ flatConfirmation: true }), { timeframe: "5m", carryAtrAcrossSessions: true });
+    // only the pivot this test is about: the flat bar makes its equal-high neighbours swings of their own, which are not the point here
+    const ofInterest = (events: ReadonlyArray<{ eventCode: string; details: Record<string, unknown> }>) =>
+      events.filter((event) => event.eventCode === "SWING_HIGH" && event.details.pivotCandleId === "bar-23");
+    expect(ofInterest(carryOnly.events)).toHaveLength(0);
+
+    const reanchored = await runDetection(twoSessions({ flatConfirmation: true }), {
+      timeframe: "5m",
+      carryAtrAcrossSessions: true,
+      reanchorSuppressedSwings: true,
+    });
+    const swing = ofInterest(reanchored.events);
+    expect(swing).toHaveLength(1);
+    expect(swing[0]).toMatchObject({
+      candleId: "bar-26",
+      details: { pivotCandleId: "bar-23", confirmationCandleId: "bar-26", originalConfirmationCandleId: "bar-25", reanchored: true },
+    });
+  });
+
+  it("changes nothing for a run that asks for neither option", async () => {
+    const plain = await runDetection(twoSessions(), { timeframe: "5m" });
+    const explicit = await runDetection(twoSessions(), { timeframe: "5m", carryAtrAcrossSessions: false, reanchorSuppressedSwings: false });
+
+    expect(explicit.events).toEqual(plain.events);
+  });
+});
+
+describe("reanchorSuppressedSwings", () => {
+  function bar(id: string): PatternCandle {
+    return { id, openTime: new Date(0), open: 1, high: 1, low: 1, close: 1, volume: 1 };
+  }
+  function swing(candleId: string, eventCode: DetectedPriceActionEvent["eventCode"] = "SWING_HIGH"): DetectedPriceActionEvent {
+    return { candleId, eventCode, direction: "BEARISH", level: 10, confidence: 0.5, details: { confirmationCandleId: candleId } };
+  }
+  const segment = [bar("a"), bar("b"), bar("c"), bar("d")];
+
+  it("moves a swing from a suppressed candle to the next one that is not suppressed", () => {
+    const result = reanchorSuppressedSwings([swing("b")], segment, new Set(["b", "c"]));
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ candleId: "d", details: { confirmationCandleId: "d", originalConfirmationCandleId: "b", reanchored: true } });
+  });
+
+  it("drops a swing when no later candle in the session is usable", () => {
+    expect(reanchorSuppressedSwings([swing("c")], segment, new Set(["c", "d"]))).toEqual([]);
+  });
+
+  it("lets an event already on the destination win, because the row key is candle, code and version", () => {
+    const existing = swing("d");
+    const result = reanchorSuppressedSwings([swing("c"), existing], segment, new Set(["c"]));
+
+    expect(result).toEqual([existing]);
+  });
+
+  it("leaves non-swing events and events on usable candles alone", () => {
+    const breakout: DetectedPriceActionEvent = { candleId: "b", eventCode: "BREAKOUT", direction: "BULLISH", level: 10, confidence: 0.7, details: {} };
+    const onUsable = swing("a");
+
+    expect(reanchorSuppressedSwings([breakout, onUsable], segment, new Set(["b"]))).toEqual([breakout, onUsable]);
+  });
+
+  it("returns the events as they were when nothing is suppressed", () => {
+    const events = [swing("b")];
+
+    expect(reanchorSuppressedSwings(events, segment, new Set())).toEqual(events);
   });
 });
