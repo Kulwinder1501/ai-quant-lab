@@ -1,5 +1,5 @@
 import { ictGapGuardFor } from "../../../modules/technical-analysis/domain/ict/series-gaps.js";
-import { experimentalPriceActionVersionsSql } from "../../../modules/pattern-recognition/domain/market-pattern.js";
+import { supersededPriceActionVersionsSql } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { IndicatorCode, IndicatorValues } from "../../../modules/technical-analysis/domain/technical-indicator.js";
 import type {
@@ -536,8 +536,8 @@ export class PostgresStrategyMarketContextRepository implements StrategyMarketCo
         WHERE candle_id = $1
           -- known_at, not detected_at: see the pattern_detections query above.
           AND known_at <= $2
-          -- Experimental versions (price-action-v4) are written beside the current one for comparison only; a strategy must not see them.
-          AND algorithm_version NOT IN (${experimentalPriceActionVersionsSql()})
+          -- Superseded versions (v2, v3) stay in the table as history; a strategy reads the current version only, because several readers take support/resistance from every version loaded.
+          AND algorithm_version NOT IN (${supersededPriceActionVersionsSql()})
         ORDER BY event_type ASC, algorithm_version ASC
       `, [candle.id, candle.close_time]),
       /*

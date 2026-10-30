@@ -95,9 +95,9 @@ describe("observeMarketContext", () => {
       now: NOW,
     });
 
-    // swing levels come from the current version only: experimental labels (price-action-v4) are written beside it for comparison
+    // swing levels come from the current version only: the superseded versions (v2, v3) stay in the table as history
     expect(swingQueries).toHaveLength(1);
-    expect(swingQueries[0]).toContain("pae.algorithm_version NOT IN ('price-action-v4')");
+    expect(swingQueries[0]).toContain("pae.algorithm_version NOT IN ('price-action-v2', 'price-action-v2-atr', 'price-action-v3', 'price-action-v3-atr')");
     expect(note).toContain(MARKET_CONTEXT_OBSERVATION_CODE);
     expect(note).toContain('"dq":"PASS"');
     expect(note).toContain("wouldBlock");

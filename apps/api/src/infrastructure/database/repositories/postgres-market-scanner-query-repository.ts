@@ -24,6 +24,7 @@ import type {
   WatchlistInstrument,
 } from "../../../modules/market-scanner/domain/market-scanner.js";
 import { scannerExchanges } from "../../../modules/market-scanner/domain/market-scanner.js";
+import { supersededPriceActionVersionsSql } from "../../../modules/pattern-recognition/domain/market-pattern.js";
 import type { DatabaseQueryable } from "../database.js";
 
 interface WatchlistRow extends QueryResultRow {
@@ -550,6 +551,8 @@ export class PostgresMarketScannerQueryRepository implements MarketScannerQueryR
           FROM price_action_events
           WHERE price_action_events.candle_id = c.id
             AND price_action_events.known_at <= CURRENT_TIMESTAMP
+            -- Superseded versions (v2, v3) stay in the table as history; the screen shows the current version only.
+            AND price_action_events.algorithm_version NOT IN (${supersededPriceActionVersionsSql()})
         ), '[]'::jsonb) AS price_action_events,
         latest_prediction.id AS prediction_id,
         latest_prediction.prediction AS prediction_label,

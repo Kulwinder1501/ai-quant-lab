@@ -101,8 +101,13 @@ type IndicatorSnapshot = StrategyMarketContext["indicators"][number];
  *
  * The frozen `pattern-v5-research` cohort carries its own explicit `priceActionAlgorithmVersion` pin
  * in research-strategies.ts, so its definition hash is unchanged.
+ *
+ * Bumped again 2026-10-30 (3 -> 4): the detector's current price-action version moved from v3 to v4, and a registered configuration is
+ * immutable, so the new default needs a new version. A replay over 200 sessions on both indices changed 0.8% of this strategy's trades and
+ * no measurable return (docs/2026-10-30-pattern-strategy-v3-vs-v4-price-action-results.md), so this is a move for the levels being right,
+ * not a claim of better results. The strategy has had no owner since AutoBot-Sniper was decommissioned on 2026-10-28.
  */
-export const momentumScalpPatternStrategyVersion = 3;
+export const momentumScalpPatternStrategyVersion = 4;
 
 export interface MomentumScalpPatternStrategyConfiguration {
   indicatorAlgorithmVersion: string;
@@ -567,7 +572,7 @@ export class MomentumScalpPatternStrategy {
 }
 
 /** Bumped alongside momentumScalpPatternStrategyVersion above -- same shared default, same reason. */
-export const momentumScalpPatternStrategyV2Version = 4;
+export const momentumScalpPatternStrategyV2Version = 5;
 
 export const momentumScalpPatternStrategyV2Registration = {
   strategyKey: "momentum-scalp-pattern-v2",

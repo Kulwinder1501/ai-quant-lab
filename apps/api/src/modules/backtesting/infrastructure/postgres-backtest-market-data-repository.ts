@@ -1,5 +1,5 @@
 import { ictGapGuardFor } from "../../technical-analysis/domain/ict/series-gaps.js";
-import { experimentalPriceActionAlgorithmVersions, experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
+import { supersededPriceActionAlgorithmVersions, supersededPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { CandlestickPatternCode, PatternDirection, PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
 import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/domain/technical-indicator.js";
@@ -95,18 +95,18 @@ function appendToMap<T>(target: Map<string, T[]>, candleId: string, value: T): v
  */
 export class PostgresBacktestMarketDataRepository implements BacktestMarketDataRepository {
   /**
-   * `includeExperimentalPriceActionVersions` lets one run read an experimental price-action version (price-action-v4) that every
-   * other reader is kept away from, so a strategy pinned to it by `--strategy-config` can be replayed against the current version.
-   * The default and the ordinary query are unchanged; the version arrives through a separate query, and only labels in the
-   * experimental list are accepted, so this cannot be used to read an arbitrary or superseded version.
+   * `includeSupersededPriceActionVersions` lets one run read a superseded price-action version (v2, v3) that every other reader is
+   * kept away from, so a strategy pinned to it (a frozen cohort, or a `--strategy-config` arm) can still be replayed over its own
+   * history. The ordinary query and its exclusion are unchanged; the version arrives through a separate query, and only labels in
+   * the superseded list are accepted, so this cannot be used to read an arbitrary label.
    */
   constructor(
     private readonly database: DatabaseQueryable,
-    private readonly includeExperimentalPriceActionVersions: readonly string[] = [],
+    private readonly includeSupersededPriceActionVersions: readonly string[] = [],
   ) {
-    for (const version of includeExperimentalPriceActionVersions) {
-      if (!experimentalPriceActionAlgorithmVersions.includes(version)) {
-        throw new Error(`"${version}" is not an experimental price-action version; the ordinary loader already reads it or it is not readable here.`);
+    for (const version of includeSupersededPriceActionVersions) {
+      if (!(supersededPriceActionAlgorithmVersions as readonly string[]).includes(version)) {
+        throw new Error(`"${version}" is not a superseded price-action version; the ordinary loader already reads the current one and no other label is readable here.`);
       }
     }
   }
@@ -210,8 +210,8 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
         WHERE candle_id = ANY($1::uuid[])
           -- known_at, not detected_at: see the pattern_detections query above.
           AND known_at <= $2
-          -- Experimental versions (price-action-v4) are written beside the current one for comparison only; a replay must not see them.
-          AND algorithm_version NOT IN (${experimentalPriceActionVersionsSql()})
+          -- Superseded versions (v2, v3) stay in the table as history; a replay reads the current version only unless the strategy pins one (see the constructor).
+          AND algorithm_version NOT IN (${supersededPriceActionVersionsSql()})
         ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
       `, [candleIds, input.dataCutoffAt]),
       this.database.query<{ bar_time: Date; snapshot_payload: IctStateCompositeSnapshot }>(`
@@ -248,7 +248,7 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
       });
     }
 
-    const requestedExperimentalRows = this.includeExperimentalPriceActionVersions.length === 0
+    const requestedSupersededRows = this.includeSupersededPriceActionVersions.length === 0
       ? []
       : (await this.database.query<PriceActionEventRow>(`
         SELECT
@@ -264,10 +264,10 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
           AND known_at <= $2
           AND algorithm_version = ANY($3::text[])
         ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
-      `, [candleIds, input.dataCutoffAt, [...this.includeExperimentalPriceActionVersions]])).rows;
+      `, [candleIds, input.dataCutoffAt, [...this.includeSupersededPriceActionVersions]])).rows;
 
     const priceActionEventsByCandle = new Map<string, StrategyMarketContext["priceActionEvents"]>();
-    for (const row of [...priceActionResult.rows, ...requestedExperimentalRows]) {
+    for (const row of [...priceActionResult.rows, ...requestedSupersededRows]) {
       appendToMap(priceActionEventsByCandle, row.candle_id, {
         eventCode: row.event_type,
         algorithmVersion: row.algorithm_version,

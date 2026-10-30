@@ -15,7 +15,7 @@ import {
   type PatternDetectionRepository,
   type PriceActionEventRepository,
 } from "../domain/market-pattern.js";
-import { PriceActionEngine, priceActionConfigurationForTimeframe } from "../domain/price-action-engine.js";
+import { PriceActionEngine, priceActionConfigurationForTimeframe, priceActionSpansSessions } from "../domain/price-action-engine.js";
 import { atrSeries } from "../domain/atr-series.js";
 import { findSuppressedCandleIds, isIntradayTimeframe, splitIntoSessions } from "../domain/session-segmentation.js";
 
@@ -27,19 +27,6 @@ export interface DetectMarketPatternsInput {
   timeframe: string;
   candlestickAlgorithmVersion?: string;
   priceActionAlgorithmVersion?: string;
-  /**
-   * Compute the ATR over the whole series and hand each session its own slice, instead of letting the ATR restart every morning.
-   * Only matters for an engine measuring in ATR units. Structure (trend, breakout, swings) stays session-local either way.
-   */
-  carryAtrAcrossSessions?: boolean;
-  /** Move a swing event whose confirming candle is suppressed to the next candle that is not. See `reanchorSuppressedSwings`. */
-  reanchorSuppressedSwings?: boolean;
-  /**
-   * Run the price-action engine once over the whole series and hand each session its own events, instead of one run per session. For the
-   * timeframes where a session cannot hold the engine's lookbacks (see `priceActionSpansSessions`). Candlestick and chart patterns stay
-   * per session either way, and a swing is only ever re-anchored inside its own session.
-   */
-  priceActionAcrossSessions?: boolean;
   since?: Date;
   /**
    * The instrument's tick size, for the DOJI minimum-range floor. Defaults to the NSE 0.05 tick:
@@ -175,8 +162,8 @@ export class DetectMarketPatterns {
     private readonly priceActionEventRepository: PriceActionEventRepository,
     private readonly candlestickEngine = new CandlestickPatternEngine(),
     /**
-     * Null (the default) selects the `price-action-v3` engine for the timeframe: ATR units on
-     * intraday, percent on daily. An explicit engine is used as given, and the caller is then
+     * Null (the default) selects the current price-action engine for the timeframe: ATR units on
+     * intraday, percent on daily, with the retest below 15m. An explicit engine is used as given, and the caller is then
      * responsible for pairing it with the matching `priceActionAlgorithmVersion` label.
      */
     private readonly priceActionEngine: PriceActionEngine | null = null,
@@ -213,11 +200,16 @@ export class DetectMarketPatterns {
     // reports volume) neither trigger nor take part in a pattern.
     const patterns: DetectedCandlestickPattern[] = [];
     const events: DetectedPriceActionEvent[] = [];
-    const carriedAtr = input.carryAtrAcrossSessions === true && priceActionEngine.usesAtr
+    // The ATR is computed over the whole series and each session is handed its own slice, so it does not restart every morning (it left
+    // the first 13 candles of a session without one and so nothing was emitted before about 10:25). Only matters in ATR units.
+    const carriedAtr = priceActionEngine.usesAtr
       ? atrSeries(candles, priceActionEngine.atrPeriod)
       : null;
     const positionInSeries = carriedAtr ? new Map(candles.map((candle, index) => [candle.id, index] as const)) : null;
-    const eventsByCandle = input.priceActionAcrossSessions === true && intraday
+    // From 15m up a session cannot hold the engine's lookbacks (see `priceActionSpansSessions`), so the price-action rules run once over the
+    // whole series and each session is handed its own events. Candlestick and chart patterns stay per session, and a swing is only ever
+    // re-anchored inside its own session.
+    const eventsByCandle = priceActionSpansSessions(input.timeframe)
       ? groupByCandle(priceActionEngine.detect(candles))
       : null;
     for (const segment of splitIntoSessions(candles, input.timeframe)) {
@@ -234,9 +226,8 @@ export class DetectMarketPatterns {
           segment,
           carriedAtr && positionInSeries ? { atrValues: segment.map((candle) => carriedAtr[positionInSeries.get(candle.id)!] ?? null) } : {},
         );
-      const priceActionEvents = input.reanchorSuppressedSwings === true
-        ? reanchorSuppressedSwings(detectedPriceAction, segment, suppressed)
-        : detectedPriceAction;
+      // A swing whose confirming candle is a suppressed bar is moved to the next candle that is not, instead of being lost.
+      const priceActionEvents = reanchorSuppressedSwings(detectedPriceAction, segment, suppressed);
       for (const event of [...priceActionEvents, ...this.chartPatternEngine.detect(segment)]) {
         if (usable(event)) events.push(event);
       }

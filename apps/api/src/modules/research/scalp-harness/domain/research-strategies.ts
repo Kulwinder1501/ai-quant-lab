@@ -96,7 +96,11 @@ export const frozenSourceContentDigests = Object.freeze({
   // 3->4). pattern-v5-research was given its own explicit priceActionAlgorithmVersion: "price-action-v2"
   // override first, so its registered behaviour and researchStrategySourceChecksums entry are unchanged --
   // only this drift-detector pin moves.
-  "momentum-scalp-pattern-strategy.ts": "035548bd3bb6e4350f1b61fa1187c09ab70481c0f67c7adbbf21c14c87d02d32",
+  // Re-pinned 2026-10-30: the detector's current price-action version moved from v3 to v4 (momentumScalpPatternStrategyVersion bumped
+  // 3->4, momentumScalpPatternStrategyV2Version 4->5). The pattern definition below carries its own explicit
+  // priceActionAlgorithmVersion: "price-action-v2" override (pinned 2026-10-22), so its registered configuration, its definition hash and its
+  // researchStrategySourceChecksums entry are unchanged -- only this drift-detector pin moves.
+  "momentum-scalp-pattern-strategy.ts": "e6ca4adfa879d7050f6d73434529505cb7fe1367b1306d199210334f564fa2f3",
 });
 
 export const researchStrategySourceChecksums = Object.freeze({

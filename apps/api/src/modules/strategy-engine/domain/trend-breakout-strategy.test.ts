@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { priceActionAlgorithmVersion } from "../../pattern-recognition/domain/market-pattern.js";
 import type { StrategyMarketContext } from "./strategy.js";
 import {
   defaultTrendBreakoutStrategyConfiguration,
   parseTrendBreakoutStrategyConfiguration,
   TrendBreakoutStrategy,
+  trendBreakoutStrategyVersion,
 } from "./trend-breakout-strategy.js";
 
 function configuration(): Record<string, unknown> {
@@ -43,7 +45,7 @@ function qualifyingLongContext(): StrategyMarketContext {
     }],
     priceActionEvents: [{
       eventCode: "BREAKOUT",
-      algorithmVersion: "price-action-v2",
+      algorithmVersion: priceActionAlgorithmVersion,
       direction: "BULLISH",
       level: 100,
       confidence: 0.9,
@@ -85,7 +87,7 @@ function qualifyingShortContext(): StrategyMarketContext {
     }],
     priceActionEvents: [{
       eventCode: "BREAKDOWN",
-      algorithmVersion: "price-action-v2",
+      algorithmVersion: priceActionAlgorithmVersion,
       direction: "BEARISH",
       level: 100,
       confidence: 0.92,
@@ -108,7 +110,7 @@ describe("TrendBreakoutStrategy", () => {
       riskReward: 2,
       evidence: {
         strategy: "trend-breakout",
-        strategyVersion: 3,
+        strategyVersion: trendBreakoutStrategyVersion,
         sourceCandleId: "candle-long",
         trigger: "BREAKOUT",
         pattern: "BULLISH_ENGULFING",
@@ -121,7 +123,7 @@ describe("TrendBreakoutStrategy", () => {
       "PATTERN", "PRICE_ACTION", "STRATEGY",
     ]);
     expect(proposal.evidenceItems.at(-1)).toMatchObject({
-      sourceReference: "trend-breakout:v3",
+      sourceReference: `trend-breakout:v${trendBreakoutStrategyVersion}`,
       details: { sourceCandleId: "candle-long", timeframe: "1d" },
     });
     expect(proposal.reasoning.at(-1)).toBe(
@@ -147,7 +149,7 @@ describe("TrendBreakoutStrategy", () => {
     });
     expect(proposal.confidence).toBeCloseTo(0.9562, 10);
     expect(proposal.evidenceItems.find((item) => item.sourceType === "PRICE_ACTION")).toMatchObject({
-      sourceReference: "BREAKDOWN:price-action-v2",
+      sourceReference: `BREAKDOWN:${priceActionAlgorithmVersion}`,
       label: "BREAKDOWN is the bearish entry trigger",
     });
   });

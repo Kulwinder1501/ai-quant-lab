@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Re-detects pattern evidence (candlestick-v2 / price-action-v3) from scratch for NSE symbol/timeframe pairs.
+  Re-detects pattern evidence (candlestick-v2 / the current price-action version) from scratch for NSE symbol/timeframe pairs.
 
 .DESCRIPTION
   *** NOT RUN. Delivered with the pattern-recognition audit fixes; run it deliberately, once the
@@ -10,7 +10,7 @@
     The candlestick / price-action / chart-pattern rules changed (see
     docs/2026-10-10-pattern-recognition-v2-redetection.md). Stored candlestick-v1 rows are marked
     superseded by migration 133 but not deleted, and consumers now read only candlestick-v2 and
-    price-action-v3. Until this script (or an equivalent run) has been executed, there is no v2
+    the current price-action version (price-action-v3 when this was written, price-action-v4 since 2026-10-30). Until this script (or an equivalent run) has been executed, there is no v2
     evidence, so patterns correctly carry no weight.
 
   What it does
@@ -19,7 +19,7 @@
         npm run analysis:detect-patterns -- --instrument <SYMBOL> --timeframe <TF>
 
     WITHOUT --from, so the whole completed history is detected and every bar is re-evaluated.
-    Each pair is written under candlestick-v2 / price-action-v3 (new rows next to the old ones;
+    Each pair is written under candlestick-v2 / the current price-action version (new rows next to the old ones;
     the upsert key includes the algorithm version, so v1 rows are neither touched nor removed) and
     stamps candle_feature_coverage for the new versions.
 
@@ -29,9 +29,8 @@
     - Run it with the scheduler's pattern-detection job paused, or accept that both write the same
       v2 rows (the upsert is idempotent, so the worst case is duplicated work).
     - The CLI resolves NSE instruments only. Other exchanges are not covered (see the doc).
-    - Do NOT pass --threshold-mode: the default picks ATR units on intraday and percent on daily,
-      which is what price-action-v3 means. --threshold-mode atr writes a different version label
-      (price-action-v3-atr) and is for research comparisons only.
+    - There is nothing to pass for the price-action rules: the CLI picks ATR units on intraday and percent on daily and
+      stores under the current version. (`--threshold-mode` and `--engine` were retired on 2026-10-30.)
 
   Choosing the pairs
     Run this READ-ONLY query (for example through the scheduler container's python and
@@ -105,7 +104,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Detection failed for $($pair.Symbol) $($pair.Timeframe) (exit $LASTEXITCODE)." }
   }
   if (-not $Execute) {
-    Write-Host "Dry run only. Re-run with -Execute to detect candlestick-v2 / price-action-v3 for the pairs above."
+    Write-Host "Dry run only. Re-run with -Execute to detect candlestick-v2 / the current price-action version for the pairs above."
   }
 } finally {
   Pop-Location

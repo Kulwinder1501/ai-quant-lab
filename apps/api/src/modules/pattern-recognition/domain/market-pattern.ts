@@ -46,54 +46,44 @@ export const supersededCandlestickAlgorithmVersions = ["candlestick-v1"] as cons
 /**
  * The price-action / chart-pattern rule set that detection writes and consumers must read.
  *
- * v3 = the v2 rules with: session-local series for intraday timeframes, a timeframe-aware distance
- * unit (ATR on intraday, percent on daily), bounded chart-pattern breakout windows, and the
- * invalidation rules in `chart-pattern-engine.ts`. `price-action-v2` rows were written under the
- * old behaviour and are superseded by convention (the table has no definitions registry).
- * `price-action-v3-atr` is the forced-ATR variant for a daily series.
+ * v4, current from 2026-10-30. It is the v3 rules with four corrections found on NIFTY 5m on 2026-10-29: the ATR is carried across
+ * sessions (it restarted each morning, so nothing was emitted before about 10:25); a swing whose confirming candle is a suppressed
+ * frozen-feed bar is re-anchored to the next real candle instead of being lost (the session high at 15:10 never appeared); a swing is
+ * called SUPPORT or RESISTANCE only after a retest (`levelMinTouches: 2`) on the timeframes below 15m, the raw SWING_HIGH / SWING_LOW
+ * being unchanged; and from 15m up the price-action rules run across sessions, because their 20-candle lookbacks do not fit in one
+ * session there. Replayed against v3 on the pattern strategy AutoBot-Sniper ran (200 sessions, both indices) it changed 0.8% of its
+ * trades and no measurable return (docs/2026-10-30-pattern-strategy-v3-vs-v4-price-action-results.md): the move is for the levels being
+ * right, not for an edge.
  */
-export const priceActionAlgorithmVersion = "price-action-v3";
-export const priceActionAtrAlgorithmVersion = "price-action-v3-atr";
-export const supersededPriceActionAlgorithmVersions = ["price-action-v2", "price-action-v2-atr"] as const;
+export const priceActionAlgorithmVersion = "price-action-v4";
 
 /**
- * v4 = the v3 rules with three corrections found on NIFTY 5m on 2026-10-29: the ATR is carried across sessions (it restarted each
- * morning, so nothing was emitted before about 10:25); a swing whose confirming candle is a suppressed frozen-feed bar is re-anchored
- * to the next real candle instead of being lost (the session high at 15:10 never appeared); and a swing is called SUPPORT or
- * RESISTANCE only after a retest (`levelMinTouches: 2`), the raw SWING_HIGH / SWING_LOW being unchanged. From 15m up the price-action rules also run across
- * sessions, because their 20-candle lookbacks do not fit in one session there; the retest applies below 15m only.
+ * Labels that are no longer written. Their rows stay in the table as history, and every ordinary reader excludes them (see
+ * `supersededPriceActionVersionsSql`), because several readers take support/resistance from every version in the loaded context and
+ * two rule sets side by side would be read as one. `superseded-price-action-versions.test.ts` fails if a new reader of
+ * `price_action_events` does not exclude them.
  *
- * Opt-in only: `priceActionAlgorithmVersion` stays v3, so the scheduler, the shadow decisions and every pinned reader are unaffected.
- * Rows exist under this label only where `analysis:detect-patterns --engine v4` was run.
+ * v2 predates the session-local series and the timeframe-aware unit; v3 is the ATR-restarting-each-morning rule set v4 replaced;
+ * `-atr` is the forced-ATR variant of each, a different unit being a different interpretation of the rules.
  */
-export const priceActionV4AlgorithmVersion = "price-action-v4";
+export const supersededPriceActionAlgorithmVersions = ["price-action-v2", "price-action-v2-atr", "price-action-v3", "price-action-v3-atr"] as const;
 
 /**
- * Labels written beside the current version for comparison and read by nothing that decides anything.
- *
- * The loaders that build the context strategies, backtests and the paper-trade market-context note read exclude these (see
- * `experimentalPriceActionVersionsSql`), so adding rows under one of them cannot change what any bot or backtest sees. The
- * scanner is the deliberate exception: it shows every version side by side. `experimental-price-action-versions.test.ts` fails if a
- * new reader of `price_action_events` neither excludes them nor is listed there as an exception.
+ * The superseded versions a strategy configuration explicitly pins through `priceActionAlgorithmVersion`, for the one reader allowed to
+ * load them on request (the backtest loader, so a replay of a frozen cohort pinned to an old version still sees its rows). A
+ * configuration that names the current version or nothing asks for none, so ordinary runs read only the current version.
  */
-export const experimentalPriceActionAlgorithmVersions: readonly string[] = [priceActionV4AlgorithmVersion];
-
-/**
- * The experimental versions a strategy configuration explicitly pins through `priceActionAlgorithmVersion`, for the one reader that is
- * allowed to load them on request (the backtest loader, so a `--strategy-config` arm pinned to price-action-v4 can be replayed). A
- * configuration that names the current version, a superseded one, or nothing asks for none, so ordinary runs are untouched.
- */
-export function experimentalPriceActionVersionsPinnedBy(configuration: Record<string, unknown> | null): string[] {
+export function supersededPriceActionVersionsPinnedBy(configuration: Record<string, unknown> | null): string[] {
   const pinned = configuration?.priceActionAlgorithmVersion;
-  return typeof pinned === "string" && experimentalPriceActionAlgorithmVersions.includes(pinned) ? [pinned] : [];
+  return typeof pinned === "string" && (supersededPriceActionAlgorithmVersions as readonly string[]).includes(pinned) ? [pinned] : [];
 }
 
 /**
  * The quoted, comma-separated list for a `NOT IN (...)` clause. Built from the constants above, never from input; the check keeps a
  * future edit from putting a quote or a space into a label that is spliced into SQL text.
  */
-export function experimentalPriceActionVersionsSql(): string {
-  return experimentalPriceActionAlgorithmVersions
+export function supersededPriceActionVersionsSql(): string {
+  return supersededPriceActionAlgorithmVersions
     .map((version) => {
       if (!/^[a-z0-9-]+$/.test(version)) throw new Error(`Unsafe price-action algorithm version label: ${version}`);
       return `'${version}'`;

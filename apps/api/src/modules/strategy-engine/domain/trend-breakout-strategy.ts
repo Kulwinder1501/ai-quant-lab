@@ -1,4 +1,5 @@
 import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/domain/technical-indicator.js";
+import { priceActionAlgorithmVersion } from "../../pattern-recognition/domain/market-pattern.js";
 import type {
   ProposedTradeIdea,
   StrategyMarketContext,
@@ -59,7 +60,7 @@ export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyCon
     SUPERTREND: { atrPeriod: 10, multiplier: 3 },
   },
   candlestickAlgorithmVersion: "candlestick-v2",
-  priceActionAlgorithmVersion: "price-action-v2",
+  priceActionAlgorithmVersion,
   rsiLongMin: 52,
   rsiLongMax: 70,
   rsiShortMin: 30,
@@ -83,8 +84,13 @@ export const defaultTrendBreakoutStrategyConfiguration: TrendBreakoutStrategyCon
  * confidence candidate), and flat/holiday bars poisoning detection. This strategy is TERMINAL_UNOWNED
  * (see strategy-registry.ts) -- no bot trades it -- so the version bump changes nothing live; it only
  * keeps its idea-generation and backtest population on the corrected pattern source.
+ *
+ * Bumped 2026-10-30 (3 -> 4): priceActionAlgorithmVersion was pinned to "price-action-v2", which stopped being written on 2026-10-09, so this
+ * strategy found no breakout or trend event and generated no idea for three weeks. It now follows the detector's current version, as
+ * momentum-scalp-pattern does, and a registered configuration being immutable, that needs a new version. Still TERMINAL_UNOWNED: no bot
+ * trades it, so this only restores its research proposals.
  */
-export const trendBreakoutStrategyVersion = 3;
+export const trendBreakoutStrategyVersion = 4;
 
 export const trendBreakoutStrategyRegistration = {
   strategyKey: "trend-breakout",

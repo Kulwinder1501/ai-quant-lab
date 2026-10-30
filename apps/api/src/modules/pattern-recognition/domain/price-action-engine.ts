@@ -37,7 +37,7 @@ export interface PriceActionConfiguration {
   /**
    * How many separate visits to a swing's price band (the pivot itself is the first) a swing needs before it is also reported as
    * SUPPORT or RESISTANCE. The raw SWING_HIGH / SWING_LOW event is always emitted. Absent means 1, which is every swing: the
-   * `price-action-v3` behaviour. `price-action-v4` asks for 2, so an isolated five-candle swing is not called a level.
+   * behaviour before `price-action-v4`. The current version asks for 2 below 15m, so an isolated five-candle swing is not called a level.
    */
   levelMinTouches?: number;
 }
@@ -63,36 +63,27 @@ export const atrPriceActionConfiguration: PriceActionConfiguration = {
 };
 
 /**
- * The configuration `price-action-v3` uses for a timeframe: ATR units on intraday, percent on daily.
+ * The configuration the current price-action version (`price-action-v4`) uses for a timeframe: ATR units on intraday, percent on daily,
+ * plus a retest before a swing is also called SUPPORT or RESISTANCE (`levelMinTouches`) on the timeframes where a five-candle swing is
+ * only minutes of price. The other three corrections live in the application layer, which is where the sessions are cut.
  *
- * The percent unit made the trend rule "1% over 20 bars", which on 1m is a violent session rather
- * than a trend (and only the percent variant was ever stored; the ATR variant was never run), so
- * intraday trend/breakout/pullback rules were effectively silent. `v3` therefore defines the unit
- * by timeframe -- the same unit-count thresholds, measured in the volatility of the bar size being
- * read. Every event records `thresholdMode` in its details, so a stored row states which unit
- * produced it.
- */
-export function priceActionConfigurationForTimeframe(timeframe: string): PriceActionConfiguration {
-  return isIntradayTimeframe(timeframe) ? atrPriceActionConfiguration : defaultConfiguration;
-}
-
-/**
- * The configuration `price-action-v4` uses: the v3 units for the timeframe, plus a retest before a swing is also called SUPPORT or
- * RESISTANCE (`levelMinTouches`) on the timeframes where a five-candle swing is only minutes of price. The other two v4 corrections
- * live in the application layer, which is where the sessions are cut.
+ * The unit is by timeframe because the percent unit made the trend rule "1% over 20 bars", which on 1m is a violent session rather than
+ * a trend, so intraday trend/breakout/pullback rules were effectively silent. The same unit-count thresholds are measured in the
+ * volatility of the bar size being read. Every event records `thresholdMode` in its details, so a stored row states which unit produced it.
  *
  * The retest is asked for below 15m only. On 1m and 5m a swing spans 5 to 25 minutes, so most are noise and a revisit is the cheapest
  * evidence of a level. From 15m up a swing spans 75 minutes to 5 hours and there are few of them, so requiring a revisit hides most real
  * levels (replayed on both indices over six sessions: 30m kept 5 support/resistance rows out of 15 swings, and daily lost about a fifth
  * of its rows for nothing). The threshold is a judgment, not tuned on outcomes.
  */
-export function priceActionConfigurationV4ForTimeframe(timeframe: string): PriceActionConfiguration {
+export function priceActionConfigurationForTimeframe(timeframe: string): PriceActionConfiguration {
+  const base = isIntradayTimeframe(timeframe) ? atrPriceActionConfiguration : defaultConfiguration;
   const minutes = timeframeMinutes(timeframe);
-  return { ...priceActionConfigurationForTimeframe(timeframe), levelMinTouches: minutes !== null && minutes < 15 ? 2 : 1 };
+  return { ...base, levelMinTouches: minutes !== null && minutes < 15 ? 2 : 1 };
 }
 
 /**
- * Whether `price-action-v4` runs the price-action rules over the whole series instead of one session at a time: the intraday timeframes
+ * Whether the price-action rules run over the whole series instead of one session at a time: the intraday timeframes
  * from 15m up.
  *
  * The trend, breakout and pullback rules look back 20 and 10 candles. A session holds 75 candles on 5m but only 25 on 15m, 13 on 30m and 7

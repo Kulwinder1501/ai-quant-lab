@@ -232,8 +232,8 @@ describe("PostgresBacktestMarketDataRepository", () => {
     // detected_at predicate (alone or in addition) would silently erase history from every replay.
     expect(patternQuery?.text).toContain("pattern_detections.known_at <= $2");
     expect(priceActionQuery?.text).toContain("AND known_at <= $2");
-    // price-action-v4 is written beside v3 for comparison; a replay must read only what a bot could have read
-    expect(priceActionQuery?.text).toContain("algorithm_version NOT IN ('price-action-v4')");
+    // Superseded versions stay in the table as history; a replay reads the current version only, as a bot does
+    expect(priceActionQuery?.text).toContain("algorithm_version NOT IN ('price-action-v2', 'price-action-v2-atr', 'price-action-v3', 'price-action-v3-atr')");
     const withoutSqlComments = (sql: string | undefined): string => (sql ?? "").replace(/--.*$/gm, "");
     expect(withoutSqlComments(patternQuery?.text)).not.toContain("detected_at");
     expect(withoutSqlComments(priceActionQuery?.text)).not.toContain("detected_at");
@@ -295,7 +295,7 @@ describe("PostgresBacktestMarketDataRepository", () => {
     expect(calls[0]?.text).toContain("FROM candles");
   });
 
-  describe("experimental price-action versions", () => {
+  describe("superseded price-action versions", () => {
     const window = {
       instrumentId: "instrument-1",
       timeframe: "1d",
@@ -312,49 +312,50 @@ describe("PostgresBacktestMarketDataRepository", () => {
       candle_id: "candle-1", event_type: "SUPPORT", algorithm_version: version, direction: "BULLISH", level: "100", confidence: "0.5", details: {},
     });
 
-    // The ordinary query returns what the database would after its NOT IN clause (no v4); the opt-in one returns v4.
+    // The ordinary query returns what the database would after its NOT IN clause (the current version); the opt-in one returns v3.
     function loader(include?: readonly string[]) {
       const calls: QueryCall[] = [];
       const query = async (text: string, values?: unknown[]): Promise<{ rows: unknown[] }> => {
         calls.push({ text, values });
         if (text.includes("FROM candles")) return { rows: [candle] };
-        if (text.includes("FROM price_action_events")) return { rows: [support(text.includes("= ANY($3::text[])") ? "price-action-v4" : "price-action-v3")] };
+        if (text.includes("FROM price_action_events")) return { rows: [support(text.includes("= ANY($3::text[])") ? "price-action-v3" : "price-action-v4")] };
         return { rows: [] };
       };
       return { repository: new PostgresBacktestMarketDataRepository({ query } as unknown as DatabaseQueryable, include), calls };
     }
     const priceActionQueries = (calls: QueryCall[]) => calls.filter((call) => call.text.includes("FROM price_action_events"));
 
-    it("by default reads the ordinary version only and issues no extra query", async () => {
+    it("by default reads the current version only and issues no extra query", async () => {
       const { repository, calls } = loader();
 
       const [context] = await repository.listContexts(window);
 
-      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v3"]);
+      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v4"]);
       expect(priceActionQueries(calls)).toHaveLength(1);
       // The exclusion the guard test pins is still on that query.
-      expect(priceActionQueries(calls)[0]?.text).toContain("NOT IN ('price-action-v4')");
+      expect(priceActionQueries(calls)[0]?.text).toContain("NOT IN ('price-action-v2', 'price-action-v2-atr', 'price-action-v3', 'price-action-v3-atr')");
     });
 
-    it("loads a version a run asks for through a separate query, and keeps the ordinary one", async () => {
-      const { repository, calls } = loader(["price-action-v4"]);
+    it("loads a superseded version a run pins through a separate query, and keeps the current one", async () => {
+      const { repository, calls } = loader(["price-action-v3"]);
 
       const [context] = await repository.listContexts(window);
 
-      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v3", "price-action-v4"]);
+      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v4", "price-action-v3"]);
       const [ordinary, requested] = priceActionQueries(calls);
-      expect(ordinary?.text).toContain("NOT IN ('price-action-v4')");
+      expect(ordinary?.text).toContain("NOT IN ('price-action-v2', 'price-action-v2-atr', 'price-action-v3', 'price-action-v3-atr')");
       expect(requested?.text).toContain("algorithm_version = ANY($3::text[])");
-      expect(requested?.values).toEqual([["candle-1"], window.dataCutoffAt, ["price-action-v4"]]);
+      expect(requested?.values).toEqual([["candle-1"], window.dataCutoffAt, ["price-action-v3"]]);
       // Same point-in-time rule as the ordinary read: nothing that was not known at the cutoff.
       expect(requested?.text).toContain("known_at <= $2");
     });
 
-    it("refuses a version that is not experimental, so it cannot be used to read a superseded or the current one", () => {
+    it("refuses a label that is not superseded, so it cannot be used to read the current version or an arbitrary one", () => {
       const database = { query: async () => ({ rows: [] }) } as unknown as DatabaseQueryable;
 
-      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v2"])).toThrow(/not an experimental price-action version/);
-      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v3"])).toThrow(/not an experimental price-action version/);
+      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v4"])).toThrow(/not a superseded price-action version/);
+      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v9"])).toThrow(/not a superseded price-action version/);
+      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v2"])).not.toThrow();
     });
   });
 });

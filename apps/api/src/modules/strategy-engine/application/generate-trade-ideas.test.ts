@@ -7,6 +7,7 @@ import type {
   StrategyVersionRepository,
   TradeIdeaRepository,
 } from "../domain/strategy.js";
+import { priceActionAlgorithmVersion } from "../../pattern-recognition/domain/market-pattern.js";
 import { defaultTrendBreakoutStrategyConfiguration } from "../domain/trend-breakout-strategy.js";
 import { mayProposeLiveTrades, registeredStrategies } from "../domain/strategy-registry.js";
 import { GenerateTradeIdeas } from "./generate-trade-ideas.js";
@@ -51,7 +52,7 @@ function qualifyingContext(): StrategyMarketContext {
     }],
     priceActionEvents: [{
       eventCode: "BREAKOUT",
-      algorithmVersion: "price-action-v2",
+      algorithmVersion: priceActionAlgorithmVersion,
       direction: "BULLISH",
       level: 108,
       confidence: 0.8,
@@ -230,7 +231,7 @@ describe("GenerateTradeIdeas", () => {
     expect(saved[0].evidenceItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "ATR:ta-v1" }),
       expect.objectContaining({ sourceType: "PATTERN", sourceReference: "BULLISH_ENGULFING:candlestick-v2" }),
-      expect.objectContaining({ sourceType: "PRICE_ACTION", sourceReference: "BREAKOUT:price-action-v2" }),
+      expect.objectContaining({ sourceType: "PRICE_ACTION", sourceReference: `BREAKOUT:${priceActionAlgorithmVersion}` }),
       expect.objectContaining({ sourceType: "INDICATOR", sourceReference: "SMC:smc-v2", contribution: 0.05 }),
     ]));
     expect(saved[0].evidence.smc).toMatchObject({

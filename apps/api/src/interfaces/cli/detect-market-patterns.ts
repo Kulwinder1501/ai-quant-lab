@@ -8,55 +8,18 @@ import { PostgresPatternDefinitionRepository } from "../../infrastructure/databa
 import { PostgresPatternDetectionRepository } from "../../infrastructure/database/repositories/postgres-pattern-detection-repository.js";
 import { PostgresPriceActionEventRepository } from "../../infrastructure/database/repositories/postgres-price-action-event-repository.js";
 import { DetectMarketPatterns } from "../../modules/pattern-recognition/application/detect-market-patterns.js";
-import {
-  atrPriceActionConfiguration,
-  PriceActionEngine,
-  priceActionConfigurationV4ForTimeframe,
-  priceActionSpansSessions,
-} from "../../modules/pattern-recognition/domain/price-action-engine.js";
-import { CandlestickPatternEngine } from "../../modules/pattern-recognition/domain/candlestick-pattern-engine.js";
-import {
-  priceActionAlgorithmVersion,
-  priceActionAtrAlgorithmVersion,
-  priceActionV4AlgorithmVersion,
-} from "../../modules/pattern-recognition/domain/market-pattern.js";
+import { priceActionAlgorithmVersion } from "../../modules/pattern-recognition/domain/market-pattern.js";
 import { getOption, parseDateOption, parseHistoricalTimeframe, requireOption } from "./arguments.js";
 
 /**
- * Without `--threshold-mode` the use case picks the `price-action-v3` engine for the timeframe
- * (ATR units on intraday, percent on daily) and stores under `price-action-v3`; that is the
- * normal run. `--threshold-mode atr` forces ATR units on any timeframe and is stored under its own
- * `price-action-v3-atr` version, because a different unit is a different interpretation of the
- * rules. `--threshold-mode percent` is only accepted for the daily timeframe, where it is what the
- * default already does: forcing percent units onto an intraday series under the `price-action-v3`
- * label would re-create the mixed-rule rows the version bump exists to end.
+ * Detects candlestick, chart-pattern and price-action events for one instrument and timeframe and stores them under the current
+ * versions. The price-action rules pick their unit by timeframe (ATR on intraday, percent on daily), carry the ATR across sessions,
+ * re-anchor swings whose confirming candle is a suppressed bar, and ask for a retest before a swing is called SUPPORT or RESISTANCE
+ * on the timeframes below 15m; see `priceActionConfigurationForTimeframe` and `DetectMarketPatterns`.
+ *
+ * There is one rule set and one label (`price-action-v4`). The earlier versions and their `--threshold-mode` / `--engine` switches
+ * were retired on 2026-10-30; their rows remain in the table as history and every ordinary reader excludes them.
  */
-const priceActionVariants = {
-  atr: { engine: () => new PriceActionEngine(atrPriceActionConfiguration), algorithmVersion: priceActionAtrAlgorithmVersion },
-} as const;
-
-function parseThresholdMode(value: string | undefined): "default" | "atr" {
-  if (value === undefined) return "default";
-  const normalized = value.trim().toLowerCase();
-  if (normalized !== "percent" && normalized !== "atr") {
-    throw new Error(`Unsupported --threshold-mode "${value}". Use: percent, atr.`);
-  }
-  return normalized === "atr" ? "atr" : "default";
-}
-
-/**
- * `--engine v4` runs the `price-action-v4` rules and stores under that version, alongside v3, never over it. It carries the ATR
- * across sessions, re-anchors swings whose confirming candle is a suppressed bar, and asks for a retest before calling a swing
- * SUPPORT or RESISTANCE. Omitted, the normal v3 run is unchanged. It sets its own units, so it cannot be combined with
- * `--threshold-mode`.
- */
-function parseEngineRevision(value: string | undefined): "v3" | "v4" {
-  if (value === undefined) return "v3";
-  const normalized = value.trim().toLowerCase();
-  if (normalized !== "v3" && normalized !== "v4") throw new Error(`Unsupported --engine "${value}". Use: v3, v4.`);
-  return normalized;
-}
-
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
   const environment = loadEnvironment();
@@ -64,23 +27,8 @@ async function main(): Promise<void> {
   try {
     const symbol = requireOption(argumentsList, "instrument").toUpperCase();
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
-    const requestedMode = getOption(argumentsList, "threshold-mode");
-    const thresholdMode = parseThresholdMode(requestedMode);
-    if (requestedMode?.trim().toLowerCase() === "percent" && timeframe !== "1d") {
-      throw new Error(
-        `--threshold-mode percent is only valid for --timeframe 1d (got ${timeframe}); `
-        + "omit the flag for the timeframe-appropriate default.",
-      );
-    }
     const fromArg = getOption(argumentsList, "from");
     const since = fromArg ? parseDateOption(fromArg, false) : undefined;
-    const engineRevision = parseEngineRevision(getOption(argumentsList, "engine"));
-    if (engineRevision === "v4" && requestedMode !== undefined) {
-      throw new Error("--engine v4 sets its own units; do not combine it with --threshold-mode.");
-    }
-    const variant = engineRevision === "v4"
-      ? { engine: () => new PriceActionEngine(priceActionConfigurationV4ForTimeframe(timeframe)), algorithmVersion: priceActionV4AlgorithmVersion }
-      : thresholdMode === "atr" ? priceActionVariants.atr : null;
     const instrument = await new PostgresInstrumentRepository(database).findByExchangeAndSymbol("NSE", symbol);
     if (!instrument) {
       throw new Error(`NSE instrument "${symbol}" is not registered.`);
@@ -90,8 +38,8 @@ async function main(): Promise<void> {
       new PostgresPatternDefinitionRepository(database),
       new PostgresPatternDetectionRepository(database),
       new PostgresPriceActionEventRepository(database),
-      new CandlestickPatternEngine(),
-      variant ? variant.engine() : null,
+      undefined,
+      undefined,
       undefined,
       // Records that this window was processed, which is what lets the scalp research harness
       // tell "no pattern here" from "not detected yet" and stop capturing half-built contexts.
@@ -99,10 +47,6 @@ async function main(): Promise<void> {
     ).execute({
       instrumentId: instrument.id,
       timeframe,
-      priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
-      ...(engineRevision === "v4"
-        ? { carryAtrAcrossSessions: true, reanchorSuppressedSwings: true, priceActionAcrossSessions: priceActionSpansSessions(timeframe) }
-        : {}),
       since,
       tickSize: Number.isFinite(Number(instrument.tickSize)) && Number(instrument.tickSize) > 0
         ? Number(instrument.tickSize)
@@ -114,8 +58,7 @@ async function main(): Promise<void> {
       instrument: symbol,
       timeframe,
       since: since?.toISOString(),
-      thresholdMode,
-      priceActionAlgorithmVersion: variant ? variant.algorithmVersion : priceActionAlgorithmVersion,
+      priceActionAlgorithmVersion,
       ...result,
     }));
   } finally {

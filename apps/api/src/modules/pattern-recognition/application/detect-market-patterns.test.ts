@@ -55,7 +55,7 @@ function engulfingSeries(timesMs: readonly number[], volumes: readonly number[] 
 
 async function runDetection(
   candles: PersistedCandle[],
-  input: { timeframe: string; tickSize?: number; carryAtrAcrossSessions?: boolean; reanchorSuppressedSwings?: boolean; priceActionAcrossSessions?: boolean },
+  input: { timeframe: string; tickSize?: number },
 ) {
   const detections: Array<{ candleId: string; contextCandleIds: readonly string[]; details: Record<string, unknown> }> = [];
   const events: Array<{ candleId: string; eventCode: string; details: Record<string, unknown> }> = [];
@@ -136,7 +136,7 @@ describe("DetectMarketPatterns", () => {
       expect.objectContaining({
         candleId: "candle-4",
         eventCode: "SWING_HIGH",
-        algorithmVersion: "price-action-v3",
+        algorithmVersion: "price-action-v4",
         details: expect.objectContaining({ pivotCandleId: "candle-2", confirmationCandleId: "candle-4" }),
       }),
     ]));
@@ -175,7 +175,7 @@ describe("DetectMarketPatterns", () => {
     // All five, not only the ones that produced a detection.
     expect(layers.CANDLESTICK_PATTERN!.candleIds).toEqual(candles.map((candle) => candle.id));
     expect(layers.PRICE_ACTION!.candleIds).toEqual(candles.map((candle) => candle.id));
-    expect(layers.PRICE_ACTION!.algorithmVersion).toBe("price-action-v3");
+    expect(layers.PRICE_ACTION!.algorithmVersion).toBe("price-action-v4");
     expect(result.candlesCovered).toBe(candles.length);
     expect(new Set(detections.map((item) => item.candleId)).size).toBeLessThan(candles.length);
   });
@@ -300,7 +300,7 @@ describe("DetectMarketPatterns", () => {
   });
 });
 
-describe("price-action-v4 options", () => {
+describe("price-action corrections: the ATR is carried across sessions and swings are re-anchored", () => {
   const dayOne = Date.parse("2026-08-10T03:45:00Z"); // 09:15 IST
   const dayTwo = Date.parse("2026-08-11T03:45:00Z");
 
@@ -321,41 +321,26 @@ describe("price-action-v4 options", () => {
     return candles;
   }
 
-  it("leaves the opening of a session silent when the ATR restarts, and speaks when it is carried across sessions", async () => {
-    const withoutCarry = await runDetection(twoSessions(), { timeframe: "5m" });
-    expect(withoutCarry.events.filter((event) => event.eventCode === "SWING_HIGH")).toHaveLength(0);
-
-    const carried = await runDetection(twoSessions(), { timeframe: "5m", carryAtrAcrossSessions: true });
+  it("speaks from the opening of a session, because the ATR is carried across sessions instead of restarting each morning", async () => {
+    // The second session has 10 candles and the ATR needs 14, so a restarting ATR would leave it silent: the swing high at its fourth candle exists only because the ATR was warmed in the first.
+    const carried = await runDetection(twoSessions(), { timeframe: "5m" });
     const swing = carried.events.filter((event) => event.eventCode === "SWING_HIGH");
     expect(swing).toHaveLength(1);
     expect(swing[0]).toMatchObject({ candleId: "bar-25", details: { pivotCandleId: "bar-23", confirmationCandleId: "bar-25" } });
   });
 
-  it("loses a swing whose confirming candle is a suppressed bar, and keeps it on the next real candle when asked", async () => {
-    const carryOnly = await runDetection(twoSessions({ flatConfirmation: true }), { timeframe: "5m", carryAtrAcrossSessions: true });
+  it("keeps a swing whose confirming candle is a suppressed bar, on the next real candle", async () => {
     // only the pivot this test is about: the flat bar makes its equal-high neighbours swings of their own, which are not the point here
     const ofInterest = (events: ReadonlyArray<{ eventCode: string; details: Record<string, unknown> }>) =>
       events.filter((event) => event.eventCode === "SWING_HIGH" && event.details.pivotCandleId === "bar-23");
-    expect(ofInterest(carryOnly.events)).toHaveLength(0);
 
-    const reanchored = await runDetection(twoSessions({ flatConfirmation: true }), {
-      timeframe: "5m",
-      carryAtrAcrossSessions: true,
-      reanchorSuppressedSwings: true,
-    });
+    const reanchored = await runDetection(twoSessions({ flatConfirmation: true }), { timeframe: "5m" });
     const swing = ofInterest(reanchored.events);
     expect(swing).toHaveLength(1);
     expect(swing[0]).toMatchObject({
       candleId: "bar-26",
       details: { pivotCandleId: "bar-23", confirmationCandleId: "bar-26", originalConfirmationCandleId: "bar-25", reanchored: true },
     });
-  });
-
-  it("changes nothing for a run that asks for neither option", async () => {
-    const plain = await runDetection(twoSessions(), { timeframe: "5m" });
-    const explicit = await runDetection(twoSessions(), { timeframe: "5m", carryAtrAcrossSessions: false, reanchorSuppressedSwings: false });
-
-    expect(explicit.events).toEqual(plain.events);
   });
 });
 
@@ -419,24 +404,14 @@ describe("price-action across sessions (15m and up)", () => {
     return candles;
   }
 
-  it("finds a breakout that needs more candles than one session holds, only when the rules run across sessions", async () => {
+  it("finds a breakout that needs more candles than one session holds, because the rules run across sessions", async () => {
     // two sessions of 12: the 20-candle breakout lookback never fits in one, and the jump lands on candle 22
     const candles = sessions([12, 12], (index) => (index === 22 ? { open: 100, high: 111, low: 100, close: 110 } : {}));
 
-    const perSession = await runDetection(candles, { timeframe: "15m", carryAtrAcrossSessions: true });
-    expect(perSession.events.filter((event) => event.eventCode === "BREAKOUT")).toHaveLength(0);
-
-    const across = await runDetection(candles, { timeframe: "15m", priceActionAcrossSessions: true });
+    const across = await runDetection(candles, { timeframe: "15m" });
     const breakout = across.events.filter((event) => event.eventCode === "BREAKOUT");
     expect(breakout).toHaveLength(1);
     expect(breakout[0]).toMatchObject({ candleId: "bar-22" });
-  });
-
-  it("stays per session unless the option is set", async () => {
-    const candles = sessions([12, 12], (index) => (index === 22 ? { open: 100, high: 111, low: 100, close: 110 } : {}));
-
-    const off = await runDetection(candles, { timeframe: "15m", priceActionAcrossSessions: false });
-    expect(off.events.filter((event) => event.eventCode === "BREAKOUT")).toHaveLength(0);
   });
 
   it("never moves a re-anchored swing into the next session", async () => {
@@ -451,12 +426,12 @@ describe("price-action across sessions (15m and up)", () => {
       events.filter((event) => event.eventCode === "SWING_HIGH" && event.details.pivotCandleId === pivot);
 
     // control: with a normal last bar the swing is confirmed on it and is found
-    const control = await runDetection(build(false), { timeframe: "15m", priceActionAcrossSessions: true, reanchorSuppressedSwings: true });
+    const control = await runDetection(build(false), { timeframe: "15m" });
     expect(swingOf(control.events)).toHaveLength(1);
     expect(swingOf(control.events)[0]).toMatchObject({ candleId: "bar-31" });
 
     // the confirming bar is suppressed and nothing later exists in the session: the swing is dropped, not carried onto the next day's first bar
-    const dropped = await runDetection(build(true), { timeframe: "15m", priceActionAcrossSessions: true, reanchorSuppressedSwings: true });
+    const dropped = await runDetection(build(true), { timeframe: "15m" });
     expect(swingOf(dropped.events)).toHaveLength(0);
   });
 });

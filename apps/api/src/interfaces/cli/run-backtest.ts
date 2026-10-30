@@ -8,7 +8,7 @@ import { BacktestEngine, defaultBacktestConfiguration } from "../../modules/back
 import type { BacktestConfiguration, BacktestPositionSizing } from "../../modules/backtesting/domain/backtesting.js";
 import { requireRegisteredStrategy } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { PostgresBacktestMarketDataRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-market-data-repository.js";
-import { experimentalPriceActionVersionsPinnedBy } from "../../modules/pattern-recognition/domain/market-pattern.js";
+import { supersededPriceActionVersionsPinnedBy } from "../../modules/pattern-recognition/domain/market-pattern.js";
 import type { BacktestMarketDataRepository } from "../../modules/backtesting/domain/backtesting.js";
 import {
   attachHigherTimeframes,
@@ -473,13 +473,17 @@ async function main(): Promise<void> {
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
     const nativeHtfTimeframes = parseNativeHtfTimeframes(argumentsList);
     
-    // An arm pinned to an experimental price-action version (`--strategy-config '{"priceActionAlgorithmVersion":"price-action-v4"}'`)
-    // is the only run that loads one; every other run reads exactly what it did before.
-    const experimentalVersions = experimentalPriceActionVersionsPinnedBy(configurationOverride);
+    // The configuration the run actually uses: the registered version's, with any override on top.
+    const effectiveConfiguration = configurationOverride === null
+      ? strategyVersion.configuration
+      : { ...strategyVersion.configuration, ...configurationOverride };
+    // A strategy pinned to a superseded price-action version (a frozen cohort, or `--strategy-config '{"priceActionAlgorithmVersion":
+    // "price-action-v3"}'`) is the only run that loads one; every other run reads the current version alone.
+    const supersededVersions = supersededPriceActionVersionsPinnedBy(effectiveConfiguration);
     let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
-      ? new PostgresBacktestMarketDataRepository(database, experimentalVersions)
+      ? new PostgresBacktestMarketDataRepository(database, supersededVersions)
       : new HigherTimeframeDecoratedMarketData(
-        new PostgresBacktestMarketDataRepository(database, experimentalVersions),
+        new PostgresBacktestMarketDataRepository(database, supersededVersions),
         higherTimeframeBuckets,
       );
 
@@ -551,9 +555,7 @@ async function main(): Promise<void> {
       ),
     ).execute({
       strategyVersionId: strategyVersion.id,
-      strategyConfiguration: configurationOverride === null
-        ? strategyVersion.configuration
-        : { ...strategyVersion.configuration, ...configurationOverride },
+      strategyConfiguration: effectiveConfiguration,
       instrumentId: instrument.id,
       timeframe,
       dataWindowStart,

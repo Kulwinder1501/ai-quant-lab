@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   PriceActionEngine,
   priceActionConfigurationForTimeframe,
-  priceActionConfigurationV4ForTimeframe,
   priceActionSpansSessions,
   type PriceActionConfiguration,
 } from "./price-action-engine.js";
@@ -257,14 +256,14 @@ describe("priceActionConfigurationForTimeframe", () => {
     }
   });
 
-  it("shares every unit-count threshold between the two modes, changing only the unit", () => {
-    const { thresholdMode: _intradayMode, ...intraday } = priceActionConfigurationForTimeframe("5m");
-    const { thresholdMode: _dailyMode, ...daily } = priceActionConfigurationForTimeframe("1d");
+  it("shares every unit-count threshold between the two modes, changing only the unit (and the retest, which is by bar size)", () => {
+    const { thresholdMode: _intradayMode, levelMinTouches: _intradayTouches, ...intraday } = priceActionConfigurationForTimeframe("5m");
+    const { thresholdMode: _dailyMode, levelMinTouches: _dailyTouches, ...daily } = priceActionConfigurationForTimeframe("1d");
     expect(intraday).toEqual(daily);
   });
 });
 
-describe("price-action-v4 corrections", () => {
+describe("price-action corrections (the price-action-v4 rules)", () => {
   const quiet = { trendLookback: 10, breakoutLookback: 10, pullbackLookback: 10 };
   const atrConfiguration = { ...testConfiguration, ...quiet, thresholdMode: "ATR" as const, atrPeriod: 14 };
   // one clear swing high (candle 3), confirmed by candle 5
@@ -345,21 +344,20 @@ describe("price-action-v4 corrections", () => {
     expect(eventFor(retested, "SUPPORT", "8")).toMatchObject({ level: 100 });
   });
 
-  it("keeps every swing a level when no minimum is set, which is the v3 behaviour", () => {
+  it("keeps every swing a level when no minimum is set", () => {
     const events = new PriceActionEngine({ ...testConfiguration, ...quiet }).detect(swingCandles);
 
     expect(eventFor(events, "RESISTANCE", "5")).toMatchObject({ level: 15 });
   });
 
-  it("builds the v4 configuration from the v3 units for the timeframe plus the retest rule, leaving v3 untouched", () => {
+  it("builds the configuration from the timeframe's units plus the retest rule", () => {
     // a five-candle swing is minutes of price on 1m and 5m, so those ask for a retest; from 15m up it does not, or most real levels vanish
-    expect(priceActionConfigurationV4ForTimeframe("1m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
-    expect(priceActionConfigurationV4ForTimeframe("5m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
+    expect(priceActionConfigurationForTimeframe("1m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
+    expect(priceActionConfigurationForTimeframe("5m")).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 2 });
     for (const timeframe of ["15m", "30m", "60m"]) {
-      expect(priceActionConfigurationV4ForTimeframe(timeframe)).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 1 });
+      expect(priceActionConfigurationForTimeframe(timeframe)).toMatchObject({ thresholdMode: "ATR", levelMinTouches: 1 });
     }
-    expect(priceActionConfigurationV4ForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 1 });
-    expect(priceActionConfigurationForTimeframe("5m").levelMinTouches).toBeUndefined();
+    expect(priceActionConfigurationForTimeframe("1d")).toMatchObject({ thresholdMode: "PERCENT", levelMinTouches: 1 });
   });
 });
 
