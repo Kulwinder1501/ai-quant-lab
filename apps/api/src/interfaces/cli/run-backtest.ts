@@ -8,6 +8,7 @@ import { BacktestEngine, defaultBacktestConfiguration } from "../../modules/back
 import type { BacktestConfiguration, BacktestPositionSizing } from "../../modules/backtesting/domain/backtesting.js";
 import { requireRegisteredStrategy } from "../../modules/strategy-engine/domain/strategy-registry.js";
 import { PostgresBacktestMarketDataRepository } from "../../modules/backtesting/infrastructure/postgres-backtest-market-data-repository.js";
+import { experimentalPriceActionVersionsPinnedBy } from "../../modules/pattern-recognition/domain/market-pattern.js";
 import type { BacktestMarketDataRepository } from "../../modules/backtesting/domain/backtesting.js";
 import {
   attachHigherTimeframes,
@@ -472,10 +473,13 @@ async function main(): Promise<void> {
     const higherTimeframeBuckets = parseHigherTimeframeBuckets(argumentsList);
     const nativeHtfTimeframes = parseNativeHtfTimeframes(argumentsList);
     
+    // An arm pinned to an experimental price-action version (`--strategy-config '{"priceActionAlgorithmVersion":"price-action-v4"}'`)
+    // is the only run that loads one; every other run reads exactly what it did before.
+    const experimentalVersions = experimentalPriceActionVersionsPinnedBy(configurationOverride);
     let marketData: BacktestMarketDataRepository = higherTimeframeBuckets === null
-      ? new PostgresBacktestMarketDataRepository(database)
+      ? new PostgresBacktestMarketDataRepository(database, experimentalVersions)
       : new HigherTimeframeDecoratedMarketData(
-        new PostgresBacktestMarketDataRepository(database),
+        new PostgresBacktestMarketDataRepository(database, experimentalVersions),
         higherTimeframeBuckets,
       );
 

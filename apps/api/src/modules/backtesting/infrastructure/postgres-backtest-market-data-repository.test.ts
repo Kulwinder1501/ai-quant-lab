@@ -294,4 +294,67 @@ describe("PostgresBacktestMarketDataRepository", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.text).toContain("FROM candles");
   });
+
+  describe("experimental price-action versions", () => {
+    const window = {
+      instrumentId: "instrument-1",
+      timeframe: "1d",
+      dataWindowStart: new Date("2026-01-01T00:00:00.000Z"),
+      dataWindowEnd: new Date("2026-02-01T00:00:00.000Z"),
+      dataCutoffAt: new Date("2026-02-05T00:00:00.000Z"),
+    };
+    const candle = {
+      id: "candle-1", instrument_id: "instrument-1", timeframe: "1d",
+      open_time: new Date("2026-01-05T03:45:00.000Z"), close_time: new Date("2026-01-05T10:00:00.000Z"),
+      open: "100", high: "104", low: "99", close: "102", volume: "10", tick_size: "0.05",
+    };
+    const support = (version: string) => ({
+      candle_id: "candle-1", event_type: "SUPPORT", algorithm_version: version, direction: "BULLISH", level: "100", confidence: "0.5", details: {},
+    });
+
+    // The ordinary query returns what the database would after its NOT IN clause (no v4); the opt-in one returns v4.
+    function loader(include?: readonly string[]) {
+      const calls: QueryCall[] = [];
+      const query = async (text: string, values?: unknown[]): Promise<{ rows: unknown[] }> => {
+        calls.push({ text, values });
+        if (text.includes("FROM candles")) return { rows: [candle] };
+        if (text.includes("FROM price_action_events")) return { rows: [support(text.includes("= ANY($3::text[])") ? "price-action-v4" : "price-action-v3")] };
+        return { rows: [] };
+      };
+      return { repository: new PostgresBacktestMarketDataRepository({ query } as unknown as DatabaseQueryable, include), calls };
+    }
+    const priceActionQueries = (calls: QueryCall[]) => calls.filter((call) => call.text.includes("FROM price_action_events"));
+
+    it("by default reads the ordinary version only and issues no extra query", async () => {
+      const { repository, calls } = loader();
+
+      const [context] = await repository.listContexts(window);
+
+      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v3"]);
+      expect(priceActionQueries(calls)).toHaveLength(1);
+      // The exclusion the guard test pins is still on that query.
+      expect(priceActionQueries(calls)[0]?.text).toContain("NOT IN ('price-action-v4')");
+    });
+
+    it("loads a version a run asks for through a separate query, and keeps the ordinary one", async () => {
+      const { repository, calls } = loader(["price-action-v4"]);
+
+      const [context] = await repository.listContexts(window);
+
+      expect(context?.priceActionEvents.map((event) => event.algorithmVersion)).toEqual(["price-action-v3", "price-action-v4"]);
+      const [ordinary, requested] = priceActionQueries(calls);
+      expect(ordinary?.text).toContain("NOT IN ('price-action-v4')");
+      expect(requested?.text).toContain("algorithm_version = ANY($3::text[])");
+      expect(requested?.values).toEqual([["candle-1"], window.dataCutoffAt, ["price-action-v4"]]);
+      // Same point-in-time rule as the ordinary read: nothing that was not known at the cutoff.
+      expect(requested?.text).toContain("known_at <= $2");
+    });
+
+    it("refuses a version that is not experimental, so it cannot be used to read a superseded or the current one", () => {
+      const database = { query: async () => ({ rows: [] }) } as unknown as DatabaseQueryable;
+
+      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v2"])).toThrow(/not an experimental price-action version/);
+      expect(() => new PostgresBacktestMarketDataRepository(database, ["price-action-v3"])).toThrow(/not an experimental price-action version/);
+    });
+  });
 });

@@ -79,6 +79,16 @@ export const priceActionV4AlgorithmVersion = "price-action-v4";
 export const experimentalPriceActionAlgorithmVersions: readonly string[] = [priceActionV4AlgorithmVersion];
 
 /**
+ * The experimental versions a strategy configuration explicitly pins through `priceActionAlgorithmVersion`, for the one reader that is
+ * allowed to load them on request (the backtest loader, so a `--strategy-config` arm pinned to price-action-v4 can be replayed). A
+ * configuration that names the current version, a superseded one, or nothing asks for none, so ordinary runs are untouched.
+ */
+export function experimentalPriceActionVersionsPinnedBy(configuration: Record<string, unknown> | null): string[] {
+  const pinned = configuration?.priceActionAlgorithmVersion;
+  return typeof pinned === "string" && experimentalPriceActionAlgorithmVersions.includes(pinned) ? [pinned] : [];
+}
+
+/**
  * The quoted, comma-separated list for a `NOT IN (...)` clause. Built from the constants above, never from input; the check keeps a
  * future edit from putting a quote or a space into a label that is spliced into SQL text.
  */

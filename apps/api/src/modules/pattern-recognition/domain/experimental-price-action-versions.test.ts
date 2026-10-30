@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   experimentalPriceActionAlgorithmVersions,
+  experimentalPriceActionVersionsPinnedBy,
   experimentalPriceActionVersionsSql,
   priceActionAlgorithmVersion,
   priceActionAtrAlgorithmVersion,
@@ -34,6 +35,16 @@ describe("experimental price-action versions", () => {
     expect(experimentalPriceActionAlgorithmVersions).toContain(priceActionV4AlgorithmVersion);
     expect(experimentalPriceActionAlgorithmVersions).not.toContain(priceActionAlgorithmVersion);
     expect(experimentalPriceActionAlgorithmVersions).not.toContain(priceActionAtrAlgorithmVersion);
+  });
+
+  it("names an experimental version a strategy configuration pins, and nothing else", () => {
+    expect(experimentalPriceActionVersionsPinnedBy({ priceActionAlgorithmVersion: "price-action-v4" })).toEqual(["price-action-v4"]);
+    // The current, a superseded and a missing or mistyped pin all ask for nothing, so an ordinary run loads exactly what it did.
+    expect(experimentalPriceActionVersionsPinnedBy({ priceActionAlgorithmVersion: priceActionAlgorithmVersion })).toEqual([]);
+    expect(experimentalPriceActionVersionsPinnedBy({ priceActionAlgorithmVersion: "price-action-v2" })).toEqual([]);
+    expect(experimentalPriceActionVersionsPinnedBy({ priceActionAlgorithmVersion: 4 })).toEqual([]);
+    expect(experimentalPriceActionVersionsPinnedBy({ scoreThreshold: 5 })).toEqual([]);
+    expect(experimentalPriceActionVersionsPinnedBy(null)).toEqual([]);
   });
 
   it("splices into SQL as a quoted list", () => {

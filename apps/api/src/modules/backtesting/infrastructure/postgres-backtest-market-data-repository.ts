@@ -1,5 +1,5 @@
 import { ictGapGuardFor } from "../../technical-analysis/domain/ict/series-gaps.js";
-import { experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
+import { experimentalPriceActionAlgorithmVersions, experimentalPriceActionVersionsSql } from "../../pattern-recognition/domain/market-pattern.js";
 import type { QueryResultRow } from "pg";
 import type { CandlestickPatternCode, PatternDirection, PriceActionEventCode } from "../../pattern-recognition/domain/market-pattern.js";
 import type { IndicatorCode, IndicatorValues } from "../../technical-analysis/domain/technical-indicator.js";
@@ -94,7 +94,22 @@ function appendToMap<T>(target: Map<string, T[]>, candleId: string, value: T): v
  * source-time window separately.
  */
 export class PostgresBacktestMarketDataRepository implements BacktestMarketDataRepository {
-  constructor(private readonly database: DatabaseQueryable) {}
+  /**
+   * `includeExperimentalPriceActionVersions` lets one run read an experimental price-action version (price-action-v4) that every
+   * other reader is kept away from, so a strategy pinned to it by `--strategy-config` can be replayed against the current version.
+   * The default and the ordinary query are unchanged; the version arrives through a separate query, and only labels in the
+   * experimental list are accepted, so this cannot be used to read an arbitrary or superseded version.
+   */
+  constructor(
+    private readonly database: DatabaseQueryable,
+    private readonly includeExperimentalPriceActionVersions: readonly string[] = [],
+  ) {
+    for (const version of includeExperimentalPriceActionVersions) {
+      if (!experimentalPriceActionAlgorithmVersions.includes(version)) {
+        throw new Error(`"${version}" is not an experimental price-action version; the ordinary loader already reads it or it is not readable here.`);
+      }
+    }
+  }
 
   async listContexts(input: {
     instrumentId: string;
@@ -233,8 +248,26 @@ export class PostgresBacktestMarketDataRepository implements BacktestMarketDataR
       });
     }
 
+    const requestedExperimentalRows = this.includeExperimentalPriceActionVersions.length === 0
+      ? []
+      : (await this.database.query<PriceActionEventRow>(`
+        SELECT
+          candle_id,
+          event_type,
+          algorithm_version,
+          direction,
+          level,
+          confidence,
+          details
+        FROM price_action_events
+        WHERE candle_id = ANY($1::uuid[])
+          AND known_at <= $2
+          AND algorithm_version = ANY($3::text[])
+        ORDER BY candle_id ASC, event_type ASC, algorithm_version ASC
+      `, [candleIds, input.dataCutoffAt, [...this.includeExperimentalPriceActionVersions]])).rows;
+
     const priceActionEventsByCandle = new Map<string, StrategyMarketContext["priceActionEvents"]>();
-    for (const row of priceActionResult.rows) {
+    for (const row of [...priceActionResult.rows, ...requestedExperimentalRows]) {
       appendToMap(priceActionEventsByCandle, row.candle_id, {
         eventCode: row.event_type,
         algorithmVersion: row.algorithm_version,
