@@ -88,17 +88,28 @@ services:
     restart: unless-stopped
     # The one container that spikes. Its jobs are child processes (`npm run ...`, 60-560 MB each)
     # and several overlap during the FX/gold collection ticks: memory.peak read 5.4 GiB (3.8 GiB
-    # of it anonymous) over two hours, while the main process itself is ~115 MB. 6g is about 10%
-    # over the highest figure seen. Too low a ceiling here kills a job, or the scheduler itself,
-    # mid-run, so raise it if a new heavy job lands rather than letting it trip.
-    mem_limit: 6g
-    memswap_limit: 6g
+    # of it anonymous) over two hours, while the main process itself is ~115 MB. Too low a ceiling
+    # here kills a job, or the scheduler itself, mid-run, so raise it if a new heavy job lands
+    # rather than letting it trip.
+    #
+    # The V8 heap ceiling is set explicitly below, and that matters: Node derives its default from
+    # the memory it can see (about 4 GB when 15 GB or more is visible, about 2 GB below that), so a
+    # container limit or a smaller WSL VM silently halves it. That happened on 2026-10-30: a 6g
+    # limit made `calculate-technical-indicators --instrument XAU_USD --timeframe 1m` die with
+    # "JavaScript heap out of memory" at 2 GB on the next quarter hour, because it computes the
+    # whole 2.4 million-bar series on every run (`--from` only limits what is written). It will
+    # keep growing, so the real fix is to bound that computation; until then this is the headroom.
+    # 8g leaves room for one 4 GB-heap job plus the others seen overlapping it.
+    mem_limit: 8g
+    memswap_limit: 8g
     # Reuses the api image and only overrides the command. Deliberately skips the
     # migrate-and-seed prelude in that image's CMD: the api service owns those, and
     # running them from two containers races on the same database.
     command: ["node", "apps/api/dist/interfaces/scheduler/scheduler.js"]
     environment:
       NODE_ENV: production
+      # Inherited by every child process the scheduler spawns. See the memory note above.
+      NODE_OPTIONS: --max-old-space-size=4096
       DATABASE_URL: postgresql://${POSTGRES_USER:-ai_quant_lab}:${POSTGRES_PASSWORD:-change_me}@database-v2:5432/${POSTGRES_DB:-ai_quant_lab}
       GIFT_NIFTY_YAHOO_SYMBOL: ${GIFT_NIFTY_YAHOO_SYMBOL:-}
       FII_DII_HISTORY_URL: ${FII_DII_HISTORY_URL:-}
