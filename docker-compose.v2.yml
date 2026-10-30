@@ -3,6 +3,19 @@ services:
     image: pgvector/pgvector:pg16
     container_name: ai-quant-lab-db-v2
     restart: unless-stopped
+    # Every service below carries a memory ceiling (mem_limit == memswap_limit, so a runaway is
+    # killed inside its own cgroup rather than swapping the whole VM). Sized 2026-10-30 from
+    # measured peaks, after the Docker VM went unresponsive twice that day while host-side replay
+    # workers held most of the machine's 31.5 GB (see the .wslconfig 12 GB cap that goes with
+    # these). The ceilings sit well above every peak read from memory.peak, so they are a backstop,
+    # not a tuning knob: if one trips, find what grew before raising it.
+    #
+    # The database's footprint is almost all page cache (anonymous memory was 88 MiB against
+    # 10.4 GB of file cache, shared_buffers is 160 MB and the working set is a 34 GB database), so
+    # this ceiling bounds how much cache it may hold; the kernel reclaims cache at the ceiling
+    # rather than killing anything. Real anonymous use under load is far smaller.
+    mem_limit: 8g
+    memswap_limit: 8g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ai_quant_lab}
       POSTGRES_USER: ${POSTGRES_USER:-ai_quant_lab}
@@ -25,6 +38,9 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: ai-quant-lab-api-v2
     restart: unless-stopped
+    # Peak 126 MiB measured; the headroom is for the CLIs run inside it with `docker exec`.
+    mem_limit: 2g
+    memswap_limit: 2g
     environment:
       NODE_ENV: production
       API_PORT: 4000
@@ -70,6 +86,13 @@ services:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-scheduler-v2
     restart: unless-stopped
+    # The one container that spikes. Its jobs are child processes (`npm run ...`, 60-560 MB each)
+    # and several overlap during the FX/gold collection ticks: memory.peak read 5.4 GiB (3.8 GiB
+    # of it anonymous) over two hours, while the main process itself is ~115 MB. 6g is about 10%
+    # over the highest figure seen. Too low a ceiling here kills a job, or the scheduler itself,
+    # mid-run, so raise it if a new heavy job lands rather than letting it trip.
+    mem_limit: 6g
+    memswap_limit: 6g
     # Reuses the api image and only overrides the command. Deliberately skips the
     # migrate-and-seed prelude in that image's CMD: the api service owns those, and
     # running them from two containers races on the same database.
@@ -158,6 +181,10 @@ services:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-scalp-research-scheduler-v2
     restart: unless-stopped
+    # Peak 315 MiB measured, but it recomputes ICT snapshots from scratch (its cache writes are
+    # denied), so it is given room for a long window.
+    mem_limit: 2g
+    memswap_limit: 2g
     profiles: ["research"]
     command: ["node", "apps/api/dist/interfaces/scheduler/scalp-research-scheduler.js"]
     environment:
@@ -183,6 +210,10 @@ services:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-live-collector-v2
     restart: unless-stopped
+    # Peak ~90 MiB measured. A collector that outgrows this has a leak, and dying in its own
+    # cgroup (then restarting) is better than starving the VM it shares with the database.
+    mem_limit: 512m
+    memswap_limit: 512m
     # A daemon, not a scheduled job. It polls quotes and aggregates them into bars for the
     # whole session, so it cannot be a cron entry: the scheduler's overlap guard would see a
     # run that never ends and its abandonment horizon would write it off mid-session.
@@ -236,6 +267,9 @@ services:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-live-collector-scalp-v2
     restart: unless-stopped
+    # Peak ~103 MiB measured; see live-collector-v2.
+    mem_limit: 512m
+    memswap_limit: 512m
     command:
       - "node"
       - "apps/api/dist/interfaces/cli/collect-live-market-data.js"
@@ -267,6 +301,9 @@ services:
     image: aiquantlab-api-v2:latest
     container_name: ai-quant-lab-depth-collector-v2
     restart: unless-stopped
+    # Peak ~108 MiB measured (50-level frames, flushed every 2 s); see live-collector-v2.
+    mem_limit: 512m
+    memswap_limit: 512m
     # Phase 28's raw L2 capture. A daemon for the same reason the other collectors are: it holds a
     # socket for the session, so the scheduler's overlap guard would write off a run that never ends.
     #
@@ -341,6 +378,9 @@ services:
         NEXT_PUBLIC_API_URL: http://localhost:4001/api/v1
     container_name: ai-quant-lab-web-v2
     restart: unless-stopped
+    # Peak ~188 MiB measured.
+    mem_limit: 512m
+    memswap_limit: 512m
     environment:
       NODE_ENV: production
       PORT: 3000
