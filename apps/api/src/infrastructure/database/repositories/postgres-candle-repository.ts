@@ -167,6 +167,35 @@ export class PostgresCandleRepository implements CandleRepository {
   }
 
   /**
+   * {@link listCompleted}'s bars, restricted to the `warmupBars` before `since` and all from `since`.
+   *
+   * "Completed" is the same rule as above, applied inside the bound as well as outside it, so the
+   * Nth bar back is counted over the bars a full read would have returned and a half-built bar
+   * cannot shift the window. Fewer than `warmupBars` earlier bars means the whole series.
+   */
+  async listCompletedWindow(instrumentId: string, timeframe: string, since: Date, warmupBars: number): Promise<PersistedCandle[]> {
+    if (!Number.isInteger(warmupBars) || warmupBars < 1) {
+      throw new Error("warmupBars must be a positive integer.");
+    }
+    const result = await this.database.query<CandleRow>(`
+      SELECT ${returningColumns}
+      FROM candles
+      WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
+        AND close_time <= CURRENT_TIMESTAMP
+        AND open_time >= COALESCE((
+          SELECT open_time
+          FROM candles
+          WHERE instrument_id = $1 AND timeframe = $2 AND is_complete = TRUE
+            AND close_time <= CURRENT_TIMESTAMP AND open_time < $3
+          ORDER BY open_time DESC
+          OFFSET $4::int - 1 LIMIT 1
+        ), '-infinity'::timestamptz)
+      ORDER BY open_time ASC
+    `, [instrumentId, timeframe, since, warmupBars]);
+    return result.rows.map(toCandle);
+  }
+
+  /**
    * The settled daily close for a symbol on a session, by symbol rather than id.
    *
    * Restricted to complete candles: a provisional close is still moving, and this

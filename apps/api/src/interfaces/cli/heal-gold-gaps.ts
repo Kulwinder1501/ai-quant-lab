@@ -7,6 +7,7 @@ import {
   scanOandaGaps,
   type MissingRange,
 } from "../../modules/market-data/application/scan-oanda-gaps.js";
+import { LONG_SERIES_WARMUP_BARS } from "../../modules/technical-analysis/application/calculate-technical-indicators.js";
 
 /**
  * Backfills holes in the OANDA 1m series that the regular 15-minute collection tick cannot reach:
@@ -178,6 +179,7 @@ async function main(): Promise<void> {
           "analysis:calculate-indicators", "--workspace", "@ai-quant-lab/api", "--",
           "--exchange", "OANDA", "--instrument", GOLD, "--timeframe", timeframe,
           "--from", goldWindow.from.toISOString(),
+          "--warmup-bars", String(LONG_SERIES_WARMUP_BARS),
         ]));
       }
     }
@@ -205,6 +207,7 @@ async function main(): Promise<void> {
             "analysis:calculate-indicators", "--workspace", "@ai-quant-lab/api", "--",
             "--exchange", "OANDA", "--instrument", DXY, "--timeframe", timeframe,
             "--from", dxyWindow.from.toISOString(),
+            "--warmup-bars", String(LONG_SERIES_WARMUP_BARS),
           ]));
         }
       }

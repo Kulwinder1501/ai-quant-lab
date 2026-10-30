@@ -61,4 +61,13 @@ export interface CandleRepository {
   findByKey(instrumentId: string, timeframe: string, openTime: Date): Promise<PersistedCandle | null>;
   listIncomplete(instrumentIds: string[], timeframe: string, closedBefore: Date): Promise<PersistedCandle[]>;
   listCompleted(instrumentId: string, timeframe: string): Promise<PersistedCandle[]>;
+  /**
+   * The same completed bars as {@link listCompleted}, but only the last `warmupBars` before `since`
+   * and everything from `since` on, in order. For a series too long to read whole (XAU_USD 1m is
+   * 2.4 million bars) when the caller needs current values that long history cannot change.
+   *
+   * Optional because only the database repository can do this without loading the series first;
+   * a caller that asks for it on one that cannot must fail, not quietly read everything.
+   */
+  listCompletedWindow?(instrumentId: string, timeframe: string, since: Date, warmupBars: number): Promise<PersistedCandle[]>;
 }

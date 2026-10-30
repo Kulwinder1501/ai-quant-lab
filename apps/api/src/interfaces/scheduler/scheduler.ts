@@ -55,6 +55,7 @@ import { PostgresPremarketBiasRepository } from "../../infrastructure/database/r
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
 import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
 import { EquityMissedRunGuard } from "../../modules/equity-research/application/equity-missed-run-guard.js";
+import { LONG_SERIES_WARMUP_BARS } from "../../modules/technical-analysis/application/calculate-technical-indicators.js";
 
 /** Jobs that fail whenever the Fyers credential is unusable; folded into the daily auth health check. */
 const FYERS_DEPENDENT_JOB_TYPES = ["OPTION_CHAIN", "OPTION_PREMIUM_TICKS"];
@@ -1229,7 +1230,8 @@ async function main(): Promise<void> {
          * about 56 s to every tick and delayed the bot's read of the newest bar by that much.
          *
          * The 1m indicator calculations read the whole 1m history each time (about 88 s each for XAU_USD and DXY on
-         * 2026-10-23) and nothing the gold bot evaluates reads them: it scans 5m and 15m, and the DXY gate reads
+         * 2026-10-23; since 2026-10-30 they read LONG_SERIES_WARMUP_BARS before the write window instead, see its
+         * note) and nothing the gold bot evaluates reads them: it scans 5m and 15m, and the DXY gate reads
          * 15m candles. The only reader found is the dashboard chart's 1m view, which was refreshed every fifteen
          * minutes until the tick went to five, so they keep that cadence: the first tick of each quarter hour.
          */
@@ -1261,6 +1263,7 @@ async function main(): Promise<void> {
             "--instrument", "XAU_USD",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
+            "--warmup-bars", String(LONG_SERIES_WARMUP_BARS),
           ]);
         }
 
@@ -1291,6 +1294,7 @@ async function main(): Promise<void> {
             "--instrument", "DXY",
             "--timeframe", timeframe,
             "--from", indicatorsFrom.toISOString(),
+            "--warmup-bars", String(LONG_SERIES_WARMUP_BARS),
           ]);
         }
       });

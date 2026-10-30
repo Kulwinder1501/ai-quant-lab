@@ -18,7 +18,9 @@ import { getOption, parseDateOption, parseHistoricalTimeframe, parseInstrumentEx
  * removed by a plain re-run unless their candle is live. Listing the affected rows, the optional
  * (never auto-run) cleanup, and the exact recompute commands are in
  * docs/2026-10-10-volatility-audit-fixes.md. `--from` is the only bound (there is no `--to`):
- * the whole series is always computed and `--from` limits what is written.
+ * the whole series is computed and `--from` limits what is written, unless `--warmup-bars N` is
+ * also given, which reads only N bars before `--from` as well (for XAU_USD and DXY, whose 1m
+ * series are millions of bars; see CalculateTechnicalIndicators for why N = 5000 is enough).
  */
 
 async function main(): Promise<void> {
@@ -30,6 +32,14 @@ async function main(): Promise<void> {
     const timeframe = parseHistoricalTimeframe(requireOption(argumentsList, "timeframe"));
     const fromArg = getOption(argumentsList, "from");
     const since = fromArg ? parseDateOption(fromArg, false) : undefined;
+    const warmupArg = getOption(argumentsList, "warmup-bars");
+    const warmupBars = warmupArg === undefined ? undefined : Number(warmupArg);
+    if (warmupBars !== undefined && (!Number.isInteger(warmupBars) || warmupBars < 1)) {
+      throw new Error(`--warmup-bars must be a positive integer, got "${warmupArg}".`);
+    }
+    if (warmupBars !== undefined && !since) {
+      throw new Error("--warmup-bars is measured back from --from, so --from is required with it.");
+    }
     const family = (getOption(argumentsList, "family") ?? "all").toLowerCase();
     if (family !== "all" && family !== "smc") {
       throw new Error(`Unsupported indicator family "${family}". Use all or smc.`);
@@ -48,8 +58,8 @@ async function main(): Promise<void> {
       new PostgresCandleRepository(database),
       new PostgresIndicatorDefinitionRepository(database),
       new PostgresIndicatorSnapshotRepository(database),
-    ).execute({ instrumentId: instrument.id, timeframe, since, definitions });
-    console.info(JSON.stringify({ level: "info", message: "Technical indicator calculation complete", instrument: symbol, timeframe, family, since: since?.toISOString(), ...result }));
+    ).execute({ instrumentId: instrument.id, timeframe, since, definitions, warmupBars });
+    console.info(JSON.stringify({ level: "info", message: "Technical indicator calculation complete", instrument: symbol, timeframe, family, since: since?.toISOString(), warmupBars, ...result }));
   } finally {
     await database.end();
   }
