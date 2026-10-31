@@ -32,7 +32,22 @@ const POOLED_WALK_FORWARD_FOLDS = "5";
 const VOLATILITY_LABEL_SCHEME = "volatility-expansion-v1";
 const VOLATILITY_HORIZON_BARS = "5";
 const VOLATILITY_EXPANSION_BAND = "0.25";
-const SWING_FEATURE_SCHEMA_VERSION = "ml-feature-v7";
+/**
+ * v7's 38 columns read from candlestick-v2 / price-action-v4, which detection writes today.
+ *
+ * Moved from "ml-feature-v7" on 2026-10-31. v7 reads candlestick-v1 and price-action-v2, which detection stopped writing on
+ * 2026-10-09 and 2026-10-10, so every v7 model predicts from price-action features that arrive empty (63% with no raw value
+ * after 10-09, against 10% before) and pattern features read from a superseded version with a look-ahead defect. The version is
+ * part of the family key, so every configuration below is a new family and trains once straight away, then on its cadence.
+ *
+ * It is a new schema version and not an edit to v7's pins because inference rejects an artifact whose stored feature
+ * definition differs from the one built for its schema. Pre-registered comparison on these six configurations
+ * (docs/2026-10-31-ml-evidence-v4-retrain-preregistration.md): no demonstrated difference, every CPCV edge over trivial within
+ * 0.005 (the pooled ones within 0.001), even though the single-index models see price-action evidence on only 7-13% of their
+ * rows (v3 and v4 suppress zero-volume bars and the index daily series had no volume before mid-2025). The move is for the
+ * inputs to exist at prediction time, not for a better score.
+ */
+const SWING_FEATURE_SCHEMA_VERSION = "ml-feature-v7-pa4";
 /**
  * Earliest bar any scheduled configuration may train on. See the window note on
  * `buildEodTrainingPlan` for why this opens at 2017 and which series it actually changes.

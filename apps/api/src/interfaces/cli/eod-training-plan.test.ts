@@ -29,7 +29,7 @@ describe("buildEodTrainingPlan", () => {
         "--label-scheme", "volatility-expansion-v1",
         "--horizon-bars", "5",
         "--expansion-band", "0.25",
-        "--feature-schema", "ml-feature-v7",
+        "--feature-schema", "ml-feature-v7-pa4",
       ]));
     }
   });
@@ -56,7 +56,7 @@ describe("buildEodTrainingPlan", () => {
   it("derives complete family keys and dated refit keys that match train.py's identity", () => {
     const nifty = plan.find((step) => step.description === "xgboost NIFTY50 1d volatility");
     expect(nifty?.modelFamilyKey).toBe(
-      "volatility-expansion-xgboost--NIFTY50--1d--h5--ml-feature-v7--volatility-expansion-v1--band0.25",
+      "volatility-expansion-xgboost--NIFTY50--1d--h5--ml-feature-v7-pa4--volatility-expansion-v1--band0.25",
     );
     expect(nifty?.args).toEqual(expect.arrayContaining([
       "--model-key",
@@ -67,7 +67,7 @@ describe("buildEodTrainingPlan", () => {
     // mirror still agrees with the Python implementation instead of agreeing with itself.
     const pooled = plan.find((step) => step.description === "xgboost pooled 1d volatility");
     expect(pooled?.modelFamilyKey).toBe(
-      "volatility-expansion-xgboost--pool2-71ffbbe3--1d--h5--ml-feature-v7--volatility-expansion-v1--band0.25",
+      "volatility-expansion-xgboost--pool2-71ffbbe3--1d--h5--ml-feature-v7-pa4--volatility-expansion-v1--band0.25",
     );
   });
 
@@ -84,7 +84,7 @@ describe("buildEodTrainingPlan", () => {
     const swapped = buildEodTrainingPlan(now, "SBIN,TCS")
       .find((step) => step.description === "xgboost pooled 1d volatility");
     expect(swapped?.modelFamilyKey).toBe(
-      "volatility-expansion-xgboost--pool2-b43a9abb--1d--h5--ml-feature-v7--volatility-expansion-v1--band0.25",
+      "volatility-expansion-xgboost--pool2-b43a9abb--1d--h5--ml-feature-v7-pa4--volatility-expansion-v1--band0.25",
     );
   });
 
@@ -159,6 +159,23 @@ describe("selectDueTrainingSteps", () => {
     ]);
     const { due } = selectDueTrainingSteps([niftyXgboost], otherFamilies, new Date(now));
     expect(due).toEqual([niftyXgboost]);
+  });
+
+  it("does not let the same configuration under the previous schema version delay the current one", () => {
+    // The schema version is part of the family key, so moving a configuration to ml-feature-v7-pa4 makes it a new family that trains
+    // at once. If a fresh ml-feature-v7 artifact of the same configuration counted, nothing would retrain for a month, which is the
+    // whole point of the move: those models read evidence detection stopped writing.
+    const previousSchemaKey = niftyKey.replace("ml-feature-v7-pa4", "ml-feature-v7");
+    expect(previousSchemaKey).not.toBe(niftyKey);
+
+    const { due, skipped } = selectDueTrainingSteps(
+      [niftyXgboost],
+      new Map([[`${previousSchemaKey}--refit-20261021`, new Date(now)]]),
+      new Date(now),
+    );
+
+    expect(due).toEqual([niftyXgboost]);
+    expect(skipped).toEqual([]);
   });
 
   it("takes the newest artifact when a configuration has several", () => {
