@@ -114,6 +114,30 @@ FEATURE_SCHEMA_VERSION_SCALP_V2 = "ml-feature-scalp-v2"
 #: key, and an ablated artifact must be impossible to confuse with a production one.
 FEATURE_SCHEMA_VERSION_V7_NO_PATTERN = "ml-feature-v7-nopattern"
 
+#: v7's columns and nothing else changed, read from the evidence versions detection writes today:
+#: ``candlestick-v2`` and ``price-action-v4``. v7 itself keeps reading ``candlestick-v1`` and ``price-action-v2``,
+#: which detection stopped writing on 2026-10-09 (the first has a look-ahead defect and was superseded by migration 133).
+#:
+#: A new schema version rather than a change to v7's pins, deliberately. The evidence versions are part of a model's
+#: stored feature definition, and inference rejects any artifact whose stored definition differs from the one the code
+#: builds for its schema, so editing v7 in place would invalidate every model already registered. The version is also
+#: part of the model key, so a v4 model cannot be confused with a v7 one, the same reason the ablation above is its own
+#: version. ``test_evidence_v4_schema`` fails if detection's current versions move on without this one.
+FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4 = "ml-feature-v7-pa4"
+
+#: The (pattern, price-action) versions every schema version reads, unless listed in the mapping below. These are the
+#: values every existing artifact was trained with and its stored definition records.
+LEGACY_EVIDENCE_ALGORITHM_VERSIONS: tuple[str, str] = ("candlestick-v1", "price-action-v2")
+EVIDENCE_ALGORITHM_VERSIONS_BY_SCHEMA: dict[str, tuple[str, str]] = {
+    FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4: ("candlestick-v2", "price-action-v4"),
+}
+
+
+def evidence_versions_for(schema_version: str) -> tuple[str, str]:
+    """The (pattern, price-action) algorithm versions a schema version reads."""
+
+    return EVIDENCE_ALGORITHM_VERSIONS_BY_SCHEMA.get(schema_version, LEGACY_EVIDENCE_ALGORITHM_VERSIONS)
+
 #: v9 (Model D: 75 columns) plus the ICT structural covariates -- HTF bias, premium/discount zone,
 #: distance to the nearest order block, and BOS/CHoCH presence/distance. Registered as its own
 #: version, not patched into v9 in place, for the same reason v7-nopattern is: this is the
@@ -180,6 +204,7 @@ KNOWN_FEATURE_SCHEMA_VERSIONS: tuple[str, ...] = (
     FEATURE_SCHEMA_VERSION_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+    FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4,
     FEATURE_SCHEMA_VERSION_V_ICT,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED,
     FEATURE_SCHEMA_VERSION_V_ICT_OTE,

@@ -27,10 +27,12 @@ from typing import Any
 
 from .contracts import (
     FEATURE_SCHEMA_VERSION,
+    evidence_versions_for,
     FEATURE_SCHEMA_VERSION_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V5,
     FEATURE_SCHEMA_VERSION_V6,
+    FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     FEATURE_SCHEMA_VERSION_V8,
     FEATURE_SCHEMA_VERSION_V8_GEOMETRY,
@@ -607,6 +609,8 @@ _SCHEMA_BY_VERSION: Mapping[str, tuple[str, ...]] = {
     FEATURE_SCHEMA_VERSION_SCALP: FEATURE_SCHEMA_SCALP,
     FEATURE_SCHEMA_VERSION_SCALP_V2: FEATURE_SCHEMA_SCALP_V2,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN: FEATURE_SCHEMA_V7_NO_PATTERN,
+    # Same columns as v7; only the evidence versions its definition records differ (see contracts.py).
+    FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4: FEATURE_SCHEMA_V7,
     FEATURE_SCHEMA_VERSION_V_ICT: FEATURE_SCHEMA_V_ICT,
     FEATURE_SCHEMA_VERSION_V_ICT_REFINED: FEATURE_SCHEMA_V_ICT_REFINED,
     FEATURE_SCHEMA_VERSION_V_ICT_OTE: FEATURE_SCHEMA_V_ICT_OTE,
@@ -617,13 +621,14 @@ assert set(_SCHEMA_BY_VERSION) == set(KNOWN_FEATURE_SCHEMA_VERSIONS)
 
 
 def _definition_for(schema_version: str) -> dict[str, Any]:
+    pattern_version, price_action_version = evidence_versions_for(schema_version)
     return {
         "schemaVersion": schema_version,
         "features": list(_SCHEMA_BY_VERSION[schema_version]),
         "indicatorAlgorithmVersion": "ta-v1",
         "indicatorParameters": {code: dict(parameters) for code, parameters in _INDICATOR_PARAMETERS.items()},
-        "patternAlgorithmVersion": "candlestick-v1",
-        "priceActionAlgorithmVersion": "price-action-v2",
+        "patternAlgorithmVersion": pattern_version,
+        "priceActionAlgorithmVersion": price_action_version,
     }
 
 

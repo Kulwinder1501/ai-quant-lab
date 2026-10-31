@@ -25,8 +25,10 @@ from ai_quant_lab_ml.contracts import (
     ALGORITHM_CHOICES,
     FEATURE_SCHEMA_VERSION,
     FEATURE_SCHEMA_VERSION_V5,
+    FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4,
     FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
     SCALP_TIMEFRAMES,
+    evidence_versions_for,
     DIRECTIONAL_ALPHABET,
     LABEL_SCHEME_FIXED_HORIZON,
     LABEL_SCHEME_TRIPLE_BARRIER,
@@ -338,11 +340,23 @@ def build_parser() -> argparse.ArgumentParser:
             FEATURE_SCHEMA_VERSION,
             FEATURE_SCHEMA_VERSION_V5,
             FEATURE_SCHEMA_VERSION_V7_NO_PATTERN,
+            FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4,
         ),
         default=None,
         help=(
             "Override the swing feature-schema version for an A/B capacity comparison "
-            f"(default: the timeframe's current mapping, {FEATURE_SCHEMA_VERSION} for swing)."
+            f"(default: the timeframe's current mapping, {FEATURE_SCHEMA_VERSION} for swing). "
+            f"{FEATURE_SCHEMA_VERSION_V7_EVIDENCE_V4} is v7's columns read from candlestick-v2 / price-action-v4, which "
+            "detection writes today; v7 reads candlestick-v1 / price-action-v2, which it stopped writing on 2026-10-09."
+        ),
+    )
+    parser.add_argument(
+        "--research-only",
+        action="store_true",
+        help=(
+            "Train and record the candidate and its artifact, but never enroll it in the volatility shadow pool and "
+            "never promote it. For comparisons whose models must not start accumulating live predictions: shadow "
+            "enrollment is sticky, so a model enrolled by an experiment would keep predicting for good."
         ),
     )
     return parser
@@ -1117,6 +1131,16 @@ def main() -> int:
     if args.feature_schema is not None and args.timeframe in SCALP_TIMEFRAMES:
         parser.error("--feature-schema applies only to swing timeframes; scalp timeframes keep their own schema.")
     schema_version = args.feature_schema or schema_version_for(args.timeframe)
+    if args.research_only and args.promote:
+        parser.error("--research-only cannot be combined with --promote.")
+    # The evidence versions are part of the schema's stored feature definition, so they come from the schema chosen here and
+    # not from a default: the request, the artifact's protocol and the definition inference checks it against then cannot differ.
+    pattern_algorithm_version, price_action_algorithm_version = evidence_versions_for(schema_version)
+    request = dataclasses.replace(
+        request,
+        pattern_algorithm_version=pattern_algorithm_version,
+        price_action_algorithm_version=price_action_algorithm_version,
+    )
     model_key = args.model_key or default_model_key(
         request, args.algorithm, schema_version, pooled_instruments=pooled_instruments
     )
@@ -1478,6 +1502,7 @@ def main() -> int:
         volatility_shadow_enrolled = (
             is_volatility
             and qualifies_for_promotion
+            and not args.research_only
             and repository.enroll_volatility_shadow(
                 label_scheme=request.label_scheme,
                 model_key=model_key,
