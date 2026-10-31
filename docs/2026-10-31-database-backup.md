@@ -49,7 +49,10 @@ is in use. The task has `StartWhenAvailable` (a missed run happens as soon as th
 
 ### The morning check (`morning-check.ps1`)
 
-Silent when everything is fine; raises a Windows notification listing what is wrong otherwise. It changes nothing.
+Silent when everything is fine; otherwise it shows a Windows toast **and** a topmost message box listing what is wrong
+(the box closes itself after 2 minutes and is shown again 10 minutes later if the problem remains). The box exists because the
+toast alone was silently dropped on the operator's machine on 2026-10-31 (no error; most likely Do Not Disturb or Focus
+Assist), while the box was seen. It changes nothing else.
 
 1. Docker reachable and every `ai-quant-lab-*` container running and not unhealthy.
 2. The last backup succeeded and finished within 36 hours.
@@ -58,7 +61,7 @@ Silent when everything is fine; raises a Windows notification listing what is wr
    the Fyers access token (`provider_credentials.access_token_expires_at`) is valid for at least another 30 minutes.
    This is the "log in to Fyers" alert. It repeats every 10 minutes until the login is done or 09:40 passes.
 
-`morning-check.ps1 -Test` sends one test notification. A summary of the last run is in `last-morning-check.json`.
+`morning-check.ps1 -Test` sends one test toast and one test message box. A summary of the last run is in `last-morning-check.json`.
 
 ## What is NOT in the backup, and how to get it back
 

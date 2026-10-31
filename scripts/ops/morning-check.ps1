@@ -58,9 +58,27 @@ function Show-Toast([string]$title, [string]$body) {
   }
 }
 
+# A toast can be dropped silently (Do Not Disturb / Focus Assist, or notifications switched off for the sender) with no
+# error, which is not good enough for "log in to Fyers before the open". A message box is always shown on the desktop
+# and stays on top; it closes itself after TimeoutSeconds so a run never hangs, and the next run (10 minutes later)
+# shows it again if the problem is still there.
+function Show-Popup([string]$title, [string]$body, [int]$timeoutSeconds = 120) {
+  try {
+    $shell = New-Object -ComObject WScript.Shell
+    # 48 = exclamation icon, 4096 = system modal (topmost)
+    [void]$shell.Popup($body, $timeoutSeconds, $title, 48 + 4096)
+    return $true
+  } catch {
+    Write-Log "message box could not be shown: $($_.Exception.Message)"
+    return $false
+  }
+}
+
 if ($Test) {
-  $shown = Show-Toast 'AI Quant Lab' 'Test notification: the morning check can reach your desktop.'
-  Write-Host "test notification shown: $shown"
+  $toast = Show-Toast 'AI Quant Lab' 'Test notification: the morning check can reach your desktop.'
+  Write-Host "test toast shown: $toast"
+  Write-Host 'showing the message box (closes by itself after 60 seconds)...'
+  [void](Show-Popup 'AI Quant Lab' 'Test: the morning check can reach your desktop. You can close this.' 60)
   exit 0
 }
 
@@ -136,4 +154,5 @@ $body = ($problems -join ' | ')
 Write-Log "ALERT: $body"
 $title = if ($problems.Count -eq 1) { 'AI Quant Lab: needs attention' } else { "AI Quant Lab: $($problems.Count) problems" }
 [void](Show-Toast $title $body)
+[void](Show-Popup $title $body)
 exit 2
