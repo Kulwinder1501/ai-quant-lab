@@ -783,8 +783,15 @@ async function main(): Promise<void> {
     }
   };
 
-  cronSchedule("30 16 * * 1-5", () => {
+  // The Fyers access token dies at 16:31 IST every day (the refresh API is disabled), so the daily VIX bar has to be
+  // fetched before that: at 16:30 it ran one minute before the cutoff and the 17:15/18:15 retries could never
+  // authenticate, so it failed 3 of 5 recent days. 16:22 is after the 16:05 end-of-day pipeline, whose inputs stay as
+  // they were, with a second try at 16:27. The 17:15/18:15 retries stay for a login made late in the evening.
+  cronSchedule("22 16 * * 1-5", () => {
     void schedule("INDIA_VIX_EOD", () => collectIndiaVix(["1d"], 10));
+  });
+  cronSchedule("27 16 * * 1-5", () => {
+    void schedule("INDIA_VIX_EOD_RETRY", () => collectIndiaVix(["1d"], 10));
   });
   cronSchedule("15 17,18 * * 1-5", () => {
     void schedule("INDIA_VIX_EOD_RETRY", () => collectIndiaVix(["1d"], 10));
@@ -1314,7 +1321,7 @@ async function main(): Promise<void> {
    * flag to thread through instead.
    *
    * Runs at 16:25 IST, after CANDLE_GAP_CHECK (16:20) confirms the day's BANKNIFTY bars are final
-   * and before INDIA_VIX_EOD (16:30). Labels can only be generated for candidates that already
+   * and around INDIA_VIX_EOD (16:22 to 16:27); the two do not depend on each other. Labels can only be generated for candidates that already
    * exist, so the two are sequenced with `await` rather than fired independently -- the same
    * reasoning as XAU_CANDLE_COLLECTION/PAPER_TRADING_BOT_GOLD directly above.
    *
