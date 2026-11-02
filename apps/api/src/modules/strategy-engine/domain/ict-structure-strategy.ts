@@ -84,7 +84,7 @@ const KILLZONE_WINDOWS: readonly { readonly name: string; readonly from: number;
   { name: "AFTERNOON", from: 13 * 60, to: 14 * 60 + 30 },
 ];
 
-function killzoneAt(instant: Date): string | null {
+export function killzoneAt(instant: Date): string | null {
   const minute = istMinuteOfDay(instant);
   for (const w of KILLZONE_WINDOWS) {
     if (minute >= w.from && minute < w.to) return w.name;
