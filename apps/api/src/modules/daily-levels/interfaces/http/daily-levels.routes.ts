@@ -17,7 +17,7 @@ export const HISTORY_CAVEAT =
   "Measured on 15-minute bars from 2023 against four displaced placebo lines per level. Every class, placebo included, shows a bounce share above 50% "
   + "because a touch is measured from the line itself while the touch bar has often already moved away from it; the comparison with placebo lines "
   + "cancels that. There are fourteen comparisons here, so about one in twenty would exclude zero by chance alone, and a difference smaller than roughly "
-  + "five points cannot be ruled out.";
+  + "five points for all levels (ten for a single family) cannot be ruled out.";
 
 const INSTRUMENTS: readonly DailyLevelsInstrument[] = ["NIFTY50", "BANKNIFTY"];
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;

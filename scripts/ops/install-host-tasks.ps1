@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Installs (or re-installs) the two host-side Windows scheduled tasks for AI Quant Lab: the nightly database backup and
+  Installs (or re-installs) the host-side Windows scheduled tasks for AI Quant Lab: the nightly database backup and
   the morning check. Safe to re-run: it overwrites the copies and re-registers the tasks.
 
 .DESCRIPTION
@@ -14,18 +14,21 @@
                                makes a missed run happen as soon as the machine is awake again. WakeToRun is requested too.
     AIQuantLab-MorningCheck    weekdays from CheckStart (default 08:50), repeating every 10 minutes for 50 minutes, so a
                                missing Fyers login is flagged before the 09:15 open and repeated until it is fixed.
+    AIQuantLab-MorningLevels   weekdays at LevelsStart (default 08:58) and ten minutes later: shows the daily levels sheet
+                               the scheduler builds at 08:55 (docs/2026-11-02-daily-levels-sheet-and-reaction-protocol.md).
 #>
 param(
   [string]$OpsDir = (Join-Path $env:USERPROFILE 'ai-quant-lab-ops'),
   [string]$BackupTime = '17:45',
   [string]$CheckStart = '08:50',
+  [string]$LevelsStart = '08:58',
   [string]$OffsiteDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $bin = Join-Path $OpsDir 'bin'
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'backup-database.ps1'), (Join-Path $PSScriptRoot 'morning-check.ps1') -Destination $bin -Force
+Copy-Item (Join-Path $PSScriptRoot 'backup-database.ps1'), (Join-Path $PSScriptRoot 'morning-check.ps1'), (Join-Path $PSScriptRoot 'morning-levels.ps1') -Destination $bin -Force
 Write-Host "scripts installed to $bin"
 
 $user = "$env:USERDOMAIN\$env:USERNAME"
@@ -52,6 +55,17 @@ $checkSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfO
 Register-ScheduledTask -TaskName 'AIQuantLab-MorningCheck' -Action $checkAction -Trigger $checkTrigger -Settings $checkSettings `
   -Principal $principal -Force -Description 'Notifies when the Fyers login, the backup, the disk or a container needs attention.' | Out-Null
 Write-Host "registered AIQuantLab-MorningCheck, weekdays from $CheckStart every 10 minutes for 50 minutes"
+
+# 3. the morning levels message: the scheduler builds the sheet at 08:55 (retry 09:05); this shows it at LevelsStart and once more ten
+# minutes later, and is silent on weekends, NSE holidays and once it has shown the day's message.
+$levelsAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "$common -File `"$bin\morning-levels.ps1`""
+$levelsTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At $LevelsStart
+$levelsTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At $LevelsStart -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration (New-TimeSpan -Minutes 15)).Repetition
+$levelsSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+  -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+Register-ScheduledTask -TaskName 'AIQuantLab-MorningLevels' -Action $levelsAction -Trigger $levelsTrigger -Settings $levelsSettings `
+  -Principal $principal -Force -Description 'Shows the daily levels sheet for NIFTY 50 and BANK NIFTY before the open.' | Out-Null
+Write-Host "registered AIQuantLab-MorningLevels, weekdays at $LevelsStart and ten minutes later"
 
 Get-ScheduledTask -TaskName 'AIQuantLab-*' | ForEach-Object {
   $i = Get-ScheduledTaskInfo -TaskName $_.TaskName
