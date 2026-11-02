@@ -79,32 +79,38 @@ export class PostgresDailyLevelsRepository {
   }
 
   /**
-   * The last option-chain observation strictly before 08:50 IST on the session date (and no older than five days), restricted to the
-   * nearest expiry that is on or after the session date. Null when there is none.
+   * The option chain the sheet's open-interest walls come from: the nearest expiry that is on or after the session date among observations
+   * from the last five days and strictly before 08:50 IST on the session date, and the latest such observation of that expiry.
+   *
+   * The expiry is chosen first, then its latest observation. The collector stores one expiry per snapshot and rolls to the next week
+   * after the close of the day before expiry, so the last snapshot overall can belong to next week's expiry (seen 2026-11-02: the 11-03
+   * weekly was last observed in-session, and the 15:53 snapshot already held 11-09). Taking the last snapshot would then show next week's
+   * positioning on the very day the nearer expiry matters most.
    */
   async oiBeforeOpen(underlying: DailyLevelsInstrument, sessionDate: string): Promise<OiObservation | null> {
+    const window = `underlying_symbol = $1
+         AND observed_at < (($2::date + time '08:50') AT TIME ZONE 'Asia/Kolkata')
+         AND observed_at >= (($2::date - $3::int + time '00:00') AT TIME ZONE 'Asia/Kolkata')`;
+    const nearest = await this.database.query<{ expiry: string | null }>(
+      `SELECT to_char(min(expiry_date), 'YYYY-MM-DD') AS expiry FROM option_chain_snapshots
+       WHERE ${window} AND expiry_date >= $2::date`,
+      [underlying, sessionDate, OI_MAX_AGE_DAYS],
+    );
+    const expiry = nearest.rows[0]?.expiry ?? null;
+    if (expiry === null) return null;
+
     const latest = await this.database.query<{ observed_at: Date | null }>(
       `SELECT max(observed_at) AS observed_at FROM option_chain_snapshots
-       WHERE underlying_symbol = $1
-         AND observed_at < (($2::date + time '08:50') AT TIME ZONE 'Asia/Kolkata')
-         AND observed_at >= (($2::date - $3::int + time '00:00') AT TIME ZONE 'Asia/Kolkata')`,
-      [underlying, sessionDate, OI_MAX_AGE_DAYS],
+       WHERE ${window} AND expiry_date = $4::date`,
+      [underlying, sessionDate, OI_MAX_AGE_DAYS, expiry],
     );
     const observedAt = latest.rows[0]?.observed_at ?? null;
     if (observedAt === null) return null;
 
-    const expiry = await this.database.query<{ expiry: string | null }>(
-      `SELECT to_char(min(expiry_date), 'YYYY-MM-DD') AS expiry FROM option_chain_snapshots
-       WHERE underlying_symbol = $1 AND observed_at = $2 AND expiry_date >= $3::date`,
-      [underlying, observedAt, sessionDate],
-    );
-    const nearest = expiry.rows[0]?.expiry ?? null;
-    if (nearest === null) return null;
-
     const rows = await this.database.query<{ strike: string; option_type: string; open_interest: string | null }>(
       `SELECT strike_price AS strike, option_type, open_interest FROM option_chain_snapshots
        WHERE underlying_symbol = $1 AND observed_at = $2 AND expiry_date = $3::date`,
-      [underlying, observedAt, nearest],
+      [underlying, observedAt, expiry],
     );
     const byStrike = new Map<number, { callOi: number; putOi: number }>();
     for (const row of rows.rows) {
@@ -116,9 +122,9 @@ export class PostgresDailyLevelsRepository {
       byStrike.set(strike, entry);
     }
     return {
-      strikes: [...byStrike.entries()].map(([strike, oi]) => ({ strike, callOi: oi.callOi, putOi: oi.putOi })).sort((a, b) => a.strike - b.strike),
+      strikes: [...byStrike.entries()].map(([strike, oi]) => ({ strike, callOi: oi.callOi, putOi: oi.putOi })).sort((x, y) => x.strike - y.strike),
       observedAt: observedAt.toISOString(),
-      expiry: nearest,
+      expiry,
     };
   }
 
