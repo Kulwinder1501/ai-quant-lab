@@ -140,6 +140,7 @@ import { equitySeriesVersioningMigration } from "./139-equity-series-versioning.
 import { equityAlertsAndEventsMigration } from "./140-equity-alerts-and-events.js";
 import { correctNiftyLotSizeMigration } from "./141-correct-nifty-lot-size.js";
 import { optionChainVendorGreeksMigration } from "./142-option-chain-vendor-greeks.js";
+import { dailyLevelsMigration } from "./143-daily-levels.js";
 
 export const migrations = [
   initialSchemaMigration,
@@ -284,4 +285,5 @@ export const migrations = [
   equityAlertsAndEventsMigration,
   correctNiftyLotSizeMigration,
   optionChainVendorGreeksMigration,
+  dailyLevelsMigration,
 ];

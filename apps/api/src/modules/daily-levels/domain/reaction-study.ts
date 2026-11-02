@@ -39,6 +39,8 @@ export interface StudyLine {
   readonly family: LevelFamily;
   readonly kind: "REAL" | "PLACEBO";
   readonly price: number;
+  /** Distinct families in the zone a real level sits in; absent on placebo lines. Used only for the descriptive confluence split. */
+  readonly confluence?: number;
 }
 
 export interface TouchResult {
@@ -49,6 +51,7 @@ export interface TouchResult {
   readonly outcome: TouchOutcome;
   /** Index of the touch bar within the session. */
   readonly touchIndex: number;
+  readonly confluence?: number;
 }
 
 /** Four displaced lines per real level, minus any that sit within the exclusion distance of a real level that session. */
@@ -97,7 +100,7 @@ export function evaluateSession(
       if (bounced) { outcome = "BOUNCE"; break; }
       if (broke) { outcome = "BREAK"; break; }
     }
-    results.push({ key: line.key, family: line.family, kind: line.kind, side, outcome, touchIndex });
+    results.push({ key: line.key, family: line.family, kind: line.kind, side, outcome, touchIndex, ...(line.confluence === undefined ? {} : { confluence: line.confluence }) });
   }
   return results;
 }
@@ -110,15 +113,26 @@ export interface SessionCounts {
   readonly placeboBreak: number;
 }
 
-export function countSession(results: readonly TouchResult[], family: StudyFamily): SessionCounts {
+/**
+ * Counts resolved touches for two groups of results: group A goes in the "real" columns and group B in the "placebo" columns, so the same
+ * statistic compares real with placebo lines, or one kind of real level with another. A result classified `null` is left out.
+ */
+export function countBy(results: readonly TouchResult[], classify: (result: TouchResult) => "A" | "B" | null): SessionCounts {
   const counts = { realBounce: 0, realBreak: 0, placeboBounce: 0, placeboBreak: 0 };
   for (const result of results) {
-    if (family !== "ALL" && result.family !== family) continue;
     if (result.outcome === "UNRESOLVED") continue;
-    if (result.kind === "REAL") counts[result.outcome === "BOUNCE" ? "realBounce" : "realBreak"] += 1;
-    else counts[result.outcome === "BOUNCE" ? "placeboBounce" : "placeboBreak"] += 1;
+    const group = classify(result);
+    if (group === null) continue;
+    const bounced = result.outcome === "BOUNCE";
+    if (group === "A") counts[bounced ? "realBounce" : "realBreak"] += 1;
+    else counts[bounced ? "placeboBounce" : "placeboBreak"] += 1;
   }
   return counts;
+}
+
+/** Real lines of one family (or all) against the placebo lines displaced from the same family. */
+export function countSession(results: readonly TouchResult[], family: StudyFamily): SessionCounts {
+  return countBy(results, (result) => (family !== "ALL" && result.family !== family ? null : result.kind === "REAL" ? "A" : "B"));
 }
 
 /** Deterministic generator, so the interval is reproducible from the seed. */
@@ -134,7 +148,8 @@ export function mulberry32(seed: number): () => number {
 }
 
 export interface ReactionSummary {
-  readonly family: StudyFamily;
+  /** A family, `ALL`, or the name of a descriptive comparison. */
+  readonly family: string;
   readonly sessions: number;
   readonly realResolved: number;
   readonly placeboResolved: number;
@@ -161,7 +176,7 @@ function differenceOf(counts: readonly SessionCounts[]): { real: number | null; 
 }
 
 /** The real-minus-placebo bounce share, with a bootstrap interval that resamples whole sessions (the unit that shares a market). */
-export function summariseReaction(family: StudyFamily, perSession: readonly SessionCounts[], parameters = STUDY_PARAMETERS): ReactionSummary {
+export function summariseReaction(family: string, perSession: readonly SessionCounts[], parameters = STUDY_PARAMETERS): ReactionSummary {
   const point = differenceOf(perSession);
   const realResolved = perSession.reduce((sum, day) => sum + day.realBounce + day.realBreak, 0);
   const placeboResolved = perSession.reduce((sum, day) => sum + day.placeboBounce + day.placeboBreak, 0);

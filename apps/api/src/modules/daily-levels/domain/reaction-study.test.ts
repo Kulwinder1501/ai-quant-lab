@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   STUDY_PARAMETERS,
+  countBy,
   countSession,
   describeReaction,
   evaluateSession,
@@ -105,6 +106,17 @@ describe("counting and the interval", () => {
     const results = [touch("REAL", "BOUNCE"), touch("REAL", "BREAK"), touch("REAL", "UNRESOLVED"), touch("PLACEBO", "BOUNCE", "PRIOR_DAY")];
     expect(countSession(results, "ALL")).toEqual({ realBounce: 1, realBreak: 1, placeboBounce: 1, placeboBreak: 0 });
     expect(countSession(results, "PIVOT")).toEqual({ realBounce: 1, realBreak: 1, placeboBounce: 0, placeboBreak: 0 });
+  });
+
+  it("compares two groups of real levels with the same counter", () => {
+    const results = [
+      { ...touch("REAL", "BOUNCE"), confluence: 2 },
+      { ...touch("REAL", "BREAK"), confluence: 2 },
+      { ...touch("REAL", "BOUNCE"), confluence: 1 },
+      { ...touch("PLACEBO", "BOUNCE") },
+    ];
+    const counts = countBy(results, (result) => (result.kind !== "REAL" ? null : (result.confluence ?? 0) >= 2 ? "A" : "B"));
+    expect(counts).toEqual({ realBounce: 1, realBreak: 1, placeboBounce: 1, placeboBreak: 0 });
   });
 
   it("gives the same interval every time for the same seed", () => {
