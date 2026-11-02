@@ -1314,6 +1314,7 @@ export class AiAutonomousAgent {
         option_type: "CE" | "PE" | null;
         underlying_symbol: string | null;
         trade_idea_id: string | null;
+        /** The strategy's stable key (e.g. `momentum-scalp-index`), through trade_ideas.strategy_version_id. `trade_ideas` has no name column: this query selected `trade_ideas.strategy_name` from 2026-10-15 and failed with "column does not exist", which broke /agent/performance. A key, not the display name, because names change with strategy versions and this groups reflections. */
         setup_family: string | null;
       }>(`
         SELECT paper_trades.id, paper_trades.instrument_id, paper_trades.side, paper_trades.quantity,
@@ -1322,9 +1323,11 @@ export class AiAutonomousAgent {
                paper_trades.opened_at, paper_trades.closed_at, source_candle.timeframe,
                paper_trades.option_strike, paper_trades.option_expiry, paper_trades.option_type,
                paper_trades.underlying_symbol, paper_trades.trade_idea_id,
-               trade_ideas.strategy_name AS setup_family
+               strategies.strategy_key AS setup_family
         FROM paper_trades
         LEFT JOIN trade_ideas ON trade_ideas.id = paper_trades.trade_idea_id
+        LEFT JOIN strategy_versions ON strategy_versions.id = trade_ideas.strategy_version_id
+        LEFT JOIN strategies ON strategies.id = strategy_versions.strategy_id
         LEFT JOIN candles AS source_candle ON source_candle.id = trade_ideas.source_candle_id
         WHERE paper_trades.id = $1
       `, [tradeId]);
