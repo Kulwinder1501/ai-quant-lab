@@ -43,6 +43,7 @@ import { PostgresOptionPremiumTickRepository } from "../../infrastructure/databa
 import { defaultRiskPolicy, evaluateRisk } from "../../modules/risk-management/domain/risk.js";
 import { isAtOrAfterSessionEntryCutoff } from "../../modules/paper-trading/domain/session-close.js";
 import { istTradingDayWindow } from "../../modules/paper-trading/domain/daily-trade-cap.js";
+import { describeStrategyFailures, type StrategyFailure } from "../../modules/paper-trading/domain/strategy-failure-report.js";
 import { observeOppositeSignal } from "../../modules/paper-trading/application/opposite-signal-observation.js";
 import { observeVolumeProfile } from "../../modules/paper-trading/application/volume-profile-observation.js";
 import { observeMarketContext } from "../../modules/paper-trading/application/market-context-observation.js";
@@ -411,6 +412,11 @@ async function main(): Promise<void> {
      * open-position evaluation that used to be skipped when a failure aborted mid-run.
      */
     const unexpectedOpenFailures: Array<Record<string, unknown>> = [];
+    /**
+     * Strategies that threw while evaluating a bar one of these bots owns. Also a fault rather than a refusal: the generator
+     * isolates the exception so the other strategies still run, which hid a crash on every ICT setup for three weeks (2026-11-02).
+     */
+    const strategyFailures: StrategyFailure[] = [];
 
     // Execute isolated trading logic for each bot sandbox in DUAL_BOT_SANDBOX
     for (const botSpec of selectBotSandboxes(DUAL_BOT_SANDBOX, process.argv.slice(2))) {
@@ -454,6 +460,11 @@ async function main(): Promise<void> {
 
         for (const result of botResults) {
           if (result.skippedReason) {
+            if (result.skippedReason === "STRATEGY_FAILED") {
+              strategyFailures.push({
+                bot: botSpec.name, symbol, timeframe, strategy: result.strategyKey, message: result.failureMessage ?? null,
+              });
+            }
             strategyOutcomes.push({
               symbol, timeframe, strategy: result.strategyKey,
               skippedReason: result.skippedReason,
@@ -760,17 +771,20 @@ async function main(): Promise<void> {
       timestamp: now.toISOString(),
       skippedSeries,
       unexpectedOpenFailures,
+      strategyFailures,
       bots: botReports,
     }, null, 2));
 
     // Raised at the end rather than where it happened, so the cycle finishes its work first. A
     // contended or capped idea is not in here; those are refusals and the run stays healthy.
-    if (unexpectedOpenFailures.length > 0) {
-      throw new Error(
-        `${unexpectedOpenFailures.length} paper trade open(s) failed unexpectedly. `
-        + "Every other bot and the open-position evaluation still ran; see unexpectedOpenFailures.",
-      );
-    }
+    const faults = [
+      unexpectedOpenFailures.length > 0
+        ? `${unexpectedOpenFailures.length} paper trade open(s) failed unexpectedly. `
+          + "Every other bot and the open-position evaluation still ran; see unexpectedOpenFailures."
+        : null,
+      describeStrategyFailures(strategyFailures),
+    ].filter((fault): fault is string => fault !== null);
+    if (faults.length > 0) throw new Error(faults.join(" "));
   } finally {
     if (pendingShadowPromises.length > 0) {
       await Promise.allSettled(pendingShadowPromises);
