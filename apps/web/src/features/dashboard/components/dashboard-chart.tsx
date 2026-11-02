@@ -101,7 +101,7 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
     const last = chartData?.candles.at(-1)?.close ?? Number.NaN;
     return {
       lines: chartLevelsFromZones(sheet.body.zones, last),
-      note: `Levels for ${formatCalendarDate(sheet.body.sessionDate)}, built from the ${formatCalendarDate(sheet.body.referenceDate)} close. Solid line: two or more kinds of source agree; dashed: one. Context, not a signal.`,
+      note: `Levels for ${formatCalendarDate(sheet.body.sessionDate)}, built from the ${formatCalendarDate(sheet.body.referenceDate)} close. Solid line: two or more kinds of source agree; dashed: one. Prev = previous trading day; Pivot R/S are calculated from its high, low and close. Context, not a signal.`,
     };
   }, [mode, levelsUnderlying, symbol, sheet, chartData]);
 

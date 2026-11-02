@@ -111,26 +111,33 @@ function level(key: string, family: SheetLevel["family"], price: number, label =
 }
 
 describe("chart line labels", () => {
-  it("shortens the known keys and keeps R/S levels and round numbers readable", () => {
-    expect(levelShortLabel({ key: "pdh", label: "Previous day high" })).toBe("PDH");
-    expect(levelShortLabel({ key: "pdc", label: "Previous day close" })).toBe("Close");
-    expect(levelShortLabel({ key: "r2", label: "R2" })).toBe("R2");
-    expect(levelShortLabel({ key: "s3", label: "S3" })).toBe("S3");
-    expect(levelShortLabel({ key: "pivot", label: "Pivot" })).toBe("P");
-    expect(levelShortLabel({ key: "call-oi-wall", label: "Highest call open interest" })).toBe("Call OI");
-    expect(levelShortLabel({ key: "round-23500", label: "Round 23500" })).toBe("23,500");
-    expect(levelShortLabel({ key: "week-high", label: "Previous week high" })).toBe("Wk high");
+  it("says what each line is in plain words", () => {
+    expect(levelShortLabel({ key: "pdh", label: "Previous day high" })).toBe("Prev high");
+    expect(levelShortLabel({ key: "pdl", label: "Previous day low" })).toBe("Prev low");
+    expect(levelShortLabel({ key: "pdc", label: "Previous day close" })).toBe("Prev close");
+    expect(levelShortLabel({ key: "pivot", label: "Pivot" })).toBe("Pivot");
+    expect(levelShortLabel({ key: "r2", label: "R2" })).toBe("Pivot R2");
+    expect(levelShortLabel({ key: "s3", label: "S3" })).toBe("Pivot S3");
+    expect(levelShortLabel({ key: "range-high", label: "5-session high" })).toBe("5-day high");
+    expect(levelShortLabel({ key: "week-low", label: "Previous week low" })).toBe("Last week low");
+    expect(levelShortLabel({ key: "call-oi-wall", label: "Highest call open interest" })).toBe("Call OI wall");
+    expect(levelShortLabel({ key: "put-oi-wall", label: "Highest put open interest" })).toBe("Put OI wall");
+  });
+
+  it("does not put a price in a round number's label, because the axis tag already shows the zone's price", () => {
+    expect(levelShortLabel({ key: "round-23500", label: "Round 23500" })).toBe("Round number");
   });
 
   it("falls back to the full label for a key it does not know", () => {
     expect(levelShortLabel({ key: "something-new", label: "Something new" })).toBe("Something new");
   });
 
-  it("names a zone by its first two lines and counts the rest", () => {
-    const lines = [level("pdh", "PRIOR_DAY", 1), level("r1", "PIVOT", 1), level("round-100", "ROUND_NUMBER", 1), level("range-high", "RANGE_5D", 1)];
-    expect(zoneChartLabel({ levels: lines.slice(0, 1) })).toBe("PDH");
-    expect(zoneChartLabel({ levels: lines.slice(0, 2) })).toBe("PDH · R1");
-    expect(zoneChartLabel({ levels: lines })).toBe("PDH · R1 +2");
+  it("joins up to three lines of a zone with +, then counts the rest", () => {
+    const lines = [level("pdc", "PRIOR_DAY", 1), level("pdh", "PRIOR_DAY", 1), level("range-high", "RANGE_5D", 1), level("round-100", "ROUND_NUMBER", 1)];
+    expect(zoneChartLabel({ levels: lines.slice(0, 1) })).toBe("Prev close");
+    expect(zoneChartLabel({ levels: lines.slice(0, 2) })).toBe("Prev close + Prev high");
+    expect(zoneChartLabel({ levels: lines.slice(0, 3) })).toBe("Prev close + Prev high + 5-day high");
+    expect(zoneChartLabel({ levels: lines })).toBe("Prev close + Prev high + 5-day high + 1 more");
   });
 });
 
@@ -162,7 +169,7 @@ describe("chartLevelsFromZones", () => {
       [23_050, false, "CLOSE"],
       [23_300, true, "ZONE"],
     ]);
-    expect(lines[2].label).toBe("R1 · 23,300");
+    expect(lines[2].label).toBe("Pivot R1 + Round number");
   });
 
   it("draws nothing for an unusable last price", () => {

@@ -154,33 +154,36 @@ export interface ChartLevel {
 }
 
 const SHORT_LABELS: Record<string, string> = {
-  pdh: "PDH",
-  pdl: "PDL",
-  pdc: "Close",
-  pivot: "P",
-  "range-high": "5D high",
-  "range-low": "5D low",
-  "week-high": "Wk high",
-  "week-low": "Wk low",
-  "call-oi-wall": "Call OI",
-  "put-oi-wall": "Put OI",
+  pdh: "Prev high",
+  pdl: "Prev low",
+  pdc: "Prev close",
+  pivot: "Pivot",
+  "range-high": "5-day high",
+  "range-low": "5-day low",
+  "week-high": "Last week high",
+  "week-low": "Last week low",
+  "call-oi-wall": "Call OI wall",
+  "put-oi-wall": "Put OI wall",
 };
 
-/** A short axis label for one line: `PDH`, `R2`, `S1`, `Call OI`, or the round number itself. */
+/**
+ * A plain-words label for one line: `Prev high`, `Pivot R1`, `Call OI wall`, `Round number`. "Prev" is the previous trading day. A round
+ * number carries no price in its label: the price tag on the axis already shows the zone's price, and a number in the label that differed
+ * from the tag (a round 23,500 grouped with R1 at 23,509) read as a mistake.
+ */
 export function levelShortLabel(level: Pick<SheetLevel, "key" | "label">): string {
   const known = SHORT_LABELS[level.key];
   if (known) return known;
-  if (/^[rs][123]$/.test(level.key)) return level.key.toUpperCase();
-  const round = /^round-(\d+)$/.exec(level.key);
-  if (round) return new Intl.NumberFormat("en-IN").format(Number(round[1]));
+  if (/^[rs][123]$/.test(level.key)) return `Pivot ${level.key.toUpperCase()}`;
+  if (/^round-\d+$/.test(level.key)) return "Round number";
   return level.label;
 }
 
-/** The first two short labels of a zone, then `+n` for the rest, e.g. `PDH · R1 +1`. */
+/** Up to three of a zone's lines joined with ` + `, then `+ n more`, e.g. `Prev close + Prev high + 5-day high`. */
 export function zoneChartLabel(zone: Pick<SheetZone, "levels">): string {
   const labels = zone.levels.map(levelShortLabel);
-  const shown = labels.slice(0, 2).join(" · ");
-  return labels.length > 2 ? `${shown} +${labels.length - 2}` : shown;
+  const shown = labels.slice(0, 3).join(" + ");
+  return labels.length > 3 ? `${shown} + ${labels.length - 3} more` : shown;
 }
 
 export const CHART_LEVELS_PER_SIDE = 6;
