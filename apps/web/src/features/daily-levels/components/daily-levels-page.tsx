@@ -1,13 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { PageHeader } from "../../../components/layout/page-header";
 import { GlassPanel } from "../../../components/ui/glass-panel";
 import { Tabs } from "../../../components/ui/tabs";
-import { errorMessage, isAbortError } from "../../../lib/errors";
 import { formatIstDate } from "../../../lib/ist-date";
-import { getApiV1Url } from "../../research/api";
 import {
   buildLadder,
   confluenceText,
@@ -20,9 +18,9 @@ import {
   formatShare,
   formatZoneRange,
   sheetFreshness,
-  type HistoryComparison,
   type SheetZone,
 } from "../levels-view";
+import { useDailyLevels, type History, type SheetBody } from "../use-daily-levels";
 
 const UNDERLYINGS = [
   { id: "NIFTY50", label: "NIFTY 50" },
@@ -31,76 +29,7 @@ const UNDERLYINGS = [
 
 type Underlying = (typeof UNDERLYINGS)[number]["id"];
 
-interface History {
-  studyVersion: string;
-  computedAt: string;
-  windowFrom: string;
-  windowTo: string;
-  sessionsUsed: number;
-  sessionsSkipped: number;
-  comparisons: HistoryComparison[];
-  confluence: HistoryComparison | null;
-  caveat: string;
-}
-
-interface SheetBody {
-  available: true;
-  underlying: Underlying;
-  sessionDate: string;
-  referenceDate: string;
-  referencePrice: number;
-  version: number;
-  generatedAt: string;
-  zones: SheetZone[];
-  unavailable: Array<{ family: string; reason: string }>;
-  oi: { observedAt: string | null; expiry: string | null } | null;
-  history: History | null;
-  disclaimer: string;
-}
-
-interface EmptyBody {
-  available: false;
-  underlying: Underlying;
-  reason: string;
-  disclaimer: string;
-}
-
-type LoadState =
-  | { status: "loading" }
-  | { status: "error"; message: string }
-  | { status: "ready"; body: SheetBody | EmptyBody };
-
 const timeFormatter = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false });
-
-/** Loads the stored sheet for one index; the state is keyed by the index so a tab change never shows the previous index's sheet. */
-function useDailyLevels(underlying: Underlying): LoadState {
-  const [loaded, setLoaded] = useState<{ key: Underlying; state: LoadState } | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch(`${getApiV1Url()}/daily-levels?underlying=${underlying}`, {
-          headers: { Accept: "application/json" },
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          const body = await response.json().catch(() => null) as { error?: string } | null;
-          throw new Error(body?.error ?? `Request failed (${response.status}).`);
-        }
-        const payload = await response.json() as { data: SheetBody | EmptyBody };
-        setLoaded({ key: underlying, state: { status: "ready", body: payload.data } });
-      } catch (error) {
-        if (isAbortError(error)) return;
-        setLoaded({ key: underlying, state: { status: "error", message: errorMessage(error, "The levels could not be loaded.") } });
-      }
-    })();
-    return () => controller.abort();
-  }, [underlying]);
-
-  return loaded !== null && loaded.key === underlying ? loaded.state : { status: "loading" };
-}
 
 function SourceChips({ zone }: { zone: SheetZone }) {
   return (

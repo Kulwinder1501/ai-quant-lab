@@ -6,6 +6,7 @@ import type { CandlestickData, HistogramData, LineData, SeriesMarker } from "lig
 import type { ChartPayload } from "../domain";
 import { useAppStore } from "../../../stores/app-store";
 import { ZoneBoxesPrimitive, type ZoneBox } from "./zone-box-primitive";
+import type { ChartLevel } from "../../daily-levels/levels-view";
 
 /** Across all FVG/OB zones combined -- see the `zoneBoxes` memo for why this is global, not per-group. */
 const MAX_ZONES_TOTAL = 8;
@@ -17,12 +18,20 @@ interface InteractiveChartProps {
   /** Draws FVG/Order Block as shaded price zones. Separate from `showPatterns`: these are
    *  ICT-ledger indicator output (real fill-state tracking), not candlestick pattern markers. */
   showZones?: boolean;
+  /**
+   * Horizontal lines to draw on the price scale (the daily levels). Each is coloured by where it sits against the latest close: above it
+   * reads as resistance, below it as support, and the zone holding the previous close is neutral. Pass a stable array: a new one rebuilds
+   * the chart.
+   */
+  levels?: ChartLevel[];
   /** Sizing for the chart container. Defaults to a self-supporting height for
    *  callers that don't constrain it; pass "h-full w-full" inside a flex row. */
   className?: string;
 }
 
-export function InteractiveChart({ payload, activeIndicators, showPatterns, showZones = false, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
+const NO_LEVELS: ChartLevel[] = [];
+
+export function InteractiveChart({ payload, activeIndicators, showPatterns, showZones = false, levels = NO_LEVELS, className = "w-full h-full min-h-[300px]" }: InteractiveChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const theme = useAppStore((state) => state.theme);
@@ -340,6 +349,19 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
     });
     mainSeries.setData(ohlcData);
 
+    const lastClose = ohlcData.length > 0 ? ohlcData[ohlcData.length - 1].close : null;
+    for (const level of levels) {
+      const colour = level.kind === "CLOSE" ? chartColors.sma : lastClose !== null && level.price > lastClose ? chartColors.down : chartColors.up;
+      mainSeries.createPriceLine({
+        price: level.price,
+        color: colour,
+        lineWidth: level.strong ? 2 : 1,
+        lineStyle: level.strong ? LineStyle.Solid : LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: level.label,
+      });
+    }
+
     if (markers.length > 0) {
       createSeriesMarkers(mainSeries, markers);
     }
@@ -442,7 +464,7 @@ export function InteractiveChart({ payload, activeIndicators, showPatterns, show
     };
   }, [
     ohlcData, volumeData, hasSma, smaData, hasBb, bbUpper, bbMiddle, bbLower,
-    hasRsi, rsiData, markers, zoneBoxes, payload.timeframe, chartColors
+    hasRsi, rsiData, markers, zoneBoxes, levels, payload.timeframe, chartColors
   ]);
 
   if (candles.length === 0) {

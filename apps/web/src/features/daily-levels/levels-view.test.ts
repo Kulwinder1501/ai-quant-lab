@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLadder,
+  chartLevelsFromZones,
+  levelShortLabel,
+  zoneChartLabel,
   confluenceText,
   excludesZero,
   familyLabel,
@@ -11,6 +14,7 @@ import {
   formatShare,
   formatZoneRange,
   sheetFreshness,
+  type SheetLevel,
   type SheetZone,
 } from "./levels-view";
 
@@ -99,5 +103,70 @@ describe("history numbers", () => {
     expect(excludesZero({ lower: 0.01, upper: 0.09 })).toBe(true);
     expect(excludesZero({ lower: -0.09, upper: -0.01 })).toBe(true);
     expect(excludesZero({ lower: null, upper: null })).toBe(false);
+  });
+});
+
+function level(key: string, family: SheetLevel["family"], price: number, label = key): SheetLevel {
+  return { key, family, price, label };
+}
+
+describe("chart line labels", () => {
+  it("shortens the known keys and keeps R/S levels and round numbers readable", () => {
+    expect(levelShortLabel({ key: "pdh", label: "Previous day high" })).toBe("PDH");
+    expect(levelShortLabel({ key: "pdc", label: "Previous day close" })).toBe("Close");
+    expect(levelShortLabel({ key: "r2", label: "R2" })).toBe("R2");
+    expect(levelShortLabel({ key: "s3", label: "S3" })).toBe("S3");
+    expect(levelShortLabel({ key: "pivot", label: "Pivot" })).toBe("P");
+    expect(levelShortLabel({ key: "call-oi-wall", label: "Highest call open interest" })).toBe("Call OI");
+    expect(levelShortLabel({ key: "round-23500", label: "Round 23500" })).toBe("23,500");
+    expect(levelShortLabel({ key: "week-high", label: "Previous week high" })).toBe("Wk high");
+  });
+
+  it("falls back to the full label for a key it does not know", () => {
+    expect(levelShortLabel({ key: "something-new", label: "Something new" })).toBe("Something new");
+  });
+
+  it("names a zone by its first two lines and counts the rest", () => {
+    const lines = [level("pdh", "PRIOR_DAY", 1), level("r1", "PIVOT", 1), level("round-100", "ROUND_NUMBER", 1), level("range-high", "RANGE_5D", 1)];
+    expect(zoneChartLabel({ levels: lines.slice(0, 1) })).toBe("PDH");
+    expect(zoneChartLabel({ levels: lines.slice(0, 2) })).toBe("PDH · R1");
+    expect(zoneChartLabel({ levels: lines })).toBe("PDH · R1 +2");
+  });
+});
+
+describe("chartLevelsFromZones", () => {
+  const last = 23_000;
+  const at = (centre: number, levels: SheetLevel[], confluence = levels.length > 1 ? 2 : 1): SheetZone =>
+    zone(centre, last, { levels, families: ["PIVOT"], confluence });
+
+  it("keeps the nearest zones on each side and drops the rest", () => {
+    const zones = [23_020, 23_040, 23_060, 23_080, 22_980, 22_960, 22_940].map((c) => at(c, [level(`l${c}`, "PIVOT", c)]));
+    const lines = chartLevelsFromZones(zones, last, { perSide: 2 });
+    expect(lines.map((l) => l.price)).toEqual([22_960, 22_980, 23_020, 23_040]);
+  });
+
+  it("drops a zone farther than the maximum distance from price", () => {
+    const zones = [at(23_100, [level("a", "PIVOT", 23_100)]), at(24_000, [level("b", "PIVOT", 24_000)])];
+    expect(chartLevelsFromZones(zones, last, { maxDistancePct: 3 }).map((l) => l.price)).toEqual([23_100]);
+  });
+
+  it("marks a zone with two kinds of source as strong and the zone holding the previous close as the close line", () => {
+    const zones = [
+      at(23_300, [level("r1", "PIVOT", 23_300), level("round-23300", "ROUND_NUMBER", 23_300)]),
+      at(23_050, [level("pdc", "PRIOR_DAY", 23_050)]),
+      at(22_900, [level("s1", "PIVOT", 22_900)]),
+    ];
+    const lines = chartLevelsFromZones(zones, last);
+    expect(lines.map((l) => [l.price, l.strong, l.kind])).toEqual([
+      [22_900, false, "ZONE"],
+      [23_050, false, "CLOSE"],
+      [23_300, true, "ZONE"],
+    ]);
+    expect(lines[2].label).toBe("R1 · 23,300");
+  });
+
+  it("draws nothing for an unusable last price", () => {
+    expect(chartLevelsFromZones([at(23_100, [level("a", "PIVOT", 23_100)])], Number.NaN)).toEqual([]);
+    expect(chartLevelsFromZones([at(23_100, [level("a", "PIVOT", 23_100)])], 0)).toEqual([]);
   });
 });

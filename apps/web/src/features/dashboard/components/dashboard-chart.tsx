@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, memo } from "react";
+import React, { useEffect, useMemo, useState, useCallback, memo } from "react";
 import { createPortal } from "react-dom";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { GlassPanel } from "../../../components/ui/glass-panel";
@@ -8,9 +8,17 @@ import { InteractiveChart } from "../../charts/components/interactive-chart";
 import { ChartLegend } from "./chart-legend";
 import { postResearchJson } from "../../research/api";
 import type { ChartPayload } from "../../charts/domain";
+import { formatIstDate } from "../../../lib/ist-date";
+import { chartLevelsFromZones, formatCalendarDate, sheetFreshness, type ChartLevel } from "../../daily-levels/levels-view";
+import { isLevelsUnderlying, useDailyLevels } from "../../daily-levels/use-daily-levels";
 
 const TIMEFRAMES = ["1m", "5m", "15m"] as const;
-const MODES = ["Clean", "Indicators", "Patterns"] as const;
+/**
+ * "Levels" is the default: candles and the daily support/resistance lines, nothing else. The other three are the older, busier views and
+ * stay one click away.
+ */
+const MODES = ["Levels", "Clean", "Indicators", "Patterns"] as const;
+const NO_LEVELS: ChartLevel[] = [];
 
 type Timeframe = (typeof TIMEFRAMES)[number];
 type ChartMode = (typeof MODES)[number];
@@ -19,7 +27,7 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
   const [chartData, setChartData] = useState<ChartPayload | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [timeframe, setTimeframe] = useState<Timeframe>("15m");
-  const [mode, setMode] = useState<ChartMode>("Indicators");
+  const [mode, setMode] = useState<ChartMode>("Levels");
   const [isExpanded, setIsExpanded] = useState(false);
 
   /*
@@ -47,7 +55,7 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
       const res = await postResearchJson("/charts/data", {
         symbol: symbol.trim().toUpperCase(),
         timeframe: timeframe,
-        indicators: mode === "Clean" ? [] : ["SMA", "BB", "RSI"],
+        indicators: mode === "Clean" || mode === "Levels" ? [] : ["SMA", "BB", "RSI"],
         includePatterns: mode === "Patterns" || mode === "Indicators", // Include patterns in Indicators and Patterns modes
       }, signal) as { data: ChartPayload };
       setChartData(res.data);
@@ -75,6 +83,27 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
       clearInterval(interval);
     };
   }, [loadChartData]);
+
+  // The sheet exists for the two indices only; the hook stays idle for any other symbol and outside Levels mode.
+  const levelsUnderlying = isLevelsUnderlying(symbol.trim().toUpperCase()) ? (symbol.trim().toUpperCase() as "NIFTY50" | "BANKNIFTY") : null;
+  const sheet = useDailyLevels(mode === "Levels" ? levelsUnderlying : null);
+
+  // The lines, and the sentence under the chart saying what they are (or why there are none). A sheet that is not for today or the next
+  // session is not drawn: yesterday's lines on today's chart would look current.
+  const levelsView = useMemo<{ lines: ChartLevel[]; note: string }>(() => {
+    if (mode !== "Levels") return { lines: NO_LEVELS, note: "" };
+    if (levelsUnderlying === null) return { lines: NO_LEVELS, note: `No levels for ${symbol}: the sheet is built for NIFTY50 and BANKNIFTY.` };
+    if (sheet.status === "loading" || sheet.status === "idle") return { lines: NO_LEVELS, note: "Loading the levels..." };
+    if (sheet.status === "error") return { lines: NO_LEVELS, note: `Levels unavailable: ${sheet.message}` };
+    if (!sheet.body.available) return { lines: NO_LEVELS, note: sheet.body.reason };
+    const freshness = sheetFreshness(sheet.body.sessionDate, formatIstDate(new Date()));
+    if (freshness.state === "OLD") return { lines: NO_LEVELS, note: `No levels drawn: the latest sheet is for ${formatCalendarDate(sheet.body.sessionDate)}, not today.` };
+    const last = chartData?.candles.at(-1)?.close ?? Number.NaN;
+    return {
+      lines: chartLevelsFromZones(sheet.body.zones, last),
+      note: `Levels for ${formatCalendarDate(sheet.body.sessionDate)}, built from the ${formatCalendarDate(sheet.body.referenceDate)} close. Solid line: two or more kinds of source agree; dashed: one. Context, not a signal.`,
+    };
+  }, [mode, levelsUnderlying, symbol, sheet, chartData]);
 
   const panel = (
     /* Colours come from the themed slate/cyan scales, which are wired to the
@@ -136,11 +165,12 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
           <InteractiveChart
             key={`${symbol}-${timeframe}-${mode}`}
             payload={chartData}
-            activeIndicators={mode === "Clean" ? [] : ["SMA", "BB", "RSI"]}
+            activeIndicators={mode === "Clean" || mode === "Levels" ? [] : ["SMA", "BB", "RSI"]}
             showPatterns={mode === "Patterns"}
             // FVG/Order Block live here, not in "Patterns": they're ICT-ledger indicator
             // output with real fill-state tracking, not candlestick pattern markers.
             showZones={mode === "Indicators"}
+            levels={levelsView.lines}
             className="h-full w-full"
           />
         )}
@@ -151,7 +181,7 @@ export const DashboardChart = memo(function DashboardChart({ symbol }: { symbol:
       )}
 
       <div className="shrink-0 border-t border-slate-700/40 px-3 py-1.5 text-[9px] text-slate-500">
-        Stored completed OHLC bars — {timeframe} — Mode: {mode}
+        {mode === "Levels" ? levelsView.note : `Stored completed OHLC bars — ${timeframe} — Mode: ${mode}`}
       </div>
     </GlassPanel>
   );

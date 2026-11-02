@@ -142,3 +142,74 @@ export function formatDifference(comparison: Pick<HistoryComparison, "difference
 export function excludesZero(comparison: Pick<HistoryComparison, "lower" | "upper">): boolean {
   return comparison.lower !== null && comparison.upper !== null && (comparison.lower > 0 || comparison.upper < 0);
 }
+
+/** One horizontal line on the dashboard chart. */
+export interface ChartLevel {
+  price: number;
+  label: string;
+  /** Two or more kinds of source agree on this zone: drawn solid and heavier. */
+  strong: boolean;
+  /** `CLOSE` is the zone that holds the previous close; it is drawn neutral, the others take their colour from where they sit against price. */
+  kind: "ZONE" | "CLOSE";
+}
+
+const SHORT_LABELS: Record<string, string> = {
+  pdh: "PDH",
+  pdl: "PDL",
+  pdc: "Close",
+  pivot: "P",
+  "range-high": "5D high",
+  "range-low": "5D low",
+  "week-high": "Wk high",
+  "week-low": "Wk low",
+  "call-oi-wall": "Call OI",
+  "put-oi-wall": "Put OI",
+};
+
+/** A short axis label for one line: `PDH`, `R2`, `S1`, `Call OI`, or the round number itself. */
+export function levelShortLabel(level: Pick<SheetLevel, "key" | "label">): string {
+  const known = SHORT_LABELS[level.key];
+  if (known) return known;
+  if (/^[rs][123]$/.test(level.key)) return level.key.toUpperCase();
+  const round = /^round-(\d+)$/.exec(level.key);
+  if (round) return new Intl.NumberFormat("en-IN").format(Number(round[1]));
+  return level.label;
+}
+
+/** The first two short labels of a zone, then `+n` for the rest, e.g. `PDH · R1 +1`. */
+export function zoneChartLabel(zone: Pick<SheetZone, "levels">): string {
+  const labels = zone.levels.map(levelShortLabel);
+  const shown = labels.slice(0, 2).join(" · ");
+  return labels.length > 2 ? `${shown} +${labels.length - 2}` : shown;
+}
+
+export const CHART_LEVELS_PER_SIDE = 6;
+export const CHART_LEVELS_MAX_DISTANCE_PCT = 3;
+
+/**
+ * The lines to draw on the chart: the zones nearest to the last price on each side, within a few percent of it (a line far outside the
+ * visible range adds nothing), each at the centre of its zone. The zone holding the previous close is marked `CLOSE`. Ascending by price.
+ */
+export function chartLevelsFromZones(
+  zones: readonly SheetZone[],
+  lastPrice: number,
+  options: { perSide?: number; maxDistancePct?: number } = {},
+): ChartLevel[] {
+  const perSide = options.perSide ?? CHART_LEVELS_PER_SIDE;
+  const maxDistancePct = options.maxDistancePct ?? CHART_LEVELS_MAX_DISTANCE_PCT;
+  if (!Number.isFinite(lastPrice) || lastPrice <= 0) return [];
+  const near = zones
+    .map((zone) => ({ zone, distance: Math.abs(zone.centre - lastPrice) }))
+    .filter((entry) => (entry.distance / lastPrice) * 100 <= maxDistancePct)
+    .sort((a, b) => a.distance - b.distance);
+  const above = near.filter((entry) => entry.zone.centre > lastPrice).slice(0, perSide);
+  const below = near.filter((entry) => entry.zone.centre <= lastPrice).slice(0, perSide);
+  return [...above, ...below]
+    .map(({ zone }): ChartLevel => ({
+      price: zone.centre,
+      label: zoneChartLabel(zone),
+      strong: zone.confluence >= 2,
+      kind: zone.levels.some((level) => level.key === "pdc") ? "CLOSE" : "ZONE",
+    }))
+    .sort((a, b) => a.price - b.price);
+}
