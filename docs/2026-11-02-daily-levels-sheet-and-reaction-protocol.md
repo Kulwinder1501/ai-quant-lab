@@ -36,12 +36,13 @@ Question: do these levels behave differently from arbitrary lines? Only families
 (`PRIOR_DAY`, `PIVOT`, `RANGE_5D`, `RANGE_WEEK`, `ROUND_NUMBER`), because open-interest history is too short (since 2026-08-04).
 
 - **Data:** 15-minute bars of NIFTY50 and BANKNIFTY, regular session 09:15-15:30 IST, every stored session from 2023-01-02 to the last complete session before the run.
+- **Sessions skipped:** a session with fewer than 20 of its 25 fifteen-minute bars is skipped (special short sessions such as Muhurat and Saturday sessions, and data gaps; 5-6 per index since 2023). The skipped count is reported. The previous close used to set the side of a first-bar touch is the previous daily close.
 - **Levels:** built for each session from daily bars strictly before it, exactly as in section 2.
 - **Touch:** the first bar of the session whose low-high range comes within 0.05% of the level. The test side is set by the previous bar's close (the first bar uses the previous session's last close): below the level it is a **resistance test**, above it a **support test**. A level is touched at most once per session.
 - **Outcome**, from the bars after the touch bar, first passage: **BOUNCE** if price moves 0.25% away from the level on the rejection side before it moves 0.25% through the level; **BREAK** the other way; **UNRESOLVED** if neither happens by 8 bars (two hours) or the session end, or both happen inside one bar.
 - **Placebo:** for every real level, four lines at offsets of -0.50%, -0.35%, +0.35% and +0.50% from it, dropped if within 0.15% of any real level that session, run through the identical procedure.
 - **Statistic:** BOUNCE share among resolved touches, per family and for all real levels, against the pooled placebo. The difference (real minus placebo) gets a day-clustered bootstrap 95% interval (resample sessions with replacement, 5,000 draws, seed 20261102).
-- **Descriptive only:** confluence 2 or more against 1, and each instrument separately.
+- **Descriptive only:** real levels whose zone has confluence 2 or more against real levels whose zone has confluence 1 (same statistic and interval, one group in place of the placebo), and each instrument separately.
 
 The page prints each number with its interval and a plain sentence ("no demonstrated difference from random lines" when the interval
 contains zero). No result changes how the sheet is built, and the families are not pruned or re-weighted afterwards; a different
