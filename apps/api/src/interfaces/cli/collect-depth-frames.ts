@@ -261,6 +261,9 @@ async function main(): Promise<void> {
       message: "Depth capture progress",
       elapsedSeconds: Math.round((Date.now() - startedAt.getTime()) / 1_000),
       framesReceived: streamStats.framesReceived,
+      // Sides whose whole-book total was not restated and was carried from the previous message.
+      // Expect about 1-2% of frames in session; a sudden jump or a flat zero is a feed change.
+      totalsCarriedForward: streamStats.totalsCarriedForward,
       rowsWritten: written,
       buffered: bufferStats.buffered,
       selfDropped: bufferStats.selfDropped,

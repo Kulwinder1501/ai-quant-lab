@@ -85,6 +85,10 @@ export class FyersTbtDepthStreamer extends EventEmitter {
   private closed = false;
   private framesReceived = 0;
   private droppedMessages = 0;
+  /** Per-side totals replaced by the previous accepted one; see `resolveTotals`. */
+  private totalsCarriedForward = 0;
+  /** The last accepted whole-book totals per contract, within one continuous stream. */
+  private readonly lastTotals = new Map<string, { tbq: number; tsq: number }>();
   private lastFrameAt: Date | null = null;
   /** Set on transport open, cleared by the first frame, so "streaming" is logged once per socket. */
   private awaitingFirstFrame = false;
@@ -232,6 +236,9 @@ export class FyersTbtDepthStreamer extends EventEmitter {
       return;
     }
 
+    // A new socket is a new stream: nothing accepted before it may be carried into it.
+    this.lastTotals.clear();
+
     store.updateDepth = (packet: unknown, callback: unknown, _diffOnly: unknown): void => {
       const decoded = packet as { feeds?: Record<string, unknown>; snapshot?: boolean };
       if (!decoded?.feeds || typeof callback !== "function") return;
@@ -249,6 +256,8 @@ export class FyersTbtDepthStreamer extends EventEmitter {
         if (ticker === "" || !value.depth) continue;
 
         const book = this.bookAssembler.apply(ticker, value.depth, isSnapshot);
+        // A snapshot restarts the contract's state, so it never inherits totals from before it.
+        if (isSnapshot) this.lastTotals.delete(ticker);
         /*
          * `sequenceNo`, `feedTime`, `sendTime`, `tbq` and `tsq` are 64-bit fields, and protobuf.js
          * decodes those to a `Long` object, not a number or a string -- the same encoding
@@ -274,6 +283,7 @@ export class FyersTbtDepthStreamer extends EventEmitter {
         // Prices arrive as paise. The vendor divides by 100 in `_addDepth`; doing it here keeps the
         // assembler unit-agnostic and the conversion in one place.
         const toRupees = (values: readonly number[]): number[] => values.map((v) => v / 100);
+        const totals = this.resolveTotals(ticker, unwrap(value.depth.tbq), unwrap(value.depth.tsq));
 
         (callback as (symbol: string, depth: unknown) => void)(ticker, {
           bidprice: toRupees(book.bidPrice),
@@ -282,8 +292,8 @@ export class FyersTbtDepthStreamer extends EventEmitter {
           askqty: book.askQty,
           bidordn: book.bidOrders,
           askordn: book.askOrders,
-          tbq: unwrap(value.depth.tbq),
-          tsq: unwrap(value.depth.tsq),
+          tbq: totals.tbq,
+          tsq: totals.tsq,
           snapshot: isSnapshot,
           timestamp: unwrap(value.feedTime),
           sendtime: unwrap(value.sendTime),
@@ -292,6 +302,37 @@ export class FyersTbtDepthStreamer extends EventEmitter {
       }
     };
     log("info", "Depth book assembler installed; levels keyed by num", {});
+  }
+
+  /**
+   * The whole-book totals for one message.
+   *
+   * Fyers sends depth as increments, and a message that does not restate a side's total leaves it
+   * unchanged. The vendor's own model says so: `fyers-api-v3/tbtsocket/models.js` `_addDepth` only
+   * assigns `this.tbq` / `this.tsq` when the wrapper is present, and keeps the previous value
+   * otherwise. This patch replaces that model, and reading the packet fresh with a default of 0
+   * stored a 0 total for 1.2-1.8% of in-session BANKNIFTY futures frames (measured 2026-11-02: one
+   * side at a time, 637 of 653 zero runs a single frame on 10-29, the price ladder and 50 levels
+   * normal, the neighbouring frames' totals normal on both sides). Every "shock" in the Phase 28
+   * replenishment study was one of those frames; see the 2026-10-24 correction in the Phase 28
+   * manifest.
+   *
+   * A side total of 0 beside a populated book is not a state the market can be in, so a value of 0
+   * (absent, or an explicit zero) is read as "not restated" and the last accepted total is carried.
+   * A snapshot clears the memory first, so nothing is carried across a reconnect or a gap. With
+   * nothing accepted yet the value stays 0, as before, which every reader already treats as
+   * unavailable. Frames stored before this change keep their zeros.
+   */
+  private resolveTotals(ticker: string, tbq: number, tsq: number): { tbq: number; tsq: number } {
+    const previous = this.lastTotals.get(ticker) ?? { tbq: 0, tsq: 0 };
+    const resolved = {
+      tbq: tbq > 0 ? tbq : previous.tbq,
+      tsq: tsq > 0 ? tsq : previous.tsq,
+    };
+    if (tbq <= 0 && previous.tbq > 0) this.totalsCarriedForward += 1;
+    if (tsq <= 0 && previous.tsq > 0) this.totalsCarriedForward += 1;
+    this.lastTotals.set(ticker, resolved);
+    return resolved;
   }
 
   private activate(symbols: string[]): void {
@@ -326,10 +367,11 @@ export class FyersTbtDepthStreamer extends EventEmitter {
   }
 
   /** Enough to tell a quiet book from a dead socket. */
-  stats(): { framesReceived: number; droppedMessages: number; lastFrameAt: Date | null } {
+  stats(): { framesReceived: number; droppedMessages: number; totalsCarriedForward: number; lastFrameAt: Date | null } {
     return {
       framesReceived: this.framesReceived,
       droppedMessages: this.droppedMessages,
+      totalsCarriedForward: this.totalsCarriedForward,
       lastFrameAt: this.lastFrameAt,
     };
   }

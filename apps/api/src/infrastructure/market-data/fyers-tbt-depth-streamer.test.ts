@@ -344,4 +344,125 @@ describe("installBookAssembler's patched updateDepth", () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]!.sequenceNo).toBe(0);
   });
+
+  describe("whole-book totals when a message does not restate them", () => {
+    // Measured 2026-11-02 on BANKNIFTY futures: 1.2-1.8% of in-session frames stored a 0 total on one
+    // side while the price ladder and the neighbouring frames were normal. Fyers sends increments and
+    // the vendor's own model keeps the previous total when a message omits it; the patched
+    // updateDepth read the packet fresh and defaulted to 0.
+    const book = {
+      bids: [{ price: 10000, qty: 10, nord: 1, num: 0 }],
+      asks: [{ price: 10100, qty: 15, nord: 1, num: 0 }],
+    };
+
+    function fire(
+      socket: FakeSocket,
+      totals: Record<string, unknown>,
+      options: { ticker?: string; snapshot?: boolean } = {},
+    ): void {
+      fireUpdateDepth(socket, {
+        snapshot: options.snapshot ?? false,
+        feeds: {
+          "1": {
+            ticker: options.ticker ?? "NSE:X",
+            depth: { ...book, ...totals },
+            feedTime: 1_787_300_311,
+            sendTime: 1_787_300_311,
+            sequenceNo: 5,
+          },
+        },
+      });
+    }
+
+    async function ready() {
+      const { streamer, sockets } = build({ withDatastore: true });
+      const frames: DepthFrame[] = [];
+      streamer.on("frame", (frame: DepthFrame) => { frames.push(frame); });
+      streamer.subscribe(["NSE:X"]);
+      await vi.waitFor(() => { expect(sockets).toHaveLength(1); });
+      return { streamer, sockets, frames };
+    }
+
+    it("carries the previous total for a side that a later message leaves out", async () => {
+      const { streamer, sockets, frames } = await ready();
+
+      fire(sockets[0]!, { tbq: { value: new FakeLong("33450") }, tsq: { value: new FakeLong("41790") } });
+      fire(sockets[0]!, { tsq: { value: new FakeLong("42000") } });
+
+      expect(frames).toHaveLength(2);
+      expect(frames[1]!.totalBuyQty).toBe(33_450);
+      expect(frames[1]!.totalSellQty).toBe(42_000);
+      expect(streamer.stats().totalsCarriedForward).toBe(1);
+    });
+
+    it("reads an explicit zero as not restated, because a populated book cannot total zero", async () => {
+      const { streamer, sockets, frames } = await ready();
+
+      fire(sockets[0]!, { tbq: 1_000, tsq: 2_000 });
+      fire(sockets[0]!, { tbq: { value: new FakeLong("0") }, tsq: 2_100 });
+
+      expect(frames[1]!.totalBuyQty).toBe(1_000);
+      expect(frames[1]!.totalSellQty).toBe(2_100);
+      expect(streamer.stats().totalsCarriedForward).toBe(1);
+    });
+
+    it("takes a restated total as it comes, including a smaller one", async () => {
+      const { streamer, sockets, frames } = await ready();
+
+      fire(sockets[0]!, { tbq: 1_000, tsq: 2_000 });
+      fire(sockets[0]!, { tbq: 400, tsq: 900 });
+      fire(sockets[0]!, {});
+
+      expect(frames[1]!.totalBuyQty).toBe(400);
+      expect(frames[2]!.totalBuyQty).toBe(400);
+      expect(frames[2]!.totalSellQty).toBe(900);
+      expect(streamer.stats().totalsCarriedForward).toBe(2);
+    });
+
+    it("stays 0 when no total has been accepted yet, and does not count that as a carry", async () => {
+      const { streamer, sockets, frames } = await ready();
+
+      fire(sockets[0]!, {});
+
+      expect(frames[0]!.totalBuyQty).toBe(0);
+      expect(frames[0]!.totalSellQty).toBe(0);
+      expect(streamer.stats().totalsCarriedForward).toBe(0);
+    });
+
+    it("does not carry a total across a snapshot", async () => {
+      const { streamer, sockets, frames } = await ready();
+
+      fire(sockets[0]!, { tbq: 1_000, tsq: 2_000 });
+      fire(sockets[0]!, {}, { snapshot: true });
+
+      expect(frames[1]!.totalBuyQty).toBe(0);
+      expect(frames[1]!.totalSellQty).toBe(0);
+      expect(streamer.stats().totalsCarriedForward).toBe(0);
+    });
+
+    it("keeps each contract's totals separate", async () => {
+      const { sockets, frames } = await ready();
+
+      fire(sockets[0]!, { tbq: 1_000, tsq: 2_000 }, { ticker: "NSE:A" });
+      fire(sockets[0]!, { tbq: 3_000, tsq: 4_000 }, { ticker: "NSE:B" });
+      fire(sockets[0]!, {}, { ticker: "NSE:A" });
+
+      expect(frames[2]!.providerSymbol).toBe("NSE:A");
+      expect(frames[2]!.totalBuyQty).toBe(1_000);
+      expect(frames[2]!.totalSellQty).toBe(2_000);
+    });
+
+    it("does not carry a total from before a reconnect into the new socket", async () => {
+      const { streamer, sockets, frames } = await ready();
+      fire(sockets[0]!, { tbq: 1_000, tsq: 2_000 });
+
+      sockets[0]!.emit("close");
+      await vi.waitFor(() => { expect(sockets).toHaveLength(2); });
+      fire(sockets[1]!, {});
+
+      expect(frames).toHaveLength(2);
+      expect(frames[1]!.totalBuyQty).toBe(0);
+      expect(streamer.stats().totalsCarriedForward).toBe(0);
+    });
+  });
 });
