@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IctStructureStrategy } from "./ict-structure-strategy.js";
+import { IctStructureStrategy, computeIctSetupId } from "./ict-structure-strategy.js";
 import type { StrategyMarketContext } from "./strategy.js";
 import type { IctStateCompositeSnapshot } from "../../technical-analysis/domain/ict/config.js";
 
@@ -190,6 +190,25 @@ describe("IctStructureStrategy sweep -> MSS -> retrace model", () => {
     expect(a.evidence.setupId).toBe(b.evidence.setupId);
   });
 
+  it("proposes the same idea from a snapshot read back from the JSON cache as from one just computed", () => {
+    // `ict_state_snapshots.snapshot_payload` is JSON, so every Date in a cached snapshot is a string. This threw
+    // "toISOString is not a function" on every cache hit and lost each real setup from 2026-10-13, once the shadow capture began
+    // caching a bar before the bot read it.
+    const fresh = mssSnapshot();
+    const cached = JSON.parse(JSON.stringify(fresh)) as IctStateCompositeSnapshot;
+    expect(typeof (cached.mss as unknown as { breakBarTime: unknown }).breakBarTime).toBe("string");
+
+    const fromFresh = strategy.evaluate(contextFor(fresh, TAPPING_BAR), RETRACE);
+    const fromCache = strategy.evaluate(contextFor(cached, TAPPING_BAR), RETRACE);
+    expect(fromCache).toHaveLength(1);
+    expect(fromCache[0].side).toBe(fromFresh[0].side);
+    expect(fromCache[0].entryPrice).toBe(fromFresh[0].entryPrice);
+    expect(fromCache[0].stopLoss).toBe(fromFresh[0].stopLoss);
+    expect(fromCache[0].targetPrice).toBe(fromFresh[0].targetPrice);
+    // The identity must not depend on where the snapshot came from, or the same setup would be proposed twice.
+    expect(fromCache[0].evidence.setupId).toBe(fromFresh[0].evidence.setupId);
+  });
+
   it("is dormant by default: the original alignment model is what runs without the switch", () => {
     // With no entryModel the MSS fields are ignored and this alignment-less snapshot yields nothing.
     expect(strategy.evaluate(contextFor(mssSnapshot(), TAPPING_BAR), {})).toHaveLength(0);
@@ -242,5 +261,30 @@ describe("requireOte anchored on the displacement leg", () => {
     const bar: Bar = { open: 111, high: 113, low: 110.5, close: 112 };
     const ideas = strategy.evaluate(contextFor(alignmentSnapshot(true), bar), { requireOte: true, oteAnchor: "DEALING_RANGE" });
     expect(ideas).toHaveLength(0);
+  });
+});
+
+describe("computeIctSetupId", () => {
+  const base = { strategyId: "ict-structure-v1", instrument: "inst-1", timeframe: "5m", eventType: "MSS", level: 54701.9, direction: "BEARISH" };
+  const at = new Date("2026-11-02T07:55:00.000Z");
+  const pivot = new Date("2026-11-02T06:20:00.000Z");
+
+  it("gives one id whether the instants arrive as Dates, ISO strings or epoch milliseconds", () => {
+    const fromDates = computeIctSetupId({ ...base, confirmationCandleTime: at, brokenPivotTime: pivot });
+    const fromStrings = computeIctSetupId({ ...base, confirmationCandleTime: at.toISOString(), brokenPivotTime: pivot.toISOString() });
+    const fromNumbers = computeIctSetupId({ ...base, confirmationCandleTime: at.getTime(), brokenPivotTime: pivot.getTime() });
+    expect(fromStrings).toBe(fromDates);
+    expect(fromNumbers).toBe(fromDates);
+  });
+
+  it("still separates different setups", () => {
+    const a = computeIctSetupId({ ...base, confirmationCandleTime: at, brokenPivotTime: pivot });
+    const b = computeIctSetupId({ ...base, confirmationCandleTime: new Date(at.getTime() + 300_000), brokenPivotTime: pivot });
+    expect(a).not.toBe(b);
+  });
+
+  it("refuses an unparseable instant instead of hashing 'Invalid Date'", () => {
+    expect(() => computeIctSetupId({ ...base, confirmationCandleTime: "not a time", brokenPivotTime: pivot }))
+      .toThrow(/valid instant for confirmationCandleTime/);
   });
 });

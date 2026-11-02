@@ -19,12 +19,29 @@ import { istMinuteOfDay } from "../../platform/calendar/trading-session.js";
  * Computes a deterministic SHA256 setupId for a structural confirmation event.
  * Canonical identity: strategyId + instrument + timeframe + confirmationCandleTime + brokenPivotTime + eventType + level + direction.
  */
+/**
+ * The instant as an ISO string, whether it arrives as a `Date`, an ISO string or epoch milliseconds.
+ *
+ * A snapshot is stored as JSON (`ict_state_snapshots.snapshot_payload`) and every `Date` in it comes back from the cache as a string,
+ * while a snapshot just computed still carries `Date`s. The setup identity must not depend on which one the strategy was handed:
+ * calling `.toISOString()` on the string threw on every cache hit, so every setup was lost whenever something else (the shadow
+ * capture, from 2026-10-13) had cached the bar first. Normalising here also keeps the id identical for the same setup either way,
+ * which the unique index on (strategy version, setupId) relies on.
+ */
+function instantIso(value: Date | string | number, field: string): string {
+  const instant = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(instant.getTime())) {
+    throw new Error(`ICT setup identity needs a valid instant for ${field}; got ${String(value)}.`);
+  }
+  return instant.toISOString();
+}
+
 export function computeIctSetupId(params: {
   strategyId: string;
   instrument: string;
   timeframe: string;
-  confirmationCandleTime: Date;
-  brokenPivotTime: Date;
+  confirmationCandleTime: Date | string | number;
+  brokenPivotTime: Date | string | number;
   eventType: string;
   level: number;
   direction: string;
@@ -33,8 +50,8 @@ export function computeIctSetupId(params: {
     params.strategyId,
     params.instrument,
     params.timeframe,
-    params.confirmationCandleTime.toISOString(),
-    params.brokenPivotTime.toISOString(),
+    instantIso(params.confirmationCandleTime, "confirmationCandleTime"),
+    instantIso(params.brokenPivotTime, "brokenPivotTime"),
     params.eventType,
     params.level.toFixed(4),
     params.direction,
