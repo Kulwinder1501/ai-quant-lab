@@ -18,6 +18,8 @@
     "data:collect:index-futures": "tsx src/interfaces/cli/ingest-index-futures-ohlcv.ts",
     "data:predict:opening-gap": "tsx src/interfaces/cli/predict-opening-gap.ts",
     "data:settle:opening-gap": "tsx src/interfaces/cli/settle-opening-gap-predictions.ts",
+    "data:daily-levels": "tsx src/interfaces/cli/generate-daily-levels.ts",
+    "research:daily-levels-study": "tsx src/interfaces/cli/run-daily-levels-reaction-study.ts",
     "data:premarket-bias": "tsx src/interfaces/cli/premarket-bias.ts",
     "data:settle:session-outcomes": "tsx src/interfaces/cli/settle-session-outcomes.ts",
     "data:premarket-bias:report": "tsx src/interfaces/cli/premarket-bias-report.ts",

@@ -164,4 +164,10 @@ describe("the sentence", () => {
     expect(describeReaction({ ...base, difference: 0.05, lower: 0.01, upper: 0.09 })).toBe("Bounced more often than random lines (+1.0 to +9.0 points).");
     expect(describeReaction({ ...base, difference: -0.05, lower: -0.09, upper: -0.01 })).toBe("Bounced less often than random lines (-9.0 to -1.0 points).");
   });
+
+  it("names the other group when it is not random lines", () => {
+    expect(describeReaction({ ...base, difference: -0.03, lower: -0.07, upper: -0.01 }, "single-source levels")).toBe("Bounced less often than single-source levels (-7.0 to -1.0 points).");
+    expect(describeReaction({ ...base, difference: 0, lower: -0.02, upper: 0.02 }, "single-source levels")).toBe("No demonstrated difference from single-source levels (-2.0 to +2.0 points).");
+  });
 });
+

@@ -210,12 +210,15 @@ export function summariseReaction(family: string, perSession: readonly SessionCo
   };
 }
 
-/** The sentence shown beside the numbers. It states what the interval allows and nothing more. */
-export function describeReaction(summary: ReactionSummary): string {
-  if (summary.difference === null || summary.lower === null || summary.upper === null) return "Too few resolved touches to compare with random lines.";
+/** The sentence shown beside the numbers. It states what the interval allows and nothing more. `comparedWith` names the other group. */
+export function describeReaction(summary: ReactionSummary, comparedWith = "random lines"): string {
+  if (summary.difference === null || summary.lower === null || summary.upper === null) return `Too few resolved touches to compare with ${comparedWith}.`;
   const points = (value: number): string => `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}`;
   const range = `${points(summary.lower)} to ${points(summary.upper)} points`;
-  if (summary.lower > 0) return `Bounced more often than random lines (${range}).`;
-  if (summary.upper < 0) return `Bounced less often than random lines (${range}).`;
-  return `No demonstrated difference from random lines (${range}).`;
+  if (summary.lower > 0) return `Bounced more often than ${comparedWith} (${range}).`;
+  if (summary.upper < 0) return `Bounced less often than ${comparedWith} (${range}).`;
+  return `No demonstrated difference from ${comparedWith} (${range}).`;
 }
+
+/** What the confluence comparison is against: it has no placebo, its second group is real levels in single-source zones. */
+export const CONFLUENCE_COMPARISON_LABEL = "single-source levels";

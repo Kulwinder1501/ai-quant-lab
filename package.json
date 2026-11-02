@@ -21,6 +21,8 @@
     "data:collect:index-futures": "npm run data:collect:index-futures --workspace @ai-quant-lab/api --",
     "data:predict:opening-gap": "npm run data:predict:opening-gap --workspace @ai-quant-lab/api --",
     "data:settle:opening-gap": "npm run data:settle:opening-gap --workspace @ai-quant-lab/api --",
+    "data:daily-levels": "npm run data:daily-levels --workspace @ai-quant-lab/api --",
+    "research:daily-levels-study": "npm run research:daily-levels-study --workspace @ai-quant-lab/api --",
     "data:premarket-bias": "npm run data:premarket-bias --workspace @ai-quant-lab/api --",
     "data:settle:session-outcomes": "npm run data:settle:session-outcomes --workspace @ai-quant-lab/api --",
     "data:premarket-bias:report": "npm run data:premarket-bias:report --workspace @ai-quant-lab/api --",
