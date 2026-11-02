@@ -124,7 +124,10 @@ services:
       # the reachable path into the gate.
       ORDERBOOK01_LIVE_GATE_ENABLED: ${ORDERBOOK01_LIVE_GATE_ENABLED:-false}
       # Bots that read the bar 30 s after the 5-minute boundary (see scheduler.ts). Empty restores the old timing.
-      PAPER_BOT_DELAYED_BOTS: ${PAPER_BOT_DELAYED_BOTS:-}
+      # Defaults to the two ICT bots: their entry is one specific bar (the one that taps the OTE band and holds), and at the
+      # boundary the bar that just closed is not saved yet, so they read the bar before it. Measured 2026-11-02 on BANKNIFTY 5m:
+      # median 302 s stale, and 46 of 222 bars never read at all.
+      PAPER_BOT_DELAYED_BOTS: ${PAPER_BOT_DELAYED_BOTS:-AutoBot-IctNifty15m,AutoBot-IctBankNifty5m}
       # Twelve Data: powers XAU_USD candle collection (XAU_CANDLE_COLLECTION) and the gold paper
       # bot (PAPER_TRADING_BOT_GOLD), both scheduled from this process. See api-v2's own copy of
       # this variable for why Twelve Data rather than Fyers/Kite/OANDA.
