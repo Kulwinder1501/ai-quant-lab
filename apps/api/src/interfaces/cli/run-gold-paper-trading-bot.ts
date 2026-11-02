@@ -16,6 +16,7 @@ import { classifyOpenFailure } from "../../modules/paper-trading/domain/paper-tr
 import { EvaluateOpenPaperTrades } from "../../modules/paper-trading/application/evaluate-open-paper-trades.js";
 import { GenerateTradeIdeas } from "../../modules/strategy-engine/application/generate-trade-ideas.js";
 import { OpenPaperTrade } from "../../modules/paper-trading/application/open-paper-trade.js";
+import { describeStrategyFailures, type StrategyFailure } from "../../modules/paper-trading/domain/strategy-failure-report.js";
 import { MAXIMUM_EXECUTABLE_QUOTE_AGE_MS, PrepareDirectEntry } from "../../modules/paper-trading/application/prepare-direct-entry.js";
 import {
   assessDataFreshness,
@@ -160,6 +161,7 @@ async function main(): Promise<void> {
     const strategyOutcomes: Array<Record<string, unknown>> = [];
     const refused: Array<Record<string, unknown>> = [];
     const skippedSeries: Array<Record<string, unknown>> = [];
+    const strategyFailures: StrategyFailure[] = [];
 
 const GOLD_LEVERAGE = 20;
 const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
@@ -215,6 +217,12 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
            * TIMEFRAME_UNSUPPORTED / STRATEGY_FAILED have no context to diagnose and stay skipped.
            */
           if (result.skippedReason && result.skippedReason !== "RULES_NOT_MET") {
+            // An exception is a fault, not a quiet bar: raised at the end of the run so it is recorded FAILED.
+            if (result.skippedReason === "STRATEGY_FAILED") {
+              strategyFailures.push({
+                bot: GOLD_ACCOUNT_NAME, symbol: XAU_SYMBOL, timeframe, strategy: result.strategyKey, message: result.failureMessage ?? null,
+              });
+            }
             strategyOutcomes.push({
               timeframe, strategy: result.strategyKey, skippedReason: result.skippedReason,
               ...(result.failureMessage ? { failureMessage: result.failureMessage } : {}),
@@ -474,6 +482,7 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       decisionsRecorded,
       skippedSeries,
       strategyOutcomes,
+      strategyFailures,
       positionsOpened: opened.length,
       signalsRefused: refused.length,
       openPositionsAfterRun: openPositions,
@@ -484,11 +493,13 @@ const GOLD_RISK_PER_TRADE_PERCENT = 1.0;
       refused,
     }, null, 2));
 
-    if (evaluation.evaluationFailures.length > 0) {
-      throw new Error(
-        `${evaluation.evaluationFailures.length} open gold trade(s) failed to evaluate; see evaluationFailures.`,
-      );
-    }
+    const faults = [
+      evaluation.evaluationFailures.length > 0
+        ? `${evaluation.evaluationFailures.length} open gold trade(s) failed to evaluate; see evaluationFailures.`
+        : null,
+      describeStrategyFailures(strategyFailures),
+    ].filter((fault): fault is string => fault !== null);
+    if (faults.length > 0) throw new Error(faults.join(" "));
   } finally {
     await database.end();
   }
