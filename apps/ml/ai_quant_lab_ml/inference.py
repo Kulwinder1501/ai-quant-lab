@@ -264,8 +264,9 @@ def validate_production_artifact(
             "The production artifact has no training-only similar-setup reference data. Retrain and promote a Phase 11-compatible model."
         )
     try:
+        # The artifact's own declared version, not one inferred from its columns: two versions can share them.
         training_reference_data = parse_reference_metadata(
-            reference_metadata, expected_schema=expected_schema, alphabet=alphabet
+            reference_metadata, expected_schema=expected_schema, alphabet=alphabet, schema_version=schema_version
         )
     except ReferenceDataError as error:
         raise InferenceError(f"The production artifact has invalid training-only reference data: {error}") from error

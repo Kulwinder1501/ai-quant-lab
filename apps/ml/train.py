@@ -1392,7 +1392,7 @@ def main() -> int:
             # Phase 11 uses only this training partition—never validation rows—
             # to explain label agreement among nearby historical setups.
             "trainingReferenceSet": build_reference_metadata(
-                final_split.train, schema=result.feature_schema, alphabet=alphabet
+                final_split.train, schema=result.feature_schema, alphabet=alphabet, schema_version=schema_version
             ),
         }
         destination = artifact_path(args.artifact_dir, model_key, trained_at)

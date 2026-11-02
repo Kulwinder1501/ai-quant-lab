@@ -143,7 +143,12 @@ def _parse_datetime(value: Any, field: str) -> datetime:
 
 
 def _known_schemas() -> Mapping[tuple[str, ...], str]:
-    """Map each supported ordered schema to the version that names it."""
+    """Map each supported ordered schema to a version that names it.
+
+    Membership only. Two versions can name the same columns (see ``_versions_naming``), and a dict
+    keyed on the columns keeps whichever was registered last, so the value here must never be read
+    as *the* version of a schema.
+    """
 
     return {
         tuple(feature_schema(version)): version
@@ -172,17 +177,41 @@ def _fixed_schema(schema: Sequence[str] | None) -> tuple[str, ...]:
     return selected
 
 
-def _schema_version_of(selected_schema: tuple[str, ...]) -> str:
-    """Return the version naming an already-validated schema.
+def _versions_naming(selected_schema: tuple[str, ...]) -> tuple[str, ...]:
+    """Every known version whose columns are exactly ``selected_schema``, in registration order.
+
+    More than one is possible: ``ml-feature-v7-pa4`` exists only to pin different evidence versions
+    on v7's columns, so the columns alone do not identify a version. A reverse lookup keyed on the
+    columns returned the later of the two for every v7 artifact, and every v7 model then failed
+    inference with "incompatible feature-schema version" (2026-10-31 deploy, found 2026-11-02).
+    """
+
+    return tuple(
+        version
+        for version in KNOWN_FEATURE_SCHEMA_VERSIONS
+        if tuple(feature_schema(version)) == selected_schema
+    )
+
+
+def _schema_version_of(selected_schema: tuple[str, ...], schema_version: str | None = None) -> str:
+    """Return the version to record for an already-validated schema.
 
     Reference data for a scalp model must declare the scalp version, not the
     swing one, or the reader rejects the writer's own output.
+
+    A caller that knows its version passes it, and it must name this schema. A caller that does not
+    gets the first registered version of those columns, which is what every artifact written before
+    a second version existed carries.
     """
 
-    version = _known_schemas().get(selected_schema)
-    if version is None:
+    named = _versions_naming(selected_schema)
+    if not named:
         raise ReferenceDataError("Reference data schema does not correspond to a known feature-schema version.")
-    return version
+    if schema_version is None:
+        return named[0]
+    if schema_version not in named:
+        raise ReferenceDataError("Reference data feature-schema version does not name the selected feature schema.")
+    return schema_version
 
 
 def _label_counts(
@@ -302,12 +331,16 @@ def build_reference_metadata(
     maximum_examples: int = DEFAULT_MAXIMUM_REFERENCE_EXAMPLES,
     schema: Sequence[str] | None = None,
     alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+    schema_version: str | None = None,
 ) -> dict[str, Any]:
     """Build deterministic, stratified metadata from a model's training rows only.
 
     Callers must pass ``TemporalSplit.train`` rather than the full experiment or
     validation rows.  The function deliberately does not accept a validation
     sequence, making the training-only boundary visible at every call site.
+
+    ``schema_version`` names the version being trained; it is required whenever more than one
+    version has the same columns, and is checked against them either way.
     """
 
     selected_schema = _fixed_schema(schema)
@@ -340,7 +373,7 @@ def build_reference_metadata(
         # writer actually used, rather than assuming the directional one.
         "labelAlphabet": alphabet.name,
         "labels": list(alphabet.labels),
-        "featureSchemaVersion": _schema_version_of(selected_schema),
+        "featureSchemaVersion": _schema_version_of(selected_schema, schema_version),
         "featureSchema": list(selected_schema),
         "trainingOnly": True,
         "sampling": {
@@ -414,14 +447,25 @@ def parse_reference_metadata(
     *,
     expected_schema: Sequence[str] | None = None,
     alphabet: LabelAlphabet = DIRECTIONAL_ALPHABET,
+    schema_version: str | None = None,
 ) -> ReferenceData:
-    """Parse and validate saved reference metadata against its feature schema."""
+    """Parse and validate saved reference metadata against its feature schema.
+
+    With ``schema_version`` the metadata must declare exactly that version. Without it, any version
+    that names these columns is accepted, because the columns alone cannot say which of several
+    versions with the same columns the artifact was trained under.
+    """
 
     selected_schema = _fixed_schema(expected_schema)
     payload = _require_mapping(metadata, "Reference metadata")
     if payload.get("format") != REFERENCE_DATA_FORMAT:
         raise ReferenceDataError("Reference metadata has an unsupported format.")
-    if payload.get("featureSchemaVersion") != _schema_version_of(selected_schema):
+    declared_version = payload.get("featureSchemaVersion")
+    if schema_version is not None:
+        compatible = declared_version == _schema_version_of(selected_schema, schema_version)
+    else:
+        compatible = declared_version in _versions_naming(selected_schema)
+    if not compatible:
         raise ReferenceDataError("Reference metadata has an incompatible feature-schema version.")
     payload_schema = _require_sequence(payload.get("featureSchema"), "Reference metadata featureSchema")
     if tuple(payload_schema) != selected_schema:
