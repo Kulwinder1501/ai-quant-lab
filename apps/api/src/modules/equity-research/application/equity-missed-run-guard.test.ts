@@ -6,6 +6,7 @@ import {
   addDays,
   isWeekend,
   getEligibleEndDate,
+  isPartialCollectionFailure,
   type DatabaseQueryable,
 } from "./equity-missed-run-guard.js";
 
@@ -17,6 +18,8 @@ class MockDatabase implements DatabaseQueryable {
   public bars = new Set<string>();
   public evaluations = new Set<string>();
   public holidays = new Set<string>();
+  /** Per date: the active stocks that have history but no bar for it (what `stocksMissingBarOn` returns). */
+  public missingStocks = new Map<string, string[]>();
   public queries: Array<{ text: string; values?: unknown[] }> = [];
 
   async query<T = Record<string, unknown>>(text: string, values?: unknown[]): Promise<{ rows: T[] }> {
@@ -26,6 +29,10 @@ class MockDatabase implements DatabaseQueryable {
     if (text.includes("FROM nse_holidays")) {
       const isHol = this.holidays.has(val);
       return { rows: isHol ? ([{ name: "Mock Holiday" }] as unknown as T[]) : [] };
+    }
+    // Before the price_bar branch: the per-stock statement mentions price_bar in its subqueries.
+    if (text.includes("FROM equity_research.watchlist_stock")) {
+      return { rows: (this.missingStocks.get(val) ?? []).map((symbol) => ({ symbol })) as unknown as T[] };
     }
     if (text.includes("FROM equity_research.price_bar")) {
       return { rows: [{ exists: this.bars.has(val) }] as unknown as T[] };
@@ -437,6 +444,109 @@ describe("EquityMissedRunGuard", () => {
 
       // The attempt counter reset! 2026-10-23 is eligible again for retry
       expect(nextDayCheck).toEqual(["2026-10-23"]);
+    });
+  });
+  describe("per-stock gaps (2026-11-02: a run fetched 3 of 5 stocks and nothing retried the other two)", () => {
+    const DATE = "2026-11-02";
+    const AS_OF = new Date("2026-11-02T13:00:00Z"); // 18:30 IST, after the 17:05 cutoff: the eligible end date is the 2nd
+    const T0 = new Date("2026-11-02T13:00:00Z").getTime();
+
+    /** Bars and an evaluation exist for the date, as they did that evening, but two stocks have no bar. */
+    function dayWithTwoStocksMissing(): MockDatabase {
+      const mockDb = new MockDatabase();
+      mockDb.bars.add(DATE);
+      mockDb.evaluations.add(DATE);
+      mockDb.missingStocks.set(DATE, ["DATAMATICS", "METHODHUB"]);
+      return mockDb;
+    }
+
+    it("treats a date as missing when some stocks lack their bar, even though others have one and the date was evaluated", async () => {
+      const guard = new EquityMissedRunGuard(dayWithTwoStocksMissing(), { commandRunner: async () => {} });
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 })).toEqual([DATE]);
+    });
+
+    it("does not flag a date on which every stock has its bar", async () => {
+      const mockDb = dayWithTwoStocksMissing();
+      mockDb.missingStocks.delete(DATE);
+      const guard = new EquityMissedRunGuard(mockDb, { commandRunner: async () => {} });
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 })).toEqual([]);
+    });
+
+    it("counts a collection that ended with stocks missing as a collection that ran: the date is evaluated, and counted as an attempt", async () => {
+      const mockDb = dayWithTwoStocksMissing();
+      const commands: string[] = [];
+      const runner = async (_cmd: string, args: string[]) => {
+        commands.push(args.join(" "));
+        if (args.includes("equity:collect:eod")) {
+          throw new Error("npm run equity:collect:eod exited with code 2. Last stderr output:\nPARTIAL_COLLECTION: 2 of 5 stocks could not be collected");
+        }
+      };
+      const guard = new EquityMissedRunGuard(mockDb, { commandRunner: runner, maxAttemptsPerDate: 3, backoffMs: 15 * 60_000 });
+
+      const result = await guard.runCatchup([DATE], T0);
+
+      expect(result.collected).toBe(true);
+      expect(result.evaluatedDates).toEqual([DATE]);
+      expect(commands).toEqual(["run equity:collect:eod", `run equity:alerts:eval -- --date ${DATE}`]);
+      expect(guard.getAttemptState(DATE)?.attempts).toBe(1);
+    });
+
+    it("does not collect again every minute while the stocks stay missing: the backoff and the attempt cap apply", async () => {
+      const mockDb = dayWithTwoStocksMissing();
+      const runner = async (_cmd: string, args: string[]) => {
+        if (args.includes("equity:collect:eod")) throw new Error("exited with code 2. PARTIAL_COLLECTION: 2 of 5");
+      };
+      const guard = new EquityMissedRunGuard(mockDb, { commandRunner: runner, maxAttemptsPerDate: 2, backoffMs: 15 * 60_000 });
+      await guard.runCatchup([DATE], T0);
+
+      // One minute later: inside the 15-minute backoff, so nothing is due.
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 + 60_000 })).toEqual([]);
+      // Sixteen minutes later: due again.
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 + 16 * 60_000 })).toEqual([DATE]);
+      await guard.runCatchup([DATE], T0 + 16 * 60_000);
+      // The cap (2) is reached: no more retries that day.
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 + 40 * 60_000 })).toEqual([]);
+    });
+
+    it("clears the attempt count once every stock has its bar", async () => {
+      const mockDb = dayWithTwoStocksMissing();
+      const runner = async (_cmd: string, args: string[]) => {
+        if (args.includes("equity:collect:eod")) mockDb.missingStocks.delete(DATE); // the retry fetched the two stocks
+      };
+      const guard = new EquityMissedRunGuard(mockDb, { commandRunner: runner });
+
+      const result = await guard.runCatchup([DATE], T0);
+
+      expect(result.evaluatedDates).toEqual([DATE]);
+      expect(guard.getAttemptState(DATE)).toBeUndefined();
+      expect(await guard.findMissingDates({ startDate: DATE, asOfDate: AS_OF, nowMs: T0 + 60_000 })).toEqual([]);
+    });
+
+    it("still treats a collector that crashed or failed for every stock (exit code 1) as a failed collection", async () => {
+      const mockDb = dayWithTwoStocksMissing();
+      const commands: string[] = [];
+      const runner = async (_cmd: string, args: string[]) => {
+        commands.push(args.join(" "));
+        if (args.includes("equity:collect:eod")) throw new Error("npm run equity:collect:eod exited with code 1. Last stderr output:\nboom");
+      };
+      const guard = new EquityMissedRunGuard(mockDb, { commandRunner: runner });
+
+      const result = await guard.runCatchup([DATE], T0);
+
+      expect(result.collected).toBe(false);
+      expect(result.evaluatedDates).toEqual([]);
+      expect(commands).toEqual(["run equity:collect:eod"]);
+      expect(guard.getAttemptState(DATE)?.attempts).toBe(1);
+    });
+  });
+
+  describe("isPartialCollectionFailure", () => {
+    it("recognises the collector's partial-failure marker and exit code, and nothing else", () => {
+      expect(isPartialCollectionFailure(new Error("... PARTIAL_COLLECTION: 2 of 5 stocks could not be collected"))).toBe(true);
+      expect(isPartialCollectionFailure(new Error("npm run equity:collect:eod exited with code 2."))).toBe(true);
+      expect(isPartialCollectionFailure(new Error("npm run equity:collect:eod exited with code 1."))).toBe(false);
+      expect(isPartialCollectionFailure(new Error("npm run equity:collect:eod was killed by SIGTERM"))).toBe(false);
+      expect(isPartialCollectionFailure("boom")).toBe(false);
     });
   });
 });

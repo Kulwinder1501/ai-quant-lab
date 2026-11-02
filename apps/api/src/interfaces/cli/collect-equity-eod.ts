@@ -2,7 +2,11 @@ import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { EquityAlertsEvaluationService } from "../../modules/equity-research/application/equity-alerts-evaluation-service.js";
-import { EquityEodCollector } from "../../modules/equity-research/application/equity-eod-collector.js";
+import {
+  EquityEodCollector,
+  PARTIAL_COLLECTION_EXIT_CODE,
+  describePartialCollection,
+} from "../../modules/equity-research/application/equity-eod-collector.js";
 import { PostgresEquityAlertRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-alert-repository.js";
 import { PostgresEquityCorporateActionRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-corporate-action-repository.js";
 import { PostgresEquityEventFlagRepository } from "../../modules/equity-research/infrastructure/repositories/postgres-equity-event-flag-repository.js";
@@ -82,8 +86,16 @@ async function main(): Promise<void> {
       ...result,
     }));
 
+    // Every stock is collected before this point, so failing the run here costs nothing: the job row now says which stocks were missed
+    // (a run that fetched 3 of 5 used to end COMPLETED, and only the alert inbox noticed).
     if (result.totalStocks > 0 && result.successfulStocks === 0) {
       process.exitCode = 1;
+    } else {
+      const partial = describePartialCollection(result);
+      if (partial !== null) {
+        console.error(JSON.stringify({ level: "error", message: partial }));
+        process.exitCode = PARTIAL_COLLECTION_EXIT_CODE;
+      }
     }
   } finally {
     await database.end();

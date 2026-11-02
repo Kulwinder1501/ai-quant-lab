@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { EquityEodCollector } from "./equity-eod-collector.js";
+import {
+  EquityEodCollector,
+  PARTIAL_COLLECTION_EXIT_CODE,
+  PARTIAL_COLLECTION_MARKER,
+  describePartialCollection,
+} from "./equity-eod-collector.js";
 import { parseChartRawRecord, parseFundamentalsRawRecord } from "./parsers.js";
 import type { WatchlistStockRecord, RawRecord } from "../domain/types.js";
 import { createHash } from "node:crypto";
@@ -543,4 +548,38 @@ describe("EquityEodCollector and Land-First parser (Gates S2, S3, S4, S8)", () =
   });
 });
 
+describe("describePartialCollection", () => {
+  const summary = (symbol: string, success: boolean, error?: string) => ({
+    stockId: symbol, symbol, exchange: "NSE" as const, success,
+    barsInserted: 0, barsRestated: 0, barsUnchanged: 0, actionsInserted: 0, factsInserted: 0,
+    ...(error === undefined ? {} : { error }),
+  });
 
+  it("says nothing when every stock was collected", () => {
+    expect(describePartialCollection({ totalStocks: 2, failedStocks: 0, summaries: [summary("SUZLON", true), summary("TMPV", true)] })).toBeNull();
+  });
+
+  it("names the stocks that failed and why, with the marker the guard looks for", () => {
+    const text = describePartialCollection({
+      totalStocks: 5,
+      failedStocks: 2,
+      summaries: [
+        summary("DATAMATICS", false, "fetch failed"),
+        summary("METHODHUB", false),
+        summary("SUZLON", true),
+        summary("TMCV", true),
+        summary("TMPV", true),
+      ],
+    });
+    expect(text).toContain(PARTIAL_COLLECTION_MARKER);
+    expect(text).toContain("2 of 5 stocks could not be collected");
+    expect(text).toContain("DATAMATICS (fetch failed)");
+    expect(text).toContain("METHODHUB (no error recorded)");
+    expect(text).not.toContain("SUZLON");
+  });
+
+  it("uses an exit code that is neither success nor the crash code", () => {
+    expect(PARTIAL_COLLECTION_EXIT_CODE).not.toBe(0);
+    expect(PARTIAL_COLLECTION_EXIT_CODE).not.toBe(1);
+  });
+});

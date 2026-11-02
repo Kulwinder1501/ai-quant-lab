@@ -1,4 +1,5 @@
 import { isNseHoliday } from "../../market-data/domain/nse-session-calendar.js";
+import { PARTIAL_COLLECTION_EXIT_CODE, PARTIAL_COLLECTION_MARKER } from "./equity-eod-collector.js";
 
 export interface DatabaseQueryable {
   query<T = Record<string, unknown>>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -106,6 +107,15 @@ async function defaultCommandRunner(command: string, args: string[]): Promise<vo
  * - Only records a date as evaluated if bars exist AND evaluation actually ran.
  * - If bars have not appeared yet, leaves the date missing and retries later up to the cap.
  */
+/**
+ * True when `equity:collect:eod` ran to the end but some stocks could not be fetched (exit code 2, or its PARTIAL_COLLECTION message),
+ * as opposed to the collector crashing or every stock failing (exit code 1).
+ */
+export function isPartialCollectionFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(PARTIAL_COLLECTION_MARKER) || message.includes(`exited with code ${PARTIAL_COLLECTION_EXIT_CODE}`);
+}
+
 export class EquityMissedRunGuard {
   private readonly commandRunner: (command: string, args: string[]) => Promise<void>;
   private readonly lookbackDays: number;
@@ -195,6 +205,26 @@ export class EquityMissedRunGuard {
   }
 
   /**
+   * The active stocks that should have a bar on this date and do not: stocks that already had history on or before it (a stock added
+   * later is not "missing" an earlier day) and have no bar for it. Sorted by symbol.
+   *
+   * `hasBarsForDate` answers "does ANY stock have a bar", which is how a run that fetched 3 of 5 stocks on 2026-11-02 looked healthy:
+   * DATAMATICS and METHODHUB stayed a session behind until the next scheduled run, and nothing retried them.
+   */
+  async stocksMissingBarOn(dateStr: string): Promise<string[]> {
+    const result = await this.db.query<{ symbol: string }>(
+      `SELECT w.symbol
+       FROM equity_research.watchlist_stock w
+       WHERE w.active
+         AND EXISTS (SELECT 1 FROM equity_research.price_bar earlier WHERE earlier.stock_id = w.id AND earlier.bar_date <= $1::date)
+         AND NOT EXISTS (SELECT 1 FROM equity_research.price_bar b WHERE b.stock_id = w.id AND b.bar_date = $1::date)
+       ORDER BY w.symbol`,
+      [dateStr],
+    );
+    return result.rows.map((row) => row.symbol);
+  }
+
+  /**
    * Checks if an evaluation was completed for the date, indicated by:
    * 1. A COMPLETED row in scheduled_job_runs for EQUITY_EOD_COLLECT or EQUITY_ALERTS_EVAL, OR
    * 2. Existing alert records in equity_research.alert for evaluated_date.
@@ -273,8 +303,10 @@ export class EquityMissedRunGuard {
         if (!holiday) {
           const hasBars = await this.hasBarsForDate(current);
           const hasEval = await this.hasEvaluationForDate(current);
+          // A date with bars for some stocks but not all is still missing: the stocks that lack one need another collection.
+          const stocksMissing = hasBars ? await this.stocksMissingBarOn(current) : [];
 
-          if (!hasBars || !hasEval) {
+          if (!hasBars || !hasEval || stocksMissing.length > 0) {
             // Check retry cap and backoff for this date (resets on new IST day)
             const attemptState = this.getOrResetAttemptState(current, nowMs);
             if (attemptState) {
@@ -326,12 +358,24 @@ export class EquityMissedRunGuard {
     }
 
     // 1. Run collection ONCE
+    let collectionFailed = false;
     try {
       await this.commandRunner("npm", ["run", "equity:collect:eod"]);
     } catch (err: unknown) {
-      this.logger.error("Failed to run equity:collect:eod during catchup", {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      if (isPartialCollectionFailure(err)) {
+        // The collector ran and some stocks could not be fetched; the others were collected and the stocks still missing are counted
+        // per date below, so this is not a failed collection and the dates can still be evaluated.
+        this.logger.warn("equity:collect:eod finished with some stocks not collected", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } else {
+        collectionFailed = true;
+        this.logger.error("Failed to run equity:collect:eod during catchup", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (collectionFailed) {
       const currentIstDay = getIstDayString(nowMs);
       for (const date of missingDates) {
         const curr = this.getOrResetAttemptState(date, nowMs) ?? {
@@ -381,8 +425,24 @@ export class EquityMissedRunGuard {
       try {
         await this.commandRunner("npm", ["run", "equity:alerts:eval", "--", "--date", date]);
         await this.recordEvaluationCompleted(date);
-        this.dateAttempts.delete(date); // Succeeded: clear attempt tracker
         evaluatedDates.push(date);
+        // Evaluated, but a stock may still lack its bar (its fetch failed again, or it is suspended). That counts as an attempt, so the
+        // cap and the backoff stop the guard collecting again every minute; the tracker is cleared only once every stock has its bar.
+        const stillMissing = await this.stocksMissingBarOn(date);
+        if (stillMissing.length === 0) {
+          this.dateAttempts.delete(date);
+        } else {
+          state.attempts += 1;
+          state.lastAttemptMs = nowMs;
+          state.lastAttemptIstDay = currentIstDay;
+          this.dateAttempts.set(date, state);
+          this.logger.warn("Some stocks still have no bar for the date after collection; retrying later", {
+            date,
+            stocks: stillMissing,
+            attempt: state.attempts,
+            maxAttempts: this.maxAttemptsPerDate,
+          });
+        }
       } catch (err: unknown) {
         state.attempts += 1;
         state.lastAttemptMs = nowMs;

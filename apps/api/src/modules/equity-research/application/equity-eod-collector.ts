@@ -34,6 +34,26 @@ export interface EodCollectionResult {
   summaries: StockCollectionSummary[];
 }
 
+/**
+ * The exit code `collect-equity-eod` ends with when it finished but some stocks could not be fetched. Distinct from 1 (every stock failed,
+ * or the run crashed) so the missed-run guard can tell "the collector ran and a stock needs another try" from "the collector is broken".
+ */
+export const PARTIAL_COLLECTION_EXIT_CODE = 2;
+
+/** Marker in the message below; the guard recognises a partial collection by it as well as by the exit code. */
+export const PARTIAL_COLLECTION_MARKER = "PARTIAL_COLLECTION";
+
+/**
+ * One sentence naming the stocks that failed and why, or null when every stock was collected. Until 2026-11-02 a run that fetched 3 of 5
+ * stocks ended COMPLETED with nothing to say which two were missing: the job row, which is what anyone reads afterwards, was silent.
+ */
+export function describePartialCollection(result: Pick<EodCollectionResult, "totalStocks" | "failedStocks" | "summaries">): string | null {
+  if (result.failedStocks <= 0) return null;
+  const failed = result.summaries.filter((summary) => !summary.success);
+  const listed = failed.map((summary) => `${summary.symbol} (${summary.error ?? "no error recorded"})`).join(", ");
+  return `${PARTIAL_COLLECTION_MARKER}: ${result.failedStocks} of ${result.totalStocks} stocks could not be collected: ${listed}. The rest were collected and their alerts evaluated; the missed-run guard retries the failed ones.`;
+}
+
 export class EquityEodCollector {
   constructor(
     private readonly watchlistRepo: PostgresEquityWatchlistRepository,
