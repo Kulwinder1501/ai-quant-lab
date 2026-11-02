@@ -289,6 +289,8 @@ async function main(): Promise<void> {
     // Includes up to two Gemini round trips (45s timeout each) plus the quote fetches.
     PREMARKET_BIAS: 6 * 60 * 1000,
     PREMARKET_PREOPEN_UPDATE: 4 * 60 * 1000,
+    // Reads stored daily bars and one option-chain observation, writes two small rows; a dead claimant should not hold the slot.
+    DAILY_LEVELS: 4 * 60 * 1000,
     // Reads stored 1m bars for two instruments; same patience as the other settlement sweeps.
     SESSION_OUTCOME_SETTLEMENT: 10 * 60 * 1000,
     // Loads one bar's ICT state for four series on a five-minute cron; a run that outlives the next
@@ -620,6 +622,18 @@ async function main(): Promise<void> {
   });
   cronSchedule(PREMARKET_FINAL_SLOT_CRON, () => {
     void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]));
+  });
+
+  /**
+   * The pre-open levels sheet for NIFTY50 and BANKNIFTY (docs/2026-11-02-daily-levels-sheet-and-reaction-protocol.md). It reads stored data
+   * only, so it needs no Fyers token. Two slots, the second a no-op once a sheet exists: a failed first run (a late EOD bar, a database
+   * hiccup) is retried before the open. Weekends and NSE holidays are skipped by the command.
+   */
+  cronSchedule("55 8 * * 1-5", () => {
+    void schedule("DAILY_LEVELS", () => runCommand("npm", ["run", "data:daily-levels"]));
+  });
+  cronSchedule("5 9 * * 1-5", () => {
+    void schedule("DAILY_LEVELS", () => runCommand("npm", ["run", "data:daily-levels"]));
   });
 
   /**
@@ -1955,6 +1969,7 @@ async function main(): Promise<void> {
       "OPENING_GAP_SETTLEMENT",
       "PREMARKET_BIAS",
       "PREMARKET_PREOPEN_UPDATE",
+      "DAILY_LEVELS",
       "SESSION_OUTCOME_SETTLEMENT",
       "ICT_SHADOW_CAPTURE",
       "ICT_SHADOW_RESOLVE",
