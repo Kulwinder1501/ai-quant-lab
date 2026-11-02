@@ -7,6 +7,11 @@ COPY packages/contracts/package*.json ./packages/contracts/
 COPY packages/pricing/package*.json ./packages/pricing/
 COPY apps/api/package*.json ./apps/api/
 COPY apps/web/package*.json ./apps/web/
+# The web build never loads onnxruntime-node (an API dependency of this workspace-wide install). Its install script downloads extra
+# binaries from api.nuget.org, and this Alpine builder's resolver fails on that host (EAI_AGAIN, six attempts on 2026-11-02), which made
+# the image impossible to rebuild once a package.json change had invalidated the layer cache. Skipping the download changes nothing the
+# web uses; the API image has its own Dockerfile and is unaffected.
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN npm ci
 
 COPY tsconfig*.json ./
