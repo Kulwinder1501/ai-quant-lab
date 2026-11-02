@@ -51,9 +51,7 @@ import {
 import { istMinuteOfHour, shouldFetchIndexHistory } from "../../modules/market-data/domain/index-history-cadence.js";
 import { PostgresFyersRequestLedger } from "../../infrastructure/database/repositories/postgres-fyers-request-ledger.js";
 import { setFyersRequestPersister, fyersRequestCounter } from "../../modules/market-data/domain/fyers-request-counter.js";
-import { PostgresPremarketBiasRepository } from "../../infrastructure/database/repositories/postgres-premarket-repository.js";
 import { isNseHoliday } from "../../modules/market-data/domain/nse-session-calendar.js";
-import { assessPremarketRun } from "../../modules/premarket-intelligence/domain/run-check.js";
 import { EquityMissedRunGuard } from "../../modules/equity-research/application/equity-missed-run-guard.js";
 import { LONG_SERIES_WARMUP_BARS } from "../../modules/technical-analysis/application/calculate-technical-indicators.js";
 
@@ -286,13 +284,8 @@ async function main(): Promise<void> {
     OPENING_GAP_PREDICTION: 5 * 60 * 1000,
     // Reads stored candles only, same patience as AUXILIARY_PREDICTION_SETTLEMENT.
     OPENING_GAP_SETTLEMENT: 10 * 60 * 1000,
-    // Includes up to two Gemini round trips (45s timeout each) plus the quote fetches.
-    PREMARKET_BIAS: 6 * 60 * 1000,
-    PREMARKET_PREOPEN_UPDATE: 4 * 60 * 1000,
     // Reads stored daily bars and one option-chain observation, writes two small rows; a dead claimant should not hold the slot.
     DAILY_LEVELS: 4 * 60 * 1000,
-    // Reads stored 1m bars for two instruments; same patience as the other settlement sweeps.
-    SESSION_OUTCOME_SETTLEMENT: 10 * 60 * 1000,
     // Loads one bar's ICT state for four series on a five-minute cron; a run that outlives the next
     // tick has been superseded by it.
     ICT_SHADOW_CAPTURE: 4 * 60 * 1000,
@@ -303,8 +296,6 @@ async function main(): Promise<void> {
     // Equity research EOD collector (Slice 0): 50 stocks at 1 req/s takes ~2.5 mins; 15 min horizon.
     EQUITY_EOD_COLLECT: 15 * 60 * 1000,
     EQUITY_MISSED_RUN_GUARD: 15 * 60 * 1000,
-    // Three indexed reads and a comparison; nothing is fetched or computed.
-    PREMARKET_RUN_CHECK: 2 * 60 * 1000,
     // Four history fetches and four indicator passes for the two ETFs: about a minute.
     ETF_INTRADAY_HEAL: 15 * 60 * 1000,
     // Reads and counts only.
@@ -605,56 +596,18 @@ async function main(): Promise<void> {
   });
 
   /**
-   * The Asia-to-India pre-market engine: a deterministic snapshot (GIFT Nifty, Asian and global
-   * cues, candidate levels), the benchmark baselines, and -- when GEMINI_API_KEY and GEMINI_MODEL
-   * are set -- a strictly validated model interpretation of that snapshot. Without the key it still
-   * stores snapshot and baselines, so the benchmark population accrues from day one.
-   *
-   * Two tries, five minutes apart and both before the 09:08 pre-open, so a transient outage can
-   * recover; only the second (`--final`) may record a no-data day, or a failed model call, as
-   * terminal. The second is a no-op once the first has recorded. NSE holidays are skipped.
-   */
-  // Named because the run check reads these timers' last fire times; one literal each, so they cannot drift apart.
-  const PREMARKET_FIRST_SLOT_CRON = "52 8 * * 1-5";
-  const PREMARKET_FINAL_SLOT_CRON = "57 8 * * 1-5";
-  cronSchedule(PREMARKET_FIRST_SLOT_CRON, () => {
-    void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850"]));
-  });
-  cronSchedule(PREMARKET_FINAL_SLOT_CRON, () => {
-    void schedule("PREMARKET_BIAS", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]));
-  });
-
-  /**
    * The pre-open levels sheet for NIFTY50 and BANKNIFTY (docs/2026-11-02-daily-levels-sheet-and-reaction-protocol.md). It reads stored data
    * only, so it needs no Fyers token. Two slots, the second a no-op once a sheet exists: a failed first run (a late EOD bar, a database
    * hiccup) is retried before the open. Weekends and NSE holidays are skipped by the command.
    */
-  cronSchedule("55 8 * * 1-5", () => {
+  // Named because the catch-up below reads these timers' last fire times.
+  const DAILY_LEVELS_FIRST_CRON = "55 8 * * 1-5";
+  const DAILY_LEVELS_RETRY_CRON = "5 9 * * 1-5";
+  cronSchedule(DAILY_LEVELS_FIRST_CRON, () => {
     void schedule("DAILY_LEVELS", () => runCommand("npm", ["run", "data:daily-levels"]));
   });
-  cronSchedule("5 9 * * 1-5", () => {
+  cronSchedule(DAILY_LEVELS_RETRY_CRON, () => {
     void schedule("DAILY_LEVELS", () => runCommand("npm", ["run", "data:daily-levels"]));
-  });
-
-  /**
-   * The conditional 09:10 update. It records a probe of NSE's allIndices `indicativeClose` every
-   * day, and writes a second snapshot only when that feed carries a time-stamped pre-open print
-   * inside the pre-open window -- see `evaluatePreOpenGate`.
-   */
-  cronSchedule("10 9 * * 1-5", () => {
-    void schedule("PREMARKET_PREOPEN_UPDATE", () => runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0910"]));
-  });
-
-  /**
-   * Measures the gap / first-hour / full-session outcomes the snapshots are scored against. After
-   * the close with margin (the closing-window bars land late), plus a morning catch-up for a day
-   * the evening run missed.
-   */
-  cronSchedule("40 16 * * 1-5", () => {
-    void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
-  });
-  cronSchedule("47 8 * * 1-5", () => {
-    void schedule("SESSION_OUTCOME_SETTLEMENT", () => runCommand("npm", ["run", "data:settle:session-outcomes"]));
   });
 
   /**
@@ -1967,16 +1920,12 @@ async function main(): Promise<void> {
       "INSTITUTIONAL_FLOWS_RETRY",
       "OPENING_GAP_PREDICTION",
       "OPENING_GAP_SETTLEMENT",
-      "PREMARKET_BIAS",
-      "PREMARKET_PREOPEN_UPDATE",
       "DAILY_LEVELS",
-      "SESSION_OUTCOME_SETTLEMENT",
       "ICT_SHADOW_CAPTURE",
       "ICT_SHADOW_RESOLVE",
       "ICT_GATE_REPORT",
       "EQUITY_EOD_COLLECT",
       "EQUITY_MISSED_RUN_GUARD",
-      "PREMARKET_RUN_CHECK",
       "ETF_INTRADAY_HEAL",
       "SESSION_COVERAGE_CHECK",
       "PREOPEN_DATA_CATCHUP",
@@ -2117,76 +2066,35 @@ async function main(): Promise<void> {
   }, 60_000);
 
   /**
-   * The pre-market run check. Once each trading morning, after the 08:57 slot has had time to finish, it decides from
-   * the database and this process's own timers whether the pre-market run happened and, if not, why -- see
-   * `assessPremarketRun`. On 2026-10-14 the run left no trace at all and the container's logs were gone before anyone
-   * looked.
+   * Builds the day's levels sheet when neither of its timers fired today.
    *
-   * A plain interval deciding on wall-clock time, not a cron, for the reason the watchdog above is one: a cron in the
-   * hour window is exactly what stops firing after a host suspend, and a check that dies of the thing it checks for
-   * reports nothing. A miss is thrown, so the job row is FAILED with the diagnosis in `error_details`, which outlives
-   * the logs. A scheduler that starts after 09:05 checks once on start-up and finds the earlier process's rows.
+   * The 08:55 and 09:05 crons are hour-restricted, the kind that does not fire again after a host suspend, and a scheduler restarted
+   * between 08:55 and 09:05 has an empty fire record. The pre-market engine this replaced went missing on 14, 20, 21 and 22 October
+   * for exactly that reason. A plain interval on wall-clock time, so it does not depend on the timers it covers for. The sheet uses
+   * only data from before the session, so building it later in the day is as valid as at 08:55; it looks from 08:58 until the close.
+   * The command is idempotent (a session that already has a sheet is left alone), so covering for a timer that fired in an earlier
+   * process costs one cheap read. Weekends and NSE holidays are skipped by the command.
    */
-  const PREMARKET_CHECK_FROM_IST_MINUTE = 9 * 60 + 5;
-  const PREMARKET_CHECK_UNTIL_IST_MINUTE = 15 * 60 + 30;
-  let premarketCheckedDate: string | null = null;
+  const DAILY_LEVELS_CATCHUP_FROM_IST_MINUTE = 8 * 60 + 58;
+  const DAILY_LEVELS_CATCHUP_UNTIL_IST_MINUTE = 15 * 60 + 30;
+  let dailyLevelsCatchUpDate: string | null = null;
   setInterval(() => {
     const now = new Date();
     const ist = new Date(now.getTime() + 5.5 * 60 * 60_000);
     const sessionDate = ist.toISOString().slice(0, 10);
     const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
     const weekday = ist.getUTCDay();
-    if (weekday === 0 || weekday === 6 || premarketCheckedDate === sessionDate) return;
-    if (minute < PREMARKET_CHECK_FROM_IST_MINUTE || minute > PREMARKET_CHECK_UNTIL_IST_MINUTE) return;
-    premarketCheckedDate = sessionDate;
-    void schedule("PREMARKET_RUN_CHECK", async () => {
-      const stored = await new PostgresPremarketBiasRepository(database).loadRunEvidence(sessionDate);
-      const verdict = assessPremarketRun({
-        sessionDate,
-        holiday: (await isNseHoliday(database, now)).name,
-        ...stored,
-        firstSlotTimerFiredAt: cronLastFiredAt.get(PREMARKET_FIRST_SLOT_CRON) ?? null,
-        finalSlotTimerFiredAt: cronLastFiredAt.get(PREMARKET_FINAL_SLOT_CRON) ?? null,
-        processStartedAt,
-        firstSlotDueAt: new Date(`${sessionDate}T08:52:00+05:30`),
-        finalSlotDueAt: new Date(`${sessionDate}T08:57:00+05:30`),
-      });
-      log("Pre-market run check", { sessionDate, outcome: verdict.outcome, detail: verdict.detail });
-      if (verdict.outcome === "MISSED" || verdict.outcome === "RAN_NO_RESULT") throw new Error(verdict.detail);
-    });
-  }, 60_000);
-
-  /**
-   * Runs the pre-market bias when neither of its timers fired today.
-   *
-   * The 08:52 and 08:57 crons are hour-restricted, which is the kind that does not fire again after a host suspend,
-   * and a scheduler restarted between 08:52 and 09:05 has an empty fire record. Either way the job was simply missing
-   * on 14, 20, 21 and 22 October. A plain interval on wall-clock time, the same shape as the run check below, so it
-   * does not depend on the timers it covers for. It looks from 08:58, after the final slot's timer is due, and stops
-   * at 09:07 because the pre-open update owns the window from 09:08. The run is idempotent: once a slot has recorded,
-   * the final run is a no-op, so covering for a timer that did fire in an earlier process costs nothing.
-   */
-  const PREMARKET_CATCHUP_FROM_IST_MINUTE = 8 * 60 + 58;
-  const PREMARKET_CATCHUP_UNTIL_IST_MINUTE = 9 * 60 + 7;
-  let premarketCatchUpDate: string | null = null;
-  setInterval(() => {
-    const now = new Date();
-    const ist = new Date(now.getTime() + 5.5 * 60 * 60_000);
-    const sessionDate = ist.toISOString().slice(0, 10);
-    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-    const weekday = ist.getUTCDay();
-    if (weekday === 0 || weekday === 6 || premarketCatchUpDate === sessionDate) return;
-    if (minute < PREMARKET_CATCHUP_FROM_IST_MINUTE || minute > PREMARKET_CATCHUP_UNTIL_IST_MINUTE) return;
-    premarketCatchUpDate = sessionDate;
-    const timerFiredToday = [PREMARKET_FIRST_SLOT_CRON, PREMARKET_FINAL_SLOT_CRON].some((expression) => {
+    if (weekday === 0 || weekday === 6 || dailyLevelsCatchUpDate === sessionDate) return;
+    if (minute < DAILY_LEVELS_CATCHUP_FROM_IST_MINUTE || minute > DAILY_LEVELS_CATCHUP_UNTIL_IST_MINUTE) return;
+    dailyLevelsCatchUpDate = sessionDate;
+    const timerFiredToday = [DAILY_LEVELS_FIRST_CRON, DAILY_LEVELS_RETRY_CRON].some((expression) => {
       const firedAt = cronLastFiredAt.get(expression);
       return firedAt !== undefined && istDateKey(firedAt) === sessionDate;
     });
     if (timerFiredToday) return;
-    void schedule("PREMARKET_BIAS", async () => {
-      if ((await isNseHoliday(database, now)).holiday) return;
-      log("Pre-market catch-up: neither slot timer fired today", { sessionDate });
-      await runCommand("npm", ["run", "data:premarket-bias", "--", "--slot", "0850", "--final"]);
+    void schedule("DAILY_LEVELS", async () => {
+      log("Daily levels catch-up: neither timer fired today", { sessionDate });
+      await runCommand("npm", ["run", "data:daily-levels"]);
     });
   }, 60_000);
 

@@ -1,6 +1,6 @@
 import axios from "axios";
 import { parseNseNumber } from "./nse-api-client.js";
-import { parseNseIndexTimestamp } from "../../modules/premarket-intelligence/domain/preopen-gate.js";
+import { parseNseIndexTimestamp } from "./nse-index-timestamp.js";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
