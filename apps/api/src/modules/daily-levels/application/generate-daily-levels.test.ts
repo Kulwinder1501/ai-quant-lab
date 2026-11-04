@@ -6,6 +6,7 @@ const bars: DailyBar[] = [
   { date: "2026-10-28", high: 23_000, low: 22_700, close: 22_900 },
   { date: "2026-10-29", high: 23_100, low: 22_800, close: 22_950 },
   { date: "2026-10-30", high: 23_150, low: 22_900, close: 23_050 },
+  { date: "2026-11-02", high: 23_250, low: 23_000, close: 23_200 },
 ];
 
 function fakeRepository(overrides: Partial<DailyLevelsRepository> = {}): DailyLevelsRepository & { saved: unknown[] } {
@@ -59,7 +60,7 @@ describe("generateDailyLevels", () => {
     const repository = fakeRepository();
     const [result] = await generateDailyLevels(repository, "2026-11-03", ["NIFTY50"], { dryRun: true });
     expect(result.status).toBe("DRY_RUN");
-    expect(result.sheet?.referencePrice).toBe(23_050);
+    expect(result.sheet?.referencePrice).toBe(23_200);
     expect(repository.saved).toHaveLength(0);
   });
 
@@ -68,6 +69,37 @@ describe("generateDailyLevels", () => {
     const [result] = await generateDailyLevels(repository, "2026-11-03", ["NIFTY50"]);
     expect(result.status).toBe("NO_DATA");
     expect(repository.saved).toHaveLength(0);
+  });
+
+  it("refuses a sheet built on a daily bar older than the previous trading session", async () => {
+    const repository = fakeRepository({ dailyBars: vi.fn(async () => bars.slice(0, 3)) });
+    const [stored] = await generateDailyLevels(repository, "2026-11-03", ["NIFTY50"]);
+    expect(stored.status).toBe("STALE_REFERENCE");
+    expect(stored.detail).toBe("newest completed daily bar is 2026-10-30, the previous trading session was 2026-11-02");
+    const [forced] = await generateDailyLevels(repository, "2026-11-03", ["NIFTY50"], { force: true });
+    expect(forced.status).toBe("STALE_REFERENCE");
+    const [dryRun] = await generateDailyLevels(repository, "2026-11-03", ["NIFTY50"], { dryRun: true });
+    expect(dryRun.status).toBe("STALE_REFERENCE");
+    expect(repository.saved).toHaveLength(0);
+  });
+
+  it("accepts the Friday bar for a Monday session", async () => {
+    const repository = fakeRepository({ dailyBars: vi.fn(async () => bars.slice(0, 3)) });
+    const [result] = await generateDailyLevels(repository, "2026-11-02", ["NIFTY50"]);
+    expect(result.status).toBe("STORED");
+    expect(result.sheet?.referenceDate).toBe("2026-10-30");
+  });
+
+  it("steps back over an NSE holiday to find the previous trading session", async () => {
+    const holidayName = vi.fn(async (date: string) => (date === "2026-11-10" ? "Diwali Balipratipada" : null));
+    const onBeforeHoliday = fakeRepository({ holidayName, dailyBars: vi.fn(async () => [...bars, { date: "2026-11-09", high: 23_300, low: 23_100, close: 23_250 }]) });
+    const [ok] = await generateDailyLevels(onBeforeHoliday, "2026-11-11", ["NIFTY50"]);
+    expect(ok.status).toBe("STORED");
+    expect(ok.sheet?.referenceDate).toBe("2026-11-09");
+    const missingBar = fakeRepository({ holidayName });
+    const [stale] = await generateDailyLevels(missingBar, "2026-11-11", ["NIFTY50"]);
+    expect(stale.status).toBe("STALE_REFERENCE");
+    expect(stale.detail).toContain("the previous trading session was 2026-11-09");
   });
 
   it("carries the option-chain walls and their provenance into the stored sheet", async () => {

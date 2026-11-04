@@ -2,7 +2,7 @@ import "dotenv/config";
 import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool } from "../../infrastructure/database/database.js";
 import { PostgresDailyLevelsRepository } from "../../infrastructure/database/repositories/postgres-daily-levels-repository.js";
-import { generateDailyLevels } from "../../modules/daily-levels/application/generate-daily-levels.js";
+import { generateDailyLevels, type GenerateStatus } from "../../modules/daily-levels/application/generate-daily-levels.js";
 import type { DailyLevelsInstrument } from "../../modules/daily-levels/domain/levels.js";
 import { istDateKey } from "../../modules/market-data/domain/nse-session-calendar.js";
 
@@ -14,10 +14,12 @@ import { istDateKey } from "../../modules/market-data/domain/nse-session-calenda
  *   --force               build a new version although a sheet exists (never overwrites)
  *   --dry-run             build and print, store nothing
  *
- * Exits non-zero when an index has no data to build from, so the scheduled job is recorded FAILED instead of leaving an empty page.
+ * Exits non-zero when an index has no data to build from, or only daily bars older than the previous trading session (STALE_REFERENCE,
+ * nothing stored), so the scheduled job is recorded FAILED instead of leaving an empty or a day-old page.
  */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const INSTRUMENTS: readonly DailyLevelsInstrument[] = ["NIFTY50", "BANKNIFTY"];
+const FAILING_STATUSES: ReadonlySet<GenerateStatus> = new Set(["NO_DATA", "STALE_REFERENCE"]);
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -39,7 +41,7 @@ async function main(): Promise<void> {
     });
     for (const result of results) {
       console.info(JSON.stringify({
-        level: result.status === "NO_DATA" ? "error" : "info",
+        level: FAILING_STATUSES.has(result.status) ? "error" : "info",
         message: "Daily levels",
         sessionDate: date,
         underlying: result.underlying,
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
         ...(process.argv.includes("--dry-run") ? { sheet: result.sheet } : {}),
       }));
     }
-    if (results.some((result) => result.status === "NO_DATA")) process.exitCode = 1;
+    if (results.some((result) => FAILING_STATUSES.has(result.status))) process.exitCode = 1;
   } finally {
     await database.end();
   }
