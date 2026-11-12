@@ -3,6 +3,7 @@ import { loadEnvironment } from "../../config/environment.js";
 import { createDatabasePool, type DatabasePool } from "../../infrastructure/database/database.js";
 import { NseMarketSession } from "../../modules/market-data/domain/nse-market-session.js";
 import {
+  assessCollectorAlert,
   describeCollectorHealth,
   evaluateCollectorHealth,
   type CollectorObservation,
@@ -80,11 +81,14 @@ async function main(): Promise<void> {
         observations: await loadObservations(database, symbol, sessionDate),
         now,
       });
-      if (health.status === "DEGRADED") degraded = true;
+      // The exit code follows what needs attention now. A gap that closed more than 15 minutes ago
+      // stays in the log and in `status`, but no longer fails the job for the rest of the day.
+      const assessment = assessCollectorAlert(health, now);
+      if (assessment.actionable.length > 0) degraded = true;
       console.info(JSON.stringify({
         // Warn, not error: a degraded collector is an operational alert, and this process must not
         // read as a failed research run.
-        level: health.status === "DEGRADED" ? "warn" : "info",
+        level: assessment.actionable.length > 0 ? "warn" : "info",
         message: "Collector health",
         symbol,
         summary: describeCollectorHealth(health),
@@ -104,6 +108,8 @@ async function main(): Promise<void> {
           : { unavailableReason: health.exchangeFeed.unavailableReason },
         persistenceLagMs: health.persistenceLagMs,
         findings: health.findings,
+        actionable: assessment.actionable,
+        recoveredEarlier: assessment.recoveredEarlier,
       }));
     }
     // Non-zero on DEGRADED so a scheduler or shell caller can alert without parsing the log.

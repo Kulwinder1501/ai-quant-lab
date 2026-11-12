@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assessCollectorAlert,
   describeCollectorHealth,
   evaluateCollectorHealth,
   STRUCTURAL_SILENCE_MS,
@@ -242,5 +243,80 @@ describe("collector health", () => {
     expect(describeCollectorHealth(health)).toMatch(/DEGRADED — RECEIPT_SILENCE_/);
     expect(describeCollectorHealth(evaluateCollectorHealth({ ...base, observations: fullSession() })))
       .toMatch(/HEALTHY — covered/);
+  });
+});
+
+describe("collector alert assessment", () => {
+  /** A 7.5-minute drop, 2026-11-12 shape: 05:04:30-05:12:00 UTC on the test day. */
+  const dropFrom = new Date("2026-08-25T05:04:30.000Z");
+  const dropTo = new Date("2026-08-25T05:12:00.000Z");
+  const withDrop = fullSession({ skipFrom: dropFrom, skipTo: dropTo });
+  const upTo = (at: Date): CollectorObservation[] => withDrop.filter((item) => item.observedAt.getTime() <= at.getTime());
+  const assess = (now: Date) => {
+    const health = evaluateCollectorHealth({ ...base, observations: upTo(now), now });
+    return { health, ...assessCollectorAlert(health, now) };
+  };
+
+  it("alerts when a gap has only just recovered", () => {
+    const result = assess(new Date("2026-08-25T05:13:00.000Z"));
+
+    expect(result.actionable.some((finding) => finding.startsWith("RECEIPT_SILENCE_"))).toBe(true);
+    expect(result.recoveredEarlier).toEqual([]);
+  });
+
+  it("stops failing once the gap is over and old, while the day stays DEGRADED on record", () => {
+    // The 2026-11-12 bug: the job failed every ten minutes for the rest of the day.
+    const result = assess(new Date("2026-08-25T07:00:00.000Z"));
+
+    expect(result.health.status).toBe("DEGRADED");
+    expect(result.health.findings.some((finding) => finding.startsWith("RECEIPT_SILENCE_"))).toBe(true);
+    expect(result.actionable).toEqual([]);
+    expect(result.recoveredEarlier.some((finding) => finding.startsWith("RECEIPT_SILENCE_"))).toBe(true);
+  });
+
+  it("reports a collector that is silent right now, before any later row closes a gap", () => {
+    // Dies at 10:00 IST and never comes back: the evaluator alone sees no gap at all.
+    const diedAt = new Date("2026-08-25T04:30:00.000Z");
+    const now = new Date("2026-08-25T04:40:00.000Z");
+    const observations = fullSession().filter((item) => item.observedAt.getTime() <= diedAt.getTime());
+    const health = evaluateCollectorHealth({ ...base, observations, now });
+
+    expect(health.findings).toEqual([]);
+    expect(assessCollectorAlert(health, now).actionable).toEqual(["RECEIPT_SILENCE_ONGOING_600S"]);
+  });
+
+  it("does not call a normal pause an outage", () => {
+    const now = new Date("2026-08-25T04:30:00.000Z");
+    const observations = fullSession().filter((item) => item.observedAt.getTime() <= now.getTime() - 60_000);
+    const health = evaluateCollectorHealth({ ...base, observations, now });
+
+    expect(assessCollectorAlert(health, now).actionable).toEqual([]);
+  });
+
+  it("does not alarm on the quiet after the close", () => {
+    const health = evaluateCollectorHealth({ ...base, observations: fullSession() });
+
+    expect(assessCollectorAlert(health, afterClose).actionable).toEqual([]);
+  });
+
+  it("reports a collector that has produced nothing since the open", () => {
+    const now = new Date("2026-08-25T04:30:00.000Z");
+    const health = evaluateCollectorHealth({ ...base, observations: [], now });
+
+    expect(assessCollectorAlert(health, now).actionable).toEqual(["COLLECTOR_PRODUCED_NOTHING"]);
+  });
+
+  it("does not judge a collector that has not yet had its warm-up", () => {
+    const now = new Date("2026-08-25T03:47:00.000Z");
+    const health = evaluateCollectorHealth({ ...base, observations: [], now });
+
+    expect(assessCollectorAlert(health, now).actionable).toEqual([]);
+  });
+
+  it("still fails for session-level findings however old they are", () => {
+    const late = fullSession().filter((item) => item.observedAt.getTime() > expectedOpenAt.getTime() + 30 * 60_000);
+    const health = evaluateCollectorHealth({ ...base, observations: late });
+
+    expect(assessCollectorAlert(health, afterClose).actionable).toContain("COLLECTOR_STARTED_LATE");
   });
 });

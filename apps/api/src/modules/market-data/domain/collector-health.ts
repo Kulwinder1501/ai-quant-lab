@@ -264,6 +264,75 @@ export function evaluateCollectorHealth(input: {
   };
 }
 
+/**
+ * How long after a silence ends it still counts as news.
+ *
+ * `COLLECTOR_HEALTH` runs every 10 minutes, so 15 minutes guarantees at least one run sees a freshly
+ * recovered gap even if a run is late, without keeping the alarm red for the rest of the day.
+ */
+export const RECENT_GAP_ALERT_WINDOW_MS = 15 * 60_000;
+
+/** A gap finding is a silence; everything else describes the session, not a moment in it. */
+function isGapFinding(finding: string): boolean {
+  return finding.startsWith("RECEIPT_SILENCE_") || finding.startsWith("EXCHANGE_FEED_SILENCE_");
+}
+
+export interface CollectorAlertAssessment {
+  /** Worth failing the scheduled job for: something is wrong now, or just stopped being wrong. */
+  readonly actionable: readonly string[];
+  /** Real, recorded, and already recovered: a historical fact about the day, not a live alarm. */
+  readonly recoveredEarlier: readonly string[];
+}
+
+/**
+ * Separates "act now" from "this happened earlier and is over".
+ *
+ * `evaluateCollectorHealth` deliberately keeps a recovered gap in the day's record, so a session with
+ * one brief network drop is DEGRADED until the close. That is the right record and the wrong alarm:
+ * the job built on it went red every ten minutes for the rest of the day, hours after the collector
+ * had recovered (2026-11-12: a 7.5-minute network drop at 10:34 failed the job from 10:43 on).
+ *
+ * The evaluator also only sees a gap once a later observation closes it, so a collector that dies
+ * and stays dead never forms one. It was invisible until it came back. The tail silence is checked
+ * here, against `now`, so a collector that is down is reported while it is down.
+ *
+ * Alerting policy only. The day's record, and every research path, are untouched.
+ */
+export function assessCollectorAlert(health: CollectorHealthStatus, now: Date): CollectorAlertAssessment {
+  const actionable = new Set<string>();
+  const recoveredEarlier: string[] = [];
+
+  // "Nothing yet" is judged below against the clock: before the open it is simply the morning.
+  for (const finding of health.findings) {
+    if (!isGapFinding(finding) && finding !== "COLLECTOR_PRODUCED_NOTHING") actionable.add(finding);
+  }
+
+  const recentSince = now.getTime() - RECENT_GAP_ALERT_WINDOW_MS;
+  const gapLabel = (prefix: string, durationMs: number): string => `${prefix}${Math.round(durationMs / 1000)}S`;
+  const gaps = [
+    ...health.receipt.gaps.map((gap) => ({ gap, label: gapLabel("RECEIPT_SILENCE_", gap.durationMs) })),
+    ...(health.exchangeFeed.available
+      ? health.exchangeFeed.gaps.map((gap) => ({ gap, label: gapLabel("EXCHANGE_FEED_SILENCE_", gap.durationMs) }))
+      : []),
+  ];
+  for (const { gap, label } of gaps) {
+    if (gap.endAt.getTime() >= recentSince) actionable.add(label);
+    else recoveredEarlier.push(label);
+  }
+
+  // Judged only after the warm-up that `COLLECTOR_STARTED_LATE` also allows.
+  const pastWarmup = now.getTime() >= health.expectedOpenAt.getTime() + SESSION_EDGE_TOLERANCE_MS;
+  if (pastWarmup && health.lastObservedAt === null) {
+    actionable.add("COLLECTOR_PRODUCED_NOTHING");
+  } else if (pastWarmup && health.lastObservedAt !== null && now.getTime() < health.expectedCloseAt.getTime()) {
+    // Tail silence only counts while the session is running; after the close, quiet is correct.
+    const silentForMs = now.getTime() - health.lastObservedAt.getTime();
+    if (silentForMs >= STRUCTURAL_SILENCE_MS) actionable.add(`RECEIPT_SILENCE_ONGOING_${Math.round(silentForMs / 1000)}S`);
+  }
+
+  return { actionable: [...actionable], recoveredEarlier };
+}
+
 /** One line for an alert or log, naming what broke rather than emitting a score. */
 export function describeCollectorHealth(health: CollectorHealthStatus): string {
   if (health.status === "HEALTHY") {
