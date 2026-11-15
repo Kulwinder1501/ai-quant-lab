@@ -24,6 +24,11 @@
 .PARAMETER BackupDir
   Where dumps go. Default: <profile>\ai-quant-lab-backups\db  (the same disk as the database: this protects against
   corruption, a deleted volume and a bad migration, NOT against losing the machine; see OffsiteDir).
+.PARAMETER WaitForDatabaseMinutes
+  How long to keep checking for a healthy database container before giving up (default 90; the scheduled task is
+  killed after 2 hours, and a dump takes about 10 minutes). Added 2026-11-15: on 11-06..11-08 and 11-14 the run found the
+  container down (machine off, or Windows just started and Docker not up yet), failed once and made no backup until
+  the next day. A bounded wait lets a run that starts while the machine is still waking up complete. 0 = check once.
 .PARAMETER OffsiteDir
   Optional. If set (for example a OneDrive folder), the newest dump is copied there after a successful backup.
   Not set by default: it uploads a 2+ GB copy of the data to another service and needs the owner's decision.
@@ -36,6 +41,8 @@ param(
   [int]$KeepDaily = 4,
   [int]$KeepWeekly = 2,
   [int]$MinimumFreeGB = 15,
+  [int]$WaitForDatabaseMinutes = 90,
+  [int]$RetryEverySeconds = 60,
   [string[]]$DerivedTables = @('indicator_snapshots', 'ict_state_snapshots', 'price_action_events', 'pattern_detections', 'candle_feature_coverage')
 )
 
@@ -73,9 +80,27 @@ function Fail([string]$why) {
 
 Write-Log "=== backup start ($name) ==="
 
-# 1. the database must be up and healthy
-$health = (docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $Container) 2>$null
-if ($LASTEXITCODE -ne 0 -or $health -notmatch '^running healthy') { Fail "database container is not running and healthy (state: '$health')" }
+# 1. the database must be up and healthy; if it is not, keep checking for a bounded time (a stopped Docker, a machine
+#    that has only just woken) instead of burning the whole day's backup on one look
+function Get-DatabaseHealth {
+  $h = (docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $Container) 2>$null
+  return @{ ok = ($LASTEXITCODE -eq 0 -and $h -match '^running healthy'); state = "$h" }
+}
+$deadline = $started.AddMinutes($WaitForDatabaseMinutes)
+$check = Get-DatabaseHealth
+$lastNote = $started
+$waited = $false
+while (-not $check.ok -and (Get-Date) -lt $deadline) {
+  if (((Get-Date) - $lastNote).TotalMinutes -ge 10 -or $lastNote -eq $started) {
+    Write-Log ("database not healthy yet (state: '{0}'), checking again every {1} s until {2:HH:mm}" -f $check.state, $RetryEverySeconds, $deadline)
+    $lastNote = Get-Date
+  }
+  $waited = $true
+  Start-Sleep -Seconds $RetryEverySeconds
+  $check = Get-DatabaseHealth
+}
+if (-not $check.ok) { Fail ("database container is not running and healthy after waiting {0} min (state: '{1}')" -f $WaitForDatabaseMinutes, $check.state) }
+if ($waited) { Write-Log ("database became healthy after {0:N0} s, continuing" -f ((Get-Date) - $started).TotalSeconds) }
 
 # 2. room on the disk, counting what is already there
 $drive = Get-PSDrive -Name ((Split-Path $BackupDir -Qualifier).TrimEnd(':'))

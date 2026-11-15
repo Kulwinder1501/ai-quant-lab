@@ -124,3 +124,7 @@ the derived tables take to recompute.
 - The derived tables are not backed up, so a restore is followed by a recompute (hours, not minutes, for the full history).
 - A dump taken while the stack runs is a consistent snapshot of that moment (`pg_dump` uses one transaction), so rows written
   after it began are not in it.
+
+## Retry when the database is down (2026-11-15)
+
+The backup used to look at the database container once and fail if it was not healthy. That cost the runs of 2026-11-06..08 (machine off) and 2026-11-14 19:02 (container exited, Windows just started), each leaving no backup until the next day. It now waits for a healthy container, checking every `-RetryEverySeconds` (default 60) for up to `-WaitForDatabaseMinutes` (default 90; the scheduled task is killed after 2 hours and a dump takes about 10 minutes), logging the wait, then carries on as before. If the database never comes up, it fails after the wait with the same status file and exit code 1, so the morning check still reports it. Tested with a missing container (fails after the wait, exit 1) and a container that appears 30 s into the wait (continues). Change `-WaitForDatabaseMinutes 0` to restore the old check-once behaviour. Copy the script to `<profile>i-quant-lab-opsin` (or re-run `install-host-tasks.ps1`) for it to take effect.
