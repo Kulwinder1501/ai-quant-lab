@@ -19,6 +19,7 @@ import { checkManualOptionGeometry, parseManualOptionBarriers } from "../../doma
 import {
   MAXIMUM_LIVE_STREAM_QUOTE_AGE_MS,
   chooseManualOptionFill,
+  resolveManualUnderlyingEntry,
 } from "../../domain/manual-option-fill.js";
 import {
   checkLimitAgainstAsk,
@@ -787,34 +788,29 @@ export function registerPaperTradingRoutes(
        * fill's own tick carries the spot it was observed with, which is preferred; a chain
        * snapshot (only ever accepted when fresh) and then a live quote are the fallbacks.
        */
-      let underlyingEntryPrice: number | null = chosenFill.underlyingValue;
       // A manual open has no antecedent idea, so there is no separate signal-time level to
-      // record: the chain snapshot/live quote resolved here *is* the fill-moment observation,
-      // taken server-side in the same request that books the fill. Carried onto both
-      // underlyingEntryPrice (for consumers that read the "signal-time" column) and
-      // underlyingFillPrice (migration 120) -- for this path the two happen to be the same
-      // real observation, not two different numbers.
-      let underlyingFillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null =
-        chosenFill.underlyingValue === null ? null : "OPTION_PREMIUM_TICK_ASK";
-      try {
-        // Only when the fill did not bring its own spot: a stored snapshot's spot is as old as the snapshot.
-        const snapshot = underlyingEntryPrice !== null
-          ? null
-          : await dependencies.optionChainRepository.latestSnapshot({
-            underlyingSymbol: String(underlyingSymbol).toUpperCase(),
-          });
-        if (snapshot) {
-          underlyingEntryPrice = snapshot.underlyingValue ?? null;
-          if (underlyingEntryPrice !== null) underlyingFillSource = "OPTION_CHAIN_QUOTE";
-        }
-      } catch {
-        underlyingEntryPrice = null;
-      }
+      // record: the spot resolved here *is* the fill-moment observation, taken server-side in
+      // the same request that books the fill. Carried onto both underlyingEntryPrice (for
+      // consumers that read the "signal-time" column) and underlyingFillPrice (migration 120)
+      // -- for this path the two happen to be the same real observation, not two different
+      // numbers. Freshest source first; a stored chain snapshot is used only if it is as fresh
+      // as a stored tick may be (it used to be taken whatever its age: see
+      // `resolveManualUnderlyingEntry`).
+      const resolvedEntry = resolveManualUnderlyingEntry({
+        fillUnderlying: chosenFill.underlyingValue,
+        liveSpot: liveSpot?.price ?? null,
+        snapshot: chainSnapshot === null ? null : { underlyingValue: chainSnapshot.underlyingValue, observedAt: chainSnapshot.observedAt },
+        now: quoteNow,
+      });
+      let underlyingEntryPrice: number | null = resolvedEntry?.price ?? null;
+      let underlyingFillSource: "OPTION_CHAIN_QUOTE" | "OPTION_PREMIUM_TICK_ASK" | null = resolvedEntry?.fillSource ?? null;
       if (underlyingEntryPrice === null) {
+        // No fresh spot in hand: ask for a live quote now. Its price is real but carries no recognised
+        // provenance tag, so it anchors the entry only and is left out of underlyingFillPrice.
         const livePrices = await loadLivePrices(
           dependencies.marketQuoteClient,
           [String(underlyingSymbol).toUpperCase()],
-        );
+        ).catch(() => ({} as Record<string, number>));
         underlyingEntryPrice = livePrices[String(underlyingSymbol).toUpperCase()] ?? null;
       }
 

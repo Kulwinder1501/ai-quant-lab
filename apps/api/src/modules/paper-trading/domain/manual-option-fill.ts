@@ -50,6 +50,52 @@ function usableQuote(quote: ManualFillQuote | null | undefined, now: Date, maxAg
   return ageMs >= -MAXIMUM_QUOTE_FUTURE_SKEW_MS && ageMs <= maxAgeMs;
 }
 
+export interface ManualUnderlyingEntry {
+  price: number;
+  /**
+   * The provenance tag `underlying_fill_price_source` accepts for this price, or null when the price is real and live
+   * but has no recognised tag (it is then stored as the entry anchor only, never as a labelled fill price).
+   */
+  fillSource: "OPTION_PREMIUM_TICK_ASK" | "OPTION_CHAIN_QUOTE" | null;
+}
+
+function validSpot(value: number | null | undefined): value is number {
+  return value !== undefined && value !== null && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * Where the underlying was when a hand-taken option was bought.
+ *
+ * 2026-11-18: a BANKNIFTY put bought at 09:37 was recorded with an entry spot of 62,239.1 while the index was at
+ * about 62,100. That number was the 09:23 chain snapshot's underlying, 14 minutes old. The route preferred the
+ * stored snapshot over a live quote, and `latestSnapshot` has no freshness limit, so any buy whose fill quote did not
+ * carry a spot took the snapshot's, which is up to a full collection interval old (across the account's 22 earlier
+ * trades the entry spot was off by up to 175 points; exits use a live price and were fine). That stale number feeds
+ * trap detection (`liveSpot - underlyingEntryPrice`) and every later analysis of where the trade was taken.
+ *
+ * Order, freshest first: the spot the winning fill quote carried; the live stream's last index price (the caller has
+ * already age-limited it); a stored chain snapshot only if it is as fresh as a stored tick may be. Null when none
+ * qualifies, and the caller then asks for a live quote; a stale snapshot is never used.
+ */
+export function resolveManualUnderlyingEntry(input: {
+  fillUnderlying: number | null | undefined;
+  liveSpot: number | null | undefined;
+  snapshot: { underlyingValue: number | null; observedAt: Date } | null | undefined;
+  now: Date;
+  maxSnapshotAgeMs?: number;
+}): ManualUnderlyingEntry | null {
+  if (validSpot(input.fillUnderlying)) return { price: input.fillUnderlying, fillSource: "OPTION_PREMIUM_TICK_ASK" };
+  if (validSpot(input.liveSpot)) return { price: input.liveSpot, fillSource: null };
+  const snapshot = input.snapshot;
+  if (snapshot && validSpot(snapshot.underlyingValue)) {
+    const ageMs = input.now.getTime() - snapshot.observedAt.getTime();
+    if (ageMs >= -MAXIMUM_QUOTE_FUTURE_SKEW_MS && ageMs <= (input.maxSnapshotAgeMs ?? MAXIMUM_MANUAL_QUOTE_AGE_MS)) {
+      return { price: snapshot.underlyingValue, fillSource: "OPTION_CHAIN_QUOTE" };
+    }
+  }
+  return null;
+}
+
 export function chooseManualOptionFill(input: {
   /** The live socket's latest book for the exact contract, when this process is streaming it. Preferred. */
   stream?: ManualFillQuote | null;

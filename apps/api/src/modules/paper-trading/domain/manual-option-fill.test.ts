@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseManualOptionFill, MAXIMUM_MANUAL_QUOTE_AGE_MS } from "./manual-option-fill.js";
+import { chooseManualOptionFill, MAXIMUM_MANUAL_QUOTE_AGE_MS, resolveManualUnderlyingEntry } from "./manual-option-fill.js";
 
 const now = new Date("2026-10-13T06:40:59.000Z");
 const secondsAgo = (s: number) => new Date(now.getTime() - s * 1000);
@@ -95,5 +95,42 @@ describe("chooseManualOptionFill", () => {
   it("does not invent an underlying: a tick without a usable one leaves it null", () => {
     const result = chooseManualOptionFill({ tick: { bid: 100, ask: 101, observedAt: secondsAgo(1), underlyingValue: 0 }, chainQuote: null, now });
     expect(result).toMatchObject({ ok: true, underlyingValue: null });
+  });
+});
+
+describe("resolveManualUnderlyingEntry: where the underlying was at the fill", () => {
+  const snapshotAt = (secondsOld: number, underlyingValue: number | null = 62239.1) => ({ underlyingValue, observedAt: secondsAgo(secondsOld) });
+
+  it("never records a 14-minute-old chain snapshot as the entry spot -- the 2026-11-18 BANKNIFTY put (62,239.1 stored, index near 62,100)", () => {
+    // the fill quote carried no spot, the stream had a live index price, the snapshot was 14 minutes old
+    const result = resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: 62100.8, snapshot: snapshotAt(14 * 60), now });
+    expect(result).toEqual({ price: 62100.8, fillSource: null });
+  });
+
+  it("returns nothing, rather than the stale snapshot, when only an old snapshot exists (the caller then asks for a live quote)", () => {
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: null, snapshot: snapshotAt(14 * 60), now })).toBeNull();
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: undefined, liveSpot: undefined, snapshot: null, now })).toBeNull();
+  });
+
+  it("prefers the spot the winning fill quote carried, tagged as the tick's", () => {
+    const result = resolveManualUnderlyingEntry({ fillUnderlying: 55125.4, liveSpot: 55130, snapshot: snapshotAt(5), now });
+    expect(result).toEqual({ price: 55125.4, fillSource: "OPTION_PREMIUM_TICK_ASK" });
+  });
+
+  it("accepts a snapshot only while it is as fresh as a stored tick may be, and tags it as the chain's", () => {
+    const atLimit = { underlyingValue: 62100, observedAt: new Date(now.getTime() - MAXIMUM_MANUAL_QUOTE_AGE_MS) };
+    const pastLimit = { underlyingValue: 62100, observedAt: new Date(now.getTime() - MAXIMUM_MANUAL_QUOTE_AGE_MS - 1) };
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: null, snapshot: atLimit, now })).toEqual({ price: 62100, fillSource: "OPTION_CHAIN_QUOTE" });
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: null, snapshot: pastLimit, now })).toBeNull();
+  });
+
+  it("does not invent a spot: zero, negative or non-finite values are skipped, and a snapshot without a value gives nothing", () => {
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: 0, liveSpot: Number.NaN, snapshot: snapshotAt(5, null), now })).toBeNull();
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: -1, liveSpot: 62100, snapshot: null, now })).toEqual({ price: 62100, fillSource: null });
+  });
+
+  it("tolerates a snapshot stamped a little ahead of the clock but not one from the future", () => {
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: null, snapshot: { underlyingValue: 62100, observedAt: new Date(now.getTime() + 2000) }, now })).not.toBeNull();
+    expect(resolveManualUnderlyingEntry({ fillUnderlying: null, liveSpot: null, snapshot: { underlyingValue: 62100, observedAt: new Date(now.getTime() + 60_000) }, now })).toBeNull();
   });
 });
