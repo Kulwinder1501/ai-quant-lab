@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  FYERS_EOD_RESERVE_REQUESTS,
   FYERS_REST_JOB_TYPES,
+  FYERS_RESERVE_PAUSED_JOBS,
   FyersRateLimitGate,
   FyersRateLimitedError,
   classifyFyersRateLimit,
   classifyFyersRateLimitFromText,
+  fyersEodReserveDecision,
   isFyersRateLimitedError,
+  minutesToFyersSessionClose,
   rateLimitCooldownMs,
 } from "./fyers-rate-limit.js";
 
@@ -111,5 +115,44 @@ describe("Daily Budget Guard Constants", () => {
     expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADING_BOT")).toBe(false);
     expect(LOW_PRIORITY_FYERS_JOBS.has("PAPER_TRADE_EXIT_SWEEP")).toBe(false);
     expect(LOW_PRIORITY_FYERS_JOBS.has("INDICES_INTRADAY")).toBe(false);
+  });
+});
+
+describe("EOD reserve", () => {
+  // 2026-11-19 is a Thursday; IST = UTC + 5:30.
+  const ist = (h: number, m: number) => new Date(Date.UTC(2026, 10, 19, h - 5, m - 30));
+
+  it("counts the minutes left to the 15:30 close, never more than a session and never negative", () => {
+    expect(minutesToFyersSessionClose(ist(9, 15))).toBe(375);
+    expect(minutesToFyersSessionClose(ist(3, 0))).toBe(375);
+    expect(minutesToFyersSessionClose(ist(13, 30))).toBe(120);
+    expect(minutesToFyersSessionClose(ist(15, 30))).toBe(0);
+    expect(minutesToFyersSessionClose(ist(16, 5))).toBe(0);
+  });
+
+  it("lets the optional polling run while the day is on course", () => {
+    // 11:00 with 1,800 spent: 1,800 + 270 min * 8 + 250 = 4,210.
+    const decision = fyersEodReserveDecision({ dailyTotal: 1_800, now: ist(11, 0) });
+    expect(decision.projectedWithReserve).toBe(4_210);
+    expect(decision.pause).toBe(false);
+  });
+
+  it("pauses it when the essential polling alone would leave less than the EOD's share", () => {
+    // 2026-11-19 shape: about 3,400 spent by 12:30 (180 min left): 3,400 + 1,440 + 250 = 5,090.
+    expect(fyersEodReserveDecision({ dailyTotal: 3_400, now: ist(12, 30) }).pause).toBe(true);
+    // The same hour with 3,300: 4,990 is under the cap, so it keeps running.
+    expect(fyersEodReserveDecision({ dailyTotal: 3_300, now: ist(12, 30) }).pause).toBe(false);
+  });
+
+  it("after the close only the EOD's share is held back", () => {
+    expect(fyersEodReserveDecision({ dailyTotal: 4_749, now: ist(15, 45) }).pause).toBe(false);
+    expect(fyersEodReserveDecision({ dailyTotal: 5_000 - FYERS_EOD_RESERVE_REQUESTS, now: ist(15, 45) }).pause).toBe(true);
+  });
+
+  it("pauses only optional polling, never the jobs bots and the volume views depend on", () => {
+    expect([...FYERS_RESERVE_PAUSED_JOBS].sort()).toEqual(["AI_AGENT_TICK", "OPTION_CHAIN", "OPTION_PREMIUM_TICKS"]);
+    for (const essential of ["INDICES_INTRADAY", "INDIA_VIX_INTRADAY", "INDEX_FUTURES_INTRADAY", "PAPER_TRADE_EXIT_SWEEP", "PAPER_TRADING_BOT"]) {
+      expect(FYERS_RESERVE_PAUSED_JOBS.has(essential)).toBe(false);
+    }
   });
 });

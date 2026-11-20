@@ -164,3 +164,62 @@ export const FYERS_DAILY_BUDGET_WARNING_THRESHOLD = 4_200;
 export const LOW_PRIORITY_FYERS_JOBS: ReadonlySet<string> = new Set([
   "AI_AGENT_TICK",
 ]);
+
+/**
+ * Keeps the end-of-day run's share of the daily quota.
+ *
+ * The 4,200 guard above only pauses the agent tick. Everything else keeps polling, so the day's count reached 5,270 on
+ * 2026-11-18, 6,434 on 2026-11-19 and 7,356 on 2026-11-17. On 2026-11-19 Fyers started refusing at about 13:30 IST, and at
+ * 16:05 every step of the EOD pipeline failed with HTTP 429 (heal 15m/30m/60m, the 1d bars of 26 series), as on 11-17.
+ * Measured on 11-19 from the scheduler's own request-count lines: option premium polling 2,379 requests (it falls back to
+ * HTTP whenever the websocket is quiet), index history 1,461, futures bars 929, agent tick 675, option chain 113.
+ *
+ * A flat threshold cannot protect the EOD, because the polling that must not stop (index history, VIX, futures bars) keeps
+ * spending after it. So the test looks ahead: pause the optional polling when the day's count, plus what the essential
+ * polling will still spend before the close, plus the EOD's share, would reach the cap.
+ */
+
+/** Held back for the 16:05 EOD pipeline and the jobs near it (measured about 150 requests; 250 leaves room). */
+export const FYERS_EOD_RESERVE_REQUESTS = 250;
+
+/**
+ * What the polling that never pauses spends per minute of session: index history about 3.9, futures bars about 1,
+ * collector and UI quotes about 2.3 (2026-11-19). Rounded up so the projection errs towards pausing early.
+ */
+export const FYERS_ESSENTIAL_REQUESTS_PER_MINUTE = 8;
+
+/**
+ * Optional polling, paused by the projection. Option premium polling and the chain go together on purpose: the premium
+ * collector chooses its contracts from a chain snapshot, so pausing only one of them leaves a half-working series (see
+ * 2026-10-19 above). Index history, VIX and futures bars are not here: bots and the volume views read them.
+ */
+export const FYERS_RESERVE_PAUSED_JOBS: ReadonlySet<string> = new Set([
+  "OPTION_PREMIUM_TICKS",
+  "OPTION_CHAIN",
+  "AI_AGENT_TICK",
+]);
+
+/** The session length used when it is not yet 09:15: 09:15 to 15:30 IST. */
+const SESSION_MINUTES = 375;
+const SESSION_CLOSE_IST_MINUTE = 15 * 60 + 30;
+
+/** Minutes left until 15:30 IST, between 0 and a full session. */
+export function minutesToFyersSessionClose(now: Date): number {
+  const istMinuteOfDay = Math.floor(((now.getTime() + IST_OFFSET_MS) % DAY_MS) / 60_000);
+  return Math.min(SESSION_MINUTES, Math.max(0, SESSION_CLOSE_IST_MINUTE - istMinuteOfDay));
+}
+
+export interface FyersReserveDecision {
+  pause: boolean;
+  /** The day's count if the essential polling carries on to the close, plus the EOD's reserve. */
+  projectedWithReserve: number;
+  minutesToClose: number;
+}
+
+export function fyersEodReserveDecision(input: { dailyTotal: number; now: Date }): FyersReserveDecision {
+  const minutesToClose = minutesToFyersSessionClose(input.now);
+  const projectedWithReserve = input.dailyTotal
+    + minutesToClose * FYERS_ESSENTIAL_REQUESTS_PER_MINUTE
+    + FYERS_EOD_RESERVE_REQUESTS;
+  return { pause: projectedWithReserve >= FYERS_DAILY_REQUEST_CAP, projectedWithReserve, minutesToClose };
+}

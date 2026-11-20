@@ -44,6 +44,9 @@ import {
   FYERS_REST_JOB_TYPES,
   FYERS_DAILY_REQUEST_CAP,
   FYERS_DAILY_BUDGET_WARNING_THRESHOLD,
+  FYERS_EOD_RESERVE_REQUESTS,
+  FYERS_RESERVE_PAUSED_JOBS,
+  fyersEodReserveDecision,
   LOW_PRIORITY_FYERS_JOBS,
   FyersRateLimitGate,
   classifyFyersRateLimitFromText,
@@ -423,6 +426,38 @@ async function main(): Promise<void> {
           });
         }
         return;
+      }
+
+      /*
+       * EOD reserve: pause the optional polling (option premium and chain, agent tick) when the day's count plus the
+       * essential polling still to come plus the EOD's share would reach the 5,000 cap. Without it the cap was reached
+       * mid-afternoon on 11-17 and 11-19 and the 16:05 EOD pipeline was refused outright.
+       */
+      if (FYERS_RESERVE_PAUSED_JOBS.has(jobType)) {
+        let dailyCount = fyersRequestCounter.getDailyTotal();
+        try {
+          dailyCount = Math.max(dailyCount, await fyersLedger.getDailyTotal(istDateKey(new Date())));
+        } catch {
+          // DB error: fall back to this process's own count
+        }
+        const reserve = fyersEodReserveDecision({ dailyTotal: dailyCount, now: new Date() });
+        if (reserve.pause) {
+          const last = gateSkipLoggedAt.get(`${jobType}:reserve`) ?? 0;
+          if (Date.now() - last > 5 * 60_000) {
+            gateSkipLoggedAt.set(`${jobType}:reserve`, Date.now());
+            log("Scheduled job skipped: keeping the daily Fyers quota for the EOD run", {
+              jobType,
+              scheduledFor: scheduledFor.toISOString(),
+              dailyRequests: dailyCount,
+              projectedWithReserve: reserve.projectedWithReserve,
+              minutesToClose: reserve.minutesToClose,
+              eodReserve: FYERS_EOD_RESERVE_REQUESTS,
+              cap: FYERS_DAILY_REQUEST_CAP,
+              skippedReason: "FYERS_EOD_RESERVE",
+            });
+          }
+          return;
+        }
       }
 
       /*
